@@ -561,31 +561,54 @@ function agentFilesFromZip(blob, size) {
   })
 }
 
+// A minimal TokenCredential that returns a pre-acquired storage-scoped AAD token
+// (forwarded from the browser). Lets us read the deployment package with the
+// caller's identity when the storage account has shared-key access disabled.
+function staticTokenCredential(token) {
+  return {
+    getToken: async () => ({ token, expiresOnTimestamp: Date.now() + 5 * 60 * 1000 }),
+  }
+}
+
 // Open the Flex Consumption deployment package blob for ranged reads. Returns
 // `{ blob, size }` or null when unavailable (not Flex, unreachable, or no perms).
-async function openFlexPackageBlob(accessToken, subscriptionId, site) {
+// Tries the storage account key (ARM listKeys) first, then the caller's AAD
+// identity (a forwarded storage-scoped token) — the latter succeeds when
+// shared-key access is disabled but the user has "Storage Blob Data Reader".
+async function openFlexPackageBlob(accessToken, subscriptionId, site, storageToken) {
   const containerUrl = await flexDeploymentContainerUrl(accessToken, site)
   if (!containerUrl) return null
   const { account, container } = parseBlobContainerUrl(containerUrl)
   if (!account || !container) return null
+
+  const credentials = []
   const key = await storageAccountKey(accessToken, subscriptionId, parseResourceGroup(site?.id), account)
-  if (!key) return null
-  const containerClient = new ContainerClient(containerUrl, new StorageSharedKeyCredential(account, key))
-  let blobName = ''
-  for await (const item of containerClient.listBlobsFlat()) {
-    const name = String(item?.name ?? '')
-    if (name.toLowerCase() === 'released-package.zip') {
-      blobName = name
-      break
+  if (key) credentials.push(new StorageSharedKeyCredential(account, key))
+  if (storageToken) credentials.push(staticTokenCredential(storageToken))
+
+  for (const credential of credentials) {
+    try {
+      const containerClient = new ContainerClient(containerUrl, credential)
+      let blobName = ''
+      for await (const item of containerClient.listBlobsFlat()) {
+        const name = String(item?.name ?? '')
+        if (name.toLowerCase() === 'released-package.zip') {
+          blobName = name
+          break
+        }
+        if (!blobName && name.toLowerCase().endsWith('.zip')) blobName = name
+      }
+      if (!blobName) continue
+      const blob = containerClient.getBlockBlobClient(blobName)
+      const props = await blob.getProperties()
+      const size = Number(props.contentLength ?? 0)
+      if (!size) continue
+      return { blob, size }
+    } catch {
+      /* try the next credential */
     }
-    if (!blobName && name.toLowerCase().endsWith('.zip')) blobName = name
   }
-  if (!blobName) return null
-  const blob = containerClient.getBlockBlobClient(blobName)
-  const props = await blob.getProperties()
-  const size = Number(props.contentLength ?? 0)
-  if (!size) return null
-  return { blob, size }
+  return null
 }
 
 // Read the deployed `*.agent.md` file names from a Flex Consumption app's
@@ -725,9 +748,9 @@ function readAgentFileFromZip(blob, size, agentName) {
 
 // Read an agent's `*.agent.md` content from a Flex Consumption deployment
 // package. Returns null when unavailable.
-async function flexPackageAgentDefinition(accessToken, subscriptionId, site, agentName) {
+async function flexPackageAgentDefinition(accessToken, subscriptionId, site, agentName, storageToken) {
   try {
-    const pkg = await openFlexPackageBlob(accessToken, subscriptionId, site)
+    const pkg = await openFlexPackageBlob(accessToken, subscriptionId, site, storageToken)
     if (!pkg) return null
     return await readAgentFileFromZip(pkg.blob, pkg.size, agentName)
   } catch {
@@ -769,16 +792,16 @@ async function kuduAgentDefinition(accessToken, site, agentName) {
 // Read the deployed `<agent>.agent.md` source content for a single agent.
 // Prefers Kudu VFS; falls back to the Flex deployment package. Returns null when
 // the source can't be read (e.g. caller lacks permission).
-export async function readAgentDefinition(accessToken, subscriptionId, site, agentName) {
+export async function readAgentDefinition(accessToken, subscriptionId, site, agentName, storageToken) {
   const kudu = await kuduAgentDefinition(accessToken, site, agentName)
   if (kudu != null) return kudu
-  return flexPackageAgentDefinition(accessToken, subscriptionId, site, agentName)
+  return flexPackageAgentDefinition(accessToken, subscriptionId, site, agentName, storageToken)
 }
 
 // Read the text content of a deployed source file at a wwwroot-relative path
 // (e.g. `function_app.py`). Prefers Kudu VFS; falls back to the Flex deployment
 // package. Returns null when the file can't be read.
-export async function readSourceFile(accessToken, subscriptionId, site, relPath) {
+export async function readSourceFile(accessToken, subscriptionId, site, relPath, storageToken) {
   const clean = String(relPath ?? '').replace(/^\.?\/+/, '')
   if (!clean || clean.includes('..')) return null
   const scm = scmHostName(site)
@@ -795,12 +818,105 @@ export async function readSourceFile(accessToken, subscriptionId, site, relPath)
     }
   }
   try {
-    const pkg = await openFlexPackageBlob(accessToken, subscriptionId, site)
+    const pkg = await openFlexPackageBlob(accessToken, subscriptionId, site, storageToken)
     if (pkg) return await readZipEntryContent(pkg.blob, pkg.size, (fullName) => fullName === clean)
   } catch {
     /* unavailable */
   }
   return null
+}
+
+// List every source file entry in a Flex Consumption deployment package by
+// reading only the zip's central directory. Build artifacts are filtered out.
+// Returns [{ path, size }] or null when the package can't be reached.
+function listSourceEntriesFromZip(blob, size) {
+  return new Promise((resolve) => {
+    const files = []
+    let settled = false
+    const done = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(files)
+    }
+    const timer = setTimeout(done, 15000)
+    try {
+      const reader = new BlobRandomAccessReader(blob)
+      yauzl.fromRandomAccessReader(reader, size, { lazyEntries: true, autoClose: false }, (err, zip) => {
+        if (err || !zip) return done()
+        zip.on('entry', (entry) => {
+          const name = String(entry?.fileName ?? '')
+          if (!name.endsWith('/') && !isBuildArtifact(name)) {
+            files.push({ path: name, size: Number(entry?.uncompressedSize ?? 0) })
+          }
+          zip.readEntry()
+        })
+        zip.on('end', () => {
+          try { zip.close() } catch { /* ignore */ }
+          done()
+        })
+        zip.on('error', done)
+        zip.readEntry()
+      })
+    } catch {
+      done()
+    }
+  })
+}
+
+// Recursively walk Kudu VFS starting at site/wwwroot. Skips node_modules and
+// python virtualenv caches. Returns [{ path, size }] or null on failure.
+async function listKuduSourceFiles(accessToken, site) {
+  const scm = scmHostName(site)
+  if (!scm) return null
+  const files = []
+  const skip = new Set(['node_modules', '.venv', '__pycache__', '.python_packages', '.git'])
+  async function walk(rel) {
+    const url = `https://${scm}/api/vfs/${rel ? `site/wwwroot/${rel}/` : 'site/wwwroot/'}`
+    let entries
+    try {
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(6000),
+      })
+      if (!res.ok) return
+      entries = await res.json()
+    } catch {
+      return
+    }
+    if (!Array.isArray(entries)) return
+    for (const entry of entries) {
+      const name = String(entry?.name ?? '')
+      if (!name || skip.has(name)) continue
+      const childRel = rel ? `${rel}/${name}` : name
+      if (String(entry?.mime ?? '') === 'inode/directory') {
+        await walk(childRel)
+      } else {
+        files.push({ path: childRel, size: Number(entry?.size ?? 0) })
+      }
+    }
+  }
+  try {
+    await walk('')
+  } catch {
+    return null
+  }
+  return files
+}
+
+// List every source file in a deployed app (wwwroot-relative paths). Prefers
+// Kudu VFS; falls back to the Flex Consumption deployment package. Returns
+// [{ path, size }] or null when neither source is reachable.
+export async function listSourceFiles(accessToken, subscriptionId, site, storageToken) {
+  const kudu = await listKuduSourceFiles(accessToken, site)
+  if (kudu && kudu.length) return kudu
+  try {
+    const pkg = await openFlexPackageBlob(accessToken, subscriptionId, site, storageToken)
+    if (pkg) return await listSourceEntriesFromZip(pkg.blob, pkg.size)
+  } catch {
+    /* unavailable */
+  }
+  return kudu ?? null
 }
 
 // Fetch a single Function App's site object (used when reading one agent).

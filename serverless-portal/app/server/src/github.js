@@ -255,6 +255,26 @@ export async function getRepo(token, owner, name) {
   }
 }
 
+// Read a file's decoded text content from a repo via the Contents API. Returns
+// null when the file/repo/ref isn't found or can't be read (never throws).
+export async function readRepoFile(token, owner, repo, filePath, ref) {
+  const b = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+  const p = String(filePath)
+    .split('/')
+    .map(encodeURIComponent)
+    .join('/')
+  const q = ref ? `?ref=${encodeURIComponent(ref)}` : ''
+  try {
+    const meta = await gh(token, `${b}/contents/${p}${q}`)
+    if (meta && typeof meta.content === 'string' && (meta.encoding ?? 'base64') === 'base64') {
+      return Buffer.from(meta.content, 'base64').toString('utf-8')
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
 // Rolling-branch resolution (one PR per app until merged): reuse the branch of an
 // OPEN PR under `${prefix}/` so edits accumulate into a single PR; start a fresh
 // timestamped branch when there's no open PR (first connect, or the last PR was

@@ -21,6 +21,13 @@ const DEFAULT_AUTHORITY = 'https://login.microsoftonline.com/organizations'
 // can later be acquired silently for API calls.
 export const ARM_SCOPE = 'https://management.core.windows.net/.default'
 
+// Storage data-plane scope — used ONLY so the backend can read a Flex app's
+// deployment package with the caller's identity when the storage account has
+// shared-key access disabled. Deliberately NOT part of the sign-in request:
+// it's acquired silently when already consented, and consented on demand via a
+// user-initiated button, so the login flow is never affected.
+export const STORAGE_SCOPE = 'https://storage.azure.com/.default'
+
 // Sign-in request: identity + ARM consent up front.
 export const loginRequest: RedirectRequest = {
   scopes: ['openid', 'profile', ARM_SCOPE],
@@ -227,6 +234,41 @@ export async function signOut(): Promise<void> {
   }
   // Manual-token-only session: reload to the sign-in gate with a clean slate.
   if (hadManual) window.location.assign('/')
+}
+
+/**
+ * Best-effort SILENT acquisition of a storage-data-plane token, forwarded to the
+ * backend so it can read a Flex app's deployment package with the caller's
+ * identity. Returns null on any failure (no MSAL account, manual-token session,
+ * or consent required) so it never triggers UI — callers simply omit the header
+ * and the backend falls back to the shared-key / GitHub paths.
+ */
+export async function acquireStorageToken(): Promise<string | null> {
+  if (getManualToken()) return null
+  try {
+    const account = msal().getActiveAccount() ?? msal().getAllAccounts()[0]
+    if (!account) return null
+    const res = await msal().acquireTokenSilent({ scopes: [STORAGE_SCOPE], account })
+    return res.accessToken || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Interactive consent for the storage scope. USER-INITIATED ONLY (wired to the
+ * "Grant access & retry" button). Uses a popup so the editor state is preserved.
+ * Returns true when a token was obtained.
+ */
+export async function consentStorageAccess(): Promise<boolean> {
+  if (getManualToken()) return false
+  try {
+    const account = msal().getActiveAccount() ?? msal().getAllAccounts()[0] ?? undefined
+    const res = await msal().acquireTokenPopup({ scopes: [STORAGE_SCOPE], account })
+    return !!res.accessToken
+  } catch {
+    return false
+  }
 }
 
 /**

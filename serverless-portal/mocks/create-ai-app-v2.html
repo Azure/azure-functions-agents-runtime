@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Create AI App — simplified</title>
+    <link rel="stylesheet" href="styles.css" />
+    <style>
+      /* --- mock-only styling for the simplified create flow --- */
+      .create-wrap { max-width: 760px; }
+      .prompt-card { padding: 22px 22px 18px; }
+      .prompt-box {
+        width: 100%; box-sizing: border-box; min-height: 96px; resize: vertical;
+        font-size: 16px; line-height: 1.5; padding: 14px 16px; border-radius: 12px;
+        border: 1px solid var(--border-strong, #d2d6e2); background: var(--surface, #fff); color: var(--text, #191c26);
+        font-family: inherit;
+      }
+      .prompt-box:focus { outline: 2px solid var(--brand-soft, #eef1ff); border-color: var(--brand, #6366f1); }
+      .req-row { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; font-size: 12.5px; }
+      .only-req { color: var(--green, #16794c); font-weight: 600; }
+      .ex-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .ex-chip {
+        border: 1px solid var(--border, #e5e7f0); background: var(--surface-2, #f2f3f9); color: var(--text, #191c26);
+        border-radius: 999px; padding: 7px 13px; font-size: 12.5px; cursor: pointer; font-family: inherit;
+      }
+      .ex-chip:hover { border-color: var(--brand, #6366f1); }
+      .defaults { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 16px; }
+      @media (max-width: 640px) { .defaults { grid-template-columns: 1fr; } }
+      .default-tile {
+        border: 1px solid var(--border, #e5e7f0); border-radius: 10px; padding: 11px 13px; background: var(--surface, #fff);
+      }
+      .default-tile .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-faint, #8a91a1); font-weight: 700; }
+      .default-tile .v { font-size: 13px; font-weight: 600; margin-top: 3px; display: flex; align-items: center; gap: 6px; }
+      .default-tile .chg { font-size: 11.5px; color: var(--brand, #6366f1); cursor: pointer; }
+      .adv { margin-top: 18px; border: 1px dashed var(--border-strong, #d2d6e2); border-radius: 10px; }
+      .adv > summary { cursor: pointer; padding: 12px 15px; font-weight: 600; font-size: 13.5px; list-style: none; display: flex; align-items: center; gap: 8px; }
+      .adv > summary::-webkit-details-marker { display: none; }
+      .adv[open] > summary { border-bottom: 1px solid var(--border, #e5e7f0); }
+      .adv .adv-body { padding: 14px 15px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      @media (max-width: 640px) { .adv .adv-body { grid-template-columns: 1fr; } }
+      .gen-card { margin-top: 18px; }
+      .distinct { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+      @media (max-width: 720px) { .distinct { grid-template-columns: 1fr; } }
+      .dcol { border: 1px solid var(--border, #e5e7f0); border-radius: 10px; padding: 12px 13px; background: var(--surface, #fff); }
+      .dcol .dhead { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 12.5px; margin-bottom: 8px; }
+      .dcol .dhead .tag { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; padding: 2px 7px; border-radius: 999px; font-weight: 700; }
+      .tag.agent { background: var(--brand-soft, #eef1ff); color: var(--brand-dark, #4f46e5); }
+      .tag.trigger { background: var(--amber-soft, #fdf3d7); color: var(--amber, #9a6700); }
+      .tag.tool { background: var(--purple-soft, #f1eafe); color: var(--purple, #7c3aed); }
+      .dline { font-size: 12.5px; padding: 6px 0; border-top: 1px solid var(--border, #e5e7f0); display: flex; align-items: center; gap: 7px; }
+      .dline:first-of-type { border-top: none; }
+      .dline .mono { font-size: 11.5px; }
+      .conn-note { font-size: 11.5px; color: var(--text-muted, #59606f); margin-top: 6px; }
+    </style>
+  </head>
+  <body>
+    <header class="appbar">
+      <a class="brand" href="index.html"><span class="brand-mark">⚡</span><span class="brand-name">AI Apps</span></a>
+      <div class="appbar-spacer"></div>
+      <div class="appbar-user" title="Signed in">SN</div>
+    </header>
+
+    <div class="body">
+      <aside class="sidebar">
+        <nav class="sidenav">
+          <div class="group-label">Build</div>
+          <a class="sidelink active" href="index.html"><span class="ico">🧩</span><span class="label">AI Apps</span></a>
+          <a class="sidelink" href="skills.html"><span class="ico">📚</span><span class="label">Skills</span></a>
+        </nav>
+      </aside>
+
+      <main class="main">
+        <div class="breadcrumb"><a href="index.html">AI Apps</a> / Create</div>
+        <div class="page-title"><h1>Create an AI App</h1></div>
+        <p class="page-sub">
+          Just describe what you want. The runtime is markdown-first — an app needs only a <b>name</b>, a
+          <b>description</b>, and how it runs. Everything else is inherited and can be changed later.
+        </p>
+
+        <div class="create-wrap">
+          <!-- The ONLY required input -->
+          <div class="card prompt-card">
+            <label style="font-weight: 650; font-size: 14px">What should your agent do?</label>
+            <textarea
+              id="prompt"
+              class="prompt-box"
+              style="margin-top: 8px"
+              placeholder="e.g. Every morning, summarize what changed in my Azure subscription and email it to me. Also let me chat with it about the changes."
+              oninput="onType()"
+            ></textarea>
+            <div class="req-row">
+              <span class="badge green"><span class="dot"></span> Required</span>
+              <span class="only-req">This is the only thing we need.</span>
+            </div>
+
+            <div class="ex-chips" id="examples"></div>
+
+            <!-- Smart defaults so nothing else blocks the user -->
+            <div class="defaults">
+              <div class="default-tile">
+                <div class="k">Name</div>
+                <div class="v">✨ auto <span class="chg">change</span></div>
+              </div>
+              <div class="default-tile">
+                <div class="k">Runs as</div>
+                <div class="v">💬 Chat <span class="chg">change</span></div>
+              </div>
+              <div class="default-tile">
+                <div class="k">Model</div>
+                <div class="v">gpt-5.4 <span class="chg">change</span></div>
+              </div>
+            </div>
+
+            <!-- Everything that used to be required is now optional + collapsed -->
+            <details class="adv">
+              <summary>⚙️ Advanced (optional) — subscription, resource group, region, Foundry project</summary>
+              <div class="adv-body">
+                <div class="field" style="margin: 0">
+                  <label>Subscription</label>
+                  <select><option>Contoso Production</option><option>Contoso Non-Prod</option></select>
+                </div>
+                <div class="field" style="margin: 0">
+                  <label>Resource group</label>
+                  <input type="text" value="rg-ai-apps" />
+                  <div class="hint">Defaults to a new group named for your app.</div>
+                </div>
+                <div class="field" style="margin: 0">
+                  <label>Region</label>
+                  <select><option>eastus2</option><option>westus3</option><option>westcentralus</option></select>
+                </div>
+                <div class="field" style="margin: 0">
+                  <label>Foundry project (optional)</label>
+                  <input type="text" placeholder="Use workspace default" />
+                  <div class="hint">Leave blank to use your default model. Set later if needed.</div>
+                </div>
+              </div>
+            </details>
+
+            <div class="pill-row" style="margin-top: 18px">
+              <button class="btn primary" id="genBtn" onclick="generate()" style="opacity: .55; pointer-events: none">
+                ✨ Generate &amp; preview
+              </button>
+              <span class="muted" style="font-size: 12px">You'll review the app before it's created.</span>
+            </div>
+          </div>
+
+          <!-- Live preview shows the THREE distinct concepts as they're generated -->
+          <div class="card gen-card" id="genCard" style="display: none">
+            <div class="card-head">
+              <h3 style="margin: 0">Preview · <span id="gName">My AI App</span></h3>
+              <span class="badge gray mono" id="gFn">my-ai-app</span>
+            </div>
+            <p class="muted" style="font-size: 12.5px; margin-top: 0">
+              Here's what will be created. Notice the three distinct building blocks:
+            </p>
+
+            <div class="distinct">
+              <!-- AGENTS -->
+              <div class="dcol">
+                <div class="dhead"><span class="tag agent">Agent</span> the .agent.md</div>
+                <div id="dAgents"></div>
+                <div class="conn-note">Identity + instructions. Exactly one trigger each.</div>
+              </div>
+              <!-- TRIGGERS -->
+              <div class="dcol">
+                <div class="dhead"><span class="tag trigger">Trigger</span> what starts it</div>
+                <div id="dTriggers"></div>
+                <div class="conn-note">A connector trigger fires on an <b>event</b> (e.g. new email).</div>
+              </div>
+              <!-- TOOLS -->
+              <div class="dcol">
+                <div class="dhead"><span class="tag tool">MCP tool</span> what it can do</div>
+                <div id="dTools"></div>
+                <div class="conn-note">An <b>action</b> the agent takes (e.g. send email).</div>
+              </div>
+            </div>
+
+            <div class="pill-row" style="margin-top: 16px">
+              <a class="btn primary" href="ai-app-detail-v2.html">Create AI App</a>
+              <span class="muted" style="font-size: 12px">Add or change capabilities any time after it's created.</span>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      // Scenario library grounded in the runtime samples. Each shows the three
+      // distinct concepts kept separate: agents, triggers (incl. connector
+      // EVENTS), and MCP tools (incl. connector ACTIONS).
+      const SCENARIOS = [
+        {
+          kw: ['azure', 'resource', 'subscription', 'report', 'changed'],
+          name: 'Contoso Ops Assistant',
+          agents: [
+            { slug: 'daily_report', label: 'Daily Report', trig: { kind: 'timer', text: 'Every day 07:00' } },
+            { slug: 'ops_chat', label: 'Ops Chat', trig: { kind: 'chat', text: 'Chat (built-in)' } },
+          ],
+          tools: [
+            { kind: 'connector', text: 'Office 365 · Send email' },
+            { kind: 'mcp', text: 'Microsoft Learn' },
+            { kind: 'system', text: 'Web request' },
+          ],
+        },
+        {
+          kw: ['outlook', 'email', 'reply', 'inbox', 'respond'],
+          name: 'Inbox Autoresponder',
+          agents: [{ slug: 'on_new_email', label: 'On New Email', trig: { kind: 'connector', text: 'Outlook · new email arrives' } }],
+          tools: [{ kind: 'connector', text: 'Office 365 · Draft reply' }],
+        },
+        {
+          kw: ['news', 'digest', 'headlines', 'tech'],
+          name: 'Tech News Digest',
+          agents: [{ slug: 'daily_tech_news', label: 'Daily Tech News', trig: { kind: 'timer', text: 'Every day 15:00' } }],
+          tools: [{ kind: 'connector', text: 'Office 365 · Send email' }, { kind: 'system', text: 'Web request' }],
+        },
+        {
+          kw: ['docs', 'question', 'learn', 'documentation', 'answer', 'chat'],
+          name: 'Azure Docs Helper',
+          agents: [{ slug: 'docs_qa', label: 'Docs Q&A', trig: { kind: 'chat', text: 'Chat (built-in)' } }],
+          tools: [{ kind: 'mcp', text: 'Microsoft Learn' }],
+        },
+        {
+          kw: ['incident', 'triage', 'classify', 'alert', 'queue', 'ticket'],
+          name: 'Incident Triage',
+          agents: [
+            { slug: 'triage', label: 'Triage', trig: { kind: 'queue', text: 'Storage queue: incidents' } },
+            { slug: 'summarize', label: 'Summarize', trig: { kind: 'subagent', text: 'Sub-agent (delegated)' } },
+          ],
+          tools: [{ kind: 'skill', text: 'severity-rubric' }, { kind: 'system', text: 'Code sandbox' }],
+        },
+      ]
+      const EXAMPLES = [
+        'Summarize my Azure resource changes every morning and email me',
+        'Reply to incoming Outlook email automatically',
+        'Send me a daily tech-news digest',
+        'Answer Azure questions from the docs (chat only)',
+        'Triage incidents from a storage queue',
+      ]
+
+      const slug = (s) => (s.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')) || 'my-ai-app'
+      const TRIG_ICON = { timer: '⏰', chat: '💬', connector: '🔌', queue: '📥', http: '🌐', subagent: '🤝' }
+      const TOOL_ICON = { connector: '🔌', mcp: '🧰', system: '⚙️', skill: '📚', custom: '🐍' }
+      const TOOL_TAG = { connector: 'Connector', mcp: 'MCP', system: 'System', skill: 'Skill', custom: 'Python' }
+
+      function renderExamples() {
+        document.getElementById('examples').innerHTML = EXAMPLES.map(
+          (s) => `<button class="ex-chip" data-t="${s.replace(/"/g, '&quot;')}" onclick="useExample(this.dataset.t)">${s}</button>`,
+        ).join('')
+      }
+      function useExample(t) {
+        document.getElementById('prompt').value = t
+        onType()
+      }
+      function onType() {
+        const has = document.getElementById('prompt').value.trim().length > 6
+        const b = document.getElementById('genBtn')
+        b.style.opacity = has ? '1' : '.55'
+        b.style.pointerEvents = has ? 'auto' : 'none'
+      }
+
+      function pick(text) {
+        const t = text.toLowerCase()
+        return SCENARIOS.find((s) => s.kw.some((k) => t.includes(k))) || {
+          name: 'My AI App',
+          agents: [{ slug: 'assistant', label: 'Assistant', trig: { kind: 'chat', text: 'Chat (built-in)' } }],
+          tools: [{ kind: 'system', text: 'Web request' }],
+        }
+      }
+
+      function generate() {
+        const sc = pick(document.getElementById('prompt').value)
+        document.getElementById('gName').textContent = sc.name
+        document.getElementById('gFn').textContent = slug(sc.name)
+
+        document.getElementById('dAgents').innerHTML = sc.agents
+          .map((a) => `<div class="dline">📄 <span class="mono">${a.slug}.agent.md</span></div>`)
+          .join('')
+
+        document.getElementById('dTriggers').innerHTML = sc.agents
+          .map((a) => {
+            const conn = a.trig.kind === 'connector'
+            return `<div class="dline">${TRIG_ICON[a.trig.kind] || '▶'} ${a.trig.text}${conn ? ' <span class="badge amber" style="margin-left:auto">event</span>' : ''}</div>`
+          })
+          .join('')
+
+        document.getElementById('dTools').innerHTML = sc.tools
+          .map(
+            (t) =>
+              `<div class="dline">${TOOL_ICON[t.kind]} ${t.text}<span class="badge ${t.kind === 'connector' ? 'blue' : 'gray'}" style="margin-left:auto">${TOOL_TAG[t.kind]}</span></div>`,
+          )
+          .join('')
+
+        document.getElementById('genCard').style.display = ''
+        document.getElementById('genCard').scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      }
+
+      renderExamples()
+    </script>
+  </body>
+</html>

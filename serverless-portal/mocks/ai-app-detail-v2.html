@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI App — Contoso Ops Assistant</title>
+    <link rel="stylesheet" href="styles.css" />
+    <style>
+      /* --- mock-only, crisp detail view --- */
+      .hero { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 4px 0 18px; }
+      .hero .spacer { flex: 1; }
+      .live-pill { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-muted, #59606f);
+        border: 1px solid var(--border, #e5e7f0); border-radius: 999px; padding: 5px 12px; background: var(--surface, #fff); }
+      .live-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green, #16a34a); }
+      .btn.deploy { position: relative; }
+      .btn.deploy .n { position: absolute; top: -7px; right: -7px; background: var(--amber, #d97706); color: #fff;
+        font-size: 10px; font-weight: 800; min-width: 17px; height: 17px; border-radius: 999px; display: grid; place-items: center; padding: 0 4px; }
+      .btn.deploy .n[hidden] { display: none; }
+
+      /* Try panel */
+      .try { border: 1px solid var(--border, #e5e7f0); border-radius: 14px; background: var(--surface, #fff); overflow: hidden; }
+      .try-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--border, #e5e7f0); }
+      .try-head h3 { margin: 0; font-size: 15px; }
+      .try-head .hint { font-size: 12px; color: var(--text-muted, #59606f); }
+      .try-tabs { display: flex; gap: 6px; flex-wrap: wrap; padding: 12px 16px 0; }
+      .try-tab { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; cursor: pointer;
+        border: 1px solid var(--border, #e5e7f0); background: var(--surface, #fff); color: var(--text, #1c2430);
+        border-radius: 999px; padding: 7px 13px; }
+      .try-tab .t { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; font-weight: 800; padding: 2px 6px; border-radius: 6px; }
+      .try-tab.on { border-color: var(--brand, #6366f1); background: var(--brand-soft, #eef1ff); color: var(--brand-dark, #4f46e5); }
+      .tt-chat { background: #e6efff; color: #2557c7; }
+      .tt-timer { background: #fdf3d7; color: #9a6700; }
+      .tt-conn { background: #fdeede; color: #b4530a; }
+
+      .try-body { padding: 14px 16px 16px; }
+      .runsas { font-size: 12.5px; color: var(--text-muted, #59606f); margin: 0 0 12px; }
+      .runsas b { color: var(--text, #1c2430); }
+
+      /* chat surface */
+      .stream { display: flex; flex-direction: column; gap: 10px; min-height: 64px; margin-bottom: 12px; }
+      .bubble { max-width: 78%; padding: 9px 13px; border-radius: 14px; font-size: 13px; line-height: 1.45; }
+      .bubble.u { align-self: flex-end; background: var(--brand, #6366f1); color: #fff; border-bottom-right-radius: 4px; }
+      .bubble.a { align-self: flex-start; background: #f3f4f8; color: var(--text, #1c2430); border-bottom-left-radius: 4px; }
+      .bubble .who { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; opacity: .7; margin-bottom: 3px; }
+      .composer { display: flex; gap: 8px; }
+      .composer input { flex: 1; font: inherit; font-size: 13px; padding: 10px 13px; border-radius: 10px;
+        border: 1px solid var(--border, #e5e7f0); background: var(--surface, #fff); color: var(--text, #1c2430); }
+      .composer input:focus { outline: none; border-color: var(--brand, #6366f1); box-shadow: 0 0 0 3px var(--brand-soft, #eef1ff); }
+
+      /* run surface (timer / connector) */
+      .run-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+      .sample { font-size: 12px; color: var(--text-muted, #59606f); background: #f7f8fb; border: 1px solid var(--border, #e5e7f0);
+        border-radius: 8px; padding: 8px 12px; flex: 1; min-width: 220px; }
+      .sample .mono { color: var(--text, #1c2430); }
+      .result { margin-top: 12px; font-size: 12.5px; border: 1px solid #cfe9d8; background: #f0faf4; color: #135c37;
+        border-radius: 10px; padding: 10px 13px; display: none; }
+      .result.show { display: block; }
+      .result .mono { color: #0f4d2e; }
+
+      /* Agents table */
+      .agents { width: 100%; border-collapse: collapse; font-size: 13px; }
+      .agents th, .agents td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border, #e5e7f0); vertical-align: middle; }
+      .agents th { font-size: 10.5px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-faint, #8a91a1); font-weight: 700; }
+      .agents tr:last-child td { border-bottom: none; }
+      .agents .nm { font-weight: 600; }
+      .uses { display: flex; flex-wrap: wrap; gap: 5px; }
+      .uses .none { color: var(--text-faint, #8a91a1); }
+      .chip { font-size: 11px; padding: 3px 8px; border-radius: 6px; background: #eef0f6; color: #46506a; font-weight: 600; white-space: nowrap; }
+      .chip.conn { background: #e6efff; color: #2557c7; }
+      .chip.mcp { background: #eef0f6; color: #46506a; }
+      .chip.tool { background: #f1eafe; color: #7c3aed; }
+      .chip.skill { background: #e8f6ef; color: #137a4c; }
+      .agents .act { text-align: right; white-space: nowrap; }
+      .lnk { font: inherit; font-size: 12.5px; font-weight: 600; color: var(--brand-dark, #4f46e5); background: none; border: none; cursor: pointer; padding: 4px 8px; border-radius: 7px; }
+      .lnk:hover { background: var(--brand-soft, #eef1ff); }
+
+      .runsas-tag { font-size: 11px; padding: 3px 8px; border-radius: 6px; font-weight: 700; white-space: nowrap; }
+      .ra-chat { background: #e6efff; color: #2557c7; }
+      .ra-timer { background: #fdf3d7; color: #9a6700; }
+      .ra-conn { background: #fdeede; color: #b4530a; }
+      .ra-sub { background: #eef0f6; color: #46506a; }
+
+      /* inline editing */
+      .ed-name, .ed-trig, .ed-add { font: inherit; font-size: 12.5px; padding: 6px 9px; border-radius: 8px;
+        border: 1px solid var(--border, #e5e7f0); background: var(--surface, #fff); color: var(--text, #1c2430); }
+      .ed-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; width: 150px; }
+      .ed-name:focus, .ed-trig:focus, .ed-add:focus { outline: none; border-color: var(--brand, #6366f1); box-shadow: 0 0 0 3px var(--brand-soft, #eef1ff); }
+      .agents tr.editing { background: var(--brand-soft, #eef1ff); }
+      .agents tr.editing td { border-bottom-color: #d7dcf5; }
+      .uses.edit { align-items: center; }
+      .uses.edit .chip { display: inline-flex; align-items: center; padding-right: 5px; }
+      .chip .x { margin-left: 6px; cursor: pointer; opacity: .55; font-weight: 800; border: none; background: none; color: inherit; font-size: 12px; padding: 0; line-height: 1; }
+      .chip .x:hover { opacity: 1; }
+      .ed-add { padding: 5px 8px; font-size: 12px; border-style: dashed; color: var(--brand-dark, #4f46e5); cursor: pointer; }
+      .row-act { display: inline-flex; gap: 6px; justify-content: flex-end; }
+      .btn.xs { padding: 5px 11px; font-size: 12px; }
+      .btn.ghost-danger { color: #b42318; border-color: #f0c4bf; background: #fff; }
+      .btn.ghost-danger:hover { background: #fdeeec; }
+      .flash { animation: flashbg 1.1s ease; }
+      @keyframes flashbg { 0% { background: #d9f5e4; } 100% { background: transparent; } }
+      .card-head .grow { flex: 1; }
+
+      /* edit drawer (same flow as Add capability) */
+      .scrim { position: fixed; inset: 0; background: rgba(20,24,40,.38); opacity: 0; visibility: hidden; transition: opacity .18s ease; z-index: 40; }
+      .scrim.open { opacity: 1; visibility: visible; }
+      .drawer { position: fixed; top: 0; right: 0; height: 100vh; width: min(540px, 94vw); background: var(--surface, #fff);
+        box-shadow: -14px 0 40px rgba(20,24,40,.18); transform: translateX(100%); transition: transform .2s ease; z-index: 41; display: flex; flex-direction: column; }
+      .drawer.open { transform: none; }
+      .dw-head { display: flex; align-items: center; gap: 10px; padding: 16px 18px; border-bottom: 1px solid var(--border, #e5e7f0); }
+      .dw-head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+      .dw-close { margin-left: auto; font-size: 15px; }
+      .dw-body { flex: 1; overflow-y: auto; padding: 4px 18px 18px; }
+      .dw-sec { padding: 15px 0; border-bottom: 1px solid var(--border, #eef0f4); }
+      .dw-sec > .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-faint, #8a91a1); font-weight: 700; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+      .dw-sec > .lbl .kindtag { font-size: 10px; padding: 2px 7px; border-radius: 999px; font-weight: 800; letter-spacing: .3px; }
+      .dw .field { margin-bottom: 12px; }
+      textarea.instr { width: 100%; min-height: 130px; font-size: 13px; line-height: 1.55; padding: 11px 13px; border-radius: 10px;
+        border: 1px solid var(--border-strong, #d2d6e2); background: var(--surface, #fff); color: var(--text, #191c26); resize: vertical;
+        font-family: "Cascadia Code", "SF Mono", Consolas, monospace; }
+      textarea.instr:focus { outline: none; border-color: var(--brand, #6366f1); box-shadow: 0 0 0 3px var(--brand-soft, #eef1ff); }
+      .tool-list { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+      .tool-list .chip { display: inline-flex; align-items: center; padding-right: 5px; }
+      .addtool { padding: 6px 10px; font-size: 12px; border: 1px dashed var(--border-strong, #d2d6e2); border-radius: 8px;
+        color: var(--brand-dark, #4f46e5); background: var(--surface, #fff); font-family: inherit; cursor: pointer; }
+      .model-opt { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 8px; cursor: pointer; }
+      .model-opt input { width: auto; }
+      .builtin-row { display: flex; flex-direction: column; gap: 8px; }
+      .builtin-row label { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+      .builtin-row input { width: auto; }
+      .files-note { font-size: 12px; color: var(--text-muted, #59606f); background: var(--surface-2, #f2f3f9);
+        border: 1px solid var(--border, #e5e7f0); border-radius: 8px; padding: 9px 12px; line-height: 1.6; }
+      .files-note b { color: var(--text, #191c26); }
+      .files-note .mono { color: var(--brand-dark, #4f46e5); }
+      .dw-foot { border-top: 1px solid var(--border, #e5e7f0); padding: 13px 18px; display: flex; align-items: center; gap: 10px; }
+      .dw-foot .spacer { flex: 1; }
+
+      /* collapsible explainer */
+      details.how { margin-top: 16px; border: 1px solid var(--border, #e5e7f0); border-radius: 10px; background: var(--surface, #fff); }
+      details.how > summary { cursor: pointer; list-style: none; padding: 12px 15px; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+      details.how > summary::-webkit-details-marker { display: none; }
+      details.how > summary .chev { margin-left: auto; color: var(--text-faint, #8a91a1); transition: transform .15s; }
+      details.how[open] > summary .chev { transform: rotate(90deg); }
+      details.how .in { padding: 0 15px 14px; font-size: 12.5px; color: var(--text-muted, #59606f); line-height: 1.55; }
+      details.how .in b { color: var(--text, #1c2430); }
+      details.how .in .same { margin-top: 10px; background: var(--amber-soft, #fdf3d7); border: 1px solid #f0d998; color: #7a5200; border-radius: 8px; padding: 8px 12px; }
+    </style>
+  </head>
+  <body>
+    <header class="appbar">
+      <a class="brand" href="index.html"><span class="brand-mark">⚡</span><span class="brand-name">AI Apps</span></a>
+      <div class="appbar-spacer"></div>
+      <a class="btn primary sm" href="create-ai-app-v2.html">＋ New AI App</a>
+      <div class="appbar-user" title="Signed in">SN</div>
+    </header>
+
+    <div class="body">
+      <aside class="sidebar">
+        <nav class="sidenav">
+          <div class="group-label">Build</div>
+          <a class="sidelink active" href="index.html"><span class="ico">🧩</span><span class="label">AI Apps</span></a>
+          <a class="sidelink" href="skills.html"><span class="ico">📚</span><span class="label">Skills</span></a>
+        </nav>
+      </aside>
+
+      <main class="main">
+        <div class="breadcrumb"><a href="index.html">AI Apps</a> / Contoso Ops Assistant</div>
+        <div class="page-title">
+          <h1 class="mono">contoso-ops-assistant</h1>
+          <span class="badge purple">🔖 agent-runtime</span>
+        </div>
+        <p class="page-sub">4 agents · eastus2 · <a href="#">Open host ↗</a></p>
+
+        <!-- HERO: edit → save → deploy -->
+        <div class="hero">
+          <span class="live-pill"><span class="dot"></span> <span id="depText">Live · deployed 2h ago</span></span>
+          <div class="spacer"></div>
+          <a class="btn" href="add-capability-v2.html">＋ Add capability</a>
+          <button class="btn deploy" id="deployBtn">🚀 Deploy edits<span class="n" id="pendCount" hidden>0</span></button>
+        </div>
+
+        <!-- AGENTS — editable: agent name, trigger, and the tools/connectors it uses -->
+        <div class="card">
+          <div class="card-head">
+            <h3 style="margin: 0">Agents, triggers &amp; tools</h3>
+            <span class="muted grow" style="font-size: 12px">one <span class="mono">.agent.md</span> · click <b>Edit</b> to change instructions, trigger, tools &amp; model</span>
+            <button class="btn sm" id="addAgent">＋ Add agent</button>
+          </div>
+          <div style="overflow-x: auto">
+            <table class="agents">
+              <thead>
+                <tr><th>Agent</th><th>Runs as</th><th>Uses (tools)</th><th></th></tr>
+              </thead>
+              <tbody id="agentRows"><!-- injected --></tbody>
+            </table>
+          </div>
+
+          <details class="how">
+            <summary>How triggers &amp; tools differ<span class="chev">▸</span></summary>
+            <div class="in">
+              <b>Trigger</b> = what <i>starts</i> an agent (an event: a timer, a queue message, or a connector event like “a new email arrived”).
+              <b>MCP tool</b> = what an agent can <i>do</i> (an action: “send an email”, “query docs”).
+              <div class="same">💡 Same connector, two roles: <b>Office 365</b> can <b>start</b> the app (trigger: “new email”) <i>and</i> be a <b>tool</b> it uses (action: “draft reply”).</div>
+            </div>
+          </details>
+        </div>
+
+        <!-- TRY IT — moved to the bottom -->
+        <div class="try" id="tryPanel" style="margin-top: 22px">
+          <div class="try-head">
+            <h3>▶ Try it</h3>
+            <span class="hint">— pick an agent and run it, right here</span>
+          </div>
+          <div class="try-tabs" id="tabs"><!-- injected --></div>
+          <div class="try-body" id="tryBody"><!-- injected --></div>
+        </div>
+      </main>
+    </div>
+
+    <!-- EDIT DRAWER — how a customer edits & makes changes (same flow as Add capability) -->
+    <div class="scrim" id="scrim"></div>
+    <aside class="drawer" id="drawer" aria-hidden="true" aria-label="Edit agent">
+      <div class="dw-head">
+        <h3>Edit <span class="mono" id="dwTitle">agent</span></h3>
+        <button class="lnk dw-close" id="dwClose" title="Close">✕</button>
+      </div>
+      <div class="dw-body" id="dwBody"><!-- injected --></div>
+      <div class="dw-foot">
+        <button class="btn ghost-danger xs" id="dwDelete">🗑 Delete</button>
+        <div class="spacer"></div>
+        <button class="btn" id="dwCancel">Cancel</button>
+        <button class="btn primary" id="dwSave">Save changes</button>
+      </div>
+    </aside>
+
+    <script>
+      /* ---------- data ---------- */
+      const TRIGGERS = {
+        chat:       { label: '💬 Chat (built-in UI + API)',   raCls: 'ra-chat',  tab: '💬', tabCls: 'tt-chat',  kind: 'chat' },
+        timer:      { label: '⏰ Timer · daily 07:00',         raCls: 'ra-timer', tab: '⏰', tabCls: 'tt-timer', kind: 'run'  },
+        connector:  { label: '🔌 Connector event · new email', raCls: 'ra-conn',  tab: '🔌', tabCls: 'tt-conn',  kind: 'run'  },
+        http:       { label: '🌐 HTTP request',                raCls: 'ra-timer', tab: '🌐', tabCls: 'tt-timer', kind: 'run'  },
+        queue:      { label: '📥 Queue message',               raCls: 'ra-timer', tab: '📥', tabCls: 'tt-timer', kind: 'run'  },
+        blob:       { label: '🗂️ Blob created',                raCls: 'ra-timer', tab: '🗂️', tabCls: 'tt-timer', kind: 'run'  },
+        servicebus: { label: '🚌 Service Bus message',         raCls: 'ra-timer', tab: '🚌', tabCls: 'tt-timer', kind: 'run'  },
+        eventgrid:  { label: '⚡ Event Grid event',            raCls: 'ra-timer', tab: '⚡', tabCls: 'tt-timer', kind: 'run'  },
+        none:       { label: '🤝 Sub-agent (internal)',        raCls: 'ra-sub',   tab: '🤝', tabCls: 'tt-chat',  kind: 'sub'  },
+      };
+      const TRIGGER_ORDER = ['chat', 'timer', 'connector', 'http', 'queue', 'blob', 'servicebus', 'eventgrid', 'none'];
+
+      // Per-trigger config fields (mirror the Add-capability step-2 form)
+      const TRIG_FIELDS = {
+        timer:      [{ k: 'schedule', label: 'Schedule (cron)', type: 'text', def: '0 0 7 * * *' }],
+        connector:  [
+          { k: 'service', label: 'Service', type: 'select', opts: ['Office 365 Outlook', 'SharePoint', 'Dataverse', 'SQL Server', 'Salesforce'], def: 'Office 365 Outlook' },
+          { k: 'event',   label: 'Event',   type: 'select', opts: ['A new email arrives', 'A new item is created', 'An item is modified'], def: 'A new email arrives' },
+          { k: 'connection', label: 'Connection', type: 'select', opts: ['Outlook — Contoso (existing)', '＋ New connection…'], def: 'Outlook — Contoso (existing)' },
+        ],
+        http:       [{ k: 'route', label: 'Route', type: 'text', def: '/api/ops' }, { k: 'auth', label: 'Auth', type: 'select', opts: ['Function key', 'Anonymous', 'Entra ID'], def: 'Function key' }],
+        queue:      [{ k: 'queue', label: 'Queue name', type: 'text', def: 'ops-jobs' }],
+        blob:       [{ k: 'path', label: 'Container path', type: 'text', def: 'uploads/{name}' }],
+        servicebus: [{ k: 'entity', label: 'Queue or topic', type: 'text', def: 'incidents' }],
+        eventgrid:  [{ k: 'topic', label: 'Topic', type: 'text', def: 'contoso-resources' }],
+      };
+
+      const TOOL_CATALOG = [
+        { type: 'conn',  name: 'Office 365' },
+        { type: 'conn',  name: 'Microsoft Teams' },
+        { type: 'conn',  name: 'SQL Server' },
+        { type: 'conn',  name: 'Salesforce' },
+        { type: 'conn',  name: 'ServiceNow' },
+        { type: 'mcp',   name: 'Microsoft Learn' },
+        { type: 'mcp',   name: 'GitHub MCP' },
+        { type: 'tool',  name: 'azure_rest' },
+        { type: 'tool',  name: 'web_request' },
+        { type: 'tool',  name: 'code sandbox' },
+        { type: 'skill', name: 'azure-resources' },
+        { type: 'sub',   name: 'summarize' },
+      ];
+      const TYPE_LABEL = { conn: 'Connector', mcp: 'MCP server', tool: 'Custom / system tool', skill: 'Skill', sub: 'Sub-agent' };
+      const TYPE_ORDER = ['conn', 'mcp', 'tool', 'skill', 'sub'];
+      const MODELS = ['gpt-5.4', 'gpt-4o', 'gpt-4o-mini', 'o3'];
+      const APP_MODEL = 'gpt-5.4';
+
+      let AGENTS = [
+        { id: 'a1', slug: 'ops_chat', trigger: 'chat', tools: [], model: null, builtin: { ui: true, api: true, mcp: false },
+          instructions: 'You are the operations assistant for Contoso. Answer questions about Azure resource changes, incidents, and deployments. For deep summaries, delegate to the summarize sub-agent.',
+          sampleUser: 'Which resource groups changed in the last 24h?',
+          sampleReply: 'Three groups changed: rg-prod-web (2 edits), rg-data (1), rg-net (1). Want details on any of them?' },
+        { id: 'a2', slug: 'daily_report', trigger: 'timer', model: null,
+          tools: [['conn', 'Office 365'], ['mcp', 'Microsoft Learn'], ['tool', 'azure_rest'], ['skill', 'azure-resources']],
+          cfg: { schedule: '0 0 7 * * *' },
+          instructions: 'When triggered, list resources changed in the last 24h in $SUBSCRIPTION_ID, format an HTML summary grouped by resource group, and email it to $TO_EMAIL with today\u2019s date.',
+          runResult: 'summarized <b>4</b> resource changes and emailed the report to ops@contoso.com. Duration 3.2s.' },
+        { id: 'a3', slug: 'on_new_email', trigger: 'connector', model: null,
+          tools: [['conn', 'Office 365']],
+          cfg: { service: 'Office 365 Outlook', event: 'A new email arrives', connection: 'Outlook — Contoso (existing)' },
+          instructions: 'When a new Outlook email arrives from a watched sender, draft a helpful reply using the Office 365 tools. Never send \u2014 only create a draft.',
+          runResult: 'drafted a reply and saved it to Drafts. Duration 1.8s.' },
+        { id: 'a4', slug: 'summarize', trigger: 'none', tools: [], model: null,
+          instructions: 'You are an internal summarization specialist. Given text, produce a concise, structured summary. Invoked by other agents as delegate_summarize.' },
+      ];
+
+      /* ---------- state ---------- */
+      let seq = 5;
+      let editingId = null;
+      let draft = null;
+      let pending = 0;
+      let active = 'ops_chat';
+      const $ = (id) => document.getElementById(id);
+      const kindOf = (a) => TRIGGERS[a.trigger].kind;
+      const esc = (s) => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const defaultsFor = (tr) => { const o = {}; (TRIG_FIELDS[tr] || []).forEach((f) => (o[f.k] = f.def ?? '')); return o; };
+
+      /* ---------- agents table (read-only rows; Edit opens the drawer) ---------- */
+      function viewRow(a) {
+        const t = TRIGGERS[a.trigger];
+        const uses = a.tools.length
+          ? `<div class="uses">${a.tools.map(([c, n]) => `<span class="chip ${c}">${n}</span>`).join('')}</div>`
+          : `<span class="uses none">—</span>`;
+        let act = '';
+        if (t.kind === 'chat') act = `<button class="lnk" data-go="${a.slug}">Try →</button>`;
+        else if (t.kind === 'run') act = `<button class="lnk" data-go="${a.slug}">Run →</button>`;
+        return `<tr data-id="${a.id}">
+          <td class="nm mono">${a.slug}</td>
+          <td><span class="runsas-tag ${t.raCls}">${t.label}</span></td>
+          <td>${uses}</td>
+          <td class="act"><span class="row-act">${act}<button class="lnk" data-edit="${a.id}">Edit</button></span></td>
+        </tr>`;
+      }
+
+      function renderRows() {
+        $('agentRows').innerHTML = AGENTS.map(viewRow).join('');
+        const tbody = $('agentRows');
+        tbody.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => openDrawer(b.dataset.edit)));
+        tbody.querySelectorAll('[data-go]').forEach((b) => (b.onclick = () => {
+          active = b.dataset.go; renderTabs(); renderBody();
+          $('tryPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }));
+      }
+
+      function flashRow(id) {
+        const tr = document.querySelector(`#agentRows tr[data-id="${id}"]`);
+        if (tr) { tr.classList.add('flash'); setTimeout(() => tr.classList.remove('flash'), 1100); }
+      }
+      function updateDeploy() {
+        const c = $('pendCount');
+        if (pending > 0) { c.textContent = pending; c.hidden = false; } else { c.hidden = true; }
+      }
+
+      /* ---------- edit drawer ---------- */
+      function openDrawer(id) {
+        editingId = id;
+        const a = AGENTS.find((x) => x.id === id);
+        draft = {
+          slug: a.slug, trigger: a.trigger, tools: a.tools.map((t) => t.slice()),
+          instructions: a.instructions || '', model: a.model ?? null,
+          cfg: Object.assign(defaultsFor(a.trigger), a.cfg || {}),
+          builtin: a.builtin ? { ...a.builtin } : null, _isNew: a._isNew || false,
+        };
+        renderDrawer();
+        $('scrim').classList.add('open');
+        $('drawer').classList.add('open');
+      }
+
+      function closeDrawer(discardNew) {
+        if (discardNew && draft && draft._isNew) AGENTS = AGENTS.filter((x) => x.id !== editingId);
+        editingId = null; draft = null;
+        $('scrim').classList.remove('open');
+        $('drawer').classList.remove('open');
+        renderRows(); renderTabs(); renderBody();
+      }
+
+      function filesFor() {
+        const f = [`<span class="mono">${(draft.slug || 'agent').trim() || 'agent'}.agent.md</span>`];
+        if (draft.tools.some(([c]) => c === 'conn' || c === 'mcp')) f.push('<span class="mono">mcp.json</span>');
+        if (draft.tools.some(([c, n]) => c === 'tool' && n === 'azure_rest')) f.push('<span class="mono">tools/azure_rest.py</span>');
+        if (draft.tools.some(([c]) => c === 'skill')) f.push('<span class="mono">skills/…/SKILL.md</span>');
+        const model = draft.model
+          ? `Model <b>overridden to ${draft.model}</b> in this agent file.`
+          : `Model <b>inherits ${APP_MODEL}</b> from <span class="mono">agents.config.yaml</span>.`;
+        return `Saving writes ${f.join(' · ')}. ${model}`;
+      }
+
+      function renderDrawer() {
+        const kind = TRIGGERS[draft.trigger].kind;
+        $('dwTitle').textContent = (draft.slug || 'agent').trim() || 'agent';
+        const kindTag = kind === 'chat'
+          ? '<span class="kindtag ra-chat">chat</span>'
+          : kind === 'sub' ? '<span class="kindtag ra-sub">sub-agent</span>' : '<span class="kindtag ra-timer">triggered</span>';
+        const trigOpts = TRIGGER_ORDER.map((id) => `<option value="${id}" ${draft.trigger === id ? 'selected' : ''}>${TRIGGERS[id].label}</option>`).join('');
+        const cfgFields = (TRIG_FIELDS[draft.trigger] || []).map((f) => {
+          const val = draft.cfg[f.k] ?? f.def ?? '';
+          if (f.type === 'select') {
+            return `<div class="field"><label>${f.label}</label><select data-cfg="${f.k}">${f.opts.map((o) => `<option ${o === val ? 'selected' : ''}>${o}</option>`).join('')}</select></div>`;
+          }
+          return `<div class="field"><label>${f.label}</label><input type="text" data-cfg="${f.k}" value="${esc(val)}" /></div>`;
+        }).join('') || `<p class="runsas" style="margin:0">Runs as <b>${TRIGGERS[draft.trigger].label}</b> — no extra settings.</p>`;
+
+        const chips = draft.tools.length
+          ? draft.tools.map(([c, n], i) => `<span class="chip ${c}">${n}<button class="x" data-rm="${i}" title="Remove">✕</button></span>`).join('')
+          : '<span class="uses none">No tools yet</span>';
+        const remaining = TOOL_CATALOG.filter((tc) => !draft.tools.some(([, n]) => n === tc.name));
+        const addOpts = TYPE_ORDER.map((g) => {
+          const items = remaining.filter((tc) => tc.type === g);
+          return items.length ? `<optgroup label="${TYPE_LABEL[g]}">${items.map((tc) => `<option value="${tc.type}|${tc.name}">${tc.name}</option>`).join('')}</optgroup>` : '';
+        }).join('');
+
+        const override = draft.model !== null;
+
+        $('dwBody').innerHTML = `
+          <div class="dw-sec dw">
+            <div class="lbl">Identity ${kindTag}</div>
+            <div class="field"><label>Agent name</label><input type="text" id="dwName" value="${esc(draft.slug)}" spellcheck="false" />
+              <div class="hint">File: <span class="mono">${(draft.slug || 'agent').trim() || 'agent'}.agent.md</span></div></div>
+            <div class="field"><label>Instructions</label><textarea class="instr" id="dwInstr" spellcheck="false">${esc(draft.instructions)}</textarea>
+              <div class="hint">The agent’s prompt — the body of its <span class="mono">.agent.md</span>.</div></div>
+          </div>
+
+          <div class="dw-sec dw">
+            <div class="lbl">Trigger — how it starts</div>
+            <div class="field"><label>Runs as</label><select id="dwTrig">${trigOpts}</select></div>
+            <div id="dwCfg">${cfgFields}</div>
+          </div>
+
+          <div class="dw-sec dw">
+            <div class="lbl">Tools — what it can do</div>
+            <div class="tool-list" id="dwTools">${chips}<select class="addtool" id="dwAdd"><option value="">＋ Add tool…</option>${addOpts}</select></div>
+            <div class="hint" style="margin-top:8px">Same catalog as <a href="add-capability-v2.html">Add capability</a>. Tools are shared; each agent picks a subset.</div>
+          </div>
+
+          <div class="dw-sec dw">
+            <div class="lbl">Model</div>
+            <label class="model-opt"><input type="radio" name="dwModel" value="inherit" ${!override ? 'checked' : ''}/> Inherit app default — <span class="mono">${APP_MODEL}</span></label>
+            <label class="model-opt"><input type="radio" name="dwModel" value="override" ${override ? 'checked' : ''}/> Override for this agent</label>
+            ${override ? `<div class="field" style="margin-top:6px"><select id="dwModelSel">${MODELS.map((m) => `<option ${m === draft.model ? 'selected' : ''}>${m}</option>`).join('')}</select></div>` : ''}
+          </div>
+
+          ${kind === 'chat' ? `<div class="dw-sec dw">
+            <div class="lbl">Endpoints</div>
+            <div class="builtin-row">
+              <label><input type="checkbox" id="bi_ui" ${draft.builtin?.ui ? 'checked' : ''}/> Chat UI (debug playground)</label>
+              <label><input type="checkbox" id="bi_api" ${draft.builtin?.api ? 'checked' : ''}/> Chat API (HTTP)</label>
+              <label><input type="checkbox" id="bi_mcp" ${draft.builtin?.mcp ? 'checked' : ''}/> Expose this agent as an MCP tool</label>
+            </div>
+          </div>` : ''}
+
+          <div class="dw-sec dw" style="border-bottom:none">
+            <div class="lbl">Files this change writes</div>
+            <div class="files-note" id="dwFiles">${filesFor()}</div>
+          </div>`;
+        bindDrawer();
+      }
+
+      function bindDrawer() {
+        const b = $('dwBody');
+        b.querySelector('#dwName').oninput = (e) => { draft.slug = e.target.value; $('dwTitle').textContent = e.target.value || 'agent'; $('dwFiles').innerHTML = filesFor(); };
+        b.querySelector('#dwInstr').oninput = (e) => (draft.instructions = e.target.value);
+        b.querySelector('#dwTrig').onchange = (e) => {
+          draft.trigger = e.target.value;
+          draft.cfg = defaultsFor(e.target.value);
+          if (TRIGGERS[e.target.value].kind === 'chat' && !draft.builtin) draft.builtin = { ui: true, api: true, mcp: false };
+          renderDrawer();
+        };
+        b.querySelectorAll('[data-cfg]').forEach((el) => (el.oninput = el.onchange = () => (draft.cfg[el.dataset.cfg] = el.value)));
+        const add = b.querySelector('#dwAdd');
+        if (add) add.onchange = () => { if (!add.value) return; const [t, n] = add.value.split('|'); draft.tools.push([t, n]); renderDrawer(); };
+        b.querySelectorAll('[data-rm]').forEach((x) => (x.onclick = () => { draft.tools.splice(+x.dataset.rm, 1); renderDrawer(); }));
+        b.querySelectorAll('input[name="dwModel"]').forEach((r) => (r.onchange = () => {
+          if (!r.checked) return;
+          draft.model = r.value === 'override' ? (draft.model ?? APP_MODEL) : null;
+          renderDrawer();
+        }));
+        const msel = b.querySelector('#dwModelSel');
+        if (msel) msel.onchange = () => { draft.model = msel.value; $('dwFiles').innerHTML = filesFor(); };
+        ['ui', 'api', 'mcp'].forEach((k) => { const c = b.querySelector('#bi_' + k); if (c) c.onchange = () => { draft.builtin = draft.builtin || {}; draft.builtin[k] = c.checked; }; });
+      }
+
+      function saveDrawer() {
+        const a = AGENTS.find((x) => x.id === editingId);
+        a.slug = (draft.slug || 'agent').trim().replace(/\s+/g, '_') || 'agent';
+        a.trigger = draft.trigger;
+        a.tools = draft.tools.map((t) => t.slice());
+        a.instructions = draft.instructions;
+        a.model = draft.model;
+        a.cfg = { ...draft.cfg };
+        a.builtin = TRIGGERS[a.trigger].kind === 'chat' ? (draft.builtin || { ui: true, api: true, mcp: false }) : null;
+        delete a._isNew;
+        const savedId = a.id;
+        editingId = null; draft = null;
+        pending++; updateDeploy();
+        active = a.slug;
+        $('scrim').classList.remove('open');
+        $('drawer').classList.remove('open');
+        renderRows(); renderTabs(); renderBody(); flashRow(savedId);
+      }
+
+      function deleteFromDrawer() {
+        if (!editingId) return;
+        const wasNew = AGENTS.find((x) => x.id === editingId)?._isNew;
+        AGENTS = AGENTS.filter((x) => x.id !== editingId);
+        editingId = null; draft = null;
+        if (!wasNew) { pending++; updateDeploy(); }
+        $('scrim').classList.remove('open');
+        $('drawer').classList.remove('open');
+        renderRows(); renderTabs(); renderBody();
+      }
+
+      /* ---------- try it (bottom) ---------- */
+      function renderTabs() {
+        const tabs = $('tabs');
+        const list = AGENTS.filter((a) => kindOf(a) !== 'sub');
+        if (!list.some((a) => a.slug === active)) active = list.length ? list[0].slug : null;
+        tabs.innerHTML = list.map((a) => {
+          const t = TRIGGERS[a.trigger];
+          return `<button class="try-tab ${a.slug === active ? 'on' : ''}" data-slug="${a.slug}"><span class="t ${t.tabCls}">${t.tab}</span> ${a.slug}</button>`;
+        }).join('');
+        tabs.querySelectorAll('.try-tab').forEach((b) => (b.onclick = () => { active = b.dataset.slug; renderTabs(); renderBody(); }));
+      }
+
+      function renderBody() {
+        const tryBody = $('tryBody');
+        const a = AGENTS.find((x) => x.slug === active && kindOf(x) !== 'sub') || AGENTS.find((x) => kindOf(x) !== 'sub');
+        if (!a) { tryBody.innerHTML = '<p class="runsas">No runnable agent yet — add one above and Save.</p>'; return; }
+        const t = TRIGGERS[a.trigger];
+        if (t.kind === 'chat') {
+          const sampleU = a.sampleUser || 'Hello!';
+          const sampleR = a.sampleReply || 'Hi — I’m your agent. Ask me anything.';
+          tryBody.innerHTML = `
+            <p class="runsas">Runs as <b>${t.label}</b> — talk to it below.</p>
+            <div class="stream" id="stream"></div>
+            <div class="composer">
+              <input id="msg" placeholder="Ask ${a.slug} something…" />
+              <button class="btn primary" id="send">Send</button>
+            </div>`;
+          const stream = $('stream'), input = $('msg');
+          const bubble = (who, cls, text) => {
+            const d = document.createElement('div');
+            d.className = 'bubble ' + cls;
+            d.innerHTML = `<div class="who">${who}</div>${text}`;
+            stream.appendChild(d);
+          };
+          const send = () => {
+            const v = input.value.trim() || sampleU;
+            bubble('You', 'u', v); input.value = '';
+            setTimeout(() => bubble(a.slug, 'a', sampleR), 350);
+          };
+          $('send').onclick = send;
+          input.onkeydown = (e) => { if (e.key === 'Enter') send(); };
+          bubble(a.slug, 'a', 'Hi — I’m your ops assistant. Try “' + sampleU + '”');
+        } else {
+          const runLabel = a.trigger === 'connector' ? '▶ Simulate event' : '▶ Run now';
+          const sample = a.trigger === 'connector'
+            ? 'Sample event: “RE: prod incident” from alice@contoso.com'
+            : 'Simulated ' + t.label.replace(/^[^ ]+ /, '') + ' fires the agent';
+          const result = a.runResult || 'completed successfully. Duration 2.0s.';
+          tryBody.innerHTML = `
+            <p class="runsas">Runs as <b>${t.label}</b> — trigger it manually to test.</p>
+            <div class="run-row">
+              <button class="btn primary" id="run">${runLabel}</button>
+              <div class="sample">${sample}</div>
+            </div>
+            <div class="result" id="result">✅ Ran <span class="mono">${a.slug}</span> — ${result}</div>`;
+          $('run').onclick = () => {
+            const r = $('result');
+            r.classList.remove('show'); void r.offsetWidth; r.classList.add('show');
+          };
+        }
+      }
+
+      /* ---------- top-level actions ---------- */
+      $('addAgent').onclick = () => {
+        const a = { id: 'a' + seq++, slug: 'new_agent', trigger: 'chat', tools: [], model: null,
+          builtin: { ui: true, api: true, mcp: false }, instructions: 'You are a helpful assistant.', _isNew: true,
+          sampleUser: 'Hello!', sampleReply: 'Hi — I’m a new agent. Configure me, then Save.' };
+        AGENTS.push(a);
+        openDrawer(a.id);
+      };
+      $('deployBtn').onclick = () => {
+        if (pending === 0) return;
+        pending = 0; updateDeploy();
+        $('depText').textContent = 'Live · deployed just now';
+      };
+      $('dwClose').onclick = () => closeDrawer(true);
+      $('dwCancel').onclick = () => closeDrawer(true);
+      $('scrim').onclick = () => closeDrawer(true);
+      $('dwSave').onclick = saveDrawer;
+      $('dwDelete').onclick = deleteFromDrawer;
+
+      renderRows();
+      renderTabs();
+      renderBody();
+      updateDeploy();
+    </script>
+  </body>
+</html>

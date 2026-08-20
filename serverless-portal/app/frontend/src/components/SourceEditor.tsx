@@ -7,6 +7,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, Tooltip } from '@coreai/fluentui-react'
 import { CopyRegular, CheckmarkRegular } from '@fluentui/react-icons'
+import { consentStorageAccess } from '../auth'
 
 export function CopyButton({ text, title }: { text: string; title: string }) {
   const [copied, setCopied] = useState(false)
@@ -48,6 +49,7 @@ export function DraftEditor({
   onSaved?: () => void
 }) {
   const qc = useQueryClient()
+  const [grantBusy, setGrantBusy] = useState(false)
   const { data, isLoading, error } = useQuery({
     queryKey,
     queryFn: load,
@@ -125,10 +127,28 @@ export function DraftEditor({
         {renderActions?.({ source, dirty })}
       </div>
       {unreadable && (
-        <p className="muted" style={{ fontSize: 12, margin: '0 0 8px' }}>
-          The deployed source couldn’t be read (permission or plan) — start from here; saving stores a
-          portal draft.
-        </p>
+        <div style={{ margin: '0 0 8px' }}>
+          <p className="muted" style={{ fontSize: 12, margin: '0 0 6px' }}>
+            The deployed source couldn’t be read. Connected GitHub repos are read automatically; if your
+            app’s storage requires it, grant read access below. Editing still saves a portal draft.
+          </p>
+          <Button
+            size="small"
+            disabled={grantBusy}
+            onClick={async () => {
+              setGrantBusy(true)
+              try {
+                const ok = await consentStorageAccess()
+                if (ok) await qc.invalidateQueries({ queryKey })
+              } finally {
+                setGrantBusy(false)
+              }
+            }}
+            title="Grant this portal read access to the app’s deployment storage, then retry"
+          >
+            {grantBusy ? 'Requesting access…' : 'Grant access & retry'}
+          </Button>
+        </div>
       )}
       <textarea
         className="editor"

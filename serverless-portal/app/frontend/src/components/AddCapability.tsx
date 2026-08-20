@@ -2,7 +2,7 @@
 // trigger, or an MCP tool server to an agent, writing the change into a portal
 // draft of the agent's `.agent.md` or the app's `mcp.json`.
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQueryClient, useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { Modal } from './Modal'
@@ -34,14 +34,26 @@ export function AddCapability({
   subscription,
   resourceGroup,
   app,
-  agentName,
+  agentName: agentNameProp,
+  agents,
+  variant = 'card',
 }: {
   subscription: string
   resourceGroup: string
   app: string
   agentName: string
+  // When provided (app-level entry point), the user can retarget the capability
+  // to any of these agents inside the modal. Omitted for the per-agent panel.
+  agents?: string[]
+  // 'card' renders the standalone explanatory card (per-agent panel); 'button'
+  // renders just a compact trigger for a toolbar (app-level).
+  variant?: 'card' | 'button'
 }) {
   const qc = useQueryClient()
+  // The agent a trigger will be written to. Seeded from the prop; retargetable
+  // inside the modal when an `agents` list is supplied.
+  const [agentName, setAgentName] = useState(agentNameProp)
+  useEffect(() => setAgentName(agentNameProp), [agentNameProp])
   const [open, setOpen] = useState(false)
   const [view, setView] = useState<View>('gallery')
   const [busy, setBusy] = useState(false)
@@ -165,21 +177,27 @@ export function AddCapability({
 
   return (
     <>
-      <div className="card" style={{ marginBottom: 18 }}>
-        <div className="card-head">
-          <h3 style={{ margin: 0, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-            <Icon name="plus" size={18} /> Add capability
-          </h3>
-          <Button size="small" onClick={openModal}>
-            Add a trigger or tool
-          </Button>
+      {variant === 'button' ? (
+        <Button size="small" onClick={openModal} title="Add a trigger, tool, or skill to this app">
+          ＋ Add capability
+        </Button>
+      ) : (
+        <div className="card" style={{ marginBottom: 18 }}>
+          <div className="card-head">
+            <h3 style={{ margin: 0, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+              <Icon name="plus" size={18} /> Add capability
+            </h3>
+            <Button size="small" onClick={openModal}>
+              Add a trigger or tool
+            </Button>
+          </div>
+          <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+            Pick a ready-made recipe to make <span className="mono">{agentName}</span> run (a trigger) or give it new
+            abilities (a tool or skill). Every change saves as a draft — publish with <strong>Deploy edits</strong> or
+            open a PR.
+          </p>
         </div>
-        <p className="muted" style={{ fontSize: 12, margin: 0 }}>
-          Pick a ready-made recipe to make <span className="mono">{agentName}</span> run (a trigger) or give it new
-          abilities (a tool or skill). Every change saves as a draft — publish with <strong>Deploy edits</strong> or
-          open a PR.
-        </p>
-      </div>
+      )}
 
       {open && (
         <Modal title="Add a capability" onClose={() => setOpen(false)} width={760}>
@@ -196,6 +214,22 @@ export function AddCapability({
 
           {view === 'gallery' && (
             <>
+              {agents && agents.length > 1 && (
+                <div className="field" style={{ marginBottom: 14 }}>
+                  <label>Add to agent</label>
+                  <SearchableSelect
+                    value={agentName}
+                    onChange={(v) => setAgentName(v)}
+                    options={agents.map((a) => ({ value: a, label: a }))}
+                    placeholder="Select an agent…"
+                    ariaLabel="Target agent for this capability"
+                  />
+                  <div className="hint">
+                    Triggers attach to this agent’s <span className="mono">.agent.md</span>. Tools &amp; skills are
+                    shared by all agents.
+                  </div>
+                </div>
+              )}
               <div className="recipe-section-label">Make it run — triggers</div>
               <div className="recipe-grid">
                 <RecipeCard
@@ -320,6 +354,15 @@ export function AddCapability({
               >
                 {busy ? 'Applying…' : 'Apply custom schedule'}
               </Button>
+              <AiGenerate
+                kind="timer_trigger"
+                triggerType="timer_trigger"
+                title="Generate a scheduled agent with AI"
+                hint="Describe the recurring task; a Foundry model writes a complete .agent.md (timer trigger + instructions). Applying replaces this agent's draft."
+                subscription={subscription}
+                app={app}
+                agentName={agentName}
+              />
             </>
           )}
 
@@ -637,7 +680,7 @@ function RecipeCard({
   )
 }
 
-type GenKind = 'http_trigger' | 'connector_trigger' | 'custom_tool' | 'skill'
+type GenKind = 'http_trigger' | 'connector_trigger' | 'timer_trigger' | 'custom_tool' | 'skill'
 
 // A Foundry-backed generator: pick a model, describe the capability, generate
 // the code/config, preview it, then apply it to a draft (`.agent.md` for
@@ -791,7 +834,9 @@ function AiGenerate({
                 ? 'e.g. How to query Azure Resource Graph: common KQL, endpoints, auth, and pitfalls.'
                 : kind === 'connector_trigger'
                   ? 'e.g. When a new Outlook email arrives from my manager, draft a concise reply.'
-                  : 'e.g. Accept a support ticket, classify urgency, and return a JSON triage result.'
+                  : kind === 'timer_trigger'
+                    ? 'e.g. Every weekday at 9am UTC, summarise yesterday\u2019s open GitHub PRs and post the digest to Teams.'
+                    : 'e.g. Accept a support ticket, classify urgency, and return a JSON triage result.'
           }
           onChange={(_, data) => setDesc(data.value)}
           textarea={{ spellCheck: false, style: { minHeight: '84px' } }}

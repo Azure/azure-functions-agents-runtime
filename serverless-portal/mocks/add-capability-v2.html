@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Add capability — Contoso Ops Assistant</title>
+    <link rel="stylesheet" href="styles.css" />
+    <style>
+      /* --- mock-only, scoped to the add-capability wizard --- */
+      .wiz { max-width: 860px; }
+      .cat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px; }
+      @media (max-width: 680px) { .cat-grid { grid-template-columns: 1fr; } }
+      .recipe-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+      .rec .meta .badge { font-size: 10.5px; }
+      .catline { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); margin: 2px 0 12px; }
+      .catline .k { font-weight: 700; color: var(--text); }
+
+      .sel-recipe { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--border);
+        border-radius: 10px; background: var(--surface-2); margin-bottom: 18px; }
+      .sel-recipe .ico { font-size: 22px; }
+      .sel-recipe .t { font-weight: 650; }
+      .sel-recipe .d { font-size: 12.5px; color: var(--text-muted); }
+      .sel-recipe .spacer { flex: 1; }
+
+      .assign { border: 1px dashed var(--border-strong); border-radius: 10px; padding: 14px 16px 4px; background: var(--surface);
+        margin: 4px 0 18px; }
+      .assign .lead { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; color: var(--text-faint); margin-bottom: 10px; }
+
+      .check { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 6px; }
+      .check label { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 500; cursor: pointer; }
+      .check input { width: auto; }
+
+      .actions { display: flex; align-items: center; gap: 10px; margin-top: 22px; }
+      .actions .spacer { flex: 1; }
+
+      .done-card { text-align: left; }
+      .done-ico { width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; font-size: 24px;
+        background: var(--green-soft); color: var(--green); margin-bottom: 12px; }
+      .summary { display: grid; grid-template-columns: 150px 1fr; gap: 8px 14px; margin: 14px 0 6px; }
+      .summary dt { color: var(--text-muted); font-size: 12.5px; }
+      .summary dd { margin: 0; font-size: 13.5px; }
+    </style>
+  </head>
+  <body>
+    <header class="appbar">
+      <a class="brand" href="index.html"><span class="brand-mark">⚡</span><span class="brand-name">AI Apps</span></a>
+      <div class="appbar-spacer"></div>
+      <a class="btn primary sm" href="create-ai-app-v2.html">＋ New AI App</a>
+      <div class="appbar-user" title="Signed in">SN</div>
+    </header>
+
+    <div class="body">
+      <aside class="sidebar">
+        <nav class="sidenav">
+          <div class="group-label">Build</div>
+          <a class="sidelink active" href="index.html"><span class="ico">🧩</span><span class="label">AI Apps</span></a>
+          <a class="sidelink" href="skills.html"><span class="ico">📚</span><span class="label">Skills</span></a>
+        </nav>
+      </aside>
+
+      <main class="main">
+        <div class="breadcrumb">
+          <a href="index.html">AI Apps</a> / <a href="ai-app-detail-v2.html">Contoso Ops Assistant</a> / Add capability
+        </div>
+        <div class="page-title"><h1>Add a capability</h1></div>
+        <p class="page-sub">Give <span class="mono">contoso-ops-assistant</span> a new way to <b>start</b> (a trigger) or a new thing it can <b>do</b> (a tool).</p>
+
+        <div class="wiz">
+          <div class="steps">
+            <span class="step" id="s1">1 · Choose</span>
+            <span class="step-sep">→</span>
+            <span class="step" id="s2">2 · Configure</span>
+            <span class="step-sep">→</span>
+            <span class="step" id="s3">3 · Done</span>
+          </div>
+
+          <!-- STEP 1 -->
+          <section id="step1">
+            <div class="cat-grid" id="catGrid"><!-- category picks --></div>
+            <p class="catline" id="catLine"></p>
+            <div class="recipe-grid" id="recipeGrid"><!-- recipe picks --></div>
+          </section>
+
+          <!-- STEP 2 -->
+          <section id="step2" hidden>
+            <div class="sel-recipe" id="selRecipe"></div>
+            <div class="card" id="cfgCard">
+              <div id="cfgFields"><!-- per-recipe fields --></div>
+              <div class="assign" id="assignBox"><!-- assign to agent / availability --></div>
+            </div>
+            <div class="actions">
+              <button class="btn" id="backBtn">← Back</button>
+              <div class="spacer"></div>
+              <button class="btn primary" id="addBtn">Add capability</button>
+            </div>
+          </section>
+
+          <!-- STEP 3 -->
+          <section id="step3" hidden>
+            <div class="card done-card">
+              <div class="done-ico">✓</div>
+              <h3 style="margin:0 0 4px; font-size:16px" id="doneTitle">Capability added</h3>
+              <p class="muted" style="margin:0" id="doneSub"></p>
+              <dl class="summary" id="doneSummary"></dl>
+              <div class="callout" style="margin:14px 0 0">
+                <span class="ico">🚀</span>
+                <div>
+                  <b>Not live yet.</b> Your change is saved as a draft edit — deploy to roll it out.
+                  <div class="actions" style="margin-top:12px">
+                    <button class="btn primary" id="deployBtn">🚀 Deploy now</button>
+                    <button class="btn" id="againBtn">＋ Add another</button>
+                    <a class="btn ghost" href="ai-app-detail-v2.html">Back to app</a>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      const AGENTS = ['ops_chat', 'daily_report', 'on_new_email', 'summarize'];
+
+      const CATS = {
+        trigger: {
+          icon: '⚡', title: 'A trigger', desc: 'How the app starts — an event.',
+          line: 'A <span class="k">trigger</span> is an event that starts the app. It creates <b>one new agent</b> that runs whenever the event happens.',
+          recipes: [
+            { id: 'timer',      icon: '⏰', t: 'On a schedule',                d: 'Run daily, hourly, or a custom cron.',            tag: 'timer_trigger' },
+            { id: 'connector',  icon: '🔌', t: 'When a connector event happens', d: 'New email, new row, new file… (1,400+ services).', tag: 'connector_trigger' },
+            { id: 'http',       icon: '🌐', t: 'On an HTTP request',            d: 'Expose an endpoint the agent answers.',            tag: 'http_trigger' },
+            { id: 'queue',      icon: '📥', t: 'On a queue message',            d: 'Process Azure Storage queue messages.',            tag: 'queue_trigger' },
+            { id: 'blob',       icon: '🗂️', t: 'On a new blob',                 d: 'React to files uploaded to Blob Storage.',          tag: 'blob_trigger' },
+            { id: 'servicebus', icon: '🚌', t: 'On a Service Bus message',      d: 'Queue or topic subscription.',                     tag: 'service_bus_trigger' },
+            { id: 'eventgrid',  icon: '⚡', t: 'On an Event Grid event',        d: 'React to Azure resource events.',                  tag: 'event_grid_trigger' },
+          ],
+        },
+        tool: {
+          icon: '🔌', title: 'A tool', desc: 'What the app can do — an action.',
+          line: 'A <span class="k">tool</span> is an action an agent can take. Tools are <b>shared</b> — pick which agents can use it.',
+          recipes: [
+            { id: 'o365',       icon: '📧', t: 'Connect Office 365',        d: 'Send/draft email, calendar, files as MCP tools.', tag: 'connector MCP' },
+            { id: 'teams',      icon: '💬', t: 'Connect Microsoft Teams',   d: 'Post messages, read channels.',                   tag: 'connector MCP' },
+            { id: 'sql',        icon: '🗄️', t: 'Connect SQL',               d: 'Query and update rows.',                          tag: 'connector MCP' },
+            { id: 'salesforce', icon: '☁️', t: 'Connect Salesforce',        d: 'Read/write CRM records.',                         tag: 'connector MCP' },
+            { id: 'mcp',        icon: '🧰', t: 'Add a remote MCP server',   d: 'Any HTTP MCP endpoint (e.g. Microsoft Learn).',   tag: 'mcp.json' },
+            { id: 'pytool',     icon: '🐍', t: 'Add a custom tool',         d: 'A Python @tool in tools/*.py.',                   tag: 'custom tool' },
+            { id: 'skill',      icon: '📚', t: 'Add a skill',               d: 'Progressive-disclosure knowledge (SKILL.md).',    tag: 'skill' },
+            { id: 'subagent',   icon: '🤝', t: 'Use another agent as a tool', d: 'Delegate to a sub-agent.',                      tag: 'sub-agent' },
+          ],
+        },
+      };
+
+      const SUGGEST = { timer: 'daily_report_2', connector: 'on_new_email_2', http: 'on_request', queue: 'on_queue_msg', blob: 'on_new_blob', servicebus: 'on_sb_message', eventgrid: 'on_azure_event' };
+
+      let cat = 'trigger';
+      let recipeId = null;
+      const $ = (id) => document.getElementById(id);
+      const recipeOf = (id) => [...CATS.trigger.recipes, ...CATS.tool.recipes].find((r) => r.id === id);
+
+      function setStep(n) {
+        $('step1').hidden = n !== 1; $('step2').hidden = n !== 2; $('step3').hidden = n !== 3;
+        [1, 2, 3].forEach((i) => $('s' + i).classList.toggle('active', i === n));
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+
+      /* ---------- step 1 ---------- */
+      function renderStep1() {
+        $('catGrid').innerHTML = Object.entries(CATS).map(([key, c]) =>
+          `<button class="pick ${key === cat ? 'active' : ''}" data-cat="${key}">
+             <span class="ico">${c.icon}</span>
+             <span><span class="t">${c.title}</span><span class="d">${c.desc}</span></span>
+           </button>`).join('');
+        $('catLine').innerHTML = CATS[cat].line;
+        $('recipeGrid').innerHTML = CATS[cat].recipes.map((r) =>
+          `<button class="pick rec" data-recipe="${r.id}">
+             <span class="ico">${r.icon}</span>
+             <span><span class="t">${r.t}</span><span class="d">${r.d}</span>
+               <span class="meta"><span class="badge gray mono">${r.tag}</span></span></span>
+           </button>`).join('');
+        $('catGrid').querySelectorAll('[data-cat]').forEach((b) => (b.onclick = () => { cat = b.dataset.cat; renderStep1(); }));
+        $('recipeGrid').querySelectorAll('[data-recipe]').forEach((b) => (b.onclick = () => { recipeId = b.dataset.recipe; openConfig(); }));
+      }
+
+      /* ---------- step 2 ---------- */
+      function field(label, control, hint) {
+        return `<div class="field"><label>${label}</label>${control}${hint ? `<div class="hint">${hint}</div>` : ''}</div>`;
+      }
+      function sel(id, opts) { return `<select id="${id}">${opts.map((o) => `<option>${o}</option>`).join('')}</select>`; }
+      function txt(id, val, ph) { return `<input type="text" id="${id}" value="${val || ''}" placeholder="${ph || ''}" />`; }
+
+      function fieldsFor(r) {
+        switch (r.id) {
+          case 'timer':
+            return field('Schedule', sel('f_sched', ['Every day at 07:00', 'Every hour', 'Every Monday at 09:00', 'Custom cron…']))
+              + field('Cron expression', txt('f_cron', '0 0 7 * * *'), 'Shown for reference — edit if you picked Custom.');
+          case 'connector':
+            return field('Service', sel('f_svc', ['Office 365 Outlook', 'SharePoint', 'Dataverse', 'SQL Server', 'Salesforce']))
+              + field('Event', sel('f_evt', ['A new email arrives', 'A new item is created', 'An item is modified']))
+              + field('Connection', sel('f_conn', ['Outlook — Contoso (existing)', '＋ New connection…']), 'Connections are managed by your Connector Gateway.');
+          case 'http':
+            return field('Route', txt('f_route', '/api/ops', '/api/…'))
+              + field('Auth', sel('f_auth', ['Function key', 'Anonymous', 'Entra ID']));
+          case 'queue':
+            return field('Queue name', txt('f_q', 'ops-jobs'))
+              + field('Storage connection', sel('f_conn', ['AzureWebJobsStorage (default)', '＋ New connection…']));
+          case 'blob':
+            return field('Container path', txt('f_path', 'uploads/{name}'))
+              + field('Storage connection', sel('f_conn', ['AzureWebJobsStorage (default)', '＋ New connection…']));
+          case 'servicebus':
+            return field('Namespace', txt('f_ns', 'contoso-bus'))
+              + field('Queue or topic', txt('f_qt', 'incidents'));
+          case 'eventgrid':
+            return field('Topic', txt('f_topic', 'contoso-resources'))
+              + field('Subscription', txt('f_sub', 'ops-sub'));
+          case 'o365': case 'teams': case 'sql': case 'salesforce': {
+            const acts = {
+              o365: ['Send email', 'Draft email', 'Read calendar', 'Read files'],
+              teams: ['Post message', 'Read channel', 'Create meeting'],
+              sql: ['Query rows', 'Insert rows', 'Update rows'],
+              salesforce: ['Read records', 'Create records', 'Update records'],
+            }[r.id];
+            return field('Connection', sel('f_conn', [`${r.t.replace('Connect ', '')} — Contoso (existing)`, '＋ New connection…']), 'Auth is handled via the connection’s apihub scope.')
+              + `<div class="field"><label>Actions to expose as tools</label><div class="check">${acts.map((a, i) =>
+                  `<label><input type="checkbox" ${i < 2 ? 'checked' : ''}/> ${a}</label>`).join('')}</div></div>`;
+          }
+          case 'mcp':
+            return field('Name', txt('f_name', 'microsoft-learn'))
+              + field('Server URL', txt('f_url', 'https://learn.microsoft.com/api/mcp'))
+              + field('Auth', sel('f_auth', ['None', 'OAuth (scope + client id)']));
+          case 'pytool':
+            return field('File', txt('f_file', 'tools/azure_rest.py'))
+              + field('What it does', txt('f_desc', 'Calls the Azure REST API for resource changes.'));
+          case 'skill':
+            return field('Skill', sel('f_skill', ['azure-resources', 'incident-runbook', '＋ New skill…']));
+          case 'subagent':
+            return field('Expose which agent as a tool', sel('f_agent', AGENTS.filter((a) => a !== 'summarize').concat('summarize')));
+          default:
+            return field('Name', txt('f_name', ''));
+        }
+      }
+
+      function assignFor(r) {
+        if (cat === 'trigger') {
+          return `<div class="lead">Creates a new agent</div>`
+            + field('New agent name', txt('f_agentname', SUGGEST[r.id] || 'new_agent'),
+                'A trigger runs exactly one agent. This <span class="mono">.agent.md</span> will be created for it.');
+        }
+        return `<div class="lead">Availability</div>`
+          + field('Which agents can use this tool?', sel('f_avail', ['All agents', ...AGENTS]),
+              'Tools are shared across the app; each agent can be filtered to a subset.');
+      }
+
+      function openConfig() {
+        const r = recipeOf(recipeId);
+        $('selRecipe').innerHTML =
+          `<span class="ico">${r.icon}</span>
+           <span><span class="t">${r.t}</span><br /><span class="d">${r.d}</span></span>
+           <span class="spacer"></span>
+           <span class="badge ${cat === 'trigger' ? 'amber' : 'purple'}">${cat === 'trigger' ? '⚡ trigger' : '🔌 tool'}</span>
+           <button class="btn sm" id="changeBtn">Change</button>`;
+        $('cfgFields').innerHTML = fieldsFor(r);
+        $('assignBox').innerHTML = assignFor(r);
+        $('changeBtn').onclick = () => setStep(1);
+        setStep(2);
+      }
+
+      /* ---------- step 3 ---------- */
+      function addCapability() {
+        const r = recipeOf(recipeId);
+        const val = (id) => { const el = $(id); return el ? el.value : ''; };
+        let rows = '';
+        if (cat === 'trigger') {
+          const name = val('f_agentname') || 'new_agent';
+          $('doneTitle').textContent = 'Trigger added';
+          $('doneSub').innerHTML = `New agent <span class="mono">${name}</span> will run when this event fires.`;
+          rows = `<dt>New agent</dt><dd class="mono">${name}</dd>
+                  <dt>Runs as</dt><dd>${r.icon} ${r.t} <span class="badge gray mono">${r.tag}</span></dd>`;
+          if ($('f_svc')) rows += `<dt>Service · event</dt><dd>${val('f_svc')} · ${val('f_evt')}</dd>`;
+          if ($('f_sched')) rows += `<dt>Schedule</dt><dd>${val('f_sched')}</dd>`;
+          if ($('f_route')) rows += `<dt>Route</dt><dd class="mono">${val('f_route')}</dd>`;
+        } else {
+          $('doneTitle').textContent = 'Tool added';
+          $('doneSub').innerHTML = `<span class="mono">${r.t}</span> is now available to your agents.`;
+          rows = `<dt>Tool</dt><dd>${r.icon} ${r.t} <span class="badge gray mono">${r.tag}</span></dd>
+                  <dt>Available to</dt><dd>${val('f_avail') || 'All agents'}</dd>`;
+          if ($('f_url')) rows += `<dt>Server</dt><dd class="mono">${val('f_url')}</dd>`;
+          if ($('f_file')) rows += `<dt>File</dt><dd class="mono">${val('f_file')}</dd>`;
+        }
+        $('doneSummary').innerHTML = rows;
+        setStep(3);
+      }
+
+      $('addBtn').onclick = addCapability;
+      $('backBtn').onclick = () => setStep(1);
+      $('againBtn').onclick = () => { recipeId = null; renderStep1(); setStep(1); };
+      $('deployBtn').onclick = () => {
+        $('deployBtn').textContent = '✓ Deployed';
+        $('deployBtn').disabled = true;
+      };
+
+      renderStep1();
+      setStep(1);
+    </script>
+  </body>
+</html>

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { api, type LiveAgentApp } from '../api'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { api, type LiveAgentApp, type SourceListEntry } from '../api'
 import { useDeployJob, DeploymentStatus, GitHubConnect } from '../deploy'
 import { CopyButton, DraftEditor } from '../components/SourceEditor'
+import { AddCapability } from '../components/AddCapability'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
 import { Badge, EmptyState, StatTiles, StatusBadge } from '../components/ui'
@@ -86,6 +87,82 @@ function parseMcpServers(content?: string | null): McpServer[] {
   }
 }
 
+// A folder in the sidebar's file tree. Files at the root live in `files`;
+// nested directories live in `dirs`, keyed by folder name.
+interface TreeFolder {
+  files: TreeFile[]
+  dirs: Map<string, TreeFolder>
+}
+interface TreeFile {
+  path: string // wwwroot-relative
+  name: string // basename
+  source: 'draft' | 'deployed' | 'both' | 'stub'
+}
+
+function pickIcon(name: string): string {
+  if (name.endsWith('.agent.md')) return '📄'
+  if (name.endsWith('.py')) return '🐍'
+  if (name === 'mcp.json') return '🔌'
+  if (name === 'host.json' || name.endsWith('.yaml') || name.endsWith('.yml')) return '⚙️'
+  if (name === 'requirements.txt' || name.startsWith('package')) return '📦'
+  if (name.endsWith('.md')) return '💡'
+  if (name.endsWith('.json')) return '🗂️'
+  return '📄'
+}
+
+function newFolder(): TreeFolder {
+  return { files: [], dirs: new Map() }
+}
+
+// Union of the discovered files and the curated fallback list into a
+// nested-folder tree. Well-known files a fresh app is expected to have
+// (function_app.py, host.json, …) are surfaced even when the deployed package
+// can't be read, so the user can still start a draft.
+function buildFileTree(
+  listed: SourceListEntry[],
+  fallback: { path: string; label: string; icon: string }[],
+): TreeFolder {
+  const root = newFolder()
+  const byPath = new Map<string, TreeFile>()
+
+  const insert = (file: TreeFile) => {
+    byPath.set(file.path, file)
+    const segments = file.path.split('/')
+    let cursor = root
+    for (let i = 0; i < segments.length - 1; i++) {
+      const dir = segments[i]
+      if (!cursor.dirs.has(dir)) cursor.dirs.set(dir, newFolder())
+      cursor = cursor.dirs.get(dir)!
+    }
+    cursor.files.push(file)
+  }
+
+  for (const f of listed) {
+    insert({
+      path: f.path,
+      name: f.path.split('/').pop() ?? f.path,
+      source: f.source,
+    })
+  }
+  for (const f of fallback) {
+    if (byPath.has(f.path)) continue
+    insert({
+      path: f.path,
+      name: f.path.split('/').pop() ?? f.path,
+      source: 'stub',
+    })
+  }
+
+  // Deterministic order: files A-Z, then subfolders A-Z.
+  const sortFolder = (folder: TreeFolder) => {
+    folder.files.sort((a, b) => a.name.localeCompare(b.name))
+    folder.dirs = new Map([...folder.dirs.entries()].sort((a, b) => a[0].localeCompare(b[0])))
+    for (const child of folder.dirs.values()) sortFolder(child)
+  }
+  sortFolder(root)
+  return root
+}
+
 type Sel =
   | { kind: 'overview' }
   | { kind: 'agent'; name: string }
@@ -138,9 +215,70 @@ export default function AppDetailPage() {
 
   const endpoints = app ? buildAppEndpoints(app) : []
   const endpointsText = endpoints.map((e) => `${e.kind.padEnd(5)} ${e.url}`).join('\n')
+  // The selected agent's live metadata (trigger + whether it exposes a chat API),
+  // used to organize the side panel and gate the "Try it" action.
+  const selectedAgent =
+    sel.kind === 'agent' && app ? app.agents.find((a) => a.name === sel.name) : undefined
   const codeFiles = app ? buildCodeFiles(app) : []
   const builtinCount = app?.agents.filter((a) => a.builtinEndpoints).length ?? 0
   const supportingCount = app?.supportingFunctions?.length ?? 0
+
+  // Real file listing — merges the app's deployed package (via Kudu VFS or the
+  // Flex zip's central directory) with any local drafts, so the sidebar shows
+  // every file the "Deploy edits" step will push, not just a curated set.
+  const qc = useQueryClient()
+  const filesListQuery = useQuery({
+    queryKey: ['sourceList', subForQuery, app?.resourceGroup ?? '', appName ?? ''],
+    queryFn: () =>
+      api.listSources({ subscription: subForQuery, app: app!.name, resourceGroup: app!.resourceGroup }),
+    enabled: !!app,
+    staleTime: 60_000,
+    refetchOnMount: false,
+  })
+  const listedFiles: SourceListEntry[] = filesListQuery.data?.files ?? []
+
+  // Union of the discovered files and the curated fallback list, so a fresh
+  // app whose package isn't readable still surfaces the obvious well-known
+  // files as editable draft slots.
+  const tree = useMemo(() => buildFileTree(listedFiles, codeFiles), [listedFiles, codeFiles])
+
+  // Delete a portal-side draft. Used by the file editor's Delete-draft button
+  // and the sidebar's per-file action.
+  const deleteDraft = useMutation({
+    mutationFn: (relPath: string) =>
+      api.deleteSourceDraft({ subscription: subForQuery, app: appName!, path: relPath }),
+    onSuccess: (_res, relPath) => {
+      qc.invalidateQueries({ queryKey: ['source', subForQuery, appName ?? '', relPath] })
+      qc.invalidateQueries({ queryKey: ['sourceList', subForQuery, app?.resourceGroup ?? '', appName ?? ''] })
+    },
+  })
+
+  // Create a new file draft. Prompts for a wwwroot-relative path, seeds an
+  // empty draft, then selects it in the editor.
+  const [newFileError, setNewFileError] = useState<string | null>(null)
+  const addNewFile = async () => {
+    if (!app) return
+    setNewFileError(null)
+    // eslint-disable-next-line no-alert
+    const raw = window.prompt('New file path (wwwroot-relative, e.g. tools/hello.py)', 'tools/hello.py')
+    if (!raw) return
+    const path = raw.replace(/^\.?\/+/, '').trim()
+    if (!path || path.includes('..')) {
+      setNewFileError('Invalid path.')
+      return
+    }
+    if (listedFiles.some((f) => f.path === path)) {
+      setSel({ kind: 'file', path, label: path.split('/').pop() ?? path })
+      return
+    }
+    try {
+      await api.saveSource({ subscription: subForQuery, app: app.name, path, content: '' })
+      await qc.invalidateQueries({ queryKey: ['sourceList', subForQuery, app.resourceGroup, app.name] })
+      setSel({ kind: 'file', path, label: path.split('/').pop() ?? path })
+    } catch (e) {
+      setNewFileError((e as Error).message)
+    }
+  }
 
   // mcp.json is only fetched when the MCP tab is opened.
   const { data: mcpSource } = useQuery({
@@ -290,6 +428,16 @@ export default function AppDetailPage() {
             <Link className="btn" to="/create-agent">
               ＋ Add agent
             </Link>
+            {app.agents.length > 0 && (
+              <AddCapability
+                variant="button"
+                subscription={subForQuery}
+                resourceGroup={app.resourceGroup}
+                app={app.name}
+                agentName={app.agents[0].name}
+                agents={app.agents.map((a) => a.name)}
+              />
+            )}
             {isFetching && (
               <span className="cache-stamp">⟳ Refreshing…</span>
             )}
@@ -371,20 +519,38 @@ export default function AppDetailPage() {
                 </>
               )}
 
-              <div className="group-label">App files</div>
-              {codeFiles.map((f) => (
-                <button
-                  key={f.path}
-                  className={
-                    'node' +
-                    (sel.kind === 'file' && sel.path === f.path && sel.label === f.label ? ' active' : '')
-                  }
-                  onClick={() => setSel({ kind: 'file', path: f.path, label: f.label })}
-                  title={f.path}
+              <div className="group-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span>App files</span>
+                <Button
+                  size="small"
+                  appearance="subtle"
+                  onClick={() => void addNewFile()}
+                  title="Create a new file in this app (saved as a draft)"
                 >
-                  {f.icon} <span className="mono">{f.label}</span>
-                </button>
-              ))}
+                  ＋ New file
+                </Button>
+              </div>
+              {filesListQuery.isLoading && (
+                <div className="muted" style={{ fontSize: 12, padding: '4px 8px' }}>
+                  Listing files…
+                </div>
+              )}
+              {filesListQuery.error && (
+                <div className="muted" style={{ fontSize: 12, padding: '4px 8px', color: 'var(--red)' }}>
+                  Couldn’t list files: {(filesListQuery.error as Error).message.slice(0, 80)}
+                </div>
+              )}
+              {newFileError && (
+                <div className="muted" style={{ fontSize: 12, padding: '4px 8px', color: 'var(--red)' }}>
+                  {newFileError}
+                </div>
+              )}
+              <FileTreeView
+                folder={tree}
+                depth={0}
+                sel={sel}
+                onSelect={(file) => setSel({ kind: 'file', path: file.path, label: file.name })}
+              />
             </aside>
 
             <section className="component-editor">
@@ -431,14 +597,46 @@ export default function AppDetailPage() {
                     <h3 className="mono" style={{ margin: 0 }}>
                       {sel.name}.agent.md
                     </h3>
-                    <Link
-                      className="btn sm"
-                      to={`/agents/${enc(subForQuery)}/${enc(app.name)}/${enc(sel.name)}`}
-                      title="Open the full agent page"
-                    >
-                      Open agent page →
-                    </Link>
+                    <div style={{ display: 'inline-flex', gap: 8 }}>
+                      {selectedAgent?.builtinEndpoints && (
+                        <Link
+                          className="btn sm"
+                          to={`/playground/${enc(subForQuery)}/${enc(app.name)}/${enc(sel.name)}`}
+                          title="Chat with this agent's built-in endpoint"
+                        >
+                          💬 Try it
+                        </Link>
+                      )}
+                      <Link
+                        className="btn sm"
+                        to={`/agents/${enc(subForQuery)}/${enc(app.name)}/${enc(sel.name)}`}
+                        title="Open the full agent page"
+                      >
+                        Open agent page →
+                      </Link>
+                    </div>
                   </div>
+                  {selectedAgent && (
+                    <p className="muted" style={{ fontSize: 12, marginTop: 0, marginBottom: 14 }}>
+                      Runs as <span className="badge gray">{selectedAgent.trigger || 'http'}</span>
+                      {selectedAgent.builtinEndpoints
+                        ? ' · exposes a chat API you can try'
+                        : ' · no chat endpoint (triggered agent)'}
+                    </p>
+                  )}
+
+                  <AddCapability
+                    subscription={subForQuery}
+                    resourceGroup={app.resourceGroup}
+                    app={app.name}
+                    agentName={sel.name}
+                  />
+
+                  <span className="group-sub">Definition</span>
+                  <p className="muted" style={{ fontSize: 12, margin: '4px 0 10px' }}>
+                    Edit the agent’s <span className="mono">.agent.md</span> — its instructions, trigger, and
+                    settings. Saves as a draft; publish with <strong>Deploy edits</strong>.
+                  </p>
                   <DraftEditor
                     key={'agent:' + sel.name}
                     queryKey={['agentDefinition', subForQuery, app.name, sel.name]}
@@ -525,7 +723,25 @@ export default function AppDetailPage() {
                       api.saveSource({ subscription: subForQuery, app: app.name, path: sel.path, content })
                     }
                     fallback=""
-                    renderActions={renderPrAction}
+                    renderActions={({ source, dirty }) => {
+                      const filePath = sel.kind === 'file' ? sel.path : ''
+                      return (
+                        <>
+                          {renderPrAction({ source, dirty })}
+                          {source === 'draft' && !dirty && filePath && (
+                            <Button
+                              size="small"
+                              appearance="subtle"
+                              disabled={deleteDraft.isPending}
+                              onClick={() => deleteDraft.mutate(filePath)}
+                              title="Discard this portal draft (does not touch the deployed file)"
+                            >
+                              {deleteDraft.isPending ? 'Deleting…' : 'Delete draft'}
+                            </Button>
+                          )}
+                        </>
+                      )
+                    }}
                     onSaved={onDraftSaved}
                   />
                 </>
@@ -552,6 +768,122 @@ export default function AppDetailPage() {
             </div>
           )}
         </>
+      )}
+    </>
+  )
+}
+
+// Recursive sidebar view of the app's file tree. Renders folders as
+// collapsible group headers and files as clickable rows; the currently
+// selected file is highlighted. A small badge marks files that carry a
+// portal-side draft (unpublished edits) so they stand out from deployed-only
+// files at a glance.
+function FileTreeView({
+  folder,
+  depth,
+  sel,
+  onSelect,
+  prefix = '',
+}: {
+  folder: TreeFolder
+  depth: number
+  sel: Sel
+  onSelect: (file: TreeFile) => void
+  prefix?: string
+}) {
+  return (
+    <>
+      {folder.files.map((f) => {
+        const active = sel.kind === 'file' && sel.path === f.path
+        const draftBadge =
+          f.source === 'draft' || f.source === 'both' ? (
+            <span
+              className="badge amber"
+              style={{ marginLeft: 'auto', fontSize: 10 }}
+              title={f.source === 'both' ? 'Deployed + draft' : 'Draft only'}
+            >
+              draft
+            </span>
+          ) : f.source === 'stub' ? (
+            <span
+              className="badge gray"
+              style={{ marginLeft: 'auto', fontSize: 10 }}
+              title="Not present in the deployed package — start a draft to create it"
+            >
+              stub
+            </span>
+          ) : null
+        return (
+          <button
+            key={f.path}
+            className={'node' + (active ? ' active' : '')}
+            onClick={() => onSelect(f)}
+            title={f.path}
+            style={{ paddingLeft: 8 + depth * 12 }}
+          >
+            <span style={{ marginRight: 6 }}>{pickIcon(f.name)}</span>
+            <span className="mono">{f.name}</span>
+            {draftBadge}
+          </button>
+        )
+      })}
+      {[...folder.dirs.entries()].map(([dir, child]) => {
+        const nextPrefix = prefix ? `${prefix}/${dir}` : dir
+        return (
+          <FileTreeFolder
+            key={nextPrefix}
+            name={dir}
+            folder={child}
+            depth={depth}
+            sel={sel}
+            onSelect={onSelect}
+            prefix={nextPrefix}
+          />
+        )
+      })}
+    </>
+  )
+}
+
+function FileTreeFolder({
+  name,
+  folder,
+  depth,
+  sel,
+  onSelect,
+  prefix,
+}: {
+  name: string
+  folder: TreeFolder
+  depth: number
+  sel: Sel
+  onSelect: (file: TreeFile) => void
+  prefix: string
+}) {
+  // Expand top-level folders by default so common entry points (skills/,
+  // tools/, agents/) are visible without a click; deeper folders start
+  // collapsed to keep the sidebar scannable.
+  const [open, setOpen] = useState(depth === 0)
+  return (
+    <>
+      <button
+        type="button"
+        className="node"
+        onClick={() => setOpen((v) => !v)}
+        title={prefix}
+        style={{ paddingLeft: 8 + depth * 12, fontWeight: 500 }}
+      >
+        <span style={{ marginRight: 6 }}>{open ? '📂' : '📁'}</span>
+        <span className="mono">{name}</span>
+      </button>
+      {open && (
+        <FileTreeView
+          folder={folder}
+          depth={depth + 1}
+          sel={sel}
+          onSelect={onSelect}
+          prefix={prefix}
+        />
       )}
     </>
   )

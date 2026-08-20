@@ -3,7 +3,7 @@
 // Every request forwards the signed-in user's ARM access token (acquired via
 // MSAL) as a Bearer token; the backend uses it to call ARM as that user.
 
-import { acquireArmToken, getManualToken, clearManualToken } from './auth'
+import { acquireArmToken, acquireStorageToken, getManualToken, clearManualToken } from './auth'
 
 export interface Health {
   status: string
@@ -71,6 +71,16 @@ export interface SourceFile {
   deployedContent: string | null
   content: string
   source: 'draft' | 'deployed' | 'none'
+}
+
+export interface SourceListEntry {
+  path: string
+  size: number
+  source: 'draft' | 'deployed' | 'both'
+}
+export interface SourceListing {
+  app: string
+  files: SourceListEntry[]
 }
 
 export interface DeployResult {
@@ -204,13 +214,19 @@ export class ApiError extends Error {
   }
 }
 
-async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
+async function req<T>(
+  method: string,
+  url: string,
+  body?: unknown,
+  extraHeaders?: Record<string, string>,
+): Promise<T> {
   const token = await acquireArmToken()
   const res = await fetch(url, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
       ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...(extraHeaders ?? {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
@@ -249,11 +265,15 @@ export const api = {
     ),
 
   // Agent definition (.agent.md) — read deployed source or portal draft, save draft.
-  getAgentDefinition: (p: { subscription: string; app: string; resourceGroup: string; name: string }) =>
-    req<AgentDefinition>(
+  getAgentDefinition: async (p: { subscription: string; app: string; resourceGroup: string; name: string }) => {
+    const storageToken = await acquireStorageToken()
+    return req<AgentDefinition>(
       'GET',
       `/api/agents/definition?subscription=${enc(p.subscription)}&app=${enc(p.app)}&resourceGroup=${enc(p.resourceGroup)}&name=${enc(p.name)}`,
-    ),
+      undefined,
+      storageToken ? { 'X-Storage-Token': storageToken } : undefined,
+    )
+  },
   saveAgentDefinition: (p: { subscription: string; app: string; name: string; content: string }) =>
     req<{ ok: boolean; source: string }>(
       'PUT',
@@ -262,17 +282,41 @@ export const api = {
     ),
 
   // Source files (e.g. function_app.py) — read deployed source or portal draft, save draft.
-  getSource: (p: { subscription: string; app: string; resourceGroup: string; path: string }) =>
-    req<SourceFile>(
+  getSource: async (p: { subscription: string; app: string; resourceGroup: string; path: string }) => {
+    const storageToken = await acquireStorageToken()
+    return req<SourceFile>(
       'GET',
       `/api/source?subscription=${enc(p.subscription)}&app=${enc(p.app)}&resourceGroup=${enc(p.resourceGroup)}&path=${enc(p.path)}`,
-    ),
+      undefined,
+      storageToken ? { 'X-Storage-Token': storageToken } : undefined,
+    )
+  },
   saveSource: (p: { subscription: string; app: string; path: string; content: string }) =>
     req<{ ok: boolean; source: string }>(
       'PUT',
       `/api/source?subscription=${enc(p.subscription)}&app=${enc(p.app)}&path=${enc(p.path)}`,
       { content: p.content },
     ),
+
+  // Remove a source-file draft (portal-side working copy). Does not touch the
+  // deployed file — that only changes on the next "Deploy edits".
+  deleteSourceDraft: (p: { subscription: string; app: string; path: string }) =>
+    req<{ ok: boolean; removed: boolean }>(
+      'DELETE',
+      `/api/source?subscription=${enc(p.subscription)}&app=${enc(p.app)}&path=${enc(p.path)}`,
+    ),
+
+  // Enumerate every source file for an app — deployed files merged with local
+  // drafts, tagged so the UI can show which paths carry unpublished edits.
+  listSources: async (p: { subscription: string; app: string; resourceGroup: string }) => {
+    const storageToken = await acquireStorageToken()
+    return req<SourceListing>(
+      'GET',
+      `/api/source/list?subscription=${enc(p.subscription)}&app=${enc(p.app)}&resourceGroup=${enc(p.resourceGroup)}`,
+      undefined,
+      storageToken ? { 'X-Storage-Token': storageToken } : undefined,
+    )
+  },
 
   // Start creating/deploying an agent app; returns a job id to poll. Provisioning
   // + remote build run in the background so the user can watch in the portal.
@@ -350,7 +394,7 @@ export const api = {
   generateCapability: (p: {
     subscription: string
     app?: string
-    kind: 'http_trigger' | 'connector_trigger' | 'custom_tool' | 'skill'
+    kind: 'http_trigger' | 'connector_trigger' | 'timer_trigger' | 'custom_tool' | 'skill'
     triggerType?: string
     name: string
     description: string

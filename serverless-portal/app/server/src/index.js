@@ -34,7 +34,7 @@ app.use(
       'http://localhost:5173',
       'http://127.0.0.1:5173',
     ],
-    methods: ['GET', 'PUT', 'POST', 'OPTIONS'],
+    methods: ['GET', 'PUT', 'POST', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Authorization', 'Content-Type'],
   }),
 )
@@ -187,6 +187,50 @@ async function writeDraft(subscription, appName, name, content) {
   await fs.promises.writeFile(filePath, content, 'utf-8')
 }
 
+// Read the optional storage-scoped AAD token the browser forwards so the backend
+// can open a Flex app's deployment package with the caller's identity when the
+// storage account has shared-key access disabled.
+function storageTokenFrom(req) {
+  const h = req.get('X-Storage-Token')
+  return typeof h === 'string' && h.trim() ? h.trim() : null
+}
+
+// Parse `owner/repo` out of a GitHub repo URL (https or ssh, with/without .git).
+function parseGitHubOwnerRepo(repoUrl) {
+  const m = /github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?$/i.exec(String(repoUrl || ''))
+  return m ? { owner: m[1], repo: m[2] } : null
+}
+
+// Fallback source read from the app's connected GitHub repo: resolves the app's
+// repo link + the caller's stored GitHub token, then tries each candidate path
+// until one resolves. Returns content or null (never throws). Independent of
+// storage/Kudu, so it works even when the deployment package can't be read.
+async function readRepoFileForApp(token, subscription, resourceGroup, appName, candidatePaths) {
+  if (!resourceGroup) return null
+  let oid = ''
+  try {
+    oid = azure.getSignedInIdentity(token).oid
+  } catch {
+    return null
+  }
+  const entry = oid ? github.tokenStore.get(oid) : null
+  if (!entry?.token) return null
+  let link = null
+  try {
+    link = await azure.getAppGithubLink(token, subscription, resourceGroup, appName)
+  } catch {
+    return null
+  }
+  const parsed = link?.repoUrl ? parseGitHubOwnerRepo(link.repoUrl) : null
+  if (!parsed) return null
+  const branch = link.branch || 'main'
+  for (const filePath of candidatePaths) {
+    const content = await github.readRepoFile(entry.token, parsed.owner, parsed.repo, filePath, branch)
+    if (content != null) return content
+  }
+  return null
+}
+
 // Read an agent's definition: the portal draft if one exists, else the deployed
 // `*.agent.md` source. Requires ?subscription, ?resourceGroup, ?app, ?name.
 app.get(
@@ -199,11 +243,21 @@ app.get(
     const name = String(req.query.name ?? '').trim()
     if (!appName || !name) throw new HttpError(400, 'app and name query parameters are required.')
 
+    const storageToken = storageTokenFrom(req)
     const draftContent = await readDraft(subscription, appName, name)
     let deployedContent = null
     if (resourceGroup) {
       const site = await azure.getSite(token, subscription, resourceGroup, appName)
-      if (site) deployedContent = await azure.readAgentDefinition(token, subscription, site, name)
+      if (site) deployedContent = await azure.readAgentDefinition(token, subscription, site, name, storageToken)
+    }
+    // Fallback: read the source straight from the app's connected GitHub repo.
+    if (deployedContent == null) {
+      deployedContent = await readRepoFileForApp(token, subscription, resourceGroup, appName, [
+        `${name}.agent.md`,
+        `src/${name}.agent.md`,
+        `agents/${name}.agent.md`,
+        `src/agents/${name}.agent.md`,
+      ])
     }
     res.json({
       name,
@@ -277,11 +331,19 @@ app.get(
     if (!appName || !relPath) throw new HttpError(400, 'app and path query parameters are required.')
     if (relPath.includes('..')) throw new HttpError(400, 'Invalid path.')
 
+    const storageToken = storageTokenFrom(req)
     const draftContent = await readSourceDraft(subscription, appName, relPath)
     let deployedContent = null
     if (resourceGroup) {
       const site = await azure.getSite(token, subscription, resourceGroup, appName)
-      if (site) deployedContent = await azure.readSourceFile(token, subscription, site, relPath)
+      if (site) deployedContent = await azure.readSourceFile(token, subscription, site, relPath, storageToken)
+    }
+    // Fallback: read the file straight from the app's connected GitHub repo.
+    if (deployedContent == null) {
+      deployedContent = await readRepoFileForApp(token, subscription, resourceGroup, appName, [
+        relPath,
+        `src/${relPath}`,
+      ])
     }
     res.json({
       path: relPath,
@@ -311,6 +373,89 @@ app.put(
   }),
 )
 
+// Delete a source-file draft (portal-side working copy). Used by the file tree
+// so the user can revert a draft they no longer want to publish. Does NOT touch
+// the deployed source — that only changes on the next "Deploy edits".
+app.delete(
+  '/api/source',
+  wrap(async (req, res) => {
+    requireToken(req)
+    const subscription = String(req.query.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const appName = String(req.query.app ?? '').trim()
+    const relPath = String(req.query.path ?? '').trim()
+    if (!appName || !relPath) throw new HttpError(400, 'app and path query parameters are required.')
+    if (relPath.includes('..')) throw new HttpError(400, 'Invalid path.')
+    const filePath = sourceDraftPath(subscription, appName, relPath)
+    let removed = false
+    try {
+      await fs.promises.unlink(filePath)
+      removed = true
+    } catch {
+      /* already gone or never existed */
+    }
+    res.json({ ok: true, removed })
+  }),
+)
+
+// List every source file for this app so the portal can render a real file
+// tree. Merges (a) the deployed package (Kudu VFS or the Flex zip's central
+// directory) with (b) any local drafts, tagging each entry so the UI can show
+// which files have unpublished edits. Requires ?subscription, ?resourceGroup,
+// ?app.
+app.get(
+  '/api/source/list',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.query.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const appName = String(req.query.app ?? '').trim()
+    const resourceGroup = String(req.query.resourceGroup ?? '').trim()
+    if (!appName) throw new HttpError(400, 'app query parameter is required.')
+
+    const storageToken = storageTokenFrom(req)
+    const byPath = new Map()
+    const upsert = (p, patch) => {
+      const cur = byPath.get(p) ?? { path: p, size: 0, deployed: false, draft: false }
+      byPath.set(p, { ...cur, ...patch })
+    }
+
+    // Deployed files — best effort; empty when the caller can't read source.
+    if (resourceGroup) {
+      const site = await azure.getSite(token, subscription, resourceGroup, appName)
+      if (site) {
+        try {
+          const deployed = await azure.listSourceFiles(token, subscription, site, storageToken)
+          for (const f of deployed ?? []) upsert(f.path, { size: f.size ?? 0, deployed: true })
+        } catch {
+          /* leave the deployed set empty */
+        }
+      }
+    }
+
+    // Local drafts (portal-side working copies).
+    const sourceDir = path.join(SOURCE_DRAFTS_DIR, safeSegment(subscription), safeSegment(appName))
+    for (const f of await readDirRecursive(sourceDir)) {
+      upsert(f.name, { size: f.data.length, draft: true })
+    }
+    // Also treat a *.agent.md draft under the agent-drafts directory as a
+    // top-level draft (that's where the DraftEditor for `.agent.md` files
+    // writes). Draft names carry the `.agent.md` suffix directly.
+    const agentDir = path.join(DRAFTS_DIR, safeSegment(subscription), safeSegment(appName))
+    for (const name of await listDirFiles(agentDir)) {
+      if (!/\.agent\.md$/i.test(name)) continue
+      upsert(name, { draft: true })
+    }
+
+    const files = [...byPath.values()]
+      .map((f) => ({
+        path: f.path,
+        size: f.size,
+        source: f.draft && f.deployed ? 'both' : f.draft ? 'draft' : 'deployed',
+      }))
+      .sort((a, b) => a.path.localeCompare(b.path))
+    res.json({ app: appName, files })
+  }),
+)
+
 // ---------------------------------------------------------------------------
 // Create / deploy agent — refresh the target Function App's portal-managed
 // source tree, then provision (for a new app) and push it to Azure with a
@@ -326,7 +471,8 @@ const SCAFFOLD_DIR = path.join(__dirname, '..', 'scaffold')
 const PORTAL_SKILLS_DIR = path.join(__dirname, '..', 'skills')
 const KIND_TO_PORTAL_SKILL = {
   http_trigger: 'authoring-triggers',
-  connector_trigger: 'authoring-triggers',
+  connector_trigger: 'authoring-connector-trigger',
+  timer_trigger: 'authoring-timer-trigger',
   custom_tool: 'authoring-custom-tools',
   skill: 'authoring-skills',
 }
@@ -913,8 +1059,8 @@ app.post(
     const description = String(req.body?.description ?? '').trim()
     const appName = String(req.body?.app ?? '').trim()
     const triggerType = String(req.body?.triggerType ?? '').trim()
-    if (!['http_trigger', 'connector_trigger', 'custom_tool', 'skill'].includes(kind)) {
-      throw new HttpError(400, 'kind must be http_trigger, connector_trigger, custom_tool, or skill.')
+    if (!['http_trigger', 'connector_trigger', 'timer_trigger', 'custom_tool', 'skill'].includes(kind)) {
+      throw new HttpError(400, 'kind must be http_trigger, connector_trigger, timer_trigger, custom_tool, or skill.')
     }
     if (!description) throw new HttpError(400, 'A description is required to generate.')
 
