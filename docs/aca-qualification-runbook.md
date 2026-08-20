@@ -61,6 +61,42 @@ Two ways out, and this is a policy decision rather than a code change:
 Until one is chosen, the ACA stages are `continueOnError`, so they surface the
 problem without blocking anything.
 
+### ⚠ Open: remote build is not producing a loadable app
+
+**Found by live testing; not yet resolved.**
+
+After `az functionapp deployment source config-zip` reports
+*"Deployment was successful"*, the app registers **zero functions**
+(`az functionapp function list` returns `[]`), so `/api/__buildinfo` and every
+agent route return 404. The host is otherwise healthy and Easy Auth answers 401
+as expected, which is why this is not visible from a simple reachability check.
+
+Confirmed so far:
+
+- `SCM_DO_BUILD_DURING_DEPLOYMENT` is rejected by Flex outright (*"not supported
+  with this SKU"*) and must not be set — this was fixed.
+- Deployment reports success both with and without `--build-remote true`.
+- The apps stay healthy; the failure is that no functions load, which means the
+  runtime import fails and therefore the dependency install did not produce a
+  usable environment.
+
+Leading hypothesis: the generated `requirements.txt` installs the runtime from a
+**relative** wheel path (`./azurefunctions_agents_runtime-<version>.whl`), and
+the remote build may not resolve that path from the build working directory. The
+next diagnostic step is to read the Oryx build log for a deployment — note that
+SCM basic auth is disabled on these apps, so the log must be reached with an
+Entra token rather than publishing credentials.
+
+Alternatives if the relative path is the cause: reference the wheel by absolute
+path within the deployment root, vendor the dependencies into
+`.python_packages` at assemble time and skip the remote build, or publish the
+wheel to the internal feed and reference it by version.
+
+**Current state of the test apps:** the py3.13 app has been deployed with this
+fixture and does not currently load functions. These apps are disposable and are
+redeployed by every run, but anyone relying on the previously deployed content
+should redeploy it.
+
 ## Prerequisites
 
 | Item | Notes |
