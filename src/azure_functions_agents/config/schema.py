@@ -225,26 +225,19 @@ class SystemToolsAgentOverride(BaseModel):
     web_request: bool | None = None
 
 
-class HarnessAgentConfig(BaseModel):
-    """Configuration for harness-mode agents (``create_harness_agent``).
-
-    When an agent opts into harness mode (``harness: true`` in frontmatter or
-    ``agents.config.yaml``), the runtime uses MAF's ``create_harness_agent``
-    instead of the plain ``Agent`` constructor. The harness can compact
-    accumulated conversation history before model calls, reducing input-token
-    growth after the configured threshold is reached. Agent instructions are
-    still supplied on every model call.
-
-    All fields are optional; an empty object (``harness: true`` short-hand)
-    uses the harness defaults with no compaction configured.
-    """
+class CompactionConfig(BaseModel):
+    """Token limits for compacting accumulated conversation history."""
 
     model_config = ConfigDict(extra="forbid")
 
-    max_context_window_tokens: int | None = None
-    max_output_tokens: int | None = None
-    disable_file_memory: bool = True
-    disable_mode: bool = True
+    max_context_window_tokens: int = Field(gt=0)
+    max_output_tokens: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def output_must_fit_context_window(self) -> CompactionConfig:
+        if self.max_output_tokens >= self.max_context_window_tokens:
+            raise ValueError("max_output_tokens must be less than max_context_window_tokens")
+        return self
 
 
 class GlobalConfig(BaseModel):
@@ -256,11 +249,11 @@ class GlobalConfig(BaseModel):
     model: str | None = None
     timeout: float | None = None
     tools: ToolsFilter | None = None
-    harness: bool | HarnessAgentConfig | None = Field(
+    compaction: CompactionConfig | None = Field(
         default=None,
         description=(
-            "App-wide harness-agent enablement and context-compaction settings. "
-            "Agents inherit this value when their front matter omits harness."
+            "App-wide conversation-compaction token limits. "
+            "Agents inherit this value when their front matter omits compaction."
         ),
     )
     http_auth: EndpointAuthConfig | None = Field(
@@ -300,11 +293,11 @@ class AgentSpec(BaseModel):
     instructions: str = ""
     source_file: str | None = None
     is_main: bool = False
-    harness: bool | HarnessAgentConfig | None = Field(
+    compaction: CompactionConfig | Literal[False] | None = Field(
         default=None,
         description=(
-            "Per-agent harness override. Omit to inherit global settings, set false to opt out, "
-            "set true to enable harness defaults, or provide an object with compaction settings."
+            "Per-agent conversation-compaction override. Omit to inherit global settings, "
+            "set false to opt out, or provide model-specific token limits."
         ),
     )
 
@@ -346,7 +339,7 @@ class ResolvedAgent(BaseModel):
     substitute_variables: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
     source_file: str | None = None
-    harness_config: HarnessAgentConfig | None = None
+    compaction_config: CompactionConfig | None = None
 
 
 GlobalConfig.model_rebuild()
@@ -417,6 +410,7 @@ GLOBAL_CONFIG_DESCRIPTIONS: dict[str, str] = {
     "model": "Default LLM model identifier for all agents",
     "timeout": "Default execution timeout in seconds",
     "tools": "Global tool filtering configuration. [Details](#global-tools)",
+    "compaction": "App-wide conversation-compaction limits. [Details](./front-matter-spec.md#compaction)",
 }
 
 GLOBAL_CONFIG_DEFAULTS: dict[str, str] = {
@@ -424,6 +418,7 @@ GLOBAL_CONFIG_DEFAULTS: dict[str, str] = {
     "model": "Resolved from env/provider",
     "timeout": "`900`",
     "tools": "`{}`",
+    "compaction": "`null`",
 }
 
 SYSTEM_TOOLS_CONFIG_DESCRIPTIONS: dict[str, str] = {
@@ -456,6 +451,7 @@ AGENT_SPEC_OPTIONAL_DESCRIPTIONS: dict[str, str] = {
     "mcp": "MCP server filtering. [Details](#agent-mcp)",
     "skills": "Skill filtering. [Details](#agent-skills)",
     "tools": "Custom tool filtering. [Details](#agent-tools)",
+    "compaction": "Per-agent compaction override. [Details](./front-matter-spec.md#compaction)",
     "workflows": "Dynamic Workflow enablement and filtering. [Details](./front-matter-spec.md#workflows)",
     "input_schema": "JSON Schema for HTTP request validation",
     "response_schema": "JSON Schema for response validation",

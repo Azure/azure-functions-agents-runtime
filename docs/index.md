@@ -12,6 +12,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Run agents on durable workflows** *(experimental, see [Dynamic workflows](workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
+- **Bound long conversations** — configure model-specific token budgets while retaining complete runtime-managed history
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
 
 ## Installation

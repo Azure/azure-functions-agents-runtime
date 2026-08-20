@@ -32,6 +32,7 @@ from pydantic.fields import FieldInfo
 # Extract models from the dynamically loaded schema module
 AgentSpec = schema.AgentSpec
 BuiltinEndpointsConfig = schema.BuiltinEndpointsConfig
+CompactionConfig = schema.CompactionConfig
 DynamicSessionsCodeInterpreterConfig = schema.DynamicSessionsCodeInterpreterConfig
 GlobalConfig = schema.GlobalConfig
 McpFilter = schema.McpFilter
@@ -259,7 +260,7 @@ GLOBAL_CONFIG_DESCRIPTIONS = {
     "model": "Default LLM model identifier for all agents",
     "timeout": "Default execution timeout in seconds",
     "tools": "Global tool filtering configuration. [Details](#global-tools)",
-    "harness": "App-wide harness mode and context-compaction settings. [Details](./front-matter-spec.md#harness)",
+    "compaction": "App-wide conversation-compaction limits. [Details](./front-matter-spec.md#compaction)",
     "http_auth": "App-wide default inbound HTTP authentication policy inherited by every agent's built-in HTTP endpoints; a per-agent `builtin_endpoints.http_auth` overrides it. Applies only to HTTP endpoints and does not affect MCP. Modes: `function` (default), `admin`, `anonymous`, `entra`.",
 }
 
@@ -268,7 +269,7 @@ GLOBAL_CONFIG_DEFAULTS = {
     "model": "Resolved from env/provider",
     "timeout": "`900`",
     "tools": "`{}`",
-    "harness": "`null`",
+    "compaction": "`null`",
     "http_auth": "`function` (per-agent default)",
 }
 
@@ -294,6 +295,11 @@ TOOLS_FILTER_DESCRIPTIONS = {
     "exclude": "Tool names to exclude globally from all agents",
 }
 
+COMPACTION_CONFIG_DESCRIPTIONS = {
+    "max_context_window_tokens": "Positive context-window budget used by compaction.",
+    "max_output_tokens": "Positive response budget and model output limit. Must be less than `max_context_window_tokens`.",
+}
+
 AGENT_SPEC_REQUIRED_DESCRIPTIONS = {
     "name": "Display name for the agent. Does not control function name or route.",
     "description": "Brief description of the agent's purpose",
@@ -310,7 +316,7 @@ AGENT_SPEC_OPTIONAL_DESCRIPTIONS = {
     "mcp": "MCP server filtering. [Details](#agent-mcp)",
     "skills": "Skill filtering. [Details](#agent-skills)",
     "tools": "Custom tool filtering. [Details](#agent-tools)",
-    "harness": "Per-agent harness override. [Details](./front-matter-spec.md#harness)",
+    "compaction": "Per-agent compaction override. [Details](./front-matter-spec.md#compaction)",
     "workflows": "Dynamic Workflow enablement, tool filtering, and Sub Agent grants. [Details](#agent-workflows)",
     "subagents": "Specialist agents this agent can delegate to as `delegate_<slug>` tools. [Details](./front-matter-spec.md#subagents)",
     "input_schema": "JSON Schema for HTTP request validation",
@@ -389,6 +395,8 @@ def generate_markdown() -> str:
                                       custom_defaults={"allowed_hosts": "`null`"}))
     lines.extend(["", "### Global: `tools`", ""])
     lines.extend(generate_model_table(ToolsFilter, descriptions=TOOLS_FILTER_DESCRIPTIONS))
+    lines.extend(["", "### Conversation compaction", ""])
+    lines.extend(generate_model_table(CompactionConfig, descriptions=COMPACTION_CONFIG_DESCRIPTIONS))
 
     lines.extend([
         "",
@@ -423,7 +431,9 @@ def generate_markdown() -> str:
             continue
         field_type = format_type(field_info, field_name)
         default = get_default_value(field_info)
-        description = AGENT_SPEC_OPTIONAL_DESCRIPTIONS.get(field_name, "")
+        description = AGENT_SPEC_OPTIONAL_DESCRIPTIONS.get(
+            field_name, field_info.description or ""
+        )
         
         # Special handling for inherited defaults
         if field_name == "model":

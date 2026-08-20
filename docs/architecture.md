@@ -198,20 +198,25 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
 
 Registration does not run the agent itself. Instead, `registration/_handlers.py` builds closures that call `runner.run_agent()` or `runner.run_agent_stream()`, passing the `ResolvedAgent` instructions plus the already-filtered `AgentCapabilities` — and, when the agent declares `subagents`, its `ResolvedAgent.subagents` list plus the frozen `AgentCatalog`. For non-HTTP triggers, the closure delegates payload construction to `registration/_trigger_serialization.py`: native `to_dict()`/`model_dump()` contracts are used first, then public Azure Functions binding adapters, batch recursion, and byte encoding produce JSON-safe prompt data. HTTP handlers build their request-body JSON separately and do not use this serializer. The runner then asks the active `ClientManager` to build a chat client, builds any `delegate_<slug>` tools fresh for this request, and executes through the Microsoft Agent Framework (`src/azure_functions_agents/runner.py`, `src/azure_functions_agents/client_manager.py`).
 
-`ResolvedAgent.harness_config` selects MAF's `create_harness_agent`; `None` selects the plain
-`Agent`. Both modes reuse the same runtime history provider, keyed by the public session ID returned
-to the caller and supplied on later turns. In Azure, `BlobHistoryProvider` stores that history in the
-Function App's configured storage account, so a request handled by another worker can reload the
-same conversation. The `FileHistoryProvider` fallback is for local development and does not provide
-cross-worker sharing. Harness runs force provider-managed history (`store=false`) because the runtime
-creates a new in-memory `AgentSession` object for every request, including later requests that supply
-the same session ID. Those objects represent the same logical conversation: each is initialized with
-the supplied ID, and the Blob/File provider reloads the history stored under that ID. Blob/File
-history, rather than a provider-side conversation ID retained on an earlier object, therefore remains
-authoritative. Cross-worker turn ordering is not coordinated, so callers must still avoid concurrent
-turns for the same session ID. With both harness token limits configured, MAF compacts the externally
-loaded conversation history immediately before each model call. Agent instructions remain part of
-every call; compaction controls accumulated message-history growth.
+The runner constructs every direct, delegated, and workflow Sub Agent with MAF's
+`create_harness_agent`. Constructor choice is an implementation detail, not an authoring mode.
+`ResolvedAgent.compaction_config` carries optional model-specific token limits; `None` disables
+compaction without selecting another agent implementation. The runtime supplies empty harness
+instructions and disables todo, mode, file memory, automatic web search, and tool auto-approval for
+conservative behavior. It also passes each agent's name and explicit tool list, including an empty
+list, without collapsing those values to MAF defaults.
+
+Direct agents use the runtime history provider keyed by the public session ID returned to the caller
+and supplied on later turns. In Azure, `BlobHistoryProvider` stores history in the Function App's
+configured storage account, so another worker can reload the same conversation. The
+`FileHistoryProvider` fallback is local-only. The runtime sets `store=false` and creates a new
+in-memory `AgentSession` object for each request; Blob/File history remains authoritative across
+those request-scoped objects. Cross-worker turn ordering is not coordinated, so callers must avoid
+concurrent turns for one session ID. Delegated and workflow Sub Agents instead use fresh MAF
+in-memory history for each single-task execution, preserving isolation from the caller and from other
+leaf calls. When compaction limits are configured, MAF compacts model-facing history immediately
+before each model call while the runtime's stored direct-agent history remains complete. Agent
+instructions remain part of every call.
 
 For each workflow-enabled agent, `workflows/integration.py` uses the cataloged immutable
 `WorkflowPlanPolicy` to generate model guidance and agent-scoped management
@@ -252,24 +257,19 @@ By the time a handler calls `runner.run_agent()` or `runner.run_agent_stream()`,
 
 - `ResolvedAgent.instructions` becomes the per-agent instruction block.
 - `ResolvedAgent.timeout` and `ResolvedAgent.model` become execution settings.
-- `ResolvedAgent.harness_config` selects plain or harness construction and carries optional
-  context-compaction limits. Harness mode remains explicit because the runtime cannot infer safe
-  context/output limits for every model; without both limits it provides no default compaction.
-  It also installs harness-specific persistence and middleware, so making it unconditional would
-  change existing agents even when no token reduction is possible. Plain mode preserves the direct
-  MAF `Agent` behavior for short-lived/stateless workloads, custom clients, and applications that
-  require complete uncompressed history; apps can enable harness mode globally and opt individual
-  agents out with `harness: false`.
+- `ResolvedAgent.compaction_config` carries optional context/output limits. A global object is
+  inherited when agent front matter omits `compaction`; an agent object replaces it, and
+  `compaction: false` opts out. Construction remains universal when this value is `None`.
 - `AgentCapabilities.filtered_user_tools` becomes the concrete user-tool list.
 - `AgentCapabilities.filtered_workflow_tools` contributes to that agent's
   `WorkflowPlanPolicy`; it does not shrink the complete Activity handler catalog.
 - `WorkflowIntegrationResult` supplies agent-scoped management tools and separate
   chat/trigger addenda; handlers also receive the policy and bound Durable client.
 - `AgentCapabilities.filtered_mcp_tools` becomes the concrete MCP-tool list.
-- `AgentCapabilities.enabled_skill_paths` becomes the list of skill directories handed to MAF's `SkillsProvider`.
+- `AgentCapabilities.enabled_skill_paths` becomes the list of skill directories handed to MAF's harness factory.
 - `AgentCapabilities.web_request_tools` becomes the concrete `web_request` tool list, passed to the runner via its own `web_request_tools` parameter.
 - `build_sandbox_tools_for_session()` optionally adds per-session ACA dynamic session tools just before the call.
-- `ResolvedAgent.subagents` (when non-empty) plus the frozen `AgentCatalog` are passed through so `runner.build_subagent_tools()` can build one `delegate_<slug>` tool per reference for this request; each tool's handler builds its own fresh specialist `Agent` per call (see "Multi-agent delegation" below).
+- `ResolvedAgent.subagents` (when non-empty) plus the frozen `AgentCatalog` are passed through so `runner.build_subagent_tools()` can build one `delegate_<slug>` tool per reference for this request; each tool's handler builds its own fresh specialist harness agent per call (see "Multi-agent delegation" below).
 
 The runner therefore focuses on execution concerns: session history, lock management, final tool assembly order, delegated-specialist construction, and streaming/non-streaming response handling.
 

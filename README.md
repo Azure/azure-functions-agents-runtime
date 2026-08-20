@@ -14,6 +14,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Run agents on durable workflows** *(experimental, see [`docs/workflows.md`](docs/workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
+- **Bound long conversations** — configure model-specific token budgets while retaining complete runtime-managed history
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
 
 ## Installation
@@ -43,6 +44,23 @@ The runtime uses Microsoft Agent Framework, which supports Microsoft Foundry, Az
 If `AZURE_FUNCTIONS_AGENTS_PROVIDER` is unset, auto-detection picks the first provider whose env vars are set, in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`. Set `AZURE_FUNCTIONS_AGENTS_PROVIDER` to make the provider choice intentional.
 
 Model resolution precedence is: explicit requested model > provider-specific env (`FOUNDRY_MODEL` for Foundry, `AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI) > `AZURE_FUNCTIONS_AGENTS_MODEL` > provider default.
+
+## Conversation Compaction
+
+Every agent uses the runtime's single MAF-backed execution implementation. For long conversations,
+configure model-specific compaction limits globally:
+
+```yaml
+# agents.config.yaml
+compaction:
+  max_context_window_tokens: 128000
+  max_output_tokens: 8000
+```
+
+Agents inherit this object. An agent can replace both limits or set `compaction: false` to opt out.
+The full Blob/File conversation remains stored; compaction bounds only the context sent to the model.
+The former `harness` authoring key is no longer accepted. See the
+[front matter spec](docs/front-matter-spec.md#compaction) for migration details.
 
 ## Quick Start
 

@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
+import pytest
 from agent_framework import (
     BaseChatClient,
     ChatMiddlewareLayer,
@@ -17,7 +22,7 @@ from agent_framework import (
 
 from azure_functions_agents import runner
 from azure_functions_agents.client_manager import InferenceTarget
-from azure_functions_agents.config.schema import HarnessAgentConfig
+from azure_functions_agents.config.schema import CompactionConfig
 
 # ---------------------------------------------------------------------------
 # Minimal fake Agent
@@ -83,54 +88,65 @@ class _SharedHistoryProvider(HistoryProvider):
 
 
 # ---------------------------------------------------------------------------
-# Tests: _build_harness_agent_session falls back when import unavailable
+# Tests: universal harness construction
 # ---------------------------------------------------------------------------
 
 
-def test_build_harness_agent_session_falls_back_on_import_error(monkeypatch: Any) -> None:
-    """When create_harness_agent is missing, harness helper delegates to plain builder."""
-    plain_called: list[dict[str, Any]] = []
+def test_runner_import_fails_without_create_harness_agent() -> None:
+    """An incompatible MAF installation fails during runtime import, without fallback."""
+    project_root = Path(__file__).resolve().parents[1]
+    script = """
+import sys
+import types
 
-    async def fake_plain_builder(
-        **kwargs: Any,
-    ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
-        plain_called.append(kwargs)
-        return _FakeAgent(), object(), "fallback-session", None, InferenceTarget()
+import agent_framework as installed
 
-    import builtins
+incompatible = types.ModuleType("agent_framework")
+incompatible.__dict__.update(
+    {
+        name: value
+        for name, value in vars(installed).items()
+        if name not in {"create_harness_agent", "__getattr__"}
+    }
+)
 
-    real_import = builtins.__import__
+def resolve_export(name):
+    if name == "create_harness_agent":
+        raise AttributeError(name)
+    return getattr(installed, name)
 
-    def _patched_import(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name == "agent_framework" and args and args[2] and "create_harness_agent" in (args[2] or ()):
-            raise ImportError("create_harness_agent not available")
-        return real_import(name, *args, **kwargs)
+incompatible.__getattr__ = resolve_export
+sys.modules["agent_framework"] = incompatible
+for name in list(sys.modules):
+    if name.startswith("azure_functions_agents"):
+        del sys.modules[name]
 
-    monkeypatch.setattr(builtins, "__import__", _patched_import)
-    monkeypatch.setattr(runner, "_build_agent_session_history", fake_plain_builder)
-
-    asyncio.run(
-        runner._build_harness_agent_session(
-            instructions="do stuff",
-            session_id=None,
-            tools=[],
-            mcp_tools=[],
-            skill_paths=None,
-            model=None,
-            sandbox_tools=None,
-            system_addendum=None,
-            workflow_enabled=False,
-            workflow_durable_client=None,
-            agent_name=None,
-            web_request_tools=None,
-            harness_config=HarnessAgentConfig(),
-        )
+try:
+    import azure_functions_agents.runner
+except RuntimeError as exc:
+    assert "agent-framework-core==1.13.0" in str(exc)
+    assert "create_harness_agent" in str(exc)
+else:
+    raise AssertionError("runner import unexpectedly accepted incompatible MAF")
+"""
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        filter(None, (str(project_root / "src"), environment.get("PYTHONPATH")))
     )
 
-    assert len(plain_called) == 1, "plain builder should have been called once as fallback"
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=project_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
-def test_build_harness_agent_session_forces_provider_managed_history(
+def test_build_agent_session_forces_provider_managed_history(
     monkeypatch: Any,
 ) -> None:
     """Fresh request-scoped sessions must reload history from the configured provider."""
@@ -140,13 +156,10 @@ def test_build_harness_agent_session_forces_provider_managed_history(
         captured.append(kwargs)
         return _FakeAgent()
 
-    import agent_framework
-
     monkeypatch.setattr(
-        agent_framework,
+        runner,
         "create_harness_agent",
         fake_create_harness_agent,
-        raising=False,
     )
     monkeypatch.setattr(
         runner.get_client_manager(),
@@ -156,7 +169,7 @@ def test_build_harness_agent_session_forces_provider_managed_history(
     monkeypatch.setattr(runner, "_build_history_provider", lambda: object())
 
     asyncio.run(
-        runner._build_harness_agent_session(
+        runner._build_agent_session(
             instructions="do stuff",
             session_id="shared-session",
             tools=[],
@@ -167,16 +180,26 @@ def test_build_harness_agent_session_forces_provider_managed_history(
             system_addendum=None,
             workflow_enabled=False,
             workflow_durable_client=None,
-            agent_name=None,
+            agent_name="support-agent",
             web_request_tools=None,
-            harness_config=HarnessAgentConfig(),
+            compaction_config=None,
         )
     )
 
     assert captured[0]["default_options"] == {"store": False}
+    assert captured[0]["name"] == "support-agent"
+    assert captured[0]["tools"] == []
+    assert captured[0]["max_context_window_tokens"] is None
+    assert captured[0]["max_output_tokens"] is None
+    assert captured[0]["harness_instructions"] == ""
+    assert captured[0]["disable_todo"] is True
+    assert captured[0]["disable_mode"] is True
+    assert captured[0]["disable_file_memory"] is True
+    assert captured[0]["disable_web_search"] is True
+    assert captured[0]["disable_tool_auto_approval"] is True
 
 
-def test_build_harness_agent_session_forwards_system_instructions(monkeypatch: Any) -> None:
+def test_build_agent_session_forwards_system_instructions(monkeypatch: Any) -> None:
     """Markdown and runtime instructions are forwarded without MAF harness guidance."""
     captured: list[dict[str, Any]] = []
 
@@ -184,13 +207,10 @@ def test_build_harness_agent_session_forwards_system_instructions(monkeypatch: A
         captured.append(kwargs)
         return _FakeAgent()
 
-    import agent_framework
-
     monkeypatch.setattr(
-        agent_framework,
+        runner,
         "create_harness_agent",
         fake_create_harness_agent,
-        raising=False,
     )
     monkeypatch.setattr(
         runner.get_client_manager(),
@@ -200,7 +220,7 @@ def test_build_harness_agent_session_forwards_system_instructions(monkeypatch: A
     monkeypatch.setattr(runner, "_build_history_provider", lambda: object())
 
     asyncio.run(
-        runner._build_harness_agent_session(
+        runner._build_agent_session(
             instructions="Markdown system prompt.",
             session_id="instruction-session",
             tools=[],
@@ -213,7 +233,7 @@ def test_build_harness_agent_session_forwards_system_instructions(monkeypatch: A
             workflow_durable_client=None,
             agent_name=None,
             web_request_tools=None,
-            harness_config=HarnessAgentConfig(),
+            compaction_config=None,
         )
     )
 
@@ -224,7 +244,7 @@ def test_build_harness_agent_session_forwards_system_instructions(monkeypatch: A
     assert captured[0]["disable_todo"] is True
 
 
-def test_build_harness_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
+def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
     """Harness agents receive all shared tools and return their delegation error tracker."""
     captured_agent_options: list[dict[str, Any]] = []
     captured_delegate_options: list[tuple[Any, Any, float]] = []
@@ -252,13 +272,10 @@ def test_build_harness_agent_session_appends_subagent_tools(monkeypatch: Any) ->
         )
         return [delegate_tool], delegate_tracker
 
-    import agent_framework
-
     monkeypatch.setattr(
-        agent_framework,
+        runner,
         "create_harness_agent",
         fake_create_harness_agent,
-        raising=False,
     )
     monkeypatch.setattr(
         runner.get_client_manager(),
@@ -269,7 +286,7 @@ def test_build_harness_agent_session_appends_subagent_tools(monkeypatch: Any) ->
     monkeypatch.setattr(runner, "build_subagent_tools", fake_build_subagent_tools)
 
     _, _, _, returned_tracker, _ = asyncio.run(
-        runner._build_harness_agent_session(
+        runner._build_agent_session(
             instructions="coordinate specialists",
             session_id="shared-session",
             tools=[local_tool],
@@ -282,7 +299,7 @@ def test_build_harness_agent_session_appends_subagent_tools(monkeypatch: Any) ->
             workflow_durable_client=None,
             agent_name="coordinator",
             web_request_tools=[web_request_tool],
-            harness_config=HarnessAgentConfig(),
+            compaction_config=None,
             subagents=subagents,
             catalog=catalog,
             coordinator_deadline=123.0,
@@ -330,16 +347,16 @@ def test_fresh_harness_agents_reload_history_for_same_session(monkeypatch: Any) 
             "workflow_durable_client": None,
             "agent_name": None,
             "web_request_tools": None,
-            "harness_config": HarnessAgentConfig(),
+            "compaction_config": None,
         }
-        first_agent, first_session, _, _, _ = await runner._build_harness_agent_session(**common)
+        first_agent, first_session, _, _, _ = await runner._build_agent_session(**common)
         await first_agent.run("Use the Premium plan.", session=first_session)
         assert [message.text for message in stored_messages] == [
             "Use the Premium plan.",
             "response",
         ]
 
-        second_agent, second_session, _, _, _ = await runner._build_harness_agent_session(**common)
+        second_agent, second_session, _, _, _ = await runner._build_agent_session(**common)
         await second_agent.run("Which plan did I choose?", session=second_session)
 
     asyncio.run(run_two_turns())
@@ -385,15 +402,15 @@ def test_harness_compacts_model_context_without_rewriting_stored_history(
             "workflow_durable_client": None,
             "agent_name": None,
             "web_request_tools": None,
-            "harness_config": HarnessAgentConfig(
+            "compaction_config": CompactionConfig(
                 max_context_window_tokens=500,
                 max_output_tokens=100,
             ),
         }
-        first_agent, first_session, _, _, _ = await runner._build_harness_agent_session(**common)
+        first_agent, first_session, _, _, _ = await runner._build_agent_session(**common)
         await first_agent.run(first_prompt, session=first_session)
 
-        second_agent, second_session, _, _, _ = await runner._build_harness_agent_session(**common)
+        second_agent, second_session, _, _, _ = await runner._build_agent_session(**common)
         await second_agent.run(second_prompt, session=second_session)
 
     asyncio.run(run_two_turns())
@@ -413,132 +430,108 @@ def test_harness_compacts_model_context_without_rewriting_stored_history(
 
 
 # ---------------------------------------------------------------------------
-# Tests: run_agent dispatches to harness builder when harness_config is set
+# Tests: public execution always uses the universal builder
 # ---------------------------------------------------------------------------
 
 
-def test_run_agent_uses_harness_builder_when_config_set(monkeypatch: Any) -> None:
-    """run_agent calls _build_harness_agent_session when harness_config is not None."""
-    harness_called: list[dict[str, Any]] = []
-    plain_called: list[dict[str, Any]] = []
+def test_run_agent_uses_universal_builder_without_compaction(monkeypatch: Any) -> None:
+    """run_agent uses the universal builder when compaction is not configured."""
+    captured: list[dict[str, Any]] = []
     subagents = [SimpleNamespace(agent="billing")]
     catalog = object()
 
-    async def fake_harness_builder(
+    async def fake_builder(
         **kwargs: Any,
     ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
-        harness_called.append(kwargs)
+        captured.append(kwargs)
         return (
-            _FakeAgent("harness response"),
+            _FakeAgent("response"),
             object(),
-            "harness-session",
+            "session",
             None,
             InferenceTarget(),
         )
 
-    async def fake_plain_builder(**kwargs: Any) -> tuple[_FakeAgent, object, str]:
-        plain_called.append(kwargs)
-        return _FakeAgent("plain response"), object(), "plain-session"
-
-    monkeypatch.setattr(runner, "_build_harness_agent_session", fake_harness_builder)
-    monkeypatch.setattr(runner, "_build_agent_session_history", fake_plain_builder)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_builder)
 
     result = asyncio.run(
         runner.run_agent(
             "hello",
-            harness_config=HarnessAgentConfig(),
             subagents=subagents,
             catalog=catalog,
         )
     )
 
-    assert len(harness_called) == 1
-    assert len(plain_called) == 0
-    assert harness_called[0]["subagents"] is subagents
-    assert harness_called[0]["catalog"] is catalog
-    assert isinstance(harness_called[0]["coordinator_deadline"], float)
-    assert result.content == "harness response"
-    assert result.session_id == "harness-session"
+    assert len(captured) == 1
+    assert captured[0]["compaction_config"] is None
+    assert captured[0]["subagents"] is subagents
+    assert captured[0]["catalog"] is catalog
+    assert isinstance(captured[0]["coordinator_deadline"], float)
+    assert result.content == "response"
+    assert result.session_id == "session"
 
 
-def test_run_agent_uses_plain_builder_when_config_is_none(monkeypatch: Any) -> None:
-    """run_agent calls _build_agent_session_history when harness_config is None (default)."""
-    harness_called: list[dict[str, Any]] = []
-    plain_called: list[dict[str, Any]] = []
-
-    async def fake_harness_builder(
-        **kwargs: Any,
-    ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
-        harness_called.append(kwargs)
-        return _FakeAgent(), object(), "harness-session", None, InferenceTarget()
-
-    async def fake_plain_builder(
-        **kwargs: Any,
-    ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
-        plain_called.append(kwargs)
-        return _FakeAgent("plain response"), object(), "plain-session", None, InferenceTarget()
-
-    monkeypatch.setattr(runner, "_build_harness_agent_session", fake_harness_builder)
-    monkeypatch.setattr(runner, "_build_agent_session_history", fake_plain_builder)
-
-    result = asyncio.run(runner.run_agent("hello"))
-
-    assert len(plain_called) == 1
-    assert len(harness_called) == 0
-    assert result.session_id == "plain-session"
-
-
-def test_run_agent_stream_uses_harness_builder_when_config_set(monkeypatch: Any) -> None:
-    """run_agent_stream calls _build_harness_agent_session when harness_config is not None."""
-    harness_called: list[dict[str, Any]] = []
+def test_run_agent_stream_forwards_compaction(monkeypatch: Any) -> None:
+    """run_agent_stream forwards compaction to the universal builder."""
+    captured: list[dict[str, Any]] = []
     subagents = [SimpleNamespace(agent="billing")]
     catalog = object()
+    config = CompactionConfig(max_context_window_tokens=64_000, max_output_tokens=4_000)
 
-    async def fake_harness_builder(
+    async def fake_builder(
         **kwargs: Any,
     ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
-        harness_called.append(kwargs)
+        captured.append(kwargs)
 
         class _StreamingAgent(_FakeAgent):
             async def run(self, _p: str, *, session: Any, options: Any = None) -> Any:  # type: ignore[override]
                 return SimpleNamespace(text="streamed", messages=[])
 
-        return _StreamingAgent(), object(), "stream-harness-session", None, InferenceTarget()
+        return _StreamingAgent(), object(), "stream-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_harness_agent_session", fake_harness_builder)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_builder)
 
     async def collect() -> list[str]:
         return [
             chunk
             async for chunk in runner.run_agent_stream(
                 "hi",
-                harness_config=HarnessAgentConfig(),
+                compaction_config=config,
                 subagents=subagents,
                 catalog=catalog,
             )
         ]
 
     asyncio.run(collect())
-    assert len(harness_called) == 1
-    assert harness_called[0]["harness_config"] == HarnessAgentConfig()
-    assert harness_called[0]["subagents"] is subagents
-    assert harness_called[0]["catalog"] is catalog
-    assert isinstance(harness_called[0]["coordinator_deadline"], float)
+    assert len(captured) == 1
+    assert captured[0]["compaction_config"] is config
+    assert captured[0]["subagents"] is subagents
+    assert captured[0]["catalog"] is catalog
+    assert isinstance(captured[0]["coordinator_deadline"], float)
 
 
-def test_run_agent_passes_harness_config_fields_to_builder(monkeypatch: Any) -> None:
-    """run_agent forwards harness_config with its fields to _build_harness_agent_session."""
+def test_run_agent_passes_compaction_config_to_builder(monkeypatch: Any) -> None:
+    """run_agent forwards the resolved compaction configuration unchanged."""
     captured: list[dict[str, Any]] = []
-    cfg = HarnessAgentConfig(max_context_window_tokens=200_000, max_output_tokens=16_000)
+    config = CompactionConfig(max_context_window_tokens=200_000, max_output_tokens=16_000)
 
-    async def fake_harness_builder(
+    async def fake_builder(
         **kwargs: Any,
     ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
         captured.append(kwargs)
         return _FakeAgent(), object(), "s", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_harness_agent_session", fake_harness_builder)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_builder)
 
-    asyncio.run(runner.run_agent("prompt", harness_config=cfg))
+    asyncio.run(runner.run_agent("prompt", compaction_config=config))
 
-    assert captured[0]["harness_config"] is cfg
+    assert captured[0]["compaction_config"] is config
+
+
+def test_removed_harness_config_python_keywords_are_rejected() -> None:
+    """The old constructor-selection keyword has no compatibility alias."""
+    with pytest.raises(TypeError, match="harness_config"):
+        runner.run_agent("prompt", harness_config=True)  # type: ignore[call-arg]
+
+    with pytest.raises(TypeError, match="harness_config"):
+        runner.run_agent_stream("prompt", harness_config=True)  # type: ignore[call-arg]

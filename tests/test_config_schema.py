@@ -8,9 +8,9 @@ from pydantic import ValidationError
 from azure_functions_agents.config.schema import (
     AgentSpec,
     BuiltinEndpointsConfig,
+    CompactionConfig,
     DynamicSessionsCodeInterpreterConfig,
     GlobalConfig,
-    HarnessAgentConfig,
     McpFilter,
     ResolvedAgent,
     SubagentRef,
@@ -131,48 +131,72 @@ def test_global_config_extra_forbidden() -> None:
 
 
 # ---------------------------------------------------------------------------
-# HarnessAgentConfig
+# CompactionConfig
 # ---------------------------------------------------------------------------
 
 
-def test_harness_agent_config_defaults() -> None:
-    config = HarnessAgentConfig()
-    assert config.max_context_window_tokens is None
-    assert config.max_output_tokens is None
-    assert config.disable_file_memory is True
-    assert config.disable_mode is True
-
-
-def test_harness_agent_config_with_fields() -> None:
-    config = HarnessAgentConfig(max_context_window_tokens=128_000, max_output_tokens=4_096)
+def test_compaction_config_with_valid_limits() -> None:
+    config = CompactionConfig(max_context_window_tokens=128_000, max_output_tokens=4_096)
     assert config.max_context_window_tokens == 128_000
     assert config.max_output_tokens == 4_096
 
 
-def test_harness_agent_config_extra_forbidden() -> None:
+def test_compaction_config_extra_forbidden() -> None:
     with pytest.raises(ValidationError):
-        HarnessAgentConfig.model_validate({"unknown_field": True})
+        CompactionConfig.model_validate(
+            {
+                "max_context_window_tokens": 128_000,
+                "max_output_tokens": 4_096,
+                "unknown_field": True,
+            }
+        )
 
 
-@pytest.mark.parametrize("field", ["harness_instructions", "disable_todo"])
-def test_harness_agent_config_removed_fields_forbidden(field: str) -> None:
+@pytest.mark.parametrize(
+    "value",
+    [
+        {},
+        {"max_context_window_tokens": 128_000},
+        {"max_output_tokens": 4_096},
+        {"max_context_window_tokens": 0, "max_output_tokens": 4_096},
+        {"max_context_window_tokens": 4_096, "max_output_tokens": 4_096},
+        {"max_context_window_tokens": 4_096, "max_output_tokens": 8_192},
+    ],
+)
+def test_compaction_config_rejects_invalid_limits(value: dict[str, int]) -> None:
     with pytest.raises(ValidationError):
-        HarnessAgentConfig.model_validate({field: True})
+        CompactionConfig.model_validate(value)
 
 
-@pytest.mark.parametrize("value", [True, False, None, HarnessAgentConfig(max_context_window_tokens=8192)])
-def test_agent_spec_harness_variants(value: bool | HarnessAgentConfig | None) -> None:
-    spec = AgentSpec(name="X", description="Y", harness=value)
-    assert spec.harness == value
+@pytest.mark.parametrize(
+    "value",
+    [False, None, CompactionConfig(max_context_window_tokens=8_192, max_output_tokens=1_024)],
+)
+def test_agent_spec_compaction_variants(value: bool | CompactionConfig | None) -> None:
+    spec = AgentSpec(name="X", description="Y", compaction=value)
+    assert spec.compaction == value
 
 
-@pytest.mark.parametrize("value", [True, False, None, HarnessAgentConfig()])
-def test_global_config_harness_variants(value: bool | HarnessAgentConfig | None) -> None:
-    config = GlobalConfig(harness=value)
-    assert config.harness == value
+@pytest.mark.parametrize(
+    "value",
+    [None, CompactionConfig(max_context_window_tokens=8_192, max_output_tokens=1_024)],
+)
+def test_global_config_compaction_variants(value: CompactionConfig | None) -> None:
+    config = GlobalConfig(compaction=value)
+    assert config.compaction == value
 
 
-def test_resolved_agent_harness_config_defaults_none() -> None:
+@pytest.mark.parametrize("model", [AgentSpec, GlobalConfig])
+@pytest.mark.parametrize("value", [True, False])
+def test_removed_harness_config_is_forbidden(model: type[AgentSpec] | type[GlobalConfig], value: bool) -> None:
+    payload = {"harness": value}
+    if model is AgentSpec:
+        payload.update(name="X", description="Y")
+    with pytest.raises(ValidationError):
+        model.model_validate(payload)
+
+
+def test_resolved_agent_compaction_config_defaults_none() -> None:
     resolved = ResolvedAgent(
         name="X",
         description="desc",
@@ -190,7 +214,7 @@ def test_resolved_agent_harness_config_defaults_none() -> None:
         response_schema=None,
         response_example=None,
     )
-    assert resolved.harness_config is None
+    assert resolved.compaction_config is None
 
 
 def test_global_config_auth_defaults_to_none() -> None:

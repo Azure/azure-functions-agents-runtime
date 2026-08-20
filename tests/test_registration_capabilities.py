@@ -144,34 +144,6 @@ def test_agent_capabilities_defaults_are_independent_lists() -> None:
     assert b.enabled_skill_paths == []
 
 
-def test_build_skills_provider_returns_none_for_empty() -> None:
-    from azure_functions_agents.runner import _build_skills_provider
-
-    assert _build_skills_provider(None) is None
-    assert _build_skills_provider([]) is None
-
-
-def test_build_skills_provider_returns_provider_for_skill_paths(tmp_path: Path) -> None:
-    pytest.importorskip("agent_framework")
-    skill_dir = tmp_path / "alpha"
-    skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text(
-        "---\nname: alpha\ndescription: A test skill.\n---\n\n# Alpha\n",
-        encoding="utf-8",
-    )
-
-    from azure_functions_agents.runner import _build_skills_provider
-
-    provider = _build_skills_provider([skill_dir])
-
-    # We don't depend on a specific attribute layout — just that the helper
-    # returns a non-None ``ContextProvider`` from MAF when given paths.
-    assert provider is not None
-    from agent_framework import ContextProvider
-
-    assert isinstance(provider, ContextProvider)
-
-
 # ---------------------------------------------------------------------------
 # web_request tool channel — build-once-at-registration, default-on wiring.
 # The factory import is lazy (``import_module`` inside ``capabilities.py``),
