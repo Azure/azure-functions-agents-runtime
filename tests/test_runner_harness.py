@@ -221,7 +221,13 @@ def test_build_harness_agent_session_forwards_system_instructions(monkeypatch: A
         "Markdown system prompt. Runtime system addendum."
     )
     assert captured[0]["harness_instructions"] == ""
+    assert captured[0]["tools"] == []
     assert captured[0]["disable_todo"] is True
+    assert captured[0]["disable_mode"] is True
+    assert captured[0]["disable_file_memory"] is True
+    assert captured[0]["disable_web_search"] is True
+    assert captured[0]["disable_tool_auto_approval"] is True
+    assert captured[0]["default_options"] == {"store": False}
 
 
 def test_build_harness_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:

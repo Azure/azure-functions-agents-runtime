@@ -34,6 +34,8 @@ AgentSpec = schema.AgentSpec
 BuiltinEndpointsConfig = schema.BuiltinEndpointsConfig
 DynamicSessionsCodeInterpreterConfig = schema.DynamicSessionsCodeInterpreterConfig
 GlobalConfig = schema.GlobalConfig
+HarnessAgentConfig = schema.HarnessAgentConfig
+HarnessModeConfig = schema.HarnessModeConfig
 McpFilter = schema.McpFilter
 SkillsFilter = schema.SkillsFilter
 SystemToolsAgentOverride = schema.SystemToolsAgentOverride
@@ -64,6 +66,11 @@ WEB_REQUEST_DESCRIPTIONS = schema.WEB_REQUEST_DESCRIPTIONS
 
 def format_type(field_info: FieldInfo, field_name: str) -> str:
     """Format field type annotation as a readable string."""
+    if field_name == "sdk":
+        return "`maf`"
+    if field_name == "mode":
+        return "`default` \\| object"
+
     annotation = field_info.annotation
     annotation_args = get_args(annotation)
 
@@ -99,6 +106,8 @@ def format_type(field_info: FieldInfo, field_name: str) -> str:
         "DynamicSessionsCodeInterpreterConfig",
         "EndpointAuthConfig",
         "EntraAuthConfig",
+        "HarnessAgentConfig",
+        "HarnessModeConfig",
         "McpFilter",
         "SkillsFilter",
         "ToolsFilter",
@@ -259,7 +268,6 @@ GLOBAL_CONFIG_DESCRIPTIONS = {
     "model": "Default LLM model identifier for all agents",
     "timeout": "Default execution timeout in seconds",
     "tools": "Global tool filtering configuration. [Details](#global-tools)",
-    "harness": "App-wide harness mode and context-compaction settings. [Details](./front-matter-spec.md#harness)",
     "http_auth": "App-wide default inbound HTTP authentication policy inherited by every agent's built-in HTTP endpoints; a per-agent `builtin_endpoints.http_auth` overrides it. Applies only to HTTP endpoints and does not affect MCP. Modes: `function` (default), `admin`, `anonymous`, `entra`.",
 }
 
@@ -268,7 +276,6 @@ GLOBAL_CONFIG_DEFAULTS = {
     "model": "Resolved from env/provider",
     "timeout": "`900`",
     "tools": "`{}`",
-    "harness": "`null`",
     "http_auth": "`function` (per-agent default)",
 }
 
@@ -301,6 +308,8 @@ AGENT_SPEC_REQUIRED_DESCRIPTIONS = {
 }
 
 AGENT_SPEC_OPTIONAL_DESCRIPTIONS = {
+    "sdk": "Agent SDK. Only `maf` is supported. [Details](./front-matter-spec.md#sdk-and-mode)",
+    "mode": "Execution mode: plain MAF (`default`) or nested harness settings. [Details](./front-matter-spec.md#sdk-and-mode)",
     "builtin_endpoints": "Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints)",
     "model": "Override LLM model for this agent",
     "timeout": "Override execution timeout (seconds) for this agent",
@@ -310,13 +319,21 @@ AGENT_SPEC_OPTIONAL_DESCRIPTIONS = {
     "mcp": "MCP server filtering. [Details](#agent-mcp)",
     "skills": "Skill filtering. [Details](#agent-skills)",
     "tools": "Custom tool filtering. [Details](#agent-tools)",
-    "harness": "Per-agent harness override. [Details](./front-matter-spec.md#harness)",
     "workflows": "Dynamic Workflow enablement, tool filtering, and Sub Agent grants. [Details](#agent-workflows)",
     "subagents": "Specialist agents this agent can delegate to as `delegate_<slug>` tools. [Details](./front-matter-spec.md#subagents)",
     "input_schema": "JSON Schema for HTTP request validation",
     "response_schema": "JSON Schema for response validation",
     "response_example": "Example response structure (multiline string)",
     "metadata": "Additional metadata for organization. Free-form.",
+}
+
+HARNESS_MODE_DESCRIPTIONS = {
+    "harness": "Harness execution settings. An empty object enables harness mode without compaction.",
+}
+
+HARNESS_CONFIG_DESCRIPTIONS = {
+    "max_context_window_tokens": "Positive total context budget used by conversation compaction. Must be provided with `max_output_tokens`.",
+    "max_output_tokens": "Positive reserved output budget and model output-token limit. Must be less than `max_context_window_tokens`.",
 }
 
 TRIGGER_SPEC_DESCRIPTIONS = {
@@ -436,6 +453,10 @@ def generate_markdown() -> str:
             default = "`{}`"
         elif field_name == "builtin_endpoints":
             default = "`false`"
+        elif field_name == "sdk":
+            default = "`maf`"
+        elif field_name == "mode":
+            default = "`default`"
         elif field_name == "system_tools":
             default = "Inherited"
         elif field_name == "mcp":
@@ -486,6 +507,46 @@ def generate_markdown() -> str:
         "**Note:** `debug_chat_ui: true` automatically enables `chat_api: true`",
         "",
         "**See:** [Front Matter Spec - builtin_endpoints](./front-matter-spec.md#builtin_endpoints)",
+        "",
+    ])
+
+    lines.extend([
+        "### Agent: `mode`",
+        "",
+        "Use `default` for plain MAF agent execution, or provide a harness object:",
+        "",
+        "```yaml",
+        "sdk: maf",
+        "mode:",
+        "  harness:",
+        "    max_context_window_tokens: 8192",
+        "    max_output_tokens: 4096",
+        "```",
+        "",
+    ])
+    lines.extend(generate_model_table(HarnessModeConfig, descriptions=HARNESS_MODE_DESCRIPTIONS))
+    lines.extend([
+        "",
+        "#### Agent: `mode.harness`",
+        "",
+        "Omit both token fields for harness execution without compaction, or provide both fields.",
+        "",
+    ])
+    lines.extend(
+        generate_model_table(
+            HarnessAgentConfig,
+            descriptions=HARNESS_CONFIG_DESCRIPTIONS,
+            custom_defaults={
+                "max_context_window_tokens": "`null`",
+                "max_output_tokens": "`null`",
+            },
+        )
+    )
+    lines.extend([
+        "",
+        "`max_output_tokens` must be less than `max_context_window_tokens`.",
+        "",
+        "**See:** [Front Matter Spec - sdk and mode](./front-matter-spec.md#sdk-and-mode)",
         "",
     ])
 

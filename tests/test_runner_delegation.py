@@ -44,6 +44,7 @@ from azure_functions_agents.client_manager import (
 )
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
+    HarnessAgentConfig,
     ResolvedAgent,
     SubagentRef,
     ToolsFilter,
@@ -416,6 +417,55 @@ def test_build_delegated_agent_never_wires_its_own_declared_subagents() -> None:
     # never accepts a catalog at all, so it has no way to build delegate_*
     # tools for "billing" regardless of what it declares.
     assert not any(name.startswith("delegate_") for name in _tool_names(agent))
+
+
+@pytest.mark.parametrize("execution_role", ["delegate", "workflow_subagent"])
+@pytest.mark.asyncio
+async def test_harness_mode_applies_to_each_stateless_leaf_role(
+    monkeypatch: pytest.MonkeyPatch,
+    execution_role: Any,
+) -> None:
+    set_client_manager(_FakeClientManager())
+    captured: list[dict[str, Any]] = []
+
+    async def respond(task: str) -> str:
+        return f"handled: {task}"
+
+    def build_harness(_client: Any, **kwargs: Any) -> _FakeSpecialistAgent:
+        captured.append(kwargs)
+        return _FakeSpecialistAgent("billing", respond)
+
+    monkeypatch.setattr(runner, "_build_harness_role_agent", build_harness)
+
+    config = HarnessAgentConfig(
+        max_context_window_tokens=8192,
+        max_output_tokens=4096,
+    )
+    local_tool = tool(lambda: "ok", name="billing_lookup")
+    resolved = _make_resolved(
+        slug="billing",
+        instructions="handle billing",
+        subagents=[SubagentRef(agent="shipping")],
+        harness_config=config,
+    )
+    capabilities = AgentCapabilities(filtered_user_tools=[local_tool])
+
+    result = await runner.run_leaf_agent_task(
+        resolved,
+        capabilities,
+        "invoice 42",
+        timeout=1.0,
+        execution_role=execution_role,
+    )
+
+    assert result == "handled: invoice 42"
+    assert len(captured) == 1
+    assert captured[0]["agent_name"] == "billing"
+    assert captured[0]["agent_instructions"] == "handle billing"
+    assert captured[0]["harness_config"] is config
+    assert captured[0]["history_provider"] is None
+    assert {item.name for item in captured[0]["tools"]} == {"billing_lookup"}
+    assert not any(item.name.startswith("delegate_") for item in captured[0]["tools"])
 
 
 def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and_skills_not_coordinators(

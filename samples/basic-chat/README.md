@@ -14,6 +14,7 @@ An endpoint-first chat agent with a built-in web UI, streaming API, MCP tool, Mi
 - **Microsoft Foundry** — provisions an AI Services account, Foundry project, and `gpt-5.4` deployment
 - **Code execution** — sandboxed Python via ACA Dynamic Sessions with Playwright support
 - **Session persistence** — multi-turn conversations stored in Azure Blob Storage
+- **Conversation compaction** — MAF harness mode bounds model-facing history to an explicit token budget while retaining full persisted history
 
 ## Prerequisites
 

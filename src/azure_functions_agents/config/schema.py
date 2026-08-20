@@ -226,25 +226,33 @@ class SystemToolsAgentOverride(BaseModel):
 
 
 class HarnessAgentConfig(BaseModel):
-    """Configuration for harness-mode agents (``create_harness_agent``).
-
-    When an agent opts into harness mode (``harness: true`` in frontmatter or
-    ``agents.config.yaml``), the runtime uses MAF's ``create_harness_agent``
-    instead of the plain ``Agent`` constructor. The harness can compact
-    accumulated conversation history before model calls, reducing input-token
-    growth after the configured threshold is reached. Agent instructions are
-    still supplied on every model call.
-
-    All fields are optional; an empty object (``harness: true`` short-hand)
-    uses the harness defaults with no compaction configured.
-    """
+    """Optional conversation-compaction limits for MAF harness mode."""
 
     model_config = ConfigDict(extra="forbid")
 
-    max_context_window_tokens: int | None = None
-    max_output_tokens: int | None = None
-    disable_file_memory: bool = True
-    disable_mode: bool = True
+    max_context_window_tokens: int | None = Field(default=None, gt=0)
+    max_output_tokens: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_token_limits(self) -> HarnessAgentConfig:
+        limits = (self.max_context_window_tokens, self.max_output_tokens)
+        if (limits[0] is None) != (limits[1] is None):
+            raise ValueError(
+                "max_context_window_tokens and max_output_tokens must be provided together"
+            )
+        if limits[0] is not None and limits[1] is not None and limits[1] >= limits[0]:
+            raise ValueError(
+                "max_output_tokens must be less than max_context_window_tokens"
+            )
+        return self
+
+
+class HarnessModeConfig(BaseModel):
+    """Agent execution-mode wrapper for MAF harness configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    harness: HarnessAgentConfig
 
 
 class GlobalConfig(BaseModel):
@@ -256,13 +264,6 @@ class GlobalConfig(BaseModel):
     model: str | None = None
     timeout: float | None = None
     tools: ToolsFilter | None = None
-    harness: bool | HarnessAgentConfig | None = Field(
-        default=None,
-        description=(
-            "App-wide harness-agent enablement and context-compaction settings. "
-            "Agents inherit this value when their front matter omits harness."
-        ),
-    )
     http_auth: EndpointAuthConfig | None = Field(
         default=None,
         description=(
@@ -281,6 +282,17 @@ class AgentSpec(BaseModel):
 
     name: str
     description: str
+    sdk: Literal["maf"] = Field(
+        default="maf",
+        description="Agent SDK. Only Microsoft Agent Framework (`maf`) is supported.",
+    )
+    mode: Literal["default"] | HarnessModeConfig = Field(
+        default="default",
+        description=(
+            "Agent execution mode. Use `default` for plain MAF execution or provide "
+            "a `harness` object with optional conversation-compaction token limits."
+        ),
+    )
     trigger: TriggerSpec | None = None
     builtin_endpoints: bool | BuiltinEndpointsConfig | None = None
     model: str | None = None
@@ -300,13 +312,6 @@ class AgentSpec(BaseModel):
     instructions: str = ""
     source_file: str | None = None
     is_main: bool = False
-    harness: bool | HarnessAgentConfig | None = Field(
-        default=None,
-        description=(
-            "Per-agent harness override. Omit to inherit global settings, set false to opt out, "
-            "set true to enable harness defaults, or provide an object with compaction settings."
-        ),
-    )
 
 
 class ResolvedAgent(BaseModel):

@@ -18,7 +18,6 @@ Optional file in the root directory. All properties are optional.
 | `model` | string | No | Resolved from env/provider | Default LLM model identifier for all agents |
 | `timeout` | number | No | `900` | Default execution timeout in seconds |
 | `tools` | object | No | `{}` | Global tool filtering configuration. [Details](#global-tools) |
-| `harness` | boolean \| HarnessAgentConfig | No | `null` | App-wide harness mode and context-compaction settings. [Details](./front-matter-spec.md#harness) |
 | `http_auth` | object | No | `function` (per-agent default) | App-wide default inbound HTTP authentication policy inherited by every agent's built-in HTTP endpoints; a per-agent `builtin_endpoints.http_auth` overrides it. Applies only to HTTP endpoints and does not affect MCP. Modes: `function` (default), `admin`, `anonymous`, `entra`. |
 
 ### Global: `system_tools`
@@ -71,6 +70,8 @@ YAML front matter at the top of each agent markdown file.
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
+| `sdk` | `maf` | No | `maf` | Agent SDK. Only `maf` is supported. [Details](./front-matter-spec.md#sdk-and-mode) |
+| `mode` | `default` \| object | No | `default` | Execution mode: plain MAF (`default`) or nested harness settings. [Details](./front-matter-spec.md#sdk-and-mode) |
 | `builtin_endpoints` | boolean \| object | No | `false` | Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints) |
 | `model` | string | No | Inherited from global | Override LLM model for this agent |
 | `timeout` | number | No | Inherited from global | Override execution timeout (seconds) for this agent |
@@ -86,7 +87,6 @@ YAML front matter at the top of each agent markdown file.
 | `response_schema` | object | No | `null` | JSON Schema for response validation |
 | `response_example` | string | No | `null` | Example response structure (multiline string) |
 | `metadata` | object | No | `{}` | Additional metadata for organization. Free-form. |
-| `harness` | boolean \| HarnessAgentConfig | No | `null` | Per-agent harness override. [Details](./front-matter-spec.md#harness) |
 
 ### Agent: `trigger`
 
@@ -126,6 +126,35 @@ Enable built-in endpoints for interactive testing, programmatic access, and agen
 **Note:** `debug_chat_ui: true` automatically enables `chat_api: true`
 
 **See:** [Front Matter Spec - builtin_endpoints](./front-matter-spec.md#builtin_endpoints)
+
+### Agent: `mode`
+
+Use `default` for plain MAF agent execution, or provide a harness object:
+
+```yaml
+sdk: maf
+mode:
+  harness:
+    max_context_window_tokens: 8192
+    max_output_tokens: 4096
+```
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `harness` | object | **Yes** | N/A | Harness execution settings. An empty object enables harness mode without compaction. |
+
+#### Agent: `mode.harness`
+
+Omit both token fields for harness execution without compaction, or provide both fields.
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `max_context_window_tokens` | integer | No | `null` | Positive total context budget used by conversation compaction. Must be provided with `max_output_tokens`. |
+| `max_output_tokens` | integer | No | `null` | Positive reserved output budget and model output-token limit. Must be less than `max_context_window_tokens`. |
+
+`max_output_tokens` must be less than `max_context_window_tokens`.
+
+**See:** [Front Matter Spec - sdk and mode](./front-matter-spec.md#sdk-and-mode)
 
 ### Agent: `system_tools`
 

@@ -102,7 +102,13 @@ if TYPE_CHECKING:
     # call-time `from agent_framework import ...` imports below (this
     # module's established pattern for the heavier agent-construction
     # symbols), so this adds no import-time cost.
-    from agent_framework import Agent, AgentResponse, ContextProvider, SupportsChatGetResponse
+    from agent_framework import (
+        Agent,
+        AgentResponse,
+        ContextProvider,
+        HistoryProvider,
+        SupportsChatGetResponse,
+    )
 
     from .workflows.schema import WorkflowPlanPolicy
 
@@ -522,10 +528,47 @@ def _build_role_agent(
     )
 
 
+def _build_harness_role_agent(
+    chat_client: SupportsChatGetResponse[Any],
+    *,
+    agent_instructions: str | None,
+    tools: list[AgentTool],
+    skill_paths: list[Path] | None,
+    agent_name: str | None,
+    history_provider: HistoryProvider | None,
+    harness_config: HarnessAgentConfig,
+) -> Agent[Any]:
+    """Build one conservatively configured MAF harness agent for any role."""
+    import warnings
+
+    from agent_framework import create_harness_agent
+    from agent_framework._feature_stage import ExperimentalWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=ExperimentalWarning)
+        return create_harness_agent(
+            chat_client,
+            name=agent_name,
+            harness_instructions="",
+            agent_instructions=agent_instructions,
+            tools=tools,
+            history_provider=history_provider,
+            skills_paths=skill_paths or None,
+            disable_tool_auto_approval=True,
+            disable_web_search=True,
+            disable_todo=True,
+            disable_mode=True,
+            max_context_window_tokens=harness_config.max_context_window_tokens,
+            max_output_tokens=harness_config.max_output_tokens,
+            disable_file_memory=True,
+            default_options={"store": False},
+        )
+
+
 def _build_delegated_agent(
     resolved: ResolvedAgent, capabilities: AgentCapabilities
 ) -> tuple[Agent[Any], InferenceTarget]:
-    """Build one specialist's MAF ``Agent`` in the *delegated* execution role.
+    """Build one specialist in its resolved mode for a stateless leaf role.
 
     Runs as itself: own instructions, model, and static tools, but never a
     per-request sandbox or main-only Dynamic-Workflow tools (naturally
@@ -535,26 +578,70 @@ def _build_delegated_agent(
     """
     client_manager = get_client_manager()
     chat_client, inference_target = client_manager.build_chat_client_with_target(resolved.model)
-    agent = _build_role_agent(
-        chat_client,
-        instructions=resolved.instructions,
-        tools=list(capabilities.filtered_user_tools or []),
-        mcp_tools=list(capabilities.filtered_mcp_tools or []),
-        skill_paths=capabilities.enabled_skill_paths,
-        sandbox_tools=None,
-        web_request_tools=capabilities.web_request_tools,
-        system_addendum=None,
-        workflow_enabled=False,
-        workflow_durable_client=None,
-        workflow_agent_slug=None,
-        # The slug, not `resolved.name` (the display name) — this becomes
-        # the MAF span's `gen_ai.agent.name`, matching the `delegate_<slug>`
-        # tool name so a trace viewer can correlate the two directly.
-        agent_name=resolved.slug,
-        resolved_id=None,
-        history_provider=None,
-        delegate_tools=None,
-    )
+    if resolved.harness_config is not None:
+        resolved_tools, effective_instructions = _assemble_agent_inputs(
+            instructions=resolved.instructions,
+            tools=list(capabilities.filtered_user_tools or []),
+            mcp_tools=list(capabilities.filtered_mcp_tools or []),
+            sandbox_tools=None,
+            web_request_tools=capabilities.web_request_tools,
+            system_addendum=None,
+            workflow_enabled=False,
+            workflow_durable_client=None,
+            workflow_agent_slug=None,
+            agent_name=resolved.slug,
+            resolved_id=None,
+            delegate_tools=None,
+            workflow_policy=None,
+        )
+        try:
+            agent = _build_harness_role_agent(
+                chat_client,
+                agent_instructions=effective_instructions,
+                tools=resolved_tools,
+                skill_paths=capabilities.enabled_skill_paths,
+                agent_name=resolved.slug,
+                history_provider=None,
+                harness_config=resolved.harness_config,
+            )
+        except ImportError:
+            logger.warning(
+                "create_harness_agent is not available in the installed agent_framework "
+                "version; falling back to plain Agent"
+            )
+            agent = _build_role_agent(
+                chat_client,
+                instructions=resolved.instructions,
+                tools=list(capabilities.filtered_user_tools or []),
+                mcp_tools=list(capabilities.filtered_mcp_tools or []),
+                skill_paths=capabilities.enabled_skill_paths,
+                sandbox_tools=None,
+                web_request_tools=capabilities.web_request_tools,
+                system_addendum=None,
+                workflow_enabled=False,
+                workflow_durable_client=None,
+                agent_name=resolved.slug,
+                resolved_id=None,
+                history_provider=None,
+                delegate_tools=None,
+            )
+    else:
+        agent = _build_role_agent(
+            chat_client,
+            instructions=resolved.instructions,
+            tools=list(capabilities.filtered_user_tools or []),
+            mcp_tools=list(capabilities.filtered_mcp_tools or []),
+            skill_paths=capabilities.enabled_skill_paths,
+            sandbox_tools=None,
+            web_request_tools=capabilities.web_request_tools,
+            system_addendum=None,
+            workflow_enabled=False,
+            workflow_durable_client=None,
+            agent_name=resolved.slug,
+            resolved_id=None,
+            history_provider=None,
+            delegate_tools=None,
+        )
     return agent, inference_target
 
 
@@ -921,11 +1008,8 @@ async def _build_harness_agent_session(
     inference_target)``; ``delegate_error_tracker`` is ``None`` unless
     ``subagents`` is non-empty.
     """
-    import warnings
-
     try:
-        from agent_framework import create_harness_agent
-        from agent_framework._feature_stage import ExperimentalWarning
+        from agent_framework import create_harness_agent as available_harness_factory
     except ImportError:
         logger.warning(
             "create_harness_agent is not available in the installed agent_framework "
@@ -950,6 +1034,7 @@ async def _build_harness_agent_session(
             coordinator_deadline=coordinator_deadline,
             workflow_policy=workflow_policy,
         )
+    del available_harness_factory
 
     resolved_config = harness_config if harness_config is not None else HarnessAgentConfig()
 
@@ -996,31 +1081,39 @@ async def _build_harness_agent_session(
         workflow_policy=workflow_policy,
     )
 
-    # create_harness_agent takes skills_paths natively; no SkillsProvider in context_providers.
-    # history_provider is passed directly (not via context_providers) so that the harness can
-    # call before_run/after_run on it for both context injection and per-service-call persistence.
-    # Force provider-managed storage because request-scoped AgentSession instances do not retain
-    # the service-managed conversation ID returned by clients that store history by default.
-    # MAF >= 1.12.1 applies before-call compaction after the external provider loads history, so
-    # request-scoped agents can compact Blob-backed conversations without persisting in-memory
-    # compaction state between requests.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=ExperimentalWarning)
-        agent = create_harness_agent(
+    try:
+        agent = _build_harness_role_agent(
             chat_client,
-            harness_instructions="",
             agent_instructions=effective_instructions,
-            tools=resolved_tools or None,
+            tools=resolved_tools,
+            skill_paths=skill_paths,
+            agent_name=agent_name,
             history_provider=history_provider,
-            skills_paths=skill_paths or None,
-            disable_tool_auto_approval=True,
-            disable_web_search=True,
-            disable_todo=True,
-            disable_mode=resolved_config.disable_mode,
-            max_context_window_tokens=resolved_config.max_context_window_tokens,
-            max_output_tokens=resolved_config.max_output_tokens,
-            disable_file_memory=resolved_config.disable_file_memory,
-            default_options={"store": False},
+            harness_config=resolved_config,
+        )
+    except ImportError:
+        logger.warning(
+            "create_harness_agent is not available in the installed agent_framework "
+            "version; falling back to plain Agent"
+        )
+        return await _build_agent_session_history(
+            instructions=instructions,
+            session_id=session_id,
+            tools=tools,
+            mcp_tools=mcp_tools,
+            skill_paths=skill_paths,
+            model=model,
+            sandbox_tools=sandbox_tools,
+            system_addendum=system_addendum,
+            workflow_enabled=workflow_enabled,
+            workflow_durable_client=workflow_durable_client,
+            workflow_agent_slug=workflow_agent_slug,
+            agent_name=agent_name,
+            web_request_tools=web_request_tools,
+            subagents=subagents,
+            catalog=catalog,
+            coordinator_deadline=coordinator_deadline,
+            workflow_policy=workflow_policy,
         )
 
     return agent, session, resolved_id, delegate_error_tracker, inference_target

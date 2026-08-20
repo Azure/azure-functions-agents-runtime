@@ -18,7 +18,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
   - Code execution sandbox configuration
   - Outbound web request tool (`web_request`) — enabled by default, SSRF-guarded
 - Default runtime settings (model, timeout)
-- Optional harness mode with token-budget conversation-history compaction
+- Explicit MAF execution modes with optional token-budget conversation-history compaction
 
 **MCP server discovery:**
 - MCP servers (defined in `mcp.json`), including connector-backed MCP servers
@@ -47,8 +47,8 @@ For capabilities (MCP, skills, tools):
 
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
-| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools`, `harness`, `http_auth` |
-| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `harness`, `workflows`, `subagents`, `input_schema`, `response_schema`, `response_example`, `metadata` |
+| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools`, `http_auth` |
+| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `sdk`, `mode`, `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `workflows`, `subagents`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
 ---
@@ -67,7 +67,6 @@ Optional file in the root directory that defines shared infrastructure and runti
 - `model` — String specifying default LLM model identifier
 - `timeout` — Number specifying default execution timeout in seconds
 - `tools` — Object for tool filtering configuration
-- `harness` — Boolean or object enabling harness mode and optional token-budget history compaction
 - `http_auth` — String or object specifying the app-wide default inbound HTTP authentication policy (same model as `builtin_endpoints.http_auth`). Every agent's built-in HTTP endpoints inherit this value unless the agent authors its own `builtin_endpoints.http_auth`, which always overrides. When omitted, endpoints default to `function`. Applies only to HTTP endpoints and does not affect the MCP endpoint. Example: `http_auth: entra` requires every agent's chat API to use Entra ID by default.
 
 **Note:** MCP servers (from `mcp.json`), skills (from `skills/` directory), and custom tools (from `tools/` directory) are automatically discovered. Agents can filter them out using exclude lists.
@@ -84,6 +83,8 @@ YAML front matter at the top of each agent file.
 
 **Optional properties:**
 - `builtin_endpoints` — Object or boolean for enabling built-in chat UI, chat API, and MCP tool endpoints
+- `sdk` — Agent SDK selector; only `maf` is supported and it is the default
+- `mode` — `default` for plain MAF execution or an object containing nested harness settings
 - `model` — String to override global default model
 - `timeout` — Number to override global default timeout
 - `logger` — Boolean to enable/disable response logging for triggered agents
@@ -92,7 +93,6 @@ YAML front matter at the top of each agent file.
 - `mcp` — Boolean or object to inherit, disable, or exclude MCP servers
 - `skills` — Object with exclude lists or false to filter skills
 - `tools` — Object with exclude lists or false to filter tools
-- `harness` — Boolean or object to inherit, opt out of, or configure harness mode
 - `workflows` — Object to enable Dynamic Workflows on an agent
 - `subagents` — Array of `{agent, when?}` references to specialist agents this agent may delegate to at chat time
 - `input_schema` — Object, JSON Schema for HTTP request validation
@@ -156,10 +156,10 @@ Fields are organized into categories based on how they can be used:
 **Runtime Settings (Global defaults, overridable in agents):**
 - `model` — LLM selection
 - `timeout` — Execution time limit
-- `harness` — Harness mode and token-budget conversation-history compaction
 
 **Agent-Specific (Agent front matter only):**
 - `name`, `description` — Agent identity (required)
+- `sdk`, `mode` — SDK selection and plain or harness execution mode
 - `trigger` — Invocation method (required unless at least one built-in endpoint is enabled, or the agent is referenced as an internal specialist via another agent's `subagents` or `workflows.subagents`)
 - `builtin_endpoints` — Built-in chat UI, chat API, and MCP tool endpoints
 - `subagents` — Chat-time delegation to specialist agents (`delegate_<slug>` tools; see [`subagents`](#subagents))
@@ -192,37 +192,45 @@ unless another agent references it through `subagents` or
 
 ### Optional Fields
 
-#### `harness`
-- **Type:** `boolean | object`
-- **Typical location:** Global configuration, with optional per-agent override
-- **Description:** Uses MAF's harness agent and optionally compacts accumulated conversation
-  history before model calls. Compaction reduces the context sent to the model; it does not replace
-  the full conversation history stored by the runtime's Blob/File history provider. The agent's
-  system instructions (the `.agent.md` markdown body plus any runtime addendum) are not conversation
-  history and remain in every model call. Both token-limit fields are required to activate the
-  default compaction strategy.
+#### `sdk` and `mode`
+- **Types:** `sdk: maf`; `mode: default | object`
+- **Typical location:** Agent only
+- **Defaults:** `sdk: maf`, `mode: default`
+- **Description:** Selects the agent SDK and execution mode. Microsoft Agent Framework (`maf`) is
+  currently the only supported SDK. `default` uses the plain MAF `Agent`; a nested `harness` object
+  uses MAF's harness agent and may compact accumulated conversation history before model calls.
 
 ```yaml
-# agents.config.yaml
-harness:
-  max_context_window_tokens: 8192  # Total token budget used by the compaction strategy
-  max_output_tokens: 4096          # Reserved response budget and model output-token limit
-  disable_mode: true               # Disable MAF's plan/execute mode provider
-  disable_file_memory: true        # Disable MAF's session file-memory provider
+# .agent.md front matter
+sdk: maf
+mode:
+  harness:
+    max_context_window_tokens: 8192  # Total budget used by compaction
+    max_output_tokens: 4096          # Reserved response and output-token budget
 ```
 
-Agents that omit `harness` inherit this global object. Use `harness: false` in an agent's front
-matter to opt out. `harness: true` explicitly enables harness defaults and therefore does not
-inherit fields from a global harness object; use an object for an agent-specific configuration.
+Omitting either top-level field is valid. Omitted `sdk` means `maf`; omitted `mode` means `default`.
+An empty `mode: { harness: {} }` selects harness execution without enabling compaction. Otherwise,
+both token limits are required positive integers and `max_output_tokens` must be less than
+`max_context_window_tokens`. `sdk`, scalar `mode`, and nested token values participate in normal
+front-matter environment substitution before validation; string substitution cannot create the
+nested mapping itself.
 
-For this runtime's default configuration, compaction of message history across turns in the same
-session is the harness mode's primary added behavior. MAF's harness-level instructions and todo
-provider are always disabled. The mode and file-memory providers are disabled by default, but can
-be enabled with `disable_mode: false` or `disable_file_memory: false`.
+Harness mode applies whenever that agent runs directly, as a chat-time delegated specialist, or as
+a Workflow Sub Agent. Direct runs retain authoritative full Blob/File history while compaction
+bounds only the message context sent to the model. Specialist runs remain fresh, single-task leaf
+executions with no nested delegation or persistent history. Harness instructions are empty, and the
+runtime disables todo, plan/execute mode, file memory, web search, and automatic tool approval;
+these controls are intentionally not author-configurable.
 
 `max_context_window_tokens` is the budget used by compaction and may be lower than the model's
 physical context window. The default strategy begins truncating older non-system message groups at
 80% of the input budget, where input budget is `max_context_window_tokens - max_output_tokens`.
+
+The earlier unmerged top-level `harness` syntax is rejected. Migrate `harness: false` to
+`mode: default`, `harness: true` to `mode: { harness: {} }`, and move a harness object beneath
+`mode.harness`. Global harness configuration is not supported; place the mode object in each agent
+that should use harness execution.
 
 #### `trigger`
 - **Type:** `object`

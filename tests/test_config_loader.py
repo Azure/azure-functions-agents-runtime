@@ -66,7 +66,6 @@ def test_load_global_config_missing_returns_empty(tmp_path: Path) -> None:
         "model": None,
         "timeout": None,
         "tools": None,
-        "harness": None,
         "http_auth": None,
     }
 
@@ -178,6 +177,83 @@ def test_load_agent_specs_resolves_frontmatter_strings(
     [spec] = load_agent_specs(tmp_path)
     assert spec.model == "gpt-4.1-mini"
     assert spec.response_example == '{"status":"ok"}'
+
+
+def test_load_agent_specs_resolves_sdk_mode_and_harness_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AGENT_SDK", "maf")
+    monkeypatch.setenv("CONTEXT_LIMIT", "8192")
+    monkeypatch.setenv("OUTPUT_LIMIT", "4096")
+    (tmp_path / "main.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Main
+            description: Main agent
+            sdk: $AGENT_SDK
+            mode:
+              harness:
+                max_context_window_tokens: $CONTEXT_LIMIT
+                max_output_tokens: $OUTPUT_LIMIT
+            ---
+            Hello
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    [spec] = load_agent_specs(tmp_path, strict=True)
+    assert spec.sdk == "maf"
+    assert spec.mode != "default"
+    assert spec.mode.harness.max_context_window_tokens == 8192
+    assert spec.mode.harness.max_output_tokens == 4096
+
+
+def test_load_agent_specs_rejects_unsupported_substituted_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AGENT_SDK", "unsupported")
+    (tmp_path / "main.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Main
+            description: Main agent
+            sdk: $AGENT_SDK
+            ---
+            Hello
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="sdk"):
+        load_agent_specs(tmp_path, strict=True)
+
+
+def test_load_agent_specs_rejects_invalid_nested_harness_limits(tmp_path: Path) -> None:
+    (tmp_path / "main.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Main
+            description: Main agent
+            mode:
+              harness:
+                max_context_window_tokens: 4096
+                max_output_tokens: 4096
+            ---
+            Hello
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must be less than"):
+        load_agent_specs(tmp_path, strict=True)
 
 
 def test_load_agent_specs_substitute_variables_false_skips_frontmatter_and_body(

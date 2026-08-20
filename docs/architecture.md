@@ -198,9 +198,11 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
 
 Registration does not run the agent itself. Instead, `registration/_handlers.py` builds closures that call `runner.run_agent()` or `runner.run_agent_stream()`, passing the `ResolvedAgent` instructions plus the already-filtered `AgentCapabilities` — and, when the agent declares `subagents`, its `ResolvedAgent.subagents` list plus the frozen `AgentCatalog`. For non-HTTP triggers, the closure delegates payload construction to `registration/_trigger_serialization.py`: native `to_dict()`/`model_dump()` contracts are used first, then public Azure Functions binding adapters, batch recursion, and byte encoding produce JSON-safe prompt data. HTTP handlers build their request-body JSON separately and do not use this serializer. The runner then asks the active `ClientManager` to build a chat client, builds any `delegate_<slug>` tools fresh for this request, and executes through the Microsoft Agent Framework (`src/azure_functions_agents/runner.py`, `src/azure_functions_agents/client_manager.py`).
 
-`ResolvedAgent.harness_config` selects MAF's `create_harness_agent`; `None` selects the plain
-`Agent`. Both modes reuse the same runtime history provider, keyed by the public session ID returned
-to the caller and supplied on later turns. In Azure, `BlobHistoryProvider` stores that history in the
+Agent front matter's optional `sdk` and `mode` fields are translated by `config/merge.py` into
+`ResolvedAgent.harness_config`: nested harness configuration selects MAF's `create_harness_agent`,
+while `None` selects the plain `Agent`. For direct execution, both modes reuse the same runtime
+history provider, keyed by the public session ID returned to the caller and supplied on later turns.
+In Azure, `BlobHistoryProvider` stores that history in the
 Function App's configured storage account, so a request handled by another worker can reload the
 same conversation. The `FileHistoryProvider` fallback is for local development and does not provide
 cross-worker sharing. Harness runs force provider-managed history (`store=false`) because the runtime
@@ -212,6 +214,11 @@ authoritative. Cross-worker turn ordering is not coordinated, so callers must st
 turns for the same session ID. With both harness token limits configured, MAF compacts the externally
 loaded conversation history immediately before each model call. Agent instructions remain part of
 every call; compaction controls accumulated message-history growth.
+
+The mode belongs to the agent rather than the invocation surface, so delegated and Workflow Sub
+Agent roles use the specialist's resolved mode too. Leaf roles remain fresh and single-task: harness
+specialists receive no persistent history provider, sandbox, workflow-management tools, or nested
+delegation. Their own filtered user/MCP/web-request tools and skills remain available.
 
 For each workflow-enabled agent, `workflows/integration.py` uses the cataloged immutable
 `WorkflowPlanPolicy` to generate model guidance and agent-scoped management
@@ -309,8 +316,8 @@ By the time a handler calls `runner.run_agent()` or `runner.run_agent_stream()`,
   It also installs harness-specific persistence and middleware, so making it unconditional would
   change existing agents even when no token reduction is possible. Plain mode preserves the direct
   MAF `Agent` behavior for short-lived/stateless workloads, custom clients, and applications that
-  require complete uncompressed history; apps can enable harness mode globally and opt individual
-  agents out with `harness: false`.
+  require complete uncompressed history. `sdk` and `mode` are agent-only: omitted `mode` selects
+  plain execution, and nested `mode.harness` selects harness execution for that agent in every role.
 - `AgentCapabilities.filtered_user_tools` becomes the concrete user-tool list.
 - `AgentCapabilities.filtered_workflow_tools` contributes to that agent's
   `WorkflowPlanPolicy`; it does not shrink the complete Activity handler catalog.

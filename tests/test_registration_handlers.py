@@ -1022,7 +1022,10 @@ def _resolved_agent_with_harness(
 def test_http_handler_forwards_harness_config(monkeypatch: Any) -> None:
     """make_http_agent_handler passes resolved.harness_config to _run_agent."""
     captured: dict[str, Any] = {}
-    cfg = HarnessAgentConfig(max_context_window_tokens=64_000)
+    cfg = HarnessAgentConfig(
+        max_context_window_tokens=64_000,
+        max_output_tokens=4_096,
+    )
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         captured.update(kwargs)

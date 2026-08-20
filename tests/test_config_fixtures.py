@@ -17,6 +17,7 @@ from azure_functions_agents.config.loader import load_agent_specs, load_global_c
 from azure_functions_agents.config.merge import compose
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
+    HarnessModeConfig,
     McpFilter,
     SkillsFilter,
     SubagentRef,
@@ -792,3 +793,43 @@ def test_multi_owner_workflows_fixture() -> None:
     known_slugs = set(by_slug)
     validate_workflow_subagent_references(incident, known_slugs=known_slugs)
     validate_workflow_subagent_references(release, known_slugs=known_slugs)
+
+
+# ---------------------------------------------------------------------------
+# 19 — agent SDK and execution modes
+# ---------------------------------------------------------------------------
+
+
+def test_sdk_modes_fixture() -> None:
+    fixture = FIXTURES_ROOT / "19_sdk_modes"
+    global_config = load_global_config(fixture)
+    specs = load_agent_specs(fixture, strict=True)
+    by_slug = {compose(spec, global_config).slug: (spec, compose(spec, global_config)) for spec in specs}
+
+    assert set(by_slug) == {
+        "compacted_harness",
+        "empty_harness",
+        "explicit_default",
+        "implicit",
+    }
+
+    implicit_spec, implicit = by_slug["implicit"]
+    explicit_spec, explicit = by_slug["explicit_default"]
+    assert implicit_spec.sdk == "maf"
+    assert implicit_spec.mode == "default"
+    assert explicit_spec.sdk == "maf"
+    assert explicit_spec.mode == "default"
+    assert implicit.harness_config is None
+    assert explicit.harness_config is None
+
+    empty_spec, empty = by_slug["empty_harness"]
+    assert isinstance(empty_spec.mode, HarnessModeConfig)
+    assert empty.harness_config is not None
+    assert empty.harness_config.max_context_window_tokens is None
+    assert empty.harness_config.max_output_tokens is None
+
+    compacted_spec, compacted = by_slug["compacted_harness"]
+    assert isinstance(compacted_spec.mode, HarnessModeConfig)
+    assert compacted.harness_config is not None
+    assert compacted.harness_config.max_context_window_tokens == 8192
+    assert compacted.harness_config.max_output_tokens == 4096
