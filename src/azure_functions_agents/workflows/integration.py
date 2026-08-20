@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -39,6 +40,8 @@ from .schema import WorkflowPlanPolicy
 from .tools import build_workflow_tools
 
 type WorkflowAgentPolicyCatalog = Mapping[str, WorkflowPlanPolicy]
+
+DATA_DRIVEN_WORKFLOWS_SKILL_NAME = "data-driven-workflows"
 
 # Whitelist of frontmatter keys we recognize under ``workflows``. Any
 # other key is rejected at app start so typos (``enabld``, ``allow_tools``)
@@ -153,6 +156,7 @@ class WorkflowIntegrationResult:
     chat_system_addendum: str | None
     trigger_system_addendum: str | None
     plan_policy: WorkflowPlanPolicy | None
+    runtime_skill_paths: tuple[Path, ...] = ()
 
     def __iter__(self) -> Iterator[Any]:
         """Yield the legacy ``(workflow_tools, system_addendum)`` pair."""
@@ -167,6 +171,11 @@ class WorkflowIntegrationResult:
         if chat_enabled != trigger_enabled:
             raise RuntimeError("workflow channel addenda must be enabled or disabled together")
         return chat_enabled
+
+
+def data_driven_workflows_skill_path() -> Path:
+    """Return the packaged data-driven workflow authoring skill directory."""
+    return Path(__file__).resolve().parent / "skills" / DATA_DRIVEN_WORKFLOWS_SKILL_NAME
 
 
 def _validate_workflows_block(metadata: dict[str, Any]) -> None:
@@ -489,6 +498,7 @@ def build_workflow_agent_integration(
             handler_catalog=handler_catalog,
         ),
         plan_policy=policy,
+        runtime_skill_paths=(data_driven_workflows_skill_path(),),
     )
 
 

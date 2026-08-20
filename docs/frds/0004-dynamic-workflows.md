@@ -4,9 +4,9 @@ title: Dynamic workflows
 status: Finalized
 author: TsuyoshiUshio
 created: 2026-07-06
-updated: 2026-08-12
-issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108, https://github.com/Azure/azure-functions-agents-runtime/issues/109, https://github.com/Azure/azure-functions-bucees-planning/issues/1274, https://github.com/Azure/azure-functions-bucees-planning/issues/1275]
-pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117, https://github.com/Azure/azure-functions-agents-runtime/pull/151]
+updated: 2026-08-14
+issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108, https://github.com/Azure/azure-functions-agents-runtime/issues/109, https://github.com/Azure/azure-functions-bucees-planning/issues/1274, https://github.com/Azure/azure-functions-bucees-planning/issues/1275, https://github.com/Azure/azure-functions-bucees-planning/issues/1276]
+pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117, https://github.com/Azure/azure-functions-agents-runtime/pull/151, https://github.com/Azure/azure-functions-agents-runtime/pull/163]
 ---
 
 # FRD 0004 — Dynamic workflows
@@ -23,6 +23,10 @@ decorator; normal plain-function tool discovery remains backward compatible.
 Workflow-enabled agents can also start the same Durable workflows from any
 supported Markdown-declared trigger; the trigger starts the workflow
 asynchronously and does not wait for it to finish.
+The next evolution adds deterministic, data-driven control flow: a task can be
+skipped by a constrained `when` predicate or expanded over a bounded JSON array
+with `for_each`, while preserving Durable replay safety, owner authorization,
+resource limits, deterministic fan-in, and observable node state.
 
 ## Evolution
 
@@ -83,6 +87,14 @@ explicitly opt a function into the Durable Activity execution path.
   to start Dynamic Workflows through the existing runner.
 - Document the workflow authoring surface in `docs/workflows.md`,
   `docs/front-matter-spec.md`, and `docs/architecture.md`.
+- Add constrained conditional execution without embedding a general-purpose
+  expression language in workflow plans.
+- Add bounded runtime fan-out over JSON arrays and deterministic fan-in over the
+  expanded results.
+- Apply the existing workflow owner policy and runtime ceilings to every
+  materialized task instance.
+- Expose skipped, expanded, running, and aggregated states through the shared
+  workflow status contract.
 
 **Non-goals**
 
@@ -94,6 +106,12 @@ explicitly opt a function into the Durable Activity execution path.
   or cross-app workflow coordination. Stateless leaf Sub Agent tasks are in v1.
 - Changing normal MAF tool execution semantics.
 - Automatically promoting every compatible plain function into a workflow tool.
+- General-purpose expressions, arbitrary code evaluation, loops other than bounded
+  array iteration, or a visual workflow designer.
+- Retry, timeout, backoff, or continue-on-error policy; those are tracked by
+  planning issue #1278.
+- Configurable resource ceilings and large-result offload; those are tracked by
+  planning issue #1279.
 
 ## 4. Proposed design
 
@@ -523,6 +541,403 @@ automation starts both with the same session ID against Azure Storage and DTS,
 proves each reaches a terminal state using only its own capabilities, and checks
 that cross-agent status access returns 404.
 
+### Data-driven control flow (Issue #1276; in review)
+
+The current workflow contract is an arbitrary but static DAG: every task id and
+dependency edge exists when `start_workflow` validates the plan. Static roots can
+already fan out and a later task can fan in through `depends_on`, but the model
+must enumerate every item before submission. That prevents a workflow from
+adapting to a bounded collection returned by a tool or Sub Agent and forces
+irrelevant branches to run even when an upstream result makes them unnecessary.
+
+This extension keeps the LLM-authored DAG as the control plane and adds two
+optional fields to each existing task type:
+
+- `when`: a constrained predicate that decides whether the logical task or
+  materialized task instance runs.
+- `for_each`: a full-value reference to an upstream JSON array. The runtime
+  materializes one instance of the task per array element.
+
+No frontmatter field is added. Existing plans that omit both fields retain their
+current validation, scheduling, result, and status behavior. The optional fields
+are omitted with exclude-unset/exclude-none serialization when absent so static
+plan model dumps and Durable wire payloads do not gain `null` fields.
+
+#### Before and after
+
+The diagram contrasts the static fan-out/fan-in already supported before this
+extension with the data-driven flow proposed here. Blue nodes are existing
+capabilities; green and amber nodes are new in Issue #1276.
+
+```mermaid
+flowchart TB
+    subgraph BEFORE["Before Issue #1276 — static DAG (already supported)"]
+        direction LR
+        B0["LLM authors every task<br/>and every dependency"]:::existing
+        B1["analyze_pr_a"]:::existing
+        B2["analyze_pr_b"]:::existing
+        B3["analyze_pr_c"]:::existing
+        B4["summarize<br/>fixed fan-in"]:::existing
+
+        B0 --> B1
+        B0 --> B2
+        B0 --> B3
+        B1 --> B4
+        B2 --> B4
+        B3 --> B4
+    end
+
+    subgraph AFTER["With Issue #1276 — data-driven DAG"]
+        direction LR
+        A0["LLM authors logical tasks only<br/>discover → analyze → summarize"]:::existing
+        A1["discover result<br/>[PR A, PR B, PR C]"]:::existing
+        A2["Runtime resolves for_each<br/>checks owner policy + node budget"]:::new
+        A3["analyze[0]<br/>when = true → run"]:::new
+        A4["analyze[1]<br/>when = false → skipped"]:::skipped
+        A5["analyze[2]<br/>when = true → run"]:::new
+        A6["analyze logical result<br/>ordered [0, 1, 2] aggregate"]:::new
+        A7["summarize<br/>consumes ${analyze.result}"]:::existing
+
+        A0 --> A1 --> A2
+        A2 --> A3
+        A2 --> A4
+        A2 --> A5
+        A3 --> A6
+        A4 --> A6
+        A5 --> A6
+        A6 --> A7
+    end
+
+    classDef existing fill:#dbeafe,stroke:#2563eb,color:#172554
+    classDef new fill:#dcfce7,stroke:#16a34a,color:#052e16
+    classDef skipped fill:#fef3c7,stroke:#d97706,color:#451a03
+```
+
+| Before this extension | Added by Issue #1276 |
+| --- | --- |
+| The LLM enumerates every concrete task id before submission. | The LLM authors one logical `for_each` task; the runtime creates bounded `[index]` instances. |
+| Parallel roots and fixed `depends_on` fan-in are supported. | Fan-out size comes from an upstream JSON array at runtime. |
+| Every ready task runs. | Constrained `when` predicates can skip a logical task or individual instance. |
+| Downstream templates reference separately authored task results. | The logical task exposes one source-ordered aggregate, including explicit skipped positions. |
+
+#### Pipeline mapping
+
+| Pipeline stage | Module(s) | Change |
+| --- | --- | --- |
+| discover | No change | Dynamic control flow does not discover new application files or capabilities. The data-driven authoring skill is a runtime-owned packaged asset, not an app-discovered skill. |
+| translate | `workflows/schema.py`, `workflows/tools.py` | Extend the agent-facing and runtime plan schemas with typed `when` and `for_each` fields. Validate syntax, upstream references, static tool/Sub Agent targets, and logical DAG structure before scheduling. |
+| register | `app.py`, `registration/capabilities.py`, `workflows/integration.py`, `runner.py`, `pyproject.toml` | Give direct workflow-enabled agents the packaged `data-driven-workflows` skill independently of project-skill filtering, reduce the runtime-owned addendum to a short on-demand load instruction, and retain local field guidance in the `start_workflow` tool schema. Build a direct-role capability copy after catalog construction so delegated roles keep the original project-only paths. Durable blueprint registration and owner policy construction remain unchanged. |
+| execute | `workflows/engine.py`, `workflows/tools.py`, `public/index.html` | Decode the validated Durable JSON payload into typed task/state boundaries, then deterministically resolve collections and predicates, materialize bounded instances, schedule them under the existing parallelism cap, aggregate results in source order, publish structured progress, and normalize controlled failures into stable envelopes. |
+
+#### Progressive authoring guidance and typed execution
+
+Detailed data-driven authoring guidance uses MAF skill progressive disclosure
+instead of occupying every workflow-enabled turn's system instructions. The
+runtime packages a `data-driven-workflows` `SKILL.md`. Its name and short
+description are visible to direct workflow-enabled agents; the body is loaded
+only when the model decides a plan needs runtime conditions or collection fan-out.
+The narrow skill description is the selection pointer; the shared addendum does
+not mention the skill because E2E evaluation showed that even a qualified
+addendum pointer encouraged speculative loads for fixed DAGs. Static workflows
+therefore do not pay the detailed control-flow context cost.
+
+This runtime-owned skill is part of `workflows.enabled`, not the application's
+discovered `skills/` inventory. It remains available when project skills are
+disabled or filtered and is not advertised in discovery summaries. After the
+two-pass catalog has retained each agent's project-only `AgentCapabilities`,
+registration creates a shallow direct-role capability copy with the built-in
+path appended. Trigger and built-in endpoint handlers receive that copy; catalog
+entries and delegated-role construction retain the original capabilities, so
+the same agent does not inherit the skill when it runs as a leaf Sub Agent
+without workflow management tools.
+
+`data-driven-workflows` is a runtime-reserved skill name. Application
+composition fails with a clear error if project discovery returns that name
+rather than relying on MAF's order-dependent skill de-duplication. Public docs
+remain the human contract; the packaged skill is the model-readable contract,
+and tests keep their core grammar aligned.
+
+The asset lives at
+`src/azure_functions_agents/workflows/skills/data-driven-workflows/SKILL.md`.
+`workflows/integration.py` resolves it relative to its own `__file__`, and
+`pyproject.toml` includes `workflows/skills/**` as package data. A wheel test
+must build and inspect or install the non-editable artifact because editable
+installs do not prove package-data inclusion.
+
+The Durable boundary still persists JSON, but scheduler internals do not operate
+on open-ended `dict[str, Any]` values. TypedDict and Literal contracts describe
+the persisted workflow payload, task variants, logical/instance states, and
+materialized instances. Newly added dynamic keys are `NotRequired`; the Durable
+payload boundary reads them with compatibility defaults once so in-flight
+static instances created before this evolution replay unchanged. The
+orchestrator trusts the already submission-validated persisted payload instead
+of reconstructing Pydantic models during replay. Untrusted pre-Pydantic
+validation input remains `Mapping[str, object]` and is narrowed explicitly.
+
+The dynamic orchestrator retains its Durable generator and every `yield` in one
+top-level function. Deterministic synchronous helpers own materialization,
+iteration binding, runnable selection, result application, and cancellation
+restoration through one typed state object. This limits nesting without moving
+Durable side effects or replay-sensitive control flow behind opaque abstractions.
+
+#### Constrained `when` contract
+
+`when` is an object rather than a string expression:
+
+```json
+{
+  "id": "notify",
+  "type": "tool",
+  "tool": "send_notification",
+  "args": {"incident": "${classify.result.incident}"},
+  "depends_on": ["classify"],
+  "when": {
+    "ref": "${classify.result.should_notify}",
+    "operator": "equals",
+    "value": true
+  }
+}
+```
+
+The contract is intentionally small:
+
+- `ref` must be one full reference to an upstream result or, inside `for_each`,
+  the current `${item}` / `${item.path}` / `${index}` local.
+- `operator` is exactly `equals` or `not_equals`.
+- `value` must be a JSON scalar (`null`, boolean, number, or string).
+- Comparison is type-sensitive JSON scalar equality. There is no coercion,
+  truthiness, ordering, regex, boolean composition, function call, or access to
+  environment/runtime state.
+- A missing path, malformed reference, non-scalar resolved value, or unsupported
+  operator is an error; it never silently evaluates to false.
+
+For a normal task, the predicate is evaluated once after all dependencies
+complete. For a `for_each` task, the collection is resolved first and the
+predicate is evaluated independently for each bound item. Evaluation order is:
+resolve dependencies, resolve `for_each` when present, bind `${item}` /
+`${index}`, evaluate `when`, and only for a true predicate resolve executable
+`args` or Sub Agent `task` templates. A false predicate therefore does not
+resolve unused executable value fields; it marks the corresponding logical task
+or instance `skipped`, schedules no Activity/timer, and produces `null` for that
+result position. A skipped task still satisfies downstream `depends_on` edges.
+
+Skip does not propagate automatically. A descendant that should be part of the
+same conditional branch must declare its own `when`; this keeps branch behavior
+visible in the authored plan and avoids an implicit dependency-reachability
+language. A full `${skipped.result}` reference resolves to `null`. Traversing
+below it, such as `${skipped.result.field}`, produces the controlled
+`workflow_reference_unresolved` failure because `null` has no traversable path.
+
+#### Bounded `for_each` contract
+
+`for_each` is available on `tool` and `sub_agent` tasks and must be one full
+upstream-result reference that resolves to a JSON array:
+
+```json
+{
+  "id": "analyze",
+  "type": "sub_agent",
+  "agent": "pr_status_analyst",
+  "task": "Analyze pull request ${item.url} at input index ${index}.",
+  "depends_on": ["discover"],
+  "for_each": "${discover.result.pull_requests}"
+}
+```
+
+The task's target (`tool`, `agent`, or `wait`) remains static and is validated
+against the owner's immutable policy before the workflow starts. Only value
+fields (`args`, a Sub Agent's `task`, and `when.ref`) may use the fixed iteration
+locals:
+
+- `${item}` returns the current element with its native JSON type.
+- `${item.path.to.field}` traverses the current element using the same
+  deterministic dictionary/list path rules as upstream result templates.
+- `${index}` returns the zero-based integer index.
+
+`item` and `index` are reserved and rejected as authored task ids in every
+plan. This keeps the iteration-local namespace unambiguous without contextual
+precedence rules, including for references such as `${item.result}`.
+
+Aliases, nested `for_each`, cross-instance references, item-dependent
+`depends_on`, and templated tool or Sub Agent names are not supported. An array
+element may be any JSON value, although a referenced item path must be valid for
+that element. `wait` tasks may use `when` but cannot use `for_each`: repeated
+identical timers add no data-driven behavior because wait deadlines cannot
+reference iteration locals.
+
+The template grammar, validation walker, and runtime resolver are extended to
+recognize `${item}`, `${item.path}`, and `${index}`. Those forms are rejected
+outside a `for_each` task, and the existing unmatched-token defense continues to
+reject every other `${...}` shape.
+
+Materialized instance ids are runtime-owned and use
+`<logical-task-id>[<zero-based-index>]`, for example `analyze[0]`. They are
+visible in status and diagnostics but cannot appear in authored `depends_on` or
+template references. Authored task ids continue to allow letters, numbers,
+underscore, and hyphen only; `[` and `]` are rejected, reserving the rendered
+instance-id namespace for the runtime. Materialization and scheduling always use
+the numeric `(logical_task_id, index)` tuple as the ordering key, with logical
+task id as the outer key when multiple tasks become ready together. The scheduler
+must not sort the rendered instance-id strings because `analyze[10]` sorts before
+`analyze[2]` lexicographically and would violate source-index wave selection even
+though that string order is itself replay-deterministic. These rules make the
+same persisted inputs and upstream results produce the same instance ids and
+Durable scheduling history on replay.
+
+An empty array is valid: no instances run, the logical node immediately becomes
+`aggregated`, and its result is `[]`.
+
+#### Deterministic fan-in
+
+A `for_each` logical node completes only after all of its materialized instances
+have completed or been skipped. Its result is an array aligned with the source
+collection:
+
+```json
+[
+  {"index": 0, "status": "completed", "result": {"summary": "ready"}},
+  {"index": 1, "status": "skipped", "result": null}
+]
+```
+
+The array is always ordered by source index, never by Activity completion order.
+A downstream task depends on the logical id (`"depends_on": ["analyze"]`) and
+can consume the complete collection with `${analyze.result}` or traverse a known
+position with the existing dotted/list-index syntax. It cannot depend on or
+reference an individual runtime-owned instance id.
+
+This is aggregation of already-completed instance results, not a new reducer
+language. Domain-specific reduction remains an ordinary workflow tool or
+authorized Sub Agent task.
+
+#### Limits and authorization
+
+The existing static plan cap still limits authored logical tasks. In addition,
+the runtime maintains a materialized-node budget:
+
+- each non-iterated task consumes one node;
+- each `for_each` array element consumes one node, including an element later
+  skipped by `when`;
+- an empty expansion consumes no materialized nodes;
+- before scheduling any instance from an expansion, the engine rejects the
+  whole expansion if it would make the workflow exceed `MAX_NODES`;
+- individual ready instances are scheduled under the existing
+  `MAX_PARALLELISM` cap.
+
+Counting skipped instances prevents a large collection from bypassing the node
+limit through a predicate. Runtime-configurable ceilings remain out of scope for
+this extension and belong to planning issue #1279.
+
+Every materialized instance inherits the already-validated task type and static
+target. Materialization re-applies the same immutable owner policy before
+dispatch as defense in depth; collection data can change arguments or Sub Agent
+instructions but cannot select a different tool or specialist. Dynamic control
+flow therefore does not broaden the workflow's capability grant.
+
+#### Stable failures
+
+Submission and runtime-controlled failures use the same flat error fields.
+`start_workflow` preserves the current top-level `"error": "<message>"` field
+for compatibility and adds `error_code` plus bounded context such as `node_id`
+and `path`. Runtime-controlled failures add `failed: true` and partial `results`
+to the same shape; the shared status adapter exposes that terminal output as
+`runtime_status: "Failed"`:
+
+```json
+{
+  "failed": true,
+  "error": "Task 'analyze' for_each did not resolve to an array.",
+  "error_code": "workflow_iteration_not_array",
+  "node_id": "analyze",
+  "path": "${discover.result.pull_requests}",
+  "results": {"discover": {"pull_requests": "omitted from this example"}}
+}
+```
+
+The failure phase and status behavior are fixed:
+
+| Code | Submission validation | Runtime resolution | Status behavior |
+| --- | --- | --- | --- |
+| `workflow_task_id_reserved` | Authored task id is `item` or `index` | N/A; rejected before scheduling | Submission returns the flat error directly |
+| `workflow_condition_invalid` | Malformed predicate, unsupported operator, invalid literal/reference shape | Resolved predicate value is not a JSON scalar | Submission returns the flat error directly; runtime output maps to `Failed` |
+| `workflow_reference_unresolved` | Unknown/non-upstream task, iteration local outside `for_each`, malformed reference | Missing dict key, invalid/out-of-range list index, or traversal through a scalar/`null` | Submission returns the flat error directly; runtime output maps to `Failed` |
+| `workflow_iteration_not_array` | N/A; result type is not knowable yet | `for_each` resolves to a non-array JSON value | Runtime output maps to `Failed` |
+| `workflow_node_limit_exceeded` | Authored logical task count exceeds the static limit | A resolved expansion would exceed the materialized-node budget | Submission returns the flat error directly; runtime output maps to `Failed` |
+
+Submission failures occur before a Durable instance is created and therefore
+have no `runtime_status`. Runtime failures are observable through
+`get_workflow_status`, `list_workflows`, and the HTTP status endpoint as a normal
+status envelope whose `runtime_status` is `Failed` and whose `output` is the flat
+failure object above. Messages may improve over time; callers key on
+`error_code`. `results` contains every logical result committed before the
+failure. A per-instance failure uses the runtime-owned instance id in `node_id`
+(`analyze[3]`), while collection materialization and aggregation failures use the
+logical id (`analyze`).
+Provider, model, and tool failures remain governed by the existing sanitized
+failure behavior and the separate reliable-execution work in issue #1278.
+
+Runtime occurrences of the four controlled failures above are returned by the
+orchestrator rather than raised. `status_envelope()` and `_is_active_status()`
+map `output.failed is True` to `runtime_status: "Failed"`, mirroring the existing
+cooperative-cancel mapping. Existing raise-based template-resolution paths are
+migrated to this single returned envelope so an unresolved runtime reference has
+one stable shape whether it occurs in normal args, a Sub Agent task, `when`, or
+`for_each`. Unexpected engine invariants and Activity/provider failures continue
+to raise and use native Durable failure behavior. Status consumers must check
+`output.failed is True` before interpreting `output` as the controlled flat
+schema; other `Failed` instances retain the native/opaque Durable failure output.
+
+#### Structured status
+
+The status envelope keeps its existing top-level fields, but `custom_status`
+becomes a versioned JSON object for dynamically controlled workflows. The legacy
+free-form string is status schema version 1; structured snapshots use version 2:
+
+```json
+{
+  "schema_version": 2,
+  "counts": {
+    "logical_total": 3,
+    "materialized_total": 4,
+    "completed": 2,
+    "skipped": 1,
+    "running": 1
+  },
+  "nodes": {
+    "discover": {"state": "completed"},
+    "analyze": {
+      "state": "running",
+      "expanded_count": 3,
+      "instances": {
+        "analyze[0]": {"state": "completed"},
+        "analyze[1]": {"state": "skipped"},
+        "analyze[2]": {"state": "running"}
+      }
+    }
+  }
+}
+```
+
+Logical node states are `pending`, `running`, `skipped`, `expanded`,
+`aggregated`, `completed`, or `failed`; instance states omit `expanded` and
+`aggregated`. A `for_each` node is `expanded` after materialization, `running`
+while any runnable instance is in flight, and `aggregated` after its ordered
+result array is committed. The shared status tools and HTTP endpoint pass this
+object through unchanged, and the built-in UI renders the states rather than
+parsing progress text. Static v1 workflows may continue returning their current
+string `custom_status`; clients must accept either shape during the experimental
+compatibility window.
+
+#### Sample
+
+The Dynamic Workflow sample for this extension must demonstrate:
+
+1. a discovery tool returning a bounded JSON array;
+2. one `for_each` tool or Sub Agent node whose predicate skips at least one item;
+3. a downstream task consuming the ordered aggregate via the logical node id;
+4. status output showing expanded, running, skipped, and aggregated states; and
+5. deterministic completion on both Azure Storage and DTS Durable backends.
+
 ## 5. Decisions log
 
 | # | Decision | Options considered | Choice | Decided by | Date |
@@ -568,6 +983,30 @@ that cross-agent status access returns 404.
 | 39 | Activity-wave failure propagation | Rely on Durable wrapper behavior / explicitly rethrow the failed wave result | Explicitly rethrow failed `task_all` results so policy denials retain their actionable error instead of degrading to a secondary `TypeError` | Agent | 2026-08-11 |
 | 40 | Internal workflow-agent terminology | `owner_slug` / `agent_slug` / `workflow_agent_slug` | Use `workflow_agent_slug` throughout workflow plumbing and persisted payloads: it identifies the top-level agent that starts, authorizes, and namespaces the workflow without colliding conceptually with a delegated Sub Agent | Human | 2026-08-12 |
 | 41 | Final-agent lifecycle public surface | Keep `AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE` / remove it and track the lifecycle gap / always register Durable | Remove the environment variable before release and track the edge case in #161; publishing an operational switch would create a customer compatibility commitment before runtime versus Durable ownership is resolved. This supersedes Decision #36. | Human + Laveesh Rohra | 2026-08-13 |
+| 42 | Record dynamic control flow | Create a separate FRD / evolve FRD 0004 | Evolve FRD 0004 because conditions and iteration extend the existing workflow plan and engine contract | Human | 2026-08-13 |
+| 43 | Condition surface | General expression string / JSON predicate object / boolean-only reference | Use a constrained JSON predicate with scalar `equals` / `not_equals`; reject missing paths and type mismatches | Agent | 2026-08-13 |
+| 44 | Iteration surface | Embedded loop expression / `for_each` full array reference / generated child plan | Use one `for_each` upstream-array reference with fixed `${item}` and `${index}` locals | Agent | 2026-08-13 |
+| 45 | Dynamic instance identity | Value hash / random id / source index | Derive runtime-only `<logical-id>[<index>]` ids from source order | Agent | 2026-08-13 |
+| 46 | Fan-in result | Completion-order list / keyed object / source-aligned envelopes | Aggregate source-ordered `{index, status, result}` envelopes under the logical node id | Agent | 2026-08-13 |
+| 47 | Skipped dependency behavior | Auto-propagate / block descendants / explicit descendant conditions | Do not auto-propagate; satisfy dependencies with `null`, require each conditional descendant to declare `when`, and fail controlled dotted traversal below `null` | Agent | 2026-08-13 |
+| 48 | Dynamic resource accounting | Count only executed Activities / count every materialized item / separate unlimited expansion | Count every materialized item, including skipped items, against `MAX_NODES`; retain `MAX_PARALLELISM` | Agent | 2026-08-13 |
+| 49 | Dynamic status contract | Continue free-form strings / event log / versioned structured snapshot | Add a versioned `custom_status` object while accepting legacy strings for static plans | Agent | 2026-08-13 |
+| 50 | Controlled error compatibility | Replace the error shape / messages only / stable code alongside existing shape | Preserve the existing error message field and add stable codes plus bounded context | Agent | 2026-08-13 |
+| 51 | Iterated wait tasks | Permit identical timers / template deadlines / reject iteration | Reject `for_each` on `wait`; keep `when` available for conditional waits | Agent | 2026-08-13 |
+| 52 | Controlled runtime failure provenance | Raise native Durable failure / return envelope and status-map / Activity wrapper | Return one stable envelope and map `output.failed` to `Failed`; reserve native raises for unexpected and Activity failures | Agent | 2026-08-13 |
+| 53 | Dynamic instance namespace | Permit all authored ids / escape collisions / reserve bracket suffixes | Restrict authored ids to letters, numbers, underscore, and hyphen; reserve `[index]` suffixes for runtime instances | Agent | 2026-08-13 |
+| 54 | Dynamic control-flow design approval | Revise individual Decisions 43-53 / approve the proposed set | Approve Decisions 43-53 as proposed and advance to implementation | Human (TsuyoshiUshio) | 2026-08-14 |
+| 55 | Iteration-local task ids | Permit shadowing with local precedence / reject only ambiguous references / reserve iteration-local names | Reserve `item` and `index` as task ids for every plan so `${item}` and `${index}` always denote `for_each` iteration locals | Human (TsuyoshiUshio) | 2026-08-19 |
+| 56 | Data-driven authoring context | Keep the full shared addendum / point only to public docs / package an on-demand MAF skill | Package `data-driven-workflows`; keep only a short load instruction in the shared addendum so detailed grammar enters context only for data-driven plans | Human (TsuyoshiUshio) | 2026-08-19 |
+| 57 | Built-in skill scope | Treat it as a filterable project skill / make it a workflow system capability / expose it to all agents | Give it only to direct workflow-enabled agents as a runtime system capability, independent of `skills: false`; do not expose it to leaf Sub Agent execution or application skill discovery | Human (TsuyoshiUshio) | 2026-08-19 |
+| 58 | Durable scheduler typing | Continue `dict[str, Any]` / reconstruct Pydantic models during replay / typed JSON wire contracts | Use TypedDict/Literal contracts and one typed mutable scheduler state while retaining JSON persistence and avoiding Pydantic reconstruction inside the orchestrator | Human (TsuyoshiUshio) | 2026-08-19 |
+| 59 | Dynamic scheduler structure | Keep one deeply nested function / class-based orchestrator / shallow deterministic phase helpers | Keep the generator/yield boundary in `_run_dynamic_workflow` and extract synchronous typed helpers for materialization, selection, result application, and cancellation restoration | Human (TsuyoshiUshio) | 2026-08-19 |
+| 60 | Review-follow-up design approval | Defer to a later PR / implement individual nits / approve Decisions 56-59 together | Approve the progressive-disclosure and typed phase-refactor design for this PR, subject to an independent architecture review before implementation | Human (TsuyoshiUshio) | 2026-08-19 |
+| 61 | Direct versus delegated skill plumbing | Add the built-in path to shared catalog capabilities / add a second persistent capability field / create a direct-role copy after catalog construction | Keep catalog capabilities project-only and pass a shallow copy with the built-in path only to trigger and built-in endpoint registration | Agent, architecture review | 2026-08-19 |
+| 62 | Built-in skill name collision | Let MAF keep the first duplicate / namespace without reservation / reserve and fail composition | Reserve `data-driven-workflows` and fail application composition when a project skill uses the same name | Agent, architecture review | 2026-08-19 |
+| 63 | Built-in skill packaging | Generate content in code / external public file / packaged workflow asset | Store `SKILL.md` under `workflows/skills/data-driven-workflows`, resolve relative to `integration.py`, add `workflows/skills/**` package data, and verify a built wheel | Agent, architecture review | 2026-08-19 |
+| 64 | Legacy Durable payload decoding | Require all new keys / revalidate via Pydantic / optional typed keys with one compatibility boundary | Mark dynamic keys `NotRequired`, apply defaults once at the persisted JSON boundary, and trust the previously validated payload internally | Agent, architecture review | 2026-08-19 |
+| 65 | Progressive-disclosure selection pointer | Keep a qualified shared-addendum pointer / rely on public docs / use only MAF skill metadata | Keep the narrow load condition in the Skill description and remove the shared-addendum pointer after E2E showed that mentioning the Skill there caused fixed DAGs to load it speculatively | Agent, E2E evidence | 2026-08-19 |
 
 ## 6. Test plan
 
@@ -634,6 +1073,73 @@ that cross-agent status access returns 404.
     their Durable instances;
   - prove independent agents and same-session isolation against Azure Storage
     and DTS.
+- [ ] Evolution #1276: schema and validation
+  - accept optional `when` on every task type and `for_each` on tool/Sub Agent
+    tasks;
+  - reject unsupported operators, malformed/local references outside iteration,
+    non-upstream references, templated targets, nested iteration, and iterated
+    waits;
+  - reject authored task ids outside letters, numbers, underscore, and hyphen so
+    they cannot collide with runtime `[index]` instance ids;
+  - reject `item` and `index` as authored task ids so iteration-local references
+    cannot be shadowed;
+  - preserve unchanged model dumps and wire payloads for static v1 plans.
+- [ ] Evolution #1276: progressive authoring guidance
+  - workflow-enabled direct agents always receive the packaged
+    `data-driven-workflows` skill, including when project skills are disabled;
+  - workflow-disabled agents and leaf Sub Agent execution do not receive it;
+  - the Skill description selects `when` / `for_each` authoring without a shared
+    addendum pointer, and fixed-DAG E2E does not load the Skill;
+  - packaged-wheel tests prove the built-in `SKILL.md` is included and readable;
+  - project discovery rejects the reserved `data-driven-workflows` name before
+    MAF skill-provider construction;
+  - skill and public-doc contract tests cover iteration locals, reserved ids,
+    skip/null behavior, strict predicates, and ordered aggregation.
+- [ ] Evolution #1276: typed scheduler structure
+  - mypy checks task variants, payload fields, state literals, and instance fields
+    without scheduler-local `dict[str, Any]`;
+  - malformed pre-validation input is narrowed from `Mapping[str, object]`;
+  - helper extraction preserves Durable replay ordering, yield boundaries,
+    controlled failure envelopes, cancellation restoration, and static scheduling.
+- [ ] Evolution #1276: deterministic execution
+  - replay produces identical instance ids, ordering, scheduling waves, skip
+    decisions, and aggregate results;
+  - numeric scheduling order remains source-aligned across index 9/10 and later
+    parallelism waves;
+  - empty, singleton, duplicate-value, mixed-type, and maximum-size arrays behave
+    deterministically;
+  - skip does not propagate, full skipped-result references resolve to `null`,
+    and dotted traversal below a skipped result fails with a stable code;
+  - `when` is evaluated before executable args/task templates, so invalid unused
+    fields on a skipped instance are not resolved;
+  - collection/type/path failures produce one returned controlled-failure
+    envelope and status-map to `Failed`.
+- [ ] Evolution #1276: stable failure phases
+  - submission validation and runtime-controlled failures use the same flat
+    `error` / `error_code` / bounded-context fields;
+  - each stable code is exercised in every applicable phase, and no Durable
+    instance is created for submission failures;
+  - runtime-controlled failures are returned, mapped to `Failed`, and exposed
+    unchanged by tool and HTTP status surfaces;
+  - per-instance failures report the runtime instance id, preserve completed
+    logical results, and remain distinguishable from opaque native Durable
+    failures.
+- [ ] Evolution #1276: limits and authorization
+  - expansion is rejected atomically before dispatch when the materialized node
+    budget would exceed `MAX_NODES`;
+  - skipped instances count against the node budget and runnable instances obey
+    `MAX_PARALLELISM`;
+  - every expanded tool and Sub Agent instance reuses the immutable owner policy
+    and cannot template its target.
+- [ ] Evolution #1276: status and UI
+  - status snapshots expose skipped, expanded, running, aggregated, and failed
+    nodes/instances;
+  - tools, HTTP status routes, and the built-in UI accept both legacy string and
+    versioned object `custom_status` values.
+- [ ] Evolution #1276: sample/E2E
+  - a sample discovers a collection, dynamically fans out, skips one item, and
+    aggregates results;
+  - the scenario completes with deterministic output on Azure Storage and DTS.
 
 ## 7. Docs impact
 
@@ -659,6 +1165,13 @@ that cross-agent status access returns 404.
   `samples/per-agent-workflows/` app.
 - [x] Evolution #151: update `samples/README.md` with the multi-agent runnable
   sample while keeping internal verifier details outside the customer app.
+- [ ] Evolution #1276: update `docs/workflows.md` with `when`, `for_each`,
+  iteration locals, fan-in, limits, stable failures, and status examples.
+- [ ] Evolution #1276: update `docs/architecture.md` for runtime materialization,
+  deterministic scheduling, structured status hand-off, runtime-owned versus
+  project-discovered skills, and direct/delegated capability paths.
+- [ ] Evolution #1276: update the selected workflow sample and its README with a
+  collection-driven fan-out/fan-in scenario.
 
 ## 8. Status & sign-off
 
@@ -695,3 +1208,13 @@ that cross-agent status access returns 404.
 - **Final-agent drain sign-off:** TsuyoshiUshio, 2026-08-12. Approved explicit
   runtime retention so pending work reaches Activity reauthorization instead of
   being stranded after the last workflow-enabled agent is removed.
+- **Dynamic control flow extension:** Drafted for planning issue #1276 on
+  2026-08-13. An independent architecture review identified skip propagation,
+  numeric instance ordering, and controlled-failure provenance as blocking
+  ambiguities; this draft now defines each explicitly and also clarifies static
+  serialization, iteration-local parsing, status schema versioning, and iterated
+  waits. A final independent review found no blocking issues and deemed the
+  extension ready for human review.
+- **Dynamic control flow human sign-off:** TsuyoshiUshio, 2026-08-14. Approved
+  Decisions 43-53 as proposed and authorized implementation and testing. FRD
+  status returned to `Finalized`.

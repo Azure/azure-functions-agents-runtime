@@ -15,7 +15,11 @@ For each incident, think through:
 - how long to wait before looking — some signals only settle after in-flight work drains,
 - what the written deliverable should contain: likely cause, supporting evidence, confidence level, and a recommended next action.
 
-When the work justifies it (multiple evidence sources, a settling delay, or a multi-step correlation), drive it as a workflow. Typical shape:
+When the work justifies it (multiple evidence sources, a settling delay, or a multi-step correlation), drive it as a workflow. Two shapes are useful:
+
+### Static evidence gathering (single service)
+
+When the incident clearly names one service:
 
 1. Fan out `fetch_logs`, `fetch_metrics`, and `fetch_deploys` for the affected service in parallel (no `depends_on` between them so they run concurrently).
 2. If you want to let in-flight work drain before correlating, add a `wait` task with a short `duration` (e.g. `PT30S`) that depends on the three fetches.
@@ -29,3 +33,36 @@ When the work justifies it (multiple evidence sources, a settling delay, or a mu
    ```
 
    Do not pre-extract fields with `${...result.path}` — `summarize_findings` consumes the whole upstream result and unpacks them itself.
+
+### Collection-driven scan (unknown or multiple services)
+
+When you don't know which services are involved, let the workflow discover and fan out over them instead of naming each one:
+
+1. A `discover_services` task takes the `incident` text and returns a bounded `services` array; low-tier services come back with `in_scope: false`.
+2. One logical `inspect_service` task fanned out with `for_each` over that array, skipping out-of-scope items with an item-level `when`. Reference the current element with `${item.*}` and `${index}`:
+
+   ```
+   id: inspect
+   type: tool
+   tool: inspect_service
+   depends_on: [discover]
+   for_each: ${discover.result.services}
+   when: { ref: ${item.in_scope}, operator: equals, value: true }
+   args:
+     service: ${item.name}
+     index: ${index}
+   ```
+
+3. A final `summarize_scan` task depends on the logical `inspect` id and consumes its whole ordered aggregate — a list of `{index, status, result}` envelopes in source order, with `result: null` for skipped positions:
+
+   ```
+   id: summarize
+   type: tool
+   tool: summarize_scan
+   depends_on: [inspect]
+   args:
+     incident: <the incident text>
+     findings: ${inspect.result}
+   ```
+
+   Depend on the logical `for_each` id (`inspect`), never an individual `inspect[0]` instance — those are runtime-owned. Pass the whole `${inspect.result}` aggregate as a single value; `summarize_scan` walks the envelopes itself.

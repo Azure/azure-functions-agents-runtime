@@ -50,6 +50,14 @@ _TERMINAL_RUNTIME_STATUSES = frozenset({
 })
 
 
+class _ConditionSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str
+    operator: Literal["equals", "not_equals"]
+    value: str | int | float | bool | None
+
+
 class _TaskSpecBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -61,6 +69,15 @@ class _TaskSpecBase(BaseModel):
             "arbitrary DAG: tasks with disjoint depends_on chains run in parallel; "
             "multiple roots are allowed. Cycles, unknown task references, and "
             "self-references are rejected at validation time."
+        ),
+    )
+    when: _ConditionSpec | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Optional predicate with ref, operator ('equals' or 'not_equals'), and a "
+            "JSON-scalar value. The ref must be one full upstream-result reference; "
+            "for_each tasks may instead use ${item}, ${item.path}, or ${index}."
         ),
     )
 
@@ -78,6 +95,14 @@ class _ToolTaskSpec(_TaskSpecBase):
     args: dict[str, Any] = Field(
         default_factory=dict,
         description="JSON-serializable arguments passed to the tool.",
+    )
+    for_each: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Optional full upstream-result reference resolving to a JSON array. "
+            "One task instance is created for each array item."
+        ),
     )
 
 
@@ -113,6 +138,14 @@ class _SubAgentTaskSpec(_TaskSpecBase):
         description=(
             "Complete self-contained instruction for the specialist; may reference "
             "upstream results."
+        ),
+    )
+    for_each: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Optional full upstream-result reference resolving to a JSON array. "
+            "One Sub Agent task is created for each array item."
         ),
     )
 
@@ -181,25 +214,40 @@ class CancelWorkflowParams(BaseModel):
     )
 
 
+def _effective_runtime_status(status: Any) -> str:
+    """Return the tool-facing runtime status for a Durable instance.
+
+    Durable has no first-class cooperative-cancel or controlled-failure
+    terminal state: the orchestrator returns a normal ``Completed`` output
+    whose payload signals the outcome. We translate a ``canceled`` output to
+    ``Canceled`` and a controlled ``failed`` output to ``Failed`` so callers
+    can branch on ``runtime_status`` alone. A native Durable ``Failed`` (raised
+    invariant / Activity/provider failure) keeps its opaque output untouched.
+    """
+    runtime_status = _runtime_status_name(status)
+    output = getattr(status, "output", None)
+    if runtime_status == "Completed" and isinstance(output, dict):
+        if output.get("canceled") is True:
+            return "Canceled"
+        if output.get("failed") is True:
+            return "Failed"
+    return runtime_status
+
+
 def status_envelope(status: Any) -> dict[str, Any]:
     """Normalize a Durable instance status into the tool-facing envelope.
 
     Translates a successfully-returned cooperative-cancel output into
-    ``runtime_status="Canceled"`` so callers (LLM tools, UI cards, drain
-    endpoint) can distinguish cooperative cancel from clean success
-    without inspecting the output payload. Hard ``terminate`` is left as
-    Durable's native ``Terminated`` status.
+    ``runtime_status="Canceled"`` and a controlled runtime failure output
+    (``output.failed is True``) into ``runtime_status="Failed"`` so callers
+    (LLM tools, UI cards, drain endpoint) can distinguish them from clean
+    success without inspecting the output payload. Hard ``terminate`` is left
+    as Durable's native ``Terminated`` status.
     """
     if status is None:
         return {"workflow_id": None, "runtime_status": "not_found"}
-    runtime_status = _runtime_status_name(status)
+    runtime_status = _effective_runtime_status(status)
     output = status.output
-    if (
-        runtime_status == "Completed"
-        and isinstance(output, dict)
-        and output.get("canceled") is True
-    ):
-        runtime_status = "Canceled"
     return {
         "workflow_id": status.instance_id,
         "runtime_status": runtime_status,
@@ -217,15 +265,7 @@ def _runtime_status_name(status: Any) -> str:
 
 
 def _is_active_status(status: Any) -> bool:
-    runtime_status = _runtime_status_name(status)
-    output = getattr(status, "output", None)
-    if (
-        runtime_status == "Completed"
-        and isinstance(output, dict)
-        and output.get("canceled") is True
-    ):
-        runtime_status = "Canceled"
-    return runtime_status not in _TERMINAL_RUNTIME_STATUSES
+    return _effective_runtime_status(status) not in _TERMINAL_RUNTIME_STATUSES
 
 
 async def fetch_session_workflows(
@@ -378,7 +418,12 @@ async def start_workflow(
             policy=policy,
         )
     except PlanValidationError as exc:
-        return _error(str(exc))
+        metadata: dict[str, str | None] = {}
+        if exc.error_code is not None:
+            metadata["error_code"] = exc.error_code
+            metadata["node_id"] = exc.node_id
+            metadata["path"] = exc.path
+        return _error(str(exc), **metadata)
 
     workflow_agent = {
         "workflow_agent_slug": session.workflow_agent_slug,
@@ -419,6 +464,10 @@ async def start_workflow(
                 "tasks": plan_to_activity_inputs(plan),
                 "workflow_agent_slug": session.workflow_agent_slug,
                 "workflow_agent": workflow_agent,
+                "policy": {
+                    "allowed_tools": sorted(policy.allowed_tools),
+                    "allowed_subagents": sorted(policy.allowed_subagents),
+                },
             },
         )
     except Exception:

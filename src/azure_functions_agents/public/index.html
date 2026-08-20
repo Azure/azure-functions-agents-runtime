@@ -1259,6 +1259,79 @@
 			return `<ul class="workflow-card-tasks">${rows}</ul>`;
 		}
 
+		// Format a workflow's `custom_status` for the card's status line.
+		// Two shapes are accepted during the experimental compatibility
+		// window (see docs/workflows.md "Status envelope"):
+		//   - schema version 1: a legacy free-form string, returned verbatim.
+		//   - schema version 2: a structured snapshot object rendered as a
+		//     concise counts + per-node state summary.
+		// Returns a plain string (never HTML). The caller is responsible for
+		// escaping it. Never throws: unknown/object shapes degrade to JSON or
+		// an empty string so a future or malformed status can't break polling.
+		function formatWorkflowStatus(customStatus) {
+			// Legacy v1 static plans keep returning a free-form string; pass
+			// it through unchanged so their cards render exactly as before.
+			if (typeof customStatus === "string") return customStatus;
+			if (customStatus === null || typeof customStatus !== "object") return "";
+			try {
+				if (customStatus.schema_version === 2) {
+					return formatDynamicWorkflowStatus(customStatus);
+				}
+				// Unknown object shape (e.g. a future schema_version): degrade
+				// to compact JSON rather than the "[object Object]" you'd get
+				// from String(...).
+				return JSON.stringify(customStatus);
+			} catch (_e) {
+				// A formatter or serialization error must never bubble up into
+				// the poll loop; fall back to empty.
+				return "";
+			}
+		}
+
+		// Render a schema_version=2 structured status object into one concise
+		// line: aggregate counts, then a per-logical-node state list. For
+		// `for_each` nodes it also surfaces the expanded instance progress so
+		// expanded / running / skipped / aggregated states are all visible.
+		function formatDynamicWorkflowStatus(status) {
+			const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+			const counts = (status.counts && typeof status.counts === "object") ? status.counts : {};
+			const completed = num(counts.completed);
+			const materialized = num(counts.materialized_total);
+			const logicalTotal = num(counts.logical_total);
+			const running = num(counts.running);
+			const skipped = num(counts.skipped);
+			// Prefer the materialized denominator (it includes expanded
+			// instances); fall back to the logical count for plans that
+			// never expanded a collection.
+			const denom = materialized || logicalTotal;
+			const parts = [`${completed}/${denom} done`];
+			if (running) parts.push(`${running} running`);
+			if (skipped) parts.push(`${skipped} skipped`);
+			let summary = parts.join(" · ");
+
+			const nodes = (status.nodes && typeof status.nodes === "object") ? status.nodes : null;
+			if (nodes) {
+				const nodeBits = [];
+				for (const [nodeId, node] of Object.entries(nodes)) {
+					if (!node || typeof node !== "object") continue;
+					const state = typeof node.state === "string" ? node.state : "unknown";
+					let bit = `${nodeId}: ${state}`;
+					if (typeof node.expanded_count === "number") {
+						const insts = (node.instances && typeof node.instances === "object")
+							? Object.values(node.instances)
+							: [];
+						const done = insts.filter(
+							(i) => i && typeof i === "object" && i.state === "completed"
+						).length;
+						bit += ` (${done}/${node.expanded_count})`;
+					}
+					nodeBits.push(bit);
+				}
+				if (nodeBits.length) summary += ` — ${nodeBits.join(", ")}`;
+			}
+			return summary;
+		}
+
 		function renderWorkflowCard(entry, envelope) {
 			const status = String(envelope.runtime_status || "Pending");
 			const terminal = TERMINAL_WORKFLOW_STATES.has(status);
@@ -1273,7 +1346,7 @@
 			const statusClass = knownStatuses.has(status) ? status : "Unknown";
 			card.className = `workflow-card terminal-${statusClass}`;
 
-			const custom = String(envelope.custom_status ?? "");
+			const custom = formatWorkflowStatus(envelope.custom_status);
 			const taskResults = envelope.output && typeof envelope.output === "object"
 				? envelope.output.results
 				: null;

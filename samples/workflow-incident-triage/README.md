@@ -17,15 +17,30 @@ feature design.
 This sample exercises the public experimental v1 workflow surface:
 workflow-safe custom tools, LLM-authored DAGs, fan-out/fan-in, result
 templating, durable timers, cooperative cancel, live-progress chat UI, and
-the optional Durable Task Scheduler backend. It deliberately does not
-demonstrate v2 features such as sub-orchestrations or sub-agent tasks.
+the optional Durable Task Scheduler backend. It also demonstrates the
+data-driven control flow from Issue #1276: a discovery tool returns a
+bounded array, a per-service task fans out over it with `for_each`, an
+item-level `when` predicate skips out-of-scope services, and a downstream
+task consumes the ordered `{index, status, result}` aggregate. It
+deliberately does not demonstrate v2 features such as sub-orchestrations or
+sub-agent tasks.
 
 ## Run locally
 
 Follow the [shared local development guide](../README.md#run-locally) for
 Python env setup, `local.settings.json`, Azurite, and `func start`. This sample
-has no extra prerequisites beyond `GITHUB_TOKEN` (used by the placeholder
-agent) and Azurite (used by Durable Functions' default Azure Storage backend).
+defaults to Microsoft Foundry. Set `FOUNDRY_PROJECT_ENDPOINT` and
+`FOUNDRY_MODEL` in `local.settings.json`; `FOUNDRY_MODEL` must be the deployment
+name that exists in that project. Run `az login` so `DefaultAzureCredential`
+can authenticate. Azure OpenAI and OpenAI remain supported through the provider
+settings in the [shared guide](../README.md#set-required-environment-variables).
+Azurite is required by the Functions host and by the default Azure Storage
+Durable backend.
+
+The sample installs the runtime's optional `[monitor]` extra. To export traces
+and metrics to Application Insights, set the standard
+`APPLICATIONINSIGHTS_CONNECTION_STRING` value in `local.settings.json`. Leaving
+it blank is supported and disables the Azure Monitor exporter.
 
 > [!IMPORTANT]
 > Activate the venv in the same shell as `func start`. Core Tools uses the
@@ -107,7 +122,8 @@ cd samples/workflow-incident-triage
 ### 3. Add the DTS app settings to `local.settings.json`
 
 `src/local.settings.dts.json.template` has the two extra values DTS
-needs:
+needs in addition to the same Foundry and optional Application Insights
+settings as the default template:
 
 ```json
 "DURABLE_TASK_SCHEDULER_CONNECTION_STRING": "Endpoint=http://localhost:8080;Authentication=None",
@@ -147,7 +163,7 @@ Restart `func start` after any swap so the host reloads `host.json`.
 
 ## Workflow-safe tools registered by this sample
 
-`src/tools/incident_tools.py` defines four synthetic-but-realistic
+`src/tools/incident_tools.py` defines seven synthetic-but-realistic
 handlers decorated with `@workflow_tool`. `create_function_app()`
 discovers them from the normal `tools/` directory and registers them with
 the app-wide workflow engine; this sample's workflow-enabled agent enables them
@@ -162,11 +178,16 @@ from that module:
 | `fetch_metrics` | `{service, window_minutes?: int = 30}` | `{service, window_minutes, cpu_p99, memory_p99, latency_p99_ms, saturation}` |
 | `fetch_deploys` | `{service, lookback_hours?: int = 24}` | `{service, lookback_hours, deploys: [{id, actor, summary, minutes_ago}]}` |
 | `summarize_findings` | `{logs, metrics, deploys, service?}` (consume whole `${node.result}` values) | `{service, likely_cause, confidence: 'low'\|'medium'\|'high', evidence: [str], recommended_action}` |
+| `discover_services` | `{incident}` | `{incident, count, services: [{name, tier, in_scope}]}` (bounded 3–5, low-tier items `in_scope: false`) |
+| `inspect_service` | `{service, index?: int = 0}` | `{service, index, errors, saturation, healthy, headline}` |
+| `summarize_scan` | `{incident?, findings}` (whole ordered `${node.result}` aggregate of `{index, status, result}` envelopes) | `{incident, scanned, skipped, unhealthy: [str], headline}` |
 
 Outputs are deterministic functions of inputs so the demo narrative is
-reproducible across runs and replays. The summary tool deliberately
-consumes the whole upstream result via `${node.result}` — there is no
+reproducible across runs and replays. The summary tools deliberately
+consume the whole upstream result via `${node.result}` — there is no
 need (and no benefit) to drill into nested paths from the plan.
+`discover_services` always returns at least one out-of-scope service so
+the data-driven `when` demo has an item to skip.
 
 ## Demo prompt
 
@@ -198,6 +219,36 @@ the orchestration unwinds at the next wave boundary, the live card flips
 to `Canceled`, and the auto-notification kicks in so the agent
 acknowledges the cancellation in its own turn (with whatever partial
 results were already gathered).
+
+## Demo prompt (data-driven scan)
+
+To exercise the Issue #1276 control flow, don't name a service — let the
+workflow discover and fan out over them:
+
+> *"Something is degrading across our platform but I'm not sure which
+> services are involved. Discover the affected services, inspect each one
+> that's in scope, and give me a consolidated summary."*
+
+The agent should:
+
+1. Author a three-task workflow: a `discover_services` task, one
+   `inspect_service` task fanned out with `for_each: ${discover.result.services}`
+   and an item-level `when: {ref: ${item.in_scope}, operator: equals, value: true}`
+   (using `${item.name}` / `${index}` for its args), and a final
+   `summarize_scan` task that depends on the logical `inspect` id and consumes
+   its whole ordered aggregate via `${inspect.result}`.
+2. Call `start_workflow` and hand off to the live-progress card. The card's
+   structured status shows the fan-out expanding (e.g. `inspect: expanded (3/4)`)
+   with one instance `skipped` — the out-of-scope low-tier service.
+3. `summarize_scan` receives the ordered `{index, status, result}` envelopes
+   (with `result: null` at the skipped position), reports how many services
+   were scanned vs. skipped, and the workflow reaches `Completed`. The same
+   auto-notification loop closes the summary inline.
+
+If a discovery, inspection, or aggregation step hits a controlled error
+(for example an out-of-range fan-out or an unresolved reference), the engine
+returns a stable failure envelope and the workflow surfaces as `Failed`
+rather than crashing the host — the live card reflects that terminal state.
 
 ## Demo dry-run script
 

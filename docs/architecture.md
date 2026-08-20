@@ -64,7 +64,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/discovery/skills.py` | Walks `skills/<name>/SKILL.md` files, validates frontmatter, and caches the name→directory map for MAF's `SkillsProvider`. | `discover_skills()`, `clear_skills_cache()` |
 | `azure_functions_agents/discovery/tools.py` | Imports `tools/*.py`, finds normal `FunctionTool`/plain-function tools, discovers `@workflow_tool` Activity targets, and caches both inventories. | `discover_project_tools()`, `discover_user_tools()` |
 | `azure_functions_agents/discovery/mcp.py` | Loads `mcp.json`, applies `resolve_env_vars_in_data()`, and translates remote HTTP server definitions into MAF MCP tool wrappers. | `discover_mcp_servers()` |
-| `azure_functions_agents/registration/capabilities.py` | Applies per-agent MCP/skills/tools filters and packages the final runtime inventory; also fails fast when an auto-derived `delegate_<slug>` tool name collides with another tool already on the same agent. | `AgentCapabilities`, `build_capabilities()`, `validate_subagent_tool_names()` |
+| `azure_functions_agents/registration/capabilities.py` | Applies per-agent MCP/skills/tools filters and packages the final runtime inventory; also fails fast when an auto-derived `delegate_<slug>` tool name collides with another tool already on the same agent. A shallow direct-role copy may add runtime-owned skills without mutating the project-only capabilities frozen in the catalog. | `AgentCapabilities`, `build_capabilities()`, `with_runtime_skill_paths()`, `validate_subagent_tool_names()` |
 | `azure_functions_agents/registration/catalog.py` | Freezes every agent's `ResolvedAgent` + `AgentCapabilities` into one immutable, slug-keyed `AgentCatalog`, built once at startup and threaded read-only into request handlers (FRD 0007). | `AgentCatalog`, `CatalogEntry`, `build_catalog()` |
 | `azure_functions_agents/registration/_naming.py` | Fails fast via `allocate_unique_function_name()` / `allocate_unique_builtin_slug()` when two `.agent.md` files sanitize to the same identity slug — a **breaking change** (FRD 0007 §5 Decision #17) replacing the previous silent auto-suffix behavior; re-exports the `_slug.py` helpers for backward compatibility. | `allocate_unique_function_name()`, `allocate_unique_builtin_slug()` |
 | `azure_functions_agents/registration/_handlers.py` | Builds the callable closures that turn incoming trigger data or HTTP bodies into runner prompts, threading the `AgentCatalog` through to the runner and combining tool-error heuristics with explicit delegate-error accounting; delegates non-HTTP binding payloads to the trigger serializer. `make_http_agent_handler()` applies the shared `_auth` Entra guard to the request before any processing when the trigger's `auth` policy is `entra`. | `make_agent_handler()`, `make_http_agent_handler()`, `build_sandbox_tools_for_session()`, `_total_tool_error_count()` |
@@ -76,11 +76,11 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming; builds per-request `delegate_<slug>` tools and fresh stateless workflow leaf agents; attempts one internal token-usage record through the shared runtime logger for each actual MAF invocation attempt. | `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
-| `azure_functions_agents/workflows/integration.py` | Builds the complete immutable handler catalog, immutable slug-keyed workflow-agent policy catalog, per-agent management tools/addenda, validates declared trigger support for workflow-enabled agents, and performs the one app-wide Durable registration. | `build_workflow_handler_catalog()`, `build_workflow_agent_policy_catalog()`, `build_workflow_agent_integration()`, `validate_workflow_agent_trigger()`, `register_workflow_runtime()` |
-| `azure_functions_agents/workflows/engine.py` | Registers one Durable blueprint per app and executes the orchestrator, workflow-tool Activity, and Workflow Sub Agent Activity. Capability-bearing Activities reauthorize against the current workflow-agent policy before complete-catalog dispatch. | `register_workflows()` |
+| `azure_functions_agents/workflows/integration.py` | Builds the complete immutable handler catalog, immutable slug-keyed workflow-agent policy catalog, per-agent management tools/addenda, validates declared trigger support for workflow-enabled agents, and performs the one app-wide Durable registration. It also resolves the packaged `data-driven-workflows` skill used for progressive authoring guidance. | `build_workflow_handler_catalog()`, `build_workflow_agent_policy_catalog()`, `build_workflow_agent_integration()`, `data_driven_workflows_skill_path()`, `validate_workflow_agent_trigger()`, `register_workflow_runtime()` |
+| `azure_functions_agents/workflows/engine.py` | Registers one Durable blueprint per app and executes the orchestrator, workflow-tool Activity, and Workflow Sub Agent Activity. Capability-bearing Activities reauthorize against the current workflow-agent policy before complete-catalog dispatch. Data-driven execution uses typed persisted-task/state contracts and deterministic phase helpers for `when` evaluation, bounded `for_each` materialization, runnable selection, ordered aggregation, result application, cancellation restoration, structured (`schema_version: 2`) status, and controlled-failure normalization. Durable `yield` boundaries remain in the top-level orchestrator generator. | `register_workflows()` |
 | `azure_functions_agents/workflows/context.py` | Tracks invocation context by `(workflow_agent_slug, session_id)` and derives non-revealing 128-bit agent/session prefixes for Durable instance IDs. | `session_instance_prefix()`, `new_workflow_instance_id()`, `workflow_matches_agent_session()` |
 | `azure_functions_agents/workflows/registry.py` | Defines immutable workflow handler entries/catalogs; production app composition passes this complete catalog explicitly rather than using the compatibility singleton allowlist as authorization. | `WorkflowHandlerCatalog`, `build_handler_catalog()` |
-| `azure_functions_agents/workflows/schema.py`, `workflows/tools.py` | Define workflow plans/policies and build agent-scoped management tools. Start-time validation and list/status/cancel/terminate operations use the captured workflow-agent policy and agent/session identity. | `WorkflowPlanPolicy`, `validate_plan()`, `build_workflow_tools()` |
+| `azure_functions_agents/workflows/schema.py`, `workflows/tools.py` | Define workflow plans/policies — including the data-driven `when` predicate and bounded `for_each` fields — and build agent-scoped management tools. Start-time validation and list/status/cancel/terminate operations use the captured workflow-agent policy and agent/session identity. | `WorkflowPlanPolicy`, `WorkflowCondition`, `validate_plan()`, `evaluate_condition()`, `build_workflow_tools()` |
 | `azure_functions_agents/_function_tool.py` | Thin local shim around MAF `FunctionTool` creation so project tools can use `@tool`, plus `@workflow_tool` metadata for Dynamic Workflow Activity targets. | `tool()`, `workflow_tool()` |
 | `azure_functions_agents/_logger.py` | Shared package logger used across discovery, registration, and runtime code. | `logger` |
 | `azure_functions_agents/_observability.py` | Cross-cutting OpenTelemetry bootstrap and conventions: enables MAF `gen_ai` instrumentation and, when the optional `[monitor]` extra is installed, the Azure Monitor exporter, provides the `af.*` span/attribute helpers (fault domain, lifecycle stage), the resolved sensitive-data flag from `ENABLE_SENSITIVE_DATA`, minimal dynamic-session and delegate-call metrics, and third-party log-noise control. | `configure_observability()`, `start_span()`, `current_span()`, `FaultDomain`, `LifecycleStage`, `record_delegate_call()` |
@@ -150,7 +150,7 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
    - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/discovery/tools.py:discover_project_tools()`, `src/azure_functions_agents/discovery/mcp.py:discover_mcp_servers()`, `src/azure_functions_agents/discovery/skills.py:discover_skills()`
    - **Input:** `app_root: Path`
    - **Output:** project tools as normal user tools (`list[FunctionTool]`) plus workflow tools (`list[WorkflowTool]`), MCP servers as `dict[str, MCPTool]`, skills as `dict[str, Path]` (skill name → skill directory)
-   - **Notes:** all three discovery modules cache by resolved app root, so startup pays the disk/import cost once per process. Tools discovery remains read-only policy-wise: it records what `tools/` exposes as normal tools and what callables explicitly opt into workflow Activity execution via `@workflow_tool`, but per-agent filtering happens later. MCP discovery applies the same env-var substitution helper (`resolve_env_vars_in_data()`) to parsed `mcp.json` data that the global-config loader applies to `agents.config.yaml`. MCP discovery is a translation step too: entries are built into ready-to-use MAF MCP tool objects when they carry a `url`; `type` is optional, but if present must be `"http"` or `"streamable-http"`. Other transport shapes (`stdio`, `sse`, etc.) and entries missing `url` are skipped with warnings. Skill discovery validates each `SKILL.md` frontmatter `name` against MAF's regex and fails fast on duplicates.
+   - **Notes:** all three discovery modules cache by resolved app root, so startup pays the disk/import cost once per process. Tools discovery remains read-only policy-wise: it records what `tools/` exposes as normal tools and what callables explicitly opt into workflow Activity execution via `@workflow_tool`, but per-agent filtering happens later. MCP discovery applies the same env-var substitution helper (`resolve_env_vars_in_data()`) to parsed `mcp.json` data that the global-config loader applies to `agents.config.yaml`. MCP discovery is a translation step too: entries are built into ready-to-use MAF MCP tool objects when they carry a `url`; `type` is optional, but if present must be `"http"` or `"streamable-http"`. Other transport shapes (`stdio`, `sse`, etc.) and entries missing `url` are skipped with warnings. Skill discovery validates each project `SKILL.md` frontmatter `name` against MAF's regex and fails fast on duplicates. `data-driven-workflows` is reserved for the runtime-owned workflow authoring skill and is rejected if discovered in the project inventory.
 
 5. **Compose a per-agent runtime view**
    - **Implemented by:** `src/azure_functions_agents/config/merge.py:compose()`
@@ -192,7 +192,7 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
     - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/registration/triggers.py:register_agent()`, `src/azure_functions_agents/registration/endpoints.py:register_builtin_endpoints()`, `src/azure_functions_agents/registration/_handlers.py`
     - **Input:** `FunctionApp`, `ResolvedAgent`, `AgentCapabilities`, and the frozen `AgentCatalog`
     - **Output:** the same `FunctionApp`, now decorated with trigger bindings, HTTP routes, SSE streaming routes, and/or MCP endpoints
-    - **Notes:** agents go through `register_agent()` when they have a trigger and `register_builtin_endpoints()` when endpoints are enabled. Each lookup uses the agent slug's workflow-agent policy. Eligible trigger/chat API/MCP surfaces receive workflow guidance, agent-scoped tools, and a Durable client binding; debug UI alone is not a starter. Workflow-disabled handlers retain their original signatures.
+    - **Notes:** agents go through `register_agent()` when they have a trigger and `register_builtin_endpoints()` when endpoints are enabled. Each lookup uses the agent slug's workflow-agent policy. Eligible trigger/chat API/MCP surfaces receive workflow guidance, agent-scoped tools, and a Durable client binding; debug UI alone is not a starter. For these direct workflow-enabled roles, registration creates a shallow capability copy that adds the packaged `data-driven-workflows` skill even when project `skills` are disabled. The immutable catalog retains project-only skill paths, so ordinary delegated and Workflow Sub Agent leaf roles never inherit workflow-authoring guidance. Workflow-disabled handlers retain their original signatures.
 
 ### Where the registration stage hands off to execution
 
@@ -222,9 +222,18 @@ For each workflow-enabled agent, `workflows/integration.py` uses the cataloged i
 `WorkflowPlanPolicy` to generate model guidance and agent-scoped management
 tools. Built-in chat/MCP handlers receive the chat addendum; declared-trigger
 handlers receive the trigger addendum, Durable client, workflow-agent slug, and policy.
-`start_workflow` validates against that policy. The orchestrator carries
-`workflow_agent_slug`, and each tool/Sub Agent Activity reauthorizes against the currently
-deployed policy before dispatching through the complete app-wide catalogs.
+MAF exposes the packaged `data-driven-workflows` skill's narrow selection
+description normally and loads its detailed grammar only on demand. The shared
+workflow addendum does not mention the skill: keeping the selection pointer in
+skill metadata avoids prompting fixed-DAG turns to load it speculatively.
+`start_workflow` validates the submitted plan against that policy and **persists** the
+owner's allowed tool/Sub Agent sets into the Durable client input, so the orchestrator
+re-validates every materialized `for_each` instance's static target against the identical
+owner boundary as defense in depth — dynamic control flow never broadens the capability
+grant. The orchestrator carries `workflow_agent_slug`, and each tool/Sub Agent Activity
+reauthorizes against the currently deployed policy before dispatching through the complete
+app-wide catalogs. Registration consumes these resolved values and does not re-parse
+workflow metadata.
 
 ### Dynamic Workflow execution lifetimes
 
@@ -235,6 +244,48 @@ Application management identity is `(workflow_agent_slug, session_id)`, encoded 
 Thus equal session IDs on different workflow-enabled agents do not share active limits or
 list/status/cancel/terminate access. HTTP uses the request/generated session;
 non-HTTP triggers generate an invocation session and no application-wide agent index.
+
+### Static vs. data-driven execution
+
+The orchestrator serves two plan shapes from one Durable blueprint. A plan
+with no `when` / `for_each` fields takes the **static** scheduler path
+unchanged: wave-based `depends_on` scheduling and a legacy string
+`custom_status`, exactly as before Issue #1276. A plan using either field
+takes the **dynamic** path, which layers four deterministic stages over the
+same DAG:
+
+- **materialize** — resolve each `for_each` value to a JSON array and create
+  one instance per element as `<logical-id>[<index>]`; reject the whole
+  expansion atomically if it would exceed the materialized-node budget
+  (skipped instances still count).
+- **evaluate** — bind `${item}` / `${item.path}` / `${index}` (whose `item` and
+  `index` names are reserved from authored task ids), evaluate the `when`
+  predicate *before* resolving executable `args` / Sub Agent `task` templates,
+  and mark false predicates `skipped` with a `null` result that still satisfies
+  downstream `depends_on`.
+- **schedule** — dispatch runnable instances under `MAX_PARALLELISM`, ordered
+  by the numeric `(logical-id, index)` tuple (never the rendered string) so
+  replay reproduces identical waves.
+- **aggregate** — once every instance of a logical node is terminal, commit
+  one source-ordered array of `{index, status, result}` envelopes under the
+  logical id for downstream consumption.
+
+Progress is published as a structured `schema_version: 2` `custom_status`
+snapshot (logical node states plus per-instance state). The four controlled
+control-flow failures (`workflow_condition_invalid`,
+`workflow_reference_unresolved`, `workflow_iteration_not_array`,
+`workflow_node_limit_exceeded`) are **returned** as a flat `failed: true`
+envelope rather than raised; `status_envelope()` and `_is_active_status()`
+normalize `output.failed is True` to `runtime_status: "Failed"`, while
+unexpected engine invariants and Activity/provider errors keep Durable's
+native failure behavior.
+
+The persisted Durable input remains JSON, described internally by typed task,
+policy, and payload contracts whose dynamic fields are optional for compatibility
+with static instances created before Issue #1276. The dynamic scheduler gathers
+that input into one typed state object. Pure phase helpers mutate materialization,
+selection, result, and cancellation state; the top-level generator alone owns
+Durable calls and `yield` ordering.
 
 ### Registration paths in practice
 
@@ -431,7 +482,7 @@ This design keeps global config declarative: shared config says what exists, whi
 
 ### Other notable boundaries
 
-- **Skills:** discovered as `SKILL.md` directories and handed to MAF's `SkillsProvider`. The provider exposes `load_skill` / `read_skill_resource` tools to the agent and scopes file access to the skill directory by design — no runtime-wide file tools required.
+- **Skills:** project skills are discovered as `SKILL.md` directories, filtered into cataloged `AgentCapabilities`, and handed to MAF's `SkillsProvider`. The provider exposes `load_skill` / `read_skill_resource` tools to the agent and scopes file access to the skill directory by design — no runtime-wide file tools required. The packaged `data-driven-workflows` skill is the one runtime-owned exception: it is added only to a workflow-enabled agent's direct trigger/endpoint capability copy, independently of project `skills` filtering, and never to catalog-backed delegated roles.
 - **Connectors:** connector actions are exposed to agents through MCP servers in `mcp.json`; connector-triggered agents use `trigger.type: connector_trigger`.
 - **Built-in endpoints:** endpoint registration is a separate module so the trigger-registration path stays focused on Azure Function bindings rather than UI and chat surface concerns.
 - **Multi-agent delegation:** `subagents:` is itself an extension point of sorts — it lets an agent's own front matter opt other, already-registered agents into its tool set without any code changes. See Section 5.

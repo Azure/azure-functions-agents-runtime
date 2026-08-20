@@ -24,11 +24,16 @@ from .config.validation import (
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
 from .discovery.tools import discover_project_tools
-from .registration.capabilities import build_capabilities, validate_subagent_tool_names
+from .registration.capabilities import (
+    build_capabilities,
+    validate_subagent_tool_names,
+    with_runtime_skill_paths,
+)
 from .registration.catalog import AgentCatalog, CatalogEntry, build_catalog
 from .registration.endpoints import register_builtin_endpoints
 from .registration.triggers import register_agent
 from .workflows.integration import (
+    DATA_DRIVEN_WORKFLOWS_SKILL_NAME,
     build_workflow_agent_integration,
     build_workflow_agent_policy_catalog,
     build_workflow_handler_catalog,
@@ -120,6 +125,11 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     workflow_tools = tool_result.workflow_tools
     mcp_tools = mcp_result.servers
     skills = skill_result.skills
+    if DATA_DRIVEN_WORKFLOWS_SKILL_NAME in skills:
+        raise ValueError(
+            f"{DATA_DRIVEN_WORKFLOWS_SKILL_NAME!r} is a reserved runtime skill name; "
+            "rename the project skill."
+        )
     skill_names = list(skills)
     mcp_names = list(mcp_tools)
     skill_name_by_path = {str(path.resolve()): name for name, path in skills.items()}
@@ -218,6 +228,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
     for resolved in resolved_agents:
         capabilities = catalog[resolved.slug].capabilities
+        direct_capabilities = capabilities
 
         workflows_enabled = False
         workflow_system_addendum: str | None = None
@@ -233,11 +244,15 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             trigger_workflow_system_addendum = (
                 workflow_integration.trigger_system_addendum
             )
+            direct_capabilities = with_runtime_skill_paths(
+                capabilities,
+                workflow_integration.runtime_skill_paths,
+            )
 
         capability_names = _serialize_capabilities_for_log(
-            user_tools=capabilities.filtered_user_tools,
-            mcp_tools=capabilities.filtered_mcp_tools,
-            skill_paths=capabilities.enabled_skill_paths,
+            user_tools=direct_capabilities.filtered_user_tools,
+            mcp_tools=direct_capabilities.filtered_mcp_tools,
+            skill_paths=direct_capabilities.enabled_skill_paths,
             skill_name_by_path=skill_name_by_path,
         )
         logger.info(
@@ -254,7 +269,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             register_agent(
                 app,
                 resolved,
-                capabilities,
+                direct_capabilities,
                 function_name=resolved.slug,
                 catalog=catalog,
                 workflows_enabled=workflows_enabled,
@@ -265,7 +280,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             register_builtin_endpoints(
                 app,
                 resolved,
-                capabilities,
+                direct_capabilities,
                 slug=resolved.slug,
                 workflows_enabled=workflows_enabled,
                 workflow_system_addendum=workflow_system_addendum,
