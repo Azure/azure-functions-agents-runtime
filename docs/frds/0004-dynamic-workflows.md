@@ -1003,9 +1003,9 @@ The LLM-authored task schema gains one optional `execution` object:
   schema before a Durable instance is created.
 
 Decision #8 reserved `@workflow_tool(...)` for execution metadata. The decorator
-therefore gains optional `timeout` and `retry` defaults, with the retry value
-validated by the same exported `WorkflowRetryPolicy` model used by plan
-translation:
+therefore gains optional authoritative `timeout` and `retry` declarations, with
+the retry value validated by the same exported `WorkflowRetryPolicy` model used
+by plan translation:
 
 ```python
 from azure_functions_agents import (
@@ -1035,12 +1035,33 @@ node satisfies its outgoing DAG edges is a property of that node in a particular
 plan, not a reusable handler default.
 
 No app-global or frontmatter execution defaults are added. For a `tool` task,
-omitted task fields fall back to its `@workflow_tool` metadata. For a
-`sub_agent` task, omitted timeout continues to use the specialist's resolved
-agent timeout and omitted retry means one attempt. Explicit task fields replace
-the corresponding target default as a whole; a task-level `retry` object does
-not field-merge with decorator metadata. `continue_on_error` always defaults to
-`false`.
+each `@workflow_tool` declaration is authoritative for its corresponding field:
+when the decorator declares `timeout`, the effective timeout is that value
+regardless of a task-level value; when it declares `retry`, the effective retry
+policy is that whole object regardless of a task-level value. A task-level field
+is used only when the decorator omits that field. This lets an LLM-authored DAG
+request retry or timeout behavior for tools that do not declare it without
+overriding the tool author's knowledge of side effects, idempotency, or safe
+execution limits. In particular, `retry=WorkflowRetryPolicy(max_attempts=1)` is
+an explicit tool-author prohibition on DAG-requested automatic retry.
+Tool authors whose handlers are not safe to retry must declare that policy;
+omitting decorator retry metadata deliberately delegates the retry choice to the
+DAG.
+
+Resolution is field-level between `timeout` and `retry`, but retry policies never
+field-merge internally. For `tool` tasks:
+
+| Decorator field | Task field | Effective field |
+| --- | --- | --- |
+| declared | omitted or declared | decorator value |
+| omitted | declared | task value |
+| omitted | omitted | field-specific runtime default |
+
+For a `sub_agent` task, which has no decorator metadata, an explicit task timeout
+is bounded by the specialist's resolved agent timeout and the fixed runtime
+limit; omitted timeout continues to use the specialist's resolved agent timeout,
+subject to the policy-aware clamp below. Omitted retry means one attempt.
+`continue_on_error` always defaults to `false`.
 
 The JSON task surface and Python decorator use the same nested
 `WorkflowRetryPolicy` / `WorkflowRetryBackoff` shape; there is no second flat
@@ -1063,9 +1084,9 @@ changes continue to be enforced independently by Activity-time reauthorization.
 
 | Pipeline stage | Module(s) | Change |
 | --- | --- | --- |
-| discover | `discovery/tools.py`, `_function_tool.py` | Accept sync and async `@workflow_tool` handlers. Capture typed timeout/retry defaults as declaration metadata without applying owner policy or importing Azure concepts. |
+| discover | `discovery/tools.py`, `_function_tool.py` | Accept sync and async `@workflow_tool` handlers. Capture typed authoritative timeout/retry declarations without applying owner policy or importing Azure concepts. |
 | translate | `config/schema.py`, `workflows/schema.py`, `workflows/tools.py` | Keep the existing Sub Agent timeout source, add typed task/decorator execution policy models, validate fixed bounds and incompatible task shapes, resolve precedence, and serialize only the effective policy. No new `workflows:` frontmatter keys are added. |
-| register | `app.py`, `workflows/integration.py`, `workflows/registry.py` | Remove the registry's async-handler rejection, freeze sync/async handler entries with execution defaults in the existing complete catalog, and build unchanged per-agent capability policies. Registration remains the only Azure-aware stage and still registers one Durable blueprint per app. |
+| register | `app.py`, `workflows/integration.py`, `workflows/registry.py` | Remove the registry's async-handler rejection, freeze sync/async handler entries with execution declarations in the existing complete catalog, and build unchanged per-agent capability policies. Registration remains the only Azure-aware stage and still registers one Durable blueprint per app. |
 | execute | `workflows/engine.py`, `workflows/context.py`, `runner.py`, `_observability.py`, `workflows/tools.py`, `public/index.html` | Execute/await handlers under an Activity-owned deadline, classify sanitized outcomes, expose invocation context, schedule deterministic retry timers, apply continued-failure DAG semantics, reauthorize every attempt, and publish versioned status/telemetry. Broaden scheduler selection so `when`, `for_each`, or any non-default effective execution policy enters the structured scheduler; the legacy static scheduler remains only for plans with none of those features. |
 
 `config/loader.py`, `config/merge.py`, and registration handlers require no new
@@ -1089,9 +1110,11 @@ It introduces fixed code-level safety bounds:
 
 Every policy-aware task has a timeout after precedence resolution. An omitted
 tool timeout defaults to `PT10M`; an omitted Sub Agent timeout uses
-`min(resolved_agent_timeout, PT10M)`. An explicit timeout above `PT10M` is
-rejected rather than silently clamped. Policy-free tasks are outside these new
-admission calculations and retain their existing deadline behavior.
+`min(resolved_agent_timeout, PT10M)`. An explicit tool timeout above `PT10M` is
+rejected rather than silently clamped. An explicit Sub Agent task timeout must
+not exceed either its resolved agent timeout or `PT10M`; exceeding either limit
+is rejected. Policy-free tasks are outside these new admission calculations and
+retain their existing deadline behavior.
 
 All policy durations are normalized to integer milliseconds before Durable persistence.
 NaN, infinity, negative values, fractional milliseconds, overflow, an omitted
@@ -1162,7 +1185,8 @@ and not by the handler:
    wrapper can stop waiting at the same deadline.
 3. A Workflow Sub Agent attempt wraps `run_leaf_agent_task()` with the effective
    deadline; its existing resolved agent timeout is the policy-free fallback and
-   is capped at `PT10M` when a policy-aware task does not override it.
+   an upper bound on any policy-aware task timeout, with `PT10M` as an additional
+   fixed upper bound.
 4. A policy-aware task with omitted timeout uses the bounded effective default
    described above; policy-free tasks retain their existing behavior.
 5. The Activity converts its own deadline expiry into the retryable sanitized
@@ -1323,11 +1347,11 @@ otherwise eligible retry once the orchestrator observes it.
 Execution policy applies to both capability-bearing task types:
 
 - Workflow Sub Agents retain their stateless leaf boundary and fixed
-  `{agent, text}` success result. Their resolved agent timeout is the fallback;
-  a task may provide a bounded override. Automatic retry remains opt-in with
-  `max_attempts > 1`. Every attempt is a fresh model invocation, can call tools,
-  can be billed separately, and receives the stable task context for correlation
-  and idempotent leaf tools.
+  `{agent, text}` success result. Their resolved agent timeout is the fallback
+  and an upper bound; a task may request a shorter timeout. Automatic retry
+  remains opt-in with `max_attempts > 1`. Every attempt is a fresh model
+  invocation, can call tools, can be billed separately, and receives the stable
+  task context for correlation and idempotent leaf tools.
 - `@workflow_tool` discovery accepts both `def` and `async def`. The registry
   stores a callable without invoking it. The async Activity runner calls the
   handler once and awaits the result if it is awaitable; sync handlers preserve
@@ -1458,8 +1482,8 @@ replay duplicates.
 | 64 | Legacy Durable payload decoding | Require all new keys / revalidate via Pydantic / optional typed keys with one compatibility boundary | Mark dynamic keys `NotRequired`, apply defaults once at the persisted JSON boundary, and trust the previously validated payload internally | Agent, architecture review | 2026-08-19 |
 | 65 | Progressive-disclosure selection pointer | Keep a qualified shared-addendum pointer / rely on public docs / use only MAF skill metadata | Keep the narrow load condition in the Skill description and remove the shared-addendum pointer after E2E showed that mentioning the Skill there caused fixed DAGs to load it speculatively | Agent, E2E evidence | 2026-08-19 |
 | 66 | Record task execution policy | Create FRD 0008 / evolve FRD 0004 | Keep one Dynamic Workflows FRD and add planning issue #1278 as an independently reviewed evolution section; do not add a new FRD index entry | Human | 2026-08-19 |
-| 67 | Public task policy surface | Flat fields / reusable `execution` object / decorator-only policy | Add an optional typed `execution` object to tool and Sub Agent tasks; use the same nested retry/backoff models for `@workflow_tool(timeout=..., retry=...)` defaults and keep `continue_on_error` task-local | Agent proposal, architecture review | 2026-08-19 |
-| 68 | Policy precedence and replay | Resolve metadata on every attempt / persist effective start-time policy / always use task values | Task fields replace corresponding target defaults, fixed bounds override both, every policy-aware task resolves a bounded timeout, and the effective policy is persisted once so replay never re-reads metadata; policy-free tasks retain existing behavior and deployed policy is still rechecked for authorization | Agent proposal, architecture review | 2026-08-19 |
+| 67 | Public task policy surface | Flat fields / reusable `execution` object / decorator-only policy | Add an optional typed `execution` object to tool and Sub Agent tasks; use the same nested retry/backoff models for `@workflow_tool(timeout=..., retry=...)` declarations and keep `continue_on_error` task-local | Agent proposal, architecture review | 2026-08-19 |
+| 68 | Policy precedence and replay | Task overrides decorator / decorator overrides corresponding task field / decorator as a numeric ceiling | Treat each declared decorator field as authoritative and use the corresponding task field only when decorator metadata omits it; treat retry as a whole object, apply fixed bounds, bound Sub Agent task timeout by its resolved timeout, and persist the effective start-time policy so replay never re-reads metadata | Human (TsuyoshiUshio) | 2026-08-20 |
 | 69 | Task-type applicability | Tool only / tool plus Sub Agent / every task including waits | Apply policy to `tool` and stateless `sub_agent` Activities; reject it on `wait` timers | Agent proposal | 2026-08-19 |
 | 70 | Failure classification | Retry every exception / provider-specific inference / explicit stable taxonomy | Retry runtime timeout/infrastructure failures and explicit `WorkflowRetryableError`; treat unknown execution failures as terminal, and make control-plane/authorization/contract failures non-continuable | Agent proposal | 2026-08-19 |
 | 71 | Timeout ownership | Orchestrator timer / Activity wrapper / Durable host only | The Activity wrapper owns each policy-aware attempt deadline, using a bounded `PT10M` fallback when target/task metadata omits one; policy-free behavior is unchanged, the handler cooperates, and the Durable host remains an independent outer ceiling that may cause redelivery | Agent proposal, architecture review | 2026-08-19 |
@@ -1608,8 +1632,12 @@ replay duplicates.
   - the scenario completes with deterministic output on Azure Storage and DTS.
 - [ ] Evolution #1278: schema, metadata, and precedence
   - validate task `execution`, exported retry/error/context types, decorator
-    defaults, fixed bounds, whole-object retry replacement, and rejection on
-    wait tasks;
+    declarations, fixed bounds, decorator-field precedence, whole-object retry
+    selection, and rejection on wait tasks;
+  - verify a DAG can request timeout or retry when the corresponding decorator
+    field is absent, while a declared decorator field remains authoritative;
+  - verify decorator `retry` with `max_attempts=1` suppresses a task-requested
+    retry policy with more than one attempt;
   - preserve byte-for-byte-equivalent model dumps and Durable inputs when policy
     is omitted;
   - persist the effective policy so replay and deployment metadata changes do not
@@ -1640,8 +1668,8 @@ replay duplicates.
   - authorization, contract, template, condition, iteration, cancellation, and
     termination failures cannot be continued.
 - [ ] Evolution #1278: Workflow Sub Agents
-  - use the resolved specialist timeout as fallback and a bounded task override
-    when present;
+  - use the resolved specialist timeout as fallback and reject a task timeout
+    above either that value or the fixed runtime bound;
   - retry only when explicitly requested, preserve stateless leaf capabilities,
     expose correlation/idempotency context to leaf execution, and keep
     `{agent, text}` success results.
@@ -1762,7 +1790,11 @@ replay duplicates.
   routing, and registry ownership. A focused re-review found only one
   non-blocking wording inconsistency in the Sub Agent timeout fallback; that text
   was corrected. No blocking findings remain.
-  This extension is **In review**; Decisions 67-79 are Agent proposals and
-  require explicit human approval before implementation. The FRD's top-level
-  `Finalized` status continues to apply only to the previously approved Dynamic
-  Workflows design.
+- **Task execution policy precedence decision:** TsuyoshiUshio, 2026-08-20.
+  Approved authoritative per-field `@workflow_tool` declarations with DAG values
+  filling only undeclared fields, whole-object retry selection, and Sub Agent
+  timeout bounded by its resolved timeout. Decision 68 is human-approved.
+  This extension remains **In review**; Decisions 67 and 69-79 remain Agent
+  proposals and require explicit human approval before implementation. The FRD's
+  top-level `Finalized` status continues to apply only to the previously approved
+  Dynamic Workflows design.
