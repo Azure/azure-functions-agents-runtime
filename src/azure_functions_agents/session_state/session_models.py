@@ -164,6 +164,13 @@ _OPERATION_PHASES_BY_KIND: Mapping[str, frozenset[str]] = {
         }
     ),
 }
+_OPERATION_REARM_PHASE_BY_KIND: Mapping[
+    DurableOperationKind, DurableOperationPhase | None
+] = {
+    "provision_submit": "provision_rearm",
+    "submit_run": "submit_rearm",
+    "reclaim_backing": None,
+}
 _OPERATION_PHASE_TRANSITIONS: Mapping[str, Mapping[str, frozenset[str]]] = {
     "provision_submit": {
         "provision_create": frozenset(
@@ -1056,6 +1063,81 @@ class SessionOperationTarget:
         )
 
 
+def _validate_operation_lifecycle(
+    kind: DurableOperationKind,
+    phase: DurableOperationPhase,
+    state: DurableOperationState,
+    finished_at: datetime | None,
+) -> None:
+    if kind not in _OPERATION_KINDS:
+        raise SessionStateContractError("unsupported durable operation kind")
+    if phase not in _OPERATION_PHASES or phase not in _OPERATION_PHASES_BY_KIND[kind]:
+        raise SessionStateContractError("operation phase does not match operation kind")
+    if state not in _OPERATION_STATES:
+        raise SessionStateContractError("unsupported durable operation state")
+    if state == "active":
+        if phase in {"completed", "aborted"} or finished_at is not None:
+            raise SessionStateContractError("active operations cannot be terminal")
+        return
+    if phase != state:
+        raise SessionStateContractError("terminal operation state and phase must agree")
+
+
+def _validate_operation_run_target(
+    kind: DurableOperationKind,
+    target: SessionOperationTarget,
+) -> None:
+    if target.run_id is not None or kind == "reclaim_backing":
+        return
+    if kind == "provision_submit":
+        raise SessionStateContractError("provision operations require an accepted run target")
+    raise SessionStateContractError("submit operations require an accepted run target")
+
+
+def _validate_operation_attempt_count(value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise SessionStateContractError("operation attempt_count must be a non-negative integer")
+
+
+def _normalize_operation_timestamps(
+    *,
+    state: DurableOperationState,
+    created_at: datetime,
+    updated_at: datetime,
+    finished_at: datetime | None,
+    lease_expires_at: datetime | None,
+    next_attempt_at: datetime | None,
+) -> tuple[datetime, datetime, datetime | None, datetime | None, datetime | None]:
+    created_at_n = _utc_datetime(created_at, "created_at")
+    updated_at_n = _utc_datetime(updated_at, "updated_at")
+    if updated_at_n < created_at_n:
+        raise SessionStateContractError("updated_at must not precede created_at")
+    finished_at_n = (
+        None if finished_at is None else _utc_datetime(finished_at, "finished_at")
+    )
+    if state != "active" and finished_at_n is None:
+        raise SessionStateContractError("terminal operations require finished_at")
+    if finished_at_n is not None and finished_at_n < created_at_n:
+        raise SessionStateContractError("finished_at must not precede created_at")
+    lease_expires_at_n = (
+        None
+        if lease_expires_at is None
+        else _utc_datetime(lease_expires_at, "lease_expires_at")
+    )
+    next_attempt_at_n = (
+        None
+        if next_attempt_at is None
+        else _utc_datetime(next_attempt_at, "next_attempt_at")
+    )
+    return (
+        created_at_n,
+        updated_at_n,
+        finished_at_n,
+        lease_expires_at_n,
+        next_attempt_at_n,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class DurableSessionOperation:
     """A same-partition fenced controller operation with a durable resume token."""
@@ -1098,17 +1180,7 @@ class DurableSessionOperation:
         finished_at: datetime | None,
         agent_slug: str = "",
     ) -> DurableSessionOperation:
-        if kind not in _OPERATION_KINDS:
-            raise SessionStateContractError("unsupported durable operation kind")
-        if phase not in _OPERATION_PHASES or phase not in _OPERATION_PHASES_BY_KIND[kind]:
-            raise SessionStateContractError("operation phase does not match operation kind")
-        if state not in _OPERATION_STATES:
-            raise SessionStateContractError("unsupported durable operation state")
-        if state == "active":
-            if phase in {"completed", "aborted"} or finished_at is not None:
-                raise SessionStateContractError("active operations cannot be terminal")
-        elif phase != state:
-            raise SessionStateContractError("terminal operation state and phase must agree")
+        _validate_operation_lifecycle(kind, phase, state, finished_at)
         normalized_target = SessionOperationTarget.create(
             session_id=target.session_id,
             sandbox_id=target.sandbox_id,
@@ -1117,34 +1189,21 @@ class DurableSessionOperation:
             digest=target.digest,
             run_id=target.run_id,
         )
-        if kind == "provision_submit" and normalized_target.run_id is None:
-            raise SessionStateContractError(
-                "provision operations require an accepted run target"
-            )
-        if kind == "submit_run" and normalized_target.run_id is None:
-            raise SessionStateContractError("submit operations require an accepted run target")
-        if isinstance(attempt_count, bool) or not isinstance(attempt_count, int) or attempt_count < 0:
-            raise SessionStateContractError("operation attempt_count must be a non-negative integer")
-        created_at_n = _utc_datetime(created_at, "created_at")
-        updated_at_n = _utc_datetime(updated_at, "updated_at")
-        if updated_at_n < created_at_n:
-            raise SessionStateContractError("updated_at must not precede created_at")
-        finished_at_n = (
-            None if finished_at is None else _utc_datetime(finished_at, "finished_at")
-        )
-        if state != "active" and finished_at_n is None:
-            raise SessionStateContractError("terminal operations require finished_at")
-        if finished_at_n is not None and finished_at_n < created_at_n:
-            raise SessionStateContractError("finished_at must not precede created_at")
-        lease_expires_at_n = (
-            None
-            if lease_expires_at is None
-            else _utc_datetime(lease_expires_at, "lease_expires_at")
-        )
-        next_attempt_at_n = (
-            None
-            if next_attempt_at is None
-            else _utc_datetime(next_attempt_at, "next_attempt_at")
+        _validate_operation_run_target(kind, normalized_target)
+        _validate_operation_attempt_count(attempt_count)
+        (
+            created_at_n,
+            updated_at_n,
+            finished_at_n,
+            lease_expires_at_n,
+            next_attempt_at_n,
+        ) = _normalize_operation_timestamps(
+            state=state,
+            created_at=created_at,
+            updated_at=updated_at,
+            finished_at=finished_at,
+            lease_expires_at=lease_expires_at,
+            next_attempt_at=next_attempt_at,
         )
         correlation_label_n = _bounded_text(
             correlation_label,
@@ -1650,6 +1709,38 @@ class ProvisionSubmitRecords:
             run=run,
             operation=operation,
             owner_idempotency=owner_idempotency,
+        )
+
+
+def validate_canceled_submit_rearm_transient(
+    session: DurableSessionRecord,
+    run: DurableRunRecord,
+    operation: DurableSessionOperation,
+) -> None:
+    """Validate the pre-launch cancellation transient that retains an active slot."""
+    target = operation.target
+    expected_rearm_phase = _OPERATION_REARM_PHASE_BY_KIND[operation.kind]
+    if (
+        run.status != "canceled"
+        or session.active_run_id != run.run_id
+        or session.active_operation_id != operation.operation_id
+        or session.operation_sequence != operation.sequence
+        or expected_rearm_phase is None
+        or operation.phase != expected_rearm_phase
+        or operation.state != "active"
+        or run.owner_partition.partition_key != session.owner_partition.partition_key
+        or operation.owner_partition.partition_key != session.owner_partition.partition_key
+        or run.session_id != session.session_id
+        or target.session_id != session.session_id
+        or run.generation != session.generation
+        or target.generation != session.generation
+        or target.digest_kind != session.digest_kind
+        or target.digest != session.digest
+        or target.run_id != run.run_id
+        or (target.sandbox_id is not None and target.sandbox_id != session.sandbox_id)
+    ):
+        raise SessionStateContractError(
+            "canceled submit rearm does not preserve its retained active slot"
         )
 
 

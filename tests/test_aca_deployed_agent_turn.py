@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import importlib.util
 import inspect
 import json
+import os
 import sys
 import time
 from dataclasses import replace
@@ -14,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from azure_functions_agents import app as app_module
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
 from azure_functions_agents.config.merge import compose
 from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
@@ -26,13 +29,32 @@ from azure_functions_agents.session_state import (
     hash_idempotency_key,
     owner_partition,
 )
-from azure_functions_agents.transport.transport_models import SandboxSummary
+from azure_functions_agents.transport.ports import SandboxSessionProvider
+from azure_functions_agents.transport.transport_models import SandboxGroupBinding, SandboxSummary
 from tests.aca_smoke_diagnostics import AcaSmokeEnvironmentError
+from tests.doubles.fake_session_runtime import (
+    DEFAULT_GROUP_RESOURCE_ID,
+    FakeSandboxSessionHandle,
+    FakeSandboxSessionProvider,
+)
 from tests.live import aca_deployed_agent_support as support
 from tests.live import aca_deployed_lifecycle_support as lifecycle_support
 
 _DEPLOYABLE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "live_aca_deployed_agent_turn"
+_TIMEOUT_RECOVERY_FIXTURE = (
+    Path(__file__).resolve().parent / "fixtures" / "live_aca_setup_timeout_recovery"
+)
 _NOW = datetime(2026, 8, 12, tzinfo=UTC)
+
+
+def _load_timeout_recovery_fixture_module(module_name: str) -> Any:
+    module_path = _TIMEOUT_RECOVERY_FIXTURE / "controlled_setup_timeout.py"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.mark.parametrize(
@@ -50,6 +72,23 @@ def test_setup_retry_after_uses_only_a_bounded_lease_delay(
     headers: dict[str, str], expected: float
 ) -> None:
     assert support.setup_retry_after_seconds(headers) == expected
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"Retry-After": "2"}, 2.0),
+        ({}, 2.0),
+        ({"Retry-After": "0"}, 2.0),
+        ({"Retry-After": "121"}, 2.0),
+        ({"Retry-After": "invalid"}, 2.0),
+    ],
+)
+def test_cancel_retry_after_uses_a_short_fallback_without_exceeding_a_setup_lease(
+    headers: dict[str, str],
+    expected: float,
+) -> None:
+    assert support.cancel_retry_after_seconds(headers) == expected
 
 
 @pytest.mark.asyncio
@@ -109,6 +148,139 @@ async def test_lifecycle_submission_honors_the_setup_retry_after_contract(
 
     assert result is accepted
     assert sleeps == [120.0]
+
+
+@pytest.mark.asyncio
+async def test_timeout_recovery_cancel_honors_retry_after_then_polls_terminal_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE", "1")
+    module_path = Path(__file__).parent / "live" / "test_aca_one_shot_recovery.py"
+    spec = importlib.util.spec_from_file_location("_timeout_recovery_cancel_regression", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    sleeps: list[float] = []
+    requests: list[tuple[str, str]] = []
+    responses = iter(
+        [
+            (
+                202,
+                {
+                    "session_id": "session-1",
+                    "run_id": "run-1",
+                    "status": "running",
+                    "phase": "provisioning",
+                },
+                {"Retry-After": "3"},
+            ),
+            (
+                200,
+                {
+                    "session_id": "session-1",
+                    "run_id": "run-1",
+                    "status": "running",
+                    "phase": "provisioning",
+                },
+                {},
+            ),
+            (
+                200,
+                {
+                    "session_id": "session-1",
+                    "run_id": "run-1",
+                    "status": "canceled",
+                    "phase": "terminal",
+                },
+                {},
+            ),
+        ]
+    )
+
+    async def request(
+        _session: object,
+        method: str,
+        url: str,
+        **_kwargs: object,
+    ) -> tuple[int, dict[str, object], dict[str, str]]:
+        requests.append((method, url))
+        return next(responses)
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(module, "json_request", request)
+    monkeypatch.setattr(module.asyncio, "sleep", record_sleep)
+    ticket = support.AcceptedRun(
+        session_id="session-1",
+        run_id="run-1",
+        management_urls={
+            "cancel_url": "https://example.test/cancel",
+            "status_url": "https://example.test/status",
+        },
+    )
+
+    terminal = await module._cancel_and_wait_for_terminal(
+        object(),
+        SimpleNamespace(),
+        ticket,
+        "******",
+    )
+
+    assert terminal["status"] == "canceled"
+    assert requests == [
+        ("POST", "https://example.test/cancel"),
+        ("GET", "https://example.test/status"),
+        ("GET", "https://example.test/status"),
+    ]
+    assert sleeps == [3.0, module._STATUS_POLL_SECONDS]
+
+
+@pytest.mark.asyncio
+async def test_timeout_recovery_submission_uses_one_synchronous_chat_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE", "1")
+    module_path = Path(__file__).parent / "live" / "test_aca_one_shot_recovery.py"
+    spec = importlib.util.spec_from_file_location("_timeout_recovery_submission_regression", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    requests: list[tuple[str, str, dict[str, str]]] = []
+
+    async def request(
+        _session: object,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, object],
+    ) -> tuple[int, dict[str, object], dict[str, str]]:
+        assert payload == {
+            "prompt": "Trigger the controlled setup-timeout recovery fixture."
+        }
+        requests.append((method, url, headers))
+        return 504, {"error": "setup_deadline_exceeded"}, {}
+
+    monkeypatch.setattr(module, "json_request", request)
+
+    admission = await module._submit_timeout_recovery_once(
+        object(),
+        SimpleNamespace(chat_url="https://example.test/agents/deployed_setup_timeout/chat"),
+        "******",
+    )
+
+    assert admission.status_code == 504
+    assert len(requests) == 1
+    method, url, headers = requests[0]
+    assert method == "POST"
+    assert url == "https://example.test/agents/deployed_setup_timeout/chat"
+    assert headers["Authorization"] == "******"
+    assert headers["Content-Type"] == "application/json"
+    assert headers["Idempotency-Key"].startswith("aca-one-shot-")
+    assert "Prefer" not in headers
 
 
 def _set_deployed_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,7 +348,6 @@ def test_deployable_fixture_has_persistent_entra_no_tools_aca_configuration(
     }
     regular = compose(specs["deployed_turn"], global_config)
     load = compose(specs["deployed_load"], global_config)
-
     assert (_DEPLOYABLE_FIXTURE / "function_app.py").is_file()
     assert (_DEPLOYABLE_FIXTURE / "host.json").is_file()
     assert (_DEPLOYABLE_FIXTURE / ".funcignore").is_file()
@@ -198,6 +369,148 @@ def test_deployable_fixture_has_persistent_entra_no_tools_aca_configuration(
     assert regular.web_request_config is None
 
 
+def test_timeout_recovery_fixture_is_a_dedicated_no_tools_aca_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_deployable_fixture_environment(monkeypatch)
+
+    global_config = load_global_config(_TIMEOUT_RECOVERY_FIXTURE)
+    specs = {
+        Path(spec.source_file).stem.removesuffix(".agent"): spec
+        for spec in load_agent_specs(_TIMEOUT_RECOVERY_FIXTURE, strict=True)
+    }
+    timeout_recovery = compose(specs["deployed_setup_timeout"], global_config)
+
+    assert set(specs) == {"deployed_setup_timeout"}
+    assert (_TIMEOUT_RECOVERY_FIXTURE / "function_app.py").is_file()
+    assert (_TIMEOUT_RECOVERY_FIXTURE / "host.json").is_file()
+    assert (_TIMEOUT_RECOVERY_FIXTURE / ".funcignore").is_file()
+    assert timeout_recovery.timeout == 120
+    assert timeout_recovery.tools_disabled
+    assert timeout_recovery.mcp_disabled is True
+    assert timeout_recovery.builtin_endpoints.chat_api is True
+    assert timeout_recovery.builtin_endpoints.http_auth.mode == "entra"
+    controlled_timeout = (
+        _TIMEOUT_RECOVERY_FIXTURE / "controlled_setup_timeout.py"
+    ).read_text(encoding="utf-8")
+    assert "AcaSandboxAdapter.open" in controlled_timeout
+    assert "await asyncio.sleep(POST_RESERVATION_DELAY_SECONDS)" in controlled_timeout
+    assert "compose_aca_application = compose_with_delayed_provider" in controlled_timeout
+    assert "app_module.compose_aca_application = original_composer" in controlled_timeout
+    assert "os.environ[_RECONCILER_CADENCE_ENV] = _RECONCILER_CADENCE_SECONDS" in (
+        controlled_timeout
+    )
+    assert controlled_timeout.index(
+        "os.environ[_RECONCILER_CADENCE_ENV] = _RECONCILER_CADENCE_SECONDS"
+    ) < controlled_timeout.index("app_module.create_function_app()")
+
+
+@pytest.mark.asyncio
+async def test_timeout_recovery_provider_implements_the_real_protocol_and_delays_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_timeout_recovery_fixture_module("_timeout_recovery_provider")
+    handle = FakeSandboxSessionHandle()
+    inner = FakeSandboxSessionProvider(handle)
+    provider = module._DelayedCreateSandboxProvider(inner)
+    delays: list[float] = []
+
+    async def record_delay(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(module.asyncio, "sleep", record_delay)
+    request = SimpleNamespace(
+        labels=SimpleNamespace(operation_label=None, to_provider_labels=lambda: {}),
+        reconcile_only=False,
+    )
+    persisted_group = SandboxGroupBinding.create(DEFAULT_GROUP_RESOURCE_ID, "westus2")
+
+    created = await provider.create(request, persisted_group=persisted_group)
+    reconciled_request = SimpleNamespace(
+        labels=SimpleNamespace(operation_label=None, to_provider_labels=lambda: {}),
+        reconcile_only=True,
+    )
+    reconciled = await provider.create(reconciled_request, persisted_group=persisted_group)
+
+    assert isinstance(provider, SandboxSessionProvider)
+    assert created is handle
+    assert reconciled is handle
+    assert delays == [module.POST_RESERVATION_DELAY_SECONDS]
+    assert inner.create_calls == [request, reconciled_request]
+
+
+@pytest.mark.asyncio
+async def test_timeout_recovery_provider_never_delegates_a_canceled_initial_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_timeout_recovery_fixture_module("_timeout_recovery_cancellation")
+    inner = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    provider = module._DelayedCreateSandboxProvider(inner)
+    delay_started = asyncio.Event()
+
+    async def blocked_delay(_delay: float) -> None:
+        delay_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(module.asyncio, "sleep", blocked_delay)
+    request = SimpleNamespace(
+        labels=SimpleNamespace(operation_label=None, to_provider_labels=lambda: {}),
+        reconcile_only=False,
+    )
+    task = asyncio.create_task(
+        provider.create(
+            request,
+            persisted_group=SandboxGroupBinding.create(DEFAULT_GROUP_RESOURCE_ID, "westus2"),
+        )
+    )
+    await delay_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert inner.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_timeout_recovery_fixture_scopes_the_composition_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_timeout_recovery_fixture_module("_timeout_recovery_composition")
+    captured_factory: object | None = None
+    opened_roots: list[Path] = []
+
+    async def open_delayed_provider(app_root: Path) -> str:
+        opened_roots.append(app_root)
+        return "delayed-provider"
+
+    def compose(
+        app_root: Path,
+        *,
+        provider_factory: object,
+    ) -> object:
+        nonlocal captured_factory
+        assert app_root == _TIMEOUT_RECOVERY_FIXTURE
+        captured_factory = provider_factory
+        return "composed"
+
+    def create() -> object:
+        return app_module.compose_aca_application(_TIMEOUT_RECOVERY_FIXTURE)
+
+    monkeypatch.setattr(app_module, "compose_aca_application", compose)
+    monkeypatch.setattr(app_module, "create_function_app", create)
+    monkeypatch.setattr(module, "_open_delayed_provider", open_delayed_provider)
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_RECONCILER_CADENCE_SECONDS", "3600")
+
+    assert module.create_controlled_function_app() == "composed"
+    assert captured_factory is not None
+    assert app_module.compose_aca_application is compose
+    assert os.environ["AZURE_FUNCTIONS_AGENTS_RECONCILER_CADENCE_SECONDS"] == "60"
+    assert callable(captured_factory)
+    assert await captured_factory() == "delayed-provider"
+    assert opened_roots == [_TIMEOUT_RECOVERY_FIXTURE]
+
+
 def test_deployed_config_reads_only_safe_url_and_route_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -212,6 +525,48 @@ def test_deployed_config_reads_only_safe_url_and_route_contract(
         "events_url": "https://deployed-aca.azurewebsites.net/api/agents/deployed_turn/sessions/session-1/runs/run-1/events",
         "cancel_url": "https://deployed-aca.azurewebsites.net/api/agents/deployed_turn/sessions/session-1/runs/run-1/cancel",
     }
+
+
+def test_timeout_recovery_config_requires_the_controlled_fixture_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_deployed_environment(monkeypatch)
+
+    with pytest.raises(AcaSmokeEnvironmentError, match="deployed_setup_timeout"):
+        support.deployed_aca_timeout_recovery_config_from_environment()
+
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG",
+        "deployed_setup_timeout",
+    )
+    config = support.deployed_aca_timeout_recovery_config_from_environment()
+
+    assert config.chat_url.endswith("/agents/deployed_setup_timeout/chat")
+
+
+def test_timeout_recovery_config_requires_time_to_observe_the_90_second_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_deployed_environment(monkeypatch)
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG",
+        "deployed_setup_timeout",
+    )
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS", "119")
+
+    with pytest.raises(AcaSmokeEnvironmentError, match="at least 120 seconds"):
+        support.deployed_aca_timeout_recovery_config_from_environment()
+
+
+def test_timeout_recovery_submission_is_synchronous_and_retains_only_request_identity() -> None:
+    headers = support.timeout_recovery_submission_headers("Bearer test-token", "idempotency-key")
+
+    assert headers == {
+        "Authorization": "Bearer test-token",
+        "Content-Type": "application/json",
+        "Idempotency-Key": "idempotency-key",
+    }
+    assert "Prefer" not in headers
 
 
 @pytest.mark.asyncio

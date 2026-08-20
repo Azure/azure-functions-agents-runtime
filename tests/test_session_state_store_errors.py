@@ -10,6 +10,7 @@ against a REAL Table service are covered separately by
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -31,18 +32,24 @@ from azure_functions_agents.session_state import (
     ConcurrencyConflictError,
     CorruptEntityError,
     DurableIdempotencyRecord,
+    DurableOwnerIdempotencyRecord,
     DurableRunRecord,
+    DurableSessionOperation,
     DurableSessionRecord,
     FunctionAppOwnerContext,
     GenerationConflictError,
     IdempotencyConflictError,
+    ProvisionSubmitRecords,
     RowAlreadyExistsError,
     RunRowNotFoundError,
     SessionNotAdmissibleError,
+    SessionOperationTarget,
     SessionRowNotFoundError,
     SessionStateStoreError,
+    StaleOperationTokenError,
     StateStoreUnavailableError,
     TerminalStateConflictError,
+    operation_correlation_label,
     owner_partition,
 )
 from azure_functions_agents.session_state.store import (
@@ -78,6 +85,7 @@ class _FakeTableClient:
         self._etag_counter = 0
         self.raise_once: dict[str, Exception] = {}
         self.transaction_failure: tuple[int, Exception] | None = None
+        self.transaction_options: list[dict[str, object]] = []
 
     def _next_etag(self) -> str:
         self._etag_counter += 1
@@ -128,7 +136,12 @@ class _FakeTableClient:
         self._etags[key] = new_etag
         return {"etag": new_etag}
 
-    async def submit_transaction(self, operations: list[Any]) -> list[dict[str, object]]:
+    async def submit_transaction(
+        self,
+        operations: list[Any],
+        **kwargs: object,
+    ) -> list[dict[str, object]]:
+        self.transaction_options.append(kwargs)
         self._maybe_raise("submit_transaction")
         if self.transaction_failure is not None:
             index, base_exc = self.transaction_failure
@@ -257,6 +270,93 @@ def _idempotency(
         run_id=run_id,
         expires_at=_NOW + timedelta(hours=1),
         created_at=_NOW,
+    )
+
+
+def _provision_submit_records(
+    *,
+    session_id: str = "session-provision",
+    run_id: str = "run-provision",
+) -> ProvisionSubmitRecords:
+    sequence = 1
+    operation = DurableSessionOperation.create(
+        owner_partition=_partition(),
+        target=SessionOperationTarget.create(
+            session_id=session_id,
+            sandbox_id=None,
+            generation=1,
+            digest_kind="funcs_zip",
+            digest="sha256:" + ("b" * 64),
+            run_id=run_id,
+        ),
+        sequence=sequence,
+        kind="provision_submit",
+        phase="provision_create",
+        state="active",
+        correlation_label=operation_correlation_label(session_id, sequence),
+        token="a" * 32,
+        attempt_count=0,
+        error_code=None,
+        lease_expires_at=_NOW + timedelta(seconds=60),
+        next_attempt_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        finished_at=None,
+    )
+    session = DurableSessionRecord.create(
+        owner_partition=_partition(),
+        session_id=session_id,
+        sandbox_id=None,
+        generation=1,
+        digest_kind="funcs_zip",
+        digest="sha256:" + ("b" * 64),
+        protocol="1",
+        status="creating",
+        last_activity_at=_NOW,
+        expires_at=_NOW + timedelta(hours=24),
+        idle_policy_armed=False,
+        active_run_id=run_id,
+        snapshot_ids=(),
+        region="westus2",
+        state_store_fingerprint=_FINGERPRINT,
+        quarantine_reason=None,
+        tombstone_reason=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        active_operation_id=operation.operation_id,
+        operation_sequence=sequence,
+    )
+    run = _run(session_id=session_id, run_id=run_id, status="accepted")
+    return ProvisionSubmitRecords.create(session, run, operation)
+
+
+def _session_after_prelaunch_cancel(
+    session: DurableSessionRecord,
+    *,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status="ready",
+        last_activity_at=updated_at,
+        expires_at=session.expires_at,
+        idle_policy_armed=False,
+        active_run_id=None,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=updated_at,
+        active_operation_id=None,
+        operation_sequence=session.operation_sequence,
     )
 
 
@@ -1088,6 +1188,771 @@ async def test_build_store_from_service_client_binds_the_named_table() -> None:
     )
     assert isinstance(store, AzureTableSessionStateStore)
     assert service_client.requested_table_name == "CustomTableName"
+
+
+@pytest.mark.asyncio
+async def test_provision_submit_confirmation_upgrades_an_ambiguous_acknowledgement() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    records = _provision_submit_records()
+    submit = fake.submit_transaction
+
+    async def commit_then_lose_acknowledgement(
+        operations: Any,
+        **kwargs: Any,
+    ) -> Any:
+        await submit(operations, **kwargs)
+        raise _http_error(503, "ServerBusy")
+
+    fake.submit_transaction = commit_then_lose_acknowledgement  # type: ignore[method-assign]
+
+    outcome = await store.begin_provision_submit(records)
+
+    assert outcome.admission == "committed"
+    assert outcome.replayed is False
+    assert outcome.run == records.run
+    assert outcome.fence is not None
+    assert outcome.fence.operation_id == records.operation.operation_id
+
+
+@pytest.mark.asyncio
+async def test_provision_submit_confirmation_uses_candidate_rows_after_terminal_race() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    initial = _provision_submit_records()
+    owner_idempotency = DurableOwnerIdempotencyRecord.create(
+        owner_partition=initial.session.owner_partition,
+        idempotency_hash="d" * 64,
+        request_hash="e" * 64,
+        session_id=initial.session.session_id,
+        run_id=initial.run.run_id,
+        expires_at=_NOW + timedelta(hours=1),
+        created_at=_NOW,
+    )
+    records = ProvisionSubmitRecords.create(
+        initial.session,
+        initial.run,
+        initial.operation,
+        owner_idempotency,
+    )
+    reserved = await store.begin_provision_submit(records)
+    assert reserved.fence is not None
+
+    canceled = await store.cancel_prelaunch_submit(
+        owner_partition=records.session.owner_partition,
+        session_id=records.session.session_id,
+        run_id=records.run.run_id,
+        token="b" * 32,
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+    assert canceled.fence is not None
+    current = await store.get_session(
+        records.session.owner_partition,
+        records.session.session_id,
+    )
+    await store.complete_operation(
+        fence=canceled.fence,
+        updated_session=_session_after_prelaunch_cancel(
+            current.record,
+            updated_at=_NOW + timedelta(seconds=2),
+        ),
+        updated_at=_NOW + timedelta(seconds=2),
+    )
+
+    outcome = await store.confirm_provision_submit(records)
+
+    assert outcome.admission == "committed"
+    assert outcome.replayed is False
+    assert outcome.run.status == "canceled"
+    assert outcome.fence is None
+
+
+@pytest.mark.asyncio
+async def test_provision_submit_unconfirmed_acknowledgement_returns_unresolved_candidate() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    records = _provision_submit_records()
+    fake.raise_once["submit_transaction"] = _http_error(503, "ServerBusy")
+
+    outcome = await store.begin_provision_submit(records)
+
+    assert outcome.admission == "possibly_committed"
+    assert outcome.replayed is False
+    assert outcome.run == records.run
+    assert outcome.run_etag is None
+    assert outcome.fence is None
+    assert fake._entities == {}
+
+
+@pytest.mark.asyncio
+async def test_provision_submit_cancellation_before_egt_propagates() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    initial = _provision_submit_records()
+    owner_idempotency = DurableOwnerIdempotencyRecord.create(
+        owner_partition=initial.session.owner_partition,
+        idempotency_hash="d" * 64,
+        request_hash="e" * 64,
+        session_id=initial.session.session_id,
+        run_id=initial.run.run_id,
+        expires_at=_NOW + timedelta(hours=1),
+        created_at=_NOW,
+    )
+    records = ProvisionSubmitRecords.create(
+        initial.session,
+        initial.run,
+        initial.operation,
+        owner_idempotency,
+    )
+    entered = asyncio.Event()
+
+    async def block_owner_read(*args: object) -> _FakeEntity:
+        del args
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    fake.get_entity = block_owner_read  # type: ignore[method-assign]
+    task = asyncio.create_task(store.begin_provision_submit(records))
+    await asyncio.wait_for(entered.wait(), timeout=1.0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert fake._entities == {}
+
+
+@pytest.mark.asyncio
+async def test_provision_submit_cancellation_during_egt_propagates() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    records = _provision_submit_records()
+    entered = asyncio.Event()
+
+    async def block_transaction(
+        operations: object,
+        **kwargs: object,
+    ) -> object:
+        del operations, kwargs
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    fake.submit_transaction = block_transaction  # type: ignore[method-assign]
+    task = asyncio.create_task(store.begin_provision_submit(records))
+    await asyncio.wait_for(entered.wait(), timeout=1.0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert fake._entities == {}
+
+
+@pytest.mark.asyncio
+async def test_operation_admission_confirmation_upgrades_an_ambiguous_acknowledgement() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    session = _session(status="ready")
+    session_etag = await store.create_session(session)
+    run = _run(run_id="run-admission", status="accepted")
+    operation = DurableSessionOperation.create(
+        owner_partition=session.owner_partition,
+        target=SessionOperationTarget.create(
+            session_id=session.session_id,
+            sandbox_id=session.sandbox_id,
+            generation=session.generation,
+            digest_kind=session.digest_kind,
+            digest=session.digest,
+            run_id=run.run_id,
+        ),
+        sequence=1,
+        kind="submit_run",
+        phase="submit_admission",
+        state="active",
+        correlation_label=operation_correlation_label(session.session_id, 1),
+        token="a" * 32,
+        attempt_count=0,
+        error_code=None,
+        lease_expires_at=_NOW + timedelta(seconds=60),
+        next_attempt_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        finished_at=None,
+    )
+    prepared = replace(
+        session,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    fence = await store.begin_operation(
+        previous=session,
+        updated=prepared,
+        operation=operation,
+        etag=session_etag,
+    )
+    records = AdmissionRecords.create(
+        replace(prepared, status="running", active_run_id=run.run_id),
+        run,
+        None,
+    )
+    submit = fake.submit_transaction
+
+    async def commit_then_lose_acknowledgement(
+        operations: Any,
+        **kwargs: Any,
+    ) -> Any:
+        await submit(operations, **kwargs)
+        raise _http_error(503, "ServerBusy")
+
+    fake.submit_transaction = commit_then_lose_acknowledgement  # type: ignore[method-assign]
+
+    outcome = await store.admit_operation_run(fence=fence, records=records)
+
+    assert outcome.admission == "committed"
+    assert outcome.replayed is False
+    assert outcome.run == run
+    stored = await store.get_session(session.owner_partition, session.session_id)
+    assert stored.record.active_run_id == run.run_id
+
+
+@pytest.mark.asyncio
+async def test_operation_admission_confirmation_uses_matching_idempotency_after_terminal_race() -> (
+    None
+):
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    session = _session(status="ready")
+    session_etag = await store.create_session(session)
+    run = _run(run_id="run-admission", status="accepted")
+    operation = DurableSessionOperation.create(
+        owner_partition=session.owner_partition,
+        target=SessionOperationTarget.create(
+            session_id=session.session_id,
+            sandbox_id=session.sandbox_id,
+            generation=session.generation,
+            digest_kind=session.digest_kind,
+            digest=session.digest,
+            run_id=run.run_id,
+        ),
+        sequence=1,
+        kind="submit_run",
+        phase="submit_admission",
+        state="active",
+        correlation_label=operation_correlation_label(session.session_id, 1),
+        token="a" * 32,
+        attempt_count=0,
+        error_code=None,
+        lease_expires_at=_NOW + timedelta(seconds=60),
+        next_attempt_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        finished_at=None,
+    )
+    prepared = replace(
+        session,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    fence = await store.begin_operation(
+        previous=session,
+        updated=prepared,
+        operation=operation,
+        etag=session_etag,
+    )
+    records = AdmissionRecords.create(
+        replace(prepared, status="running", active_run_id=run.run_id),
+        run,
+        _idempotency(session_id=session.session_id, run_id=run.run_id),
+    )
+    await store.admit_operation_run(fence=fence, records=records)
+
+    canceled = await store.cancel_prelaunch_submit(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        run_id=run.run_id,
+        token="b" * 32,
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+    assert canceled.fence is not None
+    current = await store.get_session(session.owner_partition, session.session_id)
+    await store.complete_operation(
+        fence=canceled.fence,
+        updated_session=_session_after_prelaunch_cancel(
+            current.record,
+            updated_at=_NOW + timedelta(seconds=2),
+        ),
+        updated_at=_NOW + timedelta(seconds=2),
+    )
+
+    outcome = await store.confirm_operation_run_admission(fence=fence, records=records)
+
+    assert outcome.admission == "committed"
+    assert outcome.replayed is False
+    assert outcome.run.status == "canceled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_provision_submit_terminalizes_before_launch_and_retains_fence() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    records = _provision_submit_records()
+    reserved = await store.begin_provision_submit(records)
+    assert reserved.fence is not None
+    assigned_session = replace(
+        records.session,
+        sandbox_id="sandbox-1",
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+    assigned_target = replace(records.operation.target, sandbox_id="sandbox-1")
+    await store.advance_operation(
+        fence=reserved.fence,
+        phase="provision_lifecycle",
+        updated_session=assigned_session,
+        updated_target=assigned_target,
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+
+    outcome = await store.cancel_prelaunch_submit(
+        owner_partition=records.session.owner_partition,
+        session_id=records.session.session_id,
+        run_id=records.run.run_id,
+        token="b" * 32,
+        updated_at=_NOW + timedelta(seconds=2),
+    )
+
+    assert outcome.disposition == "canceled_before_launch"
+    assert outcome.run.status == "canceled"
+    assert outcome.run.status_reason == "canceled_before_launch"
+    assert outcome.fence is not None
+    assert outcome.fence.token == "b" * 32
+    assert outcome.session.active_run_id == records.run.run_id
+    assert outcome.session.active_operation_id == records.operation.operation_id
+    assert outcome.session.sandbox_id == "sandbox-1"
+    assert outcome.operation is not None
+    assert outcome.operation.phase == "provision_rearm"
+    assert outcome.operation.target.sandbox_id == "sandbox-1"
+
+    repeated = await store.cancel_prelaunch_submit(
+        owner_partition=records.session.owner_partition,
+        session_id=records.session.session_id,
+        run_id=records.run.run_id,
+        token="c" * 32,
+        updated_at=_NOW + timedelta(seconds=2),
+    )
+    assert repeated.disposition == "terminal"
+    adopted = await store.adopt_terminal_run(outcome.run)
+    assert adopted.slot_released is False
+
+
+@pytest.mark.asyncio
+async def test_canceled_pre_pointer_provision_can_complete_as_tombstoned() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    records = _provision_submit_records()
+    reserved = await store.begin_provision_submit(records)
+    assert reserved.fence is not None
+    canceled = await store.cancel_prelaunch_submit(
+        owner_partition=records.session.owner_partition,
+        session_id=records.session.session_id,
+        run_id=records.run.run_id,
+        token="b" * 32,
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+    assert canceled.fence is not None
+    assert canceled.session.sandbox_id is None
+    tombstoned = replace(
+        canceled.session,
+        status="tombstoned",
+        active_run_id=None,
+        active_operation_id=None,
+        tombstone_reason="provision_terminal_before_pointer",
+        updated_at=_NOW + timedelta(seconds=2),
+    )
+
+    await store.complete_operation(
+        fence=canceled.fence,
+        updated_session=tombstoned,
+        terminal_run=canceled.run,
+        updated_at=_NOW + timedelta(seconds=2),
+    )
+
+    session = await store.get_session(records.session.owner_partition, records.session.session_id)
+    run = await store.get_run(
+        records.run.owner_partition,
+        records.run.session_id,
+        records.run.run_id,
+    )
+    operation = await store.get_operation(
+        records.operation.owner_partition,
+        records.operation.target.session_id,
+        records.operation.operation_id,
+    )
+    assert session.record.status == "tombstoned"
+    assert session.record.active_run_id is None
+    assert session.record.active_operation_id is None
+    assert run.record.status == "canceled"
+    assert operation.record.state == "completed"
+
+
+@pytest.mark.asyncio
+async def test_existing_submit_cancels_before_journal_claim() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    session = _session(status="ready")
+    session_etag = await store.create_session(session)
+    run = _run(run_id="run-existing-cancel", status="accepted")
+    operation = DurableSessionOperation.create(
+        owner_partition=session.owner_partition,
+        target=SessionOperationTarget.create(
+            session_id=session.session_id,
+            sandbox_id=session.sandbox_id,
+            generation=session.generation,
+            digest_kind=session.digest_kind,
+            digest=session.digest,
+            run_id=run.run_id,
+        ),
+        sequence=1,
+        kind="submit_run",
+        phase="submit_admission",
+        state="active",
+        correlation_label=operation_correlation_label(session.session_id, 1),
+        token="a" * 32,
+        attempt_count=0,
+        error_code=None,
+        lease_expires_at=_NOW + timedelta(seconds=60),
+        next_attempt_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        finished_at=None,
+    )
+    prepared = replace(
+        session,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    fence = await store.begin_operation(
+        previous=session,
+        updated=prepared,
+        operation=operation,
+        etag=session_etag,
+    )
+    admitted = replace(prepared, status="running", active_run_id=run.run_id)
+    await store.admit_operation_run(
+        fence=fence,
+        records=AdmissionRecords.create(admitted, run, None),
+    )
+
+    canceled = await store.cancel_prelaunch_submit(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        run_id=run.run_id,
+        token="b" * 32,
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+    claimed = await store.claim_operation_journal(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        run_id=run.run_id,
+        token="c" * 32,
+        updated_at=_NOW + timedelta(seconds=2),
+    )
+
+    assert canceled.disposition == "canceled_before_launch"
+    assert canceled.run.status == "canceled"
+    assert canceled.operation is not None
+    assert canceled.operation.kind == "submit_run"
+    assert canceled.operation.phase == "submit_rearm"
+    assert canceled.session.active_run_id == run.run_id
+    assert claimed is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_provision_submit_reports_launch_claimed_without_terminalizing() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    records = _provision_submit_records()
+    reserved = await store.begin_provision_submit(records)
+    assert reserved.fence is not None
+    fence = reserved.fence
+    for phase in (
+        "provision_lifecycle",
+        "provision_content",
+        "provision_manifest",
+        "provision_journal",
+    ):
+        fence = await store.advance_operation(
+            fence=fence,
+            phase=phase,  # type: ignore[arg-type]
+            updated_at=_NOW + timedelta(seconds=1),
+        )
+    claimed = await store.claim_operation_journal(
+        owner_partition=records.session.owner_partition,
+        session_id=records.session.session_id,
+        run_id=records.run.run_id,
+        token="c" * 32,
+        updated_at=_NOW + timedelta(seconds=2),
+    )
+    assert claimed is not None
+
+    outcome = await store.cancel_prelaunch_submit(
+        owner_partition=records.session.owner_partition,
+        session_id=records.session.session_id,
+        run_id=records.run.run_id,
+        token="d" * 32,
+        updated_at=_NOW + timedelta(seconds=3),
+    )
+
+    assert outcome.disposition == "launch_claimed"
+    assert outcome.run.status == "accepted"
+    assert outcome.fence is None
+    assert outcome.operation is not None
+    assert outcome.operation.phase == "provision_launching"
+
+
+@pytest.mark.asyncio
+async def test_cancel_provision_submit_reports_retry_for_an_unmatched_active_slot() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    records = _provision_submit_records()
+    await store.begin_provision_submit(records)
+    session_key = (records.session.owner_partition.partition_key, str(records.session.row_key))
+    fake._entities[session_key]["active_operation_id"] = ""
+
+    outcome = await store.cancel_prelaunch_submit(
+        owner_partition=records.session.owner_partition,
+        session_id=records.session.session_id,
+        run_id=records.run.run_id,
+        token="b" * 32,
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+
+    assert outcome.disposition == "retry"
+    assert outcome.run.status == "accepted"
+    assert outcome.fence is None
+
+
+@pytest.mark.asyncio
+async def test_journal_claim_uses_the_accepted_run_etag_in_its_egt() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    records = _provision_submit_records()
+    reserved = await store.begin_provision_submit(records)
+    assert reserved.fence is not None
+    fence = reserved.fence
+    for phase in (
+        "provision_lifecycle",
+        "provision_content",
+        "provision_manifest",
+        "provision_journal",
+    ):
+        fence = await store.advance_operation(
+            fence=fence,
+            phase=phase,  # type: ignore[arg-type]
+            updated_at=_NOW + timedelta(seconds=1),
+        )
+    run_key = (records.run.owner_partition.partition_key, str(records.run.row_key))
+    real_submit = fake.submit_transaction
+
+    async def _change_run_etag_then_submit(operations: Any) -> Any:
+        fake._etags[run_key] = "etag-run-raced"
+        return await real_submit(operations)
+
+    fake.submit_transaction = _change_run_etag_then_submit  # type: ignore[method-assign]
+    with pytest.raises(StaleOperationTokenError):
+        await store.claim_operation_journal(
+            owner_partition=records.session.owner_partition,
+            session_id=records.session.session_id,
+            run_id=records.run.run_id,
+            token="b" * 32,
+            updated_at=_NOW + timedelta(seconds=2),
+        )
+
+    operation = await store.get_operation(
+        records.session.owner_partition,
+        records.session.session_id,
+        records.operation.operation_id,
+    )
+    assert operation.record.phase == "provision_journal"
+
+
+@pytest.mark.asyncio
+async def test_prelaunch_cancel_completion_clears_operation_and_active_run_together() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    records = _provision_submit_records()
+    await store.begin_provision_submit(records)
+    canceled = await store.cancel_prelaunch_submit(
+        owner_partition=records.session.owner_partition,
+        session_id=records.session.session_id,
+        run_id=records.run.run_id,
+        token="b" * 32,
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+    assert canceled.fence is not None
+
+    completed = await store.complete_operation(
+        fence=canceled.fence,
+        updated_session=_session_after_prelaunch_cancel(
+            canceled.session,
+            updated_at=_NOW + timedelta(seconds=2),
+        ),
+        updated_at=_NOW + timedelta(seconds=2),
+    )
+
+    assert completed.operation.state == "completed"
+    assert completed.run is not None
+    assert completed.run.status == "canceled"
+    settled = await store.get_session(
+        records.session.owner_partition,
+        records.session.session_id,
+    )
+    assert settled.record.active_operation_id is None
+    assert settled.record.active_run_id is None
+
+
+@pytest.mark.asyncio
+async def test_non_canceled_terminal_submit_rearm_completes_normally() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    records = _provision_submit_records()
+    reserved = await store.begin_provision_submit(records)
+    assert reserved.fence is not None
+    assigned_session = replace(
+        records.session,
+        sandbox_id="sandbox-1",
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+    fence = await store.advance_operation(
+        fence=reserved.fence,
+        phase="provision_lifecycle",
+        updated_session=assigned_session,
+        updated_target=replace(records.operation.target, sandbox_id="sandbox-1"),
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+    terminal = replace(
+        records.run,
+        status="succeeded",
+        result_available=True,
+        updated_at=_NOW + timedelta(seconds=2),
+    )
+    adopted = await store.adopt_terminal_run(terminal)
+    assert adopted.slot_released is False
+    fence = await store.advance_operation(
+        fence=fence,
+        phase="provision_rearm",
+        updated_at=_NOW + timedelta(seconds=3),
+    )
+
+    completed = await store.complete_operation(
+        fence=fence,
+        updated_session=_session_after_prelaunch_cancel(
+            assigned_session,
+            updated_at=_NOW + timedelta(seconds=4),
+        ),
+        terminal_run=terminal,
+        updated_at=_NOW + timedelta(seconds=4),
+    )
+
+    assert completed.operation.state == "completed"
+    stored_run = await store.get_run(
+        records.run.owner_partition,
+        records.run.session_id,
+        records.run.run_id,
+    )
+    assert stored_run.record.status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_missing_run_submit_rearm_can_abort_and_release_its_slot() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    records = _provision_submit_records()
+    reserved = await store.begin_provision_submit(records)
+    assert reserved.fence is not None
+    assigned_session = replace(
+        records.session,
+        sandbox_id="sandbox-1",
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+    fence = await store.advance_operation(
+        fence=reserved.fence,
+        phase="provision_lifecycle",
+        updated_session=assigned_session,
+        updated_target=replace(records.operation.target, sandbox_id="sandbox-1"),
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+    run_key = (records.run.owner_partition.partition_key, str(records.run.row_key))
+    del fake._entities[run_key]
+    del fake._etags[run_key]
+    fence = await store.advance_operation(
+        fence=fence,
+        phase="provision_rearm",
+        updated_at=_NOW + timedelta(seconds=2),
+    )
+
+    aborted = await store.abort_operation(
+        fence=fence,
+        updated_session=_session_after_prelaunch_cancel(
+            assigned_session,
+            updated_at=_NOW + timedelta(seconds=3),
+        ),
+        error_code="provision_run_missing",
+        updated_at=_NOW + timedelta(seconds=3),
+    )
+
+    assert aborted.operation.state == "aborted"
+    settled = await store.get_session(
+        records.session.owner_partition,
+        records.session.session_id,
+    )
+    assert settled.record.active_operation_id is None
+    assert settled.record.active_run_id is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_adoption_does_not_release_an_active_operation_slot() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    records = _provision_submit_records()
+    await store.begin_provision_submit(records)
+
+    outcome = await store.adopt_terminal_run(
+        DurableRunRecord.create(
+            owner_partition=records.run.owner_partition,
+            session_id=records.run.session_id,
+            run_id=records.run.run_id,
+            generation=records.run.generation,
+            status="canceled",
+            result_available=False,
+            status_reason="canceled_before_launch",
+            expires_at=records.run.expires_at,
+            created_at=records.run.created_at,
+            updated_at=_NOW + timedelta(seconds=1),
+        )
+    )
+
+    assert outcome.run.status == "canceled"
+    assert outcome.slot_released is False
+
+
+@pytest.mark.asyncio
+async def test_journal_invalidation_does_not_release_an_active_operation_slot() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    records = _provision_submit_records()
+    await store.begin_provision_submit(records)
+
+    outcome = await store.invalidate_journal_run(
+        owner_partition=records.session.owner_partition,
+        session_id=records.session.session_id,
+        run_id=records.run.run_id,
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+
+    assert outcome.run.status == "failed"
+    assert outcome.slot_released is False
 
 
 def _http_error(status_code: int, error_code: str) -> HttpResponseError:

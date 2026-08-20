@@ -505,6 +505,224 @@ def make_agent_handler(
     return handler
 
 
+def _json_error_response(
+    message: str,
+    status_code: int,
+    *,
+    headers: dict[str, str] | None = None,
+) -> Response:
+    return Response(
+        content=json.dumps({"error": message}),
+        status_code=status_code,
+        media_type="application/json",
+        headers=headers,
+    )
+
+
+def _authorize_http_request(
+    req: Request,
+    auth_policy: EndpointAuthConfig,
+    session_runtime: SessionRuntimeBinding | None,
+) -> tuple[OwnerPrincipal | None, Response | None]:
+    """Authorize an inbound HTTP request, returning (owner, error_response)."""
+    if session_runtime is None:
+        auth_error = authorize_entra_request(req.headers.get, auth_policy)
+        if auth_error is not None:
+            return None, _json_error_response(auth_error.message, auth_error.status_code)
+        return None, None
+    resolved_owner = resolve_owner_principal(req.headers.get, auth_policy)
+    if isinstance(resolved_owner, AuthError):
+        return None, _json_error_response(resolved_owner.message, resolved_owner.status_code)
+    return resolved_owner, None
+
+
+async def _parse_request_body(req: Request) -> tuple[Any, str]:
+    """Parse the request as JSON, falling back to a decoded text body."""
+    try:
+        body = await req.json()
+        return body, json.dumps(body, ensure_ascii=False, default=str)
+    except Exception:
+        body_bytes = await req.body()
+        body = body_bytes.decode("utf-8", errors="replace") if body_bytes else {}
+        return body, body if isinstance(body, str) else json.dumps(body)
+
+
+def _build_http_prompt(resolved: ResolvedAgent, body_json: str) -> str:
+    parts: list[str] = list(_response_format_instructions(resolved))
+    parts.append(f"HTTP request data:\n```json\n{body_json}\n```")
+    return "\n\n".join(parts)
+
+
+def _build_http_runner_kwargs(
+    resolved: ResolvedAgent,
+    capabilities: AgentCapabilities,
+    catalog: AgentCatalog | None,
+    session_id: str | None,
+    *,
+    workflow_system_addendum: str | None,
+    workflows_enabled: bool,
+    durable_client: Any | None,
+) -> dict[str, Any]:
+    return {
+        "instructions": resolved.instructions,
+        "timeout": resolved.timeout,
+        "model": resolved.model,
+        "session_id": session_id,
+        "sandbox_tools": build_sandbox_tools_for_session(resolved, session_id),
+        "web_request_tools": capabilities.web_request_tools,
+        "tools": capabilities.filtered_user_tools,
+        "mcp_tools": capabilities.filtered_mcp_tools,
+        "skill_paths": capabilities.enabled_skill_paths,
+        "subagents": resolved.subagents,
+        "catalog": catalog,
+        "system_addendum": workflow_system_addendum,
+        "workflow_enabled": workflows_enabled,
+        "workflow_durable_client": durable_client,
+        "agent_name": resolved.slug,
+        "output_validator": build_output_validator(resolved),
+    }
+
+
+def _handle_validation_error(
+    span: Any,
+    validation_error: Response,
+    resolved: ResolvedAgent,
+    session_id: str | None,
+) -> Response:
+    """Annotate the run span for an input-validation failure and stamp the session."""
+    if validation_error.status_code == 500:
+        logger.error(
+            "HTTP agent '%s' has invalid input schema: %s",
+            resolved.name,
+            validation_error.body.decode("utf-8"),
+        )
+    span.set_attribute("af.agent.outcome", "error")
+    span.set_error("input validation failed", fault_domain=FaultDomain.APP)
+    span.add_event(
+        "af.input.validation_failed",
+        {
+            ATTR_FAULT_DOMAIN: FaultDomain.APP,
+            "af.http.status_code": validation_error.status_code,
+        },
+    )
+    validation_error.headers[_SESSION_ID_HEADER] = session_id or _new_session_id()
+    return validation_error
+
+
+async def _submit_run_via_controller(
+    req: Request,
+    resolved: ResolvedAgent,
+    prompt: str,
+    runner_kwargs: dict[str, Any],
+    runtime_kwargs: _SessionRuntimeKwargs,
+) -> Response:
+    """Submit an ACA-backed run through the controller and render its response."""
+    budget = RequestBudget.start(authored_timeout=resolved.timeout)
+    request, binding = split_runner_call(
+        (prompt,),
+        {
+            **runner_kwargs,
+            "idempotency_key": _request_header_value(req, "Idempotency-Key"),
+        },
+        stream=False,
+    )
+    backend = create_execution_backend(
+        binding=binding,
+        session_runtime=runtime_kwargs["session_runtime"],
+        owner=runtime_kwargs["owner"],
+        setup_budget=budget.setup,
+    )
+    controller_response = await submit_run(
+        backend,
+        request,
+        agent_slug=resolved.slug,
+        respond_async=prefers_respond_async(req.headers),
+        budget=budget,
+    )
+    if controller_response.status_code != 200:
+        return _controller_response_to_fastapi(controller_response)
+    body_value = controller_response.body
+    if not isinstance(body_value, dict):
+        return _controller_response_to_fastapi(controller_response)
+    result_content = body_value.get("response")
+    if not isinstance(result_content, str):
+        return _controller_response_to_fastapi(controller_response)
+    controller_session_id = _controller_session_id(controller_response)
+    if controller_session_id is None:
+        return _controller_response_to_fastapi(controller_response)
+    if resolved.response_example or resolved.response_schema:
+        return _render_validated_http_response(
+            resolved,
+            result_content,
+            controller_session_id,
+        )
+    return Response(
+        content=result_content,
+        status_code=200,
+        media_type="text/plain",
+        headers={_SESSION_ID_HEADER: controller_session_id},
+    )
+
+
+def _render_http_success(span: Any, resolved: ResolvedAgent, result: Any) -> Response:
+    """Render a successful synchronous run, applying the JSON response contract."""
+    if _should_log(resolved):
+        logger.info(
+            "HTTP agent '%s' response: %s",
+            resolved.name,
+            json.dumps(
+                _run_log_payload(resolved, result),
+                ensure_ascii=False,
+                default=str,
+            ),
+        )
+
+    if not (resolved.response_example or resolved.response_schema):
+        return Response(
+            content=result.content,
+            status_code=200,
+            media_type="text/plain",
+            headers={_SESSION_ID_HEADER: result.session_id},
+        )
+
+    def record_invalid_json(exc: json.JSONDecodeError) -> None:
+        logger.warning(
+            "HTTP agent '%s' returned invalid JSON: %s",
+            resolved.name,
+            exc,
+        )
+        span.set_attribute("af.agent.outcome", "error")
+        span.set_error("agent returned invalid JSON", fault_domain=FaultDomain.APP)
+        span.add_event(
+            "af.response.invalid_json",
+            {ATTR_FAULT_DOMAIN: FaultDomain.APP},
+        )
+
+    def record_schema_error(exc: jsonschema.ValidationError) -> None:
+        logger.warning(
+            "HTTP agent '%s' returned JSON that failed schema validation: %s",
+            resolved.name,
+            exc,
+        )
+        span.set_attribute("af.agent.outcome", "error")
+        span.set_error(
+            "response schema validation failed",
+            fault_domain=FaultDomain.APP,
+        )
+        span.add_event(
+            "af.response.schema_validation_failed",
+            {ATTR_FAULT_DOMAIN: FaultDomain.APP},
+        )
+
+    return _render_validated_http_response(
+        resolved,
+        result.content,
+        result.session_id,
+        on_invalid_json=record_invalid_json,
+        on_schema_error=record_schema_error,
+    )
+
+
 def make_http_agent_handler(
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
@@ -526,24 +744,9 @@ def make_http_agent_handler(
     auth_policy = auth or EndpointAuthConfig()
 
     async def _handle(req: Request, durable_client: Any | None) -> Response:
-        owner: OwnerPrincipal | None = None
-        if session_runtime is None:
-            auth_error = authorize_entra_request(req.headers.get, auth_policy)
-            if auth_error is not None:
-                return Response(
-                    content=json.dumps({"error": auth_error.message}),
-                    status_code=auth_error.status_code,
-                    media_type="application/json",
-                )
-        else:
-            resolved_owner = resolve_owner_principal(req.headers.get, auth_policy)
-            if isinstance(resolved_owner, AuthError):
-                return Response(
-                    content=json.dumps({"error": resolved_owner.message}),
-                    status_code=resolved_owner.status_code,
-                    media_type="application/json",
-                )
-            owner = resolved_owner
+        owner, auth_response = _authorize_http_request(req, auth_policy, session_runtime)
+        if auth_response is not None:
+            return auth_response
 
         logger.info(
             "HTTP agent triggered: source_file=%s",
@@ -565,181 +768,48 @@ def make_http_agent_handler(
                     None if session_runtime is not None else _new_session_id()
                 )
                 span.set_attribute("af.agent.session_id", session_id)
-                try:
-                    body = await req.json()
-                    body_json = json.dumps(body, ensure_ascii=False, default=str)
-                except Exception:
-                    body_bytes = await req.body()
-                    body = body_bytes.decode("utf-8", errors="replace") if body_bytes else {}
-                    body_json = body if isinstance(body, str) else json.dumps(body)
-
+                body, body_json = await _parse_request_body(req)
                 span.set_attribute("af.agent.input_bytes", len(body_json))
                 span.set_content("af.agent.input", body_json)
 
                 validation_error = validate_request_body(body, resolved.input_schema)
                 if validation_error is not None:
-                    if validation_error.status_code == 500:
-                        logger.error(
-                            "HTTP agent '%s' has invalid input schema: %s",
-                            resolved.name,
-                            validation_error.body.decode("utf-8"),
-                        )
-                    span.set_attribute("af.agent.outcome", "error")
-                    span.set_error("input validation failed", fault_domain=FaultDomain.APP)
-                    span.add_event(
-                        "af.input.validation_failed",
-                        {
-                            ATTR_FAULT_DOMAIN: FaultDomain.APP,
-                            "af.http.status_code": validation_error.status_code,
-                        },
+                    return _handle_validation_error(
+                        span, validation_error, resolved, session_id
                     )
-                    validation_error.headers[_SESSION_ID_HEADER] = session_id or _new_session_id()
-                    return validation_error
 
-                parts: list[str] = []
-                parts.extend(_response_format_instructions(resolved))
-                parts.append(f"HTTP request data:\n```json\n{body_json}\n```")
-                prompt = "\n\n".join(parts)
-
-                runner_kwargs: dict[str, Any] = {
-                    "instructions": resolved.instructions,
-                    "timeout": resolved.timeout,
-                    "model": resolved.model,
-                    "session_id": session_id,
-                    "sandbox_tools": build_sandbox_tools_for_session(resolved, session_id),
-                    "web_request_tools": capabilities.web_request_tools,
-                    "tools": capabilities.filtered_user_tools,
-                    "mcp_tools": capabilities.filtered_mcp_tools,
-                    "skill_paths": capabilities.enabled_skill_paths,
-                    "subagents": resolved.subagents,
-                    "catalog": catalog,
-                    "system_addendum": workflow_system_addendum,
-                    "workflow_enabled": workflows_enabled,
-                    "workflow_durable_client": durable_client,
-                    "agent_name": resolved.slug,
-                    "output_validator": build_output_validator(resolved),
-                }
+                prompt = _build_http_prompt(resolved, body_json)
+                runner_kwargs = _build_http_runner_kwargs(
+                    resolved,
+                    capabilities,
+                    catalog,
+                    session_id,
+                    workflow_system_addendum=workflow_system_addendum,
+                    workflows_enabled=workflows_enabled,
+                    durable_client=durable_client,
+                )
                 runtime_kwargs = _session_runtime_kwargs(session_runtime, owner)
-                if runtime_kwargs is None:
-                    result = await _run_agent(
-                        prompt,
-                        **runner_kwargs,
-                        workflow_policy=workflow_policy,
-                    )
-                else:
-                    budget = RequestBudget.start(authored_timeout=resolved.timeout)
-                    request, binding = split_runner_call(
-                        (prompt,),
-                        {
-                            **runner_kwargs,
-                            "idempotency_key": _request_header_value(req, "Idempotency-Key"),
-                        },
-                        stream=False,
-                    )
-                    backend = create_execution_backend(
-                        binding=binding,
-                        session_runtime=runtime_kwargs["session_runtime"],
-                        owner=runtime_kwargs["owner"],
-                        setup_budget=budget.setup,
-                    )
-                    controller_response = await submit_run(
-                        backend,
-                        request,
-                        agent_slug=resolved.slug,
-                        respond_async=prefers_respond_async(req.headers),
-                        budget=budget,
-                    )
-                    if controller_response.status_code != 200:
-                        return _controller_response_to_fastapi(controller_response)
-                    body_value = controller_response.body
-                    if not isinstance(body_value, dict):
-                        return _controller_response_to_fastapi(controller_response)
-                    result_content = body_value.get("response")
-                    if not isinstance(result_content, str):
-                        return _controller_response_to_fastapi(controller_response)
-                    controller_session_id = _controller_session_id(controller_response)
-                    if controller_session_id is None:
-                        return _controller_response_to_fastapi(controller_response)
-                    if resolved.response_example or resolved.response_schema:
-                        return _render_validated_http_response(
-                            resolved,
-                            result_content,
-                            controller_session_id,
-                        )
-                    return Response(
-                        content=result_content,
-                        status_code=200,
-                        media_type="text/plain",
-                        headers={_SESSION_ID_HEADER: controller_session_id},
+                if runtime_kwargs is not None:
+                    return await _submit_run_via_controller(
+                        req, resolved, prompt, runner_kwargs, runtime_kwargs
                     )
 
+                result = await _run_agent(
+                    prompt,
+                    **runner_kwargs,
+                    workflow_policy=workflow_policy,
+                )
                 _set_run_result_attributes(span, result)
                 span.add_event("af.agent.invoke.completed")
                 span.set_attribute("af.agent.outcome", "success")
-
-                if _should_log(resolved):
-                    logger.info(
-                        "HTTP agent '%s' response: %s",
-                        resolved.name,
-                        json.dumps(
-                            _run_log_payload(resolved, result),
-                            ensure_ascii=False,
-                            default=str,
-                        ),
-                    )
-
-                if resolved.response_example or resolved.response_schema:
-                    def record_invalid_json(exc: json.JSONDecodeError) -> None:
-                        logger.warning(
-                            "HTTP agent '%s' returned invalid JSON: %s",
-                            resolved.name,
-                            exc,
-                        )
-                        span.set_attribute("af.agent.outcome", "error")
-                        span.set_error("agent returned invalid JSON", fault_domain=FaultDomain.APP)
-                        span.add_event(
-                            "af.response.invalid_json",
-                            {ATTR_FAULT_DOMAIN: FaultDomain.APP},
-                        )
-
-                    def record_schema_error(exc: jsonschema.ValidationError) -> None:
-                        logger.warning(
-                            "HTTP agent '%s' returned JSON that failed schema validation: %s",
-                            resolved.name,
-                            exc,
-                        )
-                        span.set_attribute("af.agent.outcome", "error")
-                        span.set_error(
-                            "response schema validation failed",
-                            fault_domain=FaultDomain.APP,
-                        )
-                        span.add_event(
-                            "af.response.schema_validation_failed",
-                            {ATTR_FAULT_DOMAIN: FaultDomain.APP},
-                        )
-
-                    return _render_validated_http_response(
-                        resolved,
-                        result.content,
-                        result.session_id,
-                        on_invalid_json=record_invalid_json,
-                        on_schema_error=record_schema_error,
-                    )
-
-                return Response(
-                    content=result.content,
-                    status_code=200,
-                    media_type="text/plain",
-                    headers={_SESSION_ID_HEADER: result.session_id},
-                )
+                return _render_http_success(span, resolved, result)
             except Exception as exc:
                 span.set_attribute("af.agent.outcome", "error")
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
                 logger.exception("HTTP agent '%s' failed: %s", resolved.name, exc)
-                return Response(
-                    content=json.dumps({"error": str(exc)}),
-                    status_code=500,
-                    media_type="application/json",
+                return _json_error_response(
+                    str(exc),
+                    500,
                     headers={_SESSION_ID_HEADER: session_id or _new_session_id()},
                 )
 

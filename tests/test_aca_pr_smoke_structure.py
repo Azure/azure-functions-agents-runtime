@@ -37,7 +37,19 @@ def test_snapshot_cleanup_precedes_and_follows_sandbox_deletion() -> None:
     support = (root / "tests/live/aca_smoke_support.py").read_text()
     reaper = (root / "eng/scripts/reap_aca_smoke_sandboxes.py").read_text()
 
-    assert support.count("await delete_snapshots()") >= 4
+    cleanup = support[support.index("async def cleanup_sandbox(") :]
+    assert cleanup.index("await _delete_cleanup_snapshots(") < cleanup.index(
+        "await _delete_cleanup_handle("
+    )
+    assert cleanup.index("await _delete_cleanup_sandbox_by_labels(") < cleanup.index(
+        "await _confirm_cleanup("
+    )
+    confirmation = support[
+        support.index("async def _confirm_cleanup(") : support.index(
+            "async def _close_cleanup_adapter("
+        )
+    ]
+    assert "await _delete_cleanup_snapshots(" in confirmation
     assert "remaining_snapshots" in support
     assert "production_smoke_reaper_labels" in reaper
     assert "ci_smoke_reaper_labels" in reaper

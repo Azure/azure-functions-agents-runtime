@@ -34,6 +34,7 @@ from .._logger import logger
 from .._observability import (
     FaultDomain,
     LifecycleStage,
+    RuntimeSpan,
     record_web_request,
     start_span,
 )
@@ -552,6 +553,124 @@ def _encode_query(query: dict[str, str] | None) -> str:
     return urllib.parse.urlencode(query)
 
 
+@dataclass(frozen=True)
+class _ReceivedResponse:
+    status: int
+    content_type: str | None
+    headers: dict[str, str]
+    body: bytes
+    truncated: bool
+
+
+def _request_body(params: WebRequestParams, headers: dict[str, str]) -> bytes | None:
+    if params.json_body is not None:
+        headers["Content-Type"] = "application/json"
+        return json.dumps(params.json_body).encode("utf-8")
+    if params.body is not None:
+        return params.body.encode("utf-8")
+    return None
+
+
+def _request_url(target: ValidatedTarget, query: dict[str, str] | None) -> str:
+    query_parts = [part for part in (target.query, _encode_query(query)) if part]
+    return urllib.parse.urlunsplit(
+        (
+            target.scheme,
+            _format_netloc(target.host, target.port, target.scheme),
+            target.path,
+            "&".join(query_parts),
+            "",
+        )
+    )
+
+
+async def _send_request(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    body: bytes | None,
+    target: ValidatedTarget,
+    timeout_seconds: float,
+    max_response_bytes: int,
+) -> _ReceivedResponse:
+    connector = aiohttp.TCPConnector(
+        resolver=_PinnedResolver(target.ips),
+        use_dns_cache=False,
+        ttl_dns_cache=0,
+        force_close=True,
+    )
+    async with aiohttp.ClientSession(connector=connector) as session, session.request(
+        method,
+        url,
+        headers=headers,
+        data=body,
+        allow_redirects=False,
+        timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+    ) as response:
+        if method == "HEAD":
+            body_bytes, truncated = b"", False
+        else:
+            body_bytes, truncated = await _read_capped(response, max_response_bytes)
+        return _ReceivedResponse(
+            status=response.status,
+            content_type=response.headers.get("Content-Type"),
+            headers=_redact_response_headers(response.headers),
+            body=body_bytes,
+            truncated=truncated,
+        )
+
+
+def _blocked_request_response(span: RuntimeSpan, exc: SSRFValidationError) -> str:
+    span.set_attribute("af.web_request.blocked_reason", exc.reason)
+    span.set_error(f"web_request blocked: {exc.reason}", fault_domain=FaultDomain.WEB_REQUEST)
+    record_web_request(error=True)
+    logger.warning("web_request: blocked (%s)", exc.reason)
+    return json.dumps({"error": f"Request blocked: {exc.reason}"})
+
+
+def _oversized_request_response(span: RuntimeSpan, max_request_bytes: int) -> str:
+    record_web_request(error=True)
+    span.set_error("request body exceeds max_request_bytes", fault_domain=FaultDomain.WEB_REQUEST)
+    return json.dumps({"error": f"request body exceeds max_request_bytes ({max_request_bytes})"})
+
+
+def _timeout_response(span: RuntimeSpan, timeout_seconds: float) -> str:
+    record_web_request(error=True)
+    span.set_error("web_request timed out", fault_domain=FaultDomain.WEB_REQUEST)
+    logger.warning("web_request: timed out after %ss", timeout_seconds)
+    return json.dumps({"error": "request timed out"})
+
+
+def _transport_error_response(span: RuntimeSpan, exc: aiohttp.ClientError) -> str:
+    record_web_request(error=True)
+    safe_msg = type(exc).__name__
+    span.set_error(safe_msg, fault_domain=FaultDomain.WEB_REQUEST)
+    logger.warning("web_request: transport error (%s)", safe_msg)
+    return json.dumps({"error": f"request failed: {safe_msg}"})
+
+
+def _response_payload(target: ValidatedTarget, method: str, response: _ReceivedResponse) -> str:
+    body, body_omitted_reason = _shape_body(
+        method=method,
+        body_bytes=response.body,
+        content_type=response.content_type,
+        truncated=response.truncated,
+    )
+    result: dict[str, Any] = {
+        "status": response.status,
+        "url": target.stripped_url,
+        "content_type": response.content_type,
+        "redirect_count": 0,
+        "response_headers": response.headers,
+        "body": body,
+        "body_truncated": response.truncated,
+        "body_omitted_reason": body_omitted_reason,
+    }
+    if body_omitted_reason == "binary":
+        result["response_bytes"] = len(response.body)
+    return json.dumps(result)
+
+
 # ---------------------------------------------------------------------------
 # Factory: create the (build-once, per-agent) web_request tool
 # ---------------------------------------------------------------------------
@@ -584,109 +703,36 @@ def create_web_request_tools(config: WebRequestConfig) -> list[FunctionTool]:
                     require_https=require_https,
                 )
             except SSRFValidationError as exc:
-                span.set_attribute("af.web_request.blocked_reason", exc.reason)
-                span.set_error(
-                    f"web_request blocked: {exc.reason}", fault_domain=FaultDomain.WEB_REQUEST
-                )
-                record_web_request(error=True)
-                logger.warning("web_request: blocked (%s)", exc.reason)
-                return json.dumps({"error": f"Request blocked: {exc.reason}"})
+                return _blocked_request_response(span, exc)
 
             span.set_attribute("server.address", target.host)
             span.set_attribute("url.scheme", target.scheme)
 
             request_headers = _sanitize_request_headers(params.headers)
-            request_body: bytes | None = None
-            if params.json_body is not None:
-                request_body = json.dumps(params.json_body).encode("utf-8")
-                request_headers["Content-Type"] = "application/json"
-            elif params.body is not None:
-                request_body = params.body.encode("utf-8")
+            request_body = _request_body(params, request_headers)
 
             if request_body is not None and len(request_body) > max_request_bytes:
-                record_web_request(error=True)
-                span.set_error(
-                    "request body exceeds max_request_bytes", fault_domain=FaultDomain.WEB_REQUEST
-                )
-                return json.dumps(
-                    {"error": f"request body exceeds max_request_bytes ({max_request_bytes})"}
-                )
+                return _oversized_request_response(span, max_request_bytes)
 
-            query_parts = [part for part in (target.query, _encode_query(params.query)) if part]
-            request_url = urllib.parse.urlunsplit(
-                (
-                    target.scheme,
-                    _format_netloc(target.host, target.port, target.scheme),
-                    target.path,
-                    "&".join(query_parts),
-                    "",
-                )
-            )
-
-            connector = aiohttp.TCPConnector(
-                resolver=_PinnedResolver(target.ips),
-                use_dns_cache=False,
-                ttl_dns_cache=0,
-                force_close=True,
-            )
             try:
-                async with aiohttp.ClientSession(connector=connector) as session, session.request(
+                response = await _send_request(
                     method,
-                    request_url,
-                    headers=request_headers,
-                    data=request_body,
-                    allow_redirects=False,
-                    timeout=aiohttp.ClientTimeout(total=timeout_seconds),
-                ) as response:
-                    if method == "HEAD":
-                        body_bytes, truncated = b"", False
-                    else:
-                        body_bytes, truncated = await _read_capped(response, max_response_bytes)
-                    status = response.status
-                    content_type = response.headers.get("Content-Type")
-                    response_headers = _redact_response_headers(response.headers)
+                    _request_url(target, params.query),
+                    request_headers,
+                    request_body,
+                    target,
+                    timeout_seconds,
+                    max_response_bytes,
+                )
             except TimeoutError:
-                record_web_request(error=True)
-                span.set_error("web_request timed out", fault_domain=FaultDomain.WEB_REQUEST)
-                logger.warning("web_request: timed out after %ss", timeout_seconds)
-                return json.dumps({"error": "request timed out"})
+                return _timeout_response(span, timeout_seconds)
             except aiohttp.ClientError as exc:
-                record_web_request(error=True)
-                # Use type name only — aiohttp exception messages can embed the
-                # full request URL (including query string) which would leak
-                # secrets or confidential query parameters back to the model.
-                safe_msg = type(exc).__name__
-                span.set_error(safe_msg, fault_domain=FaultDomain.WEB_REQUEST)
-                logger.warning("web_request: transport error (%s)", safe_msg)
-                return json.dumps({"error": f"request failed: {safe_msg}"})
+                return _transport_error_response(span, exc)
 
-            body, body_omitted_reason = _shape_body(
-                method=method,
-                body_bytes=body_bytes,
-                content_type=content_type,
-                truncated=truncated,
-            )
-
-            span.set_attribute("http.response.status_code", status)
-            span.set_attribute("af.web_request.response_bytes", len(body_bytes))
-            span.set_attribute("af.web_request.body_truncated", truncated)
+            span.set_attribute("http.response.status_code", response.status)
+            span.set_attribute("af.web_request.response_bytes", len(response.body))
+            span.set_attribute("af.web_request.body_truncated", response.truncated)
             record_web_request(error=False)
-
-            result: dict[str, Any] = {
-                "status": status,
-                "url": target.stripped_url,
-                "content_type": content_type,
-                "redirect_count": 0,
-                "response_headers": response_headers,
-                "body": body,
-                "body_truncated": truncated,
-                "body_omitted_reason": body_omitted_reason,
-            }
-            if body_omitted_reason == "binary":
-                # Body is omitted for binary content, but the caller still
-                # needs to know how large the (unreturned) payload was.
-                result["response_bytes"] = len(body_bytes)
-
-            return json.dumps(result)
+            return _response_payload(target, method, response)
 
     return [web_request]

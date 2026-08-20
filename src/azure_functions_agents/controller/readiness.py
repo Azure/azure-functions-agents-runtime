@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -39,8 +39,10 @@ from ..sandbox_runtime_limits import lifecycle_auto_delete_seconds
 from ..session_state import (
     TERMINAL_RUN_STATUSES,
     ActiveRunConflictError,
+    AdmissionDisposition,
     AppIdentity,
     ConcurrencyConflictError,
+    DurableOperationKind,
     DurableOperationPhase,
     DurableOwnerIdempotencyRecord,
     DurableRunRecord,
@@ -59,6 +61,7 @@ from ..session_state import (
     SessionStateContractError,
     SessionStateStore,
     SessionStateStoreError,
+    SessionStatus,
     StaleOperationTokenError,
     operation_correlation_label,
     operation_id_for_sequence,
@@ -124,6 +127,29 @@ QUARANTINE_REASONS: frozenset[str] = frozenset(
 )
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.25
 _RESUMABLE_FILE_OPERATION_STATUS_CODES = frozenset({409, 423, 425, 429, 500, 502, 503, 504})
+_ADMISSION_CONFIRMATION_TIMEOUT_SECONDS = 1.0
+_BOUNDED_TASK_DRAIN_TIMEOUT_SECONDS = 0.05
+_INDETERMINATE_PROVISION_RECOVERY_TIMEOUT_SECONDS = 1.0
+_DETACHED_BOUNDED_TASKS: set[object] = set()
+_PROVISION_SUBMIT_OPERATION_KIND: DurableOperationKind = "provision_submit"
+_SUBMIT_RUN_OPERATION_KIND: DurableOperationKind = "submit_run"
+_SUBMIT_OPERATION_KINDS: frozenset[DurableOperationKind] = frozenset(
+    {_PROVISION_SUBMIT_OPERATION_KIND, _SUBMIT_RUN_OPERATION_KIND}
+)
+_TOMBSTONED_SESSION_STATUS: SessionStatus = "tombstoned"
+_DELETED_SESSION_STATUS: SessionStatus = "deleted"
+_RETIRED_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
+    {_TOMBSTONED_SESSION_STATUS, _DELETED_SESSION_STATUS}
+)
+_DELETING_SESSION_STATUS: SessionStatus = "deleting"
+_NON_REUSABLE_SESSION_STATUSES: frozenset[SessionStatus] = (
+    _RETIRED_SESSION_STATUSES
+    | frozenset(
+    {_DELETING_SESSION_STATUS}
+    )
+)
+_ADMISSION_NOT_RESERVED: AdmissionDisposition = "not_reserved"
+_ADMISSION_POSSIBLY_COMMITTED: AdmissionDisposition = "possibly_committed"
 
 type _SessionLockKey = tuple[str, str]
 type TargetedReconciler = Callable[[OwnerPartition, str, "SetupDeadline"], Awaitable[None]]
@@ -464,6 +490,17 @@ class ProvisionedSubmission:
 
     outcome: ProvisionSubmitOutcome
     activated: ActivatedSession | None
+    setup_timed_out: bool = False
+    timeout_metadata: SetupTimeoutMetadata | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ProvisionSubmitPreparation:
+    state_binding: StateStoreBinding
+    provider: SandboxSessionProvider
+    package: CapturedContentPackage
+    partition: OwnerPartition
+    records: ProvisionSubmitRecords
 
 
 async def activate_session(
@@ -479,24 +516,65 @@ async def activate_session(
         runtime.get_state_store(), setup_deadline, phase=SetupPhase.STATE_STORE
     )
     partition = owner_partition(owner)
-    store = state_binding.store
+    resolved = await _resolve_activation_session(
+        runtime,
+        owner,
+        partition,
+        session_id,
+        state_binding,
+        setup_deadline,
+        allow_create=allow_create,
+    )
+    if isinstance(resolved, ActivatedSession):
+        return resolved
+    return await _activate_existing_session(
+        runtime,
+        owner,
+        partition,
+        resolved,
+        state_binding,
+        setup_deadline,
+    )
+
+
+async def _resolve_activation_session(
+    runtime: SessionRuntimeBinding,
+    owner: OwnerContext,
+    partition: OwnerPartition,
+    session_id: str,
+    state_binding: StateStoreBinding,
+    setup_deadline: SetupDeadline,
+    *,
+    allow_create: bool,
+) -> ActivatedSession | SessionRead:
     try:
-        session_read = await _within_setup_budget(
-            store.get_session(partition, session_id),
+        return await _within_setup_budget(
+            state_binding.store.get_session(partition, session_id),
             setup_deadline,
             phase=SetupPhase.SESSION_LOOKUP,
         )
     except SessionRowNotFoundError:
-        if not allow_create:
-            raise SessionActivationNotFoundError("Session was not found for this owner.") from None
-        return await _create_and_activate_session(
-            runtime,
-            owner,
-            partition,
-            session_id,
-            state_binding,
-            setup_deadline,
-        )
+        if allow_create:
+            return await _create_and_activate_session(
+                runtime,
+                owner,
+                partition,
+                session_id,
+                state_binding,
+                setup_deadline,
+            )
+        raise SessionActivationNotFoundError("Session was not found for this owner.") from None
+
+
+async def _activate_existing_session(
+    runtime: SessionRuntimeBinding,
+    owner: OwnerContext,
+    partition: OwnerPartition,
+    session_read: SessionRead,
+    state_binding: StateStoreBinding,
+    setup_deadline: SetupDeadline,
+) -> ActivatedSession:
+    store = state_binding.store
 
     session = session_read.record
     _verify_owner_binding(owner, session)
@@ -507,7 +585,7 @@ async def activate_session(
         raise SessionActivationGoneError(
             "Session content belongs to a retired deployment epoch."
         )
-    if session.status in {"tombstoned", "deleted"}:
+    if session.status in _RETIRED_SESSION_STATUSES:
         raise SessionActivationGoneError("Session has been retired.")
     if session.status == "quarantined":
         raise SessionActivationNotFoundError("Session routing binding cannot be trusted.")
@@ -528,30 +606,13 @@ async def activate_session(
     )
     handle: SandboxSessionHandle | None = None
     try:
-        if session.status == "suspended":
-            handle = await _within_setup_budget(
-                provider.resume(
-                    persisted,
-                    expected,
-                    readiness_timeout_seconds=setup_deadline.remaining_setup_seconds(
-                        phase=SetupPhase.SESSION_RESUME
-                    ),
-                ),
-                setup_deadline,
-                phase=SetupPhase.SESSION_RESUME,
-            )
-        else:
-            handle = await _within_setup_budget(
-                provider.attach(
-                    persisted,
-                    expected,
-                    readiness_timeout_seconds=setup_deadline.remaining_setup_seconds(
-                        phase=SetupPhase.SESSION_ATTACH
-                    ),
-                ),
-                setup_deadline,
-                phase=SetupPhase.SESSION_ATTACH,
-            )
+        handle = await _attach_or_resume_existing_session(
+            provider,
+            persisted,
+            expected,
+            session,
+            setup_deadline,
+        )
         await _within_setup_budget(
             _verify_optional_harness_artifacts(
                 handle,
@@ -562,9 +623,7 @@ async def activate_session(
             phase=SetupPhase.MANIFEST,
         )
     except SandboxGroupAuthorizationError:
-        if handle is not None:
-            with suppress(Exception):
-                await handle.close()
+        await _close_handle_if_open(handle)
         raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
     except SandboxManifestMismatchError:
         await _quarantine_detected_binding(
@@ -578,9 +637,7 @@ async def activate_session(
             "Session sandbox binding cannot be trusted."
         ) from None
     except SessionReadinessArtifactError as exc:
-        if handle is not None:
-            with suppress(Exception):
-                await handle.close()
+        await _close_handle_if_open(handle)
         await _quarantine_detected_binding(
             store,
             session,
@@ -599,6 +656,44 @@ async def activate_session(
         partition=partition,
         store=store,
     )
+
+
+async def _attach_or_resume_existing_session(
+    provider: SandboxSessionProvider,
+    persisted: PersistedSandboxBinding,
+    expected: ExpectedSandboxManifestBinding,
+    session: DurableSessionRecord,
+    setup_deadline: SetupDeadline,
+) -> SandboxSessionHandle:
+    if session.status == "suspended":
+        return await _within_setup_budget(
+            provider.resume(
+                persisted,
+                expected,
+                readiness_timeout_seconds=setup_deadline.remaining_setup_seconds(
+                    phase=SetupPhase.SESSION_RESUME
+                ),
+            ),
+            setup_deadline,
+            phase=SetupPhase.SESSION_RESUME,
+        )
+    return await _within_setup_budget(
+        provider.attach(
+            persisted,
+            expected,
+            readiness_timeout_seconds=setup_deadline.remaining_setup_seconds(
+                phase=SetupPhase.SESSION_ATTACH
+            ),
+        ),
+        setup_deadline,
+        phase=SetupPhase.SESSION_ATTACH,
+    )
+
+
+async def _close_handle_if_open(handle: SandboxSessionHandle | None) -> None:
+    if handle is not None:
+        with suppress(Exception):
+            await handle.close()
 
 
 async def revalidate_before_submit(
@@ -724,7 +819,7 @@ async def rearm_idle_lifecycle(
                 "disarmed idle lifecycle requires its active durable operation"
             ) from exc
         if (
-            operation.record.kind not in {"provision_submit", "submit_run"}
+            operation.record.kind not in _SUBMIT_OPERATION_KINDS
             or operation.record.target.run_id is None
         ):
             return False
@@ -733,11 +828,10 @@ async def rearm_idle_lifecycle(
             activated,
             expected_run_id=operation.record.target.run_id,
         )
-    if current.record.active_run_id is not None or current.record.status in {
-        "deleting",
-        "deleted",
-        "tombstoned",
-    }:
+    if (
+        current.record.active_run_id is not None
+        or current.record.status in _NON_REUSABLE_SESSION_STATUSES
+    ):
         return False
     if current.record.idle_policy_armed:
         return False
@@ -842,7 +936,7 @@ async def begin_submit_operation(
             run_id=run.run_id,
         ),
         sequence=sequence,
-        kind="submit_run",
+        kind=_SUBMIT_RUN_OPERATION_KIND,
         phase="submit_disarm",
         state="active",
         correlation_label=operation_correlation_label(current.record.session_id, sequence),
@@ -941,7 +1035,7 @@ async def finalize_submit_operation(
     )
     if current.record.active_operation_id is None:
         return False
-    if current.record.status in {"tombstoned", "deleting", "deleted"}:
+    if current.record.status in _NON_REUSABLE_SESSION_STATUSES:
         return False
     try:
         operation = await activated.store.get_operation(
@@ -959,7 +1053,7 @@ async def finalize_submit_operation(
         token=uuid4().hex,
         updated_at=datetime.now(UTC),
     )
-    if fence is None or fence.kind not in {"provision_submit", "submit_run"}:
+    if fence is None or fence.kind not in _SUBMIT_OPERATION_KINDS:
         return False
     if (
         fence.target.sandbox_id != activated.session.sandbox_id
@@ -995,7 +1089,9 @@ async def finalize_submit_operation(
         updated_at=datetime.now(UTC),
     )
     phase: DurableOperationPhase = (
-        "provision_rearm" if fence.kind == "provision_submit" else "submit_rearm"
+        "provision_rearm"
+        if fence.kind == _PROVISION_SUBMIT_OPERATION_KIND
+        else "submit_rearm"
     )
     fence = await activated.store.advance_operation(
         fence=fence,
@@ -1042,7 +1138,7 @@ async def abort_submit_operation(
     )
     if current.record.active_run_id is not None:
         return
-    if current.record.status in {"tombstoned", "deleting", "deleted"}:
+    if current.record.status in _NON_REUSABLE_SESSION_STATUSES:
         return
     await activated.handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime))
     released = _session_after_submit_rearm(
@@ -1193,6 +1289,42 @@ async def provision_new_session_submit(
     setup_deadline: SetupDeadline,
 ) -> ProvisionedSubmission:
     """Reserve the first run before any sandbox create, then provision its operation."""
+    preparation = await _prepare_provision_submit(
+        runtime,
+        owner,
+        session_id=session_id,
+        run_id=run_id,
+        timeout=timeout,
+        attempt=attempt,
+        setup_deadline=setup_deadline,
+    )
+    outcome = await _await_admission_with_setup_timeout(
+        lambda: preparation.state_binding.store.begin_provision_submit(preparation.records),
+        setup_deadline,
+        lambda: _confirm_provision_admission_after_setup_timeout(
+            preparation.state_binding.store,
+            preparation.records,
+        ),
+        phase=SetupPhase.PROVISION_CREATE,
+    )
+    return await _complete_provision_submit(
+        runtime,
+        preparation,
+        outcome,
+        setup_deadline,
+    )
+
+
+async def _prepare_provision_submit(
+    runtime: SessionRuntimeBinding,
+    owner: OwnerContext,
+    *,
+    session_id: str,
+    run_id: str,
+    timeout: float | None,
+    attempt: IdempotencyAttempt | None,
+    setup_deadline: SetupDeadline,
+) -> _ProvisionSubmitPreparation:
     if runtime.creation_source is None and runtime.create_profile is None:
         raise SessionCreationUnavailableError(
             "No runtime bootstrap source is available for new sandbox sessions."
@@ -1218,7 +1350,7 @@ async def provision_new_session_submit(
             run_id=run_id,
         ),
         sequence=sequence,
-        kind="provision_submit",
+        kind=_PROVISION_SUBMIT_OPERATION_KIND,
         phase="provision_create",
         state="active",
         correlation_label=operation_correlation_label(session_id, sequence),
@@ -1288,93 +1420,196 @@ async def provision_new_session_submit(
             created_at=now,
         )
     )
-    outcome = await _within_setup_budget(
-        state_binding.store.begin_provision_submit(
-            ProvisionSubmitRecords.create(
-                session,
-                run,
-                operation,
-                owner_idempotency,
-            )
-        ),
-        setup_deadline,
-        phase=SetupPhase.PROVISION_CREATE,
+    records = ProvisionSubmitRecords.create(
+        session,
+        run,
+        operation,
+        owner_idempotency,
     )
-    if outcome.replayed:
-        if (
-            outcome.run.status in TERMINAL_RUN_STATUSES
-            and outcome.run.status_reason == SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE
-        ):
-            raise SessionActivationAuthorizationError(
-                SANDBOX_GROUP_AUTHORIZATION_MESSAGE
-            )
-        existing_session = await _within_setup_budget(
-            state_binding.store.get_session(partition, outcome.run.session_id),
-            setup_deadline,
-            phase=SetupPhase.SESSION_LOOKUP,
-        )
-        if existing_session.record.active_operation_id is None:
-            return ProvisionedSubmission(outcome=outcome, activated=None)
-        existing_operation = await _within_setup_budget(
-            state_binding.store.get_operation(
-                partition,
-                outcome.run.session_id,
-                existing_session.record.active_operation_id,
-            ),
-            setup_deadline,
-            phase=SetupPhase.OPERATION_STATE,
-        )
-        if existing_operation.record.kind != "provision_submit":
-            return ProvisionedSubmission(outcome=outcome, activated=None)
-        fence = await _within_setup_budget(
-            state_binding.store.takeover_expired_operation(
-                owner_partition=partition,
-                session_id=outcome.run.session_id,
-                token=uuid4().hex,
-                updated_at=datetime.now(UTC),
-            ),
-            setup_deadline,
-            phase=SetupPhase.PROVISION_RECONCILE,
-        )
-        if fence is None:
-            raise _setup_timeout_error(
+    return _ProvisionSubmitPreparation(
+        state_binding=state_binding,
+        provider=provider,
+        package=package,
+        partition=partition,
+        records=records,
+    )
+
+
+async def _complete_provision_submit(
+    runtime: SessionRuntimeBinding,
+    preparation: _ProvisionSubmitPreparation,
+    outcome: ProvisionSubmitOutcome,
+    setup_deadline: SetupDeadline,
+) -> ProvisionedSubmission:
+    if outcome.admission == _ADMISSION_NOT_RESERVED:
+        raise _setup_timeout_error(setup_deadline, SetupPhase.PROVISION_CREATE)
+    if outcome.admission == _ADMISSION_POSSIBLY_COMMITTED:
+        return _indeterminate_provision_submission(outcome, setup_deadline)
+    if (
+        outcome.replayed
+        and outcome.run.status in TERMINAL_RUN_STATUSES
+        and outcome.run.status_reason == SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE
+    ):
+        raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE)
+    activated: ActivatedSession | None = None
+    try:
+        if outcome.replayed:
+            return await _resume_replayed_provision_submit(
+                runtime,
+                preparation,
+                outcome,
                 setup_deadline,
-                SetupPhase.PROVISION_RECONCILE,
-                reason=SetupTimeoutReason.PROVISION_LEASE_LIVE,
             )
+        if outcome.fence is None:
+            return ProvisionedSubmission(outcome=outcome, activated=None)
         activated = await _provision_reserved_session(
             runtime,
-            state_binding,
-            provider,
-            existing_session.record,
-            fence,
-            package,
+            preparation.state_binding,
+            preparation.provider,
+            preparation.records.session,
+            outcome.fence,
+            preparation.package,
             setup_deadline,
         )
-        return ProvisionedSubmission(outcome=outcome, activated=activated)
-    assert outcome.fence is not None
-    activated = await _provision_reserved_session(
-        runtime,
-        state_binding,
-        provider,
-        session,
-        outcome.fence,
-        package,
-        setup_deadline,
-    )
-    try:
         await _within_setup_budget(
             runtime.reconcile_after_create(),
             setup_deadline,
             phase=SetupPhase.POST_CREATE_RECONCILE,
         )
+        return ProvisionedSubmission(outcome=outcome, activated=activated)
+    except (SessionActivationSetupTimeoutError, SetupBudgetExpiredError) as exc:
+        await _close_handle_if_open(None if activated is None else activated.handle)
+        return ProvisionedSubmission(
+            outcome=outcome,
+            activated=None,
+            setup_timed_out=True,
+            timeout_metadata=exc.metadata,
+        )
+    except StaleOperationTokenError:
+        await _close_handle_if_open(None if activated is None else activated.handle)
+        return await _stale_provision_submission(
+            preparation.state_binding.store,
+            preparation.partition,
+            outcome,
+        )
     except BaseException:
-        try:
-            await activated.handle.close()
-        except Exception:
-            logger.exception("Could not close sandbox handle after post-create reconciliation failure")
+        if activated is not None:
+            try:
+                await activated.handle.close()
+            except Exception:
+                logger.exception("Could not close sandbox handle after post-create reconciliation failure")
         raise
+
+
+def _indeterminate_provision_submission(
+    outcome: ProvisionSubmitOutcome,
+    setup_deadline: SetupDeadline,
+) -> ProvisionedSubmission:
+    metadata = setup_deadline.timeout_metadata(
+        phase=SetupPhase.PROVISION_CREATE,
+        reason=SetupTimeoutReason.PROVISION_INDETERMINATE,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+    )
+    return ProvisionedSubmission(
+        outcome=outcome,
+        activated=None,
+        setup_timed_out=True,
+        timeout_metadata=metadata,
+    )
+
+
+async def _resume_replayed_provision_submit(
+    runtime: SessionRuntimeBinding,
+    preparation: _ProvisionSubmitPreparation,
+    outcome: ProvisionSubmitOutcome,
+    setup_deadline: SetupDeadline,
+) -> ProvisionedSubmission:
+    if outcome.run.status in TERMINAL_RUN_STATUSES:
+        return ProvisionedSubmission(outcome=outcome, activated=None)
+    existing_session = await _within_setup_budget(
+        preparation.state_binding.store.get_session(
+            preparation.partition,
+            outcome.run.session_id,
+        ),
+        setup_deadline,
+        phase=SetupPhase.SESSION_LOOKUP,
+    )
+    operation_id = existing_session.record.active_operation_id
+    if operation_id is None:
+        return ProvisionedSubmission(outcome=outcome, activated=None)
+    existing_operation = await _within_setup_budget(
+        preparation.state_binding.store.get_operation(
+            preparation.partition,
+            outcome.run.session_id,
+            operation_id,
+        ),
+        setup_deadline,
+        phase=SetupPhase.OPERATION_STATE,
+    )
+    if existing_operation.record.kind != _PROVISION_SUBMIT_OPERATION_KIND:
+        return ProvisionedSubmission(outcome=outcome, activated=None)
+    fence = await _within_setup_budget(
+        preparation.state_binding.store.takeover_expired_operation(
+            owner_partition=preparation.partition,
+            session_id=outcome.run.session_id,
+            token=uuid4().hex,
+            updated_at=datetime.now(UTC),
+        ),
+        setup_deadline,
+        phase=SetupPhase.PROVISION_RECONCILE,
+    )
+    if fence is None:
+        return _live_provision_lease_submission(outcome, setup_deadline)
+    activated = await _provision_reserved_session(
+        runtime,
+        preparation.state_binding,
+        preparation.provider,
+        existing_session.record,
+        fence,
+        preparation.package,
+        setup_deadline,
+    )
     return ProvisionedSubmission(outcome=outcome, activated=activated)
+
+
+def _live_provision_lease_submission(
+    outcome: ProvisionSubmitOutcome,
+    setup_deadline: SetupDeadline,
+) -> ProvisionedSubmission:
+    metadata = setup_deadline.timeout_metadata(
+        phase=SetupPhase.PROVISION_RECONCILE,
+        reason=SetupTimeoutReason.PROVISION_LEASE_LIVE,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+    )
+    return ProvisionedSubmission(
+        outcome=outcome,
+        activated=None,
+        setup_timed_out=True,
+        timeout_metadata=metadata,
+    )
+
+
+async def _stale_provision_submission(
+    store: SessionStateStore,
+    partition: OwnerPartition,
+    outcome: ProvisionSubmitOutcome,
+) -> ProvisionedSubmission:
+    current_run = await store.get_run(
+        partition,
+        outcome.run.session_id,
+        outcome.run.run_id,
+    )
+    current_session = await store.get_session(partition, outcome.run.session_id)
+    return ProvisionedSubmission(
+        outcome=replace(
+            outcome,
+            run=current_run.record,
+            run_etag=current_run.etag,
+            session_etag=current_session.etag,
+            fence=None,
+        ),
+        activated=None,
+    )
 
 
 async def _provision_reserved_session(
@@ -1398,7 +1633,7 @@ async def _provision_reserved_session(
             setup_deadline,
         )
     except SandboxCreateOutcomeUnknownError:
-        await _preserve_indeterminate_provision(state_binding.store, fence)
+        await _preserve_indeterminate_provision(state_binding.store, fence, setup_deadline)
         raise _setup_timeout_error(
             setup_deadline,
             SetupPhase.PROVISION_RECONCILE,
@@ -1432,13 +1667,24 @@ async def _provision_reserved_session(
 async def _preserve_indeterminate_provision(
     store: SessionStateStore,
     fence: SessionOperationFence,
+    setup_deadline: SetupDeadline,
 ) -> None:
     """Persist an accepted-create outcome that needs stable-label reconciliation."""
-    await store.advance_operation(
-        fence=fence,
-        phase="provision_reconcile",
-        error_code="provision_create_indeterminate",
-        updated_at=datetime.now(UTC),
+    try:
+        timeout_seconds = min(
+            _INDETERMINATE_PROVISION_RECOVERY_TIMEOUT_SECONDS,
+            setup_deadline.remaining_setup_seconds(phase=SetupPhase.PROVISION_RECONCILE),
+        )
+    except SetupBudgetExpiredError:
+        return
+    await _bounded_task_result(
+        store.advance_operation(
+            fence=fence,
+            phase="provision_reconcile",
+            error_code="provision_create_indeterminate",
+            updated_at=datetime.now(UTC),
+        ),
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -1452,7 +1698,7 @@ async def _is_indeterminate_provision(
         fence.operation_id,
     )
     return (
-        operation.record.kind == "provision_submit"
+        operation.record.kind == _PROVISION_SUBMIT_OPERATION_KIND
         and operation.record.phase == "provision_reconcile"
     )
 
@@ -1487,7 +1733,7 @@ async def _fail_reserved_provision_authorization(
         digest_kind=current.record.digest_kind,
         digest=current.record.digest,
         protocol=current.record.protocol,
-        status="deleting",
+        status=_DELETING_SESSION_STATUS,
         last_activity_at=current.record.last_activity_at,
         expires_at=current.record.expires_at,
         idle_policy_armed=False,
@@ -1537,6 +1783,15 @@ async def _provision_reserved_session_inner(
         setup_deadline,
         phase=SetupPhase.OPERATION_STATE,
     )
+    current = await _within_setup_budget(
+        state_binding.store.get_session(session.owner_partition, session.session_id),
+        setup_deadline,
+        phase=SetupPhase.SESSION_LOOKUP,
+    )
+    if not fence.matches(current.record, operation.record):
+        raise StaleOperationTokenError(
+            f"operation {fence.operation_id!r} provision fence is stale"
+        )
     phase = operation.record.phase
     if phase not in {
         "provision_create",
@@ -1563,7 +1818,10 @@ async def _provision_reserved_session_inner(
         labels=labels,
         setup_deadline=setup_deadline,
     )
-    create_request = replace(create_request, reconcile_only=phase == "provision_reconcile")
+    create_request = replace(
+        create_request,
+        reconcile_only=phase == "provision_reconcile" or operation.record.attempt_count > 0,
+    )
     current = await _within_setup_budget(
         state_binding.store.get_session(session.owner_partition, session.session_id),
         setup_deadline,
@@ -1698,7 +1956,7 @@ async def _create_reserved_sandbox(
         )
     except (asyncio.CancelledError, SessionActivationSetupTimeoutError):
         with suppress(StaleOperationTokenError):
-            await _preserve_indeterminate_provision(store, fence)
+            await _preserve_indeterminate_provision(store, fence, setup_deadline)
         raise
 
 
@@ -1970,27 +2228,13 @@ async def _create_and_activate_session(
     persisted_session = initial_session
     succeeded = False
     try:
-        try:
-            handle = await _within_setup_budget(
-                provider.create(create_request, persisted_group=group),
-                setup_deadline,
-                phase=SetupPhase.PROVISION_CREATE,
-            )
-        except SandboxCapacityError:
-            await _within_setup_budget(
-                runtime.reap_for_capacity(), setup_deadline, phase=SetupPhase.CAPACITY_REAP
-            )
-            create_request = replace(
-                create_request,
-                remaining_setup_budget_seconds=setup_deadline.remaining_setup_seconds(
-                    phase=SetupPhase.PROVISION_CREATE
-                ),
-            )
-            handle = await _within_setup_budget(
-                provider.create(create_request, persisted_group=group),
-                setup_deadline,
-                phase=SetupPhase.PROVISION_CREATE,
-            )
+        handle = await _create_sandbox_with_capacity_recovery(
+            runtime,
+            provider,
+            create_request,
+            group,
+            setup_deadline,
+        )
         await _within_setup_budget(
             handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime)),
             setup_deadline,
@@ -2091,6 +2335,38 @@ async def _create_and_activate_session(
             await handle.close()
 
 
+async def _create_sandbox_with_capacity_recovery(
+    runtime: SessionRuntimeBinding,
+    provider: SandboxSessionProvider,
+    create_request: SandboxCreateRequest,
+    group: SandboxGroupBinding,
+    setup_deadline: SetupDeadline,
+) -> SandboxSessionHandle:
+    try:
+        return await _within_setup_budget(
+            provider.create(create_request, persisted_group=group),
+            setup_deadline,
+            phase=SetupPhase.PROVISION_CREATE,
+        )
+    except SandboxCapacityError:
+        await _within_setup_budget(
+            runtime.reap_for_capacity(),
+            setup_deadline,
+            phase=SetupPhase.CAPACITY_REAP,
+        )
+        retry_request = replace(
+            create_request,
+            remaining_setup_budget_seconds=setup_deadline.remaining_setup_seconds(
+                phase=SetupPhase.PROVISION_CREATE
+            ),
+        )
+        return await _within_setup_budget(
+            provider.create(retry_request, persisted_group=group),
+            setup_deadline,
+            phase=SetupPhase.PROVISION_CREATE,
+        )
+
+
 async def _wait_for_created_manifest(
     handle: SandboxSessionHandle,
     *,
@@ -2146,9 +2422,149 @@ async def _within_setup_budget[T](
         async with asyncio.timeout(setup_deadline.remaining_setup_seconds(phase=phase)):
             return await operation
     except SetupBudgetExpiredError:
+        if isinstance(operation, Coroutine):
+            operation.close()
         raise
     except TimeoutError:
         raise _setup_timeout_error(setup_deadline, phase) from None
+
+
+async def _await_admission_with_setup_timeout[T](
+    operation_factory: Callable[[], Awaitable[T]],
+    setup_deadline: SetupDeadline,
+    confirm_after_timeout: Callable[[], Awaitable[T]],
+    *,
+    phase: SetupPhase,
+) -> T:
+    """Cancel and observe an admission task before resolving a timed-out acknowledgement."""
+    started = False
+    timed_out = False
+
+    async def run() -> T:
+        nonlocal started
+        started = True
+        return await operation_factory()
+
+    task = asyncio.ensure_future(run())
+    try:
+        done, _pending = await asyncio.wait(
+            {task},
+            timeout=setup_deadline.remaining_setup_seconds(phase=phase),
+        )
+        if task in done:
+            return task.result()
+        timed_out = True
+        return await _resolve_timed_out_admission(
+            task,
+            started=started,
+            setup_deadline=setup_deadline,
+            confirm_after_timeout=confirm_after_timeout,
+            phase=phase,
+        )
+    except BaseException:
+        if not timed_out:
+            await _cancel_and_drain_bounded_task(task)
+        raise
+
+
+async def _resolve_timed_out_admission[T](
+    task: asyncio.Future[T],
+    *,
+    started: bool,
+    setup_deadline: SetupDeadline,
+    confirm_after_timeout: Callable[[], Awaitable[T]],
+    phase: SetupPhase,
+) -> T:
+    await _cancel_and_drain_bounded_task(task)
+    if not started:
+        raise _setup_timeout_error(setup_deadline, phase) from None
+    return await confirm_after_timeout()
+
+
+async def _cancel_and_drain_bounded_task[T](task: asyncio.Future[T]) -> None:
+    """Cancel a bounded task, briefly drain it, and retain it until completion."""
+    if task.done():
+        _consume_bounded_task_completion(task)
+        return
+    task.cancel()
+    try:
+        await asyncio.wait({task}, timeout=_BOUNDED_TASK_DRAIN_TIMEOUT_SECONDS)
+    finally:
+        if task.done():
+            _consume_bounded_task_completion(task)
+        else:
+            _detach_bounded_task(task)
+
+
+def _detach_bounded_task[T](task: asyncio.Future[T]) -> None:
+    """Keep an unresponsive bounded task alive until its terminal outcome is observed."""
+    if task in _DETACHED_BOUNDED_TASKS:
+        return
+    _DETACHED_BOUNDED_TASKS.add(task)
+    task.add_done_callback(_consume_detached_bounded_task)
+
+
+def _consume_detached_bounded_task[T](task: asyncio.Future[T]) -> None:
+    try:
+        _consume_bounded_task_completion(task)
+    finally:
+        _DETACHED_BOUNDED_TASKS.discard(task)
+
+
+def _consume_bounded_task_completion[T](task: asyncio.Future[T]) -> None:
+    with suppress(BaseException):
+        task.result()
+
+
+async def _bounded_task_result[T](
+    operation: Awaitable[T],
+    *,
+    timeout_seconds: float,
+) -> T | None:
+    """Await a task to completion or retain it while its cancellation finishes."""
+    task = asyncio.ensure_future(operation)
+    try:
+        done, _pending = await asyncio.wait(
+            {task},
+            timeout=timeout_seconds,
+        )
+    except BaseException:
+        await _cancel_and_drain_bounded_task(task)
+        raise
+    if task not in done:
+        await _cancel_and_drain_bounded_task(task)
+        return None
+    try:
+        return task.result()
+    except asyncio.CancelledError:
+        return None
+
+
+async def _bounded_admission_confirmation[T](operation: Awaitable[T], fallback: T) -> T:
+    """Bound one post-timeout point read without leaving its task behind."""
+    result = await _bounded_task_result(
+        operation,
+        timeout_seconds=_ADMISSION_CONFIRMATION_TIMEOUT_SECONDS,
+    )
+    return fallback if result is None else result
+
+
+async def _confirm_provision_admission_after_setup_timeout(
+    store: SessionStateStore,
+    records: ProvisionSubmitRecords,
+) -> ProvisionSubmitOutcome:
+    fallback = ProvisionSubmitOutcome(
+        run=records.run,
+        run_etag=None,
+        session_etag=None,
+        fence=None,
+        replayed=False,
+        admission=_ADMISSION_POSSIBLY_COMMITTED,
+    )
+    return await _bounded_admission_confirmation(
+        store.confirm_provision_submit(records),
+        fallback,
+    )
 
 
 async def _capture_current_package(

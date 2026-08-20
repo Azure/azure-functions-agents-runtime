@@ -8,9 +8,10 @@ import json
 import math
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -69,6 +70,11 @@ from .transport.transport_models import (
     SandboxGroupBinding,
 )
 from .workflows import build_workflow_integration
+
+if TYPE_CHECKING:
+    from .registration.capabilities import AgentCapabilities
+    from .registration.catalog import AgentCatalog
+    from .workflows.workflow_schema import WorkflowPlanPolicy
 
 DEFAULT_RECONCILER_TIMER_PASS_TIMEOUT_SECONDS = 240.0
 
@@ -583,6 +589,168 @@ def _fail_on_duplicate_slugs(resolved_agents: list[ResolvedAgent]) -> set[str]:
     return set(sources_by_slug)
 
 
+@dataclass(frozen=True)
+class _AgentWorkflowSetup:
+    """Workflow addenda and policy resolved for a single agent."""
+
+    enabled: bool = False
+    chat_system_addendum: str | None = None
+    trigger_system_addendum: str | None = None
+    policy: WorkflowPlanPolicy | None = None
+
+
+def _resolve_agent_workflow_setup(
+    app: func.FunctionApp,
+    resolved: ResolvedAgent,
+    capabilities: AgentCapabilities,
+    catalog: AgentCatalog,
+) -> _AgentWorkflowSetup:
+    """Build workflow integration for main; warn-and-skip for non-main agents."""
+    if resolved.is_main:
+        integration = build_workflow_integration(
+            app,
+            resolved.metadata,
+            workflow_tools=capabilities.filtered_workflow_tools,
+            workflow_subagents=(
+                resolved.workflows.subagents if resolved.workflows is not None else ()
+            ),
+            catalog=catalog,
+        )
+        return _AgentWorkflowSetup(
+            enabled=integration.enabled,
+            chat_system_addendum=integration.chat_system_addendum,
+            trigger_system_addendum=integration.trigger_system_addendum,
+            policy=integration.plan_policy,
+        )
+    if _workflows_requested(resolved.workflows):
+        logger.warning(
+            "workflows.enabled is only honored on main.agent.md; ignoring "
+            "workflows for agent %s",
+            resolved.name,
+        )
+    return _AgentWorkflowSetup()
+
+
+def _global_system_tools(global_config: GlobalConfig) -> set[str]:
+    """Return the built-in system tools active from global configuration."""
+    tools: set[str] = set()
+    system_tools = global_config.system_tools
+    if system_tools and system_tools.dynamic_sessions_code_interpreter:
+        tools.add("dynamic_sessions_code_interpreter")
+    if not (system_tools and system_tools.web_request is False):
+        tools.add("web_request")
+    return tools
+
+
+def _agent_system_tools(resolved: ResolvedAgent) -> set[str]:
+    """Return the built-in system tools an individual agent opts into."""
+    tools: set[str] = set()
+    if resolved.sandbox_config:
+        tools.add("dynamic_sessions_code_interpreter")
+    if resolved.web_request_config:
+        tools.add("web_request")
+    return tools
+
+
+def _enabled_builtin_endpoint_names(builtin_endpoints: Any) -> list[str]:
+    names: list[str] = []
+    if builtin_endpoints.debug_chat_ui:
+        names.append("debug_chat_ui")
+    if builtin_endpoints.chat_api:
+        names.append("chat_api")
+    if builtin_endpoints.mcp:
+        names.append("mcp")
+    return names
+
+
+def _build_agent_summary(
+    resolved: ResolvedAgent,
+    capability_names: dict[str, list[str]],
+    workflow_setup: _AgentWorkflowSetup,
+) -> dict[str, Any]:
+    agent_info: dict[str, Any] = {
+        "source_file": source_marker(resolved.source_file),
+        "registered_capabilities": capability_names,
+        "trigger_type": resolved.trigger.type if resolved.trigger else None,
+    }
+    if _builtin_endpoints_enabled(resolved.builtin_endpoints):
+        agent_info["builtin_endpoints"] = _enabled_builtin_endpoint_names(
+            resolved.builtin_endpoints
+        )
+    if workflow_setup.enabled:
+        agent_info["workflows"] = "enabled"
+    return agent_info
+
+
+def _register_resolved_agent(
+    app: func.FunctionApp,
+    resolved: ResolvedAgent,
+    *,
+    catalog: AgentCatalog,
+    session_runtime: SessionRuntimeBinding | None,
+    terminal_bindings: Mapping[str, AgentBinding],
+    skill_name_by_path: dict[str, str],
+) -> dict[str, Any]:
+    """Register one agent's trigger and endpoints (pass 2) and summarize it.
+
+    The identity slug (pass 1a) is already globally unique, so it doubles as the
+    registered function name and built-in endpoint route with no de-duplication.
+    """
+    capabilities = catalog[resolved.slug].capabilities
+    workflow_setup = _resolve_agent_workflow_setup(app, resolved, capabilities, catalog)
+
+    capability_names = _serialize_capabilities_for_log(
+        user_tools=capabilities.filtered_user_tools,
+        mcp_tools=capabilities.filtered_mcp_tools,
+        skill_paths=capabilities.enabled_skill_paths,
+        skill_name_by_path=skill_name_by_path,
+    )
+    logger.info(
+        "agent_capabilities_registered: source_file=%s user_tools=%s mcp_servers=%s skills=%s",
+        source_marker(resolved.source_file),
+        capability_names["user_tools"],
+        capability_names["mcp_servers"],
+        capability_names["skills"],
+    )
+
+    if resolved.trigger is not None:
+        register_agent(
+            app,
+            resolved,
+            capabilities,
+            function_name=resolved.slug,
+            catalog=catalog,
+            session_runtime=session_runtime,
+            workflows_enabled=workflow_setup.enabled,
+            workflow_system_addendum=workflow_setup.trigger_system_addendum,
+            workflow_policy=workflow_setup.policy,
+        )
+    if _builtin_endpoints_enabled(resolved.builtin_endpoints):
+        register_builtin_endpoints(
+            app,
+            resolved,
+            capabilities,
+            slug=resolved.slug,
+            workflows_enabled=workflow_setup.enabled,
+            workflow_system_addendum=workflow_setup.chat_system_addendum,
+            workflow_policy=workflow_setup.policy,
+            catalog=catalog,
+            session_runtime=session_runtime,
+        )
+    if session_runtime is not None:
+        management_auth = _sandbox_management_auth(resolved)
+        if management_auth is not None:
+            register_sandbox_management_endpoints(
+                app,
+                slug=resolved.slug,
+                auth=management_auth,
+                session_runtime=session_runtime,
+                binding=terminal_bindings[resolved.slug],
+            )
+
+    return _build_agent_summary(resolved, capability_names, workflow_setup)
+
+
 def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     """Build and return a fully-configured Azure Functions app.
 
@@ -636,15 +804,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     # Collect indexing summary for structured logging
     agents_summary: list[dict[str, Any]] = []
     system_tools_used: set[str] = set()
-
-    # Track global system tools configuration
-    if (
-        global_config.system_tools
-        and global_config.system_tools.dynamic_sessions_code_interpreter
-    ):
-        system_tools_used.add("dynamic_sessions_code_interpreter")
-    if not (global_config.system_tools and global_config.system_tools.web_request is False):
-        system_tools_used.add("web_request")
+    system_tools_used |= _global_system_tools(global_config)
 
     catalog = aca_composition.catalog
     terminal_bindings = aca_composition.bindings
@@ -652,139 +812,17 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
     # --- Two-pass composition, pass 2 (FRD 0007 §4.2): mutate `app` --------------------
     for resolved in resolved_agents:
-        capabilities = catalog[resolved.slug].capabilities
-        management_auth = (
-            _sandbox_management_auth(resolved) if session_runtime is not None else None
-        )
-
-        workflows_enabled = False
-        workflow_system_addendum: str | None = None
-        trigger_workflow_system_addendum: str | None = None
-        workflow_policy = None
-        if resolved.is_main:
-            workflow_integration = build_workflow_integration(
+        agents_summary.append(
+            _register_resolved_agent(
                 app,
-                resolved.metadata,
-                workflow_tools=capabilities.filtered_workflow_tools,
-                workflow_subagents=(
-                    resolved.workflows.subagents if resolved.workflows is not None else ()
-                ),
+                resolved,
                 catalog=catalog,
-            )
-            workflows_enabled = workflow_integration.enabled
-            workflow_system_addendum = workflow_integration.chat_system_addendum
-            trigger_workflow_system_addendum = (
-                workflow_integration.trigger_system_addendum
-            )
-            workflow_policy = workflow_integration.plan_policy
-        elif _workflows_requested(resolved.workflows):
-            logger.warning(
-                "workflows.enabled is only honored on main.agent.md; ignoring "
-                "workflows for agent %s",
-                resolved.name,
-            )
-
-        capability_names = _serialize_capabilities_for_log(
-            user_tools=capabilities.filtered_user_tools,
-            mcp_tools=capabilities.filtered_mcp_tools,
-            skill_paths=capabilities.enabled_skill_paths,
-            skill_name_by_path=skill_name_by_path,
-        )
-        logger.info(
-            "agent_capabilities_registered: source_file=%s user_tools=%s mcp_servers=%s skills=%s",
-            source_marker(resolved.source_file),
-            capability_names["user_tools"],
-            capability_names["mcp_servers"],
-            capability_names["skills"],
-        )
-        # The identity slug (pass 1a) is already guaranteed globally unique, so it is
-        # used directly as the registered function name / built-in endpoint slug —
-        # no allocator or de-duplication pass is needed here anymore.
-        if resolved.trigger is not None:
-            if session_runtime is None:
-                register_agent(
-                    app,
-                    resolved,
-                    capabilities,
-                    function_name=resolved.slug,
-                    catalog=catalog,
-                    workflows_enabled=workflows_enabled,
-                    workflow_system_addendum=trigger_workflow_system_addendum,
-                    workflow_policy=workflow_policy,
-                )
-            else:
-                register_agent(
-                    app,
-                    resolved,
-                    capabilities,
-                    function_name=resolved.slug,
-                    catalog=catalog,
-                    session_runtime=session_runtime,
-                    workflows_enabled=workflows_enabled,
-                    workflow_system_addendum=trigger_workflow_system_addendum,
-                    workflow_policy=workflow_policy,
-                )
-        if _builtin_endpoints_enabled(resolved.builtin_endpoints):
-            if session_runtime is None:
-                register_builtin_endpoints(
-                    app,
-                    resolved,
-                    capabilities,
-                    slug=resolved.slug,
-                    workflows_enabled=workflows_enabled,
-                    workflow_system_addendum=workflow_system_addendum,
-                    workflow_policy=workflow_policy,
-                    catalog=catalog,
-                )
-            else:
-                register_builtin_endpoints(
-                    app,
-                    resolved,
-                    capabilities,
-                    slug=resolved.slug,
-                    workflows_enabled=workflows_enabled,
-                    workflow_system_addendum=workflow_system_addendum,
-                    workflow_policy=workflow_policy,
-                    catalog=catalog,
-                    session_runtime=session_runtime,
-                )
-        if session_runtime is not None and management_auth is not None:
-            register_sandbox_management_endpoints(
-                app,
-                slug=resolved.slug,
-                auth=management_auth,
                 session_runtime=session_runtime,
-                binding=terminal_bindings[resolved.slug],
+                terminal_bindings=terminal_bindings,
+                skill_name_by_path=skill_name_by_path,
             )
-
-        # Collect agent summary info
-        agent_info: dict[str, Any] = {
-            "source_file": source_marker(resolved.source_file),
-            "registered_capabilities": capability_names,
-        }
-        if resolved.trigger:
-            agent_info["trigger_type"] = resolved.trigger.type
-        else:
-            agent_info["trigger_type"] = None
-        if _builtin_endpoints_enabled(resolved.builtin_endpoints):
-            endpoints = []
-            if resolved.builtin_endpoints.debug_chat_ui:
-                endpoints.append("debug_chat_ui")
-            if resolved.builtin_endpoints.chat_api:
-                endpoints.append("chat_api")
-            if resolved.builtin_endpoints.mcp:
-                endpoints.append("mcp")
-            agent_info["builtin_endpoints"] = endpoints
-        if workflows_enabled:
-            agent_info["workflows"] = "enabled"
-
-        # Track per-agent system tools (if not opted out)
-        if resolved.sandbox_config:
-            system_tools_used.add("dynamic_sessions_code_interpreter")
-        if resolved.web_request_config:
-            system_tools_used.add("web_request")
-
-        agents_summary.append(agent_info)
+        )
+        system_tools_used |= _agent_system_tools(resolved)
 
     if session_runtime is not None:
         cadence = resolve_reconciler_cadence()

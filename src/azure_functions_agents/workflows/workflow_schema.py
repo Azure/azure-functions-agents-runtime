@@ -125,15 +125,7 @@ def validate_plan(
     Raises :class:`PlanValidationError` with a caller-friendly message on
     any structural or semantic problem.
     """
-    if policy is not None and allowed_tools is not None:
-        raise TypeError("pass either policy or allowed_tools, not both")
-    if policy is None:
-        if allowed_tools is None:
-            raise TypeError("validate_plan requires an explicit WorkflowPlanPolicy")
-        policy = WorkflowPlanPolicy(
-            allowed_tools=frozenset(allowed_tools),
-            allowed_subagents=frozenset(),
-        )
+    policy = _resolve_plan_policy(policy, allowed_tools)
     try:
         plan = WorkflowPlan.model_validate(raw)
     except ValidationError as exc:
@@ -151,125 +143,189 @@ def validate_plan(
         if task.id in seen:
             raise PlanValidationError(f"duplicate task id: {task.id!r}")
         seen.add(task.id)
-
-        if task.type not in SUPPORTED_TASK_TYPES:
-            raise PlanValidationError(
-                f"task {task.id!r}: type {task.type!r} is not supported. "
-                f"Supported types: {sorted(SUPPORTED_TASK_TYPES)}"
-            )
-
-        if task.type == TOOL_TASK_TYPE:
-            if not task.tool:
-                raise PlanValidationError(
-                    f"task {task.id!r}: 'tool' field is required for "
-                    "type=tool tasks"
-                )
-            if task.tool not in policy.allowed_tools:
-                raise PlanValidationError(
-                    f"task {task.id!r}: tool {task.tool!r} is not workflow-safe. "
-                    f"Allowed tools: {sorted(policy.allowed_tools)}"
-                )
-            if task.duration is not None or task.until is not None:
-                raise PlanValidationError(
-                    f"task {task.id!r}: 'duration' and 'until' are only "
-                    "valid on type=wait tasks"
-                )
-            if "agent" in task.model_fields_set or "task" in task.model_fields_set:
-                raise PlanValidationError(
-                    f"task {task.id!r}: 'agent' and 'task' are only valid on "
-                    "type=sub_agent tasks"
-                )
-        elif task.type == WAIT_TASK_TYPE:
-            if task.tool is not None:
-                raise PlanValidationError(
-                    f"task {task.id!r}: 'tool' is not valid on type=wait tasks"
-                )
-            if task.args:
-                raise PlanValidationError(
-                    f"task {task.id!r}: 'args' is not valid on type=wait tasks "
-                    "(use 'duration' or 'until' instead)"
-                )
-            if "agent" in task.model_fields_set or "task" in task.model_fields_set:
-                raise PlanValidationError(
-                    f"task {task.id!r}: 'agent' and 'task' are only valid on "
-                    "type=sub_agent tasks"
-                )
-            has_duration = task.duration is not None
-            has_until = task.until is not None
-            if has_duration == has_until:
-                raise PlanValidationError(
-                    f"task {task.id!r}: type=wait tasks must specify exactly "
-                    "one of 'duration' (ISO-8601 like 'PT30S') or 'until' "
-                    "(ISO-8601 datetime); not both, not neither"
-                )
-            if has_duration:
-                try:
-                    assert task.duration is not None
-                    delta = parse_iso8601_duration(task.duration)
-                except ValueError as exc:
-                    raise PlanValidationError(
-                        f"task {task.id!r}: invalid duration {task.duration!r}: "
-                        f"{exc}"
-                    ) from exc
-                if delta <= timedelta(0):
-                    raise PlanValidationError(
-                        f"task {task.id!r}: duration must be positive"
-                    )
-                if delta > MAX_WAIT_DURATION:
-                    raise PlanValidationError(
-                        f"task {task.id!r}: duration exceeds the maximum of "
-                        f"{MAX_WAIT_DURATION}"
-                    )
-            else:
-                try:
-                    assert task.until is not None
-                    until_dt = parse_iso8601_datetime(task.until)
-                except ValueError as exc:
-                    raise PlanValidationError(
-                        f"task {task.id!r}: invalid until {task.until!r}: {exc}"
-                    ) from exc
-                # Cap `until` at the same horizon as `duration`. Using
-                # wall-clock at submit time is fine — this is a submit-time
-                # admission gate, not a replay-deterministic computation.
-                # Defense-in-depth check happens again in the orchestrator
-                # against context.current_utc_datetime (see engine.py).
-                horizon = datetime.now(UTC) + MAX_WAIT_DURATION
-                if until_dt > horizon:
-                    raise PlanValidationError(
-                        f"task {task.id!r}: until {task.until!r} is more than "
-                        f"{MAX_WAIT_DURATION} in the future"
-                    )
-        elif task.type == SUB_AGENT_TASK_TYPE:
-            if not task.agent or not task.agent.strip():
-                raise PlanValidationError(
-                    f"task {task.id!r}: 'agent' field is required and must be "
-                    "non-empty for type=sub_agent tasks"
-                )
-            if not task.task or not task.task.strip():
-                raise PlanValidationError(
-                    f"task {task.id!r}: 'task' field is required and must be "
-                    "non-empty for type=sub_agent tasks"
-                )
-            forbidden = [
-                field
-                for field in ("tool", "args", "duration", "until")
-                if field in task.model_fields_set
-            ]
-            if forbidden:
-                listed = ", ".join(repr(field) for field in forbidden)
-                raise PlanValidationError(
-                    f"task {task.id!r}: {listed} is not valid on type=sub_agent tasks"
-                )
-            if task.agent not in policy.allowed_subagents:
-                raise PlanValidationError(
-                    f"task {task.id!r}: Sub Agent {task.agent!r} is not authorized "
-                    f"for this workflow owner. Allowed Sub Agents: "
-                    f"{sorted(policy.allowed_subagents)}"
-                )
+        _validate_task_semantics(task, policy)
 
     # Validate ``depends_on`` edges reference known task ids (no self-loops,
     # no duplicates) and detect cycles.
     by_id: dict[str, WorkflowTask] = {t.id: t for t in plan.tasks}
+    _validate_dependencies(plan, by_id)
+
+    cycle = _detect_cycle(plan)
+    if cycle is not None:
+        pretty = " -> ".join(cycle)
+        raise PlanValidationError(
+            f"plan contains a dependency cycle: {pretty}"
+        )
+
+    # Validate templating refs against the upstream closure of each task.
+    upstream = _upstream_closure(plan)
+    for task in plan.tasks:
+        _validate_task_templates(task, upstream[task.id], by_id)
+
+    return plan
+
+
+def _resolve_plan_policy(
+    policy: WorkflowPlanPolicy | None,
+    allowed_tools: Collection[str] | None,
+) -> WorkflowPlanPolicy:
+    """Resolve the effective authorization boundary from the two input forms."""
+    if policy is not None and allowed_tools is not None:
+        raise TypeError("pass either policy or allowed_tools, not both")
+    if policy is not None:
+        return policy
+    if allowed_tools is None:
+        raise TypeError("validate_plan requires an explicit WorkflowPlanPolicy")
+    return WorkflowPlanPolicy(
+        allowed_tools=frozenset(allowed_tools),
+        allowed_subagents=frozenset(),
+    )
+
+
+def _validate_task_semantics(task: WorkflowTask, policy: WorkflowPlanPolicy) -> None:
+    """Dispatch per-type structural and authorization validation for one task."""
+    if task.type not in SUPPORTED_TASK_TYPES:
+        raise PlanValidationError(
+            f"task {task.id!r}: type {task.type!r} is not supported. "
+            f"Supported types: {sorted(SUPPORTED_TASK_TYPES)}"
+        )
+    if task.type == TOOL_TASK_TYPE:
+        _validate_tool_task(task, policy)
+    elif task.type == WAIT_TASK_TYPE:
+        _validate_wait_task(task)
+    else:
+        _validate_sub_agent_task(task, policy)
+
+
+def _validate_tool_task(task: WorkflowTask, policy: WorkflowPlanPolicy) -> None:
+    """Validate a type=tool task's required tool and forbidden foreign fields."""
+    if not task.tool:
+        raise PlanValidationError(
+            f"task {task.id!r}: 'tool' field is required for "
+            "type=tool tasks"
+        )
+    if task.tool not in policy.allowed_tools:
+        raise PlanValidationError(
+            f"task {task.id!r}: tool {task.tool!r} is not workflow-safe. "
+            f"Allowed tools: {sorted(policy.allowed_tools)}"
+        )
+    if task.duration is not None or task.until is not None:
+        raise PlanValidationError(
+            f"task {task.id!r}: 'duration' and 'until' are only "
+            "valid on type=wait tasks"
+        )
+    if "agent" in task.model_fields_set or "task" in task.model_fields_set:
+        raise PlanValidationError(
+            f"task {task.id!r}: 'agent' and 'task' are only valid on "
+            "type=sub_agent tasks"
+        )
+
+
+def _validate_wait_task(task: WorkflowTask) -> None:
+    """Validate a type=wait task's exactly-one-of duration/until contract."""
+    if task.tool is not None:
+        raise PlanValidationError(
+            f"task {task.id!r}: 'tool' is not valid on type=wait tasks"
+        )
+    if task.args:
+        raise PlanValidationError(
+            f"task {task.id!r}: 'args' is not valid on type=wait tasks "
+            "(use 'duration' or 'until' instead)"
+        )
+    if "agent" in task.model_fields_set or "task" in task.model_fields_set:
+        raise PlanValidationError(
+            f"task {task.id!r}: 'agent' and 'task' are only valid on "
+            "type=sub_agent tasks"
+        )
+    has_duration = task.duration is not None
+    has_until = task.until is not None
+    if has_duration == has_until:
+        raise PlanValidationError(
+            f"task {task.id!r}: type=wait tasks must specify exactly "
+            "one of 'duration' (ISO-8601 like 'PT30S') or 'until' "
+            "(ISO-8601 datetime); not both, not neither"
+        )
+    if has_duration:
+        _validate_wait_duration(task)
+    else:
+        _validate_wait_until(task)
+
+
+def _validate_wait_duration(task: WorkflowTask) -> None:
+    """Validate a wait task's positive, bounded ISO-8601 ``duration``."""
+    try:
+        assert task.duration is not None
+        delta = parse_iso8601_duration(task.duration)
+    except ValueError as exc:
+        raise PlanValidationError(
+            f"task {task.id!r}: invalid duration {task.duration!r}: "
+            f"{exc}"
+        ) from exc
+    if delta <= timedelta(0):
+        raise PlanValidationError(
+            f"task {task.id!r}: duration must be positive"
+        )
+    if delta > MAX_WAIT_DURATION:
+        raise PlanValidationError(
+            f"task {task.id!r}: duration exceeds the maximum of "
+            f"{MAX_WAIT_DURATION}"
+        )
+
+
+def _validate_wait_until(task: WorkflowTask) -> None:
+    """Validate a wait task's ``until`` datetime is within the wait horizon."""
+    try:
+        assert task.until is not None
+        until_dt = parse_iso8601_datetime(task.until)
+    except ValueError as exc:
+        raise PlanValidationError(
+            f"task {task.id!r}: invalid until {task.until!r}: {exc}"
+        ) from exc
+    # Submit-time admission gate: wall-clock is acceptable here; the
+    # orchestrator re-checks against context.current_utc_datetime as
+    # replay-deterministic defense-in-depth (see engine.py).
+    horizon = datetime.now(UTC) + MAX_WAIT_DURATION
+    if until_dt > horizon:
+        raise PlanValidationError(
+            f"task {task.id!r}: until {task.until!r} is more than "
+            f"{MAX_WAIT_DURATION} in the future"
+        )
+
+
+def _validate_sub_agent_task(task: WorkflowTask, policy: WorkflowPlanPolicy) -> None:
+    """Validate a type=sub_agent task's required/forbidden fields and authorization."""
+    if not task.agent or not task.agent.strip():
+        raise PlanValidationError(
+            f"task {task.id!r}: 'agent' field is required and must be "
+            "non-empty for type=sub_agent tasks"
+        )
+    if not task.task or not task.task.strip():
+        raise PlanValidationError(
+            f"task {task.id!r}: 'task' field is required and must be "
+            "non-empty for type=sub_agent tasks"
+        )
+    forbidden = [
+        field
+        for field in ("tool", "args", "duration", "until")
+        if field in task.model_fields_set
+    ]
+    if forbidden:
+        listed = ", ".join(repr(field) for field in forbidden)
+        raise PlanValidationError(
+            f"task {task.id!r}: {listed} is not valid on type=sub_agent tasks"
+        )
+    if task.agent not in policy.allowed_subagents:
+        raise PlanValidationError(
+            f"task {task.id!r}: Sub Agent {task.agent!r} is not authorized "
+            f"for this workflow owner. Allowed Sub Agents: "
+            f"{sorted(policy.allowed_subagents)}"
+        )
+
+
+def _validate_dependencies(
+    plan: WorkflowPlan, by_id: dict[str, WorkflowTask]
+) -> None:
+    """Ensure each depends_on edge is a known, non-self, non-duplicate task id."""
     for task in plan.tasks:
         dep_set: set[str] = set()
         for dep in task.depends_on:
@@ -286,20 +342,6 @@ def validate_plan(
                     f"task {task.id!r}: depends_on references unknown task {dep!r}"
                 )
             dep_set.add(dep)
-
-    cycle = _detect_cycle(plan)
-    if cycle is not None:
-        pretty = " -> ".join(cycle)
-        raise PlanValidationError(
-            f"plan contains a dependency cycle: {pretty}"
-        )
-
-    # Validate templating refs against the upstream closure of each task.
-    upstream = _upstream_closure(plan)
-    for task in plan.tasks:
-        _validate_task_templates(task, upstream[task.id], by_id)
-
-    return plan
 
 
 def _detect_cycle(plan: WorkflowPlan) -> list[str] | None:

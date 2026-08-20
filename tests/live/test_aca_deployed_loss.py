@@ -95,7 +95,6 @@ async def test_deployed_aca_reconciles_lost_active_backing_without_table_mutatio
     resources: DeployedAcaLifecycleResources | None = None
     accepted: AcceptedRun | None = None
     reconciled = False
-    cleanup_error: BaseException | None = None
     idempotency_key = uuid.uuid4().hex
     try:
         resources = await open_deployed_aca_lifecycle_resources(config)
@@ -178,46 +177,73 @@ async def test_deployed_aca_reconciles_lost_active_backing_without_table_mutatio
                 )
                 reconciled = True
             finally:
-                primary_error = sys.exception()
-                if accepted is None:
-                    try:
-                        accepted = await _recover_before_admission_deadline(
-                            resources,
-                            config,
-                            partition_key,
-                            idempotency_key,
-                            admission_deadline=admission_deadline,
-                        )
-                    except (AcaSmokeEnvironmentError, AssertionError, SandboxTransportError) as exc:
-                        cleanup_error = exc
-                    if accepted is None and cleanup_error is None:
-                        cleanup_error = AcaSmokeEnvironmentError(
-                            "ACA backing-loss cleanup has an unresolved admission after its "
-                            "bounded recovery deadline."
-                        )
-                if accepted is not None and not reconciled:
-                    try:
-                        await _cleanup_failed_loss_candidate(
-                            client,
-                            resources,
-                            config,
-                            authorization_evidence.authorization_header,
-                            partition_key,
-                            accepted,
-                        )
-                    except (AcaSmokeEnvironmentError, AssertionError, SandboxTransportError) as exc:
-                        cleanup_error = exc
-                if cleanup_error is not None:
-                    if primary_error is not None:
-                        primary_error.add_note(
-                            "ACA backing-loss cleanup could not confirm controller-owned tombstoning."
-                        )
-                    else:
-                        raise cleanup_error
+                await _finalize_backing_loss(
+                    client,
+                    resources,
+                    config,
+                    authorization_evidence.authorization_header,
+                    partition_key,
+                    idempotency_key,
+                    admission_deadline=admission_deadline,
+                    accepted=accepted,
+                    reconciled=reconciled,
+                    primary_error=sys.exception(),
+                )
     finally:
         if resources is not None:
             await resources.close()
     assert reconciled
+
+
+async def _finalize_backing_loss(
+    client: ClientSession,
+    resources: DeployedAcaLifecycleResources,
+    config: DeployedAcaLifecycleConfig,
+    authorization: str,
+    partition_key: str,
+    idempotency_key: str,
+    *,
+    admission_deadline: float,
+    accepted: AcceptedRun | None,
+    reconciled: bool,
+    primary_error: BaseException | None,
+) -> None:
+    cleanup_error: BaseException | None = None
+    if accepted is None:
+        try:
+            accepted = await _recover_before_admission_deadline(
+                resources,
+                config,
+                partition_key,
+                idempotency_key,
+                admission_deadline=admission_deadline,
+            )
+        except (AcaSmokeEnvironmentError, AssertionError, SandboxTransportError) as exc:
+            cleanup_error = exc
+        if accepted is None and cleanup_error is None:
+            cleanup_error = AcaSmokeEnvironmentError(
+                "ACA backing-loss cleanup has an unresolved admission after its "
+                "bounded recovery deadline."
+            )
+    if accepted is not None and not reconciled:
+        try:
+            await _cleanup_failed_loss_candidate(
+                client,
+                resources,
+                config,
+                authorization,
+                partition_key,
+                accepted,
+            )
+        except (AcaSmokeEnvironmentError, AssertionError, SandboxTransportError) as exc:
+            cleanup_error = exc
+    if cleanup_error is not None:
+        if primary_error is not None:
+            primary_error.add_note(
+                "ACA backing-loss cleanup could not confirm controller-owned tombstoning."
+            )
+        else:
+            raise cleanup_error
 
 
 def _load_config(config: DeployedAcaLifecycleConfig) -> DeployedAcaLifecycleConfig:

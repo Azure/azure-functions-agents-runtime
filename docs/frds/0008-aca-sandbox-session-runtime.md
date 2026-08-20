@@ -4,7 +4,7 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-08-17
+updated: 2026-08-18
 issues: []
 pull_requests: []
 branch: feature/aca-sandboxes
@@ -410,6 +410,19 @@ controlling amendments.
 | 167 | PR smoke identity evidence | All-scope RBAC audit / protected IaC + positive turn | Protected IaC/ops guarantees the sole guest UAMI has model-only, no-state/no-group RBAC. CI verifies only group identity shape, runtime egress, and positive model access because its controller connection cannot enumerate guest model-scope roles. | Human | 2026-08-17 | U3 CI corrective |
 | 168 | Current-checkout smoke eligibility | PR-only / every protected E2E invocation | Run the nonblocking smoke on every trusted non-fork E2E invocation, including PR, main, manual, and scheduled runs. Pipeline authorization remains the security boundary; the fork guard is defense in depth. | Human | 2026-08-18 | U3 CI corrective |
 | Meta | Implementation compaction | 30 event rows / 8 durable rows | Historical pre-merge editing compacted the then-unmerged rows 119-148; later merged and appended rows remain append-only. | Human | 2026-08-03 | 0008.6 |
+| 169 | Setup admission outcome | Generic timeout / durable outcomes | Classify admission as `not_reserved`, `committed`, or `possibly_committed`; provider work waits for confirmation. | Human + Agent | 2026-08-14 | Setup-timeout amendment |
+| 170 | Timeout response projection | Always 504 / async 202 + sync 504 | Confirmed async returns the LRO `202`; confirmed sync returns linked `504`; ambiguity returns linked `504`. | Human + Agent | 2026-08-14 | Setup-timeout amendment |
+| 171 | Retry identity | Key only / request hash only / both | Keep key hash as attempt identity and canonical request hash as its mutation guard. | Human + Agent | 2026-08-14 | Setup-timeout amendment |
+| 172 | Public progress phase | New run states / derived phase | Keep seven run states; derive `provisioning`, `executing`, `settling`, or `terminal` from durable evidence. | Human + Agent | 2026-08-14 | Setup-timeout amendment |
+| 173 | Table-first management | Activate first / durable preflight | ACA status, result, events, and pre-launch cancel read Tables before activation through the existing four-method seam. | Human + Agent | 2026-08-14 | Setup-timeout amendment |
+| 174 | Pre-launch cancel fence | Journal-only cancel / cancel EGT | Cancel and journal claim race on the operation ETag; only a narrow canceled-plus-active-slot rearm transient is legal. | Human + Agent | 2026-08-14 | Setup-timeout amendment |
+| 175 | Rubber-duck review | Leave blockers / revise design | Resolve the four durable-transition, validator, seam, and ambiguous-commit blockers in the approved revision. | Agent reviewer | 2026-08-14 | Setup-timeout amendment |
+| 176 | Architecture sign-off | In review / finalized design | Human approved the amendment on 2026-08-14. This change includes its implementation and deterministic tests; opt-in deployed and Azurite evidence remains separately gated. | Human | 2026-08-14 | Setup-timeout amendment |
+| 177 | Ambiguous absence proof | Elapsed 404 / positive durable evidence | A deadline plus 404 cannot fence a late Table commit. Keep admission uncertain until matching rows appear or exact replay resolves it; independent fresh-session admission remains available. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
+| 178 | Pre-launch cancel scope | New-session only / both submit paths | Fence both `provision_submit` and `submit_run` before launch. After launch claim, wait for a live journal and return retryable `202` while cancellation is unresolved. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
+| 179 | Stale submit fence | Propagate / durable re-read | If cancel, takeover, or another launch claimant wins, re-read the durable run and return its linked projection; never leak the losing fence as a 500 or launch twice. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
+| 180 | Terminal provision replay | Take over / return terminal | Exact replay of a terminal reserved run returns its durable outcome before operation takeover; canceled pre-pointer work never requires a sandbox pointer. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
+| 181 | Complexity and domain vocabulary | Advisory / enforce PLR0912 and PLR0915; repeated strings / owned typed vocabulary | Human approved enforcing PLR0912/PLR0915 and declaring each finite domain once in its owning typed symbols for consumers to reuse. | Human | 2026-08-18 | Review guidance |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -428,6 +441,127 @@ and folds in the mirror job to hold the 2-min-p95 SLO. It is not a second timer.
 The trade-offs accepted by Decisions #86 and #87 are that session state shares the host's `AzureWebJobsStorage` lifetime and throughput budget. ETag/CAS and live manifest cross-verification provide the durable routing controls. The controller managed identity is the sole Table writer. A Sandbox Group identity is separate; runtime attaches or forwards no identity or credentials. It must be dedicated and least-privileged, may receive explicitly required workload permissions including authenticated MCP access, and has no controller, Sandbox Group management, or state-store rights. The U3 qualification grants that identity model inference only, with no MCP or state-store permissions. The deeper state-row integrity story remains the authoritative row, monotonic generation, and live manifest cross-check.
 
 *Label-safe encoding note.* Decisions #89–91's worked examples and prose that show a 64-character lower-case hex payload for `a1-`/`o1-`/`s1-` tokens (e.g. `o1:a1-<64hex>:function_app:o1-<64hex>`, `state_store_fingerprint` as `s1-<sha256>`) are **superseded by Decisions #106/#113/#114**: every such token uses the SAME canonical `<version>-<52 lower-case base32 characters>` shape (55 characters total) everywhere — Table partition keys, future manifests, paths, and ACA labels alike. The underlying SHA-256 digest bytes, the `frame_canonical_components` framing, the `a1`/`o1` version discriminators, and the canonicalizer-registry/no-eager-migration behavior are unchanged; only the digest's string encoding moved from hex to base32, because ACA rejects labels over 63 characters and a hex `a1-`/`o1-` token (67 characters) cannot satisfy that limit. Read every `<64hex>`-shaped example elsewhere in this FRD as illustrative superseded text, not the current wire format.
+
+### 5.1 Controlling amendment — setup-timeout LRO recovery
+
+**Authority and implementation status.** This approved 2026-08-14 amendment
+controls over earlier statements that a setup timeout necessarily occurs before a
+durable run exists or can return only an unlinked `504`. It is a finalized design
+contract implemented by this change; opt-in deployed and Azurite validation
+remains separately gated.
+
+#### Defect and evidence
+A new-session EGT can commit the owner claim, `creating` session, `accepted`
+run, and `provision_submit` operation before provider, lifecycle, content,
+manifest, or journal setup times out. Dropping those IDs—or requiring
+`activate_session()` before reading them—turns a recoverable pre-launch run into
+an unhelpful `504` or `500`. The crash-safe reservation already exists; its
+recovery handle must survive the timeout.
+
+#### Goals and non-goals
+The amendment distinguishes admission outcomes; returns handles for committed
+or uncertain admission; makes pre-launch management Table-readable and
+cancelable; retains one-active-run, idempotency, fencing, and quarantine
+guarantees; and proves the result with deterministic, Azurite, and one-shot
+real-caller evidence.
+
+It does not persist prompts or envelopes, add automatic retry, queueing,
+supersede, silent sync-to-async conversion, a fifth backend method, or a fourth
+operation kind; change `/history`, timer deadlines, or the opt-in/fail-closed
+gate; or take ownership of the separate history work.
+
+#### Durable admission and simple recovery flow
+`begin_provision_submit()` (or the existing-session admission EGT) is the
+commit point. Provider create and journal launch wait for confirmation.
+`DurableAdmissionSetupTimeoutError` carries a `RunHandle` and one outcome:
+
+| Outcome | Response and controller behavior | Caller recovery |
+| --- | --- | --- |
+| `not_reserved` | `504 setup_deadline_exceeded`, `admission=not_reserved`, and no IDs. | A new POST is safe. Same key plus a byte-equivalent request safely replays. |
+| `committed` | Async returns the normal `202 Accepted` LRO ticket. Sync remains `504 setup_deadline_exceeded`, but includes the identical handle, `Location`, `Retry-After: 2`, `x-ms-session-id`, and `x-ms-retry-with: respond-async`. | Poll, read result/events, or cancel using the returned URLs; no prompt replay is required. |
+| `possibly_committed` | `504 admission_outcome_unknown` with candidate IDs and URLs, `admission=possibly_committed`, and no provider work by that controller. | Poll the candidate status URL or exact-replay the same key and byte-equivalent request. |
+
+Every handle has `session_id`, `run_id`, and status/result/events/cancel URLs.
+A `200` status confirms reservation; a `404` never disproves it because emitted
+Table bytes can commit later. Until confirmation, exact replay is safe. Without
+it, create an independent new session with a fresh key and no session header;
+do not reinterpret the uncertain key. Confirmation is a first-class
+`ProvisionSubmitOutcome`, not a mapped storage error.
+
+#### Idempotency key and request hash
+Store only the idempotency-key and canonical-request hashes. The latter covers
+agent slug, exact prompt, and timeout—not `Prefer`, which only changes response
+projection. Same key plus a byte-equivalent request replays; changed input is
+`422`; a different key is distinct and subject to the active-slot rule. Handles
+remove the need to retain prompt or key after committed admission.
+
+#### Table-first management and public phase
+The seven durable states remain unchanged; `accepted` persists through journal
+claim and never has a durable Table `accepted -> running` transition. Public
+projection adds only:
+
+| Durable evidence | Public status | Public phase |
+| --- | --- | --- |
+| Accepted run with active `provision_submit` or `submit_run` before its launching phase | `accepted` | `provisioning` |
+| Accepted run at `provision_launching` or `submit_launching`, or live journal running | `accepted` or `running` | `executing` |
+| Terminal run with active cleanup/rearm operation or retained active slot | Existing terminal status | `settling` (prompt terminal; fenced cleanup still holds the slot) |
+| Terminal run with neither active operation nor slot | Existing terminal status | `terminal` |
+
+ACA `get_run`, `read_events`, and `cancel_run` are Table-first, not controller
+catches around activation. They validate owner/run/session/operation before
+activation; result returns nonterminal projection as `200`, events heartbeat
+without invented events until launch, and cancellation returns durable IDs on
+any remaining typed timeout rather than a Functions `500`.
+
+#### Pre-launch cancel, operation race, and retained-slot transient
+
+Before launch, cancel's EGT marks the run canceled, retains its active slot,
+rotates its token, and moves to the matching rearm phase while preserving any
+sandbox/lifecycle metadata. Only this canceled-plus-active-slot transient is
+legal. Cancel and `claim_operation_journal()` race on the same ETag: cancel
+prevents launch; a winning claim reports `executing` and uses normal verified
+process cancellation. An unavailable live journal yields retryable `202`, not
+false success. Fence losers re-read and return the linked durable projection;
+terminal replay returns before takeover. While cleanup retains the slot,
+`settling` keeps same-session admission at linked `409`; the fenced rearm EGT
+then produces `terminal`. A new independent session remains independent.
+
+#### Preserved invariants
+
+Deduplicate precedes active-run admission: changed claimed input is `422` and a
+distinct key during an active slot is linked `409`. The owner/key claim, session,
+run, slot, and operation remain one owner-partition EGT; provider labels recover
+ambiguous create without duplicates. Phases are forward-only and takeover needs
+expiry plus a fresh token and ETag. The controller is the sole writer; prompts,
+credentials, claims, keys, and concrete ACA types stay outside durable state and
+the backend seam. Corruption ordering remains terminalize/adopt, quarantine,
+then security event; an active-slot cancellation cannot quarantine.
+
+#### Required validation and documentation impact
+
+Deterministic coverage spans all outcomes and provision timeouts, response
+projections, Table-first management, phases, linked conflicts, idempotency
+mutation, SSE behavior, and typed fallbacks. Azurite covers point-read
+confirmation, stale fencing, cancel races, rearm/admission, ambiguous create,
+and quarantine. The real-caller test delays one new-session POST, discards its
+prompt/key without replaying, and uses only returned handles to observe
+provisioning, events, cancel, and settlement; it also retains conflict and
+exact-replay coverage.
+
+`docs/architecture.md` covers admission, Table-first management, and
+cancel/launch; the operator guide covers polling, phases, conflict, and cancel;
+README shows returned handles. No schema or front-matter update is expected.
+
+#### Independent rubber-duck architecture review and sign-off
+
+Review resolved four blockers—an implied durable running transition, an
+overbroad completion validator, implicit Table-first seam changes, and an
+ambiguous acknowledgement without a store outcome—with derived phases, the
+specialized cancel validator, explicit four-method behavior, and
+`possibly_committed` confirmation. The human approved the design on
+**2026-08-14**. A later review removed the false deadline-plus-`404` absence
+proof: emitted Table bytes may still commit, so Decision 177 preserves the
+candidate handle, exact replay, and independent-session recovery.
 
 ## 6. Validation, documentation, and rollout
 
@@ -451,12 +585,13 @@ must describe the same supported-host/configuration validation behavior.
 
 ## 7. Status & sign-off
 
-**Status: Finalized (U3 load acceptance pending).** The current feature contract is an authenticated
+**Status: Finalized (formal N=100 load acceptance pending).** The current feature contract is an authenticated
 Functions controller, one ACA Sandbox per session, a digest-verified captured
 content package, direct file/process journal transport, and deny-by-default
 egress. The public runtime surface includes synchronous chat, explicit async
 run management, replayable events, idempotency, one active run per session,
-and controller-managed lifecycle repair.
+controller-managed lifecycle repair, and the durable setup-timeout recovery
+contract in §5.1.
 
 v1 durability is best effort through same-sandbox ACA disk auto-suspend/resume:
 normal suspension resumes the same sandbox/generation and does not imply an
@@ -475,7 +610,10 @@ the recorded real adapter, model, deployed Easy Auth, and lifecycle evidence.
 The N=5 public load diagnostic validates orchestration and cleanup only; it does
 not close Decision #29. N=100 remains human-only formal acceptance, pending
 human-supplied evidence. The Decisions log records the sign-off, amendments,
-and historical provenance for these controlling contracts.
+and historical provenance for these controlling contracts. The setup-timeout
+implementation includes deterministic regression/race coverage and a one-shot
+deployed-host asset; opt-in deployed and Azurite execution remains separately
+gated.
 
 ## 8. SDK-verified ACA platform contract
 
@@ -1307,10 +1445,11 @@ begin, resume, takeover, journal claim, and phase advance. Each write renews
 the sliding lease for `provision_submit`, `submit_run`, and `reclaim_backing`;
 timer cadence, timer pass deadline, and reclaim arithmetic remain unchanged.
 After a crash, `submit_run` and `reclaim_backing` recovery may begin up to 60
-seconds later than before. The public `504`
-body remains exactly `error=reason=setup_deadline_exceeded` plus
-`retry_with=respond-async`; it now has `Retry-After: 120` and retains
-`x-ms-retry-with: respond-async`.
+seconds later than before. A pre-reservation public `504` remains
+`error=reason=setup_deadline_exceeded` plus `retry_with=respond-async`; it has
+`Retry-After: 120` and retains `x-ms-retry-with: respond-async`. A linked
+post-reservation ticket uses `Retry-After: 2` for management polling as defined
+by §5.1.
 
 Built-in MCP remains valid with ACA. Its invocation creates the same request
 budget and controller submission used by built-in chat, passing the one
@@ -1319,8 +1458,9 @@ the same redacted timeout observer exactly once, then returned as the MCP
 tool's typed JSON error body (`setup_deadline_exceeded` and
 `retry_with=respond-async`). The MCP framework owns the outer response, so this
 tool result is not represented as an HTTP 504 and cannot carry HTTP headers;
-HTTP-facing controller routes retain `Retry-After: 120`. The default
-in-language MCP path is unchanged.
+HTTP-facing pre-reservation setup failures retain `Retry-After: 120`, while
+linked durable tickets use `Retry-After: 2`. The default in-language MCP path
+is unchanged.
 
 The journal portion of that same budget wraps journal ownership claim,
 live-owner status observation, and run-control submission. Expiry leaves the

@@ -768,6 +768,7 @@ async def test_builtin_mcp_aca_setup_timeout_uses_controller_result_and_observat
         "error": "setup_deadline_exceeded",
         "reason": "setup_deadline_exceeded",
         "retry_with": "respond-async",
+        "admission": "not_reserved",
     }
     [span] = spans
     assert span.attributes["af.setup.phase"] == "journal"

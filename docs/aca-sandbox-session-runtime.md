@@ -114,8 +114,10 @@ retryable setup timeout. Grant the role at the individual Sandbox Group scope.
 ACA session admission uses one 90-second setup budget anchored before targeted
 reconciliation. Synchronous execution retains its 180-second wall cap; a
 full-cap request therefore leaves a 90-second execution floor. Every durable
-operation uses a sliding 120-second lease, and setup `504`
-responses retain `retry_with=respond-async` with `Retry-After: 120`.
+operation uses a sliding 120-second lease. A pre-reservation setup `504` retains
+`retry_with=respond-async` with `Retry-After: 120`; once a response includes a
+durable management ticket, `Retry-After: 2` is the polling cadence for that
+ticket.
 
 ## Egress and credentials
 
@@ -137,6 +139,75 @@ provider.
 Policy and credential changes are create-time-only. Drain or replace a session
 to apply them. Rotate a group secret the same way; active streams do not
 update in place.
+
+## Admission, setup timeouts, and recovery
+
+Use `Prefer: respond-async` for new sessions. If setup exceeds its request
+budget after the runtime reserves a session and run in Tables, the recovery
+response contains:
+
+```json
+{
+  "session_id": "...",
+  "run_id": "...",
+  "status": "accepted",
+  "phase": "provisioning",
+  "admission": "committed",
+  "status_url": "/agents/main/sessions/.../runs/...",
+  "result_url": "/agents/main/sessions/.../runs/.../result",
+  "events_url": "/agents/main/sessions/.../runs/.../events",
+  "cancel_url": "/agents/main/sessions/.../runs/.../cancel"
+}
+```
+
+Keep those identifiers and URLs. They are sufficient to poll, stream, read the
+result, or cancel; the original prompt and idempotency key are not required for
+management calls.
+
+Setup timeout responses distinguish three outcomes:
+
+| `admission` | Meaning | Client action |
+| --- | --- | --- |
+| `not_reserved` | No durable session or run was created. | Submit again. The same key plus a byte-equivalent request is safe. |
+| `committed` | The durable session and run exist, but setup exceeded the synchronous budget. | Use the returned URLs; async receives `202` and synchronous receives a linked `504`. |
+| `possibly_committed` | The Table transaction acknowledgement was lost, so the candidate reservation may exist. | Poll the returned `status_url` for `200` or exact-replay the same key and byte-equivalent request. A `404` never proves absence. If exact replay is unavailable, start a fresh independent session with a new key and no session header. |
+
+A committed synchronous timeout includes the same identifiers, URLs,
+`Location`, `Retry-After`, and `x-ms-session-id` as the async ticket. Do not
+replay a POST merely to discover its identifiers.
+
+The public `phase` explains where work is without adding new run states:
+
+- `provisioning`: the sandbox is being prepared and the prompt has not launched;
+- `executing`: the journal-launch fence has won or the journal reports running;
+- `settling`: the prompt is terminal but fenced cleanup still owns the session slot;
+- `terminal`: cleanup has cleared the slot and a new run may be admitted.
+
+Status and result return `200` with the durable `accepted`/`provisioning`
+projection throughout setup. Events emit heartbeats until journal launch rather
+than inventing run events. A distinct key targeting the same busy session
+receives a linked `409 active_run_exists` with the existing run's phase and
+management URLs.
+
+Canceling during `provisioning` atomically prevents prompt launch for either a
+new-session provision or an existing-session submission and returns a terminal
+canceled run in `settling`. If the journal-launch fence has already won but the
+live journal is not yet available, cancel returns `202` with `Retry-After: 2`
+instead of claiming success; retry cancel or poll status until cancellation
+settles. Wait for `phase=terminal` before submitting a replacement run to that
+same session. A completely new session is independent of that per-session slot,
+although canceling unwanted setup avoids wasting capacity.
+
+If a `possibly_committed` candidate remains absent and exact replay is no longer
+available, start an independent new session with a fresh key and no session
+header. Do not treat the absent candidate as disproved or submit changed input
+under its key.
+
+`Idempotency-Key` names one logical attempt. The runtime separately hashes the
+agent slug, exact prompt, and timeout to prevent that key from changing meaning:
+the same key plus a byte-equivalent request safely replays the original IDs,
+changed input returns `422`, and a different key is a distinct attempt subject
+to the one-active-run rule.
 
 ## Lifecycle, recovery, and troubleshooting
 

@@ -14,6 +14,7 @@ from azure_functions_agents.transport.manifest import (
     SESSION_MANIFEST_PATH,
     ExpectedSandboxManifestBinding,
 )
+from azure_functions_agents.transport.ports import SandboxSessionHandle
 from azure_functions_agents.transport.transport_models import (
     DiskIdSource,
     DiskSource,
@@ -65,13 +66,44 @@ async def _force_delete_by_id(adapter: AcaSandboxAdapter, sandbox_id: str) -> No
     await poller.result()
 
 
-@pytest.mark.live_aca
-@pytest.mark.asyncio
-async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
+def _required_group_resource_id() -> str:
     group_resource_id = os.environ.get("AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID")
     if not group_resource_id:
         pytest.fail("AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID is required.")
+    return group_resource_id
 
+
+async def _exercise_direct_file_operations(
+    handle: SandboxSessionHandle,
+    session_id: str,
+) -> None:
+    root = f"/tmp/{session_id}"
+    path = f"{root}/file.bin"
+    await handle.mkdir(root)
+    await handle.write_file(path, b"p4a-direct-file")
+    listed = await handle.list_files(root)
+    stat = await handle.stat_file(path)
+    assert any(entry.path == path for entry in listed)
+    assert stat.size == len(b"p4a-direct-file")
+    assert await handle.read_file(path) == b"p4a-direct-file"
+    await handle.delete_file(path)
+
+    overwrite_path = f"{root}/overwrite.bin"
+    first_content = b"p4a-overwrite-before"
+    second_content = b"p4a-overwrite-after-with-a-different-length"
+    await handle.write_file(overwrite_path, first_content)
+    assert await handle.read_file(overwrite_path) == first_content
+    await handle.write_file(overwrite_path, second_content)
+    overwrite_stat = await handle.stat_file(overwrite_path)
+    assert overwrite_stat.size == len(second_content)
+    assert await handle.read_file(overwrite_path) == second_content
+    await handle.delete_file(overwrite_path)
+
+
+@pytest.mark.live_aca
+@pytest.mark.asyncio
+async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
+    group_resource_id = _required_group_resource_id()
     session_id = f"p4a-smoke-{uuid.uuid4().hex}"
     adapter = await AcaSandboxAdapter.open(group_resource_id)
     created = None
@@ -101,33 +133,7 @@ async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
         # `created` nor `resumed` is set.
         sandbox_id = created.identity.sandbox_id
 
-        root = f"/tmp/{session_id}"
-        path = f"{root}/file.bin"
-        await created.mkdir(root)
-        await created.write_file(path, b"p4a-direct-file")
-        listed = await created.list_files(root)
-        stat = await created.stat_file(path)
-        assert any(entry.path == path for entry in listed)
-        assert stat.size == len(b"p4a-direct-file")
-        assert await created.read_file(path) == b"p4a-direct-file"
-        await created.delete_file(path)
-
-        # Overwrite semantics: write, then a second *direct* write with distinct
-        # content of a different length, and require the final read-back and
-        # size to match the overwrite exactly. Production has no delete/write
-        # fallback, so this must fail here if the real data plane does not
-        # actually replace the prior bytes on a second direct write.
-        overwrite_path = f"{root}/overwrite.bin"
-        first_content = b"p4a-overwrite-before"
-        second_content = b"p4a-overwrite-after-with-a-different-length"
-        await created.write_file(overwrite_path, first_content)
-        assert await created.read_file(overwrite_path) == first_content
-
-        await created.write_file(overwrite_path, second_content)
-        overwrite_stat = await created.stat_file(overwrite_path)
-        assert overwrite_stat.size == len(second_content)
-        assert await created.read_file(overwrite_path) == second_content
-        await created.delete_file(overwrite_path)
+        await _exercise_direct_file_operations(created, session_id)
 
         expected = ExpectedSandboxManifestBinding.create(
             manifest_version=1,

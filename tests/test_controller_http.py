@@ -9,6 +9,7 @@ import pytest
 from azure_functions_agents.controller.budget import RequestBudget
 from azure_functions_agents.controller.http import (
     cancel_run,
+    prefers_respond_async,
     read_result,
     read_status,
     submit_run,
@@ -21,10 +22,14 @@ from azure_functions_agents.controller.readiness import (
 )
 from azure_functions_agents.execution.backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
+    DurableAdmissionOutcome,
+    DurableAdmissionSetupTimeoutError,
+    LinkedActiveRunConflictError,
     RunContext,
     RunError,
     RunEvent,
     RunHandle,
+    RunPhase,
     RunResult,
     RunStatus,
     StartRunRequest,
@@ -37,7 +42,11 @@ from azure_functions_agents.execution.setup_budget import (
     SetupTimeoutMetadata,
     SetupTimeoutReason,
 )
-from azure_functions_agents.session_state import RunRowNotFoundError
+from azure_functions_agents.session_state import (
+    ActiveRunConflictError,
+    IdempotencyConflictError,
+    RunRowNotFoundError,
+)
 
 
 class FakeBackend:
@@ -45,6 +54,7 @@ class FakeBackend:
         self.status = status
         self.cancelled = False
         self.started = False
+        self.requests: list[StartRunRequest] = []
         self.raise_on_start: Exception | None = None
         self.raise_on_get: Exception | None = None
         self.raise_on_cancel: Exception | None = None
@@ -52,7 +62,7 @@ class FakeBackend:
         self.hang_on_cancel = False
 
     async def start_run(self, request: StartRunRequest) -> RunHandle:
-        del request
+        self.requests.append(request)
         if self.raise_on_start is not None:
             raise self.raise_on_start
         self.started = True
@@ -61,6 +71,7 @@ class FakeBackend:
             session_id=self.status.session_id,
             state=self.status.state,
             created_at=datetime.now(UTC),
+            phase=self.status.phase,
         )
 
     async def get_run(self, context: RunContext) -> RunStatus:
@@ -106,6 +117,7 @@ def _status(
     result_available: bool = False,
     result: RunResult | None = None,
     error: RunError | None = None,
+    phase: RunPhase | None = None,
 ) -> RunStatus:
     return RunStatus(
         run_id="run-1",
@@ -115,6 +127,7 @@ def _status(
         result_available=result_available,
         result=result,
         error=error,
+        phase=phase,
     )
 
 
@@ -126,9 +139,61 @@ def _expired_budget() -> RequestBudget:
     )
 
 
+def _durable_admission_timeout(
+    *,
+    outcome: DurableAdmissionOutcome,
+    handle: RunHandle,
+) -> DurableAdmissionSetupTimeoutError:
+    return DurableAdmissionSetupTimeoutError(
+        outcome=outcome,
+        handle=handle,
+        metadata=SetupTimeoutMetadata.create(
+            phase=SetupPhase.PROVISION_CREATE,
+            reason=SetupTimeoutReason.DEADLINE_ELAPSED,
+            exception_type=SetupTimeoutExceptionType.SETUP_BUDGET_EXPIRED,
+            configured_budget_seconds=90.0,
+            elapsed_seconds=90.0,
+            remaining_seconds=0.0,
+        ),
+    )
+
+
+def _management_urls(*, session_id: str, run_id: str) -> dict[str, str]:
+    base = f"/agents/main/sessions/{session_id}/runs/{run_id}"
+    return {
+        "status_url": base,
+        "result_url": f"{base}/result",
+        "events_url": f"{base}/events",
+        "cancel_url": f"{base}/cancel",
+    }
+
+
+def test_durable_admission_timeout_is_a_provider_neutral_public_contract() -> None:
+    handle = RunHandle(
+        run_id="run-1",
+        session_id="session-1",
+        state="accepted",
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
+    )
+
+    with pytest.raises(ValueError, match="outcome"):
+        DurableAdmissionSetupTimeoutError(  # type: ignore[arg-type]
+            outcome="not_reserved",
+            handle=handle,
+            metadata=SetupTimeoutMetadata.create(
+                phase=SetupPhase.PROVISION_CREATE,
+                reason=SetupTimeoutReason.DEADLINE_ELAPSED,
+                exception_type=SetupTimeoutExceptionType.SETUP_BUDGET_EXPIRED,
+                configured_budget_seconds=90.0,
+                elapsed_seconds=90.0,
+                remaining_seconds=0.0,
+            ),
+        )
+
+
 @pytest.mark.asyncio
 async def test_async_submission_returns_shared_management_urls() -> None:
-    backend = FakeBackend(_status())
+    backend = FakeBackend(_status(phase="provisioning"))
 
     response = await submit_run(
         backend,  # type: ignore[arg-type]
@@ -142,6 +207,36 @@ async def test_async_submission_returns_shared_management_urls() -> None:
     assert response.headers["Location"].endswith("/sessions/session-1/runs/run-1")
     assert isinstance(response.body, dict)
     assert response.body["events_url"].endswith("/events")
+    assert response.body["phase"] == "provisioning"
+
+
+@pytest.mark.asyncio
+async def test_async_submission_derives_phase_when_the_handle_has_none() -> None:
+    backend = FakeBackend(_status())
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 202
+    assert response.body["phase"] == "executing"
+
+
+@pytest.mark.asyncio
+async def test_status_payload_includes_provider_neutral_phase_when_available() -> None:
+    backend = FakeBackend(_status(phase="settling"))
+
+    response = await read_status(
+        backend,  # type: ignore[arg-type]
+        RunContext(run_id="run-1", session_id="session-1"),
+    )
+
+    assert response.status_code == 200
+    assert response.body["phase"] == "settling"
 
 
 @pytest.mark.asyncio
@@ -178,6 +273,49 @@ async def test_sync_success_keeps_session_identity_in_the_response_header() -> N
         "delegate_error_count": 0,
     }
     assert response.headers["x-ms-session-id"] == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_prefer_only_changes_submission_projection() -> None:
+    request = StartRunRequest(
+        prompt="hello",
+        session_id="session-1",
+        idempotency_key="caller-key",
+        timeout=30.0,
+    )
+    completed = _status(
+        state="succeeded",
+        result_available=True,
+        result=RunResult(
+            content="answer",
+            content_intermediate=[],
+            tool_calls=[],
+            reasoning=None,
+            delegate_error_count=0,
+        ),
+    )
+    async_backend = FakeBackend(completed)
+    sync_backend = FakeBackend(completed)
+
+    async_response = await submit_run(
+        async_backend,  # type: ignore[arg-type]
+        request,
+        agent_slug="main",
+        respond_async=prefers_respond_async({"Prefer": "wait=5, respond-async"}),
+        budget=RequestBudget.start(authored_timeout=30.0),
+    )
+    sync_response = await submit_run(
+        sync_backend,  # type: ignore[arg-type]
+        request,
+        agent_slug="main",
+        respond_async=prefers_respond_async({"Prefer": "wait=5"}),
+        budget=RequestBudget.start(authored_timeout=30.0),
+    )
+
+    assert async_backend.requests == sync_backend.requests == [request]
+    assert async_response.status_code == 202
+    assert sync_response.status_code == 200
+    assert async_response.headers["x-ms-session-id"] == sync_response.headers["x-ms-session-id"]
 
 
 @pytest.mark.asyncio
@@ -283,7 +421,7 @@ async def test_sync_deadline_provider_cleanup_error_returns_typed_timeout() -> N
 
 
 @pytest.mark.asyncio
-async def test_setup_expiry_returns_retry_hint_before_run_starts() -> None:
+async def test_not_reserved_setup_timeout_is_context_free() -> None:
     backend = FakeBackend(_status())
     backend.raise_on_start = SetupBudgetExpiredError(
         SetupTimeoutMetadata.create(
@@ -306,7 +444,187 @@ async def test_setup_expiry_returns_retry_hint_before_run_starts() -> None:
 
     assert not backend.started
     assert response.status_code == 504
-    assert response.headers == {"x-ms-retry-with": "respond-async", "Retry-After": "120"}
+    assert response.body == {
+        "error": "setup_deadline_exceeded",
+        "reason": "setup_deadline_exceeded",
+        "retry_with": "respond-async",
+        "admission": "not_reserved",
+    }
+    assert response.headers == {
+        "x-ms-retry-with": "respond-async",
+        "Retry-After": "120",
+    }
+
+
+@pytest.mark.asyncio
+async def test_confirmed_setup_timeout_projects_the_reserved_handle_by_preference() -> None:
+    handle = RunHandle(
+        run_id="run-1",
+        session_id="session-1",
+        state="accepted",
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
+    )
+    urls = _management_urls(session_id=handle.session_id, run_id=handle.run_id)
+    request = StartRunRequest(prompt="hello", idempotency_key="caller-key", timeout=30.0)
+
+    async_backend = FakeBackend(_status())
+    async_backend.raise_on_start = _durable_admission_timeout(
+        outcome="committed",
+        handle=handle,
+    )
+    async_response = await submit_run(
+        async_backend,  # type: ignore[arg-type]
+        request,
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    sync_backend = FakeBackend(_status())
+    sync_backend.raise_on_start = _durable_admission_timeout(
+        outcome="committed",
+        handle=handle,
+    )
+    sync_response = await submit_run(
+        sync_backend,  # type: ignore[arg-type]
+        request,
+        agent_slug="main",
+        respond_async=False,
+        budget=_expired_budget(),
+    )
+
+    assert async_response.status_code == 202
+    assert async_response.body == {
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "status": "accepted",
+        "admission": "committed",
+        "phase": "provisioning",
+        **urls,
+    }
+    assert async_response.headers == {
+        "Location": urls["status_url"],
+        "Retry-After": "2",
+        "x-ms-session-id": "session-1",
+    }
+    assert sync_response.status_code == 504
+    assert sync_response.body == {
+        "error": "setup_deadline_exceeded",
+        "reason": "setup_deadline_exceeded",
+        "retry_with": "respond-async",
+        "admission": "committed",
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "status": "accepted",
+        "phase": "provisioning",
+        **urls,
+    }
+    assert sync_response.headers == {
+        "Location": urls["status_url"],
+        "Retry-After": "2",
+        "x-ms-session-id": "session-1",
+        "x-ms-retry-with": "respond-async",
+    }
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_setup_timeout_returns_a_linked_confirmation_ticket() -> None:
+    handle = RunHandle(
+        run_id="run-1",
+        session_id="session-1",
+        state="accepted",
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
+    )
+    urls = _management_urls(session_id=handle.session_id, run_id=handle.run_id)
+    backend = FakeBackend(_status())
+    backend.raise_on_start = _durable_admission_timeout(
+        outcome="possibly_committed",
+        handle=handle,
+    )
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello", idempotency_key="caller-key", timeout=30.0),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 504
+    assert response.body == {
+        "error": "admission_outcome_unknown",
+        "reason": "admission_outcome_unknown",
+        "retry_with": "respond-async",
+        "admission": "possibly_committed",
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "status": "accepted",
+        "phase": "provisioning",
+        **urls,
+    }
+    assert response.headers == {
+        "Location": urls["status_url"],
+        "Retry-After": "2",
+        "x-ms-session-id": "session-1",
+        "x-ms-retry-with": "respond-async",
+    }
+
+
+@pytest.mark.asyncio
+async def test_linked_active_run_conflict_has_management_context() -> None:
+    conflict = LinkedActiveRunConflictError(
+        "session already has an active run",
+        session_id="session-1",
+        run_id="run-active",
+        status="accepted",
+        phase="provisioning",
+    )
+    urls = _management_urls(session_id="session-1", run_id="run-active")
+    backend = FakeBackend(_status())
+    backend.raise_on_start = conflict
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello", session_id="session-1", idempotency_key="next-key"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 409
+    assert response.body == {
+        "error": "active_run_exists",
+        "session_id": "session-1",
+        "run_id": "run-active",
+        "status": "accepted",
+        "phase": "provisioning",
+        **urls,
+    }
+    assert response.headers == {
+        "Location": urls["status_url"],
+        "x-ms-session-id": "session-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_unlinked_active_run_conflict_keeps_legacy_projection() -> None:
+    backend = FakeBackend(_status())
+    backend.raise_on_start = ActiveRunConflictError(
+        "session already has an active run",
+        active_run_id="run-active",
+    )
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello", session_id="session-1"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 409
+    assert response.body == {"error": "active_run_exists", "run_id": "run-active"}
+    assert response.headers == {}
 
 
 @pytest.mark.asyncio
@@ -336,8 +654,12 @@ async def test_live_provision_lease_returns_the_same_setup_retry_hint() -> None:
         "error": "setup_deadline_exceeded",
         "reason": "setup_deadline_exceeded",
         "retry_with": "respond-async",
+        "admission": "not_reserved",
     }
-    assert response.headers == {"x-ms-retry-with": "respond-async", "Retry-After": "120"}
+    assert response.headers == {
+        "x-ms-retry-with": "respond-async",
+        "Retry-After": "120",
+    }
 
 
 @pytest.mark.asyncio
@@ -435,6 +757,29 @@ async def test_evicted_idempotent_result_returns_gone() -> None:
     )
 
     assert response.status_code == 410
+
+
+@pytest.mark.asyncio
+async def test_idempotency_payload_mutation_returns_unprocessable_content() -> None:
+    backend = FakeBackend(_status())
+    backend.raise_on_start = IdempotencyConflictError(
+        "idempotency key already used with a different payload",
+        existing_run_id="run-1",
+    )
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="changed", idempotency_key="caller-key", timeout=31.0),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 422
+    assert response.body == {
+        "error": "idempotency_key_conflict",
+        "run_id": "run-1",
+    }
 
 
 @pytest.mark.asyncio

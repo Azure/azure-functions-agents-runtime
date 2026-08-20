@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,6 +13,7 @@ from uuid import uuid4
 import pytest
 
 import azure_functions_agents.controller.readiness as readiness_module
+from azure_functions_agents.controller.idempotency import build_idempotency_attempt
 from azure_functions_agents.controller.package import LiveManifestNotReadyError
 from azure_functions_agents.controller.readiness import (
     ATOMIC_CHECKPOINT_POINTER_PATH,
@@ -35,7 +38,13 @@ from azure_functions_agents.controller.readiness import (
     touch_session_activity,
 )
 from azure_functions_agents.controller.reconciler import SessionReconciler
-from azure_functions_agents.execution.setup_budget import SetupBudget
+from azure_functions_agents.execution.setup_budget import (
+    SetupBudget,
+    SetupPhase,
+    SetupTimeoutExceptionType,
+    SetupTimeoutMetadata,
+    SetupTimeoutReason,
+)
 from azure_functions_agents.harness.sandbox_capabilities import REQUIRED_HARNESS_CAPABILITIES
 from azure_functions_agents.journal_paths import BOOTSTRAP_ERROR_PATH
 from azure_functions_agents.session_state import (
@@ -48,6 +57,7 @@ from azure_functions_agents.session_state import (
     SessionNotAdmissibleError,
     SessionOperationTarget,
     SessionStateContractError,
+    StaleOperationTokenError,
     StateStoreUnavailableError,
     owner_partition,
 )
@@ -56,8 +66,10 @@ from azure_functions_agents.transport.transport_models import (
     SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
     DiskSource,
     SandboxCreateOutcomeUnknownError,
+    SandboxCreateRequest,
     SandboxFileOperationError,
     SandboxGroupAuthorizationError,
+    SandboxGroupBinding,
 )
 from tests.doubles.content_package import content_package
 from tests.doubles.fake_session_runtime import DEFAULT_GROUP_RESOURCE_ID
@@ -165,6 +177,44 @@ def _script_root(tmp_path: Path) -> Path:
     return tmp_path
 
 
+async def _collect_detached_task_count() -> int:
+    gc.collect()
+    await asyncio.sleep(0)
+    return len(readiness_module._DETACHED_BOUNDED_TASKS)
+
+
+async def _release_detached_task(
+    release: asyncio.Event,
+    late_completion: asyncio.Event,
+) -> bool:
+    release.set()
+    await asyncio.wait_for(late_completion.wait(), timeout=1)
+    await asyncio.sleep(0)
+    return not await _collect_detached_task_count()
+
+
+async def _wait_for_prompt_task[T](
+    task: asyncio.Future[T],
+    loop: asyncio.AbstractEventLoop,
+) -> tuple[set[asyncio.Future[T]], float]:
+    started_at = loop.time()
+    done, _pending = await asyncio.wait({task}, timeout=0.15)
+    return done, loop.time() - started_at
+
+
+async def _finish_detached_task[T](
+    task: asyncio.Future[T],
+    done: set[asyncio.Future[T]],
+    release: asyncio.Event,
+    late_completion: asyncio.Event,
+) -> bool:
+    if task not in done:
+        release.set()
+        with suppress(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+    return await _release_detached_task(release, late_completion)
+
+
 class _CountingHandle(_FakeHandle):
     def __init__(self) -> None:
         super().__init__()
@@ -173,6 +223,331 @@ class _CountingHandle(_FakeHandle):
     async def close(self) -> None:
         self.close_calls += 1
         await super().close()
+
+
+class _StalledRecoveryStore(_FakeStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.recovery_started = asyncio.Event()
+        self.recovery_cancelled = asyncio.Event()
+        self.release_recovery = asyncio.Event()
+        self.stall_recovery = True
+
+    async def advance_operation(self, **kwargs: object):  # type: ignore[no-untyped-def]
+        if kwargs["phase"] == "provision_reconcile" and self.stall_recovery:
+            self.recovery_started.set()
+            try:
+                await self.release_recovery.wait()
+            except asyncio.CancelledError:
+                self.recovery_cancelled.set()
+                raise
+        return await super().advance_operation(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_admission_timeout_preserves_outer_cancellation() -> None:
+    started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+    confirmations = 0
+
+    async def operation() -> str:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            child_cancelled.set()
+            raise
+        return "unexpected"
+
+    async def confirm() -> str:
+        nonlocal confirmations
+        confirmations += 1
+        return "confirmed"
+
+    task = asyncio.create_task(
+        readiness_module._await_admission_with_setup_timeout(
+            operation,
+            SetupBudget.start(setup_seconds=1),
+            confirm,
+            phase=SetupPhase.PROVISION_CREATE,
+        )
+    )
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert child_cancelled.is_set()
+    assert confirmations == 0
+
+
+@pytest.mark.asyncio
+async def test_admission_timeout_confirms_child_cancellation() -> None:
+    started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+    confirmations = 0
+
+    async def operation() -> str:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            child_cancelled.set()
+            raise
+        return "unexpected"
+
+    async def confirm() -> str:
+        nonlocal confirmations
+        confirmations += 1
+        return "confirmed"
+
+    result = await readiness_module._await_admission_with_setup_timeout(
+        operation,
+        SetupBudget.start(setup_seconds=0.05),
+        confirm,
+        phase=SetupPhase.PROVISION_CREATE,
+    )
+
+    assert started.is_set()
+    assert child_cancelled.is_set()
+    assert confirmations == 1
+    assert result == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_admission_timeout_retains_resistant_task_until_late_failure_is_consumed() -> None:
+    assert not readiness_module._DETACHED_BOUNDED_TASKS
+    started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release = asyncio.Event()
+    late_completion = asyncio.Event()
+    confirmations = 0
+    loop = asyncio.get_running_loop()
+    loop_errors: list[dict[str, object]] = []
+    previous_exception_handler = loop.get_exception_handler()
+
+    async def operation() -> str:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release.wait()
+            late_completion.set()
+            raise RuntimeError("late admission failure") from None
+
+    async def confirm() -> str:
+        nonlocal confirmations
+        confirmations += 1
+        return "confirmed"
+
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    task = asyncio.create_task(
+        readiness_module._await_admission_with_setup_timeout(
+            operation,
+            SetupBudget.start(setup_seconds=0.02),
+            confirm,
+            phase=SetupPhase.PROVISION_CREATE,
+        )
+    )
+    await started.wait()
+    done, elapsed = await _wait_for_prompt_task(task, loop)
+
+    try:
+        assert task in done
+        result = task.result()
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+        detached_tasks_after_fallback = len(readiness_module._DETACHED_BOUNDED_TASKS)
+        detached_tasks_after_gc = await _collect_detached_task_count()
+        loop_errors_after_gc = list(loop_errors)
+    finally:
+        try:
+            detached_registry_empty = await _finish_detached_task(
+                task,
+                done,
+                release,
+                late_completion,
+            )
+        finally:
+            loop.set_exception_handler(previous_exception_handler)
+
+    assert started.is_set()
+    assert cancellation_seen.is_set()
+    assert elapsed < 0.15
+    assert confirmations == 1
+    assert result == "confirmed"
+    assert detached_tasks_after_fallback == 1
+    assert detached_tasks_after_gc == 1
+    assert loop_errors_after_gc == []
+    assert detached_registry_empty
+    assert loop_errors == []
+
+
+@pytest.mark.asyncio
+async def test_admission_outer_cancellation_bounds_resistant_child_and_preserves_reason() -> None:
+    assert not readiness_module._DETACHED_BOUNDED_TASKS
+    started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release = asyncio.Event()
+    late_completion = asyncio.Event()
+    confirmations = 0
+    loop = asyncio.get_running_loop()
+
+    async def operation() -> str:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release.wait()
+            late_completion.set()
+            return "late admission"
+
+    async def confirm() -> str:
+        nonlocal confirmations
+        confirmations += 1
+        return "confirmed"
+
+    task = asyncio.create_task(
+        readiness_module._await_admission_with_setup_timeout(
+            operation,
+            SetupBudget.start(setup_seconds=1),
+            confirm,
+            phase=SetupPhase.PROVISION_CREATE,
+        )
+    )
+    await started.wait()
+    started_at = loop.time()
+    task.cancel("caller cancellation")
+    done, _pending = await asyncio.wait({task}, timeout=0.15)
+    elapsed = loop.time() - started_at
+
+    try:
+        assert task in done
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            task.result()
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+        detached_tasks_after_cancellation = len(readiness_module._DETACHED_BOUNDED_TASKS)
+    finally:
+        if task not in done:
+            release.set()
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1)
+        detached_registry_empty = await _release_detached_task(release, late_completion)
+
+    assert exc_info.value.args == ("caller cancellation",)
+    assert cancellation_seen.is_set()
+    assert elapsed < 0.15
+    assert confirmations == 0
+    assert detached_tasks_after_cancellation == 1
+    assert detached_registry_empty
+
+
+@pytest.mark.asyncio
+async def test_bounded_confirmation_retains_resistant_task_and_returns_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert not readiness_module._DETACHED_BOUNDED_TASKS
+    monkeypatch.setattr(readiness_module, "_ADMISSION_CONFIRMATION_TIMEOUT_SECONDS", 0.02)
+    started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release = asyncio.Event()
+    late_completion = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    loop_errors: list[dict[str, object]] = []
+    previous_exception_handler = loop.get_exception_handler()
+
+    async def confirmation() -> str:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release.wait()
+            late_completion.set()
+            raise RuntimeError("late confirmation failure") from None
+
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    task = asyncio.create_task(
+        readiness_module._bounded_admission_confirmation(confirmation(), "fallback")
+    )
+    await started.wait()
+    started_at = loop.time()
+    done, _pending = await asyncio.wait({task}, timeout=0.15)
+    elapsed = loop.time() - started_at
+
+    try:
+        assert task in done
+        result = task.result()
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+        detached_tasks_after_fallback = len(readiness_module._DETACHED_BOUNDED_TASKS)
+        detached_tasks_after_gc = await _collect_detached_task_count()
+        loop_errors_after_gc = list(loop_errors)
+    finally:
+        try:
+            if task not in done:
+                release.set()
+                with suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=1)
+            detached_registry_empty = await _release_detached_task(release, late_completion)
+        finally:
+            loop.set_exception_handler(previous_exception_handler)
+
+    assert result == "fallback"
+    assert cancellation_seen.is_set()
+    assert elapsed < 0.15
+    assert detached_tasks_after_fallback == 1
+    assert detached_tasks_after_gc == 1
+    assert loop_errors_after_gc == []
+    assert detached_registry_empty
+    assert loop_errors == []
+
+
+@pytest.mark.asyncio
+async def test_admission_returns_immediate_result_without_confirmation() -> None:
+    confirmations = 0
+
+    async def operation() -> str:
+        return "admitted"
+
+    async def confirm() -> str:
+        nonlocal confirmations
+        confirmations += 1
+        return "confirmed"
+
+    result = await readiness_module._await_admission_with_setup_timeout(
+        operation,
+        SetupBudget.start(setup_seconds=1),
+        confirm,
+        phase=SetupPhase.PROVISION_CREATE,
+    )
+
+    assert result == "admitted"
+    assert confirmations == 0
+
+
+@pytest.mark.asyncio
+async def test_admission_propagates_predeadline_operation_error() -> None:
+    confirmations = 0
+
+    async def operation() -> str:
+        raise RuntimeError("admission failed")
+
+    async def confirm() -> str:
+        nonlocal confirmations
+        confirmations += 1
+        return "confirmed"
+
+    with pytest.raises(RuntimeError, match="admission failed"):
+        await readiness_module._await_admission_with_setup_timeout(
+            operation,
+            SetupBudget.start(setup_seconds=1),
+            confirm,
+            phase=SetupPhase.PROVISION_CREATE,
+        )
+
+    assert confirmations == 0
 
 
 @pytest.mark.asyncio
@@ -312,7 +687,11 @@ async def test_targeted_reconciliation_authorization_is_redacted(tmp_path: Path)
     runtime = replace(runtime, _targeted_reconciler=reconciliation)
 
     with pytest.raises(SessionActivationAuthorizationError) as caught:
-        await runtime.reconcile_session(owner_partition(_owner()), "session-1", SetupBudget.start())
+        await runtime.reconcile_session(
+            owner_partition(_owner()),
+            "session-1",
+            SetupBudget.start(),
+        )
 
     assert str(caught.value) == SANDBOX_GROUP_AUTHORIZATION_MESSAGE
 
@@ -326,17 +705,18 @@ async def test_reserved_provision_keeps_post_acceptance_authorization_indetermin
     provider.create_errors.append(SandboxCreateOutcomeUnknownError())
     store = _FakeStore()
 
-    with pytest.raises(SessionActivationSetupTimeoutError):
-        await provision_new_session_submit(
-            _runtime(script_root, provider, store),
-            _owner(),
-            session_id="new-session",
-            run_id="run-1",
-            timeout=None,
-            attempt=None,
-            setup_deadline=SetupBudget.start(),
-        )
+    provisioned = await provision_new_session_submit(
+        _runtime(script_root, provider, store),
+        _owner(),
+        session_id="new-session",
+        run_id="run-1",
+        timeout=None,
+        attempt=None,
+        setup_deadline=SetupBudget.start(),
+    )
 
+    assert provisioned.setup_timed_out
+    assert provisioned.timeout_metadata is not None
     assert store.session is not None
     assert store.session.status == "creating"
     assert store.session.active_run_id == "run-1"
@@ -346,6 +726,307 @@ async def test_reserved_provision_keeps_post_acceptance_authorization_indetermin
     assert operation.state == "active"
     assert operation.phase == "provision_reconcile"
     assert operation.error_code == "provision_create_indeterminate"
+
+
+@pytest.mark.asyncio
+async def test_reserved_provision_persists_typed_create_timeout_for_reconciliation(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    setup_deadline = SetupBudget.start()
+    timeout_metadata = setup_deadline.timeout_metadata(
+        phase=SetupPhase.PROVISION_CREATE,
+        reason=SetupTimeoutReason.OPERATION_TIMEOUT,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+    )
+    provider = _FakeProvider(_FakeHandle())
+    provider.create_errors.append(SessionActivationSetupTimeoutError(timeout_metadata))
+    store = _FakeStore()
+
+    provisioned = await provision_new_session_submit(
+        _runtime(script_root, provider, store),
+        _owner(),
+        session_id="new-session",
+        run_id="run-1",
+        timeout=None,
+        attempt=None,
+        setup_deadline=setup_deadline,
+    )
+
+    assert provisioned.setup_timed_out
+    assert provisioned.timeout_metadata is timeout_metadata
+    assert provisioned.outcome.fence is not None
+    [operation] = store.durable_operations.values()
+    assert operation.phase == "provision_reconcile"
+    assert operation.error_code == "provision_create_indeterminate"
+    assert len(provider.create_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_reserved_provision_returns_timeout_when_recovery_write_stalls(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    setup_deadline = SetupBudget.start()
+    timeout_metadata = setup_deadline.timeout_metadata(
+        phase=SetupPhase.PROVISION_CREATE,
+        reason=SetupTimeoutReason.OPERATION_TIMEOUT,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+    )
+    provider = _FakeProvider(_FakeHandle())
+    provider.create_errors.append(SessionActivationSetupTimeoutError(timeout_metadata))
+    store = _StalledRecoveryStore()
+
+    provisioned = await asyncio.wait_for(
+        provision_new_session_submit(
+            _runtime(script_root, provider, store),
+            _owner(),
+            session_id="new-session",
+            run_id="run-1",
+            timeout=None,
+            attempt=None,
+            setup_deadline=setup_deadline,
+        ),
+        timeout=2.0,
+    )
+
+    assert provisioned.setup_timed_out
+    assert provisioned.timeout_metadata is timeout_metadata
+    assert provisioned.outcome.fence is not None
+    assert store.recovery_started.is_set()
+    assert store.recovery_cancelled.is_set()
+    [operation] = store.durable_operations.values()
+    assert operation.phase == "provision_create"
+    assert len(provider.create_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_taken_over_indeterminate_provision_reconciles_without_second_create(
+    tmp_path: Path,
+) -> None:
+    class _TemporarilyInvisibleProvider(_FakeProvider):
+        def __init__(
+            self,
+            handle: _FakeHandle,
+            timeout_metadata: SetupTimeoutMetadata,
+        ) -> None:
+            super().__init__(handle)
+            self.create_attempts = 0
+            self.reconcile_requests: list[SandboxCreateRequest] = []
+            self._timeout_metadata = timeout_metadata
+
+        async def create(
+            self,
+            request: SandboxCreateRequest,
+            *,
+            persisted_group: SandboxGroupBinding,
+        ) -> _FakeHandle:
+            del persisted_group
+            if request.reconcile_only:
+                self.reconcile_requests.append(request)
+                raise SandboxCreateOutcomeUnknownError()
+            self.create_attempts += 1
+            self.create_calls.append(request)
+            raise SessionActivationSetupTimeoutError(self._timeout_metadata)
+
+    script_root = _script_root(tmp_path)
+    initial_deadline = SetupBudget.start()
+    timeout_metadata = initial_deadline.timeout_metadata(
+        phase=SetupPhase.PROVISION_CREATE,
+        reason=SetupTimeoutReason.OPERATION_TIMEOUT,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+    )
+    provider = _TemporarilyInvisibleProvider(_FakeHandle(), timeout_metadata)
+    store = _StalledRecoveryStore()
+    attempt = build_idempotency_attempt(
+        agent_slug="main",
+        prompt="hello",
+        timeout=None,
+        idempotency_key="indeterminate-provision-retry",
+    )
+    assert attempt is not None
+
+    initial = await provision_new_session_submit(
+        _runtime(script_root, provider, store),
+        _owner(),
+        session_id="new-session",
+        run_id="run-1",
+        timeout=None,
+        attempt=attempt,
+        setup_deadline=initial_deadline,
+    )
+
+    assert initial.setup_timed_out
+    assert store.recovery_cancelled.is_set()
+    assert store.session is not None
+    operation_id = store.session.active_operation_id
+    assert operation_id is not None
+    initial_operation = store.durable_operations[operation_id]
+    assert initial_operation.phase == "provision_create"
+    store.durable_operations[operation_id] = replace(
+        initial_operation,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    store.stall_recovery = False
+
+    replay = await provision_new_session_submit(
+        _runtime(script_root, provider, store),
+        _owner(),
+        session_id="new-session",
+        run_id="run-1",
+        timeout=None,
+        attempt=attempt,
+        setup_deadline=SetupBudget.start(),
+    )
+
+    assert replay.setup_timed_out
+    assert provider.create_attempts == 1
+    assert len(provider.create_calls) == 1
+    assert len(provider.reconcile_requests) == 1
+    assert provider.reconcile_requests[0].reconcile_only
+    assert provider.reconcile_requests[0].labels.operation_label == initial_operation.correlation_label
+    resumed_operation = store.durable_operations[operation_id]
+    assert resumed_operation.attempt_count == 1
+    assert resumed_operation.phase == "provision_reconcile"
+
+
+@pytest.mark.asyncio
+async def test_reserved_provision_preserves_outer_cancellation_during_recovery_write(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    setup_deadline = SetupBudget.start()
+    timeout_metadata = setup_deadline.timeout_metadata(
+        phase=SetupPhase.PROVISION_CREATE,
+        reason=SetupTimeoutReason.OPERATION_TIMEOUT,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+    )
+    provider = _FakeProvider(_FakeHandle())
+    provider.create_errors.append(SessionActivationSetupTimeoutError(timeout_metadata))
+    store = _StalledRecoveryStore()
+    pending = asyncio.create_task(
+        provision_new_session_submit(
+            _runtime(script_root, provider, store),
+            _owner(),
+            session_id="new-session",
+            run_id="run-1",
+            timeout=None,
+            attempt=None,
+            setup_deadline=setup_deadline,
+        )
+    )
+
+    await asyncio.wait_for(store.recovery_started.wait(), timeout=1.0)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(pending, timeout=1.0)
+
+    assert store.recovery_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_reserved_provision_returns_durable_cancel_after_losing_its_fence(
+    tmp_path: Path,
+) -> None:
+    class _CancelWinningStore(_FakeStore):
+        async def advance_operation(self, **kwargs: object):  # type: ignore[no-untyped-def]
+            if kwargs["phase"] == "provision_lifecycle":
+                fence = kwargs["fence"]
+                assert isinstance(fence, readiness_module.SessionOperationFence)
+                await self.cancel_prelaunch_submit(
+                    owner_partition=fence.owner_partition,
+                    session_id=fence.session_id,
+                    run_id="run-1",
+                    token="b" * 32,
+                    updated_at=datetime.now(UTC),
+                )
+                raise StaleOperationTokenError("cancel won the provision fence")
+            return await super().advance_operation(**kwargs)
+
+    script_root = _script_root(tmp_path)
+    handle = _CountingHandle()
+    store = _CancelWinningStore()
+
+    provisioned = await provision_new_session_submit(
+        _runtime(script_root, _FakeProvider(handle), store),
+        _owner(),
+        session_id="new-session",
+        run_id="run-1",
+        timeout=None,
+        attempt=None,
+        setup_deadline=SetupBudget.start(),
+    )
+
+    assert provisioned.activated is None
+    assert provisioned.outcome.run.status == "canceled"
+    assert provisioned.outcome.fence is None
+    assert handle.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_pre_pointer_replay_does_not_take_over_provision_rearm(
+    tmp_path: Path,
+) -> None:
+    class _CancelOnReserveStore(_FakeStore):
+        async def begin_provision_submit(self, records):  # type: ignore[no-untyped-def]
+            outcome = await super().begin_provision_submit(records)
+            if not outcome.replayed:
+                await self.cancel_prelaunch_submit(
+                    owner_partition=records.session.owner_partition,
+                    session_id=records.session.session_id,
+                    run_id=records.run.run_id,
+                    token="b" * 32,
+                    updated_at=datetime.now(UTC),
+                )
+            return outcome
+
+    script_root = _script_root(tmp_path)
+    store = _CancelOnReserveStore()
+    provider = _FakeProvider(_FakeHandle())
+    attempt = build_idempotency_attempt(
+        agent_slug="main",
+        prompt="hello",
+        timeout=None,
+        idempotency_key="retry-canceled-pre-pointer",
+    )
+    assert attempt is not None
+
+    first = await provision_new_session_submit(
+        _runtime(script_root, provider, store),
+        _owner(),
+        session_id="new-session",
+        run_id="run-1",
+        timeout=None,
+        attempt=attempt,
+        setup_deadline=SetupBudget.start(),
+    )
+    assert first.outcome.run.status == "canceled"
+    assert store.session is not None
+    assert store.session.sandbox_id is None
+    operation_id = store.session.active_operation_id
+    assert operation_id is not None
+    canceled_operation = store.durable_operations[operation_id]
+    store.durable_operations[operation_id] = replace(
+        canceled_operation,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+
+    replay = await provision_new_session_submit(
+        _runtime(script_root, provider, store),
+        _owner(),
+        session_id="different-candidate-is-ignored",
+        run_id="different-candidate-is-ignored",
+        timeout=None,
+        attempt=attempt,
+        setup_deadline=SetupBudget.start(),
+    )
+
+    assert replay.outcome.replayed is True
+    assert replay.outcome.run.run_id == "run-1"
+    assert replay.outcome.run.status == "canceled"
+    assert replay.activated is None
+    assert store.durable_operations[operation_id].token == canceled_operation.token
+    assert provider.create_calls == []
 
 
 @pytest.mark.asyncio
@@ -383,16 +1064,8 @@ async def test_reserved_provision_closes_created_handle_after_post_create_failur
     store = _PhaseFailureStore()
     runtime = _runtime(script_root, _FakeProvider(handle), store)
 
-    with pytest.raises(
-        (
-            SandboxFileOperationError,
-            SessionActivationError,
-            readiness_module.ContentPackagingError,
-            readiness_module.LiveManifestNotReadyError,
-            ConcurrencyConflictError,
-        )
-    ):
-        await provision_new_session_submit(
+    if failure_phase == "lifecycle":
+        provisioned = await provision_new_session_submit(
             runtime,
             _owner(),
             session_id="new-session",
@@ -401,6 +1074,27 @@ async def test_reserved_provision_closes_created_handle_after_post_create_failur
             attempt=None,
             setup_deadline=SetupBudget.start(),
         )
+        assert provisioned.setup_timed_out
+        assert provisioned.timeout_metadata is not None
+    else:
+        with pytest.raises(
+            (
+                SandboxFileOperationError,
+                SessionActivationError,
+                readiness_module.ContentPackagingError,
+                readiness_module.LiveManifestNotReadyError,
+                ConcurrencyConflictError,
+            )
+        ):
+            await provision_new_session_submit(
+                runtime,
+                _owner(),
+                session_id="new-session",
+                run_id="run-1",
+                timeout=None,
+                attempt=None,
+                setup_deadline=SetupBudget.start(),
+            )
 
     assert handle.close_calls == 1
 

@@ -2481,6 +2481,65 @@ async def test_reconciler_expires_pre_pointer_provision_without_raw_orphan_delet
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("created_sandbox", [False, True])
+async def test_reconciler_settles_canceled_pre_pointer_provision(
+    created_sandbox: bool,
+) -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    base = _session(
+        now - timedelta(minutes=10),
+        status="creating",
+        active_run_id="run-1",
+        sandbox_id=None,
+    )
+    run = _run(base, now, status="canceled")
+    operation = replace(
+        _provision_operation(base, run, now),
+        phase="provision_rearm",
+        error_code="canceled_before_launch",
+    )
+    session = replace(
+        base,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    labels = {
+        "owner_hash_version": session.owner_partition.owner_hash_version,
+        "owner_kind": session.owner_partition.owner_kind,
+        "owner_hash": session.owner_partition.owner_hash,
+        "app_hash": session.owner_partition.app_hash,
+        "session_id": session.session_id,
+        "operation_label": operation.correlation_label,
+    }
+    provider = InventoryProvider(
+        sandboxes=(
+            (SandboxSummary.create(sandbox_id="created-1", labels=labels),)
+            if created_sandbox
+            else ()
+        )
+    )
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).run_once()
+
+    assert report.tombstoned_sessions == 1
+    assert store.session is not None
+    assert store.session.status == "tombstoned"
+    assert store.session.active_run_id is None
+    assert store.session.active_operation_id is None
+    assert store.runs[run.run_id].status == "canceled"
+    assert store.durable_operations[operation.operation_id].state == "completed"
+    assert provider.deleted_sandboxes == (["created-1"] if created_sandbox else [])
+
+
+@pytest.mark.asyncio
 async def test_targeted_reconcile_aborts_expired_missing_submit_run() -> None:
     now = datetime(2026, 8, 5, tzinfo=UTC)
     base = _session(now, status="running", active_run_id="run-1")

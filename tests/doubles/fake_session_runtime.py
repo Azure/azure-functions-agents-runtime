@@ -27,6 +27,8 @@ from azure_functions_agents.session_state import (
     OperationRead,
     OwnerIdempotencyRead,
     OwnerPartition,
+    PreLaunchCancelDisposition,
+    PreLaunchCancelOutcome,
     ProvisionSubmitOutcome,
     ProvisionSubmitRecords,
     ReconcilerCursorRead,
@@ -34,6 +36,7 @@ from azure_functions_agents.session_state import (
     SessionNotAdmissibleError,
     SessionOperationFence,
     SessionRead,
+    SessionStateStoreError,
     TableEntityPage,
 )
 from azure_functions_agents.transport.manifest import SESSION_MANIFEST_PATH
@@ -367,6 +370,37 @@ class FakeSessionStateStore:
             replayed=False,
         )
 
+    async def confirm_operation_run_admission(
+        self,
+        *,
+        fence: SessionOperationFence,
+        records: AdmissionRecords,
+    ) -> AdmissionOutcome:
+        operation = self.durable_operations.get(fence.operation_id)
+        run = self.runs.get(records.run.run_id)
+        if (
+            self.session is None
+            or run is None
+            or operation is None
+            or self.session.active_run_id != records.run.run_id
+            or self.session.active_operation_id != fence.operation_id
+            or operation.kind != "submit_run"
+            or operation.phase not in {"submit_journal", "submit_launching", "submit_rearm"}
+        ):
+            return AdmissionOutcome(
+                run=records.run,
+                run_etag=None,
+                session_etag=None,
+                replayed=False,
+                admission="possibly_committed",
+            )
+        return AdmissionOutcome(
+            run=run,
+            run_etag="run-etag",
+            session_etag=self.etag,
+            replayed=False,
+        )
+
     async def get_owner_idempotency(
         self,
         owner_partition: OwnerPartition,
@@ -522,6 +556,11 @@ class FakeSessionStateStore:
                     replayed=True,
                 )
         if self.session is not None:
+            if self.session.active_run_id is not None:
+                raise ActiveRunConflictError(
+                    "session already has an active run",
+                    active_run_id=self.session.active_run_id,
+                )
             raise AssertionError("session row already exists")
         operation = replace(
             records.operation,
@@ -541,6 +580,58 @@ class FakeSessionStateStore:
             run_etag="run-etag",
             session_etag=self.etag,
             fence=SessionOperationFence.create(operation),
+            replayed=False,
+        )
+
+    async def confirm_provision_submit(
+        self,
+        records: ProvisionSubmitRecords,
+    ) -> ProvisionSubmitOutcome:
+        owner_idempotency = records.owner_idempotency
+        if owner_idempotency is not None:
+            owner = self.owner_idempotency.get(owner_idempotency.idempotency_hash)
+            if owner is not None:
+                if owner.request_hash != owner_idempotency.request_hash:
+                    raise IdempotencyConflictError(
+                        "idempotency key already used with a different payload",
+                        existing_run_id=owner.run_id,
+                    )
+                if owner.session_id != records.session.session_id or owner.run_id != records.run.run_id:
+                    return ProvisionSubmitOutcome(
+                        run=self.runs[owner.run_id],
+                        run_etag="run-etag",
+                        session_etag=None,
+                        fence=None,
+                        replayed=True,
+                    )
+        operation = self.durable_operations.get(records.operation.operation_id)
+        run = self.runs.get(records.run.run_id)
+        if (
+            self.session is None
+            or run is None
+            or operation is None
+            or self.session.session_id != records.session.session_id
+            or self.session.active_run_id != records.run.run_id
+            or self.session.active_operation_id != records.operation.operation_id
+            or operation.kind != "provision_submit"
+        ):
+            return ProvisionSubmitOutcome(
+                run=records.run,
+                run_etag=None,
+                session_etag=None,
+                fence=None,
+                replayed=False,
+                admission="possibly_committed",
+            )
+        return ProvisionSubmitOutcome(
+            run=run,
+            run_etag="run-etag",
+            session_etag=self.etag,
+            fence=(
+                SessionOperationFence.create(operation)
+                if operation.token == records.operation.token
+                else None
+            ),
             replayed=False,
         )
 
@@ -614,10 +705,13 @@ class FakeSessionStateStore:
         if self.session is None or self.session.active_operation_id is None:
             return None
         operation = self.durable_operations[self.session.active_operation_id]
+        run = self.runs.get(run_id)
         if (
             operation.target.run_id != run_id
             or self.session.active_run_id != run_id
             or operation.phase in {"provision_launching", "submit_launching"}
+            or run is None
+            or run.status != "accepted"
         ):
             return None
         phase = (
@@ -638,6 +732,144 @@ class FakeSessionStateStore:
         self.etag = "etag-journal-claimed"
         self.operations.append("claim_operation_journal")
         return SessionOperationFence.create(claimed)
+
+    async def cancel_prelaunch_submit(
+        self,
+        *,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        run_id: str,
+        token: str,
+        updated_at: datetime,
+    ) -> PreLaunchCancelOutcome:
+        session_read = await self.get_session(owner_partition, session_id)
+        run_read = await self.get_run(owner_partition, session_id, run_id)
+        session = session_read.record
+        run = run_read.record
+        operation_read = (
+            None
+            if session.active_operation_id is None
+            else await self.get_operation(
+                owner_partition,
+                session_id,
+                session.active_operation_id,
+            )
+        )
+        operation = None if operation_read is None else operation_read.record
+
+        def outcome(
+            disposition: PreLaunchCancelDisposition,
+            *,
+            current_run: DurableRunRecord = run,
+            current_session: DurableSessionRecord = session,
+            current_operation: DurableSessionOperation | None = operation,
+            run_etag: str = run_read.etag,
+            session_etag: str = session_read.etag,
+            operation_etag: str | None = (
+                None if operation_read is None else operation_read.etag
+            ),
+            fence: SessionOperationFence | None = None,
+        ) -> PreLaunchCancelOutcome:
+            return PreLaunchCancelOutcome(
+                disposition=disposition,
+                run=current_run,
+                run_etag=run_etag,
+                session=current_session,
+                session_etag=session_etag,
+                operation=current_operation,
+                operation_etag=operation_etag,
+                fence=fence,
+            )
+
+        if run.status in TERMINAL_RUN_STATUSES:
+            return outcome("terminal")
+        if (
+            operation is not None
+            and session.active_run_id == run_id
+            and session.active_operation_id == operation.operation_id
+            and operation.target.run_id == run_id
+            and operation.phase
+            in {
+                "provision_launching",
+                "submit_launching",
+            }
+        ):
+            return outcome("launch_claimed")
+        cancelable_phase = (
+            operation is not None
+            and (
+                (
+                    operation.kind == "provision_submit"
+                    and operation.phase
+                    in {
+                        "provision_create",
+                        "provision_lifecycle",
+                        "provision_content",
+                        "provision_manifest",
+                        "provision_journal",
+                    }
+                )
+                or (
+                    operation.kind == "submit_run"
+                    and operation.phase == "submit_journal"
+                )
+            )
+        )
+        if (
+            operation is None
+            or session.active_run_id != run_id
+            or session.active_operation_id != operation.operation_id
+            or not cancelable_phase
+        ):
+            return outcome("retry")
+        if token == operation.token:
+            raise SessionStateStoreError("pre-launch cancellation must rotate the operation token")
+        effective_updated_at = max(
+            updated_at,
+            session.updated_at,
+            run.updated_at,
+            operation.updated_at,
+        )
+        canceled = replace(
+            run,
+            status="canceled",
+            result_available=False,
+            status_reason="canceled_before_launch",
+            updated_at=effective_updated_at,
+        )
+        canceled_operation = replace(
+            operation,
+            phase=(
+                "provision_rearm"
+                if operation.kind == "provision_submit"
+                else "submit_rearm"
+            ),
+            token=token,
+            attempt_count=operation.attempt_count + 1,
+            error_code=None,
+            lease_expires_at=effective_updated_at
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
+            next_attempt_at=None,
+            updated_at=effective_updated_at,
+        )
+        retained_session = replace(
+            session,
+            updated_at=effective_updated_at,
+        )
+        self.runs[run_id] = canceled
+        self.durable_operations[operation.operation_id] = canceled_operation
+        self.session = retained_session
+        self.etag = "etag-provision-canceled"
+        self.operations.append("cancel_prelaunch_submit")
+        return outcome(
+            "canceled_before_launch",
+            current_run=canceled,
+            current_session=retained_session,
+            current_operation=canceled_operation,
+            session_etag=self.etag,
+            operation_etag=f"operation-{canceled_operation.attempt_count}",
+            fence=SessionOperationFence.create(canceled_operation),
+        )
 
     async def advance_operation(
         self,

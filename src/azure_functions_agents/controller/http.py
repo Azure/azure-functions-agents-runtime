@@ -9,10 +9,15 @@ from .._logger import logger
 from ..execution.backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
     AgentExecutionBackend,
+    DurableAdmissionOutcome,
+    DurableAdmissionSetupTimeoutError,
+    LinkedActiveRunConflictError,
     RunContext,
     RunError,
     RunHandle,
+    RunPhase,
     RunResult,
+    RunState,
     RunStatus,
     StartRunRequest,
 )
@@ -37,6 +42,16 @@ from .readiness import (
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
 )
+
+_RESPOND_ASYNC_PREFERENCE = "respond-async"
+_SETUP_TIMEOUT_ERROR_CODE = "setup_deadline_exceeded"
+_RUN_TIMEOUT_ERROR_CODE = "run_deadline_exceeded"
+_ADMISSION_OUTCOME_UNKNOWN_ERROR_CODE = "admission_outcome_unknown"
+_ADMISSION_NOT_RESERVED = "not_reserved"
+_ADMISSION_COMMITTED: DurableAdmissionOutcome = "committed"
+_ADMISSION_POSSIBLY_COMMITTED: DurableAdmissionOutcome = "possibly_committed"
+_PROVISIONING_PHASE: RunPhase = "provisioning"
+_DEFAULT_ACCEPTED_RUN_PHASE: RunPhase = "executing"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +79,7 @@ def prefers_respond_async(headers: Mapping[str, str] | None) -> bool:
         "",
     )
     return any(
-        token.strip().split(";", 1)[0].casefold() == "respond-async"
+        token.strip().split(";", 1)[0].casefold() == _RESPOND_ASYNC_PREFERENCE
         for token in prefer.split(",")
     )
 
@@ -112,8 +127,39 @@ async def submit_run(
     budget: RequestBudget,
 ) -> ControllerResponse:
     """Start a run, return an LRO ticket, or preserve the synchronous contract."""
+    started = await _start_run_or_response(
+        backend,
+        request,
+        agent_slug=agent_slug,
+        respond_async=respond_async,
+    )
+    if isinstance(started, ControllerResponse):
+        return started
+    context = RunContext(run_id=started.run_id, session_id=started.session_id)
+    if respond_async:
+        return _accepted_response(agent_slug, started, context)
     try:
-        handle = await backend.start_run(request)
+        status, _events = await budget.wait_for(collect_terminal_run(backend, context))
+    except RunDeadlineExceededError:
+        return await _synchronous_timeout_response(backend, context, budget)
+    return _synchronous_status_response(status)
+
+
+async def _start_run_or_response(
+    backend: AgentExecutionBackend,
+    request: StartRunRequest,
+    *,
+    agent_slug: str,
+    respond_async: bool,
+) -> RunHandle | ControllerResponse:
+    try:
+        return await backend.start_run(request)
+    except DurableAdmissionSetupTimeoutError as exc:
+        return _durable_admission_timeout_response(
+            agent_slug,
+            exc,
+            respond_async=respond_async,
+        )
     except (SetupBudgetExpiredError, SessionActivationSetupTimeoutError) as exc:
         return _setup_timeout_response(
             metadata=_with_request_metadata(
@@ -124,6 +170,14 @@ async def submit_run(
         )
     except SessionActivationAuthorizationError:
         return _sandbox_group_authorization_response()
+    except LinkedActiveRunConflictError as exc:
+        return _linked_active_run_response(
+            agent_slug,
+            session_id=exc.session_id,
+            run_id=exc.run_id,
+            status=exc.status,
+            phase=exc.phase,
+        )
     except ActiveRunConflictError as exc:
         return _active_run_response(exc.active_run_id)
     except IdempotencyConflictError as exc:
@@ -135,27 +189,25 @@ async def submit_run(
     except SessionActivationNotFoundError:
         return ControllerResponse(status_code=404, body={"error": "session_not_found"})
 
-    context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
-    if respond_async:
-        return _accepted_response(agent_slug, handle, context)
 
+async def _synchronous_timeout_response(
+    backend: AgentExecutionBackend,
+    context: RunContext,
+    budget: RequestBudget,
+) -> ControllerResponse:
     try:
-        status, _events = await budget.wait_for(collect_terminal_run(backend, context))
-    except RunDeadlineExceededError:
-        try:
-            status = await budget.wait_for_cleanup(backend.get_run(context))
-            if status.state in TERMINAL_RUN_STATUSES:
-                return _synchronous_status_response(status)
-            await budget.wait_for_cleanup(backend.cancel_run(context))
-        except Exception as exc:
-            logger.warning(
-                "Synchronous run cleanup deferred: session_id=%s run_id=%s error=%s",
-                context.session_id,
-                context.run_id,
-                type(exc).__name__,
-            )
-        return _run_timeout_response(context)
-    return _synchronous_status_response(status)
+        status = await budget.wait_for_cleanup(backend.get_run(context))
+        if status.state in TERMINAL_RUN_STATUSES:
+            return _synchronous_status_response(status)
+        await budget.wait_for_cleanup(backend.cancel_run(context))
+    except Exception as exc:
+        logger.warning(
+            "Synchronous run cleanup deferred: session_id=%s run_id=%s error=%s",
+            context.session_id,
+            context.run_id,
+            type(exc).__name__,
+        )
+    return _run_timeout_response(context)
 
 
 async def read_status(
@@ -228,13 +280,15 @@ async def cancel_run(
     *,
     touch: Callable[[], Awaitable[None]] | None = None,
 ) -> ControllerResponse:
-    """Cancel an attached run and return the terminal durable projection."""
+    """Cancel a run, or return an accepted projection while launch settles."""
     try:
         if touch is not None:
             await touch()
+        status = await backend.cancel_run(context)
         return ControllerResponse(
-            status_code=200,
-            body=status_payload(await backend.cancel_run(context)),
+            status_code=200 if status.state in TERMINAL_RUN_STATUSES else 202,
+            body=status_payload(status),
+            headers={} if status.state in TERMINAL_RUN_STATUSES else {"Retry-After": "2"},
         )
     except (RunRowNotFoundError, SessionRowNotFoundError):
         return ControllerResponse(status_code=404, body={"error": "run_not_found"})
@@ -260,6 +314,8 @@ def status_payload(status: RunStatus) -> dict[str, object]:
         payload["result"] = _result_payload(status.result)
     if status.error is not None:
         payload["error"] = _error_payload(status.error)
+    if status.phase is not None:
+        payload["phase"] = status.phase
     return payload
 
 
@@ -267,21 +323,17 @@ def _accepted_response(
     agent_slug: str,
     handle: RunHandle,
     context: RunContext,
+    *,
+    admission: DurableAdmissionOutcome | None = None,
+    phase: RunPhase | None = None,
+    timeout_metadata: SetupTimeoutMetadata | None = None,
 ) -> ControllerResponse:
     urls = management_urls(agent_slug=agent_slug, context=context)
     return ControllerResponse(
         status_code=202,
-        body={
-            "session_id": handle.session_id,
-            "run_id": handle.run_id,
-            "status": handle.state,
-            **urls,
-        },
-        headers={
-            "Location": urls["status_url"],
-            "Retry-After": "2",
-            "x-ms-session-id": handle.session_id,
-        },
+        body=_run_ticket_payload(handle, urls, admission=admission, phase=phase),
+        headers=_management_headers(context=context, urls=urls),
+        timeout_metadata=timeout_metadata,
     )
 
 
@@ -330,12 +382,13 @@ def _setup_timeout_response(*, metadata: SetupTimeoutMetadata) -> ControllerResp
     return ControllerResponse(
         status_code=504,
         body={
-            "error": "setup_deadline_exceeded",
-            "reason": "setup_deadline_exceeded",
-            "retry_with": "respond-async",
+            "error": _SETUP_TIMEOUT_ERROR_CODE,
+            "reason": _SETUP_TIMEOUT_ERROR_CODE,
+            "retry_with": _RESPOND_ASYNC_PREFERENCE,
+            "admission": _ADMISSION_NOT_RESERVED,
         },
         headers={
-            "x-ms-retry-with": "respond-async",
+            "x-ms-retry-with": _RESPOND_ASYNC_PREFERENCE,
             "Retry-After": str(SETUP_TIMEOUT_RETRY_AFTER_SECONDS),
         },
         timeout_metadata=metadata,
@@ -371,18 +424,89 @@ def _sandbox_group_authorization_response() -> ControllerResponse:
     )
 
 
+def _durable_admission_timeout_response(
+    agent_slug: str,
+    error: DurableAdmissionSetupTimeoutError,
+    *,
+    respond_async: bool,
+) -> ControllerResponse:
+    context = RunContext(
+        run_id=error.handle.run_id,
+        session_id=error.handle.session_id,
+    )
+    metadata = _with_request_metadata(
+        error.metadata,
+        respond_async=respond_async,
+        session_present=True,
+    )
+    phase = error.handle.phase or _PROVISIONING_PHASE
+    if error.outcome == _ADMISSION_COMMITTED:
+        if respond_async:
+            return _accepted_response(
+                agent_slug,
+                error.handle,
+                context,
+                admission=_ADMISSION_COMMITTED,
+                phase=phase,
+                timeout_metadata=metadata,
+            )
+        return _linked_setup_timeout_response(
+            agent_slug,
+            error.handle,
+            context,
+            error_code=_SETUP_TIMEOUT_ERROR_CODE,
+            admission=_ADMISSION_COMMITTED,
+            phase=phase,
+            timeout_metadata=metadata,
+        )
+    return _linked_setup_timeout_response(
+        agent_slug,
+        error.handle,
+        context,
+        error_code=_ADMISSION_OUTCOME_UNKNOWN_ERROR_CODE,
+        admission=_ADMISSION_POSSIBLY_COMMITTED,
+        phase=phase,
+        timeout_metadata=metadata,
+    )
+
+
+def _linked_setup_timeout_response(
+    agent_slug: str,
+    handle: RunHandle,
+    context: RunContext,
+    *,
+    error_code: str,
+    admission: DurableAdmissionOutcome,
+    phase: RunPhase,
+    timeout_metadata: SetupTimeoutMetadata,
+) -> ControllerResponse:
+    urls = management_urls(agent_slug=agent_slug, context=context)
+    body: dict[str, object] = {
+        "error": error_code,
+        "reason": error_code,
+        "retry_with": _RESPOND_ASYNC_PREFERENCE,
+        **_run_ticket_payload(handle, urls, admission=admission, phase=phase),
+    }
+    return ControllerResponse(
+        status_code=504,
+        body=body,
+        headers=_management_headers(context=context, urls=urls, retry_with=True),
+        timeout_metadata=timeout_metadata,
+    )
+
+
 def _run_timeout_response(context: RunContext) -> ControllerResponse:
     return ControllerResponse(
         status_code=504,
         body={
-            "error": "run_deadline_exceeded",
-            "reason": "run_deadline_exceeded",
-            "retry_with": "respond-async",
+            "error": _RUN_TIMEOUT_ERROR_CODE,
+            "reason": _RUN_TIMEOUT_ERROR_CODE,
+            "retry_with": _RESPOND_ASYNC_PREFERENCE,
             "session_id": context.session_id,
             "run_id": context.run_id,
         },
         headers={
-            "x-ms-retry-with": "respond-async",
+            "x-ms-retry-with": _RESPOND_ASYNC_PREFERENCE,
             "x-ms-session-id": context.session_id,
         },
     )
@@ -393,6 +517,80 @@ def _active_run_response(active_run_id: str | None) -> ControllerResponse:
     if active_run_id is not None:
         body["run_id"] = active_run_id
     return ControllerResponse(status_code=409, body=body)
+
+
+def _linked_active_run_response(
+    agent_slug: str,
+    *,
+    session_id: str,
+    run_id: str,
+    status: RunState,
+    phase: RunPhase | None,
+) -> ControllerResponse:
+    context = RunContext(run_id=run_id, session_id=session_id)
+    urls = management_urls(agent_slug=agent_slug, context=context)
+    body: dict[str, object] = {
+        "error": "active_run_exists",
+        "session_id": session_id,
+        "run_id": run_id,
+        "status": status,
+        **urls,
+    }
+    if phase is not None:
+        body["phase"] = phase
+    return ControllerResponse(
+        status_code=409,
+        body=body,
+        headers={
+            "Location": urls["status_url"],
+            "x-ms-session-id": session_id,
+        },
+    )
+
+
+def _run_ticket_payload(
+    handle: RunHandle,
+    urls: Mapping[str, str],
+    *,
+    admission: DurableAdmissionOutcome | None = None,
+    phase: RunPhase | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "session_id": handle.session_id,
+        "run_id": handle.run_id,
+        "status": handle.state,
+    }
+    if admission is not None:
+        payload["admission"] = admission
+    payload["phase"] = _ticket_phase(handle, phase)
+    payload.update(urls)
+    return payload
+
+
+def _ticket_phase(handle: RunHandle, phase: RunPhase | None) -> RunPhase:
+    if phase is not None:
+        return phase
+    if handle.phase is not None:
+        return handle.phase
+    if handle.state in TERMINAL_RUN_STATUSES:
+        return "terminal"
+    return _DEFAULT_ACCEPTED_RUN_PHASE
+
+
+def _management_headers(
+    *,
+    context: RunContext,
+    urls: Mapping[str, str],
+    retry_with: bool = False,
+) -> dict[str, str]:
+    headers = {
+        "Location": urls["status_url"],
+        "Retry-After": "2",
+        "x-ms-session-id": context.session_id,
+    }
+    if retry_with:
+        headers["x-ms-retry-with"] = _RESPOND_ASYNC_PREFERENCE
+    return headers
 
 
 def _idempotency_conflict_response(existing_run_id: str | None) -> ControllerResponse:

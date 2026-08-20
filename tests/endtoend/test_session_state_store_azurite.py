@@ -687,6 +687,99 @@ async def test_provision_submit_reserves_owner_claim_run_and_operation_in_one_eg
 
 
 @pytest.mark.asyncio
+async def test_prelaunch_cancel_races_journal_claim_without_launching_after_cancel() -> None:
+    async with _two_controller_stores() as (store_a, store_b):
+        partition = _partition()
+        records = _provision_submit_records(partition=partition)
+        reserved = await store_a.begin_provision_submit(records)
+        assert reserved.fence is not None
+        fence = reserved.fence
+        for phase in (
+            "provision_lifecycle",
+            "provision_content",
+            "provision_manifest",
+            "provision_journal",
+        ):
+            fence = await store_a.advance_operation(
+                fence=fence,
+                phase=phase,  # type: ignore[arg-type]
+                updated_at=_NOW + timedelta(seconds=1),
+            )
+
+        cancel_result, claim_result = await asyncio.gather(
+            store_a.cancel_prelaunch_submit(
+                owner_partition=partition,
+                session_id=records.session.session_id,
+                run_id=records.run.run_id,
+                token="b" * 32,
+                updated_at=_NOW + timedelta(seconds=2),
+            ),
+            store_b.claim_operation_journal(
+                owner_partition=partition,
+                session_id=records.session.session_id,
+                run_id=records.run.run_id,
+                token="c" * 32,
+                updated_at=_NOW + timedelta(seconds=2),
+            ),
+            return_exceptions=True,
+        )
+
+        assert not isinstance(cancel_result, BaseException)
+        assert cancel_result.disposition in {"canceled_before_launch", "launch_claimed"}
+        stored_run = await store_a.get_run(
+            partition,
+            records.session.session_id,
+            records.run.run_id,
+        )
+        stored_operation = await store_a.get_operation(
+            partition,
+            records.session.session_id,
+            records.operation.operation_id,
+        )
+        if cancel_result.disposition == "canceled_before_launch":
+            assert stored_run.record.status == "canceled"
+            assert stored_operation.record.phase == "provision_rearm"
+            assert claim_result is None or isinstance(claim_result, StaleOperationTokenError)
+        else:
+            assert stored_run.record.status == "accepted"
+            assert stored_operation.record.phase == "provision_launching"
+            assert not isinstance(claim_result, BaseException)
+            assert claim_result is not None
+
+
+@pytest.mark.asyncio
+async def test_prelaunch_cancel_completion_releases_both_fences_in_one_egt() -> None:
+    async with _one_store() as store:
+        partition = _partition()
+        records = _provision_submit_records(partition=partition)
+        await store.begin_provision_submit(records)
+        canceled = await store.cancel_prelaunch_submit(
+            owner_partition=partition,
+            session_id=records.session.session_id,
+            run_id=records.run.run_id,
+            token="b" * 32,
+            updated_at=_NOW + timedelta(seconds=1),
+        )
+        assert canceled.disposition == "canceled_before_launch"
+        assert canceled.fence is not None
+
+        completed = await store.complete_operation(
+            fence=canceled.fence,
+            updated_session=_session_after_operation(
+                (await store.get_session(partition, records.session.session_id)).record
+            ),
+            updated_at=_NOW + timedelta(seconds=2),
+        )
+
+        assert completed.operation.state == "completed"
+        assert completed.run is not None
+        assert completed.run.status == "canceled"
+        settled = await store.get_session(partition, records.session.session_id)
+        assert settled.record.active_operation_id is None
+        assert settled.record.active_run_id is None
+
+
+@pytest.mark.asyncio
 async def test_submit_admission_advances_the_existing_operation_in_one_egt() -> None:
     async with _one_store() as store:
         partition = _partition()
@@ -765,7 +858,7 @@ async def test_submit_admission_rejects_wrong_predecessor_phase() -> None:
 
 
 @pytest.mark.asyncio
-async def test_terminal_submit_rearm_keeps_second_controller_non_admissible() -> None:
+async def test_terminal_submit_adopts_before_completing_operation() -> None:
     async with _two_controller_stores() as (store_a, store_b):
         partition = _partition()
         session = replace(_session(partition=partition), sandbox_id="sandbox-1")
@@ -792,14 +885,24 @@ async def test_terminal_submit_rearm_keeps_second_controller_non_admissible() ->
             fence=fence,
             records=AdmissionRecords.create(admitted, run),
         )
-        await store_a.adopt_terminal_run(replace(run, status="succeeded"))
+        terminal = replace(run, status="succeeded")
+        adopted = await store_a.adopt_terminal_run(terminal)
+        assert adopted.run.status == "succeeded"
+        assert adopted.slot_released is False
         current = await store_a.get_session(partition, session.session_id)
-        fence = await store_a.advance_operation(
+        completed = await store_a.complete_operation(
             fence=fence,
-            phase="submit_rearm",
+            updated_session=_session_after_operation(current.record),
+            terminal_run=terminal,
             updated_at=_NOW,
-            updated_session=_session_before_submit_rearm(current.record),
         )
+        assert completed.operation.state == "completed"
+        stored_terminal = await store_a.get_run(
+            partition,
+            session.session_id,
+            run.run_id,
+        )
+        assert stored_terminal.record.status == "succeeded"
         contender_run = _run(
             partition=partition,
             run_id="run-contender",
@@ -810,10 +913,8 @@ async def test_terminal_submit_rearm_keeps_second_controller_non_admissible() ->
             contender_run.run_id,
         )
 
-        with pytest.raises(SessionNotAdmissibleError):
-            await store_b.admit_run(AdmissionRecords.create(contender_session, contender_run))
-
-        assert fence.operation_id == operation.operation_id
+        admitted = await store_b.admit_run(AdmissionRecords.create(contender_session, contender_run))
+        assert admitted.replayed is False
 
 
 @pytest.mark.asyncio

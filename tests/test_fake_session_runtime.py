@@ -88,6 +88,21 @@ def _operation(session: DurableSessionRecord, kind: str) -> DurableSessionOperat
     )
 
 
+def _run(session: DurableSessionRecord) -> DurableRunRecord:
+    return DurableRunRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        run_id="run-1",
+        generation=session.generation,
+        status="accepted",
+        result_available=False,
+        status_reason=None,
+        expires_at=_NOW + timedelta(minutes=5),
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kind", "lease_seconds"),
@@ -177,6 +192,7 @@ async def test_fake_journal_claim_renews_the_flat_lease(
         operation=operation,
         etag=store.etag,
     )
+    store.runs["run-1"] = _run(session)
 
     claimed_at = _NOW + timedelta(seconds=5)
     claimed = await store.claim_operation_journal(
@@ -191,6 +207,46 @@ async def test_fake_journal_claim_renews_the_flat_lease(
     assert store.durable_operations[claimed.operation_id].lease_expires_at == claimed_at + timedelta(
         seconds=lease_seconds
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "phase"),
+    [("provision_submit", "provision_create"), ("submit_run", "submit_journal")],
+)
+async def test_fake_prelaunch_cancel_renews_the_flat_lease(
+    kind: str,
+    phase: str,
+) -> None:
+    session = _session()
+    operation = replace(_operation(session, kind), phase=phase)
+    store = FakeSessionStateStore(session)
+    updated = replace(
+        session,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+        active_run_id="run-1",
+    )
+    await store.begin_operation(
+        previous=session,
+        updated=updated,
+        operation=operation,
+        etag=store.etag,
+    )
+    store.runs["run-1"] = _run(session)
+
+    canceled_at = _NOW + timedelta(seconds=5)
+    canceled = await store.cancel_prelaunch_submit(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        run_id="run-1",
+        token="e" * 32,
+        updated_at=canceled_at,
+    )
+
+    assert canceled.disposition == "canceled_before_launch"
+    assert canceled.operation is not None
+    assert canceled.operation.lease_expires_at == canceled_at + timedelta(seconds=120)
 
 
 @pytest.mark.asyncio

@@ -30,6 +30,9 @@ _TIMEOUT_ENV = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS"
 _BEARER_TOKEN_ENV = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_BEARER_TOKEN"
 _SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 _SETUP_RETRY_AFTER_SECONDS = 120.0
+_CANCEL_RETRY_AFTER_SECONDS = 2.0
+_TIMEOUT_RECOVERY_AGENT_SLUG = "deployed_setup_timeout"
+_TIMEOUT_RECOVERY_MINIMUM_TIMEOUT_SECONDS = 120.0
 
 
 class _TokenCredential(Protocol):
@@ -38,22 +41,61 @@ class _TokenCredential(Protocol):
 
 def setup_retry_after_seconds(headers: Mapping[str, str]) -> float:
     """Read the bounded setup-lease retry delay without retaining response headers."""
-    value = next(
+    return _bounded_retry_after_seconds(
+        headers,
+        fallback_seconds=_SETUP_RETRY_AFTER_SECONDS,
+        maximum_seconds=_SETUP_RETRY_AFTER_SECONDS,
+    )
+
+
+def cancel_retry_after_seconds(headers: Mapping[str, str]) -> float:
+    """Read the public cancellation retry delay without waiting beyond one setup lease."""
+    return _bounded_retry_after_seconds(
+        headers,
+        fallback_seconds=_CANCEL_RETRY_AFTER_SECONDS,
+        maximum_seconds=_SETUP_RETRY_AFTER_SECONDS,
+    )
+
+
+def response_header(headers: Mapping[str, str], name: str) -> str | None:
+    """Return one case-insensitive response header value."""
+    return next(
         (
             candidate
             for key, candidate in headers.items()
-            if key.casefold() == "retry-after" and isinstance(candidate, str)
+            if key.casefold() == name.casefold() and isinstance(candidate, str)
         ),
         None,
     )
+
+
+def timeout_recovery_submission_headers(
+    authorization: str,
+    idempotency_key: str,
+) -> dict[str, str]:
+    """Build the synchronous one-shot request that must surface a linked 504."""
+    return {
+        "Authorization": authorization,
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotency_key,
+    }
+
+
+def _bounded_retry_after_seconds(
+    headers: Mapping[str, str],
+    *,
+    fallback_seconds: float,
+    maximum_seconds: float,
+) -> float:
+    value = response_header(headers, "retry-after")
     if value is None:
-        return _SETUP_RETRY_AFTER_SECONDS
+        return fallback_seconds
     try:
         retry_after = int(value.strip())
     except ValueError:
-        return _SETUP_RETRY_AFTER_SECONDS
-    if not 1 <= retry_after <= _SETUP_RETRY_AFTER_SECONDS:
-        return _SETUP_RETRY_AFTER_SECONDS
+        return fallback_seconds
+    if not 1 <= retry_after <= maximum_seconds:
+        return fallback_seconds
     return float(retry_after)
 
 
@@ -163,6 +205,23 @@ def deployed_aca_smoke_config_from_environment() -> DeployedAcaSmokeConfig:
         audience=audience,
         timeout_seconds=timeout_seconds,
     )
+
+
+def deployed_aca_timeout_recovery_config_from_environment() -> DeployedAcaSmokeConfig:
+    """Load the fixed fixture route and timeout needed by one-shot recovery coverage."""
+    config = deployed_aca_smoke_config_from_environment()
+    if config.agent_slug != _TIMEOUT_RECOVERY_AGENT_SLUG:
+        raise AcaSmokeEnvironmentError(
+            f"{_AGENT_SLUG_ENV} must be {_TIMEOUT_RECOVERY_AGENT_SLUG!r} for the controlled "
+            "setup-timeout recovery fixture."
+        )
+    if config.timeout_seconds < _TIMEOUT_RECOVERY_MINIMUM_TIMEOUT_SECONDS:
+        raise AcaSmokeEnvironmentError(
+            f"{_TIMEOUT_ENV} must be at least "
+            f"{_TIMEOUT_RECOVERY_MINIMUM_TIMEOUT_SECONDS:.0f} seconds for the controlled "
+            "setup-timeout recovery fixture."
+        )
+    return config
 
 
 def submission_payload(prompt: str) -> dict[str, object]:

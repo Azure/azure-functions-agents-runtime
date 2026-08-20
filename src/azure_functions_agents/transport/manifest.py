@@ -151,39 +151,32 @@ def verify_sandbox_manifest(
     live_identity: ProvisionedSandboxIdentity,
 ) -> None:
     """Verify all routing-critical bindings without disclosing their values."""
-
-    mismatches: set[str] = set()
-    if expected.manifest_version != observed.manifest_version:
-        mismatches.add("manifest_version")
-    if expected.protocol_version != observed.protocol_version:
-        mismatches.add("protocol_version")
-    if expected.session_id != observed.session_id:
-        mismatches.add("session_id")
-    if expected.owner_hash_version != observed.owner_hash_version:
-        mismatches.add("owner_hash_version")
-    if expected.owner_hash != observed.owner_hash:
-        mismatches.add("owner_hash")
-    if expected.app_hash != observed.app_hash:
-        mismatches.add("app_hash")
-    if expected.generation != observed.generation:
-        mismatches.add("generation")
-    if expected.digest_kind != observed.digest_kind:
-        mismatches.add("digest_kind")
-    if expected.digest != observed.digest:
-        mismatches.add("digest")
-    if expected.state_store_fingerprint != observed.state_store_fingerprint:
-        mismatches.add("state_store_fingerprint")
-
-    if (
-        expected.sandbox_group_resource_id != observed.sandbox_group_resource_id
-        or expected.sandbox_group_resource_id != live_identity.group_resource_id
-    ):
-        mismatches.add("sandbox_group_resource_id")
-    if expected.sandbox_id != observed.sandbox_id or expected.sandbox_id != live_identity.sandbox_id:
-        mismatches.add("sandbox_id")
+    comparisons = (
+        ("manifest_version", expected.manifest_version != observed.manifest_version),
+        ("protocol_version", expected.protocol_version != observed.protocol_version),
+        ("session_id", expected.session_id != observed.session_id),
+        ("owner_hash_version", expected.owner_hash_version != observed.owner_hash_version),
+        ("owner_hash", expected.owner_hash != observed.owner_hash),
+        ("app_hash", expected.app_hash != observed.app_hash),
+        ("generation", expected.generation != observed.generation),
+        ("digest_kind", expected.digest_kind != observed.digest_kind),
+        ("digest", expected.digest != observed.digest),
+        ("state_store_fingerprint", expected.state_store_fingerprint != observed.state_store_fingerprint),
+        (
+            "sandbox_group_resource_id",
+            expected.sandbox_group_resource_id != observed.sandbox_group_resource_id
+            or expected.sandbox_group_resource_id != live_identity.group_resource_id,
+        ),
+        (
+            "sandbox_id",
+            expected.sandbox_id != observed.sandbox_id
+            or expected.sandbox_id != live_identity.sandbox_id,
+        ),
+    )
+    mismatches = frozenset(field for field, differs in comparisons if differs)
 
     if mismatches:
-        raise SandboxManifestMismatchError(frozenset(mismatches))
+        raise SandboxManifestMismatchError(mismatches)
 
 
 def render_sandbox_manifest_binding(expected: ExpectedSandboxManifestBinding) -> bytes:

@@ -123,6 +123,295 @@ def _wait_deadline(context: df.DurableOrchestrationContext, task: dict[str, Any]
     return deadline
 
 
+def _run_tool_activity(task: dict[str, Any]) -> dict[str, Any]:
+    """Execute one workflow-safe tool task; the tool activity's body."""
+    task_id = task["id"]
+    tool_name = task["tool"]
+    args = task.get("args") or {}
+    handler = registry.get_handler(tool_name)
+    if handler is None:
+        raise ValueError(
+            f"task {task_id!r}: tool {tool_name!r} is not registered "
+            "in the workflow-safe tool registry"
+        )
+    logger.info("workflow activity running: id=%s tool=%s", task_id, tool_name)
+    try:
+        result = handler(args)
+    except Exception:
+        logger.exception(
+            "workflow activity failed: id=%s tool=%s", task_id, tool_name
+        )
+        raise RuntimeError(
+            f"task {task_id!r}: workflow-safe tool failed"
+        ) from None
+    # Determinism contract: activity results must be JSON-serializable
+    # (Durable persists them via its own JSON pipeline; this is a fast
+    # local guard so a non-serializable result fails inside the activity
+    # with a clearer message instead of deeper in the runtime).
+    json.dumps(result)
+    return {"id": task_id, "result": result}
+
+
+async def _run_sub_agent_activity(
+    task: dict[str, Any], catalog: AgentCatalog | None
+) -> dict[str, Any]:
+    """Execute one Workflow Sub Agent task; the sub-agent activity's body."""
+    task_id = str(task["id"])
+    agent_slug = str(task["agent"])
+    workflow_id = str(task.get("workflow_id") or "")
+    if catalog is None or agent_slug not in catalog:
+        logger.error(
+            "workflow sub-agent catalog miss: workflow_id=%s node_id=%s agent=%s",
+            workflow_id,
+            task_id,
+            agent_slug,
+        )
+        raise RuntimeError(
+            f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} is not available"
+        )
+
+    entry = catalog[agent_slug]
+    logger.info(
+        "workflow sub-agent activity running: workflow_id=%s node_id=%s agent=%s",
+        workflow_id,
+        task_id,
+        agent_slug,
+    )
+    try:
+        text = await run_leaf_agent_task(
+            entry.resolved,
+            entry.capabilities,
+            str(task["task"]),
+            timeout=entry.resolved.timeout,
+            execution_role="workflow_subagent",
+        )
+    except asyncio.CancelledError:
+        raise
+    except TimeoutError:
+        logger.exception(
+            "workflow sub-agent activity timed out: workflow_id=%s node_id=%s agent=%s",
+            workflow_id,
+            task_id,
+            agent_slug,
+        )
+        raise RuntimeError(
+            f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} timed out"
+        ) from None
+    except Exception:
+        logger.exception(
+            "workflow sub-agent activity failed: workflow_id=%s node_id=%s agent=%s",
+            workflow_id,
+            task_id,
+            agent_slug,
+        )
+        raise RuntimeError(
+            f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} failed "
+            "(error_code=workflow_subagent_execution_failed)"
+        ) from None
+
+    result = {
+        "id": task_id,
+        "result": {
+            "agent": agent_slug,
+            "text": text,
+        },
+    }
+    json.dumps(result)
+    return result
+
+
+def _next_wave(
+    remaining: set[str],
+    deps: dict[str, set[str]],
+    results: dict[str, Any],
+) -> list[str]:
+    """Return the id-sorted, parallelism-capped set of ready tasks.
+
+    Validation rejects cycles and dangling deps, so an empty ready set
+    while tasks remain means the wire payload was tampered with; fail
+    loudly so the workflow ends up Failed with a clear cause.
+    """
+    ready = sorted(
+        tid for tid in remaining if not (deps[tid] - results.keys())
+    )
+    if not ready:
+        raise RuntimeError(
+            "workflow stalled: no tasks ready to run but "
+            f"{len(remaining)} task(s) remain. This indicates a "
+            "validation bug or an unsatisfiable dependency on the "
+            "submitted plan."
+        )
+    return ready[:MAX_PARALLELISM]
+
+
+def _resolve_wave_template(tid: str, value: Any, results: dict[str, Any]) -> Any:
+    """Resolve template refs for a wave task, surfacing failures as RuntimeError."""
+    try:
+        return resolve_template_value(value, results)
+    except TemplateResolutionError as exc:
+        raise RuntimeError(
+            f"task {tid!r}: template resolution failed: {exc}"
+        ) from exc
+
+
+def _build_tool_wave_item(
+    context: df.DurableOrchestrationContext,
+    tid: str,
+    task: dict[str, Any],
+    results: dict[str, Any],
+) -> tuple[dict[str, Any], Any]:
+    """Schedule a tool activity and return its (spec, task-handle) pair."""
+    resolved_args = _resolve_wave_template(tid, task.get("args") or {}, results)
+    handle = context.call_activity(
+        _ACTIVITY_NAME,
+        {
+            "id": tid,
+            "tool": task["tool"],
+            "args": resolved_args,
+        },
+    )
+    return {"id": tid, "type": TOOL_TASK_TYPE}, handle
+
+
+def _build_sub_agent_wave_item(
+    context: df.DurableOrchestrationContext,
+    tid: str,
+    task: dict[str, Any],
+    results: dict[str, Any],
+) -> tuple[dict[str, Any], Any]:
+    """Schedule a sub-agent activity and return its (spec, task-handle) pair."""
+    resolved_task = _resolve_wave_template(tid, task["task"], results)
+    if not isinstance(resolved_task, str):
+        raise RuntimeError(
+            f"task {tid!r}: resolved Sub Agent task must be a string"
+        )
+    handle = context.call_activity(
+        SUB_AGENT_ACTIVITY_NAME,
+        {
+            "id": tid,
+            "agent": task["agent"],
+            "task": resolved_task,
+            "workflow_id": context.instance_id,
+        },
+    )
+    return {"id": tid, "type": SUB_AGENT_TASK_TYPE}, handle
+
+
+def _build_wait_wave_item(
+    context: df.DurableOrchestrationContext,
+    tid: str,
+    task: dict[str, Any],
+) -> tuple[dict[str, Any], Any]:
+    """Schedule a durable timer and return its (spec, task-handle) pair."""
+    deadline = _wait_deadline(context, task)
+    handle = context.create_timer(deadline)
+    spec = {
+        "id": tid,
+        "type": WAIT_TASK_TYPE,
+        "deadline": deadline.isoformat(),
+    }
+    return spec, handle
+
+
+def _build_wave(
+    context: df.DurableOrchestrationContext,
+    wave: list[str],
+    by_id: dict[str, dict[str, Any]],
+    results: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[Any]]:
+    """Translate a ready wave into aligned result-spec and task-handle lists."""
+    wave_specs: list[dict[str, Any]] = []
+    wave_tasks: list[Any] = []
+    for tid in wave:
+        task = by_id[tid]
+        ttype = task.get("type") or TOOL_TASK_TYPE
+        if ttype == TOOL_TASK_TYPE:
+            spec, handle = _build_tool_wave_item(context, tid, task, results)
+        elif ttype == SUB_AGENT_TASK_TYPE:
+            spec, handle = _build_sub_agent_wave_item(context, tid, task, results)
+        elif ttype == WAIT_TASK_TYPE:
+            spec, handle = _build_wait_wave_item(context, tid, task)
+        else:
+            # Validator should have rejected this; defend anyway.
+            raise RuntimeError(
+                f"task {tid!r}: unsupported task type {ttype!r}"
+            )
+        wave_specs.append(spec)
+        wave_tasks.append(handle)
+    return wave_specs, wave_tasks
+
+
+def _build_cancel_result(
+    context: df.DurableOrchestrationContext,
+    cancel_task: Any,
+    wave_specs: list[dict[str, Any]],
+    wave_tasks: list[Any],
+    results: dict[str, Any],
+    total: int,
+) -> dict[str, Any]:
+    """Cancel in-flight wave timers and build the cooperative-cancel envelope."""
+    reason = cancel_task.result
+    # Durable requires every pending timer to be cancelled before the
+    # orchestration can complete; otherwise the instance stays Running until
+    # the timer naturally fires.
+    for spec, t in zip(wave_specs, wave_tasks, strict=True):
+        if spec["type"] == WAIT_TASK_TYPE and not t.is_completed:
+            t.cancel()
+    context.set_custom_status(
+        f"canceled at {len(results)}/{total} tasks done"
+    )
+    logger.info(
+        "workflow canceled: instance=%s reason=%r",
+        context.instance_id,
+        reason,
+    )
+    return {
+        "results": results,
+        "canceled": True,
+        "reason": reason,
+        "completed_count": len(results),
+        "total_count": total,
+    }
+
+
+def _apply_wave_results(
+    results: dict[str, Any],
+    remaining: set[str],
+    wave_specs: list[dict[str, Any]],
+    wave_results: list[Any],
+) -> None:
+    """Fold completed wave outputs into ``results`` and drop them from ``remaining``."""
+    for spec, raw in zip(wave_specs, wave_results, strict=True):
+        tid = spec["id"]
+        if spec["type"] in {TOOL_TASK_TYPE, SUB_AGENT_TASK_TYPE}:
+            results[tid] = raw["result"]
+        else:
+            # Timer tasks resolve to None; synthesize a result so downstream
+            # template refs to ``${tid.result}`` are useful.
+            results[tid] = {"waited_until": spec["deadline"]}
+        remaining.discard(tid)
+
+
+def _set_progress_status(
+    context: df.DurableOrchestrationContext,
+    results: dict[str, Any],
+    remaining: set[str],
+    deps: dict[str, set[str]],
+    total: int,
+) -> None:
+    """Publish the between-wave custom status naming the next ready task, if any."""
+    next_ready = sorted(
+        tid for tid in remaining if not (deps[tid] - results.keys())
+    )
+    done = len(results)
+    if next_ready:
+        context.set_custom_status(
+            f"{done}/{total} tasks done, next={next_ready[0]}"
+        )
+    else:
+        context.set_custom_status(f"{done}/{total} tasks done")
+
+
 def register_workflows(
     app: func.FunctionApp,
     *,
@@ -138,96 +427,11 @@ def register_workflows(
 
     @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
     def agents_workflow_run_tool(task) -> dict[str, Any]:  # type: ignore[no-untyped-def]
-        task_id = task["id"]
-        tool_name = task["tool"]
-        args = task.get("args") or {}
-        handler = registry.get_handler(tool_name)
-        if handler is None:
-            raise ValueError(
-                f"task {task_id!r}: tool {tool_name!r} is not registered "
-                "in the workflow-safe tool registry"
-            )
-        logger.info("workflow activity running: id=%s tool=%s", task_id, tool_name)
-        try:
-            result = handler(args)
-        except Exception:
-            logger.exception(
-                "workflow activity failed: id=%s tool=%s", task_id, tool_name
-            )
-            raise RuntimeError(
-                f"task {task_id!r}: workflow-safe tool failed"
-            ) from None
-        # Determinism contract: activity results must be JSON-serializable
-        # (Durable persists them via its own JSON pipeline; this is a fast
-        # local guard so a non-serializable result fails inside the activity
-        # with a clearer message instead of deeper in the runtime).
-        json.dumps(result)
-        return {"id": task_id, "result": result}
+        return _run_tool_activity(task)
 
     @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
     async def agents_workflow_run_sub_agent(task) -> dict[str, Any]:  # type: ignore[no-untyped-def]
-        task_id = str(task["id"])
-        agent_slug = str(task["agent"])
-        workflow_id = str(task.get("workflow_id") or "")
-        if catalog is None or agent_slug not in catalog:
-            logger.error(
-                "workflow sub-agent catalog miss: workflow_id=%s node_id=%s agent=%s",
-                workflow_id,
-                task_id,
-                agent_slug,
-            )
-            raise RuntimeError(
-                f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} is not available"
-            )
-
-        entry = catalog[agent_slug]
-        logger.info(
-            "workflow sub-agent activity running: workflow_id=%s node_id=%s agent=%s",
-            workflow_id,
-            task_id,
-            agent_slug,
-        )
-        try:
-            text = await run_leaf_agent_task(
-                entry.resolved,
-                entry.capabilities,
-                str(task["task"]),
-                timeout=entry.resolved.timeout,
-                execution_role="workflow_subagent",
-            )
-        except asyncio.CancelledError:
-            raise
-        except TimeoutError:
-            logger.exception(
-                "workflow sub-agent activity timed out: workflow_id=%s node_id=%s agent=%s",
-                workflow_id,
-                task_id,
-                agent_slug,
-            )
-            raise RuntimeError(
-                f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} timed out"
-            ) from None
-        except Exception:
-            logger.exception(
-                "workflow sub-agent activity failed: workflow_id=%s node_id=%s agent=%s",
-                workflow_id,
-                task_id,
-                agent_slug,
-            )
-            raise RuntimeError(
-                f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} failed "
-                "(error_code=workflow_subagent_execution_failed)"
-            ) from None
-
-        result = {
-            "id": task_id,
-            "result": {
-                "agent": agent_slug,
-                "text": text,
-            },
-        }
-        json.dumps(result)
-        return result
+        return await _run_sub_agent_activity(task, catalog)
 
     @bp.orchestration_trigger(context_name="context")  # type: ignore[untyped-decorator]
     def agents_workflow_orchestrator(context: df.DurableOrchestrationContext) -> Any:
@@ -259,95 +463,15 @@ def register_workflows(
         remaining: set[str] = set(by_id)
         total = len(tasks)
 
-        # Single long-lived cancel listener. Reusing the same Task across
-        # iterations of task_any is the canonical Durable pattern; once the
-        # event fires, every subsequent task_any sees it as already-complete.
-        # Note (asymmetry with timers): a wait_for_external_event Task does
-        # NOT need to be .cancel()-ed before the orchestrator returns — that
-        # method is only defined on TimerTask in the Durable Python SDK, and
-        # an unfired external-event listener does not block completion. Only
-        # in-flight timers must be explicitly cancelled (see below).
+        # Single long-lived cancel listener: reusing one Task across task_any
+        # iterations is the canonical Durable pattern. Unlike an in-flight
+        # timer, an unfired external-event listener needs no .cancel() before
+        # the orchestrator completes.
         cancel_task = context.wait_for_external_event(CANCEL_EVENT_NAME)
 
         while remaining:
-            ready = sorted(
-                tid for tid in remaining if not (deps[tid] - results.keys())
-            )
-            if not ready:
-                # Validation rejects cycles, so this means the wire payload
-                # was tampered with or has dangling deps. Fail loudly so the
-                # workflow ends up in Failed state with a clear cause.
-                raise RuntimeError(
-                    "workflow stalled: no tasks ready to run but "
-                    f"{len(remaining)} task(s) remain. This indicates a "
-                    "validation bug or an unsatisfiable dependency on the "
-                    "submitted plan."
-                )
-
-            wave = ready[:MAX_PARALLELISM]
-            wave_specs: list[dict[str, Any]] = []
-            wave_tasks: list[Any] = []
-            for tid in wave:
-                task = by_id[tid]
-                ttype = task.get("type") or TOOL_TASK_TYPE
-                if ttype == TOOL_TASK_TYPE:
-                    try:
-                        resolved_args = resolve_template_value(
-                            task.get("args") or {}, results
-                        )
-                    except TemplateResolutionError as exc:
-                        raise RuntimeError(
-                            f"task {tid!r}: template resolution failed: {exc}"
-                        ) from exc
-                    wave_tasks.append(
-                        context.call_activity(
-                            _ACTIVITY_NAME,
-                            {
-                                "id": tid,
-                                "tool": task["tool"],
-                                "args": resolved_args,
-                            },
-                        )
-                    )
-                    wave_specs.append({"id": tid, "type": TOOL_TASK_TYPE})
-                elif ttype == SUB_AGENT_TASK_TYPE:
-                    try:
-                        resolved_task = resolve_template_value(task["task"], results)
-                    except TemplateResolutionError as exc:
-                        raise RuntimeError(
-                            f"task {tid!r}: template resolution failed: {exc}"
-                        ) from exc
-                    if not isinstance(resolved_task, str):
-                        raise RuntimeError(
-                            f"task {tid!r}: resolved Sub Agent task must be a string"
-                        )
-                    wave_tasks.append(
-                        context.call_activity(
-                            SUB_AGENT_ACTIVITY_NAME,
-                            {
-                                "id": tid,
-                                "agent": task["agent"],
-                                "task": resolved_task,
-                                "workflow_id": context.instance_id,
-                            },
-                        )
-                    )
-                    wave_specs.append({"id": tid, "type": SUB_AGENT_TASK_TYPE})
-                elif ttype == WAIT_TASK_TYPE:
-                    deadline = _wait_deadline(context, task)
-                    wave_tasks.append(context.create_timer(deadline))
-                    wave_specs.append(
-                        {
-                            "id": tid,
-                            "type": WAIT_TASK_TYPE,
-                            "deadline": deadline.isoformat(),
-                        }
-                    )
-                else:
-                    # Validator should have rejected this; defend anyway.
-                    raise RuntimeError(
-                        f"task {tid!r}: unsupported task type {ttype!r}"
-                    )
+            wave = _next_wave(remaining, deps, results)
+            wave_specs, wave_tasks = _build_wave(context, wave, by_id, results)
 
             context.set_custom_status(
                 f"{len(results)}/{total} tasks done, running={','.join(wave)}"
@@ -355,54 +479,12 @@ def register_workflows(
             wave_task = context.task_all(wave_tasks)
             winner = yield context.task_any([cancel_task, wave_task])
             if winner is cancel_task:
-                reason = cancel_task.result
-                # Durable requires every pending timer to be cancelled before
-                # the orchestration can complete; otherwise the instance stays
-                # in Running until the timer naturally fires. Cancel any timers
-                # in the current wave that haven't completed yet.
-                for spec, t in zip(wave_specs, wave_tasks, strict=True):
-                    if spec["type"] == WAIT_TASK_TYPE and not t.is_completed:
-                        t.cancel()
-                context.set_custom_status(
-                    f"canceled at {len(results)}/{total} tasks done"
+                return _build_cancel_result(
+                    context, cancel_task, wave_specs, wave_tasks, results, total
                 )
-                logger.info(
-                    "workflow canceled: instance=%s reason=%r",
-                    context.instance_id,
-                    reason,
-                )
-                return {
-                    "results": results,
-                    "canceled": True,
-                    "reason": reason,
-                    "completed_count": len(results),
-                    "total_count": total,
-                }
 
-            wave_results = wave_task.result
-            for spec, raw in zip(wave_specs, wave_results, strict=True):
-                tid = spec["id"]
-                if spec["type"] in {TOOL_TASK_TYPE, SUB_AGENT_TASK_TYPE}:
-                    results[tid] = raw["result"]
-                else:
-                    # Timer tasks resolve to None; we synthesize a result so
-                    # downstream template refs to ``${tid.result}`` are useful.
-                    results[tid] = {"waited_until": spec["deadline"]}
-                remaining.discard(tid)
-
-            running_id = ""
-            next_ready = sorted(
-                tid for tid in remaining if not (deps[tid] - results.keys())
-            )
-            if next_ready:
-                running_id = next_ready[0]
-            done = len(results)
-            if running_id:
-                context.set_custom_status(
-                    f"{done}/{total} tasks done, next={running_id}"
-                )
-            else:
-                context.set_custom_status(f"{done}/{total} tasks done")
+            _apply_wave_results(results, remaining, wave_specs, wave_task.result)
+            _set_progress_status(context, results, remaining, deps, total)
 
         return {"results": results}
 

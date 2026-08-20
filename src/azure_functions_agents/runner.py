@@ -62,7 +62,7 @@ import contextlib
 import json
 import os
 import sys
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -886,6 +886,47 @@ def _function_result_event(item: Any) -> dict[str, Any]:
     }
 
 
+def _extract_response_text(response: AgentResponse[Any]) -> str:
+    """Best-effort assistant text, falling back to a message/content walk."""
+    try:
+        text = response.text
+    except Exception:
+        text = ""
+    if text:
+        return text
+    try:
+        for msg in response.messages:
+            for item in getattr(msg, "contents", None) or []:
+                if _content_type(item) == "text":
+                    text += _content_text(item)
+    except Exception as exc:
+        logger.debug("Failed to extract response text: %s", exc)
+    return text
+
+
+def _extract_tool_calls(response: AgentResponse[Any]) -> list[dict[str, Any]]:
+    """Best-effort tool-call metadata walked from a final response's messages."""
+    tool_calls: list[dict[str, Any]] = []
+    try:
+        for msg in response.messages:
+            for item in getattr(msg, "contents", None) or []:
+                ctype = _content_type(item)
+                if ctype == "function_call":
+                    tool_calls.append(_function_call_event(item))
+                elif ctype == "function_result":
+                    # Attach result to most recent matching tool_start.
+                    call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+                    matched = next(
+                        (tc for tc in reversed(tool_calls) if tc.get("tool_call_id") == call_id),
+                        None,
+                    )
+                    if matched is not None:
+                        matched["result"] = getattr(item, "result", None)
+    except Exception as exc:
+        logger.debug("Failed to extract tool_calls: %s", exc)
+    return tool_calls
+
+
 # ---------------------------------------------------------------------------
 # Public API: run_agent (non-streaming)
 # ---------------------------------------------------------------------------
@@ -1034,46 +1075,10 @@ async def run_agent(
     except TimeoutError:
         raise RuntimeError(f"Agent run timed out after {timeout}s") from None
 
-    # Extract assistant text from the final response.
-    text = ""
-    try:
-        text = response.text
-    except Exception:
-        text = ""
-    if not text:
-        # Fallback: walk messages → contents and pick out text items.
-        try:
-            for msg in response.messages:
-                for item in getattr(msg, "contents", None) or []:
-                    if _content_type(item) == "text":
-                        text += _content_text(item)
-        except Exception as exc:
-            logger.debug("Failed to extract response text: %s", exc)
-
-    # Walk content items for tool-call records (best-effort metadata for callers).
-    tool_calls: list[dict[str, Any]] = []
-    try:
-        for msg in response.messages:
-            for item in getattr(msg, "contents", None) or []:
-                ctype = _content_type(item)
-                if ctype == "function_call":
-                    tool_calls.append(_function_call_event(item))
-                elif ctype == "function_result":
-                    # Attach result to most recent matching tool_start
-                    call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
-                    matched = next(
-                        (tc for tc in reversed(tool_calls) if tc.get("tool_call_id") == call_id),
-                        None,
-                    )
-                    if matched is not None:
-                        matched["result"] = getattr(item, "result", None)
-    except Exception as exc:
-        logger.debug("Failed to extract tool_calls: %s", exc)
-
     return AgentResult(
         session_id=resolved_id,
-        content=text,
-        tool_calls=tool_calls,
+        content=_extract_response_text(response),
+        tool_calls=_extract_tool_calls(response),
         delegate_error_count=delegate_error_tracker.count if delegate_error_tracker else 0,
     )
 
@@ -1081,6 +1086,244 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 # Internal structured event stream
 # ---------------------------------------------------------------------------
+
+
+class _ToolCallStreamBuffer:
+    """Coalesce streamed function-call deltas into gated, ordered ``tool_start`` events.
+
+    A call's ``tool_start`` is emitted at most once, and only once its
+    buffered arguments parse as complete JSON, so the chat UI never observes
+    a partially-formed tool invocation.
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[str, dict[str, Any]] = {}
+        self._emitted: set[str] = set()
+
+    def buffer(self, item: Any) -> tuple[str | None, dict[str, Any]]:
+        event = _function_call_event(item)
+        call_id = event.get("tool_call_id")
+        if not isinstance(call_id, str) or not call_id:
+            return None, event
+        pending = self._pending.setdefault(
+            call_id,
+            {
+                "type": "tool_start",
+                "tool_call_id": call_id,
+                "tool_name": event.get("tool_name"),
+                "arguments": None,
+            },
+        )
+        if event.get("tool_name"):
+            pending["tool_name"] = event["tool_name"]
+        pending["arguments"] = _merge_tool_arguments(
+            pending.get("arguments"),
+            event.get("arguments"),
+        )
+        return call_id, pending
+
+    def start_if_ready(self, call_id: str, event: dict[str, Any]) -> Iterator[dict[str, object]]:
+        if call_id in self._emitted:
+            return
+        if not _is_complete_json_argument(event.get("arguments")):
+            return
+        self._emitted.add(call_id)
+        yield event
+
+    def start_before_result(self, call_id: str | None) -> Iterator[dict[str, object]]:
+        if call_id is None or call_id in self._emitted:
+            return
+        event = self._pending.get(call_id)
+        if event is None:
+            return
+        self._emitted.add(call_id)
+        yield event
+
+    def flush_pending(self) -> Iterator[dict[str, object]]:
+        for call_id, event in self._pending.items():
+            if call_id not in self._emitted:
+                self._emitted.add(call_id)
+                yield event
+
+
+async def _events_for_update(
+    update: Any, buffer: _ToolCallStreamBuffer
+) -> AsyncIterator[dict[str, object]]:
+    """Map one MAF update's content items to runner events, preserving order."""
+    for item in getattr(update, "contents", None) or []:
+        ctype = _content_type(item)
+        if ctype == "text":
+            text = _content_text(item)
+            if text:
+                yield {"type": "delta", "content": text}
+        elif ctype == "text_reasoning":
+            text = _content_text(item)
+            if text:
+                yield {"type": "intermediate", "content": text}
+        elif ctype == "function_call":
+            call_id, event = buffer.buffer(item)
+            if call_id is None:
+                yield event
+            else:
+                for output in buffer.start_if_ready(call_id, event):
+                    yield output
+        elif ctype == "function_result":
+            call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+            for output in buffer.start_before_result(
+                call_id if isinstance(call_id, str) else None
+            ):
+                yield output
+            yield _function_result_event(item)
+        # Unknown content types are intentionally ignored — the SSE
+        # vocabulary is fixed and the UI doesn't render them.
+
+
+@dataclass
+class _OrdinaryToolErrorCounter:
+    """Per-run tally of failed ordinary (non-delegate) tool calls."""
+
+    count: int = 0
+
+
+@dataclass
+class _MafStreamState:
+    """One streaming turn's MAF stream handle and usage recorder, settled once.
+
+    ``finalize`` force-runs MAF's stream cleanup at most once on
+    timeout/cancellation/teardown — MAF skips its own hooks on
+    ``BaseException`` — while ``emit_usage`` records usage at most once and is
+    a no-op until the recorder is constructed.
+    """
+
+    usage_recorder: _AgentUsageRecorder | None = None
+    stream: Any = None
+    settled: bool = False
+
+    def emit_usage(self, usage_details: Any = None) -> None:
+        if self.usage_recorder is not None:
+            self.usage_recorder.emit(usage_details)
+
+    async def finalize(self, exc: BaseException) -> None:
+        if not self.settled:
+            await _finalize_maf_stream(self.stream, exc)
+            self.settled = True
+
+
+async def _pull_stream_updates(
+    state: _MafStreamState, loop: asyncio.AbstractEventLoop, deadline: float
+) -> AsyncIterator[Any]:
+    """Yield MAF updates, bounding each ``__anext__`` wait by ``deadline``.
+
+    A deadline reached mid-wait — or already exhausted at the top of an
+    iteration — force-finalizes the stream before the ``TimeoutError``/
+    ``CancelledError`` propagates, since ``asyncio.wait_for`` injects a
+    cancellation MAF's own cleanup would otherwise skip.
+    """
+    stream_iter = state.stream.__aiter__()
+    while True:
+        try:
+            remaining = max(0.0, deadline - loop.time())
+            if remaining <= 0:
+                raise TimeoutError
+            update = await asyncio.wait_for(stream_iter.__anext__(), timeout=remaining)
+        except StopAsyncIteration:
+            break
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            await state.finalize(exc)
+            raise
+        yield update
+
+
+async def _drive_stream(
+    *,
+    agent: Any,
+    session: Any,
+    prompt: str,
+    span: RuntimeSpan,
+    loop: asyncio.AbstractEventLoop,
+    deadline: float,
+    timeout: float,
+    agent_name: str | None,
+    inference_target: InferenceTarget,
+    delegate_error_tracker: _DelegateErrorTracker | None,
+    error_counter: _OrdinaryToolErrorCounter,
+) -> AsyncGenerator[dict[str, object]]:
+    """Drive one MAF streaming turn: yield runner events and own stream finalization.
+
+    Records the run outcome on ``span`` and the terminal ``done``/``error``
+    event, always finalizing the MAF stream and emitting usage exactly once
+    across normal completion, timeout, cancellation, error, and teardown.
+    """
+    state = _MafStreamState()
+    buffer = _ToolCallStreamBuffer()
+    try:
+        state.usage_recorder = _AgentUsageRecorder(
+            agent_name=agent_name or "main",
+            execution_role="primary",
+            inference_target=inference_target,
+        )
+        state.stream = agent.run(
+            prompt,
+            stream=True,
+            session=session,
+            options=_build_chat_options_from_environment(),
+        )
+        async for update in _pull_stream_updates(state, loop, deadline):
+            async for event in _events_for_update(update, buffer):
+                if event.get("type") == "tool_end" and _looks_like_tool_error(
+                    event.get("result")
+                ):
+                    error_counter.count += 1
+                yield event
+        for event in buffer.flush_pending():
+            yield event
+        span.set_attribute("af.agent.outcome", "success")
+        state.settled = True
+        try:
+            yield {
+                "type": "done",
+                "delegate_error_count": (
+                    delegate_error_tracker.count if delegate_error_tracker else 0
+                ),
+            }
+        finally:
+            usage_details = None
+            try:
+                usage_details = await _stream_usage_details(
+                    state.stream,
+                    remaining_timeout=max(0.0, deadline - loop.time()),
+                )
+            finally:
+                state.emit_usage(usage_details)
+    except TimeoutError as exc:
+        state.emit_usage()
+        await state.finalize(exc)
+        span.set_attribute("af.agent.outcome", "error")
+        span.record_exception(
+            TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
+        )
+        yield {"type": "error", "content": f"Timeout after {timeout}s"}
+    except asyncio.CancelledError:
+        state.emit_usage()
+        raise
+    except Exception as exc:
+        state.emit_usage()
+        await state.finalize(exc)
+        logger.error("Agent stream failed: %s", exc, exc_info=True)
+        span.set_attribute("af.agent.outcome", "error")
+        span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+        yield {"type": "error", "content": str(exc)}
+    finally:
+        if not state.settled:
+            # Reached only on teardown while suspended at a `yield` (e.g. the
+            # ASGI layer closing the generator on client disconnect): no
+            # `except` above ran, so `sys.exc_info()` reflects the in-flight
+            # `GeneratorExit`/cancellation driving this finalize.
+            exc_at_teardown = sys.exc_info()[1] or asyncio.CancelledError(
+                "run_agent_stream torn down before completion"
+            )
+            await _finalize_maf_stream(state.stream, exc_at_teardown)
+            state.emit_usage()
 
 
 async def _run_agent_event_stream(
@@ -1178,289 +1421,58 @@ async def _run_agent_event_stream(
 
     yield {"type": "session", "session_id": resolved_id}
 
-    # `run_agent_stream` opens its *own* run-level span rather than relying on
-    # a caller-provided one (B3): unlike the non-streaming path — where
-    # `run_agent` returns synchronously and callers such as
-    # `registration/_handlers.py`/`registration/endpoints.py` wrap the whole
-    # call in an `agent.run {name}` span before it returns — a caller of this
-    # generator (e.g. `handle_chat_stream`) typically just constructs the
-    # generator and hands it to a `StreamingResponse` without ever driving it
-    # itself, so no ambient span from the caller is active while this body
-    # actually runs. Opening one here ensures delegate-error accounting (and
-    # timeout/exception outcomes) always lands somewhere for the streaming
-    # surface too, matching the non-streaming path's `AgentResult.delegate_error_count`.
+    # `run_agent_stream` opens its *own* run-level span because a caller of
+    # this generator typically hands it to a `StreamingResponse` without ever
+    # driving it, so no ambient span from the caller is active while this body
+    # runs. It is therefore the only place the streaming surface can record
+    # `af.agent.display_name` and the terminal tool-error accounting, mirroring
+    # the non-streaming path's `AgentResult.delegate_error_count`.
     with start_span(
         f"agent.run {agent_name or 'agent'}",
         lifecycle_stage=LifecycleStage.AGENT_RUN,
         attributes={
             "af.agent.name": agent_name,
-            # S1b: mirrors what `registration/endpoints.py`'s own
-            # `agent.run {name}` spans already set (`af.agent.name` = slug,
-            # `af.agent.display_name` = human-readable name) for the
-            # non-streaming/MCP surfaces. Those surfaces open their own span
-            # around `run_agent`, which has none of its own — but nothing
-            # upstream of *this* function does the same for the streaming
-            # surface (see the comment above), so this span is the only
-            # place `af.agent.display_name` can be recorded here.
             "af.agent.display_name": display_name,
             "af.agent.trigger_type": "stream",
             "af.agent.session_id": resolved_id,
             "af.agent.model": model,
         },
     ) as span:
-        ordinary_tool_error_count = 0
+        error_counter = _OrdinaryToolErrorCounter()
         try:
-            async with _session_lock_bounded_by(resolved_id, deadline):
-                pending_tool_calls: dict[str, dict[str, Any]] = {}
-                emitted_tool_calls: set[str] = set()
-
-                def buffer_function_call(item: Any) -> tuple[str | None, dict[str, Any]]:
-                    event = _function_call_event(item)
-                    call_id = event.get("tool_call_id")
-                    if not isinstance(call_id, str) or not call_id:
-                        return None, event
-
-                    pending = pending_tool_calls.setdefault(
-                        call_id,
-                        {
-                            "type": "tool_start",
-                            "tool_call_id": call_id,
-                            "tool_name": event.get("tool_name"),
-                            "arguments": None,
-                        },
-                    )
-                    if event.get("tool_name"):
-                        pending["tool_name"] = event["tool_name"]
-                    pending["arguments"] = _merge_tool_arguments(
-                        pending.get("arguments"),
-                        event.get("arguments"),
-                    )
-                    return call_id, pending
-
-                async def emit_tool_start_if_ready(
-                    call_id: str, event: dict[str, Any]
-                ) -> AsyncIterator[dict[str, object]]:
-                    if call_id in emitted_tool_calls:
-                        return
-                    if not _is_complete_json_argument(event.get("arguments")):
-                        return
-                    emitted_tool_calls.add(call_id)
-                    yield event
-
-                async def emit_tool_start_before_result(
-                    call_id: str | None,
-                ) -> AsyncIterator[dict[str, object]]:
-                    if call_id is None or call_id in emitted_tool_calls:
-                        return
-                    event = pending_tool_calls.get(call_id)
-                    if event is None:
-                        return
-                    emitted_tool_calls.add(call_id)
-                    yield event
-
-                # B2b: `stream`/`stream_settled` are declared here, outside
-                # the `try:` below, so the `finally:` clause added at the
-                # bottom of this block can always safely reference `stream`
-                # (even if `agent.run(...)` itself never got a chance to
-                # assign it) and can tell whether some *other* branch already
-                # finalized it. `stream_settled` becomes `True` the moment
-                # any branch below (the inner per-`__anext__()` handler, the
-                # normal-completion path, or either outer `except`) has
-                # either finalized the stream itself or reached a point where
-                # finalization is not this generator's responsibility.
-                stream: Any = None
-                stream_settled = False
-                usage_recorder: _AgentUsageRecorder | None = None
-                try:
-                    usage_recorder = _AgentUsageRecorder(
-                        agent_name=agent_name or "main",
-                        execution_role="primary",
-                        inference_target=inference_target,
-                    )
-                    stream = agent.run(
-                        prompt,
-                        stream=True,
+            async with (
+                _session_lock_bounded_by(resolved_id, deadline),
+                contextlib.aclosing(
+                    _drive_stream(
+                        agent=agent,
                         session=session,
-                        options=_build_chat_options_from_environment(),
+                        prompt=prompt,
+                        span=span,
+                        loop=loop,
+                        deadline=deadline,
+                        timeout=timeout,
+                        agent_name=agent_name,
+                        inference_target=inference_target,
+                        delegate_error_tracker=delegate_error_tracker,
+                        error_counter=error_counter,
                     )
-                    # Each iteration's wait for the *next* update is itself
-                    # bounded by the coordinator's remaining budget (B1): the
-                    # previous code only checked `loop.time() > deadline`
-                    # *after* `async for` had already yielded an update, so a
-                    # hung tool/model call producing no update at all could
-                    # block past the deadline indefinitely. Wrapping
-                    # `__anext__()` in `asyncio.wait_for` bounds that wait
-                    # directly, so a stalled generator cannot exceed the
-                    # absolute deadline either.
-                    stream_iter = stream.__aiter__()
-                    while True:
-                        try:
-                            # B2a: the `remaining <= 0` pre-check now lives
-                            # *inside* this same `try` (it used to `raise`
-                            # one level up, before this `try` even started) so
-                            # a deadline that is already exhausted at the
-                            # *top* of an iteration is finalized identically
-                            # to one that expires *while* awaiting
-                            # `__anext__()`, instead of bypassing this handler
-                            # entirely and reaching the outer
-                            # `except TimeoutError` below still unfinalized.
-                            remaining = max(0.0, deadline - loop.time())
-                            if remaining <= 0:
-                                raise TimeoutError
-                            update = await asyncio.wait_for(stream_iter.__anext__(), timeout=remaining)
-                        except StopAsyncIteration:
-                            break
-                        except (TimeoutError, asyncio.CancelledError) as exc:
-                            # `ResponseStream.__anext__` (agent_framework._types)
-                            # only runs its registered cleanup hooks — which
-                            # close the underlying OTel span, flush usage
-                            # stats, and invoke provider callbacks — from its
-                            # own `except StopAsyncIteration`/`except
-                            # Exception` branches, never on a `BaseException`
-                            # such as `asyncio.CancelledError`, which is
-                            # exactly what `asyncio.wait_for` injects into
-                            # this `__anext__()` call on timeout/cancellation.
-                            # Finalize the stream explicitly so MAF's own
-                            # span/usage bookkeeping still completes (M2).
-                            await _finalize_maf_stream(stream, exc)
-                            stream_settled = True
-                            raise
-                        for item in getattr(update, "contents", None) or []:
-                            ctype = _content_type(item)
-                            if ctype == "text":
-                                text = _content_text(item)
-                                if text:
-                                    yield {"type": "delta", "content": text}
-                            elif ctype == "text_reasoning":
-                                text = _content_text(item)
-                                if text:
-                                    yield {"type": "intermediate", "content": text}
-                            elif ctype == "function_call":
-                                call_id, event = buffer_function_call(item)
-                                if call_id is None:
-                                    yield event
-                                else:
-                                    async for output in emit_tool_start_if_ready(call_id, event):
-                                        yield output
-                            elif ctype == "function_result":
-                                call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
-                                async for output in emit_tool_start_before_result(
-                                    call_id if isinstance(call_id, str) else None
-                                ):
-                                    yield output
-                                result_event = _function_result_event(item)
-                                if _looks_like_tool_error(result_event.get("result")):
-                                    ordinary_tool_error_count += 1
-                                yield result_event
-                            # Unknown content types are intentionally ignored — the
-                            # SSE vocabulary is fixed and the UI doesn't render them.
-                    for call_id, event in pending_tool_calls.items():
-                        if call_id not in emitted_tool_calls:
-                            emitted_tool_calls.add(call_id)
-                            yield event
-                    span.set_attribute("af.agent.outcome", "success")
-                    stream_settled = True
-                    try:
-                        yield {
-                            "type": "done",
-                            "delegate_error_count": (
-                                delegate_error_tracker.count if delegate_error_tracker else 0
-                            ),
-                        }
-                    finally:
-                        usage_details = None
-                        try:
-                            usage_details = await _stream_usage_details(
-                                stream,
-                                remaining_timeout=max(0.0, deadline - loop.time()),
-                            )
-                        finally:
-                            usage_recorder.emit(usage_details)
-                except TimeoutError as exc:
-                    if usage_recorder is not None:
-                        usage_recorder.emit()
-                    if not stream_settled:
-                        # Reached when the deadline/cancellation surfaced
-                        # from somewhere the inner handler above didn't cover
-                        # (B2b) — e.g. `agent.run(...)` itself raising before
-                        # the pull loop ever started. Finalize here too
-                        # rather than assuming it already happened.
-                        await _finalize_maf_stream(stream, exc)
-                        stream_settled = True
-                    span.set_attribute("af.agent.outcome", "error")
-                    span.record_exception(
-                        TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
-                    )
-                    yield {"type": "error", "content": f"Timeout after {timeout}s"}
-                except asyncio.CancelledError:
-                    if usage_recorder is not None:
-                        usage_recorder.emit()
-                    raise
-                except Exception as exc:
-                    if usage_recorder is not None:
-                        usage_recorder.emit()
-                    if not stream_settled:
-                        # Same reasoning as the `TimeoutError` branch above:
-                        # an ordinary exception that reached here without
-                        # passing through the inner per-`__anext__()` handler
-                        # (e.g. raised directly by `agent.run(...)`, or by
-                        # the per-update content processing) still needs the
-                        # underlying MAF stream finalized (B2b).
-                        await _finalize_maf_stream(stream, exc)
-                        stream_settled = True
-                    logger.error("Agent stream failed: %s", exc, exc_info=True)
-                    span.set_attribute("af.agent.outcome", "error")
-                    span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
-                    yield {"type": "error", "content": str(exc)}
-                finally:
-                    if not stream_settled:
-                        # B2b: reached only when this async generator itself
-                        # is torn down while suspended at one of the
-                        # `yield`s above — e.g. the ASGI/HTTP layer closing
-                        # the generator on client disconnect (`aclose()`), or
-                        # the enclosing task being cancelled while suspended
-                        # at a `yield` rather than while awaiting
-                        # `__anext__()`. Python's async-generator protocol
-                        # delivers `GeneratorExit`/cancellation *at* that
-                        # suspension point — a different code path entirely
-                        # from the `except` clauses above, neither of which
-                        # catches `BaseException` subclasses such as
-                        # `GeneratorExit` — so without this, `stream` would
-                        # never be finalized here at all, only ever via a
-                        # nondeterministic GC-timed safety net.
-                        # `sys.exc_info()` reliably reflects that in-flight
-                        # exception in this specific branch precisely
-                        # *because* nothing above matched/handled it (once an
-                        # `except` above runs, it sets `stream_settled = True`
-                        # itself, so this branch is never reached for those
-                        # cases); it is only `None` here if the generator is
-                        # being torn down with no active exception at all
-                        # (e.g. a bare `.aclose()` with nothing in flight), in
-                        # which case a generic `CancelledError` is a
-                        # reasonable stand-in for the finalize hook.
-                        exc_at_teardown = sys.exc_info()[1] or asyncio.CancelledError(
-                            "run_agent_stream torn down before completion"
-                        )
-                        await _finalize_maf_stream(stream, exc_at_teardown)
-                        if usage_recorder is not None:
-                            usage_recorder.emit()
+                ) as events,
+            ):
+                async for event in events:
+                    yield event
         except TimeoutError:
+            # Reached only when the per-session lock acquisition itself times
+            # out; `_drive_stream` handles timeouts during streaming.
             span.set_attribute("af.agent.outcome", "error")
             span.record_exception(
                 TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
             )
             yield {"type": "error", "content": f"Timeout after {timeout}s"}
         finally:
-            # Retained through generator completion regardless of outcome
-            # (success/timeout/error) so the streaming surface's delegate
-            # errors are always accounted for, matching what
-            # `AgentResult.delegate_error_count` does for the non-streaming
-            # path (B3). Ordinary tool failures remain telemetry-only, while
-            # the terminal wire field stays limited to delegation failures.
             span.set_attribute(
                 "af.agent.tool_error_count",
                 (delegate_error_tracker.count if delegate_error_tracker else 0)
-                + ordinary_tool_error_count,
+                + error_counter.count,
             )
 
 
