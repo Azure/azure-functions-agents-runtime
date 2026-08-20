@@ -28,6 +28,39 @@ budget.
 
 Every stage is `continueOnError` during stabilization.
 
+### ⚠ Network isolation on the official pipeline blocks the ACA data plane
+
+**Open issue, found on the first live run.** The ACA data-plane host is not
+reachable from pipeline **1733**:
+
+```
+ServiceRequestError: Cannot connect to host management.westus2.azuredevcompute.io:443
+ssl:default [Operation not permitted]
+```
+
+`Operation not permitted` on an outbound connect is 1ES **network isolation**,
+not authentication and not RBAC.
+
+The e2e pipeline (**1777**) reaches the same host successfully, including on
+PR merge refs. The material difference is that 1733 carries
+`PipelineClassification_Audited: production`, and production-classified
+pipelines get stricter egress policy.
+
+This affects `AcaSweep` and any stage using the ACA SDK. Deployment itself uses
+the `az` CLI against ARM, which is permitted.
+
+Two ways out, and this is a policy decision rather than a code change:
+
+1. **Request an egress exemption** for `*.azuredevcompute.io` on pipeline 1733.
+   Keeps the stages in the official build, as currently designed.
+2. **Move the ACA stages to a separate, non-production-classified pipeline**,
+   mirroring how 1777 already runs ACA work. This reverses the decision to
+   extend the official build, and would also re-narrow the deployment
+   credential's blast radius.
+
+Until one is chosen, the ACA stages are `continueOnError`, so they surface the
+problem without blocking anything.
+
 ## Prerequisites
 
 | Item | Notes |
