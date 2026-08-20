@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+import azure_functions_agents.app as app_module
 from azure_functions_agents.app import create_function_app
 
 # On-disk fixtures shared with test_config_fixtures.py's loader-level tests
@@ -43,6 +44,109 @@ def _http_routes(functions: list[Any]) -> list[str]:
             if route is not None:
                 routes.append(route)
     return routes
+
+
+def test_create_function_app_rejects_reserved_runtime_skill_name(tmp_path: Path) -> None:
+    _write_agent(
+        tmp_path,
+        "main.agent.md",
+        """
+        name: Main
+        description: Desc
+        """,
+    )
+    skill_dir = tmp_path / "skills" / "data-driven-workflows"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: data-driven-workflows\n"
+        "description: Conflicts with the runtime-owned workflow skill.\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="reserved runtime skill name"):
+        create_function_app(tmp_path)
+
+
+def test_runtime_workflow_skill_is_added_only_to_direct_workflow_role(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_agent(
+        tmp_path,
+        "workflow.agent.md",
+        """
+        name: Workflow
+        description: Desc
+        builtin_endpoints:
+          chat_api: true
+        trigger:
+          type: http_trigger
+          args:
+            route: workflow-trigger
+            methods: ["POST"]
+        skills: false
+        workflows:
+          enabled: true
+        """,
+    )
+    _write_agent(
+        tmp_path,
+        "static.agent.md",
+        """
+        name: Static
+        description: Desc
+        builtin_endpoints:
+          chat_api: true
+        """,
+    )
+    captured_endpoints: dict[str, list[Path]] = {}
+    captured_triggers: dict[str, list[Path]] = {}
+    captured_catalog: dict[str, list[Path]] = {}
+
+    def _capture_builtin_endpoints(
+        _app: Any,
+        resolved: Any,
+        capabilities: Any,
+        **_kwargs: Any,
+    ) -> None:
+        captured_endpoints[resolved.slug] = capabilities.enabled_skill_paths
+
+    def _capture_agent(
+        _app: Any,
+        resolved: Any,
+        capabilities: Any,
+        **_kwargs: Any,
+    ) -> None:
+        captured_triggers[resolved.slug] = capabilities.enabled_skill_paths
+
+    def _capture_workflow_runtime(
+        _app: Any,
+        *,
+        catalog: Any,
+        **_kwargs: Any,
+    ) -> None:
+        captured_catalog.update({
+            slug: entry.capabilities.enabled_skill_paths
+            for slug, entry in catalog.items()
+        })
+
+    monkeypatch.setattr(app_module, "register_builtin_endpoints", _capture_builtin_endpoints)
+    monkeypatch.setattr(app_module, "register_agent", _capture_agent)
+    monkeypatch.setattr(app_module, "register_workflow_runtime", _capture_workflow_runtime)
+
+    create_function_app(tmp_path)
+
+    assert [path.name for path in captured_endpoints["workflow"]] == [
+        "data-driven-workflows"
+    ]
+    assert [path.name for path in captured_triggers["workflow"]] == [
+        "data-driven-workflows"
+    ]
+    assert captured_endpoints["static"] == []
+    assert captured_catalog["workflow"] == []
+    assert captured_catalog["static"] == []
 
 
 def test_create_function_app_fails_fast_on_duplicate_function_names(

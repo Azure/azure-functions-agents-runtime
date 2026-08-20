@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -29,6 +29,17 @@ class AgentCapabilities:
     filtered_mcp_tools: list[MCPTool] | None = None
     enabled_skill_paths: list[Path] = field(default_factory=list)
     web_request_tools: list[Any] | None = None
+
+
+def with_runtime_skill_paths(
+    capabilities: AgentCapabilities,
+    skill_paths: list[Path] | tuple[Path, ...],
+) -> AgentCapabilities:
+    """Return direct-role capabilities augmented with runtime-owned skills."""
+    return replace(
+        capabilities,
+        enabled_skill_paths=[*capabilities.enabled_skill_paths, *skill_paths],
+    )
 
 
 def _tool_name(tool: object) -> str:

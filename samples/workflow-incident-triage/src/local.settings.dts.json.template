@@ -3,8 +3,11 @@
   "Values": {
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "GITHUB_TOKEN": "",
     "DURABLE_TASK_SCHEDULER_CONNECTION_STRING": "Endpoint=http://localhost:8080;Authentication=None",
-    "TASKHUB_NAME": "default"
+    "TASKHUB_NAME": "default",
+    "AZURE_FUNCTIONS_AGENTS_PROVIDER": "foundry",
+    "FOUNDRY_PROJECT_ENDPOINT": "",
+    "FOUNDRY_MODEL": "gpt-5.4-mini",
+    "APPLICATIONINSIGHTS_CONNECTION_STRING": ""
   }
 }

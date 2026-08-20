@@ -372,6 +372,45 @@ def test_addendum_includes_per_tool_descriptions():
     assert "Sample tool for the addendum-rendering test." in addendum
 
 
+def test_data_driven_control_flow_grammar_uses_progressive_skill_disclosure():
+    result = integration.build_workflow_integration(
+        _FakeApp(),
+        _enable_metadata(),
+        workflow_tools=[_workflow_tool("alpha", "alpha desc")],
+    )
+
+    for addendum in (result.chat_system_addendum, result.trigger_system_addendum):
+        assert "data-driven-workflows" not in addendum
+        assert "`for_each`" not in addendum
+        assert "`when`" not in addendum
+        assert "${item.path.to.field}" not in addendum
+        assert "{index, status, result}" not in addendum
+
+    skill_path = integration.data_driven_workflows_skill_path()
+    skill = (skill_path / "SKILL.md").read_text(encoding="utf-8")
+    assert "name: data-driven-workflows" in skill
+    assert "Irrelevant to fixed task lists" in skill
+    assert "`for_each`" in skill
+    assert "tool` or `sub_agent`" in skill
+    assert "never `wait`" in skill
+    assert "${discover.result.items}" in skill
+    assert "${item}" in skill
+    assert "${item.path.to.field}" in skill
+    assert "${index}" in skill
+    assert "`item` and `index` are reserved task ids" in skill
+    assert "Keep the target tool/agent name static" in skill
+    assert "`when`" in skill
+    assert '"operator": "equals" | "not_equals"' in skill
+    assert "JSON scalar" in skill
+    assert "exact typed equality" in skill
+    assert "skip does not propagate" in skill
+    assert "evaluated before" in skill
+    assert "{index, status, result}" in skill
+    assert "source order" in skill
+    assert "${node_id.result}" in skill
+    assert "already bounded" in skill
+
+
 def test_integration_builds_owner_specific_policy_and_sub_agent_guidance() -> None:
     result = integration.build_workflow_integration(
         _FakeApp(),
@@ -799,6 +838,73 @@ def test_start_workflow_params_survive_framework_default_materialization() -> No
     }
 
 
+def test_start_workflow_params_serialize_dynamic_task_fields_when_supplied() -> None:
+    params = tools.StartWorkflowParams(
+        tasks=[
+            {
+                "id": "discover",
+                "tool": "discover_pull_requests",
+            },
+            {
+                "id": "analyze",
+                "tool": "analyze_pull_request",
+                "depends_on": ["discover"],
+                "for_each": "${discover.result.items}",
+                "when": {
+                    "ref": "${item.open}",
+                    "operator": "equals",
+                    "value": True,
+                },
+                "args": {"url": "${item.url}", "index": "${index}"},
+            },
+        ]
+    )
+
+    assert params.model_dump()["tasks"][1] == {
+        "id": "analyze",
+        "depends_on": ["discover"],
+        "when": {"ref": "${item.open}", "operator": "equals", "value": True},
+        "type": "tool",
+        "tool": "analyze_pull_request",
+        "args": {"url": "${item.url}", "index": "${index}"},
+        "for_each": "${discover.result.items}",
+    }
+
+
+@pytest.mark.asyncio
+async def test_start_workflow_serializes_stable_reference_validation_metadata() -> None:
+    class _UnexpectedClient:
+        async def get_status_all(self):
+            raise AssertionError("validation must fail before Durable scheduling")
+
+    session = context.WorkflowSessionContext(
+        workflow_agent_slug="coordinator",
+        session_id="session-1",
+        agent_name="coordinator",
+        durable_client=_UnexpectedClient(),
+    )
+    params = tools.StartWorkflowParams(
+        tasks=[
+            {
+                "id": "target",
+                "tool": "__echo",
+                "args": {"value": "${missing.result.value}"},
+            }
+        ]
+    )
+    policy = schema.WorkflowPlanPolicy(
+        allowed_tools=frozenset({"__echo"}),
+        allowed_subagents=frozenset(),
+    )
+
+    result = json.loads(await tools.start_workflow(params, session, policy=policy))
+
+    assert result["error_code"] == "workflow_reference_unresolved"
+    assert result["node_id"] == "target"
+    assert result["path"] == "args.value"
+    assert "unknown task" in result["error"]
+
+
 @pytest.mark.asyncio
 async def test_fetch_session_workflows_returns_newest_session_workflows_up_to_v1_cap():
     session_id = "session-1"
@@ -834,3 +940,108 @@ async def test_fetch_session_workflows_returns_newest_session_workflows_up_to_v1
     )
     assert envelopes[0]["last_updated_time"].endswith("00:00:29+00:00")
     assert envelopes[-1]["last_updated_time"].endswith("00:00:05+00:00")
+
+
+# --- Controlled-failure status mapping (Issue #1276) -----------------------
+
+
+def _failed_output() -> dict:
+    return {
+        "failed": True,
+        "error": "task 'analyze': for_each did not resolve to an array",
+        "error_code": "workflow_iteration_not_array",
+        "node_id": "analyze",
+        "path": "${disc.result.items}",
+        "results": {"disc": {"items": {"not": "a list"}}},
+    }
+
+
+def test_status_envelope_maps_failed_output_to_failed_runtime_status():
+    status = _FakeStatus(
+        "wf-1",
+        "Completed",
+        output=_failed_output(),
+        custom_status={"schema_version": 2},
+    )
+
+    envelope = tools.status_envelope(status)
+
+    assert envelope["runtime_status"] == "Failed"
+    # The controlled-failure payload is passed through untouched.
+    assert envelope["output"] == _failed_output()
+
+
+def test_is_active_status_false_for_failed_output():
+    status = _FakeStatus("wf-1", "Completed", output=_failed_output())
+
+    assert tools._is_active_status(status) is False
+
+
+def test_status_envelope_completed_success_stays_completed():
+    status = _FakeStatus(
+        "wf-1", "Completed", output={"results": {"a": {"ok": True}}}
+    )
+
+    assert tools.status_envelope(status)["runtime_status"] == "Completed"
+
+
+def test_status_envelope_canceled_output_still_maps_to_canceled():
+    status = _FakeStatus(
+        "wf-1",
+        "Completed",
+        output={"results": {}, "canceled": True, "reason": "stop"},
+    )
+
+    assert tools.status_envelope(status)["runtime_status"] == "Canceled"
+
+
+def test_status_envelope_native_failed_output_is_untouched():
+    native = {"opaque": "provider stack trace"}
+    status = _FakeStatus("wf-1", "Failed", output=native)
+
+    envelope = tools.status_envelope(status)
+
+    # A native Durable Failed keeps its runtime_status and opaque output;
+    # the controlled-failure adapter only fires on Completed outputs.
+    assert envelope["runtime_status"] == "Failed"
+    assert envelope["output"] == native
+
+
+# --- Owner policy persisted in the orchestration client input --------------
+
+
+class _CapturingDurableClient:
+    def __init__(self):
+        self.client_input = None
+
+    async def get_status_all(self, *args, **kwargs):
+        return []
+
+    async def start_new(self, *args, **kwargs):
+        self.client_input = kwargs["client_input"]
+        return kwargs["instance_id"]
+
+
+@pytest.mark.asyncio
+async def test_start_workflow_persists_sorted_owner_policy_in_client_input():
+    client = _CapturingDurableClient()
+    session = context.WorkflowSessionContext(
+        workflow_agent_slug="coordinator",
+        session_id="session-1",
+        agent_name="coordinator",
+        durable_client=client,
+    )
+    params = tools.StartWorkflowParams(
+        tasks=[{"id": "target", "tool": "__echo", "args": {"value": "hi"}}]
+    )
+    policy = schema.WorkflowPlanPolicy(
+        allowed_tools=frozenset({"__echo"}),
+        allowed_subagents=frozenset({"zeta", "alpha"}),
+    )
+
+    result = json.loads(await tools.start_workflow(params, session, policy=policy))
+
+    assert "workflow_id" in result
+    persisted = client.client_input["policy"]
+    assert persisted["allowed_tools"] == sorted(policy.allowed_tools)
+    assert persisted["allowed_subagents"] == ["alpha", "zeta"]
