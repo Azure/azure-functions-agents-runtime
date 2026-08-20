@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 from eng.scripts.aca_qualification_pipeline import (
     QualificationPipelineError,
+    _redacted_reason,
     build_marker,
     compare_marker,
     content_report,
@@ -220,6 +221,28 @@ class TestContentReport:
 
     def test_missing_content_is_explicit(self) -> None:
         assert content_report({}) == "content=unavailable"
+
+
+class TestRedactedReason:
+    """A reason must be diagnosable without carrying credential material."""
+
+    def test_keeps_the_operational_cause(self) -> None:
+        reason = _redacted_reason(OSError("Cannot connect to host aca.example: [Errno -2]"))
+        assert "Cannot connect to host" in reason
+
+    def test_strips_bearer_tokens_and_sas_signatures(self) -> None:
+        reason = _redacted_reason(
+            RuntimeError("failed https://x/y?sv=2024-01-01&sig=AbCdEf123 Bearer eyJhbGciOiJIUzI1NiJ9abcdefghijk")
+        )
+        assert "AbCdEf123" not in reason
+        assert "eyJhbGciOiJIUzI1NiJ9" not in reason
+        assert "<redacted>" in reason
+
+    def test_falls_back_to_type_when_empty(self) -> None:
+        assert _redacted_reason(ValueError()) == "ValueError"
+
+    def test_truncates_runaway_messages(self) -> None:
+        assert len(_redacted_reason(RuntimeError("x" * 5000))) < 500
 
 
 class TestSweepAdapterContract:

@@ -37,6 +37,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -349,6 +350,24 @@ def render_sweep_report(selection: SweepSelection, *, deleted: int, max_age_hour
     )
 
 
+_MAX_REASON_CHARS = 400
+# Anything resembling a credential, token, signature, or bearer value is dropped
+# before a reason reaches the log.
+_SECRETISH = re.compile(
+    r"(?i)(bearer\s+\S+|[?&](sig|sv|se|st|skoid|sig)=[^&\s]+|eyJ[A-Za-z0-9_\-.]{20,})"
+)
+
+
+def _redacted_reason(error: BaseException) -> str:
+    """Render an operational cause without leaking credential material."""
+    text = str(error).strip() or type(error).__name__
+    text = _SECRETISH.sub("<redacted>", text)
+    text = " ".join(text.split())
+    if len(text) > _MAX_REASON_CHARS:
+        text = text[:_MAX_REASON_CHARS] + "…"
+    return text
+
+
 async def sweep_with_adapter(
     adapter: Any,
     *,
@@ -408,10 +427,17 @@ def run_sweep(environment: Mapping[str, str], *, max_age_hours: int) -> int:
         # A crash is not the same as a clean group, and must not read like one.
         # The sweep did not observe anything, so nothing can be concluded about
         # whether sandboxes leaked.
+        #
+        # The reason is included, redacted. Redaction exists to keep prompts,
+        # tokens, and customer content out of logs -- not to make an
+        # infrastructure failure undiagnosable. A bare exception class name
+        # cannot distinguish "DNS blocked" from "denied" from "wrong endpoint",
+        # which leaves an operator with nothing to act on.
         print(
             "##vso[task.logissue type=warning]ACA pre-run sweep DID NOT RUN "
-            f"({type(error).__name__}). No conclusion can be drawn about leaked "
-            "sandboxes; this is not evidence of a clean group."
+            f"({type(error).__name__}: {_redacted_reason(error)}). No conclusion "
+            "can be drawn about leaked sandboxes; this is not evidence of a "
+            "clean group."
         )
         return 0
     print(report)
