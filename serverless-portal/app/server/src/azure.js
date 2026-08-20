@@ -919,7 +919,231 @@ export async function listSourceFiles(accessToken, subscriptionId, site, storage
   return kudu ?? null
 }
 
-// Fetch a single Function App's site object (used when reading one agent).
+// ---------------------------------------------------------------------------
+// Blob-backed session history — the runtime writes each conversation to
+// `<container>/agent-sessions/<session_id>.jsonl` on the app's own storage
+// account (`AzureWebJobsStorage`). The portal enumerates and reads those blobs
+// directly (no per-app HTTP endpoint required) so users can browse prior
+// conversations from the Playground.
+// ---------------------------------------------------------------------------
+
+const SESSION_CONTAINER_ENV = 'AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER'
+const DEFAULT_SESSION_CONTAINER = 'azure-functions-agents'
+const DEFAULT_SESSION_PREFIX = 'agent-sessions/'
+
+// Read a Function App's application settings (best effort — returns `{}` on
+// failure). Callers use it to resolve the session container name and to find
+// the App Insights connection string.
+async function readAppSettings(accessToken, subscriptionId, resourceGroup, appName) {
+  try {
+    const client = webClient(accessToken, subscriptionId)
+    const current = await client.webApps.listApplicationSettings(resourceGroup, appName)
+    return { ...(current?.properties || {}) }
+  } catch {
+    return {}
+  }
+}
+
+// Parse `AccountName=` out of an Azure Storage connection string.
+function accountFromConnString(connString) {
+  const match = /AccountName=([^;]+)/i.exec(String(connString ?? ''))
+  return match ? match[1] : ''
+}
+
+// Resolve the Function App's own storage account (the one holding
+// `AzureWebJobsStorage`, where the runtime writes session history blobs).
+// Returns { account, blobEndpoint } or null when the app-setting is missing.
+async function resolveAppStorageAccount(accessToken, subscriptionId, resourceGroup, appName, settings) {
+  const props = settings ?? (await readAppSettings(accessToken, subscriptionId, resourceGroup, appName))
+  const conn = props.AzureWebJobsStorage
+  if (conn && conn.includes('AccountName=')) {
+    const account = accountFromConnString(conn)
+    if (account) return { account, blobEndpoint: `https://${account}.blob.core.windows.net` }
+  }
+  const uri = props.AzureWebJobsStorage__blobServiceUri
+  if (uri) {
+    try {
+      const parsed = new URL(uri)
+      const account = parsed.hostname.split('.')[0]
+      if (account) return { account, blobEndpoint: uri.replace(/\/+$/, '') }
+    } catch {
+      /* fall through */
+    }
+  }
+  return null
+}
+
+// Open the app's session container with whichever credential is available
+// (shared-key first, then the forwarded storage-scoped AAD token). Returns
+// { containerClient, container } or null.
+async function openSessionContainer(accessToken, subscriptionId, site, storageToken) {
+  const resourceGroup = parseResourceGroup(site?.id)
+  const appName = site?.name || ''
+  if (!appName || !resourceGroup) return null
+  const settings = await readAppSettings(accessToken, subscriptionId, resourceGroup, appName)
+  const container = String(settings[SESSION_CONTAINER_ENV] || DEFAULT_SESSION_CONTAINER)
+  const resolved = await resolveAppStorageAccount(accessToken, subscriptionId, resourceGroup, appName, settings)
+  if (!resolved) return null
+  const containerUrl = `${resolved.blobEndpoint}/${container}`
+
+  const credentials = []
+  const key = await storageAccountKey(accessToken, subscriptionId, resourceGroup, resolved.account)
+  if (key) credentials.push(new StorageSharedKeyCredential(resolved.account, key))
+  if (storageToken) credentials.push(staticTokenCredential(storageToken))
+  for (const credential of credentials) {
+    try {
+      const client = new ContainerClient(containerUrl, credential)
+      // Touch the container to fail fast on 403/404 before returning.
+      await client.getProperties()
+      return { containerClient: client, container }
+    } catch {
+      /* try the next credential */
+    }
+  }
+  return null
+}
+
+// Enumerate the app's persisted sessions. Returns [{ sessionId, size,
+// lastModified }] sorted newest-first, or null when the storage container
+// isn't reachable. The `agent` parameter is currently informational — the
+// runtime's blob layout is not agent-scoped; callers may filter later once
+// the runtime writes per-agent prefixes.
+export async function listSessions(accessToken, subscriptionId, site, storageToken) {
+  const opened = await openSessionContainer(accessToken, subscriptionId, site, storageToken)
+  if (!opened) return null
+  const sessions = []
+  try {
+    for await (const item of opened.containerClient.listBlobsFlat({ prefix: DEFAULT_SESSION_PREFIX })) {
+      const name = String(item?.name ?? '')
+      if (!name.endsWith('.jsonl')) continue
+      const sessionId = name.slice(DEFAULT_SESSION_PREFIX.length, -'.jsonl'.length)
+      if (!sessionId) continue
+      sessions.push({
+        sessionId,
+        size: Number(item?.properties?.contentLength ?? 0),
+        lastModified: item?.properties?.lastModified?.toISOString?.() ?? null,
+      })
+    }
+  } catch {
+    return null
+  }
+  sessions.sort((a, b) => (b.lastModified ?? '').localeCompare(a.lastModified ?? ''))
+  return sessions
+}
+
+// Fetch a single session's JSONL blob and return an array of parsed message
+// dicts. Returns null when the blob can't be read; returns `[]` when the blob
+// exists but is empty.
+export async function readSession(accessToken, subscriptionId, site, sessionId, storageToken) {
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(String(sessionId ?? ''))) return null
+  const opened = await openSessionContainer(accessToken, subscriptionId, site, storageToken)
+  if (!opened) return null
+  const blobName = `${DEFAULT_SESSION_PREFIX}${sessionId}.jsonl`
+  try {
+    const blob = opened.containerClient.getAppendBlobClient(blobName)
+    const buf = await blob.downloadToBuffer()
+    const text = buf.toString('utf-8')
+    const messages = []
+    for (const line of text.split(/\r?\n/)) {
+      const clean = line.trim()
+      if (!clean) continue
+      try {
+        messages.push(JSON.parse(clean))
+      } catch {
+        /* skip a partially-written line */
+      }
+    }
+    return messages
+  } catch {
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Application Insights (KQL via ARM). Every deployed agent app has an AI
+// component (linked via `APPLICATIONINSIGHTS_CONNECTION_STRING`); we resolve
+// the component by iKey / name so the portal can render invocation counts,
+// p95 latency, error rate, and recent failures without asking the caller to
+// pick a workspace.
+// ---------------------------------------------------------------------------
+
+// Parse `InstrumentationKey=` out of an App Insights connection string.
+function iKeyFromConnString(connString) {
+  const match = /InstrumentationKey=([^;]+)/i.exec(String(connString ?? ''))
+  return match ? match[1] : ''
+}
+
+// Resolve the App Insights component id for a Function App. Tries same-name in
+// same RG first (matches the portal's provision.js template), then falls back
+// to iKey lookup across every AI component in the subscription. Returns the
+// component id or ''.
+async function resolveAppInsightsComponentId(accessToken, subscriptionId, resourceGroup, appName) {
+  const settings = await readAppSettings(accessToken, subscriptionId, resourceGroup, appName)
+  const conn = settings.APPLICATIONINSIGHTS_CONNECTION_STRING || ''
+  const iKey = iKeyFromConnString(conn)
+
+  // Same-name / same-RG probe (portal-created apps always match this).
+  const sameName = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Insights/components/${appName}`
+  try {
+    const probe = await fetch(
+      `https://management.azure.com${sameName}?api-version=2020-02-02`,
+      { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(6000) },
+    )
+    if (probe.ok) return sameName
+  } catch {
+    /* fall through */
+  }
+
+  if (!iKey) return ''
+
+  // Fallback: enumerate every AI component in the subscription and match iKey.
+  try {
+    const res = await fetch(
+      `https://management.azure.com/subscriptions/${subscriptionId}/providers/Microsoft.Insights/components?api-version=2020-02-02`,
+      { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(15000) },
+    )
+    if (!res.ok) return ''
+    const body = await res.json()
+    for (const component of body?.value ?? []) {
+      if (String(component?.properties?.InstrumentationKey ?? '').toLowerCase() === iKey.toLowerCase()) {
+        return String(component?.id ?? '')
+      }
+    }
+  } catch {
+    /* unavailable */
+  }
+  return ''
+}
+
+// Execute a KQL query against an App Insights component via ARM's `/query`
+// endpoint (uses the caller's ARM token — no separate AI scope). Returns the
+// component id and the raw ARM `tables` payload, or an error object.
+export async function queryAppInsights(accessToken, subscriptionId, resourceGroup, appName, query, timespan) {
+  const componentId = await resolveAppInsightsComponentId(accessToken, subscriptionId, resourceGroup, appName)
+  if (!componentId) return { componentId: '', error: 'no-component' }
+  const url = `https://management.azure.com${componentId}/query?api-version=2018-04-20`
+  const body = { query, ...(timespan ? { timespan } : {}) }
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20000),
+    })
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      return { componentId, error: `HTTP ${res.status}${detail ? `: ${detail.slice(0, 240)}` : ''}` }
+    }
+    return { componentId, ...(await res.json()) }
+  } catch (err) {
+    return { componentId, error: String(err?.message ?? err) }
+  }
+}
+
+// Fetch a Function App's site object (used when reading one agent).
 export async function getSite(accessToken, subscriptionId, resourceGroup, appName) {
   try {
     const client = webClient(accessToken, subscriptionId)

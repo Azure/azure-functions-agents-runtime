@@ -87,6 +87,34 @@ function parseMcpServers(content?: string | null): McpServer[] {
   }
 }
 
+// Azure portal deep links to the Function App's monitoring surfaces. `Monitor`
+// opens the Application Insights integration blade; `Failures` opens the App
+// Insights Failures blade filtered to this app's role name. Both are scoped to
+// the `gen_ai` + invocation signals the runtime already emits — the wider
+// infra/health story lives in Azure Monitor.
+interface AzureResourceCtx {
+  tenantId?: string
+  subscriptionId: string
+  resourceGroup: string
+  app: string
+}
+function azurePortalRoot(tenantId?: string): string {
+  return `https://portal.azure.com/#${tenantId ? `@${tenantId}` : ''}`
+}
+function functionAppResourcePath(ctx: AzureResourceCtx): string {
+  return `/resource/subscriptions/${ctx.subscriptionId}/resourceGroups/${ctx.resourceGroup}/providers/Microsoft.Web/sites/${ctx.app}`
+}
+function buildFunctionAppMonitorUrl(ctx: AzureResourceCtx): string {
+  // AppInsights blade on the Function App — resolves the connected component
+  // and lands on Live Metrics/Performance without a separate ARM lookup.
+  return `${azurePortalRoot(ctx.tenantId)}${functionAppResourcePath(ctx)}/appServices`
+}
+function buildFunctionAppFailuresUrl(ctx: AzureResourceCtx): string {
+  // App Insights "Failures" blade for this app's Function App. The blade
+  // auto-filters to the linked component + this app's cloud role name.
+  return `${azurePortalRoot(ctx.tenantId)}${functionAppResourcePath(ctx)}/failures`
+}
+
 // A folder in the sidebar's file tree. Files at the root live in `files`;
 // nested directories live in `dirs`, keyed by folder name.
 interface TreeFolder {
@@ -168,6 +196,7 @@ type Sel =
   | { kind: 'agent'; name: string }
   | { kind: 'mcp'; name: string }
   | { kind: 'file'; path: string; label: string }
+  | { kind: 'monitor' }
 
 // AI App detail — a single Azure Function App identified as an AI App by the
 // AZURE_FUNCTIONS_AGENTS_PROVIDER app setting. Shows its composition, endpoints,
@@ -175,7 +204,7 @@ type Sel =
 export default function AppDetailPage() {
   const { subscriptionId, app: appName } = useParams<{ subscriptionId: string; app: string }>()
   const navigate = useNavigate()
-  const { selected, setSelected } = useIdentity()
+  const { selected, setSelected, identity } = useIdentity()
   const deployJob = useDeployJob()
   const [sel, setSel] = useState<Sel>({ kind: 'overview' })
 
@@ -438,6 +467,34 @@ export default function AppDetailPage() {
                 agents={app.agents.map((a) => a.name)}
               />
             )}
+            <a
+              className="btn"
+              href={buildFunctionAppMonitorUrl({
+                tenantId: identity?.user?.tenantId,
+                subscriptionId: subForQuery,
+                resourceGroup: app.resourceGroup,
+                app: app.name,
+              })}
+              target="_blank"
+              rel="noreferrer"
+              title="Open this Function App's Application Insights + invocation monitor in the Azure portal"
+            >
+              📊 Monitor
+            </a>
+            <a
+              className="btn"
+              href={buildFunctionAppFailuresUrl({
+                tenantId: identity?.user?.tenantId,
+                subscriptionId: subForQuery,
+                resourceGroup: app.resourceGroup,
+                app: app.name,
+              })}
+              target="_blank"
+              rel="noreferrer"
+              title="Open recent invocation failures (App Insights Failures blade)"
+            >
+              ⚠ Failures
+            </a>
             {isFetching && (
               <span className="cache-stamp">⟳ Refreshing…</span>
             )}
@@ -460,6 +517,13 @@ export default function AppDetailPage() {
                 onClick={() => setSel({ kind: 'overview' })}
               >
                 📊 Overview
+              </button>
+              <button
+                className={'node' + (sel.kind === 'monitor' ? ' active' : '')}
+                onClick={() => setSel({ kind: 'monitor' })}
+                title="Invocations, latency, errors, and recent failures from App Insights"
+              >
+                📈 Monitor
               </button>
 
               <div className="group-label">Agents</div>
@@ -746,6 +810,15 @@ export default function AppDetailPage() {
                   />
                 </>
               )}
+
+              {sel.kind === 'monitor' && (
+                <MonitorPane
+                  subscription={subForQuery}
+                  resourceGroup={app.resourceGroup}
+                  app={app.name}
+                  tenantId={identity?.user?.tenantId}
+                />
+              )}
             </section>
           </div>
 
@@ -887,4 +960,214 @@ function FileTreeFolder({
       )}
     </>
   )
+}
+
+// Per-app monitoring pane — runs four curated KQL presets against the app's
+// linked Application Insights component and renders the results as a compact
+// stat row + a table of recent failures. Each failure row links out to the
+// Transaction Search blade filtered by operation_Id, which is the fastest path
+// from "this request failed" to "here is the full trace" without the portal
+// having to fetch full stack traces itself.
+function MonitorPane({
+  subscription,
+  resourceGroup,
+  app,
+  tenantId,
+}: {
+  subscription: string
+  resourceGroup: string
+  app: string
+  tenantId?: string
+}) {
+  const [timeRange, setTimeRange] = useState<'1h' | '24h' | '7d'>('24h')
+  const params = { subscription, resourceGroup, app, timeRange }
+  const summary = useQuery({
+    queryKey: ['ai:summary', subscription, resourceGroup, app, timeRange],
+    queryFn: () => api.appInsightsQuery({ ...params, preset: 'summary' }),
+    staleTime: 60_000,
+    retry: false,
+  })
+  const agentsQ = useQuery({
+    queryKey: ['ai:agents', subscription, resourceGroup, app, timeRange],
+    queryFn: () => api.appInsightsQuery({ ...params, preset: 'agents' }),
+    staleTime: 60_000,
+    retry: false,
+  })
+  const failuresQ = useQuery({
+    queryKey: ['ai:recentFailures', subscription, resourceGroup, app, timeRange],
+    queryFn: () => api.appInsightsQuery({ ...params, preset: 'recentFailures' }),
+    staleTime: 60_000,
+    retry: false,
+  })
+
+  const err = (summary.error || agentsQ.error || failuresQ.error) as Error | undefined
+  const summaryRow = rowsOf(summary.data)[0] ?? []
+  const summaryCols = columnsOf(summary.data)
+  const invocations = pick(summaryCols, summaryRow, 'invocations') as number | undefined
+  const failures = pick(summaryCols, summaryRow, 'failures') as number | undefined
+  const p95 = pick(summaryCols, summaryRow, 'p95_ms') as number | undefined
+  const avg = pick(summaryCols, summaryRow, 'avg_ms') as number | undefined
+  const errRate = invocations && invocations > 0 ? Math.round(((failures ?? 0) / invocations) * 1000) / 10 : 0
+
+  const agentRows = rowsOf(agentsQ.data)
+  const agentCols = columnsOf(agentsQ.data)
+  const failureRows = rowsOf(failuresQ.data)
+  const failureCols = columnsOf(failuresQ.data)
+
+  const transactionUrl = (operationId: string) => {
+    const componentId = summary.data?.componentId || agentsQ.data?.componentId || failuresQ.data?.componentId
+    if (!componentId) return ''
+    const tenant = tenantId ? `@${tenantId}` : ''
+    return `https://portal.azure.com/#${tenant}/resource${componentId}/searchV1/searchTerm/${encodeURIComponent(operationId)}`
+  }
+
+  return (
+    <>
+      <div className="card-head">
+        <h3 style={{ margin: 0 }}>Monitor</h3>
+        <span className="muted" style={{ fontSize: 12 }}>
+          Live from App Insights · <span className="mono">cloud_RoleName == "{app}"</span>
+        </span>
+        <div style={{ flex: 1 }} />
+        <div className="copy-as-tabs" role="tablist" aria-label="Time range">
+          {(['1h', '24h', '7d'] as const).map((r) => (
+            <button
+              key={r}
+              type="button"
+              role="tab"
+              aria-selected={r === timeRange}
+              className={'copy-as-tab' + (r === timeRange ? ' is-active' : '')}
+              onClick={() => setTimeRange(r)}
+            >
+              {r}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {err && (
+        <div className="note" style={{ marginTop: 10 }}>
+          Couldn’t reach App Insights: {err.message}
+        </div>
+      )}
+
+      <StatTiles
+        items={[
+          { n: invocations ?? 0, label: 'Invocations' },
+          { n: failures ?? 0, label: 'Failures' },
+          { n: `${errRate}%`, label: 'Error rate' },
+          { n: p95 != null ? `${Math.round(p95)} ms` : '—', label: 'p95 latency' },
+          { n: avg != null ? `${Math.round(avg)} ms` : '—', label: 'avg latency' },
+        ]}
+      />
+
+      <div className="divider" />
+      <span className="group-sub">Per-agent breakdown</span>
+      {agentRows.length === 0 ? (
+        <p className="muted" style={{ fontSize: 13 }}>
+          {agentsQ.isLoading ? 'Loading…' : 'No invocations in this time range.'}
+        </p>
+      ) : (
+        <div className="ai-table-wrap">
+          <table className="ai-table">
+            <thead>
+              <tr>
+                {agentCols.map((c) => (
+                  <th key={c.name}>{prettyCol(c.name)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {agentRows.slice(0, 12).map((row, i) => (
+                <tr key={i}>
+                  {row.map((v, j) => (
+                    <td key={j} className={agentCols[j]?.name === 'operation_Name' ? 'mono' : ''}>
+                      {formatCell(agentCols[j]?.name, v)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="divider" />
+      <span className="group-sub">Recent failures</span>
+      {failureRows.length === 0 ? (
+        <p className="muted" style={{ fontSize: 13 }}>
+          {failuresQ.isLoading ? 'Loading…' : 'No failures in this time range.'}
+        </p>
+      ) : (
+        <div className="ai-table-wrap">
+          <table className="ai-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Operation</th>
+                <th>Result</th>
+                <th>Duration</th>
+                <th>Session</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {failureRows.map((row, i) => {
+                const operationId = String(pick(failureCols, row, 'operation_Id') ?? '')
+                const link = operationId ? transactionUrl(operationId) : ''
+                return (
+                  <tr key={i}>
+                    <td>{formatCell('timestamp', pick(failureCols, row, 'timestamp'))}</td>
+                    <td className="mono">{String(pick(failureCols, row, 'name') ?? '')}</td>
+                    <td>{String(pick(failureCols, row, 'resultCode') ?? '')}</td>
+                    <td>{formatCell('duration', pick(failureCols, row, 'duration'))}</td>
+                    <td className="mono">
+                      {String(pick(failureCols, row, 'session') ?? '').slice(0, 8) || '—'}
+                    </td>
+                    <td>
+                      {link && (
+                        <a href={link} target="_blank" rel="noreferrer" className="btn sm">
+                          Open trace →
+                        </a>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  )
+}
+
+function columnsOf(result: { tables?: { columns: { name: string; type: string }[] }[] } | undefined) {
+  return result?.tables?.[0]?.columns ?? []
+}
+function rowsOf(result: { tables?: { rows: unknown[][] }[] } | undefined) {
+  return result?.tables?.[0]?.rows ?? []
+}
+function pick(columns: { name: string }[], row: unknown[], column: string): unknown {
+  const i = columns.findIndex((c) => c.name === column)
+  return i >= 0 ? row[i] : undefined
+}
+function prettyCol(name: string): string {
+  return name
+    .replace(/_/g, ' ')
+    .replace(/\bMs\b/, 'ms')
+    .replace(/^./, (c) => c.toUpperCase())
+}
+function formatCell(colName: string | undefined, value: unknown): string {
+  if (value == null) return '—'
+  if (colName === 'timestamp' && typeof value === 'string') {
+    try {
+      return new Date(value).toLocaleString()
+    } catch {
+      return value
+    }
+  }
+  if (colName === 'duration' && typeof value === 'number') return `${Math.round(value)} ms`
+  if ((colName === 'p95_ms' || colName === 'avg_ms') && typeof value === 'number') return `${Math.round(value)} ms`
+  return String(value)
 }

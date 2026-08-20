@@ -457,6 +457,145 @@ app.get(
 )
 
 // ---------------------------------------------------------------------------
+// Session history — enumerate and read the blob-backed sessions the runtime
+// persists to the app's `AzureWebJobsStorage` account (default container
+// `azure-functions-agents`, prefix `agent-sessions/`). The runtime does not
+// expose an HTTP list endpoint, so the portal reads storage directly using
+// the caller's ARM/storage tokens.
+// ---------------------------------------------------------------------------
+
+app.get(
+  '/api/sessions',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.query.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const appName = String(req.query.app ?? '').trim()
+    const resourceGroup = String(req.query.resourceGroup ?? '').trim()
+    if (!appName || !resourceGroup) throw new HttpError(400, 'app and resourceGroup are required.')
+    const site = await azure.getSite(token, subscription, resourceGroup, appName)
+    if (!site) throw new HttpError(404, `Function App "${appName}" was not found.`)
+    const storageToken = storageTokenFrom(req)
+    const sessions = await azure.listSessions(token, subscription, site, storageToken)
+    if (sessions == null) {
+      res.json({ app: appName, sessions: [], readable: false })
+      return
+    }
+    res.json({ app: appName, sessions, readable: true })
+  }),
+)
+
+app.get(
+  '/api/sessions/:sessionId',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.query.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const appName = String(req.query.app ?? '').trim()
+    const resourceGroup = String(req.query.resourceGroup ?? '').trim()
+    const sessionId = String(req.params.sessionId ?? '').trim()
+    if (!appName || !resourceGroup) throw new HttpError(400, 'app and resourceGroup are required.')
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(sessionId)) throw new HttpError(400, 'Invalid session id.')
+    const site = await azure.getSite(token, subscription, resourceGroup, appName)
+    if (!site) throw new HttpError(404, `Function App "${appName}" was not found.`)
+    const storageToken = storageTokenFrom(req)
+    const messages = await azure.readSession(token, subscription, site, sessionId, storageToken)
+    if (messages == null) throw new HttpError(404, 'Session not readable (missing, no perms, or storage unavailable).')
+    res.json({ app: appName, sessionId, messages })
+  }),
+)
+
+// ---------------------------------------------------------------------------
+// App Insights KQL — the portal runs a small, curated set of queries against
+// the app's linked App Insights component (invocations, p95 latency, error
+// count, recent failures). The client picks the query by `preset` name; ad-hoc
+// KQL is only accepted when the caller passes an explicit query string.
+// ---------------------------------------------------------------------------
+
+const INSIGHTS_PRESETS = {
+  // High-level per-app metrics for the monitor tab.
+  summary: (timeRange) => `
+requests
+| where timestamp >= ago(${timeRange})
+| where cloud_RoleName == "@APP@"
+| summarize invocations = count(),
+    failures = countif(success == false),
+    p95_ms = percentile(duration, 95),
+    avg_ms = avg(duration)
+`,
+  // Bucketed invocation counts for a sparkline.
+  timeline: (timeRange) => `
+requests
+| where timestamp >= ago(${timeRange})
+| where cloud_RoleName == "@APP@"
+| summarize count() by bin(timestamp, 15m), success
+| order by timestamp asc
+`,
+  // Per-agent breakdown: operation_Name is the Azure Functions function name;
+  // the runtime registers agents with predictable names so we group on those.
+  agents: (timeRange) => `
+requests
+| where timestamp >= ago(${timeRange})
+| where cloud_RoleName == "@APP@"
+| summarize invocations = count(),
+    failures = countif(success == false),
+    p95_ms = percentile(duration, 95)
+    by operation_Name
+| order by invocations desc
+`,
+  // Recent failed invocations for the "failures → open trace" list.
+  recentFailures: (timeRange) => `
+requests
+| where timestamp >= ago(${timeRange})
+| where cloud_RoleName == "@APP@" and success == false
+| project timestamp, name, operation_Id, resultCode, duration, session = tostring(customDimensions["af.agent.session_id"])
+| order by timestamp desc
+| take 25
+`,
+}
+
+// Sanitise a KQL string identifier — used to inline the app name into a
+// preset query. Rejects anything with a quote or backslash.
+function safeKqlString(value) {
+  const s = String(value ?? '')
+  if (/["\\]/.test(s)) return ''
+  return s
+}
+
+app.post(
+  '/api/app-insights/query',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const appName = String(req.body?.app ?? '').trim()
+    const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
+    const preset = String(req.body?.preset ?? '').trim()
+    const timeRange = String(req.body?.timeRange ?? '24h').trim()
+    if (!appName || !resourceGroup) throw new HttpError(400, 'app and resourceGroup are required.')
+    if (!/^(?:\d+)(?:m|h|d)$/.test(timeRange)) throw new HttpError(400, 'timeRange must look like 15m/24h/7d.')
+
+    let query = ''
+    if (preset) {
+      const builder = INSIGHTS_PRESETS[preset]
+      if (!builder) throw new HttpError(400, `Unknown preset "${preset}".`)
+      const safeApp = safeKqlString(appName)
+      if (!safeApp) throw new HttpError(400, 'App name contains disallowed characters.')
+      query = builder(timeRange).replace(/@APP@/g, safeApp)
+    } else if (typeof req.body?.query === 'string' && req.body.query.trim()) {
+      query = String(req.body.query)
+    } else {
+      throw new HttpError(400, 'Provide either { preset } or { query }.')
+    }
+
+    const timespan = `P${timeRange.replace(/(\d+)(m|h|d)/, (_, n, u) => u === 'd' ? `${n}D` : u === 'h' ? `T${n}H` : `T${n}M`)}`
+    const result = await azure.queryAppInsights(token, subscription, resourceGroup, appName, query, timespan)
+    if (result.error === 'no-component') {
+      throw new HttpError(404, 'This app has no linked Application Insights component.')
+    }
+    if (result.error) throw new HttpError(502, `App Insights query failed: ${result.error}`)
+    res.json(result)
+  }),
+)
+
+// ---------------------------------------------------------------------------
 // Create / deploy agent — refresh the target Function App's portal-managed
 // source tree, then provision (for a new app) and push it to Azure with a
 // remote build. Every Azure call runs as the signed-in user's forwarded token.

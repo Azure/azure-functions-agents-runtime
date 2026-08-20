@@ -83,6 +83,42 @@ export interface SourceListing {
   files: SourceListEntry[]
 }
 
+export interface SessionSummary {
+  sessionId: string
+  size: number
+  lastModified: string | null
+}
+export interface SessionListing {
+  app: string
+  sessions: SessionSummary[]
+  readable: boolean
+}
+export interface SessionMessage {
+  role?: string
+  content?: unknown
+  [key: string]: unknown
+}
+export interface SessionRead {
+  app: string
+  sessionId: string
+  messages: SessionMessage[]
+}
+
+export interface AppInsightsColumn {
+  name: string
+  type: string
+}
+export interface AppInsightsTable {
+  name: string
+  columns: AppInsightsColumn[]
+  rows: unknown[][]
+}
+export interface AppInsightsResult {
+  componentId: string
+  tables?: AppInsightsTable[]
+  error?: string
+}
+
 export interface DeployResult {
   status: 'running' | 'deployed' | 'staged' | 'error'
   message: string
@@ -317,6 +353,42 @@ export const api = {
       storageToken ? { 'X-Storage-Token': storageToken } : undefined,
     )
   },
+
+  // Enumerate the runtime's blob-backed sessions for an app so the Playground
+  // can offer a history browser. `readable: false` means storage was reached
+  // but the caller lacks permission (or storage isn't yet configured).
+  listSessions: async (p: { subscription: string; app: string; resourceGroup: string }) => {
+    const storageToken = await acquireStorageToken()
+    return req<SessionListing>(
+      'GET',
+      `/api/sessions?subscription=${enc(p.subscription)}&app=${enc(p.app)}&resourceGroup=${enc(p.resourceGroup)}`,
+      undefined,
+      storageToken ? { 'X-Storage-Token': storageToken } : undefined,
+    )
+  },
+
+  // Read one session's persisted messages (parsed from the JSONL blob).
+  getSession: async (p: { subscription: string; app: string; resourceGroup: string; sessionId: string }) => {
+    const storageToken = await acquireStorageToken()
+    return req<SessionRead>(
+      'GET',
+      `/api/sessions/${enc(p.sessionId)}?subscription=${enc(p.subscription)}&app=${enc(p.app)}&resourceGroup=${enc(p.resourceGroup)}`,
+      undefined,
+      storageToken ? { 'X-Storage-Token': storageToken } : undefined,
+    )
+  },
+
+  // Run a curated Application Insights KQL preset for an app (summary /
+  // timeline / agents / recentFailures). `timeRange` is a Kusto-shortform
+  // window like "24h" / "7d" / "15m".
+  appInsightsQuery: (p: {
+    subscription: string
+    resourceGroup: string
+    app: string
+    preset?: 'summary' | 'timeline' | 'agents' | 'recentFailures'
+    query?: string
+    timeRange?: string
+  }) => req<AppInsightsResult>('POST', '/api/app-insights/query', p),
 
   // Start creating/deploying an agent app; returns a job id to poll. Provisioning
   // + remote build run in the background so the user can watch in the portal.
