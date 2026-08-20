@@ -41,6 +41,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -578,6 +579,13 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+_READINESS_DEADLINE_SECONDS = 300.0
+_READINESS_POLL_SECONDS = 10.0
+# The platform returns these while an app restarts after a deployment. They mean
+# "not ready yet", not "wrong build", so they are retried rather than failed.
+_NOT_READY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
+
 async def _fetch_build_info(base_url: str, token_scope: str) -> dict[str, Any]:
     import aiohttp
     from azure.identity.aio import DefaultAzureCredential
@@ -589,11 +597,39 @@ async def _fetch_build_info(base_url: str, token_scope: str) -> dict[str, Any]:
         await credential.close()
     url = f"{base_url.rstrip('/')}/__buildinfo"
     timeout = aiohttp.ClientTimeout(total=60)
+    deadline = time.monotonic() + _READINESS_DEADLINE_SECONDS
+    last_status: int | None = None
+
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url, headers={"Authorization": f"Bearer {token.token}"}) as response:
-            if response.status != 200:
-                raise QualificationPipelineError(f"buildinfo_http_{response.status}")
-            payload = await response.json(content_type=None)
+        while True:
+            try:
+                async with session.get(
+                    url, headers={"Authorization": f"Bearer {token.token}"}
+                ) as response:
+                    if response.status == 200:
+                        payload = await response.json(content_type=None)
+                        break
+                    last_status = response.status
+                    # An auth or not-found answer is a real answer: the app is
+                    # up and telling us something. Only restart-shaped statuses
+                    # are worth waiting on.
+                    if response.status not in _NOT_READY_STATUSES:
+                        raise QualificationPipelineError(f"buildinfo_http_{response.status}")
+            except aiohttp.ClientError as error:
+                # A connection reset mid-restart is the same condition as a 503.
+                last_status = last_status or -1
+                if time.monotonic() >= deadline:
+                    raise QualificationPipelineError(
+                        f"buildinfo_unreachable:{type(error).__name__}"
+                    ) from None
+            if time.monotonic() >= deadline:
+                raise QualificationPipelineError(
+                    f"buildinfo_not_ready_after_{int(_READINESS_DEADLINE_SECONDS)}s"
+                    f":last_status_{last_status}"
+                )
+            print(f"App not ready yet (status {last_status}); waiting for restart to settle.")
+            await asyncio.sleep(_READINESS_POLL_SECONDS)
+
     if not isinstance(payload, dict):
         raise QualificationPipelineError("buildinfo_malformed")
     return payload
