@@ -231,7 +231,7 @@ def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> No
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
@@ -276,7 +276,7 @@ def test_run_agent_stream_bounds_stalled_generator_by_coordinator_deadline(
     ) -> tuple[_StallingAgent, object, str, None, InferenceTarget]:
         return _StallingAgent(), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
     async def collect() -> list[str]:
         return [
@@ -336,7 +336,7 @@ def test_run_agent_stream_finalizes_when_deadline_exhausted_between_updates(
     ) -> tuple[_CleanupTrackingAgent, object, str, None, InferenceTarget]:
         return _CleanupTrackingAgent(fake_stream), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
     async def drive() -> list[str]:
         gen = runner.run_agent_stream("prompt", timeout=0.05)
@@ -398,7 +398,7 @@ def test_run_agent_stream_finalizes_when_cancelled_while_suspended_at_a_yield(
     ) -> tuple[_CleanupTrackingAgent, object, str, None, InferenceTarget]:
         return _CleanupTrackingAgent(fake_stream), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
     async def drive() -> None:
         gen = runner.run_agent_stream("prompt", timeout=30.0)
@@ -527,7 +527,7 @@ def test_run_agent_bounds_lock_wait_by_coordinator_deadline(monkeypatch: Any) ->
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), resolved_id, None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
     async def scenario() -> BaseException | None:
         lock = await runner._get_session_lock(resolved_id)
@@ -566,7 +566,7 @@ def test_run_agent_stream_bounds_lock_wait_by_coordinator_deadline(monkeypatch: 
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), resolved_id, None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
     async def scenario() -> list[str]:
         lock = await runner._get_session_lock(resolved_id)
@@ -679,7 +679,7 @@ def test_run_agent_stream_reports_delegate_error_count_on_span(monkeypatch: Any)
     ) -> tuple[_Agent, object, str, runner._DelegateErrorTracker, InferenceTarget]:
         return _Agent(), object(), "test-session", tracker, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
@@ -709,7 +709,7 @@ def test_run_agent_stream_reports_zero_tool_errors_without_delegation(monkeypatc
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
@@ -743,7 +743,7 @@ def test_run_agent_stream_counts_ordinary_tool_errors_without_delegation(
     ) -> tuple[_ToolErrorAgent, object, str, None, InferenceTarget]:
         return _ToolErrorAgent(), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
@@ -775,7 +775,7 @@ def test_run_agent_stream_sums_ordinary_and_delegate_tool_errors(monkeypatch: An
     ) -> tuple[_ToolErrorAgent, object, str, runner._DelegateErrorTracker, InferenceTarget]:
         return _ToolErrorAgent(), object(), "test-session", tracker, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
@@ -805,7 +805,7 @@ def test_run_agent_stream_reports_display_name_on_span(monkeypatch: Any) -> None
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
     async def collect() -> list[str]:
         return [

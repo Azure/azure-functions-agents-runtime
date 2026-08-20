@@ -1,3 +1,0 @@
-compaction:
-  max_context_window_tokens: 128000
-  max_output_tokens: 8000

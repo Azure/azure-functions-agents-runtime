@@ -1,10 +1,5 @@
 # Global configuration for all agents in this function app
 
-# Bound model-facing conversation history while retaining complete runtime history.
-compaction:
-  max_context_window_tokens: 8192
-  max_output_tokens: 4096
-
 # Default runtime configuration
 model: $FOUNDRY_MODEL
 timeout: 900

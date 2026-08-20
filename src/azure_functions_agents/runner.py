@@ -60,20 +60,10 @@ import asyncio
 import contextlib
 import json
 import sys
-import warnings
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
-
-try:
-    from agent_framework import create_harness_agent
-    from agent_framework._feature_stage import ExperimentalWarning
-except ImportError as exc:
-    raise RuntimeError(
-        "azure-functions-agents-runtime requires agent-framework-core==1.13.0 "
-        "with create_harness_agent support"
-    ) from exc
 
 from pydantic import BaseModel, Field
 
@@ -94,7 +84,7 @@ from .client_manager import InferenceTarget, get_client_manager
 from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
 from .config.paths import get_app_root, resolve_config_dir
-from .config.schema import CompactionConfig
+from .config.schema import HarnessAgentConfig
 from .discovery.mcp import MCPTool, discover_mcp_servers
 from .discovery.tools import discover_user_tools
 
@@ -108,7 +98,11 @@ from .registration.capabilities import AgentCapabilities
 from .registration.catalog import AgentCatalog, CatalogEntry
 
 if TYPE_CHECKING:
-    from agent_framework import Agent, AgentResponse, HistoryProvider, SupportsChatGetResponse
+    # Type-only: the runtime values are always obtained via the lazy,
+    # call-time `from agent_framework import ...` imports below (this
+    # module's established pattern for the heavier agent-construction
+    # symbols), so this adds no import-time cost.
+    from agent_framework import Agent, AgentResponse, ContextProvider, SupportsChatGetResponse
 
     from .workflows.schema import WorkflowPlanPolicy
 
@@ -347,6 +341,29 @@ def _build_chat_options_from_environment() -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
+# Agent + session construction
+# ---------------------------------------------------------------------------
+
+
+def _build_skills_provider(skill_paths: list[Path] | None) -> Any:
+    """Return a :class:`SkillsProvider` for the given skill directories, or ``None``."""
+    if not skill_paths:
+        return None
+    # ``SkillsProvider`` is marked experimental in MAF; constructing it emits an
+    # ``ExperimentalWarning``. We acknowledge the experimental status — it is
+    # the documented integration point for SKILL.md-based progressive disclosure —
+    # and suppress just that one warning so cold-start logs stay quiet.
+    import warnings
+
+    from agent_framework import SkillsProvider
+    from agent_framework._feature_stage import ExperimentalWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=ExperimentalWarning)
+        return SkillsProvider.from_paths(list(skill_paths))
+
+
+# ---------------------------------------------------------------------------
 # Chat-time sub-agent delegation (FRD 0007)
 # ---------------------------------------------------------------------------
 #
@@ -439,7 +456,7 @@ def _assemble_agent_inputs(
     return resolved_tools, effective_instructions
 
 
-def _create_runtime_agent(
+def _build_role_agent(
     chat_client: SupportsChatGetResponse[Any],
     *,
     instructions: str | None,
@@ -454,12 +471,23 @@ def _create_runtime_agent(
     workflow_agent_slug: str | None = None,
     agent_name: str | None,
     resolved_id: str | None,
-    history_provider: HistoryProvider | None,
+    history_provider: ContextProvider | None,
     delegate_tools: list[FunctionTool] | None,
-    compaction_config: CompactionConfig | None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Agent[Any]:
-    """Build one conservatively configured harness agent for any execution role."""
+    """Assemble the final tool list + context providers and build the MAF ``Agent``.
+
+    Shared tail for both execution roles (Decisions #13/#15):
+
+    * ``direct`` — a coordinator or any agent invoked through its own
+      trigger/endpoint. Gets a real ``history_provider`` and, if it declares
+      ``subagents``, ``delegate_tools``.
+    * ``delegated`` — a specialist invoked as a ``delegate_<slug>`` tool.
+      Gets ``history_provider=None`` and ``delegate_tools=None``; sandbox and
+      main-only Dynamic-Workflow tools are simply never passed for this role
+      (see :func:`_build_delegated_agent`), so they're naturally absent
+      rather than stripped from a shared list.
+    """
     resolved_tools, effective_instructions = _assemble_agent_inputs(
         instructions=instructions,
         tools=tools,
@@ -476,43 +504,38 @@ def _create_runtime_agent(
         workflow_policy=workflow_policy,
     )
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=ExperimentalWarning)
-        return create_harness_agent(
-            chat_client,
-            name=agent_name,
-            harness_instructions="",
-            agent_instructions=effective_instructions,
-            tools=resolved_tools,
-            history_provider=history_provider,
-            skills_paths=skill_paths or None,
-            disable_tool_auto_approval=True,
-            disable_web_search=True,
-            disable_todo=True,
-            disable_mode=True,
-            max_context_window_tokens=(
-                compaction_config.max_context_window_tokens if compaction_config else None
-            ),
-            max_output_tokens=compaction_config.max_output_tokens if compaction_config else None,
-            disable_file_memory=True,
-            default_options={"store": False},
-        )
+    context_providers: list[ContextProvider] = []
+    if history_provider is not None:
+        context_providers.append(history_provider)
+    skills_provider = _build_skills_provider(skill_paths)
+    if skills_provider is not None:
+        context_providers.append(skills_provider)
+
+    from agent_framework import Agent
+
+    return Agent(
+        chat_client,
+        name=agent_name,
+        instructions=effective_instructions,
+        tools=resolved_tools,
+        context_providers=context_providers,
+    )
 
 
 def _build_delegated_agent(
     resolved: ResolvedAgent, capabilities: AgentCapabilities
 ) -> tuple[Agent[Any], InferenceTarget]:
-    """Build one specialist harness agent in the *delegated* execution role.
+    """Build one specialist's MAF ``Agent`` in the *delegated* execution role.
 
     Runs as itself: own instructions, model, and static tools, but never a
     per-request sandbox or main-only Dynamic-Workflow tools (naturally
-    absent — never passed to :func:`_create_runtime_agent`, not stripped).
+    absent — never passed to :func:`_build_role_agent`, not stripped).
     ``resolved.subagents`` is deliberately never read — the structural
     enforcement of single-level delegation (Decision #6).
     """
     client_manager = get_client_manager()
     chat_client, inference_target = client_manager.build_chat_client_with_target(resolved.model)
-    agent = _create_runtime_agent(
+    agent = _build_role_agent(
         chat_client,
         instructions=resolved.instructions,
         tools=list(capabilities.filtered_user_tools or []),
@@ -531,7 +554,6 @@ def _build_delegated_agent(
         resolved_id=None,
         history_provider=None,
         delegate_tools=None,
-        compaction_config=resolved.compaction_config,
     )
     return agent, inference_target
 
@@ -786,7 +808,7 @@ async def build_subagent_tools(
     return tools, tracker
 
 
-async def _build_agent_session(
+async def _build_agent_session_history(
     *,
     instructions: str | None,
     session_id: str | None,
@@ -801,13 +823,135 @@ async def _build_agent_session(
     workflow_agent_slug: str | None = None,
     agent_name: str | None,
     web_request_tools: list[FunctionTool] | None = None,
-    compaction_config: CompactionConfig | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
     coordinator_deadline: float | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> tuple[Any, Any, str, _DelegateErrorTracker | None, InferenceTarget]:
-    """Construct the universal harness agent and its explicit public session."""
+    """Construct the chat client, agent, AgentSession, and history provider.
+
+    Returns ``(agent, session, resolved_session_id, delegate_error_tracker, inference_target)``;
+    ``delegate_error_tracker`` is ``None`` unless ``subagents`` is non-empty.
+    When non-empty, one ``delegate_<slug>`` tool per reference
+    (:func:`build_subagent_tools`) is appended to this (coordinator,
+    ``direct``-role) agent's own tools — never the reverse.
+    """
+    # Imported here so a missing optional dependency surfaces only when actually
+    # needed (e.g. tests that don't run the runtime path).
+    from agent_framework import AgentSession
+
+    # Build the chat client first so configuration errors surface BEFORE any
+    # filesystem state is created.
+    client_manager = get_client_manager()
+    chat_client, inference_target = client_manager.build_chat_client_with_target(model)
+
+    # Validate / generate session id.
+    validated_id = _validate_session_id(session_id)
+    if validated_id is None:
+        session = AgentSession()
+        resolved_id = session.session_id
+    else:
+        resolved_id = validated_id
+        session = AgentSession(session_id=resolved_id)
+
+    history_provider = _build_history_provider()
+
+    delegate_tools: list[FunctionTool] | None = None
+    delegate_error_tracker: _DelegateErrorTracker | None = None
+    if subagents:
+        effective_deadline = (
+            coordinator_deadline
+            if coordinator_deadline is not None
+            else asyncio.get_running_loop().time() + DEFAULT_TIMEOUT
+        )
+        delegate_tools, delegate_error_tracker = await build_subagent_tools(
+            subagents, catalog, coordinator_deadline=effective_deadline
+        )
+
+    agent = _build_role_agent(
+        chat_client,
+        instructions=instructions,
+        tools=tools,
+        mcp_tools=mcp_tools,
+        skill_paths=skill_paths,
+        sandbox_tools=sandbox_tools,
+        web_request_tools=web_request_tools,
+        system_addendum=system_addendum,
+        workflow_enabled=workflow_enabled,
+        workflow_durable_client=workflow_durable_client,
+        workflow_agent_slug=workflow_agent_slug,
+        agent_name=agent_name,
+        resolved_id=resolved_id,
+        history_provider=history_provider,
+        delegate_tools=delegate_tools,
+        workflow_policy=workflow_policy,
+    )
+
+    return agent, session, resolved_id, delegate_error_tracker, inference_target
+
+
+async def _build_harness_agent_session(
+    *,
+    instructions: str | None,
+    session_id: str | None,
+    tools: list[AgentFunctionTool] | None,
+    mcp_tools: list[MCPTool] | None,
+    skill_paths: list[Path] | None,
+    model: str | None,
+    sandbox_tools: list[FunctionTool] | None,
+    system_addendum: str | None,
+    workflow_enabled: bool,
+    workflow_durable_client: Any | None,
+    workflow_agent_slug: str | None = None,
+    agent_name: str | None,
+    web_request_tools: list[FunctionTool] | None = None,
+    harness_config: HarnessAgentConfig | None = None,
+    subagents: list[SubagentRef] | None = None,
+    catalog: AgentCatalog | None = None,
+    coordinator_deadline: float | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
+) -> tuple[Any, Any, str, _DelegateErrorTracker | None, InferenceTarget]:
+    """Construct an agent/session using MAF's ``create_harness_agent``.
+
+    Falls back to :func:`_build_agent_session_history` (plain ``Agent``) with a
+    warning when ``create_harness_agent`` is not available in the installed
+    version of ``agent_framework``.
+
+    Returns ``(agent, session, resolved_session_id, delegate_error_tracker,
+    inference_target)``; ``delegate_error_tracker`` is ``None`` unless
+    ``subagents`` is non-empty.
+    """
+    import warnings
+
+    try:
+        from agent_framework import create_harness_agent
+        from agent_framework._feature_stage import ExperimentalWarning
+    except ImportError:
+        logger.warning(
+            "create_harness_agent is not available in the installed agent_framework "
+            "version; falling back to plain Agent"
+        )
+        return await _build_agent_session_history(
+            instructions=instructions,
+            session_id=session_id,
+            tools=tools,
+            mcp_tools=mcp_tools,
+            skill_paths=skill_paths,
+            model=model,
+            sandbox_tools=sandbox_tools,
+            system_addendum=system_addendum,
+            workflow_enabled=workflow_enabled,
+            workflow_durable_client=workflow_durable_client,
+            workflow_agent_slug=workflow_agent_slug,
+            agent_name=agent_name,
+            web_request_tools=web_request_tools,
+            subagents=subagents,
+            catalog=catalog,
+            coordinator_deadline=coordinator_deadline,
+            workflow_policy=workflow_policy,
+        )
+
+    resolved_config = harness_config if harness_config is not None else HarnessAgentConfig()
 
     from agent_framework import AgentSession
 
@@ -836,12 +980,10 @@ async def _build_agent_session(
             subagents, catalog, coordinator_deadline=effective_deadline
         )
 
-    agent = _create_runtime_agent(
-        chat_client,
+    resolved_tools, effective_instructions = _assemble_agent_inputs(
         instructions=instructions,
         tools=tools,
         mcp_tools=mcp_tools,
-        skill_paths=skill_paths,
         sandbox_tools=sandbox_tools,
         web_request_tools=web_request_tools,
         system_addendum=system_addendum,
@@ -850,13 +992,103 @@ async def _build_agent_session(
         workflow_agent_slug=workflow_agent_slug,
         agent_name=agent_name,
         resolved_id=resolved_id,
-        history_provider=history_provider,
         delegate_tools=delegate_tools,
-        compaction_config=compaction_config,
         workflow_policy=workflow_policy,
     )
 
+    # create_harness_agent takes skills_paths natively; no SkillsProvider in context_providers.
+    # history_provider is passed directly (not via context_providers) so that the harness can
+    # call before_run/after_run on it for both context injection and per-service-call persistence.
+    # Force provider-managed storage because request-scoped AgentSession instances do not retain
+    # the service-managed conversation ID returned by clients that store history by default.
+    # MAF >= 1.12.1 applies before-call compaction after the external provider loads history, so
+    # request-scoped agents can compact Blob-backed conversations without persisting in-memory
+    # compaction state between requests.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=ExperimentalWarning)
+        agent = create_harness_agent(
+            chat_client,
+            harness_instructions="",
+            agent_instructions=effective_instructions,
+            tools=resolved_tools or None,
+            history_provider=history_provider,
+            skills_paths=skill_paths or None,
+            disable_tool_auto_approval=True,
+            disable_web_search=True,
+            disable_todo=True,
+            disable_mode=resolved_config.disable_mode,
+            max_context_window_tokens=resolved_config.max_context_window_tokens,
+            max_output_tokens=resolved_config.max_output_tokens,
+            disable_file_memory=resolved_config.disable_file_memory,
+            default_options={"store": False},
+        )
+
     return agent, session, resolved_id, delegate_error_tracker, inference_target
+
+
+async def _build_agent_session(
+    *,
+    instructions: str | None,
+    session_id: str | None,
+    tools: list[AgentFunctionTool] | None,
+    mcp_tools: list[MCPTool] | None,
+    skill_paths: list[Path] | None,
+    model: str | None,
+    sandbox_tools: list[FunctionTool] | None,
+    system_addendum: str | None,
+    workflow_enabled: bool,
+    workflow_durable_client: Any | None,
+    workflow_agent_slug: str | None = None,
+    agent_name: str | None,
+    web_request_tools: list[FunctionTool] | None = None,
+    harness_config: HarnessAgentConfig | None = None,
+    subagents: list[SubagentRef] | None = None,
+    catalog: AgentCatalog | None = None,
+    coordinator_deadline: float | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
+) -> tuple[Any, Any, str, _DelegateErrorTracker | None, InferenceTarget]:
+    """Build the selected plain or harness agent-session implementation."""
+    if harness_config is not None:
+        return await _build_harness_agent_session(
+            instructions=instructions,
+            session_id=session_id,
+            tools=tools,
+            mcp_tools=mcp_tools,
+            skill_paths=skill_paths,
+            model=model,
+            sandbox_tools=sandbox_tools,
+            system_addendum=system_addendum,
+            workflow_enabled=workflow_enabled,
+            workflow_durable_client=workflow_durable_client,
+            workflow_agent_slug=workflow_agent_slug,
+            agent_name=agent_name,
+            web_request_tools=web_request_tools,
+            harness_config=harness_config,
+            subagents=subagents,
+            catalog=catalog,
+            coordinator_deadline=coordinator_deadline,
+            workflow_policy=workflow_policy,
+        )
+
+    return await _build_agent_session_history(
+        instructions=instructions,
+        session_id=session_id,
+        tools=tools,
+        mcp_tools=mcp_tools,
+        skill_paths=skill_paths,
+        model=model,
+        sandbox_tools=sandbox_tools,
+        system_addendum=system_addendum,
+        workflow_enabled=workflow_enabled,
+        workflow_durable_client=workflow_durable_client,
+        workflow_agent_slug=workflow_agent_slug,
+        agent_name=agent_name,
+        web_request_tools=web_request_tools,
+        subagents=subagents,
+        catalog=catalog,
+        coordinator_deadline=coordinator_deadline,
+        workflow_policy=workflow_policy,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -938,7 +1170,7 @@ async def run_agent(
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
     web_request_tools: list[FunctionTool] | None = None,
-    compaction_config: CompactionConfig | None = None,
+    harness_config: HarnessAgentConfig | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
@@ -1024,7 +1256,7 @@ async def run_agent(
             workflow_agent_slug=workflow_agent_slug,
             agent_name=agent_name,
             web_request_tools=web_request_tools,
-            compaction_config=compaction_config,
+            harness_config=harness_config,
             subagents=subagents,
             catalog=catalog,
             coordinator_deadline=coordinator_deadline,
@@ -1135,7 +1367,7 @@ async def run_agent_stream(
     agent_name: str | None = None,
     display_name: str | None = None,
     web_request_tools: list[FunctionTool] | None = None,
-    compaction_config: CompactionConfig | None = None,
+    harness_config: HarnessAgentConfig | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
@@ -1203,7 +1435,7 @@ async def run_agent_stream(
                 workflow_agent_slug=workflow_agent_slug,
                 agent_name=agent_name,
                 web_request_tools=web_request_tools,
-                compaction_config=compaction_config,
+                harness_config=harness_config,
                 subagents=subagents,
                 catalog=catalog,
                 coordinator_deadline=deadline,

@@ -69,7 +69,7 @@ def _install_primary_agent(
     ) -> tuple[Any, Any, str, None, InferenceTarget]:
         return agent, object(), session_id, None, inference_target or InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", build)
+    monkeypatch.setattr(runner, "_build_agent_session_history", build)
 
 
 async def _collect_stream(stream: AsyncIterator[str]) -> list[str]:
@@ -351,7 +351,7 @@ async def test_run_agent_build_failure_emits_no_usage_record(
     async def fail_build(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("configuration failed")
 
-    monkeypatch.setattr(runner, "_build_agent_session", fail_build)
+    monkeypatch.setattr(runner, "_build_agent_session_history", fail_build)
     with (
         caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"),
         pytest.raises(RuntimeError, match="configuration failed"),

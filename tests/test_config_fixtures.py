@@ -792,29 +792,3 @@ def test_multi_owner_workflows_fixture() -> None:
     known_slugs = set(by_slug)
     validate_workflow_subagent_references(incident, known_slugs=known_slugs)
     validate_workflow_subagent_references(release, known_slugs=known_slugs)
-
-
-# ---------------------------------------------------------------------------
-# 19 — compaction inheritance, replacement, and opt-out
-# ---------------------------------------------------------------------------
-
-
-def test_compaction_precedence_fixture() -> None:
-    fixture = FIXTURES_ROOT / "19_compaction_precedence"
-    global_config = load_global_config(fixture)
-    resolved = [compose(spec, global_config) for spec in load_agent_specs(fixture, strict=True)]
-    by_slug = {agent.slug: agent for agent in resolved}
-
-    inherited = by_slug["inherited"]
-    assert inherited.compaction_config is global_config.compaction
-    assert inherited.compaction_config is not None
-    assert inherited.compaction_config.max_context_window_tokens == 128_000
-    assert inherited.compaction_config.max_output_tokens == 8_000
-
-    overridden = by_slug["overridden"]
-    assert overridden.compaction_config is not None
-    assert overridden.compaction_config is not global_config.compaction
-    assert overridden.compaction_config.max_context_window_tokens == 64_000
-    assert overridden.compaction_config.max_output_tokens == 4_000
-
-    assert by_slug["disabled"].compaction_config is None

@@ -18,7 +18,7 @@ Optional file in the root directory. All properties are optional.
 | `model` | string | No | Resolved from env/provider | Default LLM model identifier for all agents |
 | `timeout` | number | No | `900` | Default execution timeout in seconds |
 | `tools` | object | No | `{}` | Global tool filtering configuration. [Details](#global-tools) |
-| `compaction` | CompactionConfig | No | `null` | App-wide conversation-compaction limits. [Details](./front-matter-spec.md#compaction) |
+| `harness` | boolean \| HarnessAgentConfig | No | `null` | App-wide harness mode and context-compaction settings. [Details](./front-matter-spec.md#harness) |
 | `http_auth` | object | No | `function` (per-agent default) | App-wide default inbound HTTP authentication policy inherited by every agent's built-in HTTP endpoints; a per-agent `builtin_endpoints.http_auth` overrides it. Applies only to HTTP endpoints and does not affect MCP. Modes: `function` (default), `admin`, `anonymous`, `entra`. |
 
 ### Global: `system_tools`
@@ -50,13 +50,6 @@ Optional file in the root directory. All properties are optional.
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `exclude` | string[] | No | `[]` | Tool names to exclude globally from all agents |
-
-### Conversation compaction
-
-| Property | Type | Required | Default | Description |
-|----------|------|----------|---------|-------------|
-| `max_context_window_tokens` | integer | **Yes** | N/A | Positive context-window budget used by compaction. |
-| `max_output_tokens` | integer | **Yes** | N/A | Positive response budget and model output limit. Must be less than `max_context_window_tokens`. |
 
 **See:** [Front Matter Spec - Global Configuration](./front-matter-spec.md#global-configuration-agentsconfigyaml)
 
@@ -93,7 +86,7 @@ YAML front matter at the top of each agent markdown file.
 | `response_schema` | object | No | `null` | JSON Schema for response validation |
 | `response_example` | string | No | `null` | Example response structure (multiline string) |
 | `metadata` | object | No | `{}` | Additional metadata for organization. Free-form. |
-| `compaction` | CompactionConfig \| Literal[False] | No | `null` | Per-agent compaction override. [Details](./front-matter-spec.md#compaction) |
+| `harness` | boolean \| HarnessAgentConfig | No | `null` | Per-agent harness override. [Details](./front-matter-spec.md#harness) |
 
 ### Agent: `trigger`
 

@@ -12,9 +12,9 @@ from typing import Any
 
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
-    CompactionConfig,
     DynamicSessionsCodeInterpreterConfig,
     EndpointAuthConfig,
+    HarnessAgentConfig,
     ResolvedAgent,
     ToolsFilter,
 )
@@ -988,12 +988,12 @@ def test_workflow_http_handler_rejects_invalid_schema_response(
 
 
 # ---------------------------------------------------------------------------
-# compaction_config forwarding
+# harness_config forwarding
 # ---------------------------------------------------------------------------
 
 
-def _resolved_agent_with_compaction(
-    compaction_config: CompactionConfig | None,
+def _resolved_agent_with_harness(
+    harness_config: HarnessAgentConfig | None,
 ) -> ResolvedAgent:
     source = Path(__file__).resolve()
     return ResolvedAgent(
@@ -1015,14 +1015,14 @@ def _resolved_agent_with_compaction(
         response_example=None,
         metadata={},
         source_file=str(source),
-        compaction_config=compaction_config,
+        harness_config=harness_config,
     )
 
 
-def test_http_handler_forwards_compaction_config(monkeypatch: Any) -> None:
-    """make_http_agent_handler passes resolved.compaction_config to _run_agent."""
+def test_http_handler_forwards_harness_config(monkeypatch: Any) -> None:
+    """make_http_agent_handler passes resolved.harness_config to _run_agent."""
     captured: dict[str, Any] = {}
-    config = CompactionConfig(max_context_window_tokens=64_000, max_output_tokens=4_000)
+    cfg = HarnessAgentConfig(max_context_window_tokens=64_000)
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         captured.update(kwargs)
@@ -1034,15 +1034,15 @@ def test_http_handler_forwards_compaction_config(monkeypatch: Any) -> None:
     )
 
     handler = make_http_agent_handler(
-        _resolved_agent_with_compaction(config), AgentCapabilities()
+        _resolved_agent_with_harness(cfg), AgentCapabilities()
     )
     asyncio.run(handler(DummyRequest({"prompt": "hi"})))
 
-    assert captured.get("compaction_config") is config
+    assert captured.get("harness_config") is cfg
 
 
-def test_http_handler_forwards_none_compaction_config(monkeypatch: Any) -> None:
-    """make_http_agent_handler passes compaction_config=None when not configured."""
+def test_http_handler_forwards_none_harness_config(monkeypatch: Any) -> None:
+    """make_http_agent_handler passes harness_config=None when not configured."""
     captured: dict[str, Any] = {}
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
@@ -1055,17 +1055,17 @@ def test_http_handler_forwards_none_compaction_config(monkeypatch: Any) -> None:
     )
 
     handler = make_http_agent_handler(
-        _resolved_agent_with_compaction(None), AgentCapabilities()
+        _resolved_agent_with_harness(None), AgentCapabilities()
     )
     asyncio.run(handler(DummyRequest({"prompt": "hi"})))
 
-    assert captured.get("compaction_config") is None
+    assert captured.get("harness_config") is None
 
 
-def test_non_http_handler_forwards_compaction_config(monkeypatch: Any) -> None:
-    """make_agent_handler passes resolved.compaction_config to _run_agent."""
+def test_non_http_handler_forwards_harness_config(monkeypatch: Any) -> None:
+    """make_agent_handler passes resolved.harness_config to _run_agent."""
     captured: dict[str, Any] = {}
-    config = CompactionConfig(max_context_window_tokens=64_000, max_output_tokens=4_000)
+    cfg = HarnessAgentConfig()
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         captured.update(kwargs)
@@ -1081,9 +1081,9 @@ def test_non_http_handler_forwards_compaction_config(monkeypatch: Any) -> None:
     )
 
     handler = make_agent_handler(
-        _resolved_agent_with_compaction(config), "timer_trigger", AgentCapabilities()
+        _resolved_agent_with_harness(cfg), "timer_trigger", AgentCapabilities()
     )
     asyncio.run(handler({}))
 
-    assert captured.get("compaction_config") is config
+    assert captured.get("harness_config") is cfg
 
