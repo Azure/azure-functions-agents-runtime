@@ -30,6 +30,7 @@ from azure_functions_agents.controller.readiness import (
     SessionActivationSetupTimeoutError,
     SessionRunOwnershipChangedError,
     SessionRuntimeBinding,
+    SetupDeadline,
     StateStoreBinding,
     begin_submit_operation,
     disarm_submit_lifecycle,
@@ -266,7 +267,12 @@ def _runtime(
     provider: FakeSandboxSessionProvider,
     store: FakeSessionStateStore,
     *,
-    targeted_reconciler: Callable[[OwnerPartition, str], Awaitable[None]] | None = None,
+    # Three parameters, matching the reconciler the app registers. A
+    # two-parameter annotation here would invite doubles that accept the wrong
+    # arity, and mypy does not check this directory.
+    targeted_reconciler: (
+        Callable[[OwnerPartition, str, SetupDeadline | None], Awaitable[None]] | None
+    ) = None,
     post_create_reconciler: Callable[[], Awaitable[None]] | None = None,
     capacity_reaper: Callable[[], Awaitable[None]] | None = None,
 ) -> SessionRuntimeBinding:

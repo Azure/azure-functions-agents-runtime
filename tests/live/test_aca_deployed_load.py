@@ -1575,7 +1575,11 @@ async def _read_events(
     assert status == 200
     assert first_event_at is not None
     assert events
-    assert len(observed_event_timestamps) == len(events)
+    assert len(observed_event_timestamps) == len(events), (
+        f"observed {len(observed_event_timestamps)} arrival timestamps for "
+        f"{len(events)} events; the visibility series would be computed from an "
+        "incomplete sample."
+    )
     assert [event.sequence for event in events] == list(range(1, len(events) + 1))
     assert events[-1].payload.get("type") == "done"
     _assert_public_hold_events(events)
