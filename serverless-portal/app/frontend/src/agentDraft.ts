@@ -1,4 +1,4 @@
-// Shared in-progress "AI App" draft used by the two-step create flow:
+// Shared in-progress Hosted Skills app draft used by the two-step create flow:
 //   CreateAgentPage  — pick a Foundry model, describe the agent, ✨ Generate.
 //   DraftAppPage     — review the generated .agent.md, then Deploy / connect GitHub.
 // The draft lives in sessionStorage so it survives the navigation between the two

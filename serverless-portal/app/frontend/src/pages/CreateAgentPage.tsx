@@ -204,10 +204,10 @@ export default function CreateAgentPage() {
   return (
     <>
       <div className="breadcrumb">
-        Home / <Link to={`/agents/${selected}`}>AI Apps</Link> / Create
+        Home / <Link to={`/agents/${selected}`}>Hosted Skills</Link> / Create
       </div>
       <div className="page-title">
-        <h1>Create AI App</h1>
+        <h1>New Hosted Skills App</h1>
         <span className="badge gray">draft saved in this session</span>
       </div>
 
@@ -217,10 +217,10 @@ export default function CreateAgentPage() {
         </div>
       )}
 
-      <Callout title="What makes this an AI App">
+      <Callout title="What makes this a Hosted Skills app">
         <div className="muted" style={{ fontSize: 13, maxWidth: 720 }}>
           Deploying sets the <code>AZURE_FUNCTIONS_AGENTS_PROVIDER</code> app setting on the Function App — the
-          marker the portal uses to discover it as an AI App.
+          marker the portal uses to discover it as a Hosted Skills app.
         </div>
       </Callout>
 

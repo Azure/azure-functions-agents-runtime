@@ -209,7 +209,7 @@ export default function AgentDetailPage() {
   return (
     <>
       <div className="breadcrumb">
-        Home / <Link to={backTo}>Agents</Link> / {name}
+        Home / <Link to={backTo}>Hosted Skills</Link> / {name}
       </div>
       <div className="page-title">
         <button className="btn ghost sm" onClick={() => navigate(backTo)} title="Back to agents">
@@ -289,7 +289,7 @@ export default function AgentDetailPage() {
                     <span className="muted">disabled</span>
                   )}
                 </dd>
-                <dt>Agents in app</dt>
+                <dt>Hosted Skills in app</dt>
                 <dd>{hostApp?.agents.length ?? 1}</dd>
               </dl>
             </div>

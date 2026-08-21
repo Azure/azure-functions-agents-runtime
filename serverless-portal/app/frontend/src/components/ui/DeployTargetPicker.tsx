@@ -64,7 +64,7 @@ export const DeployTargetPicker = ({
           checked={mode === 'existing'}
           onChange={() => onChange({ mode: 'existing' })}
         />{' '}
-        Add to an existing AI App
+        Add to an existing Hosted Skills app
       </label>
       {mode === 'existing' && (
         <div className="field indent-field">
@@ -72,7 +72,7 @@ export const DeployTargetPicker = ({
             value={existingApp}
             onChange={(v) => onChange({ existingApp: v })}
             options={apps.map((a) => ({ value: a.name, label: a.name, sublabel: a.resourceGroup }))}
-            placeholder={appsLoading ? 'Loading apps…' : apps.length ? 'Select a Function App…' : 'No AI Apps in this subscription'}
+            placeholder={appsLoading ? 'Loading apps…' : apps.length ? 'Select a Function App…' : 'No Hosted Skills apps in this subscription'}
             loading={appsLoading}
             ariaLabel="Existing Function App"
           />
@@ -87,7 +87,7 @@ export const DeployTargetPicker = ({
           checked={mode === 'new'}
           onChange={() => onChange({ mode: 'new' })}
         />{' '}
-        Create a new AI App (Function App, Flex Consumption)
+        Create a new Hosted Skills app (Function App, Flex Consumption)
       </label>
       {mode === 'new' && (
         <div className="indent-block">

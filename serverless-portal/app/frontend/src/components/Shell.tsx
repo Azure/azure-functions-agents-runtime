@@ -26,6 +26,10 @@ const useStyles = makeStyles({
     ...shorthands.padding('0', tokens.spacingHorizontalXL),
     backgroundColor: tokens.colorNeutralBackground1,
     ...shorthands.borderBottom('1px', 'solid', tokens.colorNeutralStroke2),
+    '@media (max-width: 700px)': {
+      gap: tokens.spacingHorizontalXS,
+      ...shorthands.padding('0', tokens.spacingHorizontalS),
+    },
   },
   brand: {
     display: 'inline-flex',
@@ -44,10 +48,25 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorBrandBackground,
     ...shorthands.borderRadius(tokens.borderRadiusMedium),
   },
-  brandName: { fontSize: tokens.fontSizeBase300 },
+  brandName: {
+    fontSize: tokens.fontSizeBase300,
+    '@media (max-width: 520px)': { display: 'none' },
+  },
   spacer: { flexGrow: 1 },
-  actions: { display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalS },
-  body: { flexGrow: 1, display: 'flex', alignItems: 'flex-start' },
+  actions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalS,
+    '@media (max-width: 700px)': { gap: tokens.spacingHorizontalXXS },
+  },
+  mobileOptional: { '@media (max-width: 620px)': { display: 'none' } },
+  body: {
+    flexGrow: 1,
+    display: 'flex',
+    alignItems: 'flex-start',
+    minWidth: 0,
+    '@media (max-width: 700px)': { flexDirection: 'column', width: '100%' },
+  },
   sidebar: {
     position: 'sticky',
     top: '56px',
@@ -62,8 +81,15 @@ const useStyles = makeStyles({
     transitionProperty: 'width',
     transitionDuration: tokens.durationNormal,
     transitionTimingFunction: tokens.curveEasyEase,
+    '@media (max-width: 700px)': {
+      position: 'static',
+      width: '100%',
+      height: 'auto',
+      ...shorthands.borderRight('0', 'none', 'transparent'),
+      ...shorthands.borderBottom('1px', 'solid', tokens.colorNeutralStroke2),
+    },
   },
-  sidebarCollapsed: { width: '64px' },
+  sidebarCollapsed: { width: '64px', '@media (max-width: 700px)': { width: '100%' } },
   sidenav: {
     flexGrow: 1,
     ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalM),
@@ -71,6 +97,13 @@ const useStyles = makeStyles({
     flexDirection: 'column',
     gap: tokens.spacingVerticalXXS,
     overflowY: 'auto',
+    '@media (max-width: 700px)': {
+      flexDirection: 'row',
+      flexGrow: 0,
+      overflowX: 'auto',
+      overflowY: 'hidden',
+      ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalS),
+    },
   },
   groupLabel: {
     fontSize: tokens.fontSizeBase100,
@@ -80,6 +113,7 @@ const useStyles = makeStyles({
     fontWeight: tokens.fontWeightSemibold,
     ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalS, tokens.spacingVerticalXS),
     whiteSpace: 'nowrap',
+    '@media (max-width: 700px)': { display: 'none' },
   },
   navLink: {
     display: 'flex',
@@ -110,11 +144,19 @@ const useStyles = makeStyles({
   },
   navIconActive: { color: tokens.colorBrandForeground1 },
   navLabel: { overflow: 'hidden', textOverflow: 'ellipsis' },
-  collapseBtn: { margin: tokens.spacingHorizontalS, justifyContent: 'flex-start' },
+  collapseBtn: {
+    margin: tokens.spacingHorizontalS,
+    justifyContent: 'flex-start',
+    '@media (max-width: 700px)': { display: 'none' },
+  },
   main: {
     flexGrow: 1,
     minWidth: 0,
     ...shorthands.padding('30px', 'clamp(22px, 4vw, 56px)', '72px'),
+    '@media (max-width: 700px)': {
+      width: '100%',
+      ...shorthands.padding(tokens.spacingVerticalL, tokens.spacingHorizontalM, '56px'),
+    },
   },
 })
 
@@ -125,7 +167,7 @@ interface NavDef {
 }
 
 const NAV_ITEMS: NavDef[] = [
-  { to: '/agents', icon: 'grid', label: 'AI Apps' },
+  { to: '/agents', icon: 'grid', label: 'Hosted Skills' },
   { to: '/playground', icon: 'message', label: 'Playground' },
 ]
 
@@ -199,11 +241,11 @@ export default function Shell({ children }: { children: ReactNode }) {
             onClick={toggleSidebar}
           />
         </Tooltip>
-        <Link to="/agents" className={styles.brand} title="AI Apps">
+        <Link to="/agents" className={styles.brand} title="Hosted Skills">
           <span className={styles.brandMark}>
             <Icon name="zap" size={18} />
           </span>
-          <span className={styles.brandName}>AI Apps</span>
+          <span className={styles.brandName}>Hosted Skills</span>
         </Link>
 
         <div className={styles.spacer} />
@@ -214,7 +256,7 @@ export default function Shell({ children }: { children: ReactNode }) {
             icon={<Icon name="plus" size={16} />}
             onClick={() => navigate('/create-agent')}
           >
-            New AI App
+            New App
           </Button>
           <Tooltip content={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} relationship="label">
             <Button
@@ -227,7 +269,7 @@ export default function Shell({ children }: { children: ReactNode }) {
           <Tooltip content={userTitle} relationship="label">
             <Avatar name={userName} size={28} />
           </Tooltip>
-          <Button appearance="subtle" onClick={() => void signOut()}>
+          <Button className={styles.mobileOptional} appearance="subtle" onClick={() => void signOut()}>
             Sign out
           </Button>
         </div>

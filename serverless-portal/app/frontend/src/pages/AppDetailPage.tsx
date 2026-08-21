@@ -200,7 +200,7 @@ type Sel =
   | { kind: 'capabilities' }
   | { kind: 'history' }
 
-// AI App detail — a single Azure Function App identified as an AI App by the
+// Hosted Skills app detail — a single Azure Function App identified by the
 // AZURE_FUNCTIONS_AGENTS_PROVIDER app setting. Shows its composition, endpoints,
 // and source code, and lets the user deploy portal edits.
 export default function AppDetailPage() {
@@ -403,10 +403,10 @@ export default function AppDetailPage() {
   return (
     <>
       <div className="breadcrumb">
-        Home / <Link to={backTo}>AI Apps</Link> / {appName}
+        Home / <Link to={backTo}>Hosted Skills</Link> / {appName}
       </div>
       <div className="page-title">
-        <button className="btn ghost sm" onClick={() => navigate(backTo)} title="Back to AI Apps">
+        <button className="btn ghost sm" onClick={() => navigate(backTo)} title="Back to Hosted Skills">
           ← Back
         </button>
         <h1 className="mono">{appName}</h1>
@@ -422,7 +422,7 @@ export default function AppDetailPage() {
       {error && <p className="page-sub">Failed to load app: {error}</p>}
       {data && !app && !scanning && (
         <EmptyState>
-          AI App <strong>{appName}</strong> was not found in this subscription.{' '}
+          Hosted Skills app <strong>{appName}</strong> was not found in this subscription.{' '}
           <Link to={backTo}>Return to the dashboard</Link>.
         </EmptyState>
       )}
@@ -542,7 +542,7 @@ export default function AppDetailPage() {
                 🕘 Deploy history
               </button>
 
-              <div className="group-label">Agents</div>
+              <div className="group-label">Hosted Skills</div>
               {app.agents.map((a) => (
                 <button
                   key={a.name}

@@ -1,4 +1,4 @@
-// Shared source viewer/editor used by the AI App and agent detail pages. Loads
+// Shared source viewer/editor used by the Hosted Skills app and skill detail pages. Loads
 // a deployed source file (or a saved portal draft), lets the user edit it, and
 // saves edits to the portal working copy. Publishing a draft to the live app is
 // a separate "Deploy edits" step. Extracted so multiple pages reuse it.

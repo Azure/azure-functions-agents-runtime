@@ -726,7 +726,7 @@ export default function PlaygroundPage() {
   return (
     <>
       <div className="breadcrumb">
-        Home / <Link to={`/agents/${subForQuery}`}>Agents</Link> / Playground
+        Home / <Link to={`/agents/${subForQuery}`}>Hosted Skills</Link> / Playground
       </div>
       <div className="page-title">
         <h1>Playground</h1>

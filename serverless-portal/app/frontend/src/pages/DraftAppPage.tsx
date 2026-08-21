@@ -307,13 +307,13 @@ export default function DraftAppPage() {
     return (
       <>
         <div className="breadcrumb">
-          Home / <Link to={`/agents/${selected}`}>AI Apps</Link> / New app
+          Home / <Link to={`/agents/${selected}`}>Hosted Skills</Link> / New app
         </div>
         <div className="page-title">
           <h1>No generated app yet</h1>
         </div>
         <div className="empty">
-          Describe an agent to generate its code first. <Link to="/create-agent">Create an AI App →</Link>
+          Describe a Hosted Skill to generate its code first. <Link to="/create-agent">Create a Hosted Skills app →</Link>
         </div>
       </>
     )
@@ -322,7 +322,7 @@ export default function DraftAppPage() {
   return (
     <>
       <div className="breadcrumb">
-        Home / <Link to={`/agents/${selected}`}>AI Apps</Link> / <Link to="/create-agent">Create</Link> / Review
+        Home / <Link to={`/agents/${selected}`}>Hosted Skills</Link> / <Link to="/create-agent">Create</Link> / Review
       </div>
       <div className="page-title">
         <Button appearance="subtle" size="small" onClick={() => navigate('/create-agent')} title="Back to describe">

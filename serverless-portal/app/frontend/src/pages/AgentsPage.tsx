@@ -4,7 +4,7 @@ import { useQueries, useQuery } from '@tanstack/react-query'
 import { api, type LiveAgentApp } from '../api'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
-import { AiAppCard, EmptyState, StatTiles, SubscriptionPicker } from '../components/ui'
+import { EmptyState, HostedSkillRow, StatTiles, SubscriptionPicker } from '../components/ui'
 import { Button } from '@coreai/fluentui-react'
 
 function formatCachedAt(ms: number): string {
@@ -20,10 +20,10 @@ function formatCachedAt(ms: number): string {
   return `${d.toLocaleString()} (${rel})`
 }
 
-// The dashboard: Azure Function Apps identified as AI Apps by the
+// The dashboard: Azure Function Apps identified as Hosted Skills apps by the
 // `AZURE_FUNCTIONS_AGENTS_PROVIDER` app setting (the backend's sole "is this an
-// agent app?" signal), scoped to the selected subscription. Each app is a card
-// listing its agents, which link through to the agent detail page.
+// Hosted Skills app?" signal), scoped to the selected subscription. Each app is
+// a flat row linking through to the app detail page.
 export default function AgentsPage() {
   const {
     subscriptions,
@@ -92,14 +92,14 @@ export default function AgentsPage() {
 
   return (
     <>
-      <div className="breadcrumb">Home / AI Apps</div>
+      <div className="breadcrumb">Home / Hosted Skills</div>
       <div className="page-title">
-        <h1>AI Apps</h1>
+        <h1>Hosted Skills</h1>
       </div>
       <p className="page-sub">
-        AI Apps are Azure Function Apps that run the agent runtime, discovered in <strong>{subName}</strong>
+        Create and manage apps that host AI skills on Azure Functions in <strong>{subName}</strong>
         {data
-          ? ` — ${apps.length} app${apps.length === 1 ? '' : 's'}, ${agents.length} agent${agents.length === 1 ? '' : 's'}`
+          ? ` — ${apps.length} app${apps.length === 1 ? '' : 's'}, ${agents.length} Hosted Skill${agents.length === 1 ? '' : 's'}`
           : ''}
         .
       </p>
@@ -113,7 +113,7 @@ export default function AgentsPage() {
           error={!!identityError}
         />
         {data && (
-          <span className="cache-stamp" title="When this subscription's AI Apps were last fetched">
+          <span className="cache-stamp" title="When this subscription's Hosted Skills were last fetched">
             Cached {formatCachedAt(dataUpdatedAt)}
           </span>
         )}
@@ -125,15 +125,15 @@ export default function AgentsPage() {
           {isFetching ? '⟳ Refreshing…' : '⟳ Hard refresh'}
         </Button>
         <Link className="btn primary" to="/create-agent">
-          ＋ New AI App
+          ＋ New App
         </Link>
       </div>
 
       {data && apps.length > 0 && (
         <StatTiles
           items={[
-            { n: apps.length, label: apps.length === 1 ? 'AI App' : 'AI Apps' },
-            { n: agents.length, label: agents.length === 1 ? 'Agent' : 'Agents' },
+            { n: apps.length, label: apps.length === 1 ? 'App' : 'Apps' },
+            { n: agents.length, label: agents.length === 1 ? 'Hosted Skill' : 'Hosted Skills' },
             { n: builtinCount, label: 'Built-in endpoints' },
           ]}
         />
@@ -158,20 +158,16 @@ export default function AgentsPage() {
       {data && apps.length === 0 && <FirstRunEmptyState subName={subName} />}
 
       {apps.length > 0 && (
-        <div className="card-grid" style={{ marginTop: 16 }}>
+        <div className="hosted-skill-table" style={{ marginTop: 16 }}>
+          <div className="hosted-skill-table-head" aria-hidden="true">
+            <span>App</span><span>Hosted Skills</span><span>Model</span><span>Region</span><span>Health</span><span />
+          </div>
           {apps.map((app) => (
-            <AiAppCard
+            <HostedSkillRow
               key={app.name}
               app={app}
               renderAppLink={(children) => (
                 <Link to={`/apps/${encodeURIComponent(selected)}/${encodeURIComponent(app.name)}`}>{children}</Link>
-              )}
-              renderAgent={(a) => (
-                <Link
-                  to={`/agents/${encodeURIComponent(selected)}/${encodeURIComponent(app.name)}/${encodeURIComponent(a.name)}`}
-                >
-                  {a.name}.agent.md
-                </Link>
               )}
             />
           ))}
@@ -193,7 +189,7 @@ function FirstRunEmptyState({ subName }: { subName: string }) {
       <div className="first-run-hero">
         <h2 style={{ margin: '0 0 6px' }}>Nothing running here yet.</h2>
         <p className="muted" style={{ marginTop: 0 }}>
-          No AI Apps in {subName || 'this subscription'}. Pick a starting point:
+          No Hosted Skills in {subName || 'this subscription'}. Pick a starting point:
         </p>
         <div className="first-run-tiles">
           <Link to="/create-agent?tab=sample" className="first-run-tile">
@@ -204,7 +200,7 @@ function FirstRunEmptyState({ subName }: { subName: string }) {
           <Link to="/create-agent" className="first-run-tile">
             <span className="first-run-icon">✨</span>
             <span className="first-run-title">Create from scratch</span>
-            <span className="first-run-blurb">Describe an agent and Foundry writes its <span className="mono">.agent.md</span>.</span>
+            <span className="first-run-blurb">Describe a Hosted Skill and Foundry writes its <span className="mono">.agent.md</span>.</span>
           </Link>
           <Link to="/create-agent?tab=github" className="first-run-tile">
             <span className="first-run-icon">🐙</span>
@@ -272,7 +268,7 @@ function SampleGallery() {
 }
 
 // Recent-failures panel on the dashboard — aggregates the last 24h of failed
-// invocations across every AI App in the selected subscription. Fires one
+// invocations across every Hosted Skills app in the selected subscription. Fires one
 // App Insights query per app in parallel; skipping any app whose caller can't
 // reach its component (403 / no linked AI). Each failure links out to the
 // Transaction Search blade for that specific operation.

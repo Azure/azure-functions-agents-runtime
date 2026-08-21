@@ -1,5 +1,5 @@
 // An informational callout card with a leading icon and a title/body. Used for
-// the "how AI Apps are identified" explainer on the dashboard and create flow.
+// the Hosted Skills identification explainer on the dashboard and create flow.
 
 import type { ReactNode } from 'react'
 

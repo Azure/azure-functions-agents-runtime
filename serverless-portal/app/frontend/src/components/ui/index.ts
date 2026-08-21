@@ -11,7 +11,7 @@ export { SubscriptionPicker, type SubscriptionOption } from './SubscriptionPicke
 export { SearchableSelect, type SearchOption } from './SearchableSelect'
 export { Icon, type IconName } from './Icon'
 export { EmptyState } from './EmptyState'
-export { AiAppCard, type AiApp, type AiAppAgent } from './AiAppCard'
+export { HostedSkillRow, type HostedSkillApp, type HostedSkillSummary } from './HostedSkillRow'
 export {
   DeployTargetPicker,
   type DeployTargetValue,

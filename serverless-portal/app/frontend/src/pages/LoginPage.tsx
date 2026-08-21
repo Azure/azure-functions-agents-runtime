@@ -114,7 +114,7 @@ export default function LoginPage() {
           <Icon name="zap" size={24} />
         </div>
         <Text as="h1" size={600} weight="semibold" className={styles.title}>
-          AI Apps
+          Hosted Skills
         </Text>
         <Text as="p" size={300} className={styles.subtitle}>
           Sign in with your Microsoft account to discover serverless agents in your subscriptions.
