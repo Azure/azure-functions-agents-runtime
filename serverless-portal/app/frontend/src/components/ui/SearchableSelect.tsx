@@ -6,6 +6,7 @@
 // changes.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 export interface SearchOption {
   value: string
@@ -27,9 +28,6 @@ interface SearchableSelectProps {
 // this threshold search is redundant clutter.
 const SEARCH_THRESHOLD = 6
 
-// Popover geometry. The popover is anchored to the trigger, clamped to the
-// viewport, and never wider than the trigger; a min-width guards very narrow
-// triggers.
 const POPOVER_MAX_HEIGHT = 320
 const POPOVER_MIN_WIDTH = 240
 
@@ -41,17 +39,33 @@ interface PopoverRect {
   above: boolean
 }
 
-function computeRect(trigger: HTMLElement): PopoverRect {
+// Compute the popover rect. `preferAbove` is captured at open time so we don't
+// flip direction mid-scroll — that was a major flicker source.
+function computeRect(trigger: HTMLElement, preferAbove?: boolean): PopoverRect {
   const r = trigger.getBoundingClientRect()
   const gap = 4
   const spaceBelow = window.innerHeight - r.bottom - gap
   const spaceAbove = r.top - gap
-  const above = spaceBelow < 200 && spaceAbove > spaceBelow
+  const above =
+    preferAbove !== undefined
+      ? preferAbove
+      : spaceBelow < 200 && spaceAbove > spaceBelow
   const maxHeight = Math.min(POPOVER_MAX_HEIGHT, Math.max(160, above ? spaceAbove : spaceBelow))
   const width = Math.max(POPOVER_MIN_WIDTH, r.width)
   const left = Math.min(Math.max(8, r.left), window.innerWidth - width - 8)
   const top = above ? r.top - gap - maxHeight : r.bottom + gap
   return { left, top, width, maxHeight, above }
+}
+
+function rectEqual(a: PopoverRect | null, b: PopoverRect | null): boolean {
+  if (!a || !b) return false
+  return (
+    Math.abs(a.left - b.left) < 0.5 &&
+    Math.abs(a.top - b.top) < 0.5 &&
+    Math.abs(a.width - b.width) < 0.5 &&
+    a.maxHeight === b.maxHeight &&
+    a.above === b.above
+  )
 }
 
 export const SearchableSelect = ({
@@ -73,6 +87,12 @@ export const SearchableSelect = ({
   const popoverRef = useRef<HTMLDivElement | null>(null)
   const searchRef = useRef<HTMLInputElement | null>(null)
   const listRef = useRef<HTMLUListElement | null>(null)
+  // Whether the popover renders above the trigger — captured at open time so
+  // subsequent scroll repositions don't flip direction mid-interaction.
+  const aboveRef = useRef<boolean | undefined>(undefined)
+  // Guard: distinguish keyboard-driven activeIndex changes (should scroll into
+  // view) from parent re-render churn (should NOT scroll).
+  const keyboardMoveRef = useRef(false)
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -91,20 +111,27 @@ export const SearchableSelect = ({
       onChange(next)
       setOpen(false)
       setQuery('')
-      triggerRef.current?.focus()
+      aboveRef.current = undefined
+      triggerRef.current?.focus({ preventScroll: true })
     },
     [onChange],
   )
 
   const openPopover = useCallback(() => {
     if (disabled || loading) return
-    if (triggerRef.current) setRect(computeRect(triggerRef.current))
+    if (triggerRef.current) {
+      const r = computeRect(triggerRef.current)
+      aboveRef.current = r.above
+      setRect(r)
+    }
     setOpen(true)
     setActiveIndex(Math.max(0, options.findIndex((o) => o.value === value)))
     setQuery('')
   }, [disabled, loading, options, value])
 
-  // Reposition on scroll/resize while open, so the popover tracks its trigger.
+  // Reposition on scroll/resize while open, honouring the captured direction so
+  // the popover doesn't flip mid-scroll. Skip re-renders when the rect hasn't
+  // meaningfully changed (a common cause of visible flicker).
   useLayoutEffect(() => {
     if (!open) return
     let raf = 0
@@ -112,7 +139,9 @@ export const SearchableSelect = ({
       if (raf) return
       raf = requestAnimationFrame(() => {
         raf = 0
-        if (triggerRef.current) setRect(computeRect(triggerRef.current))
+        if (!triggerRef.current) return
+        const next = computeRect(triggerRef.current, aboveRef.current)
+        setRect((prev) => (rectEqual(prev, next) ? prev : next))
       })
     }
     window.addEventListener('scroll', reposition, { capture: true, passive: true })
@@ -136,13 +165,15 @@ export const SearchableSelect = ({
         !triggerRef.current.contains(target)
       ) {
         setOpen(false)
+        aboveRef.current = undefined
       }
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
         setOpen(false)
-        triggerRef.current?.focus()
+        aboveRef.current = undefined
+        triggerRef.current?.focus({ preventScroll: true })
       }
     }
     document.addEventListener('mousedown', onPointerDown)
@@ -161,14 +192,19 @@ export const SearchableSelect = ({
     else listRef.current?.focus()
   }, [open, showSearch])
 
-  // Reset active index when the filter changes so ArrowDown starts sensibly.
+  // Clamp active index when the filter narrows past it, without setting state
+  // during render.
   useEffect(() => {
-    if (activeIndex >= filtered.length) setActiveIndex(0)
-  }, [filtered, activeIndex])
+    if (activeIndex >= filtered.length && filtered.length > 0) setActiveIndex(0)
+  }, [filtered.length, activeIndex])
 
-  // Keep the active option visible in the scrollable list.
+  // Only scroll the active option into view when the change came from the
+  // keyboard — hover-driven changes were causing the list to visibly jump
+  // under the cursor.
   useEffect(() => {
     if (!open || !listRef.current) return
+    if (!keyboardMoveRef.current) return
+    keyboardMoveRef.current = false
     const active = listRef.current.querySelector<HTMLElement>('[data-active="true"]')
     active?.scrollIntoView({ block: 'nearest' })
   }, [open, activeIndex])
@@ -183,9 +219,11 @@ export const SearchableSelect = ({
   const handleListKey = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
+      keyboardMoveRef.current = true
       setActiveIndex((i) => Math.min(filtered.length - 1, i + 1))
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
+      keyboardMoveRef.current = true
       setActiveIndex((i) => Math.max(0, i - 1))
     } else if (e.key === 'Enter') {
       e.preventDefault()
@@ -193,9 +231,11 @@ export const SearchableSelect = ({
       if (target) commit(target.value)
     } else if (e.key === 'Home') {
       e.preventDefault()
+      keyboardMoveRef.current = true
       setActiveIndex(0)
     } else if (e.key === 'End') {
       e.preventDefault()
+      keyboardMoveRef.current = true
       setActiveIndex(Math.max(0, filtered.length - 1))
     }
   }
@@ -226,7 +266,7 @@ export const SearchableSelect = ({
         </span>
       </button>
 
-      {open && rect && (
+      {open && rect && createPortal(
         <div
           ref={popoverRef}
           className="ss-popover"
@@ -285,7 +325,6 @@ export const SearchableSelect = ({
                     role="option"
                     aria-selected={isSelected}
                     data-active={isActive || undefined}
-                    onMouseEnter={() => setActiveIndex(i)}
                     onMouseDown={(e) => {
                       // Prevent the search input from losing focus mid-click.
                       e.preventDefault()
@@ -306,7 +345,8 @@ export const SearchableSelect = ({
               })
             )}
           </ul>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )

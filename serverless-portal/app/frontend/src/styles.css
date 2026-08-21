@@ -118,12 +118,19 @@ a:hover { text-decoration: underline; }
 
 /* Deploy-in-progress lock: grey out + shimmer so no edits happen mid-deploy */
 .deploying-lock { opacity: .5; pointer-events: none; user-select: none; filter: grayscale(.35); }
-.deploy-shimmer { height: 5px; border-radius: 999px; margin: 0 0 14px; overflow: hidden; position: relative;
-  background: color-mix(in srgb, var(--brand) 18%, transparent); }
+.deploy-banner { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 8px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-left: 3px solid color-mix(in srgb, var(--brand) 55%, var(--border));
+  color: var(--text-muted); font-size: 12.5px; }
+.deploy-banner strong { color: var(--text); font-weight: 600; }
+.deploy-shimmer { height: 3px; border-radius: 999px; margin: 0 0 14px; overflow: hidden; position: relative;
+  background: color-mix(in srgb, var(--brand) 8%, transparent); }
 .deploy-shimmer::after { content: ''; position: absolute; inset: 0; border-radius: 999px;
-  background: linear-gradient(90deg, transparent, var(--brand), transparent); background-size: 50% 100%;
-  background-repeat: no-repeat; animation: deploy-shimmer 1.25s ease-in-out infinite; }
-@keyframes deploy-shimmer { 0% { background-position: -60% 0; } 100% { background-position: 160% 0; } }
+  background: linear-gradient(90deg, transparent,
+    color-mix(in srgb, var(--brand) 55%, transparent), transparent);
+  background-size: 40% 100%;
+  background-repeat: no-repeat; animation: deploy-shimmer 1.6s ease-in-out infinite; }
+@keyframes deploy-shimmer { 0% { background-position: -50% 0; } 100% { background-position: 150% 0; } }
 @media (prefers-reduced-motion: reduce) { .deploy-shimmer::after { animation: none; } }
 .suggestion { display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid var(--border);
   border-radius: 8px; background: var(--surface-2); font-size: 12px; }
@@ -185,7 +192,6 @@ textarea { resize: vertical; }
   padding: 8px 11px; border: 1px solid var(--border-strong); border-radius: 8px;
   background: var(--surface); color: var(--text); font-size: 13.5px;
   font-family: inherit; text-align: left; cursor: pointer;
-  transition: border-color 0.1s ease-in-out, box-shadow 0.1s ease-in-out;
 }
 .ss-trigger:hover:not(:disabled) { border-color: var(--brand); }
 .ss-trigger:focus-visible, .ss-trigger.is-open { outline: none;
@@ -200,9 +206,16 @@ textarea { resize: vertical; }
   z-index: 4000;
   display: flex; flex-direction: column;
   background: var(--surface); border: 1px solid var(--border-strong);
-  border-radius: 8px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16);
-  overflow: hidden;
+  border-radius: 8px; box-shadow: 0 8px 20px rgba(0, 0, 0, 0.10), 0 2px 6px rgba(0, 0, 0, 0.06);
+  overflow: hidden; contain: layout paint;
+  animation: ss-pop-in 90ms ease-out;
+  transform: translateZ(0);
 }
+@keyframes ss-pop-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) { .ss-popover { animation: none; } }
 .ss-search-wrap { padding: 8px; border-bottom: 1px solid var(--border); flex: 0 0 auto; }
 .ss-search {
   width: 100%; padding: 7px 10px; font-size: 13px; font-family: inherit;
@@ -221,8 +234,10 @@ textarea { resize: vertical; }
   color: var(--text); line-height: 1.35;
 }
 .ss-opt.is-active { background: var(--surface-2); }
+.ss-opt:hover { background: var(--surface-2); }
 .ss-opt.is-selected { color: var(--brand-dark); font-weight: 600; }
 .ss-opt.is-active.is-selected { background: var(--brand-soft); }
+.ss-opt.is-selected:hover { background: var(--brand-soft); }
 .ss-opt-label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ss-check { flex: 0 0 auto; color: var(--brand); font-weight: 700; }
 .ss-empty { padding: 12px 14px; color: var(--text-muted); font-size: 12.5px; text-align: center; }
@@ -580,8 +595,10 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .icon-btn:active { transform: translateY(1px); }
 
-/* Cards lift gently on hover. */
-.card:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); border-color: var(--border-strong); }
+/* Cards lift gently on hover — only clickable card-tiles (anchors/buttons),
+   never container cards. Ancestor transforms break `position: fixed` inside
+   the card (dropdown popovers), so form cards must never gain one. */
+a.card:hover, button.card:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); border-color: var(--border-strong); }
 
 /* Inputs: a modern focus ring in place of the flat outline. */
 input[type=text]:focus, input[type=url]:focus, select:focus, textarea:focus,

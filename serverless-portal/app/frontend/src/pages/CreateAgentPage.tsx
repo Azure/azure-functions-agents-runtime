@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api, type SampleSummary } from '../api'
@@ -99,6 +99,29 @@ export default function CreateAgentPage() {
   const foundryAccounts = foundryData?.accounts ?? []
   const selectedAccount = foundryAccounts.find((a) => a.name === draft.foundryAccount)
 
+  const subOptions = useMemo(
+    () => subscriptions.map((s) => ({ value: s.id, label: s.name })),
+    [subscriptions],
+  )
+  const accountOptions = useMemo(
+    () => foundryAccounts.map((a) => ({ value: a.name, label: a.name, sublabel: a.location })),
+    [foundryAccounts],
+  )
+  const projectOptions = useMemo(
+    () =>
+      selectedAccount?.projects.map((p) => ({ value: p.endpoint, label: p.name })) ?? [],
+    [selectedAccount],
+  )
+  const modelOptions = useMemo(
+    () =>
+      selectedAccount?.models.map((m) => ({
+        value: m.deployment,
+        label: m.deployment,
+        sublabel: m.model,
+      })) ?? [],
+    [selectedAccount],
+  )
+
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }))
 
   // Switch the Foundry subscription → clear the picked account/model.
@@ -187,51 +210,10 @@ export default function CreateAgentPage() {
         <h1>Create AI App</h1>
         <span className="badge gray">draft saved in this session</span>
       </div>
-      <p className="page-sub">
-        Pick a Foundry model and describe the agent — we’ll generate its code. You’ll review, deploy, and
-        connect GitHub on the next step. This draft is kept only for this browser session.
-      </p>
 
       {sampleBanner && (
         <div className="note ok" style={{ margin: '0 0 12px', maxWidth: 720 }}>
           ✓ {sampleBanner}
-        </div>
-      )}
-
-      {samples.length > 0 && step === 1 && (
-        <div className="card" style={{ marginBottom: 14 }}>
-          <div className="card-head">
-            <h3 style={{ margin: 0 }}>Or start from a sample</h3>
-            <span className="muted" style={{ fontSize: 12 }}>
-              Skips the AI generation step — pre-fills a ready-to-deploy draft.
-            </span>
-          </div>
-          <div className="sample-grid" style={{ marginTop: 8 }}>
-            {samples.map((s) => (
-              <button
-                key={s.slug}
-                type="button"
-                className="sample-card"
-                onClick={() => applySample(s)}
-                title={s.blurb || s.title}
-              >
-                <div className="sample-title">
-                  <span className="mono">{s.slug}</span>
-                </div>
-                <div className="sample-blurb">{s.blurb || s.title}</div>
-                <div className="sample-chips">
-                  {s.triggerTypes.map((t) => (
-                    <span className="cap-chip cap-chip-ok" key={t}>
-                      {t}
-                    </span>
-                  ))}
-                  {s.hasMcp && <span className="cap-chip cap-chip-ok">mcp</span>}
-                  {s.hasSkills && <span className="cap-chip cap-chip-ok">skills</span>}
-                  {s.hasWorkflow && <span className="cap-chip cap-chip-ok">workflow</span>}
-                </div>
-              </button>
-            ))}
-          </div>
         </div>
       )}
 
@@ -284,7 +266,7 @@ export default function CreateAgentPage() {
                   <SearchableSelect
                     value={foundrySub}
                     onChange={selectFoundrySub}
-                    options={subscriptions.map((s) => ({ value: s.id, label: s.name }))}
+                    options={subOptions}
                     placeholder="Select a subscription…"
                     ariaLabel="Foundry subscription"
                   />
@@ -294,7 +276,7 @@ export default function CreateAgentPage() {
                     <SearchableSelect
                       value={draft.foundryAccount}
                       onChange={selectAccount}
-                      options={foundryAccounts.map((a) => ({ value: a.name, label: a.name, sublabel: a.location }))}
+                      options={accountOptions}
                       placeholder={
                         foundryAccounts.length ? 'Select a Foundry resource…' : 'No Foundry resources found'
                       }
@@ -320,7 +302,7 @@ export default function CreateAgentPage() {
                         <SearchableSelect
                           value={draft.foundryEndpoint}
                           onChange={(v) => set('foundryEndpoint', v)}
-                          options={selectedAccount.projects.map((p) => ({ value: p.endpoint, label: p.name }))}
+                          options={projectOptions}
                           placeholder="Select a project…"
                           ariaLabel="Foundry project"
                         />
@@ -331,11 +313,7 @@ export default function CreateAgentPage() {
                       <SearchableSelect
                         value={draft.foundryModel}
                         onChange={(v) => set('foundryModel', v)}
-                        options={selectedAccount.models.map((m) => ({
-                          value: m.deployment,
-                          label: m.deployment,
-                          sublabel: m.model,
-                        }))}
+                        options={modelOptions}
                         placeholder={selectedAccount.models.length ? 'Select a model…' : 'No chat models deployed'}
                         ariaLabel="Model deployment"
                       />
@@ -376,6 +354,48 @@ export default function CreateAgentPage() {
               </div>
             )}
           </div>
+          <p className="page-sub" style={{ marginTop: 14 }}>
+            Pick a Foundry model and describe the agent — we’ll generate its code. You’ll review, deploy, and
+            connect GitHub on the next step. This draft is kept only for this browser session.
+          </p>
+
+          {samples.length > 0 && (
+            <div className="card" style={{ marginTop: 14 }}>
+              <div className="card-head">
+                <h3 style={{ margin: 0 }}>Or start from a sample</h3>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  Skips the AI generation step — pre-fills a ready-to-deploy draft.
+                </span>
+              </div>
+              <div className="sample-grid" style={{ marginTop: 8 }}>
+                {samples.map((s) => (
+                  <button
+                    key={s.slug}
+                    type="button"
+                    className="sample-card"
+                    onClick={() => applySample(s)}
+                    title={s.blurb || s.title}
+                  >
+                    <div className="sample-title">
+                      <span className="mono">{s.slug}</span>
+                    </div>
+                    <div className="sample-blurb">{s.blurb || s.title}</div>
+                    <div className="sample-chips">
+                      {s.triggerTypes.map((t) => (
+                        <span className="cap-chip cap-chip-ok" key={t}>
+                          {t}
+                        </span>
+                      ))}
+                      {s.hasMcp && <span className="cap-chip cap-chip-ok">mcp</span>}
+                      {s.hasSkills && <span className="cap-chip cap-chip-ok">skills</span>}
+                      {s.hasWorkflow && <span className="cap-chip cap-chip-ok">workflow</span>}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="toolbar" style={{ marginTop: 16 }}>
             {draft.mdOverride ? (
               <Button

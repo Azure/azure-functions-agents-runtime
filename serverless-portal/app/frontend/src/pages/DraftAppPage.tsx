@@ -336,9 +336,11 @@ export default function DraftAppPage() {
       <p className="page-sub">Review, add capabilities, and deploy. Kept only in this browser session.</p>
 
       {deploying && (
-        <div className="note" style={{ marginBottom: 12 }}>
-          <strong>Deploying…</strong> This can take a few minutes — editing is locked until it finishes.
-          <div className="deploy-shimmer" style={{ marginTop: 10, marginBottom: 0 }} />
+        <div className="deploy-banner" style={{ marginBottom: 12, flexDirection: 'column', alignItems: 'stretch' }}>
+          <div>
+            <strong>Deploying…</strong> This can take a few minutes — editing is locked until it finishes.
+          </div>
+          <div className="deploy-shimmer" style={{ marginTop: 8, marginBottom: 0 }} />
         </div>
       )}
 
