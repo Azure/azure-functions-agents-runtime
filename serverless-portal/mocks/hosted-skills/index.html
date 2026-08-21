@@ -3,13 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Hosted Skills - Contoso Operations</title>
+    <title>Hosted Skills</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <header class="appbar">
-      <a class="brand" href="../index.html"><span class="brand-mark">AI</span><span class="brand-name">AI Apps</span></a>
-      <div class="breadcrumb" style="margin: 0"><a href="../index.html">All Apps</a> / Contoso Operations</div>
+      <a class="brand" href="index.html"><span class="brand-mark">HS</span><span class="brand-name">Hosted Skills</span></a>
       <div class="appbar-spacer"></div>
       <button class="btn ghost sm" aria-label="Search">Search</button>
       <a class="btn primary sm" href="create-app.html">New App</a>
@@ -17,90 +16,119 @@
     </header>
 
     <div class="app-shell">
-      <aside class="app-nav">
-        <div class="app-nav-head">
-          <div class="app-nav-title"><span class="brand-mark">CO</span> Contoso Operations</div>
-          <div class="app-nav-sub">Function App · East US 2</div>
-        </div>
-        <a class="app-nav-link" href="overview.html"><span class="ico">⌂</span>Overview</a>
-        <a class="app-nav-link active" href="index.html"><span class="ico">✦</span>Hosted Skills <span class="n">4</span></a>
-        <a class="app-nav-link" href="tools.html"><span class="ico">⌘</span>Tools and Knowledge <span class="n">7</span></a>
-        <a class="app-nav-link" href="connections.html"><span class="ico">⇄</span>Connections <span class="n">3</span></a>
-        <a class="app-nav-link" href="configuration.html"><span class="ico">⚙</span>Configuration</a>
+      <aside class="app-nav workspace-nav" aria-label="Hosted Skills navigation">
+        <div class="app-nav-head"><div class="app-nav-title"><span class="brand-mark">HS</span> Hosted Skills</div><div class="app-nav-sub">Workspace</div></div>
+        <a class="app-nav-link active" href="index.html"><span class="ico">✦</span>Hosted Skills <span class="n">11</span></a>
         <a class="app-nav-link" href="operations.html"><span class="ico">◫</span>Operations</a>
-        <a class="app-nav-link" href="deploy.html"><span class="ico">↑</span>Deployment</a>
-        <div class="app-nav-group">Advanced</div>
-        <a class="app-nav-link" href="source-recovery.html"><span class="ico">{ }</span>Source</a>
+        <a class="app-nav-link" href="connections.html"><span class="ico">⇄</span>Connections</a>
+        <a class="app-nav-link" href="tools.html"><span class="ico">⌘</span>Tools and Knowledge</a>
       </aside>
+      <main class="dashboard-main">
+      <div class="page-title"><h1>Hosted Skills</h1></div>
+      <p class="page-sub">Create and manage apps that host AI skills on Azure Functions.</p>
 
-      <main class="app-content">
-        <div class="draft-bar">
-          <span class="draft-dot"></span>
-          <span class="draft-title">Draft: 3 changes</span>
-          <span class="draft-list">Incident Triage instructions · Daily Brief schedule · 1 new skill</span>
-          <span class="draft-spacer"></span>
-          <a class="btn sm" href="skill-test.html">Test</a>
-          <a class="btn primary sm" href="deploy.html">Review and deploy</a>
-        </div>
-
-        <div class="breadcrumb"><a href="../index.html">All Apps</a> / Contoso Operations / Hosted Skills</div>
-        <div class="page-title">
-          <h1>Hosted Skills</h1>
-          <span class="badge green"><span class="dot"></span>App healthy</span>
-        </div>
-        <p class="page-sub">Build and operate the AI behaviors hosted by this app.</p>
-
-        <div class="toolbar">
-          <input type="text" aria-label="Search hosted skills" placeholder="Search hosted skills" style="max-width: 320px" />
-          <select aria-label="Filter by run type" style="max-width: 190px">
-            <option>All run types</option>
-            <option>Chat or API</option>
-            <option>Schedule</option>
-            <option>Data event</option>
-            <option>Internal only</option>
+      <div class="dashboard-toolbar">
+        <div class="filter-field">
+          <label for="subscription-filter">Subscription</label>
+          <select id="subscription-filter">
+            <option value="all">All subscriptions</option>
+            <option value="prod">Contoso Production</option>
+            <option value="dev">Contoso Development</option>
+            <option value="test">Private Test Sub</option>
           </select>
-          <div class="appbar-spacer"></div>
-          <a class="btn primary" href="new-skill.html">+ New Hosted Skill</a>
         </div>
-
-        <div class="skill-list">
-          <a class="skill-row is-draft" href="skill.html">
-            <div class="skill-cell">
-              <span class="skill-title">Incident Triage</span>
-              <span class="skill-slug">incident-triage</span>
-              <span class="skill-chips"><span class="skill-chip brand">Draft changes</span></span>
-            </div>
-            <div class="skill-cell"><span class="k">How it runs</span><span class="v">Chat or API</span><span class="skill-chip">/api/incident-triage</span></div>
-            <div class="skill-cell"><span class="k">What it can use</span><span class="v">3 tools · 1 knowledge module</span><span class="skill-chips"><span class="skill-chip">ServiceNow</span><span class="skill-chip">severity-rubric</span></span></div>
-            <div class="skill-cell"><span class="k">Access</span><span class="v">Entra ID</span><span class="skill-chip green">App default</span></div>
-            <div class="health-strip"><span class="dot ok"></span><span><span class="n">Healthy</span><br /><span class="lbl">12 runs today</span></span></div>
-          </a>
-
-          <a class="skill-row" href="skill.html">
-            <div class="skill-cell"><span class="skill-title">Daily Operations Brief</span><span class="skill-slug">daily-operations-brief</span></div>
-            <div class="skill-cell"><span class="k">How it runs</span><span class="v">Schedule · 7:00 AM daily</span><span class="skill-chip">0 0 7 * * *</span></div>
-            <div class="skill-cell"><span class="k">What it can use</span><span class="v">2 tools · 2 connections</span><span class="skill-chips"><span class="skill-chip">Azure</span><span class="skill-chip">Outlook</span></span></div>
-            <div class="skill-cell"><span class="k">Access</span><span class="v">Internal only</span></div>
-            <div class="health-strip"><span class="dot warn"></span><span><span class="n">Needs attention</span><br /><span class="lbl">Last run failed</span></span></div>
-          </a>
-
-          <a class="skill-row" href="skill.html">
-            <div class="skill-cell"><span class="skill-title">Change Explainer</span><span class="skill-slug">change-explainer</span></div>
-            <div class="skill-cell"><span class="k">How it runs</span><span class="v">Data event · Queue</span><span class="skill-chip">resource-changes</span></div>
-            <div class="skill-cell"><span class="k">What it can use</span><span class="v">1 tool · 1 knowledge module</span><span class="skill-chips"><span class="skill-chip">azure_rest</span></span></div>
-            <div class="skill-cell"><span class="k">Access</span><span class="v">Function key</span></div>
-            <div class="health-strip"><span class="dot ok"></span><span><span class="n">Healthy</span><br /><span class="lbl">48 runs today</span></span></div>
-          </a>
-
-          <a class="skill-row is-draft" href="skill.html">
-            <div class="skill-cell"><span class="skill-title">Executive Summary</span><span class="skill-slug">executive-summary</span><span class="skill-chips"><span class="skill-chip brand">New draft</span></span></div>
-            <div class="skill-cell"><span class="k">How it runs</span><span class="v">Internal only</span><span class="skill-chip">Delegated</span></div>
-            <div class="skill-cell"><span class="k">What it can use</span><span class="v">No dependencies</span></div>
-            <div class="skill-cell"><span class="k">Access</span><span class="v">Other hosted skills</span></div>
-            <div class="health-strip"><span class="dot warn"></span><span><span class="n">Not deployed</span><br /><span class="lbl">Test before deploy</span></span></div>
-          </a>
+        <div class="filter-field search-field">
+          <label for="app-search">Search</label>
+          <input id="app-search" type="text" placeholder="Search by app or hosted skill" />
         </div>
+        <span class="result-count" id="result-count"></span>
+        <a class="btn primary" href="create-app.html">New App</a>
+      </div>
+
+      <div class="dashboard-summary" aria-label="Hosted Skills summary">
+        <span><strong id="app-count">6</strong> apps</span>
+        <span><strong id="skill-count">11</strong> hosted skills</span>
+        <span class="status-ok"><i></i><strong id="healthy-count">5</strong> healthy</span>
+        <span class="status-warn"><i></i><strong id="attention-count">1</strong> needs attention</span>
+        <span class="cache-state" id="cache-state">Subscription selection saved</span>
+      </div>
+
+      <div class="app-table-wrap">
+        <table class="app-table">
+          <thead><tr><th>App</th><th>Hosted Skills</th><th>Model</th><th>Region</th><th>Last deployment</th><th>Health</th><th aria-label="Actions"></th></tr></thead>
+          <tbody id="app-rows">
+            <tr data-subscription="prod" data-skills="4" data-health="healthy" data-search="contoso operations incident triage daily operations brief change explainer executive summary">
+              <td><a class="table-primary" href="overview.html">Contoso Operations</a><span class="table-secondary mono">contoso-operations</span></td><td><strong>4</strong><span class="table-secondary">Incident Triage +3</span></td><td>gpt-5.4<span class="table-secondary">Microsoft Foundry</span></td><td>East US 2</td><td>Today, 10:42 AM<span class="table-secondary">3 draft changes</span></td><td><span class="table-status healthy"><i></i>Healthy</span></td><td><a class="row-action" href="overview.html">Open</a></td>
+            </tr>
+            <tr data-subscription="prod" data-skills="2" data-health="attention" data-search="support inbox customer response escalation helper">
+              <td><a class="table-primary" href="overview.html">Support Inbox</a><span class="table-secondary mono">support-inbox</span></td><td><strong>2</strong><span class="table-secondary">Customer Response +1</span></td><td>gpt-5.4<span class="table-secondary">Microsoft Foundry</span></td><td>West US 3</td><td>Yesterday, 4:18 PM</td><td><span class="table-status attention"><i></i>Needs attention</span></td><td><a class="row-action" href="overview.html">Open</a></td>
+            </tr>
+            <tr data-subscription="dev" data-skills="1" data-health="healthy" data-search="release notes digest daily release summary">
+              <td><a class="table-primary" href="overview.html">Release Notes Digest</a><span class="table-secondary mono">release-notes-digest</span></td><td><strong>1</strong><span class="table-secondary">Daily Release Summary</span></td><td>gpt-5.4-mini<span class="table-secondary">Microsoft Foundry</span></td><td>Central US</td><td>Aug 19, 2:30 PM</td><td><span class="table-status healthy"><i></i>Healthy</span></td><td><a class="row-action" href="overview.html">Open</a></td>
+            </tr>
+            <tr data-subscription="dev" data-skills="1" data-health="healthy" data-search="docs assistant product documentation answer">
+              <td><a class="table-primary" href="overview.html">Docs Assistant</a><span class="table-secondary mono">docs-assistant</span></td><td><strong>1</strong><span class="table-secondary">Product Documentation</span></td><td>gpt-5.4-mini<span class="table-secondary">Microsoft Foundry</span></td><td>Sweden Central</td><td>Aug 18, 9:05 AM</td><td><span class="table-status healthy"><i></i>Healthy</span></td><td><a class="row-action" href="overview.html">Open</a></td>
+            </tr>
+            <tr data-subscription="test" data-skills="1" data-health="stopped" data-search="sandbox chat playground assistant">
+              <td><a class="table-primary" href="overview.html">Sandbox Chat</a><span class="table-secondary mono">sandbox-chat</span></td><td><strong>1</strong><span class="table-secondary">Playground Assistant</span></td><td>gpt-5.4-mini<span class="table-secondary">Microsoft Foundry</span></td><td>East US 2</td><td>Aug 12, 11:24 AM</td><td><span class="table-status stopped"><i></i>Stopped</span></td><td><a class="row-action" href="overview.html">Open</a></td>
+            </tr>
+            <tr data-subscription="prod" data-skills="2" data-health="healthy" data-search="sales research account briefing">
+              <td><a class="table-primary" href="overview.html">Sales Research</a><span class="table-secondary mono">sales-research</span></td><td><strong>2</strong><span class="table-secondary">Account Briefing +1</span></td><td>gpt-5.4<span class="table-secondary">Microsoft Foundry</span></td><td>East US 2</td><td>Aug 20, 8:51 AM</td><td><span class="table-status healthy"><i></i>Healthy</span></td><td><a class="row-action" href="overview.html">Open</a></td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="empty" id="empty-state" hidden>No apps match this subscription and search.</div>
+      </div>
       </main>
     </div>
+
+    <script>
+      const subscriptionKey = 'hosted-skills.subscription'
+      const subscriptionFilter = document.getElementById('subscription-filter')
+      const searchInput = document.getElementById('app-search')
+      const rows = [...document.querySelectorAll('#app-rows tr')]
+
+      try {
+        subscriptionFilter.value = localStorage.getItem(subscriptionKey) || 'all'
+      } catch {}
+
+      function applyFilters() {
+        const subscription = subscriptionFilter.value
+        const query = searchInput.value.trim().toLowerCase()
+        let shown = 0
+        let skills = 0
+        let healthy = 0
+        let attention = 0
+        rows.forEach((row) => {
+          const matchesSubscription = subscription === 'all' || row.dataset.subscription === subscription
+          const matchesSearch = !query || row.dataset.search.includes(query)
+          row.hidden = !(matchesSubscription && matchesSearch)
+          if (!row.hidden) {
+            shown++
+            skills += Number(row.dataset.skills)
+            healthy += row.dataset.health === 'healthy' ? 1 : 0
+            attention += row.dataset.health === 'attention' ? 1 : 0
+          }
+        })
+        document.getElementById('result-count').textContent = `${shown} of ${rows.length} apps`
+        document.getElementById('app-count').textContent = shown
+        document.getElementById('skill-count').textContent = skills
+        document.getElementById('healthy-count').textContent = healthy
+        document.getElementById('attention-count').textContent = attention
+        document.getElementById('empty-state').hidden = shown !== 0
+      }
+
+      subscriptionFilter.addEventListener('change', () => {
+        try {
+          localStorage.setItem(subscriptionKey, subscriptionFilter.value)
+          document.getElementById('cache-state').textContent = 'Subscription selection saved'
+        } catch {
+          document.getElementById('cache-state').textContent = 'Selection active for this session'
+        }
+        applyFilters()
+      })
+      searchInput.addEventListener('input', applyFilters)
+      applyFilters()
+    </script>
   </body>
 </html>

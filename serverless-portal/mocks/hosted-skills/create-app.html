@@ -1,28 +1,366 @@
 <!doctype html>
 <html lang="en">
-  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Create AI App</title><link rel="stylesheet" href="styles.css" /></head>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>New Hosted Skills App</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
   <body>
-    <header class="appbar"><a class="brand" href="../index.html"><span class="brand-mark">AI</span><span class="brand-name">AI Apps</span></a><div class="breadcrumb" style="margin:0"><a href="../index.html">All Apps</a> / New App</div><div class="appbar-spacer"></div><div class="appbar-user">SN</div></header>
-    <main class="main" style="max-width:980px;margin:0 auto">
-      <div class="breadcrumb"><a href="../index.html">All Apps</a> / New App</div><div class="page-title"><h1>Create an AI app</h1></div><p class="page-sub">Set up the app and its first Hosted Skill. You can change everything except the app name later.</p>
-      <div class="guided-steps"><div class="guided-step active"><span class="num">1</span>App</div><div class="guided-step"><span class="num">2</span>Model</div><div class="guided-step"><span class="num">3</span>First skill</div><div class="guided-step"><span class="num">4</span>Review</div><div class="guided-step"><span class="num">5</span>Provision</div></div>
-      <div class="split">
-        <div class="card">
-          <div class="card-head"><h3>App details</h3><span class="badge blue">Step 1 of 5</span></div>
-          <div class="field-group">
-            <div class="fld"><label for="app-name">App name</label><input id="app-name" value="Contoso Support" /><span class="hint">Azure resource name: contoso-support-a91f</span></div>
-            <div class="fld"><label for="subscription">Subscription</label><select id="subscription"><option>Contoso Production</option><option>Contoso Development</option></select></div>
-            <div class="fld"><label for="region">Azure location</label><select id="region"><option>East US 2 · Functions and Foundry available</option><option>Sweden Central · Functions and Foundry available</option></select><span class="hint">Only locations compatible with the selected model provider are shown.</span></div>
-            <div class="fld"><label for="template">Starter template</label><select id="template"><option>Customer support assistant</option><option>Operations assistant</option><option>Scheduled digest</option><option>Blank app</option></select></div>
+    <header class="appbar">
+      <a class="brand" href="index.html"><span class="brand-mark">HS</span><span class="brand-name">Hosted Skills</span></a>
+      <div class="breadcrumb" style="margin:0"><a href="index.html">Hosted Skills</a> / New App</div>
+      <div class="appbar-spacer"></div>
+      <div class="appbar-user">SN</div>
+    </header>
+
+    <div class="app-shell">
+      <aside class="app-nav workspace-nav" aria-label="Hosted Skills navigation">
+        <div class="app-nav-head"><div class="app-nav-title"><span class="brand-mark">HS</span> Hosted Skills</div><div class="app-nav-sub">Workspace</div></div>
+        <a class="app-nav-link active" href="index.html"><span class="ico">✦</span>Hosted Skills</a>
+        <a class="app-nav-link" href="operations.html"><span class="ico">◫</span>Operations</a>
+        <a class="app-nav-link" href="connections.html"><span class="ico">⇄</span>Connections</a>
+        <a class="app-nav-link" href="tools.html"><span class="ico">⌘</span>Tools and Knowledge</a>
+      </aside>
+      <main class="create-main">
+      <div class="breadcrumb"><a href="index.html">Hosted Skills</a> / New App</div>
+      <div class="page-title"><h1>New app</h1></div>
+      <p class="page-sub">Start by choosing the Foundry model your Hosted Skills will inherit.</p>
+
+      <div class="guided-steps">
+        <div class="guided-step active"><span class="num">1</span>Model</div>
+        <div class="guided-step"><span class="num">2</span>Generate skills</div>
+        <div class="guided-step"><span class="num">3</span>Deployment target</div>
+        <div class="guided-step"><span class="num">4</span>Review and deploy</div>
+      </div>
+
+      <div class="create-layout">
+        <section class="create-panel">
+          <div class="create-panel-head"><div><h2 id="step-title">Choose a model provider</h2><p id="step-description">Microsoft Foundry is available for this preview.</p></div><span class="badge blue" id="step-badge">Step 1 of 4</span></div>
+
+          <div id="model-step">
+            <div class="provider-list">
+              <label class="provider-row selected"><input type="radio" name="provider" checked /><span class="provider-copy"><strong>Microsoft Foundry</strong><span>Use a governed model deployment with managed identity.</span></span><span class="badge green">Available</span></label>
+              <label class="provider-row disabled" aria-disabled="true"><input type="radio" name="provider" disabled /><span class="provider-copy"><strong>Azure OpenAI</strong><span>Connect an Azure OpenAI resource and deployment.</span></span><span class="badge gray">Coming soon</span></label>
+              <label class="provider-row disabled" aria-disabled="true"><input type="radio" name="provider" disabled /><span class="provider-copy"><strong>OpenAI</strong><span>Connect with an API key stored in app settings.</span></span><span class="badge gray">Coming soon</span></label>
+            </div>
+
+            <div class="model-fields">
+              <div class="field-group">
+                <div class="fld"><label for="foundry-resource">Foundry resource</label><select id="foundry-resource"><option>contoso-ai-prod</option><option>contoso-ai-development</option><option>Choose another resource...</option></select></div>
+                <div class="fld"><label for="foundry-project">Foundry project</label><select id="foundry-project"><option>operations-agents</option><option>support-agents</option><option>Create a new project...</option></select></div>
+                <div class="fld"><label for="foundry-model">Model deployment</label><select id="foundry-model"><option>gpt-5.4 · Recommended</option><option>gpt-5.4-mini</option><option>o3</option></select><span class="hint">This becomes the app default. Individual Hosted Skills can override it later.</span></div>
+                <div class="fld"><label>Authentication</label><input value="Managed identity" disabled /><span class="hint">The app identity receives access to the selected Foundry project during provisioning.</span></div>
+              </div>
+            </div>
           </div>
-          <div class="form-actions"><a class="btn" href="../index.html">Cancel</a><button class="btn primary" id="continue">Continue to model</button></div>
-        </div>
-        <aside class="stack">
-          <div class="summary-block"><div class="eyebrow">What will be created</div><div class="big">One working app</div><div class="detail">Function App, managed identity, model connection, Application Insights, storage, and your first Hosted Skill.</div></div>
-          <div class="notice"><strong>No raw files required.</strong><br />The portal creates the source after validation and opens a working test experience when provisioning finishes.</div>
+
+          <div id="skill-step" hidden>
+            <div class="skill-generator">
+              <div class="generator-model"><span class="status-icon ok">✓</span><span>Generating with <strong id="generator-model-name">gpt-5.4</strong> from Microsoft Foundry</span></div>
+              <label for="skill-intent">What should your Hosted Skills do?</label>
+              <textarea id="skill-intent" rows="5">Triage production incidents, apply our severity rubric, check ServiceNow for related incidents, and prepare an executive summary when impact is high.</textarea>
+              <div class="generator-examples">
+                <button class="chip-btn" data-example="Summarize Azure changes every morning and email the operations team.">Scheduled operations brief</button>
+                <button class="chip-btn" data-example="Answer customer support questions and escalate complex cases to a specialist.">Customer support</button>
+                <button class="chip-btn" data-example="Triage production incidents, apply our severity rubric, and prepare an executive summary when impact is high.">Incident triage</button>
+              </div>
+              <p class="hint">The selected model proposes names, instructions, run modes, and dependencies. You review everything before provisioning.</p>
+            </div>
+
+            <div class="generated-preview" id="generated-preview" hidden>
+              <div class="generated-head"><div><strong>Generated Hosted Skills</strong><span id="generation-summary">2 skills proposed</span></div><span class="badge green">Ready to review</span></div>
+              <div id="generated-skills"></div>
+            </div>
+          </div>
+
+          <div id="app-step" hidden>
+            <div class="deployment-providers">
+              <label class="provider-row selected"><input type="radio" name="app-provider" checked /><span class="provider-copy"><strong>Azure Function App</strong><span>Deploy Hosted Skills to the Azure Functions runtime.</span></span><span class="badge green">Available</span></label>
+              <label class="provider-row disabled" aria-disabled="true"><input type="radio" name="app-provider" disabled /><span class="provider-copy"><strong>Azure Container App</strong><span>Deploy Hosted Skills as a managed container workload.</span></span><span class="badge gray">Coming soon</span></label>
+            </div>
+
+            <div class="target-mode" role="group" aria-label="Function App target">
+              <button class="target-mode-button active" data-target-mode="existing">Use existing Function App</button>
+              <button class="target-mode-button" data-target-mode="new">Create new Function App</button>
+            </div>
+
+            <div class="target-fields" id="existing-target">
+              <div class="field-group">
+                <div class="fld"><label for="subscription">Subscription</label><select id="subscription"><option value="prod">Contoso Production</option><option value="dev">Contoso Development</option><option value="test">Private Test Sub</option></select><span class="hint">Uses the subscription selected on the Hosted Skills dashboard.</span></div>
+                <div class="fld"><label for="existing-function">Function App</label><select id="existing-function"><option>contoso-operations · East US 2</option><option>support-inbox · West US 3</option><option>release-notes-digest · Central US</option></select><span class="hint">Only compatible Function Apps with the Hosted Skills runtime are shown.</span></div>
+                <div class="target-validation"><span class="status-icon ok">✓</span><span><strong>Ready for deployment</strong><br />Managed identity, storage, and runtime version are compatible.</span></div>
+              </div>
+            </div>
+
+            <div class="target-fields" id="new-target" hidden>
+              <div class="field-group">
+                <div class="fld"><label for="app-name">Function App name</label><input id="app-name" value="contoso-support-skills" /><span class="hint">Available Azure resource name.</span></div>
+                <div class="fld"><label for="new-subscription">Subscription</label><select id="new-subscription"><option value="prod">Contoso Production</option><option value="dev">Contoso Development</option><option value="test">Private Test Sub</option></select></div>
+                <div class="fld"><label for="region">Azure location</label><select id="region"><option>East US 2 · Functions and Foundry available</option><option>Sweden Central · Functions and Foundry available</option></select><span class="hint">Only regions compatible with the selected Foundry model are shown.</span></div>
+                <div class="fld"><label for="resource-group">Resource group</label><select id="resource-group"><option>rg-hosted-skills-prod</option><option>rg-ai-apps</option><option>Create new resource group...</option></select></div>
+              </div>
+            </div>
+          </div>
+
+          <div id="review-step" hidden>
+            <div class="review-overview">
+              <div class="review-summary-row"><span>Model</span><strong id="review-model">gpt-5.4</strong><small>Microsoft Foundry</small></div>
+              <div class="review-summary-row"><span>Deployment target</span><strong id="review-target">contoso-operations</strong><small>Azure Function App</small></div>
+              <div class="review-summary-row"><span>Hosted Skills</span><strong id="review-skill-count">2</strong><small>Generated and reviewed</small></div>
+            </div>
+
+            <section class="review-section">
+              <div class="review-section-head"><div><h3>Hosted Skills</h3><p>These reviewed definitions will be deployed.</p></div><button class="btn sm" id="edit-skills" type="button">Edit skills</button></div>
+              <div class="review-skill-list" id="review-skills"></div>
+            </section>
+
+            <section class="review-section">
+              <div class="review-section-head"><div><h3>Pre-deployment validation</h3><p>Configuration is checked before resources change.</p></div><span class="badge green"><span class="dot"></span>Passed</span></div>
+              <div class="review-validation-grid">
+                <div class="status-line"><span class="status-icon ok">✓</span>Skill names and routes are unique</div>
+                <div class="status-line"><span class="status-icon ok">✓</span>Triggers and dependencies are valid</div>
+                <div class="status-line"><span class="status-icon ok">✓</span>Foundry model access is configured</div>
+                <div class="status-line"><span class="status-icon ok">✓</span>Function App runtime is compatible</div>
+              </div>
+            </section>
+
+            <div class="deployment-impact"><strong id="deployment-impact-title">Ready to deploy</strong><span id="deployment-impact-text">The selected Function App will receive 2 Hosted Skills using gpt-5.4.</span></div>
+            <div class="deployment-progress" id="deployment-progress" hidden>
+              <div class="deployment-progress-head"><strong id="deployment-status-title">Deploying Hosted Skills</strong><span class="badge blue" id="deployment-status-badge">In progress</span></div>
+              <div class="deployment-stage done"><span>1</span><div><strong>Validate configuration</strong><small>Completed</small></div></div>
+              <div class="deployment-stage active" id="resource-stage"><span>2</span><div><strong id="resource-stage-title">Update Function App</strong><small id="resource-stage-status">Applying app settings and source package</small></div></div>
+              <div class="deployment-stage" id="startup-stage"><span>3</span><div><strong>Verify startup</strong><small>Waiting</small></div></div>
+            </div>
+          </div>
+
+          <div class="form-actions"><button class="btn" id="back" type="button">Cancel</button><button class="btn primary" id="continue">Continue to generate skills</button></div>
+        </section>
+
+        <aside class="create-aside">
+          <div class="aside-card"><h4>Selected model</h4><div class="val" id="selected-model">gpt-5.4</div><div class="muted">Microsoft Foundry · operations-agents</div></div>
+          <div class="aside-card"><h4>Provisioning</h4><div class="status-line"><span class="status-icon ok">✓</span>Managed identity</div><div class="status-line"><span class="status-icon ok">✓</span>Compatible regions only</div><div class="status-line"><span class="status-icon ok">✓</span>No secrets in source</div></div>
+          <div class="notice"><strong>Model first.</strong><br />The selected deployment sets the available regions and becomes the inherited default for every Hosted Skill in this app.</div>
         </aside>
       </div>
-    </main>
-    <script>document.getElementById('continue').onclick=()=>{document.querySelectorAll('.guided-step')[0].classList.add('done');document.querySelectorAll('.guided-step')[1].classList.add('active');document.querySelector('.card h3').textContent='Choose a model provider';document.querySelector('.field-group').innerHTML='<label class="choice selected"><input type="radio" checked name="provider"><span><span class="title">Microsoft Foundry · Recommended</span><span class="desc">Managed identity, governed model deployments, and Azure-native operations.</span></span></label><label class="choice"><input type="radio" name="provider"><span><span class="title">Azure OpenAI</span><span class="desc">Use an existing Azure OpenAI resource and deployment.</span></span></label><label class="choice"><input type="radio" name="provider"><span><span class="title">OpenAI</span><span class="desc">Connect with an app setting that stores your API key.</span></span></label>';document.getElementById('continue').textContent='Continue to first skill'}</script>
+      </main>
+    </div>
+
+    <script>
+      const subscriptionKey = 'hosted-skills.subscription'
+      const subscription = document.getElementById('subscription')
+      const newSubscription = document.getElementById('new-subscription')
+      try {
+        const cached = localStorage.getItem(subscriptionKey)
+        if (cached && cached !== 'all') {
+          subscription.value = cached
+          newSubscription.value = cached
+        }
+      } catch {}
+
+      const modelSelect = document.getElementById('foundry-model')
+      const continueButton = document.getElementById('continue')
+      const backButton = document.getElementById('back')
+      const steps = [...document.querySelectorAll('.guided-step')]
+      let currentStep = 'model'
+      let skillsGenerated = false
+
+      function selectedModel() {
+        return modelSelect.value.split(' · ')[0]
+      }
+
+      function setActiveStep(index) {
+        steps.forEach((step, stepIndex) => {
+          step.classList.toggle('active', stepIndex === index)
+          step.classList.toggle('done', stepIndex < index)
+        })
+      }
+
+      function showModelStep() {
+        currentStep = 'model'
+        document.getElementById('model-step').hidden = false
+        document.getElementById('skill-step').hidden = true
+        document.getElementById('app-step').hidden = true
+        document.getElementById('review-step').hidden = true
+        document.getElementById('step-title').textContent = 'Choose a model provider'
+        document.getElementById('step-description').textContent = 'Microsoft Foundry is available for this preview.'
+        document.getElementById('step-badge').textContent = 'Step 1 of 4'
+        continueButton.textContent = 'Continue to generate skills'
+        backButton.textContent = 'Cancel'
+        backButton.onclick = () => { location.href = 'index.html' }
+        setActiveStep(0)
+      }
+
+      function showSkillStep() {
+        currentStep = 'skills'
+        document.getElementById('model-step').hidden = true
+        document.getElementById('skill-step').hidden = false
+        document.getElementById('app-step').hidden = true
+        document.getElementById('review-step').hidden = true
+        document.getElementById('step-title').textContent = 'Generate your Hosted Skills'
+        document.getElementById('step-description').textContent = `Describe the outcome and let ${selectedModel()} propose the first skill set.`
+        document.getElementById('step-badge').textContent = 'Step 2 of 4'
+        document.getElementById('generator-model-name').textContent = selectedModel()
+        continueButton.textContent = skillsGenerated ? 'Choose deployment target' : 'Generate skills'
+        backButton.textContent = 'Back'
+        backButton.onclick = showModelStep
+        setActiveStep(1)
+      }
+
+      function generateSkills() {
+        const intent = document.getElementById('skill-intent').value.toLowerCase()
+        let skills
+        if (intent.includes('morning') || intent.includes('email')) {
+          skills = [
+            ['Daily Operations Brief', 'Schedule · Every day at 7:00 AM', 'Azure, Outlook'],
+            ['Change Summarizer', 'Internal only', 'Microsoft Learn'],
+          ]
+        } else if (intent.includes('customer') || intent.includes('support')) {
+          skills = [
+            ['Customer Support', 'Chat or API', 'Product Knowledge, CRM'],
+            ['Escalation Specialist', 'Internal only', 'ServiceNow'],
+          ]
+        } else {
+          skills = [
+            ['Incident Triage', 'Chat or API', 'ServiceNow, severity-rubric'],
+            ['Executive Summary', 'Internal only', 'No additional dependencies'],
+          ]
+        }
+        document.getElementById('generated-skills').innerHTML = skills.map((skill, index) => `
+          <section class="generated-skill-row" data-skill-index="${index}">
+            <div class="generated-skill-title"><div><strong>Hosted Skill ${index + 1}</strong><span class="badge blue">Generated</span></div><button class="btn ghost sm remove-skill" type="button">Remove</button></div>
+            <div class="generated-skill-fields">
+              <div class="fld"><label>Name</label><input class="generated-name" value="${skill[0]}" /></div>
+              <div class="fld"><label>How it runs</label><select class="generated-run"><option ${skill[1].startsWith('Chat') ? 'selected' : ''}>Chat or API</option><option ${skill[1].startsWith('Schedule') ? 'selected' : ''}>Schedule</option><option ${skill[1] === 'Internal only' ? 'selected' : ''}>Internal only</option><option>Data event</option><option>Connected service</option></select></div>
+              <div class="fld"><label>What it can use</label><input class="generated-uses" value="${skill[2]}" /></div>
+              <div class="fld"><label>Model</label><input value="${selectedModel()}" disabled /></div>
+            </div>
+            <div class="fld generated-instructions"><label>Instructions</label><textarea rows="3">${skill[0]} should fulfill the requested outcome safely. Use ${skill[2].toLowerCase()} when relevant, explain important decisions, and ask before taking irreversible actions.</textarea></div>
+          </section>`).join('')
+        document.querySelectorAll('.remove-skill').forEach((button) => {
+          button.addEventListener('click', () => {
+            button.closest('.generated-skill-row').remove()
+            updateGenerationSummary()
+          })
+        })
+        document.querySelectorAll('.generated-name').forEach((input) => input.addEventListener('input', updateGenerationSummary))
+        document.getElementById('generation-summary').textContent = `${skills.length} skills proposed by ${selectedModel()}`
+        document.getElementById('generated-preview').hidden = false
+        skillsGenerated = true
+        continueButton.textContent = 'Choose deployment target'
+      }
+
+      function updateGenerationSummary() {
+        const skillRows = [...document.querySelectorAll('.generated-skill-row')]
+        document.getElementById('generation-summary').textContent = `${skillRows.length} editable skills · ${selectedModel()}`
+        skillsGenerated = skillRows.length > 0
+        continueButton.disabled = !skillsGenerated
+      }
+
+      function showAppStep() {
+        currentStep = 'app'
+        document.getElementById('model-step').hidden = true
+        document.getElementById('skill-step').hidden = true
+        document.getElementById('app-step').hidden = false
+        document.getElementById('review-step').hidden = true
+        document.getElementById('step-title').textContent = 'Choose a deployment target'
+        document.getElementById('step-description').textContent = `Deploy the reviewed ${selectedModel()} Hosted Skills to an existing or new app.`
+        document.getElementById('step-badge').textContent = 'Step 3 of 4'
+        continueButton.textContent = 'Review and deploy'
+        backButton.textContent = 'Back'
+        backButton.onclick = showSkillStep
+        setActiveStep(2)
+      }
+
+      function selectedTarget() {
+        const mode = document.querySelector('[data-target-mode].active').dataset.targetMode
+        if (mode === 'existing') return document.getElementById('existing-function').selectedOptions[0].textContent.split(' · ')[0]
+        return document.getElementById('app-name').value
+      }
+
+      function showReviewStep() {
+        currentStep = 'review'
+        document.getElementById('model-step').hidden = true
+        document.getElementById('skill-step').hidden = true
+        document.getElementById('app-step').hidden = true
+        document.getElementById('review-step').hidden = false
+        document.getElementById('step-title').textContent = 'Review and deploy'
+        document.getElementById('step-description').textContent = 'Confirm the complete change, then deploy from this page.'
+        document.getElementById('step-badge').textContent = 'Step 4 of 4'
+        const skillRows = [...document.querySelectorAll('.generated-skill-row')]
+        document.getElementById('review-model').textContent = selectedModel()
+        document.getElementById('review-target').textContent = selectedTarget()
+        document.getElementById('review-skill-count').textContent = skillRows.length
+        document.getElementById('review-skills').innerHTML = skillRows.map((row) => {
+          const name = row.querySelector('.generated-name').value
+          const runMode = row.querySelector('.generated-run').value
+          const dependencies = row.querySelector('.generated-uses').value
+          return `<div class="review-skill-row"><div><strong>${name}</strong><span>${runMode}</span></div><span>${dependencies}</span><span>${selectedModel()}</span></div>`
+        }).join('')
+        document.getElementById('deployment-impact-text').textContent = `${selectedTarget()} will receive ${skillRows.length} Hosted Skills using ${selectedModel()}.`
+        continueButton.textContent = 'Deploy Hosted Skills'
+        continueButton.disabled = false
+        backButton.textContent = 'Back'
+        backButton.onclick = showAppStep
+        setActiveStep(3)
+      }
+
+      function deployHostedSkills() {
+        currentStep = 'deploying'
+        document.getElementById('deployment-progress').hidden = false
+        document.getElementById('deployment-impact-title').textContent = 'Deployment started'
+        document.getElementById('deployment-impact-text').textContent = `Deploying to ${selectedTarget()}. You can remain on this page to verify startup.`
+        continueButton.textContent = 'Deployment in progress'
+        continueButton.disabled = true
+        backButton.disabled = true
+        setTimeout(() => {
+          document.getElementById('resource-stage').classList.remove('active')
+          document.getElementById('resource-stage').classList.add('done')
+          document.getElementById('resource-stage-status').textContent = 'Completed'
+          document.getElementById('startup-stage').classList.add('done')
+          document.querySelector('#startup-stage small').textContent = 'Healthy'
+          document.getElementById('deployment-status-title').textContent = 'Deployment complete'
+          document.getElementById('deployment-status-badge').className = 'badge green'
+          document.getElementById('deployment-status-badge').textContent = 'Live'
+          document.getElementById('deployment-impact-title').textContent = 'Hosted Skills are live'
+          document.getElementById('deployment-impact-text').textContent = `${selectedTarget()} passed startup validation and is ready to use.`
+          continueButton.textContent = 'Open Hosted Skills'
+          continueButton.disabled = false
+          backButton.hidden = true
+          currentStep = 'complete'
+        }, 700)
+      }
+
+      modelSelect.addEventListener('change', () => {
+        document.getElementById('selected-model').textContent = selectedModel()
+        skillsGenerated = false
+        document.getElementById('generated-preview').hidden = true
+      })
+      document.querySelectorAll('[data-example]').forEach((button) => {
+        button.addEventListener('click', () => {
+          document.getElementById('skill-intent').value = button.dataset.example
+          skillsGenerated = false
+          document.getElementById('generated-preview').hidden = true
+          continueButton.textContent = 'Generate skills'
+        })
+      })
+      document.querySelectorAll('[data-target-mode]').forEach((button) => {
+        button.addEventListener('click', () => {
+          document.querySelectorAll('[data-target-mode]').forEach((item) => item.classList.toggle('active', item === button))
+          const useExisting = button.dataset.targetMode === 'existing'
+          document.getElementById('existing-target').hidden = !useExisting
+          document.getElementById('new-target').hidden = useExisting
+        })
+      })
+      document.getElementById('edit-skills').addEventListener('click', showSkillStep)
+      continueButton.addEventListener('click', () => {
+        if (currentStep === 'model') showSkillStep()
+        else if (currentStep === 'skills' && !skillsGenerated) generateSkills()
+        else if (currentStep === 'skills') showAppStep()
+        else if (currentStep === 'app') showReviewStep()
+        else if (currentStep === 'review') deployHostedSkills()
+        else if (currentStep === 'complete') location.href = 'overview.html'
+      })
+    </script>
   </body>
 </html>
