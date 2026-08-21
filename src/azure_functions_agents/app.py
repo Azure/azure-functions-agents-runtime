@@ -436,7 +436,7 @@ def _build_session_runtime_binding(
     async def targeted_reconcile(
         partition: OwnerPartition,
         session_id: str,
-        setup_deadline: SetupDeadline,
+        setup_deadline: SetupDeadline | None,
     ) -> None:
         state_binding = await runtime.get_state_store()
         provider = await runtime.get_provider()

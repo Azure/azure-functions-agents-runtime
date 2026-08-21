@@ -54,6 +54,7 @@ from azure_functions_agents.session_state import (
     DurableRunRecord,
     DurableSessionRecord,
     FunctionAppOwnerContext,
+    OwnerPartition,
     SessionNotAdmissibleError,
     SessionOperationTarget,
     SessionStateContractError,
@@ -672,6 +673,43 @@ async def test_reserved_provision_authorization_failure_terminalizes_durable_sta
     [operation] = store.durable_operations.values()
     assert operation.state == "completed"
     assert operation.lease_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_targeted_reconciliation_passes_a_deadline_argument_even_when_absent(
+    tmp_path: Path,
+) -> None:
+    """The reconciler is always invoked with three arguments, deadline or not.
+
+    The management read path reconciles without a setup deadline, while the
+    registered reconciler takes the deadline as a positional parameter. Calling
+    it with two arguments raises ``TypeError`` at runtime and surfaces as a 500
+    from the status, result, and events routes.
+    """
+    script_root = _script_root(tmp_path)
+    provider = _FakeProvider(_FakeHandle())
+    store = _FakeStore()
+    seen: list[object] = []
+
+    # Three required positional parameters, mirroring the reconciler the app
+    # registers. A ``*args`` double would accept any arity and so could never
+    # detect a mismatch -- which is why this went undetected.
+    async def reconciliation(
+        partition: OwnerPartition,
+        session_id: str,
+        setup_deadline: object,
+    ) -> None:
+        seen.append(setup_deadline)
+
+    runtime = _runtime(script_root, provider, store)
+    runtime = replace(runtime, _targeted_reconciler=reconciliation)
+
+    await runtime.reconcile_session(owner_partition(_owner()), "session-1")
+    assert seen == [None]
+
+    budget = SetupBudget.start()
+    await runtime.reconcile_session(owner_partition(_owner()), "session-1", budget)
+    assert seen == [None, budget]
 
 
 @pytest.mark.asyncio

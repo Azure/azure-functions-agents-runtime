@@ -1814,7 +1814,7 @@ async def test_nonterminal_status_poll_uses_targeted_reconciliation(
         _status(state="running"),
     )
 
-    async def targeted_reconcile(_: OwnerPartition, __: str) -> None:
+    async def targeted_reconcile(_: OwnerPartition, __: str, ___: object) -> None:
         nonlocal calls
         calls += 1
 

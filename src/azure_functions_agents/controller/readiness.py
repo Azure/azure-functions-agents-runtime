@@ -152,7 +152,9 @@ _ADMISSION_NOT_RESERVED: AdmissionDisposition = "not_reserved"
 _ADMISSION_POSSIBLY_COMMITTED: AdmissionDisposition = "possibly_committed"
 
 type _SessionLockKey = tuple[str, str]
-type TargetedReconciler = Callable[[OwnerPartition, str, "SetupDeadline"], Awaitable[None]]
+type TargetedReconciler = Callable[
+    [OwnerPartition, str, "SetupDeadline | None"], Awaitable[None]
+]
 type BoundedReconciler = Callable[[], Awaitable[None]]
 
 
@@ -416,12 +418,7 @@ class SessionRuntimeBinding:
         """Run the shared targeted lifecycle reconciliation when configured."""
         if self._targeted_reconciler is not None:
             try:
-                if setup_deadline is None:
-                    await self._targeted_reconciler(  # type: ignore[misc, call-arg]
-                        partition, session_id
-                    )
-                else:
-                    await self._targeted_reconciler(partition, session_id, setup_deadline)
+                await self._targeted_reconciler(partition, session_id, setup_deadline)
             except SandboxGroupAuthorizationError:
                 raise SessionActivationAuthorizationError(
                     SANDBOX_GROUP_AUTHORIZATION_MESSAGE

@@ -322,7 +322,7 @@ async def test_targeted_reconciliation_does_not_use_timer_pass_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[OwnerPartition, str]] = []
+    calls: list[tuple[OwnerPartition, str, object]] = []
     app_identity = AppIdentity.create(
         subscription_id="11111111-2222-3333-4444-555555555555",
         site_name="agent-app",
@@ -340,8 +340,12 @@ async def test_targeted_reconciliation_does_not_use_timer_pass_deadline(
     async def state_store_factory() -> StateStoreBinding:
         pytest.fail("targeted reconciliation callback should supply its own state store")
 
-    async def targeted_reconciler(target: OwnerPartition, session_id: str) -> None:
-        calls.append((target, session_id))
+    async def targeted_reconciler(
+        target: OwnerPartition,
+        session_id: str,
+        setup_deadline: object,
+    ) -> None:
+        calls.append((target, session_id, setup_deadline))
 
     async def deadline_should_not_run(*_: object, **__: object) -> ReconcileReport:
         pytest.fail("targeted reconciliation must not use the timer pass deadline")
@@ -358,7 +362,9 @@ async def test_targeted_reconciliation_does_not_use_timer_pass_deadline(
 
     await runtime.reconcile_session(partition, "targeted-session")
 
-    assert calls == [(partition, "targeted-session")]
+    # The deadline is asserted, not just accepted: reconciling without one must
+    # forward None rather than borrow the timer pass deadline.
+    assert calls == [(partition, "targeted-session", None)]
 
 
 def test_composition_builds_a_lazy_app_scoped_session_runtime_binding(
