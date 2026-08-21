@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>How Incident Triage Runs</title><link rel="stylesheet" href="styles.css" /></head>
+  <body>
+    <header class="appbar"><a class="brand" href="../index.html"><span class="brand-mark">AI</span><span class="brand-name">AI Apps</span></a><div class="breadcrumb" style="margin:0"><a href="../index.html">All Apps</a> / <a href="overview.html">Contoso Operations</a> / Incident Triage</div><div class="appbar-spacer"></div><div class="appbar-user">SN</div></header>
+    <div class="app-shell">
+      <aside class="app-nav"><div class="app-nav-head"><div class="app-nav-title"><span class="brand-mark">CO</span> Contoso Operations</div><div class="app-nav-sub">Function App · East US 2</div></div><a class="app-nav-link" href="overview.html"><span class="ico">⌂</span>Overview</a><a class="app-nav-link active" href="index.html"><span class="ico">✦</span>Hosted Skills</a><a class="app-nav-link" href="tools.html"><span class="ico">⌘</span>Tools and Knowledge</a><a class="app-nav-link" href="connections.html"><span class="ico">⇄</span>Connections</a><a class="app-nav-link" href="configuration.html"><span class="ico">⚙</span>Configuration</a><a class="app-nav-link" href="operations.html"><span class="ico">◫</span>Operations</a><a class="app-nav-link" href="deploy.html"><span class="ico">↑</span>Deployment</a></aside>
+      <main class="app-content">
+        <div class="draft-bar"><span class="draft-dot"></span><span class="draft-title">Draft: 3 changes</span><span class="draft-list">How Incident Triage starts is unchanged</span><span class="draft-spacer"></span><a class="btn sm" href="skill-test.html">Test</a><a class="btn primary sm" href="deploy.html">Review and deploy</a></div>
+        <div class="breadcrumb"><a href="index.html">Hosted Skills</a> / <a href="skill.html">Incident Triage</a> / How it runs</div><div class="page-title"><h1>Incident Triage</h1><span class="badge blue">Chat or API</span></div><p class="page-sub"><span class="mono">incident-triage</span> · Choose one way this Hosted Skill starts.</p>
+        <nav class="subtabs" aria-label="Hosted Skill sections"><a class="subtab" href="skill.html">Instructions</a><button class="subtab active">How it runs</button><a class="subtab" href="what-it-can-use.html">What it can use</a><button class="subtab">Access</button><a class="subtab" href="skill-test.html">Test</a><a class="subtab" href="operations.html">Runs</a></nav>
+        <div class="section-head"><div><h2>Choose how it starts</h2><p>One run mode per Hosted Skill. Advanced Azure triggers remain available when needed.</p></div></div>
+        <div class="trigger-picker" id="run-modes">
+          <button class="trigger-tile active" data-mode="chat"><div class="ttitle">Chat or API</div><div class="tsub">A person or system sends input and receives a response.</div></button>
+          <button class="trigger-tile" data-mode="schedule"><div class="ttitle">Schedule</div><div class="tsub">Run automatically at a recurring time.</div></button>
+          <button class="trigger-tile" data-mode="data"><div class="ttitle">Data event</div><div class="tsub">Start from a queue, blob, Event Grid, or Service Bus event.</div></button>
+          <button class="trigger-tile" data-mode="service"><div class="ttitle">Connected service</div><div class="tsub">Start when Outlook, SharePoint, or another connected service changes.</div></button>
+          <button class="trigger-tile" data-mode="internal"><div class="ttitle">Internal only</div><div class="tsub">Only another Hosted Skill can delegate work to this skill.</div></button>
+        </div>
+        <div class="split" style="margin-top:18px">
+          <section class="card" id="mode-config">
+            <div class="card-head"><h3>Chat and API endpoint</h3><span class="badge green"><span class="dot"></span>Available</span></div>
+            <div class="field-group"><div class="fld"><label>Endpoint route</label><input value="/api/incident-triage" disabled /><span class="hint">Derived from the skill filename. Rename the Hosted Skill to change it.</span></div><div class="fld"><label>Accepted input</label><select><option>Conversation messages or JSON payload</option></select></div><div class="fld"><label>Response mode</label><select><option>Streaming when supported</option><option>Single response</option></select></div></div>
+            <div class="notice" style="margin-top:14px"><strong>Payload shape</strong><br />Chat sends conversation messages. API callers can send <code>{ "message": "..." }</code> and receive the same response contract.</div>
+          </section>
+          <aside class="stack"><div class="aside-card"><h4>Endpoint availability</h4><div class="kv"><span class="k">Draft</span><span class="v" style="color:var(--green)">Ready to test</span></div><div class="kv"><span class="k">Deployed</span><span class="v" style="color:var(--green)">Online</span></div><div class="kv"><span class="k">Access</span><span class="v">Entra ID</span></div><a href="configuration.html">Manage access</a></div><div class="aside-card"><h4>Validation</h4><div class="status-line"><span class="status-icon ok">✓</span>Route is unique</div><div class="status-line"><span class="status-icon ok">✓</span>Required arguments are set</div><div class="status-line"><span class="status-icon ok">✓</span>One run mode selected</div></div><details class="aside-card"><summary>Advanced trigger details</summary><div class="notice" style="margin-top:10px">View the generated trigger fields and raw front matter only when the guided configuration is not sufficient.</div></details></aside>
+        </div>
+      </main>
+    </div>
+    <script>
+      const content={chat:['Chat and API endpoint','Endpoint route','/api/incident-triage','Derived from the skill filename.'],schedule:['Schedule','Schedule expression','0 0 7 * * *','Runs every day at 7:00 AM UTC.'],data:['Data event','Event source','Storage queue · incidents','A sample event payload will be available in Test.'],service:['Connected service event','Service and event','Outlook · New email arrives','Uses the Operations Outlook connection.'],internal:['Internal delegation','Routing name','delegate_incident_triage','Endpoint authentication does not apply to internal delegation.']};
+      document.querySelectorAll('[data-mode]').forEach(tile=>tile.onclick=()=>{document.querySelectorAll('[data-mode]').forEach(x=>x.classList.remove('active'));tile.classList.add('active');const v=content[tile.dataset.mode];document.querySelector('#mode-config h3').textContent=v[0];document.querySelector('#mode-config label').textContent=v[1];document.querySelector('#mode-config input').value=v[2];document.querySelector('#mode-config .hint').textContent=v[3]});
+    </script>
+  </body>
+</html>

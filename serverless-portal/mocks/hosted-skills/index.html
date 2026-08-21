@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hosted Skills - Contoso Operations</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="appbar">
+      <a class="brand" href="../index.html"><span class="brand-mark">AI</span><span class="brand-name">AI Apps</span></a>
+      <div class="breadcrumb" style="margin: 0"><a href="../index.html">All Apps</a> / Contoso Operations</div>
+      <div class="appbar-spacer"></div>
+      <button class="btn ghost sm" aria-label="Search">Search</button>
+      <a class="btn primary sm" href="create-app.html">New App</a>
+      <div class="appbar-user" title="Signed in">SN</div>
+    </header>
+
+    <div class="app-shell">
+      <aside class="app-nav">
+        <div class="app-nav-head">
+          <div class="app-nav-title"><span class="brand-mark">CO</span> Contoso Operations</div>
+          <div class="app-nav-sub">Function App · East US 2</div>
+        </div>
+        <a class="app-nav-link" href="overview.html"><span class="ico">⌂</span>Overview</a>
+        <a class="app-nav-link active" href="index.html"><span class="ico">✦</span>Hosted Skills <span class="n">4</span></a>
+        <a class="app-nav-link" href="tools.html"><span class="ico">⌘</span>Tools and Knowledge <span class="n">7</span></a>
+        <a class="app-nav-link" href="connections.html"><span class="ico">⇄</span>Connections <span class="n">3</span></a>
+        <a class="app-nav-link" href="configuration.html"><span class="ico">⚙</span>Configuration</a>
+        <a class="app-nav-link" href="operations.html"><span class="ico">◫</span>Operations</a>
+        <a class="app-nav-link" href="deploy.html"><span class="ico">↑</span>Deployment</a>
+        <div class="app-nav-group">Advanced</div>
+        <a class="app-nav-link" href="source-recovery.html"><span class="ico">{ }</span>Source</a>
+      </aside>
+
+      <main class="app-content">
+        <div class="draft-bar">
+          <span class="draft-dot"></span>
+          <span class="draft-title">Draft: 3 changes</span>
+          <span class="draft-list">Incident Triage instructions · Daily Brief schedule · 1 new skill</span>
+          <span class="draft-spacer"></span>
+          <a class="btn sm" href="skill-test.html">Test</a>
+          <a class="btn primary sm" href="deploy.html">Review and deploy</a>
+        </div>
+
+        <div class="breadcrumb"><a href="../index.html">All Apps</a> / Contoso Operations / Hosted Skills</div>
+        <div class="page-title">
+          <h1>Hosted Skills</h1>
+          <span class="badge green"><span class="dot"></span>App healthy</span>
+        </div>
+        <p class="page-sub">Build and operate the AI behaviors hosted by this app.</p>
+
+        <div class="toolbar">
+          <input type="text" aria-label="Search hosted skills" placeholder="Search hosted skills" style="max-width: 320px" />
+          <select aria-label="Filter by run type" style="max-width: 190px">
+            <option>All run types</option>
+            <option>Chat or API</option>
+            <option>Schedule</option>
+            <option>Data event</option>
+            <option>Internal only</option>
+          </select>
+          <div class="appbar-spacer"></div>
+          <a class="btn primary" href="new-skill.html">+ New Hosted Skill</a>
+        </div>
+
+        <div class="skill-list">
+          <a class="skill-row is-draft" href="skill.html">
+            <div class="skill-cell">
+              <span class="skill-title">Incident Triage</span>
+              <span class="skill-slug">incident-triage</span>
+              <span class="skill-chips"><span class="skill-chip brand">Draft changes</span></span>
+            </div>
+            <div class="skill-cell"><span class="k">How it runs</span><span class="v">Chat or API</span><span class="skill-chip">/api/incident-triage</span></div>
+            <div class="skill-cell"><span class="k">What it can use</span><span class="v">3 tools · 1 knowledge module</span><span class="skill-chips"><span class="skill-chip">ServiceNow</span><span class="skill-chip">severity-rubric</span></span></div>
+            <div class="skill-cell"><span class="k">Access</span><span class="v">Entra ID</span><span class="skill-chip green">App default</span></div>
+            <div class="health-strip"><span class="dot ok"></span><span><span class="n">Healthy</span><br /><span class="lbl">12 runs today</span></span></div>
+          </a>
+
+          <a class="skill-row" href="skill.html">
+            <div class="skill-cell"><span class="skill-title">Daily Operations Brief</span><span class="skill-slug">daily-operations-brief</span></div>
+            <div class="skill-cell"><span class="k">How it runs</span><span class="v">Schedule · 7:00 AM daily</span><span class="skill-chip">0 0 7 * * *</span></div>
+            <div class="skill-cell"><span class="k">What it can use</span><span class="v">2 tools · 2 connections</span><span class="skill-chips"><span class="skill-chip">Azure</span><span class="skill-chip">Outlook</span></span></div>
+            <div class="skill-cell"><span class="k">Access</span><span class="v">Internal only</span></div>
+            <div class="health-strip"><span class="dot warn"></span><span><span class="n">Needs attention</span><br /><span class="lbl">Last run failed</span></span></div>
+          </a>
+
+          <a class="skill-row" href="skill.html">
+            <div class="skill-cell"><span class="skill-title">Change Explainer</span><span class="skill-slug">change-explainer</span></div>
+            <div class="skill-cell"><span class="k">How it runs</span><span class="v">Data event · Queue</span><span class="skill-chip">resource-changes</span></div>
+            <div class="skill-cell"><span class="k">What it can use</span><span class="v">1 tool · 1 knowledge module</span><span class="skill-chips"><span class="skill-chip">azure_rest</span></span></div>
+            <div class="skill-cell"><span class="k">Access</span><span class="v">Function key</span></div>
+            <div class="health-strip"><span class="dot ok"></span><span><span class="n">Healthy</span><br /><span class="lbl">48 runs today</span></span></div>
+          </a>
+
+          <a class="skill-row is-draft" href="skill.html">
+            <div class="skill-cell"><span class="skill-title">Executive Summary</span><span class="skill-slug">executive-summary</span><span class="skill-chips"><span class="skill-chip brand">New draft</span></span></div>
+            <div class="skill-cell"><span class="k">How it runs</span><span class="v">Internal only</span><span class="skill-chip">Delegated</span></div>
+            <div class="skill-cell"><span class="k">What it can use</span><span class="v">No dependencies</span></div>
+            <div class="skill-cell"><span class="k">Access</span><span class="v">Other hosted skills</span></div>
+            <div class="health-strip"><span class="dot warn"></span><span><span class="n">Not deployed</span><br /><span class="lbl">Test before deploy</span></span></div>
+          </a>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

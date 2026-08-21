@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Contoso Operations</title><link rel="stylesheet" href="styles.css" /></head>
+  <body>
+    <header class="appbar"><a class="brand" href="../index.html"><span class="brand-mark">AI</span><span class="brand-name">AI Apps</span></a><div class="breadcrumb" style="margin:0"><a href="../index.html">All Apps</a> / Contoso Operations</div><div class="appbar-spacer"></div><button class="btn ghost sm">Search</button><a class="btn primary sm" href="create-app.html">New App</a><div class="appbar-user">SN</div></header>
+    <div class="app-shell">
+      <aside class="app-nav">
+        <div class="app-nav-head"><div class="app-nav-title"><span class="brand-mark">CO</span> Contoso Operations</div><div class="app-nav-sub">Function App · East US 2</div></div>
+        <a class="app-nav-link active" href="overview.html"><span class="ico">⌂</span>Overview</a><a class="app-nav-link" href="index.html"><span class="ico">✦</span>Hosted Skills <span class="n">4</span></a><a class="app-nav-link" href="tools.html"><span class="ico">⌘</span>Tools and Knowledge</a><a class="app-nav-link" href="connections.html"><span class="ico">⇄</span>Connections</a><a class="app-nav-link" href="configuration.html"><span class="ico">⚙</span>Configuration</a><a class="app-nav-link" href="operations.html"><span class="ico">◫</span>Operations</a><a class="app-nav-link" href="deploy.html"><span class="ico">↑</span>Deployment</a><div class="app-nav-group">Advanced</div><a class="app-nav-link" href="source-recovery.html"><span class="ico">{ }</span>Source</a>
+      </aside>
+      <main class="app-content">
+        <div class="draft-bar"><span class="draft-dot"></span><span class="draft-title">Draft: 3 changes</span><span class="draft-list">Changes are separate from the deployed app</span><span class="draft-spacer"></span><a class="btn sm" href="skill-test.html">Test</a><a class="btn primary sm" href="deploy.html">Review and deploy</a></div>
+        <div class="breadcrumb"><a href="../index.html">All Apps</a> / Contoso Operations</div><div class="page-title"><h1>Contoso Operations</h1><span class="badge green"><span class="dot"></span>Running</span></div><p class="page-sub">Operations support and automated reporting for Contoso's Azure estate.</p>
+        <div class="summary-grid">
+          <div class="summary-block"><div class="eyebrow">Currently deployed</div><div class="big">Version 24</div><div class="detail">Deployed today at 10:42 AM · 4 Hosted Skills</div></div>
+          <div class="summary-block"><div class="eyebrow">Draft changes</div><div class="big">3 changes</div><div class="detail">2 skills updated · 1 skill added</div></div>
+          <div class="summary-block"><div class="eyebrow">Health</div><div class="big" style="color:var(--amber)">1 needs attention</div><div class="detail">Daily Operations Brief failed at 7:00 AM</div></div>
+        </div>
+        <div class="section-head"><div><h2>Continue building</h2><p>The most useful next actions for this app.</p></div></div>
+        <div class="grid cols-2">
+          <a class="card" href="index.html"><div class="card-head"><h3>Hosted Skills</h3><span class="badge blue">Primary workspace</span></div><p class="muted">Edit instructions, choose how skills run, assign dependencies, test, and deploy.</p><span class="btn primary sm">Open Hosted Skills</span></a>
+          <a class="card" href="operations.html"><div class="card-head"><h3>Investigate the failed run</h3><span class="badge amber">Action needed</span></div><p class="muted">The Outlook connection returned an expired credential during today's scheduled brief.</p><span class="btn sm">View run details</span></a>
+        </div>
+        <div class="section-head"><div><h2>App configuration</h2><p>Shared defaults inherited by Hosted Skills unless overridden.</p></div><div class="spacer"></div><a class="btn sm" href="configuration.html">Manage configuration</a></div>
+        <div class="card"><dl class="meta-grid"><dt>Model provider</dt><dd>Microsoft Foundry · gpt-5.4</dd><dt>Default access</dt><dd>Entra ID</dd><dt>Managed identity</dt><dd>System assigned</dd><dt>Source</dt><dd>GitHub · contoso/operations-agents · main</dd><dt>Region</dt><dd>East US 2</dd></dl></div>
+      </main>
+    </div>
+  </body>
+</html>

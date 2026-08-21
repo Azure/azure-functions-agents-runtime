@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Incident Triage</title><link rel="stylesheet" href="styles.css" /></head>
+  <body>
+    <header class="appbar"><a class="brand" href="../index.html"><span class="brand-mark">AI</span><span class="brand-name">AI Apps</span></a><div class="breadcrumb" style="margin:0"><a href="../index.html">All Apps</a> / <a href="overview.html">Contoso Operations</a> / Incident Triage</div><div class="appbar-spacer"></div><div class="appbar-user">SN</div></header>
+    <div class="app-shell">
+      <aside class="app-nav"><div class="app-nav-head"><div class="app-nav-title"><span class="brand-mark">CO</span> Contoso Operations</div><div class="app-nav-sub">Function App · East US 2</div></div><a class="app-nav-link" href="overview.html"><span class="ico">⌂</span>Overview</a><a class="app-nav-link active" href="index.html"><span class="ico">✦</span>Hosted Skills</a><a class="app-nav-link" href="tools.html"><span class="ico">⌘</span>Tools and Knowledge</a><a class="app-nav-link" href="connections.html"><span class="ico">⇄</span>Connections</a><a class="app-nav-link" href="configuration.html"><span class="ico">⚙</span>Configuration</a><a class="app-nav-link" href="operations.html"><span class="ico">◫</span>Operations</a><a class="app-nav-link" href="deploy.html"><span class="ico">↑</span>Deployment</a></aside>
+      <main class="app-content">
+        <div class="draft-bar"><span class="draft-dot"></span><span class="draft-title">Draft: 3 changes</span><span class="draft-list">Editing Incident Triage</span><span class="draft-spacer"></span><a class="btn sm" href="skill-test.html">Test</a><a class="btn primary sm" href="deploy.html">Review and deploy</a></div>
+        <div class="breadcrumb"><a href="index.html">Hosted Skills</a> / Incident Triage</div><div class="page-title"><h1>Incident Triage</h1><span class="badge blue">Draft differs from deployed</span></div><p class="page-sub"><span class="mono">incident-triage</span> · Chat or API · Last deployed today at 10:42 AM</p>
+        <nav class="subtabs" aria-label="Hosted Skill sections"><button class="subtab active">Instructions</button><a class="subtab" href="how-it-runs.html">How it runs</a><a class="subtab" href="what-it-can-use.html">What it can use</a><button class="subtab">Access</button><a class="subtab" href="skill-test.html">Test</a><a class="subtab" href="operations.html">Runs</a></nav>
+        <div class="skill-editor">
+          <section class="instructions"><div class="instructions-head"><strong>Instructions</strong><span class="badge blue">2 unsaved edits</span><div class="appbar-spacer"></div><button class="btn sm" id="compare">Compare deployed</button></div><textarea id="instructions">You are the incident triage specialist for Contoso Operations.
+
+For every incident:
+1. Identify the affected service and customer impact.
+2. Apply the severity rubric from the included knowledge module.
+3. Check ServiceNow for related active incidents.
+4. Recommend the next safe diagnostic action.
+
+Never make production changes. Ask for confirmation before creating or updating a ticket.</textarea></section>
+          <aside class="aside-stack">
+            <div class="aside-card"><h4>How it runs</h4><div class="val">Chat or API</div><div class="val mono">/api/incident-triage</div><a href="how-it-runs.html">Change</a></div>
+            <div class="aside-card"><h4>Inherited configuration</h4><div class="kv"><span class="k">Model</span><span class="v">gpt-5.4</span></div><div class="kv"><span class="k">Timeout</span><span class="v">5 minutes</span></div><div class="kv"><span class="k">Access</span><span class="v">Entra ID</span></div><div class="hint">Inherited from Contoso Operations. Skill overrides are shown here when set.</div></div>
+            <div class="aside-card"><h4>What it can use</h4><div class="skill-chips"><span class="skill-chip">ServiceNow</span><span class="skill-chip">azure_rest</span><span class="skill-chip">web_request</span><span class="skill-chip green">severity-rubric</span></div><a href="what-it-can-use.html">Manage assignments</a></div>
+            <details class="aside-card"><summary>Advanced source</summary><div class="notice" style="margin-top:10px">File: <code>incident-triage.agent.md</code><br />Edit raw markdown and YAML only when guided fields are not sufficient.</div></details>
+          </aside>
+        </div>
+      </main>
+    </div>
+    <script>document.getElementById('compare').onclick=()=>{const t=document.getElementById('instructions');t.value='DEPLOYED\n- Recommend a diagnostic action.\n\nDRAFT\n+ Recommend the next safe diagnostic action.\n+ Ask for confirmation before creating or updating a ticket.';t.style.color='var(--brand-dark)'}</script>
+  </body>
+</html>

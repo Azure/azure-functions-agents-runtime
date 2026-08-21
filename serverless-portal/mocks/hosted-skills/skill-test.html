@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Test Incident Triage</title><link rel="stylesheet" href="styles.css" /></head>
+  <body>
+    <header class="appbar"><a class="brand" href="../index.html"><span class="brand-mark">AI</span><span class="brand-name">AI Apps</span></a><div class="breadcrumb" style="margin:0"><a href="../index.html">All Apps</a> / <a href="overview.html">Contoso Operations</a> / Incident Triage</div><div class="appbar-spacer"></div><div class="appbar-user">SN</div></header>
+    <div class="app-shell">
+      <aside class="app-nav"><div class="app-nav-head"><div class="app-nav-title"><span class="brand-mark">CO</span> Contoso Operations</div><div class="app-nav-sub">Function App · East US 2</div></div><a class="app-nav-link" href="overview.html"><span class="ico">⌂</span>Overview</a><a class="app-nav-link active" href="index.html"><span class="ico">✦</span>Hosted Skills</a><a class="app-nav-link" href="tools.html"><span class="ico">⌘</span>Tools and Knowledge</a><a class="app-nav-link" href="connections.html"><span class="ico">⇄</span>Connections</a><a class="app-nav-link" href="configuration.html"><span class="ico">⚙</span>Configuration</a><a class="app-nav-link" href="operations.html"><span class="ico">◫</span>Operations</a><a class="app-nav-link" href="deploy.html"><span class="ico">↑</span>Deployment</a></aside>
+      <main class="app-content">
+        <div class="draft-bar"><span class="draft-dot"></span><span class="draft-title">Testing draft</span><span class="draft-list">This run does not affect the deployed skill</span><span class="draft-spacer"></span><a class="btn primary sm" href="deploy.html">Review and deploy</a></div>
+        <div class="breadcrumb"><a href="index.html">Hosted Skills</a> / <a href="skill.html">Incident Triage</a> / Test</div><div class="page-title"><h1>Test Incident Triage</h1><span class="badge blue">Draft configuration</span></div><p class="page-sub">Send sample input and inspect responses, tool activity, and errors before deployment.</p>
+        <nav class="subtabs"><a class="subtab" href="skill.html">Instructions</a><button class="subtab">How it runs</button><button class="subtab">What it can use</button><button class="subtab">Access</button><button class="subtab active">Test</button><a class="subtab" href="operations.html">Runs</a></nav>
+        <div class="test-strip">
+          <section class="test-thread">
+            <div class="test-msg user"><span class="avatar user">SN</span><div class="bubble">Checkout API errors increased to 18% after deployment 8421. Customers in West Europe cannot complete purchases.</div></div>
+            <div class="test-msg"><span class="avatar bot">IT</span><div class="bubble"><strong>Proposed severity: SEV 2</strong><br />Customer checkout is materially degraded in one region following a known deployment. I found incident INC001284 with similar symptoms. Recommended next action: compare deployment 8421's configuration diff and error trace before rollback.</div></div>
+            <div class="test-input"><input id="test-input" placeholder="Send another test message" /><button class="btn primary" id="send-test">Send</button></div>
+          </section>
+          <aside class="stack">
+            <div class="aside-card"><h4>Tool activity</h4><div class="status-line"><span class="status-icon ok">✓</span><span><strong>severity-rubric</strong><br /><span class="muted">Loaded reference</span></span></div><div class="status-line"><span class="status-icon ok">✓</span><span><strong>ServiceNow</strong><br /><span class="muted">Searched active incidents · 426 ms</span></span></div><div class="status-line"><span class="status-icon ok">✓</span><span><strong>azure_rest</strong><br /><span class="muted">Read deployment metadata · 311 ms</span></span></div></div>
+            <div class="aside-card"><h4>Run details</h4><div class="kv"><span class="k">Result</span><span class="v" style="color:var(--green)">Passed</span></div><div class="kv"><span class="k">Duration</span><span class="v">2.4 s</span></div><div class="kv"><span class="k">Model</span><span class="v">gpt-5.4</span></div><div class="kv"><span class="k">Trace</span><a href="operations.html">Open trace</a></div></div>
+            <details class="aside-card"><summary>Run locally instead</summary><pre class="code-panel" style="margin-top:10px">func start
+azd auth login
+# Requires Azurite on 10000-10002</pre></details>
+          </aside>
+        </div>
+      </main>
+    </div>
+    <script>document.getElementById('send-test').onclick=()=>{const i=document.getElementById('test-input');if(!i.value.trim())return;const m=document.createElement('div');m.className='test-msg user';m.innerHTML='<span class="avatar user">SN</span><div class="bubble"></div>';m.querySelector('.bubble').textContent=i.value;i.value='';document.querySelector('.test-thread').insertBefore(m,document.querySelector('.test-input'))}</script>
+  </body>
+</html>

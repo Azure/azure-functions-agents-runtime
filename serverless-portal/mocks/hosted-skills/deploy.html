@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Review and Deploy</title><link rel="stylesheet" href="styles.css" /></head>
+  <body>
+    <header class="appbar"><a class="brand" href="../index.html"><span class="brand-mark">AI</span><span class="brand-name">AI Apps</span></a><div class="breadcrumb" style="margin:0"><a href="../index.html">All Apps</a> / <a href="overview.html">Contoso Operations</a> / Deployment</div><div class="appbar-spacer"></div><div class="appbar-user">SN</div></header>
+    <div class="app-shell">
+      <aside class="app-nav"><div class="app-nav-head"><div class="app-nav-title"><span class="brand-mark">CO</span> Contoso Operations</div><div class="app-nav-sub">Function App · East US 2</div></div><a class="app-nav-link" href="overview.html"><span class="ico">⌂</span>Overview</a><a class="app-nav-link" href="index.html"><span class="ico">✦</span>Hosted Skills</a><a class="app-nav-link" href="tools.html"><span class="ico">⌘</span>Tools and Knowledge</a><a class="app-nav-link" href="connections.html"><span class="ico">⇄</span>Connections</a><a class="app-nav-link" href="configuration.html"><span class="ico">⚙</span>Configuration</a><a class="app-nav-link" href="operations.html"><span class="ico">◫</span>Operations</a><a class="app-nav-link active" href="deploy.html"><span class="ico">↑</span>Deployment</a></aside>
+      <main class="app-content">
+        <div class="breadcrumb"><a href="overview.html">Contoso Operations</a> / Deployment</div><div class="page-title"><h1>Review and deploy</h1><span class="badge blue">3 draft changes</span></div><p class="page-sub">Confirm exactly what will change in the deployed app.</p>
+        <div class="split">
+          <section class="stack">
+            <div class="card"><div class="card-head"><h3>Changes</h3><span class="muted">Draft compared with version 24</span></div><div class="changeset"><div class="changeset-row"><span class="kind mod">Modified</span><span class="path">incident-triage.agent.md</span><span class="diff">+3 −1</span></div><div class="changeset-row"><span class="kind mod">Modified</span><span class="path">daily-operations-brief.agent.md</span><span class="diff">Schedule changed</span></div><div class="changeset-row"><span class="kind add">Added</span><span class="path">executive-summary.agent.md</span><span class="diff">New internal skill</span></div></div></div>
+            <div class="card"><div class="card-head"><h3>Validation</h3><span class="badge green"><span class="dot"></span>Passed</span></div><div class="status-line"><span class="status-icon ok">✓</span>No slug or route collisions</div><div class="status-line"><span class="status-icon ok">✓</span>All triggers and required arguments are valid</div><div class="status-line"><span class="status-icon ok">✓</span>All app settings and connection URLs resolve</div><div class="status-line"><span class="status-icon ok">✓</span>Delegation references are valid and one level deep</div></div>
+            <details class="card"><summary><strong>View generated source changes</strong></summary><pre class="code-panel" style="margin-top:12px">--- deployed
++++ draft
+@@ instructions
+- Recommend a diagnostic action.
++ Recommend the next safe diagnostic action.
++ Ask for confirmation before updating a ticket.</pre></details>
+          </section>
+          <aside class="stack"><div class="summary-block"><div class="eyebrow">Target</div><div class="big">Contoso Operations</div><div class="detail">Production · East US 2<br />Current version 24</div></div><div class="aside-card"><h4>Test status</h4><div class="status-line"><span class="status-icon ok">✓</span>Incident Triage passed</div><div class="status-line"><span class="status-icon warn">!</span>Daily Operations Brief not tested</div><a href="skill-test.html">Run remaining tests</a></div><button class="btn primary" id="deploy-now">Deploy 3 changes</button><a class="btn" href="index.html" style="justify-content:center">Return to draft</a><div class="notice" id="deploy-status"><strong>Deployment has not started.</strong><br />Draft changes remain separate until you deploy.</div></aside>
+        </div>
+      </main>
+    </div>
+    <script>document.getElementById('deploy-now').onclick=()=>{document.getElementById('deploy-status').innerHTML='<strong style="color:var(--green)">Deployment started.</strong><br>Validating startup and promoting version 25. You can leave this page.';document.getElementById('deploy-now').disabled=true}</script>
+  </body>
+</html>

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Restore Source Access</title><link rel="stylesheet" href="styles.css" /></head>
+  <body>
+    <header class="appbar"><a class="brand" href="../index.html"><span class="brand-mark">AI</span><span class="brand-name">AI Apps</span></a><div class="breadcrumb" style="margin:0"><a href="../index.html">All Apps</a> / <a href="overview.html">Contoso Operations</a> / Source</div><div class="appbar-spacer"></div><div class="appbar-user">SN</div></header>
+    <div class="app-shell">
+      <aside class="app-nav"><div class="app-nav-head"><div class="app-nav-title"><span class="brand-mark">CO</span> Contoso Operations</div><div class="app-nav-sub">Function App · East US 2</div></div><a class="app-nav-link" href="overview.html"><span class="ico">⌂</span>Overview</a><a class="app-nav-link" href="index.html"><span class="ico">✦</span>Hosted Skills</a><a class="app-nav-link" href="tools.html"><span class="ico">⌘</span>Tools and Knowledge</a><a class="app-nav-link" href="connections.html"><span class="ico">⇄</span>Connections</a><a class="app-nav-link" href="configuration.html"><span class="ico">⚙</span>Configuration</a><a class="app-nav-link" href="operations.html"><span class="ico">◫</span>Operations</a><a class="app-nav-link" href="deploy.html"><span class="ico">↑</span>Deployment</a><div class="app-nav-group">Advanced</div><a class="app-nav-link active" href="source-recovery.html"><span class="ico">{ }</span>Source</a></aside>
+      <main class="app-content" style="max-width:1000px">
+        <div class="breadcrumb"><a href="overview.html">Contoso Operations</a> / Source</div><div class="page-title"><h1>Restore source access</h1><span class="badge amber">Editing paused</span></div><p class="page-sub">The portal cannot read the source used by the current deployment. No draft has been created.</p>
+        <div class="recovery"><span class="rico">!</span><div><b>Source access expired for contoso/operations-agents.</b><br />Reconnect the repository or grant the portal identity read and write access before editing or deploying.</div></div>
+        <div class="section-head"><div><h2>Choose a recovery path</h2><p>The selected option determines the source of truth and future deployment path.</p></div></div>
+        <div class="choice-list">
+          <label class="choice selected"><input type="radio" name="recovery" checked /><span><span class="title">Connect source</span><span class="desc">Reconnect GitHub or choose a different repository and branch. Best when the repository is still the source of truth.</span></span><button class="btn primary sm" style="margin-left:auto">Connect GitHub</button></label>
+          <label class="choice"><input type="radio" name="recovery" /><span><span class="title">Grant access</span><span class="desc">Keep the current source and open the exact permission required for the portal managed identity.</span></span><button class="btn sm" style="margin-left:auto">View permission</button></label>
+          <label class="choice"><input type="radio" name="recovery" /><span><span class="title">View deployment source</span><span class="desc">Inspect the read-only package currently running in Azure. This does not create an editable draft.</span></span><button class="btn sm" style="margin-left:auto">Open read-only source</button></label>
+        </div>
+        <div class="summary-grid" style="margin-top:18px"><div class="summary-block"><div class="eyebrow">Current source of truth</div><div class="big">GitHub</div><div class="detail">contoso/operations-agents · main</div></div><div class="summary-block"><div class="eyebrow">Deployed from</div><div class="big">Commit 43a9c21</div><div class="detail">Today at 10:42 AM</div></div><div class="summary-block"><div class="eyebrow">Draft status</div><div class="big">None</div><div class="detail">Editing remains disabled until access is restored.</div></div></div>
+      </main>
+    </div>
+  </body>
+</html>
