@@ -136,11 +136,19 @@ export default function DraftAppPage() {
     openaiEndpoint: draft.foundryOpenaiEndpoint,
     model: draft.foundryModel,
   }
+  // Debounce the description used for capability planning so typing doesn't
+  // spin up a new query on every keystroke and flicker the results panel.
+  const [debouncedDescription, setDebouncedDescription] = useState(draft.description)
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedDescription(draft.description), 400)
+    return () => clearTimeout(handle)
+  }, [draft.description])
+
   const { data: planData, isFetching: planning } = useQuery({
-    queryKey: ['plan-capabilities', targetSub, draft.name, draft.foundryModel, draft.description],
+    queryKey: ['plan-capabilities', targetSub, draft.name, draft.foundryModel, debouncedDescription],
     queryFn: () =>
-      api.planCapabilities({ subscription: targetSub, description: draft.description, foundry: foundryForGen }),
-    enabled: capsEnabled && !!draft.foundryAccount && !!draft.foundryOpenaiEndpoint && !!draft.description.trim(),
+      api.planCapabilities({ subscription: targetSub, description: debouncedDescription, foundry: foundryForGen }),
+    enabled: capsEnabled && !!draft.foundryAccount && !!draft.foundryOpenaiEndpoint && !!debouncedDescription.trim(),
     staleTime: Infinity,
     refetchOnMount: false,
   })
@@ -622,14 +630,64 @@ export default function DraftAppPage() {
           {deployJob.phase === 'deployed' && deployedAppName && (
             <div className="card">
               <div className="card-head">
-                <h3 style={{ margin: 0 }}>✓ Deployed</h3>
+                <h3 style={{ margin: 0 }}>✓ Deployed — what's next?</h3>
               </div>
-              <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
-                <Link to={`/apps/${encodeURIComponent(targetSub)}/${encodeURIComponent(deployedAppName)}`}>
-                  Open the app →
-                </Link>{' '}
-                to manage its agents, MCP servers, tools/triggers, and code.
+              <p className="muted" style={{ fontSize: 13, marginTop: 0, marginBottom: 12 }}>
+                Three small things will take you from a running app to a demo-able flow.
               </p>
+              <ol className="next-steps">
+                <li>
+                  <span className="next-step-num">1</span>
+                  <div>
+                    <div className="next-step-title">Test in the playground</div>
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      Send a real prompt through the built-in chat endpoint. Tools + MCP calls stream into
+                      the trace panel so you can verify wiring.
+                    </div>
+                    <Link
+                      className="btn sm"
+                      style={{ marginTop: 6 }}
+                      to={`/playground/${encodeURIComponent(targetSub)}/${encodeURIComponent(deployedAppName)}`}
+                    >
+                      Open Playground →
+                    </Link>
+                  </div>
+                </li>
+                <li>
+                  <span className="next-step-num">2</span>
+                  <div>
+                    <div className="next-step-title">Connect GitHub for CI/CD</div>
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      Push the app's source to a repo so a `git push` re-deploys it — no more portal round-trips
+                      once the workflow is set up.
+                    </div>
+                    <Link
+                      className="btn sm"
+                      style={{ marginTop: 6 }}
+                      to={`/apps/${encodeURIComponent(targetSub)}/${encodeURIComponent(deployedAppName)}#github`}
+                    >
+                      Connect GitHub →
+                    </Link>
+                  </div>
+                </li>
+                <li>
+                  <span className="next-step-num">3</span>
+                  <div>
+                    <div className="next-step-title">Add a tool, MCP server, or skill</div>
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      Give the agent an ability — a Python <code>@tool</code>, a remote MCP endpoint, or a
+                      Markdown skill. Every change saves as a draft; <strong>Deploy edits</strong> pushes them.
+                    </div>
+                    <Link
+                      className="btn sm"
+                      style={{ marginTop: 6 }}
+                      to={`/apps/${encodeURIComponent(targetSub)}/${encodeURIComponent(deployedAppName)}`}
+                    >
+                      Open the app →
+                    </Link>
+                  </div>
+                </li>
+              </ol>
             </div>
           )}
         </div>

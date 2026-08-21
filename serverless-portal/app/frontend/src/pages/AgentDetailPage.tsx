@@ -433,6 +433,7 @@ export default function AgentDetailPage() {
                     fallback={markdown}
                     renderActions={renderPrAction}
                     onSaved={onAgentSaved}
+                    validationKind="agent.md"
                   />
                 </>
               )}

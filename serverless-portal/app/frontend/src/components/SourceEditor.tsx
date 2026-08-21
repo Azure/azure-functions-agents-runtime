@@ -8,6 +8,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, Tooltip } from '@coreai/fluentui-react'
 import { CopyRegular, CheckmarkRegular } from '@fluentui/react-icons'
 import { consentStorageAccess } from '../auth'
+import { api, type ValidationIssue } from '../api'
 
 export function CopyButton({ text, title }: { text: string; title: string }) {
   const [copied, setCopied] = useState(false)
@@ -40,6 +41,7 @@ export function DraftEditor({
   fallback,
   renderActions,
   onSaved,
+  validationKind,
 }: {
   queryKey: unknown[]
   load: () => Promise<{ content: string; source: string }>
@@ -47,6 +49,10 @@ export function DraftEditor({
   fallback: string
   renderActions?: (s: { source: string; dirty: boolean }) => ReactNode
   onSaved?: () => void
+  // When set to 'agent.md', the current content is validated against the
+  // runtime's schema on every keystroke (debounced) and errors are shown inline
+  // below the editor. Prevents users from discovering typos on deploy.
+  validationKind?: 'agent.md'
 }) {
   const qc = useQueryClient()
   const [grantBusy, setGrantBusy] = useState(false)
@@ -72,6 +78,25 @@ export function DraftEditor({
       onSaved?.()
     },
   })
+
+  // Debounced schema validation for `.agent.md` — hits the backend which
+  // parses the YAML frontmatter and checks it against the runtime's rules.
+  const [validation, setValidation] = useState<{ errors: ValidationIssue[]; warnings: ValidationIssue[] } | null>(null)
+  useEffect(() => {
+    if (validationKind !== 'agent.md') return
+    const current = text ?? data?.content ?? ''
+    if (!current.trim()) {
+      setValidation(null)
+      return
+    }
+    const handle = setTimeout(() => {
+      api
+        .validateAgentMd(current)
+        .then((r) => setValidation({ errors: r.errors, warnings: r.warnings }))
+        .catch(() => setValidation(null))
+    }, 350)
+    return () => clearTimeout(handle)
+  }, [text, data?.content, validationKind])
 
   if (isLoading) return <p className="muted">Loading…</p>
   if (error) return <p className="muted">Couldn’t load: {(error as Error).message}</p>
@@ -157,6 +182,36 @@ export function DraftEditor({
         onChange={(e) => setText(e.target.value)}
         aria-label="Source editor"
       />
+      {validationKind === 'agent.md' && validation && (validation.errors.length > 0 || validation.warnings.length > 0) && (
+        <div className={'validation-panel' + (validation.errors.length > 0 ? ' has-errors' : ' has-warnings')}>
+          <div className="validation-head">
+            {validation.errors.length > 0 ? (
+              <span className="badge red">
+                {validation.errors.length} error{validation.errors.length > 1 ? 's' : ''}
+              </span>
+            ) : (
+              <span className="badge amber">
+                {validation.warnings.length} warning{validation.warnings.length > 1 ? 's' : ''}
+              </span>
+            )}
+            <span className="muted" style={{ fontSize: 12 }}>
+              These will block or degrade the next deploy. Fix before publishing.
+            </span>
+          </div>
+          <ul className="validation-list">
+            {validation.errors.map((e, i) => (
+              <li key={`e${i}`} className="validation-error">
+                <span className="mono">{e.path}</span> · {e.message}
+              </li>
+            ))}
+            {validation.warnings.map((w, i) => (
+              <li key={`w${i}`} className="validation-warning">
+                <span className="mono">{w.path}</span> · {w.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {saveMutation.isError && (
         <p className="muted" style={{ color: 'var(--red)', fontSize: 12 }}>
           Save failed: {(saveMutation.error as Error).message}

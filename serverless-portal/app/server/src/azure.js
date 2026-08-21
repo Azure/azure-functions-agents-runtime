@@ -1852,6 +1852,70 @@ export async function grantFoundryAccess(accessToken, { subscriptionId, resource
   return { granted, failed, scope }
 }
 
+// End-to-end "Grant access" for a running app: resolve its managed identity
+// principalId + the Foundry account it's configured to call, then grant
+// Cognitive Services User + OpenAI User to it. Returns
+// `{ granted, failed, scope, principalId, account }`. Called by the Playground's
+// self-heal button when a chat returns 403 / permission-denied.
+export async function healFoundryAccess(accessToken, subscriptionId, resourceGroup, appName) {
+  const site = await getSite(accessToken, subscriptionId, resourceGroup, appName)
+  if (!site) throw Object.assign(new Error(`Function App "${appName}" was not found.`), { status: 404 })
+  const principalId = site?.identity?.principalId || ''
+  if (!principalId) {
+    throw Object.assign(
+      new Error("This app has no system-assigned managed identity. Enable one on the Function App first."),
+      { status: 409 },
+    )
+  }
+  const settings = await readAppSettings(accessToken, subscriptionId, resourceGroup, appName)
+  const endpoint = String(settings.FOUNDRY_PROJECT_ENDPOINT || settings.AZURE_OPENAI_ENDPOINT || '').trim()
+  if (!endpoint) {
+    throw Object.assign(
+      new Error('No FOUNDRY_PROJECT_ENDPOINT app setting on this app — nothing to grant.'),
+      { status: 404 },
+    )
+  }
+  let host
+  try {
+    host = new URL(endpoint).hostname
+  } catch {
+    throw Object.assign(new Error(`Invalid Foundry endpoint: ${endpoint}`), { status: 400 })
+  }
+  const account = host.split('.')[0]
+  if (!account) throw Object.assign(new Error(`Couldn't extract account name from ${host}.`), { status: 400 })
+
+  // Locate the AI Services account across the subscription so we know its RG.
+  let target = null
+  try {
+    const res = await fetch(
+      `https://management.azure.com/subscriptions/${subscriptionId}/providers/Microsoft.CognitiveServices/accounts?api-version=2023-05-01`,
+      { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(15000) },
+    )
+    if (res.ok) {
+      const body = await res.json()
+      target = (body?.value ?? []).find((a) => String(a?.name ?? '') === account)
+    }
+  } catch {
+    /* unavailable — fall through */
+  }
+  if (!target) {
+    throw Object.assign(
+      new Error(
+        `Couldn't find AI Services account "${account}" in this subscription. If it lives in a different subscription, grant access from the Foundry account's IAM blade in the Azure portal instead.`,
+      ),
+      { status: 404 },
+    )
+  }
+  const accountResourceGroup = parseResourceGroup(target.id)
+  const result = await grantFoundryAccess(accessToken, {
+    subscriptionId,
+    resourceGroup: accountResourceGroup,
+    account,
+    principalId,
+  })
+  return { ...result, principalId, account, accountResourceGroup }
+}
+
 // Resolve the authoritative set of agent slugs from the deployed `*.agent.md`
 // files. Prefers Kudu VFS; on Flex Consumption reads the deployment package.
 // `ok` is true only when a source returned the complete file list, so callers

@@ -20,6 +20,16 @@ RUN cd server && npm ci --omit=dev
 COPY app/server/ ./server/
 COPY app/frontend/dist ./frontend/dist
 
+# Runtime samples the portal enumerates via /api/samples. Copied from a
+# pre-staged bundle inside serverless-portal/ so the image doesn't need
+# access outside its build context.
+COPY samples-bundle/ ./samples/
+
+# The server writes portal-side drafts, app-sources scratch, and per-app deploy
+# history under /app/server/.data. COPY ran as root, so we pre-create the
+# subtree and hand it to the non-root user before switching.
+RUN mkdir -p /app/server/.data && chown -R node:node /app/server/.data
+
 ENV PORT=8080
 EXPOSE 8080
 

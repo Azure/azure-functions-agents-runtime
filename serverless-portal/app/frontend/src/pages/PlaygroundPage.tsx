@@ -470,7 +470,35 @@ export default function PlaygroundPage() {
   const [sessionsOpen, setSessionsOpen] = useState(false)
   const [compareOpen, setCompareOpen] = useState(false)
   const [compareKey, setCompareKey] = useState('')
+  const [hitPermissionError, setHitPermissionError] = useState(false)
+  const [grantBusy, setGrantBusy] = useState(false)
+  const [grantMsg, setGrantMsg] = useState('')
   const threadRef = useRef<HTMLDivElement>(null)
+
+  const runGrantAccess = async () => {
+    if (!agent || grantBusy) return
+    setGrantBusy(true)
+    setGrantMsg('')
+    try {
+      const r = await api.healFoundryAccess({
+        subscription: subForQuery,
+        resourceGroup: agent.resourceGroup,
+        app: agent.app,
+      })
+      if (r.granted.length && r.failed.length === 0) {
+        setGrantMsg(`✓ Granted ${r.granted.join(', ')} on ${r.account}. Retry the prompt now.`)
+        setHitPermissionError(false)
+      } else if (r.granted.length) {
+        setGrantMsg(`Partial: granted ${r.granted.join(', ')}; failed ${r.failed.map((f) => f.role).join(', ')}.`)
+      } else {
+        setGrantMsg(`⚠ Grant failed: ${r.failed.map((f) => f.error).join(' · ')}`)
+      }
+    } catch (e) {
+      setGrantMsg(`⚠ ${(e as Error).message}`)
+    } finally {
+      setGrantBusy(false)
+    }
+  }
 
   // Switching agents starts a fresh conversation + trace.
   useEffect(() => {
@@ -584,8 +612,10 @@ export default function PlaygroundPage() {
           finishModel()
           sawError = true
           const raw = String(evt.content || 'Agent error')
-          const hint = /403|permission/i.test(raw)
-            ? '\n\nThe app’s identity may not have access to the Foundry model. Use “Grant access” on the deploy result, or assign it the Cognitive Services User role on the Foundry account.'
+          const isPerm = /403|permission|cognitive/i.test(raw)
+          if (isPerm) setHitPermissionError(true)
+          const hint = isPerm
+            ? '\n\nThe app’s identity may not have access to the Foundry model. Click "Grant access" below to assign the Cognitive Services User role, then retry.'
             : ''
           patchAssistant({
             content: (streamText ? streamText + '\n\n' : '') + '⚠ ' + raw + hint,
@@ -832,6 +862,28 @@ export default function PlaygroundPage() {
                 }}
               />
             </div>
+            {hitPermissionError && (
+              <div className="note" style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span>Foundry permission error detected. Grant this app the roles it needs to call the model:</span>
+                <div style={{ flex: 1 }} />
+                <Button
+                  appearance="primary"
+                  size="small"
+                  onClick={() => void runGrantAccess()}
+                  disabled={grantBusy}
+                >
+                  {grantBusy ? 'Granting…' : '🔑 Grant access'}
+                </Button>
+              </div>
+            )}
+            {grantMsg && (
+              <div
+                className={'note' + (grantMsg.startsWith('✓') ? ' ok' : '')}
+                style={{ marginTop: 10 }}
+              >
+                {grantMsg}
+              </div>
+            )}
           </div>
 
           <aside className="card trace-panel">

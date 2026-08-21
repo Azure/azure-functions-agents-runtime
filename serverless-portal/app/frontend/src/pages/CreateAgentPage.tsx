@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { api } from '../api'
+import { api, type SampleSummary } from '../api'
 import { useIdentity } from '../identity'
 import { Callout, SearchableSelect, Icon } from '../components/ui'
 import { Button, Input } from '@coreai/fluentui-react'
@@ -11,11 +11,78 @@ export default function CreateAgentPage() {
   const navigate = useNavigate()
   const { selected, subscriptions } = useIdentity()
   const [draft, setDraft] = useState<Draft>(loadDraft)
+  const [searchParams, setSearchParams] = useSearchParams()
 
   // Persist to sessionStorage on every change (auto-save for the session).
   useEffect(() => {
     saveDraft(draft)
   }, [draft])
+
+  // Runtime samples for the "Start from a sample" shelf on step 1 (fetched
+  // once per tab). Also drives the `?sample=<slug>` deep-link pre-fill.
+  const samplesQuery = useQuery({
+    queryKey: ['samples:full'],
+    queryFn: () => api.listSamples(true),
+    staleTime: 60 * 60 * 1000,
+  })
+  const samples: SampleSummary[] = samplesQuery.data?.samples ?? []
+
+  // A user-visible message when we've pre-filled from a sample. Cleared once
+  // the user changes anything material.
+  const [sampleBanner, setSampleBanner] = useState<string>('')
+
+  // Split a Markdown file into { frontmatter object, body }. Used to lift
+  // `name`/`description` from a sample's primary `.agent.md` into the draft.
+  const applySample = (sample: SampleSummary) => {
+    const primary =
+      sample.files?.find((f) => f.path === 'main.agent.md') ??
+      sample.files?.find((f) => f.path.endsWith('.agent.md') && !f.path.includes('/'))
+    if (!primary) return
+    const match = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?([\s\S]*)$/.exec(primary.content)
+    const front: Record<string, unknown> = {}
+    if (match) {
+      // Very light frontmatter parse — good enough for name / description /
+      // trigger.type. Real validation happens on the backend.
+      for (const line of match[1].split(/\r?\n/)) {
+        const m = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line)
+        if (m) front[m[1]] = m[2].trim().replace(/^["']|["']$/g, '')
+      }
+    }
+    const name = String(front.name || sample.slug)
+    const description = String(front.description || sample.blurb || sample.title)
+    const body = match ? match[2].trim() : primary.content.trim()
+    const trigger: Draft['trigger'] = /trigger:\s*[\s\S]*?type:\s*(timer_trigger|generic_trigger|connector_trigger)/i.test(
+      match?.[1] ?? '',
+    )
+      ? /timer_trigger/.test(match?.[1] ?? '')
+        ? 'timer'
+        : 'connector'
+      : 'http'
+    setDraft((d) => ({
+      ...d,
+      name,
+      description,
+      instructions: body || d.instructions,
+      mdOverride: primary.content,
+      trigger,
+      builtinEndpoints:
+        primary.content.includes('builtin_endpoints: true') || primary.content.includes('builtin_endpoints:\n'),
+    }))
+    setSampleBanner(`Pre-filled from sample “${sample.slug}”. Pick a Foundry model to continue.`)
+  }
+
+  // On mount, honour a `?sample=<slug>` deep-link (from the dashboard gallery).
+  useEffect(() => {
+    const slug = searchParams.get('sample')
+    if (!slug || !samples.length) return
+    const match = samples.find((s) => s.slug === slug)
+    if (!match) return
+    applySample(match)
+    // Drop the query param so refresh doesn't re-apply the sample after edits.
+    searchParams.delete('sample')
+    setSearchParams(searchParams, { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [samples.length])
 
   const foundrySub = draft.foundrySubscription || selected
 
@@ -124,6 +191,49 @@ export default function CreateAgentPage() {
         Pick a Foundry model and describe the agent — we’ll generate its code. You’ll review, deploy, and
         connect GitHub on the next step. This draft is kept only for this browser session.
       </p>
+
+      {sampleBanner && (
+        <div className="note ok" style={{ margin: '0 0 12px', maxWidth: 720 }}>
+          ✓ {sampleBanner}
+        </div>
+      )}
+
+      {samples.length > 0 && step === 1 && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div className="card-head">
+            <h3 style={{ margin: 0 }}>Or start from a sample</h3>
+            <span className="muted" style={{ fontSize: 12 }}>
+              Skips the AI generation step — pre-fills a ready-to-deploy draft.
+            </span>
+          </div>
+          <div className="sample-grid" style={{ marginTop: 8 }}>
+            {samples.map((s) => (
+              <button
+                key={s.slug}
+                type="button"
+                className="sample-card"
+                onClick={() => applySample(s)}
+                title={s.blurb || s.title}
+              >
+                <div className="sample-title">
+                  <span className="mono">{s.slug}</span>
+                </div>
+                <div className="sample-blurb">{s.blurb || s.title}</div>
+                <div className="sample-chips">
+                  {s.triggerTypes.map((t) => (
+                    <span className="cap-chip cap-chip-ok" key={t}>
+                      {t}
+                    </span>
+                  ))}
+                  {s.hasMcp && <span className="cap-chip cap-chip-ok">mcp</span>}
+                  {s.hasSkills && <span className="cap-chip cap-chip-ok">skills</span>}
+                  {s.hasWorkflow && <span className="cap-chip cap-chip-ok">workflow</span>}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <Callout title="What makes this an AI App">
         <div className="muted" style={{ fontSize: 13, maxWidth: 720 }}>
@@ -267,9 +377,20 @@ export default function CreateAgentPage() {
             )}
           </div>
           <div className="toolbar" style={{ marginTop: 16 }}>
-            <Button appearance="primary" disabled={!foundryReady} onClick={() => setStep(2)}>
-              Continue →
-            </Button>
+            {draft.mdOverride ? (
+              <Button
+                appearance="primary"
+                disabled={!foundryReady}
+                onClick={() => navigate('/new-app/draft')}
+                title="Skip AI generation — the sample already provides a ready .agent.md"
+              >
+                Continue to review →
+              </Button>
+            ) : (
+              <Button appearance="primary" disabled={!foundryReady} onClick={() => setStep(2)}>
+                Continue →
+              </Button>
+            )}
             <Button onClick={cancel}>Cancel</Button>
             {!foundryReady && (
               <span className="muted" style={{ fontSize: 12 }}>

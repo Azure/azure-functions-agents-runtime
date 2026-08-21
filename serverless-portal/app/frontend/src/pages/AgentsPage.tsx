@@ -155,12 +155,7 @@ export default function AgentsPage() {
       )}
 
       {error && <EmptyState>Failed to scan: {error}</EmptyState>}
-      {data && apps.length === 0 && (
-        <EmptyState>
-          No AI Apps found in {subName}. Deploy one with <Link to="/create-agent">＋ New AI App</Link>, or pick
-          another subscription.
-        </EmptyState>
-      )}
+      {data && apps.length === 0 && <FirstRunEmptyState subName={subName} />}
 
       {apps.length > 0 && (
         <div className="card-grid" style={{ marginTop: 16 }}>
@@ -185,6 +180,94 @@ export default function AgentsPage() {
 
       {apps.length > 0 && <DashboardFailuresPanel subscription={selected} apps={apps} />}
     </>
+  )
+}
+
+// Empty-state on the dashboard — three top-level "get started" tiles above a
+// gallery of runtime samples. Explicit chooser is friendlier for first-time
+// visitors than a bare "no apps" message, and it turns the samples/ folder
+// into a real onboarding surface instead of docs the user has to hunt down.
+function FirstRunEmptyState({ subName }: { subName: string }) {
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div className="first-run-hero">
+        <h2 style={{ margin: '0 0 6px' }}>Nothing running here yet.</h2>
+        <p className="muted" style={{ marginTop: 0 }}>
+          No AI Apps in {subName || 'this subscription'}. Pick a starting point:
+        </p>
+        <div className="first-run-tiles">
+          <Link to="/create-agent?tab=sample" className="first-run-tile">
+            <span className="first-run-icon">🎁</span>
+            <span className="first-run-title">Deploy a sample</span>
+            <span className="first-run-blurb">One-click starter apps for chat, timer, connector, and workflow agents.</span>
+          </Link>
+          <Link to="/create-agent" className="first-run-tile">
+            <span className="first-run-icon">✨</span>
+            <span className="first-run-title">Create from scratch</span>
+            <span className="first-run-blurb">Describe an agent and Foundry writes its <span className="mono">.agent.md</span>.</span>
+          </Link>
+          <Link to="/create-agent?tab=github" className="first-run-tile">
+            <span className="first-run-icon">🐙</span>
+            <span className="first-run-title">Import from GitHub</span>
+            <span className="first-run-blurb">Point at a repo with a runtime app and deploy it in place.</span>
+          </Link>
+        </div>
+      </div>
+      <SampleGallery />
+    </div>
+  )
+}
+
+// Sample gallery — a horizontal card row that lists the runtime's bundled
+// samples. Clicking a card deep-links into the Create wizard with the sample
+// pre-selected so the user lands on a ready-to-deploy draft.
+function SampleGallery() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['samples'],
+    queryFn: () => api.listSamples(),
+    staleTime: 60 * 60 * 1000,
+  })
+  if (isLoading) return null
+  if (error) return null
+  const samples = data?.samples ?? []
+  if (samples.length === 0) return null
+  return (
+    <div style={{ marginTop: 26 }}>
+      <div className="card-head">
+        <h3 style={{ margin: 0 }}>Start from a sample</h3>
+        <span className="muted" style={{ fontSize: 12 }}>
+          Each sample is ready to run — deploy one, then edit in the portal.
+        </span>
+      </div>
+      <div className="sample-grid">
+        {samples.map((s) => (
+          <Link
+            key={s.slug}
+            className="sample-card"
+            to={`/create-agent?sample=${encodeURIComponent(s.slug)}`}
+            title={s.blurb || s.title}
+          >
+            <div className="sample-title">
+              <span className="mono">{s.slug}</span>
+            </div>
+            <div className="sample-blurb">{s.blurb || s.title}</div>
+            <div className="sample-chips">
+              {s.triggerTypes.map((t) => (
+                <span className="cap-chip cap-chip-ok" key={t}>
+                  {t}
+                </span>
+              ))}
+              {s.hasMcp && <span className="cap-chip cap-chip-ok">mcp</span>}
+              {s.hasSkills && <span className="cap-chip cap-chip-ok">skills</span>}
+              {s.hasWorkflow && <span className="cap-chip cap-chip-ok">workflow</span>}
+              {s.agents.length > 1 && (
+                <span className="cap-chip cap-chip-ok">multi-agent · {s.agents.length}</span>
+              )}
+            </div>
+          </Link>
+        ))}
+      </div>
+    </div>
   )
 }
 

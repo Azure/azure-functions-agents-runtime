@@ -119,6 +119,57 @@ export interface AppInsightsResult {
   error?: string
 }
 
+export interface SampleAgentSummary {
+  file: string
+  name: string
+  description: string
+  triggerType: string
+  builtinEndpoints: boolean
+}
+export interface SampleFile {
+  path: string
+  content: string
+}
+export interface SampleSummary {
+  slug: string
+  title: string
+  blurb: string
+  agents: SampleAgentSummary[]
+  triggerTypes: string[]
+  hasMcp: boolean
+  hasSkills: boolean
+  hasWorkflow: boolean
+  files?: SampleFile[]
+}
+
+export interface ValidationIssue {
+  path: string
+  message: string
+}
+export interface AgentMdValidation {
+  ok: boolean
+  errors: ValidationIssue[]
+  warnings: ValidationIssue[]
+  front?: unknown
+}
+
+export interface DeployHistoryEntry {
+  jobId: string
+  kind: 'create' | 'deploy' | 'redeploy' | string
+  status: 'deployed' | 'error' | string
+  finishedAt: string
+  files?: string[]
+  message?: string
+  resourceGroup?: string
+  url?: string
+  fileName?: string
+  grantOutcome?: string
+}
+export interface DeployHistory {
+  app: string
+  deploys: DeployHistoryEntry[]
+}
+
 export interface DeployResult {
   status: 'running' | 'deployed' | 'staged' | 'error'
   message: string
@@ -390,6 +441,29 @@ export const api = {
     timeRange?: string
   }) => req<AppInsightsResult>('POST', '/api/app-insights/query', p),
 
+  // Enumerate the runtime's bundled samples so the landing page + Create
+  // wizard can offer a "Start from a sample" gallery. Pass `includeFiles=true`
+  // to get every source file (used by the wizard to pre-fill the draft).
+  listSamples: (includeFiles?: boolean) =>
+    req<{ samples: SampleSummary[] }>(
+      'GET',
+      `/api/samples${includeFiles ? '?includeFiles=1' : ''}`,
+    ),
+
+  // Validate a `.agent.md` file's frontmatter against the runtime's schema —
+  // catches missing fields, unsupported trigger types, and missing required
+  // trigger args *before* the user hits deploy.
+  validateAgentMd: (content: string) =>
+    req<AgentMdValidation>('POST', '/api/validate/agent-md', { content }),
+
+  // Fetch persisted deploy history for an app (create + redeploy runs). The
+  // portal snapshots each completed job to disk under `.data/deploy-history/`.
+  listDeployHistory: (p: { subscription: string; app: string }) =>
+    req<DeployHistory>(
+      'GET',
+      `/api/deploy-history?subscription=${enc(p.subscription)}&app=${enc(p.app)}`,
+    ),
+
   // Start creating/deploying an agent app; returns a job id to poll. Provisioning
   // + remote build run in the background so the user can watch in the portal.
   startDeploy: (p: {
@@ -502,6 +576,15 @@ export const api = {
     account: string
     principalId: string
   }) => req<GrantResult>('POST', '/api/foundry/grant-access', p),
+
+  // Self-heal Foundry access for a running app — resolves the principalId and
+  // Foundry account from its app settings, then grants both roles in one shot.
+  healFoundryAccess: (p: { subscription: string; resourceGroup: string; app: string }) =>
+    req<GrantResult & { principalId: string; account: string; accountResourceGroup: string }>(
+      'POST',
+      '/api/foundry/heal-access',
+      p,
+    ),
 
   // GitHub connection (Phase 1): OAuth status, sign-in URL, repo list, connect.
   githubStatus: () => req<GitHubStatus>('GET', '/api/github/status'),

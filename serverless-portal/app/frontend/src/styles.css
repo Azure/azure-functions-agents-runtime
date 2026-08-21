@@ -256,6 +256,65 @@ a.card:hover { text-decoration: none; }
 .ai-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 .ai-table tr:last-child td { border-bottom: 0; }
 .ai-table tbody tr:hover { background: var(--surface-2); }
+
+/* First-run onboarding — 3-tile chooser above a runtime sample gallery. */
+.first-run-hero { background: linear-gradient(180deg, var(--brand-soft) 0%, transparent 100%);
+  border: 1px solid var(--border); border-radius: 14px; padding: 22px 22px 24px; }
+.first-run-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+@media (max-width: 900px) { .first-run-tiles { grid-template-columns: 1fr; } }
+.first-run-tile { display: flex; flex-direction: column; gap: 4px;
+  padding: 16px; border-radius: 10px; background: var(--surface);
+  border: 1px solid var(--border-strong); color: var(--text); text-decoration: none;
+  transition: border-color 0.15s ease-in-out, transform 0.1s ease-in-out; }
+.first-run-tile:hover { border-color: var(--brand); transform: translateY(-1px); text-decoration: none; }
+.first-run-icon { font-size: 22px; line-height: 1; margin-bottom: 4px; }
+.first-run-title { font-weight: 650; font-size: 15px; }
+.first-run-blurb { font-size: 12.5px; color: var(--text-muted); }
+
+.sample-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; margin-top: 12px; }
+.sample-card { display: block; padding: 14px 15px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface); color: var(--text); text-decoration: none;
+  transition: border-color 0.1s ease-in-out; }
+.sample-card:hover { border-color: var(--brand); text-decoration: none; }
+.sample-title { margin-bottom: 6px; font-weight: 600; }
+.sample-blurb { font-size: 12.5px; color: var(--text-muted); line-height: 1.45; margin-bottom: 8px;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.sample-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* Post-deploy "what's next" checklist on the draft-app confirmation card. */
+.next-steps { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 14px; }
+.next-steps li { display: flex; gap: 12px; align-items: flex-start; }
+.next-step-num { display: flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 999px; background: var(--brand-soft); color: var(--brand-dark);
+  font-weight: 700; font-size: 13px; flex-shrink: 0; }
+.next-step-title { font-weight: 650; font-size: 14px; margin-bottom: 3px; }
+
+/* Capabilities pane on AppDetailPage — tool / skill / MCP inventory. */
+.cap-section { margin-top: 18px; }
+.cap-section-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
+.cap-list { list-style: none; padding: 0; margin: 6px 0 0; display: flex; flex-direction: column; gap: 6px; }
+.cap-row { display: flex; align-items: flex-start; gap: 12px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 10px 12px; }
+.cap-link { display: flex; flex-direction: column; gap: 3px; text-align: left; border: 0; background: transparent;
+  flex: 1 1 auto; cursor: pointer; padding: 0; color: var(--text); font-family: inherit; font-size: 13px; }
+.cap-link:hover { color: var(--brand); }
+.cap-path { font-size: 11.5px; color: var(--text-muted); }
+.cap-desc { font-size: 12px; color: var(--text-muted); }
+.cap-used { flex-shrink: 0; font-size: 11.5px; color: var(--text-muted);
+  align-self: center; text-transform: uppercase; letter-spacing: 0.35px; }
+
+/* Live schema validation panel under the DraftEditor. Errors block deploy;
+   warnings just flag potentially-broken configuration. */
+.validation-panel { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-top: 10px;
+  background: var(--surface-2); }
+.validation-panel.has-errors { border-color: color-mix(in srgb, var(--red) 34%, transparent);
+  background: color-mix(in srgb, var(--red) 6%, transparent); }
+.validation-panel.has-warnings { border-color: color-mix(in srgb, var(--amber) 34%, transparent);
+  background: color-mix(in srgb, var(--amber) 6%, transparent); }
+.validation-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.validation-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+.validation-error { color: var(--red); }
+.validation-warning { color: var(--amber); }
 .stat { display: flex; flex-direction: column; }
 .stat .n { font-size: 19px; font-weight: 650; line-height: 1.2; }
 .stat .l { font-size: 10.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .5px; font-weight: 700; }

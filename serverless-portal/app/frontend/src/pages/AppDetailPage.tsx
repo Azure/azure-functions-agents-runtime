@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type LiveAgentApp, type SourceListEntry } from '../api'
 import { useDeployJob, DeploymentStatus, GitHubConnect } from '../deploy'
 import { CopyButton, DraftEditor } from '../components/SourceEditor'
@@ -197,6 +197,8 @@ type Sel =
   | { kind: 'mcp'; name: string }
   | { kind: 'file'; path: string; label: string }
   | { kind: 'monitor' }
+  | { kind: 'capabilities' }
+  | { kind: 'history' }
 
 // AI App detail — a single Azure Function App identified as an AI App by the
 // AZURE_FUNCTIONS_AGENTS_PROVIDER app setting. Shows its composition, endpoints,
@@ -525,6 +527,20 @@ export default function AppDetailPage() {
               >
                 📈 Monitor
               </button>
+              <button
+                className={'node' + (sel.kind === 'capabilities' ? ' active' : '')}
+                onClick={() => setSel({ kind: 'capabilities' })}
+                title="Every tool, skill, and MCP server the runtime discovered — plus which agents use each"
+              >
+                🧰 Capabilities
+              </button>
+              <button
+                className={'node' + (sel.kind === 'history' ? ' active' : '')}
+                onClick={() => setSel({ kind: 'history' })}
+                title="Past deploys — successes and failures — with links to the produced source"
+              >
+                🕘 Deploy history
+              </button>
 
               <div className="group-label">Agents</div>
               {app.agents.map((a) => (
@@ -723,6 +739,7 @@ export default function AppDetailPage() {
                     fallback=""
                     renderActions={renderPrAction}
                     onSaved={onDraftSaved}
+                    validationKind="agent.md"
                   />
                 </>
               )}
@@ -818,6 +835,20 @@ export default function AppDetailPage() {
                   app={app.name}
                   tenantId={identity?.user?.tenantId}
                 />
+              )}
+
+              {sel.kind === 'capabilities' && (
+                <CapabilitiesPane
+                  subscription={subForQuery}
+                  resourceGroup={app.resourceGroup}
+                  app={app.name}
+                  agents={app.agents.map((a) => a.name)}
+                  onOpenFile={(fp) => setSel({ kind: 'file', path: fp, label: fp.split('/').pop() ?? fp })}
+                />
+              )}
+
+              {sel.kind === 'history' && (
+                <HistoryPane subscription={subForQuery} app={app.name} />
               )}
             </section>
           </div>
@@ -1170,4 +1201,286 @@ function formatCell(colName: string | undefined, value: unknown): string {
   if (colName === 'duration' && typeof value === 'number') return `${Math.round(value)} ms`
   if ((colName === 'p95_ms' || colName === 'avg_ms') && typeof value === 'number') return `${Math.round(value)} ms`
   return String(value)
+}
+
+// Capabilities pane — union view of the tools, skills, and MCP servers this app
+// carries. Fetches the file tree once via `/api/source/list`, then reads each
+// `SKILL.md` / `tools/*.py` / `mcp.json` header via `/api/source` in parallel
+// so the panel gives a discovery-driven summary without the user having to hunt
+// through the file tree. Each item links back to its source file.
+function CapabilitiesPane({
+  subscription,
+  resourceGroup,
+  app,
+  agents,
+  onOpenFile,
+}: {
+  subscription: string
+  resourceGroup: string
+  app: string
+  agents: string[]
+  onOpenFile: (path: string) => void
+}) {
+  const filesQuery = useQuery({
+    queryKey: ['sourceList', subscription, resourceGroup, app],
+    queryFn: () => api.listSources({ subscription, app, resourceGroup }),
+    staleTime: 60_000,
+  })
+
+  const files = filesQuery.data?.files ?? []
+  const toolFiles = useMemo(
+    () => files.filter((f) => f.path.startsWith('tools/') && f.path.endsWith('.py')),
+    [files],
+  )
+  const skillFiles = useMemo(
+    () => files.filter((f) => /^skills\/[^/]+\/SKILL\.md$/i.test(f.path)),
+    [files],
+  )
+  const mcpFile = useMemo(() => files.find((f) => f.path === 'mcp.json'), [files])
+
+  const mcpQuery = useQuery({
+    queryKey: ['source', subscription, app, 'mcp.json'],
+    queryFn: () => api.getSource({ subscription, app, resourceGroup, path: 'mcp.json' }),
+    enabled: !!mcpFile,
+    staleTime: 60_000,
+  })
+  const mcpServers = useMemo(() => {
+    try {
+      const doc = JSON.parse(mcpQuery.data?.content || '') as {
+        servers?: Record<string, { type?: string; url?: string; tools?: string[] }>
+      }
+      return Object.entries(doc.servers ?? {}).map(([name, v]) => ({
+        name,
+        type: String(v?.type ?? ''),
+        url: String(v?.url ?? ''),
+        tools: Array.isArray(v?.tools) ? v.tools : [],
+      }))
+    } catch {
+      return []
+    }
+  }, [mcpQuery.data])
+
+  // Load each SKILL.md's frontmatter (name/description) so the panel can show
+  // human-readable titles instead of directory slugs.
+  const skillHeaders = useQueries({
+    queries: skillFiles.map((f) => ({
+      queryKey: ['source', subscription, app, f.path],
+      queryFn: () => api.getSource({ subscription, app, resourceGroup, path: f.path }),
+      staleTime: 60_000,
+    })),
+  })
+
+  // Ditto for the agent files, so the "used by" cue matches real skill/mcp
+  // references in each agent's frontmatter.
+  const agentSources = useQueries({
+    queries: agents.map((name) => ({
+      queryKey: ['agentDefinition', subscription, app, name],
+      queryFn: () => api.getAgentDefinition({ subscription, app, resourceGroup, name }),
+      staleTime: 60_000,
+    })),
+  })
+
+  const findUsers = (needle: string): string[] => {
+    const users: string[] = []
+    for (let i = 0; i < agents.length; i++) {
+      const content = agentSources[i].data?.content ?? ''
+      // Skills / MCP names appear in the YAML frontmatter as list entries or
+      // exclude lists — a simple substring match is enough for a "used by" cue.
+      if (content.includes(needle)) users.push(agents[i])
+    }
+    return users
+  }
+
+  const isLoading = filesQuery.isLoading
+
+  return (
+    <>
+      <div className="card-head">
+        <h3 style={{ margin: 0 }}>Capabilities</h3>
+        <span className="muted" style={{ fontSize: 12 }}>
+          Everything the runtime discovered in this app — link out to the source or add another.
+        </span>
+      </div>
+
+      <div className="cap-section">
+        <div className="cap-section-head">
+          <h4 style={{ margin: 0 }}>🐍 Tools</h4>
+          <span className="muted" style={{ fontSize: 12 }}>
+            {toolFiles.length} discovered — Python <span className="mono">@tool</span> functions under{' '}
+            <span className="mono">tools/</span>.
+          </span>
+        </div>
+        {isLoading ? (
+          <p className="muted">Loading…</p>
+        ) : toolFiles.length === 0 ? (
+          <p className="muted" style={{ fontSize: 13 }}>
+            No tools yet. Add one via the ＋ Add capability &gt; Custom tool flow.
+          </p>
+        ) : (
+          <ul className="cap-list">
+            {toolFiles.map((f) => {
+              const name = (f.path.split('/').pop() ?? '').replace(/\.py$/, '')
+              const used = findUsers(name)
+              return (
+                <li key={f.path} className="cap-row">
+                  <button className="cap-link" onClick={() => onOpenFile(f.path)}>
+                    <span className="mono">{name}</span>
+                    <span className="cap-path mono">{f.path}</span>
+                  </button>
+                  <span className="cap-used">
+                    {used.length ? `Used by ${used.length} agent${used.length > 1 ? 's' : ''}` : 'Unused'}
+                  </span>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+
+      <div className="cap-section">
+        <div className="cap-section-head">
+          <h4 style={{ margin: 0 }}>💡 Skills</h4>
+          <span className="muted" style={{ fontSize: 12 }}>
+            {skillFiles.length} discovered — Markdown knowledge under{' '}
+            <span className="mono">skills/&lt;name&gt;/SKILL.md</span>.
+          </span>
+        </div>
+        {isLoading ? (
+          <p className="muted">Loading…</p>
+        ) : skillFiles.length === 0 ? (
+          <p className="muted" style={{ fontSize: 13 }}>
+            No skills yet. Add one via the ＋ Add capability &gt; Skill flow.
+          </p>
+        ) : (
+          <ul className="cap-list">
+            {skillFiles.map((f, i) => {
+              const slug = f.path.split('/')[1] ?? f.path
+              const header = extractSkillHeader(skillHeaders[i]?.data?.content ?? '')
+              const used = findUsers(slug)
+              return (
+                <li key={f.path} className="cap-row">
+                  <button className="cap-link" onClick={() => onOpenFile(f.path)}>
+                    <span>{header.title || slug}</span>
+                    <span className="cap-path mono">{f.path}</span>
+                    {header.description && <span className="cap-desc">{header.description}</span>}
+                  </button>
+                  <span className="cap-used">
+                    {used.length ? `Used by ${used.length} agent${used.length > 1 ? 's' : ''}` : 'Available to all'}
+                  </span>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+
+      <div className="cap-section">
+        <div className="cap-section-head">
+          <h4 style={{ margin: 0 }}>🔌 MCP servers</h4>
+          <span className="muted" style={{ fontSize: 12 }}>
+            {mcpServers.length} configured in <span className="mono">mcp.json</span>.
+          </span>
+        </div>
+        {!mcpFile ? (
+          <p className="muted" style={{ fontSize: 13 }}>
+            No <span className="mono">mcp.json</span> yet. Add an MCP server via the ＋ Add capability flow.
+          </p>
+        ) : mcpServers.length === 0 ? (
+          <p className="muted" style={{ fontSize: 13 }}>
+            No servers defined. Open <span className="mono">mcp.json</span> to inspect.
+          </p>
+        ) : (
+          <ul className="cap-list">
+            {mcpServers.map((s) => {
+              const used = findUsers(s.name)
+              return (
+                <li key={s.name} className="cap-row">
+                  <button className="cap-link" onClick={() => onOpenFile('mcp.json')}>
+                    <span className="mono">{s.name}</span>
+                    <span className="cap-path mono">{s.type || 'http'} · {s.url}</span>
+                    {s.tools.length > 0 && (
+                      <span className="cap-desc">
+                        Allowlisted tools: {s.tools.join(', ')}
+                      </span>
+                    )}
+                  </button>
+                  <span className="cap-used">
+                    {used.length ? `Used by ${used.length} agent${used.length > 1 ? 's' : ''}` : 'Available to all'}
+                  </span>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+    </>
+  )
+}
+
+function extractSkillHeader(md: string): { title: string; description: string } {
+  const match = /^---\s*\r?\n([\s\S]*?)\r?\n---/.exec(md)
+  if (!match) return { title: '', description: '' }
+  const front = match[1]
+  const name = /^name:\s*(.+)$/m.exec(front)?.[1]?.trim() ?? ''
+  const desc = /^description:\s*(.+)$/m.exec(front)?.[1]?.trim() ?? ''
+  return { title: name.replace(/^["']|["']$/g, ''), description: desc.replace(/^["']|["']$/g, '') }
+}
+
+// History pane — every completed deploy (create/redeploy/error) recorded to
+// `.data/deploy-history/` on the portal's disk. Read-only; the list resets to
+// empty when a new machine hosts the portal (history isn't uploaded to Azure).
+function HistoryPane({ subscription, app }: { subscription: string; app: string }) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['deployHistory', subscription, app],
+    queryFn: () => api.listDeployHistory({ subscription, app }),
+    staleTime: 30_000,
+  })
+  const deploys = data?.deploys ?? []
+  return (
+    <>
+      <div className="card-head">
+        <h3 style={{ margin: 0 }}>Deploy history</h3>
+        <span className="muted" style={{ fontSize: 12 }}>
+          Local record of every deploy this portal has performed for this app.
+        </span>
+      </div>
+      {isLoading && <p className="muted">Loading…</p>}
+      {error && <p className="muted" style={{ color: 'var(--red)' }}>Error: {(error as Error).message}</p>}
+      {!isLoading && deploys.length === 0 && (
+        <p className="muted" style={{ fontSize: 13 }}>
+          No prior deploys recorded from this portal. Every future <strong>Deploy edits</strong> will show up here.
+        </p>
+      )}
+      {deploys.length > 0 && (
+        <div className="ai-table-wrap">
+          <table className="ai-table">
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Kind</th>
+                <th>Status</th>
+                <th>Files</th>
+                <th>Message</th>
+              </tr>
+            </thead>
+            <tbody>
+              {deploys.map((d) => (
+                <tr key={d.jobId + d.finishedAt}>
+                  <td>{d.finishedAt ? new Date(d.finishedAt).toLocaleString() : '—'}</td>
+                  <td className="mono">{d.kind}</td>
+                  <td>
+                    <span className={'badge ' + (d.status === 'deployed' ? 'green' : 'red')}>{d.status}</span>
+                  </td>
+                  <td>{d.files ? d.files.length : '—'}</td>
+                  <td className="mono" style={{ maxWidth: 480 }}>
+                    {d.message?.slice(0, 240) ?? (d.url ? d.url : '—')}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  )
 }

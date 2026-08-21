@@ -24,6 +24,45 @@ try {
         throw 'azd (Azure Developer CLI) is not installed. See https://aka.ms/azd-install.'
     }
 
+    # Build the SPA locally so the Dockerfile can COPY its prebuilt dist.
+    # The @coreai/fluentui-react feed is private and unreachable from ACR.
+    Write-Host 'Building SPA (npm run build in app/frontend)...' -ForegroundColor Cyan
+    Push-Location (Join-Path $PSScriptRoot 'app/frontend')
+    try {
+        npm run build
+        if ($LASTEXITCODE -ne 0) { throw "SPA build failed with exit $LASTEXITCODE." }
+    }
+    finally { Pop-Location }
+
+    # Stage runtime samples so /api/samples returns them from the container.
+    # The Dockerfile can't COPY outside its build context; this bundle sits
+    # inside serverless-portal/ so the image picks it up.
+    Write-Host 'Staging samples bundle...' -ForegroundColor Cyan
+    $bundle = Join-Path $PSScriptRoot 'samples-bundle'
+    if (Test-Path $bundle) { Remove-Item $bundle -Recurse -Force }
+    $sourceSamples = (Resolve-Path (Join-Path $PSScriptRoot '..\samples')).Path
+    if (Test-Path $sourceSamples) {
+        $skipDirs = @('.venv', '__pycache__', '.python_packages', '.azure')
+        $skipFiles = @('local.settings.json', 'local.settings.template.json')
+        New-Item -ItemType Directory -Path $bundle -Force | Out-Null
+        $srcLen = $sourceSamples.Length
+        Get-ChildItem -Path $sourceSamples -Recurse -Force -File | Where-Object {
+            $relPath = $_.FullName.Substring($srcLen).TrimStart('\','/')
+            if (-not $relPath) { return $false }
+            $segments = $relPath -split '[\\/]'
+            $inSkipDir = ($segments | Where-Object { $skipDirs -contains $_ }).Count -gt 0
+            -not $inSkipDir -and -not ($skipFiles -contains $_.Name)
+        } | ForEach-Object {
+            $rel = $_.FullName.Substring($srcLen).TrimStart('\','/')
+            $target = Join-Path $bundle $rel
+            $parent = Split-Path $target -Parent
+            if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+            Copy-Item -Path $_.FullName -Destination $target -Force
+        }
+        $bundleCount = (Get-ChildItem -Path $bundle -Recurse -File).Count
+        Write-Host "  bundled $bundleCount files" -ForegroundColor DarkGray
+    }
+
     # Create the azd environment if it does not exist yet (idempotent).
     $existing = azd env list --output json 2>$null | ConvertFrom-Json
     if (-not ($existing | Where-Object { $_.Name -eq $EnvName })) {

@@ -15,6 +15,7 @@ import './env.js' // load .env into process.env before anything reads config
 
 import express from 'express'
 import cors from 'cors'
+import * as YAML from 'js-yaml'
 
 import * as azure from './azure.js'
 import * as github from './github.js'
@@ -596,6 +597,355 @@ app.post(
 )
 
 // ---------------------------------------------------------------------------
+// Samples — enumerate the runtime's bundled sample apps so the landing page
+// and Create wizard can offer a "Start from a sample" gallery. Read-only from
+// disk; every sample lives under `samples/<slug>/src/`.
+// ---------------------------------------------------------------------------
+
+// Runtime root two levels above serverless-portal/, then into samples/.
+// In dev: samples live at the runtime root; in the container image they're
+// baked in under /app/samples via the Dockerfile.
+const SAMPLES_DIR = (() => {
+  const candidates = [
+    path.resolve(__dirname, '..', '..', '..', '..', 'samples'),
+    path.resolve(__dirname, '..', '..', 'samples'),
+  ]
+  for (const dir of candidates) {
+    try {
+      if (fs.statSync(dir).isDirectory()) return dir
+    } catch { /* not this one */ }
+  }
+  return candidates[0]
+})()
+
+// Skip these when listing agents inside a sample — they exist for infra/dev
+// purposes, not agent authoring.
+const SAMPLE_IGNORE_DIRS = new Set(['__pycache__', '.venv', '.python_packages', '.azure'])
+const SAMPLE_IGNORE_FILES = new Set(['local.settings.json', 'local.settings.template.json'])
+
+// Split a Markdown file into YAML frontmatter + body. Returns `{ front, body }`
+// or `{ front: null, body: raw }` when no frontmatter block is present.
+function splitFrontmatter(raw) {
+  const text = String(raw ?? '')
+  const match = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?([\s\S]*)$/.exec(text)
+  if (!match) return { front: null, body: text }
+  try {
+    const parsed = YAML.load(match[1])
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return { front: parsed, body: match[2] ?? '' }
+    }
+  } catch {
+    /* fall through */
+  }
+  return { front: null, body: text }
+}
+
+// Read a sample's primary README title + first paragraph for the tile blurb.
+async function readSampleReadme(sampleDir) {
+  try {
+    const md = await fs.promises.readFile(path.join(sampleDir, 'README.md'), 'utf-8')
+    const titleMatch = /^#\s+(.+?)\s*$/m.exec(md)
+    const paraMatch = /^\s*\n([^\n#][^\n]*(?:\n[^\n#][^\n]*)*)/m.exec(md.replace(/^#[^\n]*\n?/, ''))
+    return {
+      title: titleMatch ? titleMatch[1].trim() : '',
+      blurb: paraMatch ? paraMatch[1].replace(/\s+/g, ' ').trim().slice(0, 220) : '',
+    }
+  } catch {
+    return { title: '', blurb: '' }
+  }
+}
+
+// Enumerate the *.agent.md files inside a sample's src/ and agents/ folders,
+// returning summary metadata (name, trigger, builtin_endpoints) parsed from
+// their frontmatter.
+async function collectSampleAgents(srcDir) {
+  const results = []
+  const paths = []
+  try {
+    for (const name of await fs.promises.readdir(srcDir)) {
+      if (name.toLowerCase().endsWith('.agent.md')) paths.push(name)
+    }
+  } catch {
+    return results
+  }
+  const agentsDir = path.join(srcDir, 'agents')
+  if (await pathExists(agentsDir)) {
+    try {
+      for (const name of await fs.promises.readdir(agentsDir)) {
+        if (name.toLowerCase().endsWith('.agent.md')) paths.push(path.join('agents', name))
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  for (const rel of paths.sort()) {
+    try {
+      const raw = await fs.promises.readFile(path.join(srcDir, rel), 'utf-8')
+      const { front } = splitFrontmatter(raw)
+      const trigger = front && typeof front === 'object' && front.trigger
+      results.push({
+        file: rel.split(path.sep).join('/'),
+        name: (front && typeof front === 'object' && String(front.name || '')) || rel,
+        description: (front && typeof front === 'object' && String(front.description || '')) || '',
+        triggerType:
+          trigger && typeof trigger === 'object' ? String(trigger.type ?? '') : '',
+        builtinEndpoints:
+          front && typeof front === 'object' && front.builtin_endpoints ? true : false,
+      })
+    } catch {
+      /* skip an unreadable agent file */
+    }
+  }
+  return results
+}
+
+// List every source file inside a sample's src/ tree (excluding build output
+// and local dev settings) as `[{ path, content }]`. Used by the CreateAgent
+// wizard when the user picks a sample to pre-fill.
+async function collectSampleFiles(srcDir) {
+  const files = []
+  async function walk(dir, rel) {
+    let entries
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (SAMPLE_IGNORE_DIRS.has(entry.name)) continue
+      if (!entry.isDirectory() && SAMPLE_IGNORE_FILES.has(entry.name)) continue
+      const abs = path.join(dir, entry.name)
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name
+      if (entry.isDirectory()) {
+        await walk(abs, childRel)
+      } else {
+        try {
+          const content = await fs.promises.readFile(abs, 'utf-8')
+          files.push({ path: childRel, content })
+        } catch {
+          /* skip binary or unreadable file */
+        }
+      }
+    }
+  }
+  await walk(srcDir, '')
+  return files
+}
+
+// List every sample with summary metadata. `includeFiles=1` returns full file
+// contents (used by the wizard when a user clicks a sample tile).
+app.get(
+  '/api/samples',
+  wrap(async (req, res) => {
+    requireToken(req)
+    const includeFiles = String(req.query.includeFiles ?? '') === '1'
+    let entries
+    try {
+      entries = await fs.promises.readdir(SAMPLES_DIR, { withFileTypes: true })
+    } catch {
+      res.json({ samples: [] })
+      return
+    }
+    const samples = []
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const dir = path.join(SAMPLES_DIR, entry.name)
+      const srcDir = path.join(dir, 'src')
+      if (!(await pathExists(srcDir))) continue
+      const readme = await readSampleReadme(dir)
+      const agents = await collectSampleAgents(srcDir)
+      samples.push({
+        slug: entry.name,
+        title: readme.title || entry.name,
+        blurb: readme.blurb,
+        agents,
+        triggerTypes: [...new Set(agents.map((a) => a.triggerType).filter(Boolean))],
+        hasMcp: await pathExists(path.join(srcDir, 'mcp.json')),
+        hasSkills: await pathExists(path.join(srcDir, 'skills')),
+        hasWorkflow: agents.some((a) => /workflows:/.test(a.description || '')),
+        ...(includeFiles ? { files: await collectSampleFiles(srcDir) } : {}),
+      })
+    }
+    samples.sort((a, b) => a.slug.localeCompare(b.slug))
+    res.json({ samples })
+  }),
+)
+
+// ---------------------------------------------------------------------------
+// `.agent.md` validation — parse the frontmatter and check the fields against
+// the runtime's schema so the editor can surface errors *before* deploy.
+// Mirrors `azure_functions_agents/config/validation.py`'s allow/deny rules.
+// ---------------------------------------------------------------------------
+
+const SUPPORTED_TRIGGER_TYPES = new Set([
+  'http_trigger',
+  'timer_trigger',
+  'queue_trigger',
+  'blob_trigger',
+  'event_grid_trigger',
+  'event_hub_message_trigger',
+  'service_bus_queue_trigger',
+  'service_bus_topic_trigger',
+  'cosmos_db_trigger',
+  'cosmos_db_trigger_v3',
+  'sql_trigger',
+  'mysql_trigger',
+  'kafka_trigger',
+  'dapr_binding_trigger',
+  'dapr_service_invocation_trigger',
+  'dapr_topic_trigger',
+  'generic_trigger',
+  'connector_trigger',
+])
+
+const REJECTED_TRIGGER_TYPES = new Set([
+  'route',
+  'schedule',
+  'activity_trigger',
+  'orchestration_trigger',
+  'entity_trigger',
+  'warm_up_trigger',
+  'assistant_skill_trigger',
+  'mcp_tool_trigger',
+  'mcp_resource_trigger',
+  'mcp_prompt_trigger',
+])
+
+// Required args per trigger type — mirrors docs/triggers.md.
+const TRIGGER_REQUIRED_ARGS = {
+  http_trigger: ['route'],
+  timer_trigger: ['schedule'],
+  queue_trigger: ['queue_name', 'connection'],
+  blob_trigger: ['path'],
+  event_hub_message_trigger: ['event_hub_name', 'connection'],
+  service_bus_queue_trigger: ['queue_name', 'connection'],
+  service_bus_topic_trigger: ['topic_name', 'subscription_name', 'connection'],
+}
+
+function validateFrontmatter(front) {
+  const errors = []
+  const warnings = []
+  if (!front || typeof front !== 'object') {
+    errors.push({ path: '/', message: 'Missing or invalid YAML frontmatter block.' })
+    return { errors, warnings }
+  }
+  if (!front.name || typeof front.name !== 'string' || !front.name.trim()) {
+    errors.push({ path: '/name', message: 'name is required and must be a non-empty string.' })
+  }
+  if (!front.description || typeof front.description !== 'string' || !front.description.trim()) {
+    errors.push({ path: '/description', message: 'description is required and must be a non-empty string.' })
+  }
+  const hasBuiltin =
+    front.builtin_endpoints === true ||
+    (front.builtin_endpoints && typeof front.builtin_endpoints === 'object')
+  const trigger = front.trigger
+  if (!hasBuiltin && !trigger) {
+    errors.push({
+      path: '/trigger',
+      message:
+        'Either a trigger: block or builtin_endpoints: true is required (agents that only expose MCP still need a trigger).',
+    })
+  }
+  if (trigger) {
+    if (typeof trigger !== 'object' || Array.isArray(trigger)) {
+      errors.push({ path: '/trigger', message: 'trigger must be an object with type and args.' })
+    } else {
+      const type = String(trigger.type ?? '').trim()
+      if (!type) {
+        errors.push({ path: '/trigger/type', message: 'trigger.type is required.' })
+      } else if (REJECTED_TRIGGER_TYPES.has(type)) {
+        errors.push({
+          path: '/trigger/type',
+          message: `trigger.type "${type}" is not a runtime-supported trigger — see docs/triggers.md.`,
+        })
+      } else if (type.includes('.')) {
+        errors.push({
+          path: '/trigger/type',
+          message: 'Dotted connector types (e.g. teams.new_channel_message_trigger) are not supported — use generic_trigger with args.type.',
+        })
+      } else if (!SUPPORTED_TRIGGER_TYPES.has(type)) {
+        warnings.push({
+          path: '/trigger/type',
+          message: `Unknown trigger type "${type}". Continuing but expect a runtime error.`,
+        })
+      } else {
+        const required = TRIGGER_REQUIRED_ARGS[type] ?? []
+        const args =
+          trigger.args && typeof trigger.args === 'object' && !Array.isArray(trigger.args) ? trigger.args : {}
+        for (const key of required) {
+          const value = args[key]
+          if (value == null || (typeof value === 'string' && !value.trim())) {
+            errors.push({ path: `/trigger/args/${key}`, message: `${key} is required for ${type}.` })
+          }
+        }
+      }
+    }
+  }
+  return { errors, warnings }
+}
+
+app.post(
+  '/api/validate/agent-md',
+  wrap(async (req, res) => {
+    requireToken(req)
+    const content = req.body?.content
+    if (typeof content !== 'string') throw new HttpError(400, 'Request body must be { content: string }.')
+    const { front } = splitFrontmatter(content)
+    const result = validateFrontmatter(front)
+    res.json({ ok: result.errors.length === 0, ...result, front })
+  }),
+)
+
+// ---------------------------------------------------------------------------
+// Deployment history — every completed deploy job is snapshotted to disk so
+// the app-detail page can show past runs, not just the latest one. Snapshots
+// are keyed by (subscription, app) and stored under `.data/deploy-history/`.
+// ---------------------------------------------------------------------------
+
+const DEPLOY_HISTORY_DIR = path.join(__dirname, '..', '.data', 'deploy-history')
+
+async function recordDeployHistory(subscription, appName, entry) {
+  if (!subscription || !appName) return
+  try {
+    const dir = path.join(DEPLOY_HISTORY_DIR, safeSegment(subscription), safeSegment(appName))
+    await fs.promises.mkdir(dir, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const file = path.join(dir, `${stamp}-${safeSegment(String(entry.jobId ?? 'unknown'))}.json`)
+    await fs.promises.writeFile(file, JSON.stringify(entry, null, 2), 'utf-8')
+  } catch {
+    /* history is best-effort — never block a deploy */
+  }
+}
+
+app.get(
+  '/api/deploy-history',
+  wrap(async (req, res) => {
+    requireToken(req)
+    const subscription = String(req.query.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const appName = String(req.query.app ?? '').trim()
+    if (!appName) throw new HttpError(400, 'app query parameter is required.')
+    const dir = path.join(DEPLOY_HISTORY_DIR, safeSegment(subscription), safeSegment(appName))
+    const items = []
+    let files = []
+    try {
+      files = (await fs.promises.readdir(dir)).sort().reverse()
+    } catch {
+      res.json({ app: appName, deploys: [] })
+      return
+    }
+    for (const name of files.slice(0, 40)) {
+      try {
+        const raw = await fs.promises.readFile(path.join(dir, name), 'utf-8')
+        items.push(JSON.parse(raw))
+      } catch {
+        /* skip a corrupt entry */
+      }
+    }
+    res.json({ app: appName, deploys: items })
+  }),
+)
+
+// ---------------------------------------------------------------------------
 // Create / deploy agent — refresh the target Function App's portal-managed
 // source tree, then provision (for a new app) and push it to Azure with a
 // remote build. Every Azure call runs as the signed-in user's forwarded token.
@@ -879,8 +1229,28 @@ async function runDeployJob(id, token, ctx) {
       ...(target.kind === 'new' && principalId ? { principalId } : {}),
       ...(grantOutcome ? { grantOutcome } : {}),
     })
+    await recordDeployHistory(subscription, appName, {
+      jobId: id,
+      kind: target.kind === 'new' ? 'create' : 'deploy',
+      status: 'deployed',
+      finishedAt: new Date().toISOString(),
+      files: files.map((f) => f.name).sort(),
+      resourceGroup,
+      url: `https://${site.defaultHostName}`,
+      fileName,
+      ...(grantOutcome ? { grantOutcome } : {}),
+    })
   } catch (err) {
     setJob(id, { status: 'error', message: String(err?.message ?? err) })
+    await recordDeployHistory(subscription, appName, {
+      jobId: id,
+      kind: target.kind === 'new' ? 'create' : 'deploy',
+      status: 'error',
+      finishedAt: new Date().toISOString(),
+      message: String(err?.message ?? err),
+      resourceGroup,
+      fileName,
+    })
   }
 }
 
@@ -910,8 +1280,25 @@ async function runRedeployJob(id, token, ctx) {
       message: `Redeployed ${appName} with your saved edits.`,
       url: `https://${site.defaultHostName}`,
     })
+    await recordDeployHistory(subscription, appName, {
+      jobId: id,
+      kind: 'redeploy',
+      status: 'deployed',
+      finishedAt: new Date().toISOString(),
+      files: files.map((f) => f.name).sort(),
+      resourceGroup,
+      url: `https://${site.defaultHostName}`,
+    })
   } catch (err) {
     setJob(id, { status: 'error', message: String(err?.message ?? err) })
+    await recordDeployHistory(subscription, appName, {
+      jobId: id,
+      kind: 'redeploy',
+      status: 'error',
+      finishedAt: new Date().toISOString(),
+      message: String(err?.message ?? err),
+      resourceGroup,
+    })
   }
 }
 
@@ -1302,6 +1689,25 @@ app.post(
           principalId,
         }),
       )
+    } catch (err) {
+      throw new HttpError(err.status ?? 502, String(err?.message ?? err))
+    }
+  }),
+)
+
+// One-click "Grant access" for a running app — resolves the app's principalId
+// and Foundry account from its app settings and grants the two roles it needs
+// to call the model. Powers the Playground's self-heal button.
+app.post(
+  '/api/foundry/heal-access',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
+    const appName = String(req.body?.app ?? '').trim()
+    if (!resourceGroup || !appName) throw new HttpError(400, 'app and resourceGroup are required.')
+    try {
+      res.json(await azure.healFoundryAccess(token, subscription, resourceGroup, appName))
     } catch (err) {
       throw new HttpError(err.status ?? 502, String(err?.message ?? err))
     }

@@ -107,12 +107,18 @@ export const SearchableSelect = ({
   // Reposition on scroll/resize while open, so the popover tracks its trigger.
   useLayoutEffect(() => {
     if (!open) return
+    let raf = 0
     const reposition = () => {
-      if (triggerRef.current) setRect(computeRect(triggerRef.current))
+      if (raf) return
+      raf = requestAnimationFrame(() => {
+        raf = 0
+        if (triggerRef.current) setRect(computeRect(triggerRef.current))
+      })
     }
-    window.addEventListener('scroll', reposition, true)
+    window.addEventListener('scroll', reposition, { capture: true, passive: true })
     window.addEventListener('resize', reposition)
     return () => {
+      if (raf) cancelAnimationFrame(raf)
       window.removeEventListener('scroll', reposition, true)
       window.removeEventListener('resize', reposition)
     }
