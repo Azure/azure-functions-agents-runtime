@@ -1,88 +1,21 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { api, type SampleSummary } from '../api'
+import { api } from '../api'
 import { useIdentity } from '../identity'
-import { Callout, SearchableSelect, Icon } from '../components/ui'
-import { Button, Input } from '@coreai/fluentui-react'
+import { SearchableSelect, Icon } from '../components/ui'
+import { Button } from '@coreai/fluentui-react'
 import { type Draft, loadDraft, saveDraft, clearDraft, deriveName } from '../agentDraft'
 
 export default function CreateAgentPage() {
   const navigate = useNavigate()
   const { selected, subscriptions } = useIdentity()
   const [draft, setDraft] = useState<Draft>(loadDraft)
-  const [searchParams, setSearchParams] = useSearchParams()
 
   // Persist to sessionStorage on every change (auto-save for the session).
   useEffect(() => {
     saveDraft(draft)
   }, [draft])
-
-  // Runtime samples for the "Start from a sample" shelf on step 1 (fetched
-  // once per tab). Also drives the `?sample=<slug>` deep-link pre-fill.
-  const samplesQuery = useQuery({
-    queryKey: ['samples:full'],
-    queryFn: () => api.listSamples(true),
-    staleTime: 60 * 60 * 1000,
-  })
-  const samples: SampleSummary[] = samplesQuery.data?.samples ?? []
-
-  // A user-visible message when we've pre-filled from a sample. Cleared once
-  // the user changes anything material.
-  const [sampleBanner, setSampleBanner] = useState<string>('')
-
-  // Split a Markdown file into { frontmatter object, body }. Used to lift
-  // `name`/`description` from a sample's primary `.agent.md` into the draft.
-  const applySample = (sample: SampleSummary) => {
-    const primary =
-      sample.files?.find((f) => f.path === 'main.agent.md') ??
-      sample.files?.find((f) => f.path.endsWith('.agent.md') && !f.path.includes('/'))
-    if (!primary) return
-    const match = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?([\s\S]*)$/.exec(primary.content)
-    const front: Record<string, unknown> = {}
-    if (match) {
-      // Very light frontmatter parse — good enough for name / description /
-      // trigger.type. Real validation happens on the backend.
-      for (const line of match[1].split(/\r?\n/)) {
-        const m = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line)
-        if (m) front[m[1]] = m[2].trim().replace(/^["']|["']$/g, '')
-      }
-    }
-    const name = String(front.name || sample.slug)
-    const description = String(front.description || sample.blurb || sample.title)
-    const body = match ? match[2].trim() : primary.content.trim()
-    const trigger: Draft['trigger'] = /trigger:\s*[\s\S]*?type:\s*(timer_trigger|generic_trigger|connector_trigger)/i.test(
-      match?.[1] ?? '',
-    )
-      ? /timer_trigger/.test(match?.[1] ?? '')
-        ? 'timer'
-        : 'connector'
-      : 'http'
-    setDraft((d) => ({
-      ...d,
-      name,
-      description,
-      instructions: body || d.instructions,
-      mdOverride: primary.content,
-      trigger,
-      builtinEndpoints:
-        primary.content.includes('builtin_endpoints: true') || primary.content.includes('builtin_endpoints:\n'),
-    }))
-    setSampleBanner(`Pre-filled from sample “${sample.slug}”. Pick a Foundry model to continue.`)
-  }
-
-  // On mount, honour a `?sample=<slug>` deep-link (from the dashboard gallery).
-  useEffect(() => {
-    const slug = searchParams.get('sample')
-    if (!slug || !samples.length) return
-    const match = samples.find((s) => s.slug === slug)
-    if (!match) return
-    applySample(match)
-    // Drop the query param so refresh doesn't re-apply the sample after edits.
-    searchParams.delete('sample')
-    setSearchParams(searchParams, { replace: true })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [samples.length])
 
   const foundrySub = draft.foundrySubscription || selected
 
@@ -149,24 +82,14 @@ export default function CreateAgentPage() {
     }))
   }
 
-  // Manual entry clears the picker-derived account fields (which the AI generator
-  // needs), so ✨ Generate is only offered when a model is actually selected.
-  const setFoundryMode = (mode: 'pick' | 'manual') =>
-    setDraft((d) =>
-      mode === 'manual'
-        ? { ...d, foundryMode: mode, foundryAccount: '', foundryResourceGroup: '', foundryOpenaiEndpoint: '' }
-        : { ...d, foundryMode: mode },
-    )
-
   const [generating, setGenerating] = useState(false)
   const [genError, setGenError] = useState<string | null>(null)
   const [step, setStep] = useState<1 | 2>(draft.foundryModel ? 2 : 1)
+  const [generated, setGenerated] = useState(!!draft.name && !!draft.description)
   const canGenerate =
     !!draft.foundryAccount && !!draft.foundryOpenaiEndpoint && !!draft.description.trim() && !generating
 
-  // Generate the agent's instructions, then open the generated app to review,
-  // deploy, and connect GitHub. Nothing is deployed on this page.
-  const generateAndOpen = async () => {
+  const generateSkill = async () => {
     if (!canGenerate) return
     setGenerating(true)
     setGenError(null)
@@ -186,7 +109,7 @@ export default function CreateAgentPage() {
       const updated: Draft = { ...draft, name, instructions: r.content, mdOverride: null }
       setDraft(updated)
       saveDraft(updated)
-      navigate('/new-app/draft')
+      setGenerated(true)
     } catch (e) {
       setGenError((e as Error).message)
     } finally {
@@ -194,7 +117,7 @@ export default function CreateAgentPage() {
     }
   }
 
-  const foundryReady = !!draft.foundryModel && (draft.foundryMode === 'pick' || !!draft.foundryEndpoint)
+  const foundryReady = !!draft.foundryModel && !!draft.foundryAccount
 
   const cancel = () => {
     clearDraft()
@@ -207,60 +130,27 @@ export default function CreateAgentPage() {
         Home / <Link to={`/agents/${selected}`}>Hosted Skills</Link> / Create
       </div>
       <div className="page-title">
-        <h1>New Hosted Skills App</h1>
-        <span className="badge gray">draft saved in this session</span>
+        <h1>New Skill</h1>
       </div>
-
-      {sampleBanner && (
-        <div className="note ok" style={{ margin: '0 0 12px', maxWidth: 720 }}>
-          ✓ {sampleBanner}
-        </div>
-      )}
-
-      <Callout title="What makes this a Hosted Skills app">
-        <div className="muted" style={{ fontSize: 13, maxWidth: 720 }}>
-          Deploying sets the <code>AZURE_FUNCTIONS_AGENTS_PROVIDER</code> app setting on the Function App — the
-          marker the portal uses to discover it as a Hosted Skills app.
-        </div>
-      </Callout>
 
       <div className="steps">
         <span className={'step' + (step === 1 ? ' active' : ' done')}>1 · Model</span>
         <span className="step-sep">→</span>
-        <span className={'step' + (step === 2 ? ' active' : '')}>2 · Describe &amp; generate</span>
+        <span className={'step' + (step === 2 ? ' active' : '')}>2 · Generate skill</span>
+        <span className="step-sep">→</span>
+        <span className="step">3 · Deployment target</span>
+        <span className="step-sep">→</span>
+        <span className="step">4 · Review and deploy</span>
       </div>
 
       {step === 1 && (
         <>
           <div className="card">
-            <h3>Every agent needs a Foundry model</h3>
+            <h3>Choose a Microsoft Foundry model</h3>
             <p className="muted" style={{ marginTop: 0 }}>
-              Pick a deployed model from any subscription — or enter its details — to continue. The model runs
-              your agent and powers ✨ Generate.
+              Select the subscription, Foundry resource, project, and deployed model that will generate and run this skill.
             </p>
-            <div style={{ display: 'flex', gap: 16, marginBottom: 4 }}>
-              <label className="check" style={{ marginBottom: 0 }}>
-                <input
-                  type="radio"
-                  name="fmode"
-                  checked={draft.foundryMode === 'pick'}
-                  onChange={() => setFoundryMode('pick')}
-                />{' '}
-                Select a deployed model
-              </label>
-              <label className="check" style={{ marginBottom: 0 }}>
-                <input
-                  type="radio"
-                  name="fmode"
-                  checked={draft.foundryMode === 'manual'}
-                  onChange={() => setFoundryMode('manual')}
-                />{' '}
-                Enter manually
-              </label>
-            </div>
-
-            {draft.foundryMode === 'pick' ? (
-              <>
+            <>
                 <div className="field" style={{ marginBottom: 8 }}>
                   <label>Subscription</label>
                   <SearchableSelect
@@ -328,89 +218,12 @@ export default function CreateAgentPage() {
                   , then ↻ Refresh. A selected model powers ✨ Generate.
                 </div>
               </>
-            ) : (
-              <div className="grid cols-2" style={{ gap: 12, marginTop: 8 }}>
-                <div className="field" style={{ marginBottom: 0 }}>
-                  <label>Model / deployment name</label>
-                  <Input
-                    type="text"
-                    value={draft.foundryModel}
-                    placeholder="gpt-4o"
-                    onChange={(_, data) => set('foundryModel', data.value)}
-                  />
-                </div>
-                <div className="field" style={{ marginBottom: 0 }}>
-                  <label>Foundry project endpoint</label>
-                  <Input
-                    type="url"
-                    value={draft.foundryEndpoint}
-                    placeholder="https://<account>.services.ai.azure.com/api/projects/<project>"
-                    onChange={(_, data) => set('foundryEndpoint', data.value)}
-                  />
-                </div>
-                <div className="hint" style={{ gridColumn: '1 / -1' }}>
-                  Manual entry — you’ll write the instructions yourself (✨ Generate needs a selected model).
-                </div>
-              </div>
-            )}
           </div>
-          <p className="page-sub" style={{ marginTop: 14 }}>
-            Pick a Foundry model and describe the agent — we’ll generate its code. You’ll review, deploy, and
-            connect GitHub on the next step. This draft is kept only for this browser session.
-          </p>
-
-          {samples.length > 0 && (
-            <div className="card" style={{ marginTop: 14 }}>
-              <div className="card-head">
-                <h3 style={{ margin: 0 }}>Or start from a sample</h3>
-                <span className="muted" style={{ fontSize: 12 }}>
-                  Skips the AI generation step — pre-fills a ready-to-deploy draft.
-                </span>
-              </div>
-              <div className="sample-grid" style={{ marginTop: 8 }}>
-                {samples.map((s) => (
-                  <button
-                    key={s.slug}
-                    type="button"
-                    className="sample-card"
-                    onClick={() => applySample(s)}
-                    title={s.blurb || s.title}
-                  >
-                    <div className="sample-title">
-                      <span className="mono">{s.slug}</span>
-                    </div>
-                    <div className="sample-blurb">{s.blurb || s.title}</div>
-                    <div className="sample-chips">
-                      {s.triggerTypes.map((t) => (
-                        <span className="cap-chip cap-chip-ok" key={t}>
-                          {t}
-                        </span>
-                      ))}
-                      {s.hasMcp && <span className="cap-chip cap-chip-ok">mcp</span>}
-                      {s.hasSkills && <span className="cap-chip cap-chip-ok">skills</span>}
-                      {s.hasWorkflow && <span className="cap-chip cap-chip-ok">workflow</span>}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
 
           <div className="toolbar" style={{ marginTop: 16 }}>
-            {draft.mdOverride ? (
-              <Button
-                appearance="primary"
-                disabled={!foundryReady}
-                onClick={() => navigate('/new-app/draft')}
-                title="Skip AI generation — the sample already provides a ready .agent.md"
-              >
-                Continue to review →
-              </Button>
-            ) : (
-              <Button appearance="primary" disabled={!foundryReady} onClick={() => setStep(2)}>
-                Continue →
-              </Button>
-            )}
+            <Button appearance="primary" disabled={!foundryReady} onClick={() => setStep(2)}>
+              Continue to generate →
+            </Button>
             <Button onClick={cancel}>Cancel</Button>
             {!foundryReady && (
               <span className="muted" style={{ fontSize: 12 }}>
@@ -437,12 +250,10 @@ export default function CreateAgentPage() {
 
           <div className="card" style={{ maxWidth: 760 }}>
             <h3>
-              <Icon name="sparkles" size={15} style={{ verticalAlign: '-2px' }} /> Describe your agent
+              <Icon name="sparkles" size={15} style={{ verticalAlign: '-2px' }} /> Generate your skill
             </h3>
             <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
-              Say what the agent should do in a sentence or two. We’ll generate its{' '}
-              <span className="mono">.agent.md</span> with <span className="mono">{draft.foundryModel}</span>.
-              Nothing is deployed yet — you’ll review the generated app next, then deploy it or connect GitHub.
+              Describe the outcome. <span className="mono">{draft.foundryModel}</span> will generate the skill prompt for you to review and edit.
             </p>
             <textarea
               className="editor"
@@ -451,27 +262,22 @@ export default function CreateAgentPage() {
               placeholder="e.g. Triage inbound support tickets: classify urgency, summarize the issue, and draft a concise reply."
               value={draft.description}
               onChange={(e) => set('description', e.target.value)}
-              aria-label="Describe your agent"
+              aria-label="Describe your skill"
             />
             <div className="toolbar" style={{ marginTop: 12 }}>
-              <button className="btn primary" onClick={generateAndOpen} disabled={!canGenerate}>
+              <button className="btn primary" onClick={generateSkill} disabled={!canGenerate}>
                 {generating ? (
                   'Generating…'
                 ) : (
                   <>
-                    <Icon name="sparkles" size={14} /> Generate app
+                    <Icon name="sparkles" size={14} /> Generate skill
                   </>
                 )}
               </button>
               <button className="btn" onClick={cancel}>
                 Cancel
               </button>
-              {draft.foundryMode === 'manual' && (
-                <span className="muted" style={{ fontSize: 12 }}>
-                  Generation needs a picked model (← Model), not manual entry.
-                </span>
-              )}
-              {draft.foundryMode === 'pick' && !draft.description.trim() && (
+              {!draft.description.trim() && (
                 <span className="muted" style={{ fontSize: 12 }}>Describe the agent to generate.</span>
               )}
             </div>
@@ -479,6 +285,25 @@ export default function CreateAgentPage() {
               <p className="muted" style={{ color: 'var(--red)', fontSize: 12, margin: '10px 0 0' }}>
                 Generation failed: {genError}
               </p>
+            )}
+            {generated && (
+              <>
+                <div className="field" style={{ marginTop: 18 }}>
+                  <label>Generated prompt</label>
+                  <textarea
+                    className="editor"
+                    style={{ minHeight: 260 }}
+                    spellCheck={false}
+                    value={draft.instructions}
+                    onChange={(e) => set('instructions', e.target.value)}
+                    aria-label="Generated skill prompt"
+                  />
+                  <div className="hint">Review and edit this prompt before choosing where the skill will run.</div>
+                </div>
+                <Button appearance="primary" onClick={() => navigate('/new-app/draft')}>
+                  Continue to deployment target →
+                </Button>
+              </>
             )}
           </div>
         </>

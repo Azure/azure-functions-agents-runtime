@@ -256,7 +256,7 @@ export default function Shell({ children }: { children: ReactNode }) {
             icon={<Icon name="plus" size={16} />}
             onClick={() => navigate('/create-agent')}
           >
-            New App
+            New Skill
           </Button>
           <Tooltip content={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} relationship="label">
             <Button

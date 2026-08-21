@@ -457,7 +457,7 @@ export default function AppDetailPage() {
               {deployJob.phase === 'running' ? 'Deploying…' : '🚀 Deploy edits'}
             </Button>
             <Link className="btn" to="/create-agent">
-              ＋ Add agent
+              ＋ New Skill
             </Link>
             {app.agents.length > 0 && (
               <AddCapability

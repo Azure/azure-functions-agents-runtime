@@ -428,12 +428,31 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
 .check input { width: auto; margin-right: 4px; }
 
 /* Create-agent wizard steps */
-.steps { display: flex; align-items: center; gap: 10px; margin: 0 0 16px; }
+.steps { display: flex; align-items: center; gap: 10px; margin: 0 0 20px; flex-wrap: wrap; }
 .steps .step { font-size: 13px; font-weight: 600; color: var(--text-faint); padding: 4px 12px;
   border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); }
 .steps .step.active { color: var(--brand-dark); background: var(--brand-soft); border-color: color-mix(in srgb, var(--brand) 34%, transparent); }
 .steps .step.done { color: var(--text-muted); }
 .steps .step-sep { color: var(--text-faint); }
+.create-flow-card { max-width: 880px; }
+.create-flow-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+.review-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--border);
+  border-radius: 8px; background: var(--surface); overflow: hidden; margin-bottom: 16px; }
+.review-grid > div { display: flex; flex-direction: column; gap: 3px; padding: 14px 16px; min-width: 0; }
+.review-grid > div + div { border-left: 1px solid var(--border); }
+.review-grid span { color: var(--text-faint); font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+.review-grid strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.review-prompt { box-shadow: none; }
+.review-prompt pre { max-height: 360px; overflow: auto; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+  color: var(--text); font: 12.5px/1.55 "Cascadia Code", "SF Mono", Consolas, monospace; }
+.review-validation { margin-top: 16px; }
+@media (max-width: 760px) {
+  .review-grid { grid-template-columns: 1fr 1fr; }
+  .review-grid > div:nth-child(3) { border-left: 0; }
+  .review-grid > div:nth-child(n+3) { border-top: 1px solid var(--border); }
+  .steps .step-sep { display: none; }
+}
 
 /* Playground — agent chat + (future) live trace */
 .playground { display: grid; grid-template-columns: 1fr 320px; gap: 16px; align-items: start; }
