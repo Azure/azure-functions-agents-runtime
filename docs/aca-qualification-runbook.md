@@ -1,12 +1,14 @@
 # ACA qualification runbook
 
 Operating guide for the post-main ACA deployment and qualification stages in
-`eng/ci/official-build.yml`. Design and decisions live in
+`eng/ci/e2e-tests.yml`. Design and decisions live in
 [`frds/0008-aca-sandbox-session-runtime.md`](frds/0008-aca-sandbox-session-runtime.md) §14.
 
 ## What runs, and when
 
-On every merge to `main` or `release/*` (the pipeline is `pr: none`):
+On merge to `main`, and on manual runs from any branch. Pull request and
+scheduled builds are excluded by a per-stage condition, because this pipeline
+does carry PR triggers:
 
 ```
 AcaSweep ──┐
@@ -28,38 +30,30 @@ budget.
 
 Every stage is `continueOnError` during stabilization.
 
-### ⚠ Network isolation on the official pipeline blocks the ACA data plane
+### Network isolation: why these stages are not on the official build
 
-**Open issue, found on the first live run.** The ACA data-plane host is not
-reachable from pipeline **1733**:
+1ES **DefaultDeny** network isolation is an allow-list, and the ACA data-plane
+host is not on it:
 
 ```
 ServiceRequestError: Cannot connect to host management.westus2.azuredevcompute.io:443
 ssl:default [Operation not permitted]
 ```
 
-`Operation not permitted` on an outbound connect is 1ES **network isolation**,
-not authentication and not RBAC.
-
-The e2e pipeline (**1777**) reaches the same host successfully, including on
-PR merge refs. The material difference is that 1733 carries
-`PipelineClassification_Audited: production`, and production-classified
-pipelines get stricter egress policy.
-
-This affects `AcaSweep` and any stage using the ACA SDK. Deployment itself uses
+`Operation not permitted` on an outbound connect is network isolation, not
+authentication and not RBAC. It affects `AcaSweep` and every suite that reads
+sandbox state through the ACA SDK — lifecycle, loss, and load all call the data
+plane directly to verify what the deployed app reports. Deployment itself uses
 the `az` CLI against ARM, which is permitted.
 
-Two ways out, and this is a policy decision rather than a code change:
+The policy is keyed by **pipeline definition ID**, not by pool: the official
+build (**1733**) and this pipeline (**1777**) share a pool and image, but only
+1733 is enrolled. Enrollment is a progressive migration, so 1777 is unenrolled
+rather than exempt.
 
-1. **Request an egress exemption** for `*.azuredevcompute.io` on pipeline 1733.
-   Keeps the stages in the official build, as currently designed.
-2. **Move the ACA stages to a separate, non-production-classified pipeline**,
-   mirroring how 1777 already runs ACA work. This reverses the decision to
-   extend the official build, and would also re-narrow the deployment
-   credential's blast radius.
-
-Until one is chosen, the ACA stages are `continueOnError`, so they surface the
-problem without blocking anything.
+That makes the current arrangement a reprieve, not a fix. The durable fix is an
+allow-list entry for `management.*.azuredevcompute.io`; until then, treat a
+future enrollment of 1777 as a scheduled outage for these stages.
 
 ### ⚠ Open: remote build is not producing a loadable app
 
@@ -107,11 +101,11 @@ should redeploy it.
 | **Service-connection authorization for this pipeline** | see below — easy to miss |
 | Pipeline variables | see below |
 
-### Authorize the service connection for the official build pipeline
+### Authorize the service connection for the pipeline
 
 A service connection is authorized **per pipeline**. `larohra-sandboxgroup-test`
-was originally authorized only for the e2e pipeline (1777), so the official build
-(1733) could not use it.
+is authorized for the e2e pipeline (1777), which is where these stages run. A
+pipeline that has not been granted access cannot use it.
 
 The symptom is unhelpful: affected stages sit at `pending` indefinitely with no
 error, no log, and no failed task. In the timeline they are held at a
@@ -129,7 +123,7 @@ az rest --method get --resource 499b84ac-1321-427f-aa17-267ca6975798 \
 # Grant
 az rest --method patch --resource 499b84ac-1321-427f-aa17-267ca6975798 \
   --headers "Content-Type=application/json" \
-  --body '{"pipelines":[{"id":1733,"authorized":true}]}' \
+  --body '{"pipelines":[{"id":1777,"authorized":true}]}' \
   --uri "https://dev.azure.com/azfunc/internal/_apis/pipelines/pipelinePermissions/endpoint/<endpointId>?api-version=7.1-preview.1"
 ```
 
@@ -146,7 +140,7 @@ Two mechanisms, in increasing order of cost:
 az rest --method post --resource 499b84ac-1321-427f-aa17-267ca6975798 \
   --headers "Content-Type=application/json" \
   --body '{"previewRun": true, "resources": {"repositories": {"self": {"refName": "refs/heads/<branch>"}}}}' \
-  --uri "https://dev.azure.com/azfunc/internal/_apis/pipelines/1733/runs?api-version=7.1-preview.1"
+  --uri "https://dev.azure.com/azfunc/internal/_apis/pipelines/1777/runs?api-version=7.1-preview.1"
 ```
 
 Returns the fully compiled YAML, so template and parameter errors surface with
@@ -155,23 +149,24 @@ no agent time and no Azure cost.
 **2. Manual queue on a branch — the real thing, off `main`.**
 
 ```bash
-az pipelines run --id 1733 --branch <branch> --org https://dev.azure.com/azfunc --project internal
+az pipelines run --id 1777 --branch <branch> --org https://dev.azure.com/azfunc --project internal
 ```
 
 ADO compiles from the queued branch, so this exercises the real stages without
 running on `main` and without publishing anything — releases are pipeline
-**1735**, a separate definition. The ACA stages execute on a topic branch
-because there are no ref guards, which is deliberate.
+**1735**, a separate definition. The stage conditions admit `Manual` on any
+branch precisely so this works; automatic CI runs are still restricted to
+`main`.
 
-**The branch must be pushed to the ADO remote**, not just GitHub. Pipeline 1733
+**The branch must be pushed to the ADO remote**, not just GitHub. Pipeline 1777
 builds from `dev.azure.com/azfunc/internal`, so a GitHub-only push fails
 validation with *"Unable to resolve the reference … to a specific version."*
 
 ### Pipeline variables
 
-Set these as ordinary pipeline variables on the official build pipeline
-(`agent-runtime.official-build`, definition **1733**), matching how the e2e
-pipeline (1777) already carries its `ACA_DEPLOYED_*` set. **Already created.**
+Set these as ordinary pipeline variables on the e2e pipeline
+(`agent-runtime.e2e-tests`, definition **1777**), alongside the `ACA_DEPLOYED_*`
+set it already carries. **Already created.**
 
 | Variable | Notes |
 | --- | --- |

@@ -21,7 +21,7 @@ coverage. `test_aca_real_agent_turn.py` exercises only the production execution
 backend.
 
 Deployed cold-start, lifecycle, loss, load, and one-shot recovery suites are
-wired into the post-main ACA qualification stages of `eng/ci/official-build.yml`.
+wired into the post-main ACA qualification stages of `eng/ci/e2e-tests.yml`.
 See [`docs/aca-qualification-runbook.md`](../../docs/aca-qualification-runbook.md)
 for targets, triage, and promotion criteria. They remain runnable by hand, and
 still skip unless `AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1` is set
@@ -65,11 +65,10 @@ cancel and poll for a terminal outcome. A cancellation `202` honors
 `Retry-After` before status polling. The terminal polling window is five
 minutes: it covers the 120-second operation lease plus a 60-second dedicated
 fixture reconciler cadence and scheduling jitter.
-=======
+
 Deployed cold-start, lifecycle, loss, and load suites are wired into the
-post-main ACA qualification stages of `eng/ci/official-build.yml`. See
+post-main ACA qualification stages of `eng/ci/e2e-tests.yml`. See
 [`docs/aca-qualification-runbook.md`](../../docs/aca-qualification-runbook.md)
 for targets, triage, and promotion criteria. They remain runnable by hand, and
 still skip unless `AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1` is set
 explicitly.
->>>>>>> a479be3b (Add post-main ACA deployment, attestation, and qualification pipeline)

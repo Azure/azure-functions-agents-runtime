@@ -65,7 +65,7 @@ prerequisite; the real model turn is positive access proof, not a negative
 role-assignment attestation.
 
 The retained `aca_deployed_qualification.py` and deployed suite helpers are
-driven by the post-main ACA qualification stages in `eng/ci/official-build.yml`
+driven by the post-main ACA qualification stages in `eng/ci/e2e-tests.yml`
 and remain runnable by hand.
 
 ### `aca_qualification_pipeline.py`
