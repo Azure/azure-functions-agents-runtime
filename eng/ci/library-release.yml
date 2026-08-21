@@ -1,15 +1,14 @@
-trigger:
-  batch: true
-  branches:
-    include:
-      - main
-  paths:
-    include:
-      - src/**
-    exclude:
-      - src/azure_functions_agents/__init__.py
+trigger: none
 
 pr: none
+
+schedules:
+  - cron: '0 0 * * THU'
+    displayName: At 12:00 AM, only on Thursday
+    branches:
+      include:
+        - main
+    always: true
 
 parameters:
   - name: libraryVersion
