@@ -50,8 +50,9 @@
 		}
 
 		.topbar-title {
-			font-size: 14px;
-			font-weight: 600;
+			font-size: 18px;
+			font-weight: 700;
+			letter-spacing: -0.015em;
 		}
 
 		.topbar-actions {
@@ -495,6 +496,51 @@
 			font-size: 12px;
 		}
 
+		.run-metrics-bar {
+			display: flex;
+			align-items: center;
+			flex-wrap: wrap;
+			gap: 8px;
+			padding: 0 12px 12px 12px;
+			font-size: 12px;
+			color: var(--muted);
+		}
+
+		.run-metrics-bar[hidden] { display: none; }
+
+		.run-metrics-strip {
+			display: flex;
+			flex: 1;
+			flex-wrap: wrap;
+			gap: 6px;
+		}
+
+		.run-metric {
+			display: inline-flex;
+			align-items: baseline;
+			gap: 5px;
+			padding: 4px 8px;
+			border: 1px solid #cbd5e1;
+			border-radius: 999px;
+			background: #f8fafc;
+			color: var(--text);
+			font-variant-numeric: tabular-nums;
+		}
+
+		.run-metric-label {
+			color: var(--muted);
+			font-size: 10px;
+			font-weight: 700;
+			letter-spacing: 0.04em;
+			text-transform: uppercase;
+		}
+
+		.run-metric-value {
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+			font-size: 11px;
+			font-weight: 700;
+		}
+
 		.typing {
 			display: inline-flex;
 			gap: 4px;
@@ -724,6 +770,42 @@
 			<code id="sessionIdValue" class="session-id-value" title="Active session ID"></code>
 			<button id="copySessionBtn" class="session-copy-btn" type="button" aria-label="Copy session ID">Copy</button>
 		</div>
+		<div id="fhaSessionBar" class="session-bar" hidden>
+			<span class="session-bar-label">FHA session</span>
+			<code id="fhaSessionIdValue" class="session-id-value" title="Private Foundry Hosted Agent session ID"></code>
+			<button id="copyFhaSessionBtn" class="session-copy-btn" type="button" aria-label="Copy FHA session ID">Copy</button>
+		</div>
+		<div id="runDetailsBar" class="session-bar" hidden>
+			<span class="session-bar-label">Run trace</span>
+			<code id="traceIdValue" class="session-id-value" title="Latest response trace ID"></code>
+			<button id="copyTraceBtn" class="session-copy-btn" type="button" aria-label="Copy run trace ID">Copy</button>
+		</div>
+		<div id="runMetricsBar" class="run-metrics-bar" hidden>
+			<span class="session-bar-label">Performance</span>
+			<div class="run-metrics-strip">
+				<span class="run-metric" title="Prompt submission to completed response">
+					<span class="run-metric-label">Total</span>
+					<strong id="totalTimeValue" class="run-metric-value"></strong>
+				</span>
+				<span class="run-metric" title="Prompt submission to first assistant output">
+					<span class="run-metric-label">First output</span>
+					<strong id="firstOutputValue" class="run-metric-value"></strong>
+				</span>
+				<span class="run-metric" title="First assistant output to completed response">
+					<span class="run-metric-label">Stream</span>
+					<strong id="streamTimeValue" class="run-metric-value"></strong>
+				</span>
+				<span class="run-metric" title="Number of streamed text delta events">
+					<span class="run-metric-label">Deltas</span>
+					<strong id="deltaCountValue" class="run-metric-value"></strong>
+				</span>
+				<span class="run-metric" title="Whether the request started or continued a session">
+					<span class="run-metric-label">Turn</span>
+					<strong id="sessionModeValue" class="run-metric-value"></strong>
+				</span>
+			</div>
+			<button id="copyRunMetricsBtn" class="session-copy-btn" type="button" aria-label="Copy run performance">Copy</button>
+		</div>
 	</main>
 
 	<div id="settingsBackdrop" class="settings-backdrop" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
@@ -791,6 +873,19 @@
 		const sessionBarEl = document.getElementById("sessionBar");
 		const sessionIdValueEl = document.getElementById("sessionIdValue");
 		const copySessionBtnEl = document.getElementById("copySessionBtn");
+		const fhaSessionBarEl = document.getElementById("fhaSessionBar");
+		const fhaSessionIdValueEl = document.getElementById("fhaSessionIdValue");
+		const copyFhaSessionBtnEl = document.getElementById("copyFhaSessionBtn");
+		const runDetailsBarEl = document.getElementById("runDetailsBar");
+		const traceIdValueEl = document.getElementById("traceIdValue");
+		const copyTraceBtnEl = document.getElementById("copyTraceBtn");
+		const runMetricsBarEl = document.getElementById("runMetricsBar");
+		const totalTimeValueEl = document.getElementById("totalTimeValue");
+		const firstOutputValueEl = document.getElementById("firstOutputValue");
+		const streamTimeValueEl = document.getElementById("streamTimeValue");
+		const deltaCountValueEl = document.getElementById("deltaCountValue");
+		const sessionModeValueEl = document.getElementById("sessionModeValue");
+		const copyRunMetricsBtnEl = document.getElementById("copyRunMetricsBtn");
 
 		const settingsBackdropEl = document.getElementById("settingsBackdrop");
 		const baseUrlInputEl = document.getElementById("baseUrlInput");
@@ -840,6 +935,9 @@
 			baseUrl: "",
 			key: "",
 			sessionId: null,
+			fhaSessionId: null,
+			traceId: null,
+			runMetrics: null,
 			loading: false,
 			loadingTimer: null,
 			loadingSeconds: 0
@@ -903,9 +1001,19 @@
 		// sends an id the server would reject with a 400.
 		const SESSION_ID_MAX_LENGTH = 128;
 		const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+		const FHA_SESSION_ID_PATTERN = /^fhs1-[a-z2-7]{52}$/;
+		const TRACE_ID_PATTERN = /^[0-9a-f]{32}$/i;
 
 		function isValidSessionId(value) {
 			return typeof value === "string" && SESSION_ID_PATTERN.test(value);
+		}
+
+		function isTraceId(value) {
+			return typeof value === "string" && TRACE_ID_PATTERN.test(value);
+		}
+
+		function isFhaSessionId(value) {
+			return typeof value === "string" && FHA_SESSION_ID_PATTERN.test(value);
 		}
 
 		function buildAuthQuery() {
@@ -1169,36 +1277,176 @@
 		async function copySessionId() {
 			if (!state.sessionId) return;
 			const id = state.sessionId;
+			const copied = await writeClipboardText(id);
+			setStatus(
+				copied
+					? "Session ID copied to clipboard."
+					: "Copy failed — select the ID and copy it manually.",
+				!copied
+			);
+		}
+
+		function updateFhaSessionBar() {
+			if (!fhaSessionBarEl || !fhaSessionIdValueEl) return;
+			if (state.fhaSessionId) {
+				fhaSessionIdValueEl.textContent = state.fhaSessionId;
+				fhaSessionIdValueEl.title = state.fhaSessionId;
+				fhaSessionBarEl.hidden = false;
+			} else {
+				fhaSessionIdValueEl.textContent = "";
+				fhaSessionBarEl.hidden = true;
+			}
+		}
+
+		function setLatestFhaSessionId(sessionId) {
+			state.fhaSessionId = isFhaSessionId(sessionId) ? sessionId : null;
+			updateFhaSessionBar();
+		}
+
+		function getFhaSessionId(response) {
+			const sessionId = response?.headers?.get("x-ms-fha-session-id");
+			return isFhaSessionId(sessionId) ? sessionId : null;
+		}
+
+		async function copyFhaSessionId() {
+			if (!state.fhaSessionId) return;
+			const copied = await writeClipboardText(state.fhaSessionId);
+			setStatus(
+				copied
+					? "FHA session ID copied to clipboard."
+					: "Copy failed — select the FHA session ID and copy it manually.",
+				!copied
+			);
+		}
+
+		function updateRunDetailsBar() {
+			if (!runDetailsBarEl || !traceIdValueEl) return;
+			if (state.traceId) {
+				traceIdValueEl.textContent = state.traceId;
+				traceIdValueEl.title = state.traceId;
+				runDetailsBarEl.hidden = false;
+			} else {
+				traceIdValueEl.textContent = "";
+				runDetailsBarEl.hidden = true;
+			}
+		}
+
+		function setLatestTraceId(traceId) {
+			state.traceId = isTraceId(traceId) ? traceId : null;
+			updateRunDetailsBar();
+		}
+
+		function getTraceId(response) {
+			const traceId = response?.headers?.get("x-ms-trace-id");
+			return isTraceId(traceId) ? traceId : null;
+		}
+
+		async function writeClipboardText(value) {
 			let copied = false;
 			try {
 				if (navigator.clipboard && navigator.clipboard.writeText) {
-					await navigator.clipboard.writeText(id);
+					await navigator.clipboard.writeText(value);
 					copied = true;
 				}
 			} catch (_e) {
 				copied = false;
 			}
-			if (!copied) {
-				// Fallback for non-secure contexts / older browsers where
-				// the async clipboard API is unavailable.
-				try {
-					const ta = document.createElement("textarea");
-					ta.value = id;
-					ta.setAttribute("readonly", "");
-					ta.style.position = "absolute";
-					ta.style.left = "-9999px";
-					document.body.appendChild(ta);
-					ta.select();
-					copied = document.execCommand("copy");
-					document.body.removeChild(ta);
-				} catch (_e) {
-					copied = false;
-				}
+			if (copied) return true;
+			try {
+				const ta = document.createElement("textarea");
+				ta.value = value;
+				ta.setAttribute("readonly", "");
+				ta.style.position = "absolute";
+				ta.style.left = "-9999px";
+				document.body.appendChild(ta);
+				ta.select();
+				copied = document.execCommand("copy");
+				document.body.removeChild(ta);
+			} catch (_e) {
+				copied = false;
 			}
+			return copied;
+		}
+
+		async function copyTraceId() {
+			if (!state.traceId) return;
+			const traceId = state.traceId;
+			const copied = await writeClipboardText(traceId);
 			setStatus(
 				copied
-					? "Session ID copied to clipboard."
-					: "Copy failed — select the ID and copy it manually.",
+					? "Run trace ID copied to clipboard."
+					: "Copy failed — select the trace ID and copy it manually.",
+				!copied
+			);
+		}
+
+		function formatRunDuration(value) {
+			if (!Number.isFinite(value) || value < 0) return "—";
+			if (value < 1000) return `${Math.round(value)} ms`;
+			const seconds = value / 1000;
+			return `${seconds.toFixed(seconds < 10 ? 2 : 1)} s`;
+		}
+
+		function normalizeRunMetrics(metrics) {
+			if (!metrics || typeof metrics !== "object") return null;
+			if (!Number.isFinite(metrics.totalMs) || metrics.totalMs < 0) return null;
+			return {
+				totalMs: metrics.totalMs,
+				firstOutputMs: Number.isFinite(metrics.firstOutputMs) ? metrics.firstOutputMs : null,
+				streamingMs: Number.isFinite(metrics.streamingMs) ? metrics.streamingMs : null,
+				deltaCount: Number.isInteger(metrics.deltaCount) && metrics.deltaCount >= 0
+					? metrics.deltaCount
+					: 0,
+				sessionMode: metrics.sessionMode === "continued" ? "continued" : "new"
+			};
+		}
+
+		function updateRunMetricsBar() {
+			if (!runMetricsBarEl) return;
+			const metrics = state.runMetrics;
+			if (!metrics) {
+				runMetricsBarEl.hidden = true;
+				return;
+			}
+			totalTimeValueEl.textContent = formatRunDuration(metrics.totalMs);
+			firstOutputValueEl.textContent = formatRunDuration(metrics.firstOutputMs);
+			streamTimeValueEl.textContent = formatRunDuration(metrics.streamingMs);
+			deltaCountValueEl.textContent = String(metrics.deltaCount);
+			sessionModeValueEl.textContent = metrics.sessionMode === "continued"
+				? "Continued"
+				: "New";
+			runMetricsBarEl.hidden = false;
+		}
+
+		function setLatestRunMetrics(metrics) {
+			state.runMetrics = normalizeRunMetrics(metrics);
+			updateRunMetricsBar();
+		}
+
+		function runMetricsClipboardText() {
+			if (!state.runMetrics) return "";
+			const metrics = state.runMetrics;
+			const lines = [
+				`Total response: ${formatRunDuration(metrics.totalMs)}`,
+				`First output: ${formatRunDuration(metrics.firstOutputMs)}`,
+				`Active streaming: ${formatRunDuration(metrics.streamingMs)}`,
+				`Text deltas: ${metrics.deltaCount}`,
+				`Turn: ${metrics.sessionMode === "continued" ? "Continued session" : "New session"}`
+			];
+			if (state.sessionId) lines.push(`Session ID: ${state.sessionId}`);
+			if (state.fhaSessionId) lines.push(`FHA session ID: ${state.fhaSessionId}`);
+			if (state.traceId) lines.push(`Run trace ID: ${state.traceId}`);
+			return lines.join("\n");
+		}
+
+		async function copyRunMetrics() {
+			const summary = runMetricsClipboardText();
+			if (!summary) return;
+			const copied = await writeClipboardText(summary);
+			setStatus(
+				copied
+					? "Run performance copied to clipboard."
+					: "Copy failed — select the metrics and copy them manually.",
 				!copied
 			);
 		}
@@ -2484,6 +2732,13 @@
 		}
 
 		async function sendMessage(prompt, callbacks = {}) {
+			setLatestTraceId(null);
+			setLatestFhaSessionId(null);
+			setLatestRunMetrics(null);
+			const requestStartedAt = Number.isFinite(callbacks.startedAt)
+				? callbacks.startedAt
+				: performance.now();
+			const sessionMode = state.sessionId ? "continued" : "new";
 			const authQuery = state.key ? `?code=${encodeURIComponent(state.key)}` : "";
 			const endpoint = `${state.baseUrl}${getApiBasePath()}/chatstream${authQuery}`;
 			const headers = {
@@ -2500,6 +2755,21 @@
 				headers,
 				body: JSON.stringify({ prompt })
 			});
+			setLatestTraceId(getTraceId(response));
+			setLatestFhaSessionId(getFhaSessionId(response));
+			const responseSessionId = response.headers.get("x-ms-session-id");
+			if (isValidSessionId(responseSessionId)) {
+				const normalizedSessionId = responseSessionId.trim();
+				if (!(sessionIdIsExplicit && normalizedSessionId === state.sessionId)) {
+					state.sessionId = normalizedSessionId;
+					sessionWasFromServer = true;
+					sessionIdIsExplicit = false;
+				}
+				restoredSessionIdCandidate = null;
+				persistSessionId();
+				updateSessionBar();
+				recordSessionActivity(state.sessionId, lastSentUserMessage);
+			}
 
 			if (!response.ok) {
 				const raw = await response.text();
@@ -2523,37 +2793,17 @@
 			let streamText = "";
 			let finalMessage = "";
 			let doneReceived = false;
+			let firstOutputAt = null;
+			let completedAt = null;
+			let deltaCount = 0;
 			const intermediateResponses = [];
 			const toolCalls = [];
 			const seenToolStartKeys = new Set();
 			let pendingIntermediateLineBreak = false;
-			let lastStreamEventKey = null;
+			let lastStreamEventId = null;
 
-			const getStreamEventKey = (event) => {
-				const type = event?.type || "";
-				if (!type) return null;
-
-				if (event?.event_id) {
-					return `${type}|event:${event.event_id}`;
-				}
-
-				if (event?.tool_call_id) {
-					return `${type}|tool:${event.tool_call_id}`;
-				}
-
-				if (type === "delta" || type === "message" || type === "intermediate") {
-					return `${type}|content:${String(event?.content || "")}`;
-				}
-
-				if (type === "session") {
-					return `${type}|session:${String(event?.session_id || "")}`;
-				}
-
-				if (type === "done" || type === "error") {
-					return `${type}|${String(event?.content || "")}`;
-				}
-
-				return `${type}|${JSON.stringify(event)}`;
+			const markFirstOutput = () => {
+				if (firstOutputAt === null) firstOutputAt = performance.now();
 			};
 
 			const handleEvent = (event) => {
@@ -2589,6 +2839,8 @@
 				}
 
 				if (type === "delta" && typeof event.content === "string") {
+					markFirstOutput();
+					deltaCount += 1;
 					streamText += event.content;
 					if (typeof callbacks.onDelta === "function") {
 						callbacks.onDelta(streamText);
@@ -2597,6 +2849,7 @@
 				}
 
 				if (type === "message" && typeof event.content === "string") {
+					if (event.content) markFirstOutput();
 					finalMessage = event.content;
 					if (!event.content) {
 						pendingIntermediateLineBreak = true;
@@ -2679,6 +2932,17 @@
 				}
 
 				if (type === "done") {
+					if (typeof event?.content === "string" && event.content) {
+						markFirstOutput();
+					}
+					if (
+						!finalMessage
+						&& typeof event?.content === "string"
+						&& event.content
+					) {
+						finalMessage = event.content;
+					}
+					completedAt = performance.now();
 					doneReceived = true;
 				}
 			};
@@ -2694,27 +2958,25 @@
 					buffer = buffer.slice(boundary + 2);
 
 					const lines = block.split("\n");
-					for (const line of lines) {
-						if (!line.startsWith("data:")) continue;
-						const payload = line.slice(5).trim();
-						if (!payload) continue;
-
+					const eventIdLine = lines.find((line) => line.startsWith("id:"));
+					const eventId = eventIdLine ? eventIdLine.slice(3).trim() : null;
+					const payload = lines
+						.filter((line) => line.startsWith("data:"))
+						.map((line) => line.slice(5).trimStart())
+						.join("\n");
+					if (payload && (!eventId || eventId !== lastStreamEventId)) {
 						let event;
 						try {
 							event = JSON.parse(payload);
 						} catch {
-							continue;
+							event = null;
 						}
-
-						const eventKey = getStreamEventKey(event);
-						if (eventKey && eventKey === lastStreamEventKey) {
-							continue;
+						if (event) {
+							if (eventId) lastStreamEventId = eventId;
+							handleEvent(event);
 						}
-						lastStreamEventKey = eventKey;
-
-						handleEvent(event);
-						if (doneReceived) break;
 					}
+					if (completedAt === null) completedAt = performance.now();
 
 					if (doneReceived) break;
 					boundary = buffer.indexOf("\n\n");
@@ -2738,7 +3000,18 @@
 			return {
 				text: finalMessage || streamText || "(No response body)",
 				sessionId: state.sessionId,
-				details
+				details,
+				metrics: {
+					totalMs: Math.max(0, completedAt - requestStartedAt),
+					firstOutputMs: firstOutputAt === null
+						? null
+						: Math.max(0, firstOutputAt - requestStartedAt),
+					streamingMs: firstOutputAt === null
+						? null
+						: Math.max(0, completedAt - firstOutputAt),
+					deltaCount,
+					sessionMode
+				}
 			};
 		}
 
@@ -2753,6 +3026,7 @@
 
 			const prompt = promptInputEl.value.trim();
 			if (!prompt || state.loading) return;
+			const requestStartedAt = performance.now();
 
 			invalidateHistoryReplay();
 			startWorkflowPolling();
@@ -2787,6 +3061,7 @@
 				};
 
 				const result = await sendMessage(prompt, {
+					startedAt: requestStartedAt,
 					onDelta: (text) => {
 						setBubbleText(streamingBubble.bubble, "assistant", text);
 						scrollChatToBottom();
@@ -2809,9 +3084,11 @@
 						refreshOpenDetails(liveDetails);
 					}
 				});
-				const assistantMeta = hasDetails(result.details)
+				setLatestRunMetrics(result.metrics);
+				const assistantLabel = hasDetails(result.details)
 					? "Agent • click bubble for details"
-					: "assistant";
+					: "Assistant";
+				const assistantMeta = `${assistantLabel} • ${formatRunDuration(result.metrics.totalMs)} total`;
 				setBubbleText(streamingBubble.bubble, "assistant", result.text);
 				setBubbleIntermediates(streamingBubble.bubble, []);
 				setBubbleMeta(streamingBubble.bubble, assistantMeta);
@@ -2820,9 +3097,11 @@
 				attachBubbleDetails(streamingBubble.bubble, liveDetails);
 				refreshOpenDetails(liveDetails);
 				if (result.sessionId) {
-					setStatus(`Connected • Session ${result.sessionId}`);
+					setStatus(
+						`Connected • Session ${result.sessionId} • ${formatRunDuration(result.metrics.totalMs)} total`
+					);
 				} else {
-					setStatus("Connected");
+					setStatus(`Connected • ${formatRunDuration(result.metrics.totalMs)} total`);
 				}
 			} catch (error) {
 				setBubbleText(streamingBubble.bubble, "assistant", `Request failed. ${error.message}`);
@@ -2850,6 +3129,9 @@
 			invalidateHistoryReplay();
 			resetWorkflowStateForSessionChange();
 			state.sessionId = null;
+			setLatestTraceId(null);
+			setLatestFhaSessionId(null);
+			setLatestRunMetrics(null);
 			sessionWasFromServer = false;
 			sessionIdIsExplicit = false;
 			restoredSessionIdCandidate = null;
@@ -2873,6 +3155,18 @@
 
 		copySessionBtnEl.addEventListener("click", () => {
 			copySessionId();
+		});
+
+		copyFhaSessionBtnEl.addEventListener("click", () => {
+			copyFhaSessionId();
+		});
+
+		copyTraceBtnEl.addEventListener("click", () => {
+			copyTraceId();
+		});
+
+		copyRunMetricsBtnEl.addEventListener("click", () => {
+			copyRunMetrics();
 		});
 
 		if (sessionIdInputEl) {

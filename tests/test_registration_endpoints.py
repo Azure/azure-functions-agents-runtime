@@ -534,6 +534,7 @@ async def test_builtin_stream_honors_respond_async(
 
     assert response.status_code == 202
     assert captured["respond_async"] is True
+    assert captured["stream_events"] is False
     assert callable(captured["binding"].output_validator)
 
 
@@ -657,7 +658,10 @@ def test_builtin_chat_sync_uses_controller_session_header(
         return ControllerResponse(
             status_code=200,
             body={"response": "answer", "tool_calls": []},
-            headers={"x-ms-session-id": "new-session"},
+            headers={
+                "x-ms-session-id": "new-session",
+                "x-ms-fha-session-id": "fhs1-" + ("a" * 52),
+            },
         )
 
     monkeypatch.setattr(
@@ -682,12 +686,314 @@ def test_builtin_chat_sync_uses_controller_session_header(
 
     assert response.status_code == 200
     assert response.headers["x-ms-session-id"] == "new-session"
+    assert response.headers["x-ms-fha-session-id"] == "fhs1-" + ("a" * 52)
     assert json.loads(response.body) == {
         "session_id": "new-session",
         "response": "answer",
         "tool_calls": [],
     }
     assert callable(captured["binding"].output_validator)
+
+
+def test_builtin_chat_sync_adds_current_trace_id_and_preserves_session_header(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    trace_id = "a" * 32
+    backend_kwargs: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        lambda **kwargs: backend_kwargs.update(kwargs) or object(),
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.get_current_operation_id",
+        lambda: trace_id,
+    )
+
+    async def fake_submit_run(*_args: Any, **_kwargs: Any) -> ControllerResponse:
+        return ControllerResponse(
+            status_code=200,
+            body={"response": "answer", "tool_calls": []},
+            headers={"x-ms-session-id": "new-session"},
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.submit_run",
+        fake_submit_run,
+    )
+    register_builtin_endpoints(
+        app,
+        _resolved_agent(
+            name="Test Agent",
+            is_main=False,
+            builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+            source_file=tmp_path / "test.agent.md",
+        ),
+        AgentCapabilities(),
+        session_runtime=_runtime(tmp_path),
+    )
+    route = next(route for route in app.routes if route["route"].endswith("/chat"))
+
+    response = asyncio.run(route["handler"](DummyRequest({"prompt": "hello"})))
+
+    assert response.status_code == 200
+    assert response.headers["x-ms-session-id"] == "new-session"
+    assert response.headers["x-ms-trace-id"] == trace_id
+
+
+@pytest.mark.parametrize(
+    ("status_code", "body", "headers"),
+    [
+        (
+            202,
+            {"session_id": "accepted-session", "run_id": "run-1", "status": "accepted"},
+            {"x-ms-session-id": "accepted-session", "retry-after": "1"},
+        ),
+        (
+            409,
+            {"error": "active_run_conflict"},
+            {"x-ms-session-id": "conflicted-session", "retry-after": "2"},
+        ),
+    ],
+)
+def test_builtin_chat_controller_responses_add_trace_id_without_losing_headers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status_code: int,
+    body: dict[str, object],
+    headers: dict[str, str],
+) -> None:
+    app = FakeFunctionApp()
+    trace_id = "b" * 32
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.get_current_operation_id",
+        lambda: trace_id,
+    )
+
+    async def fake_submit_run(*_args: Any, **_kwargs: Any) -> ControllerResponse:
+        return ControllerResponse(status_code=status_code, body=body, headers=headers)
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.submit_run",
+        fake_submit_run,
+    )
+    register_builtin_endpoints(
+        app,
+        _resolved_agent(
+            name="Test Agent",
+            is_main=False,
+            builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+            source_file=tmp_path / "test.agent.md",
+        ),
+        AgentCapabilities(),
+        session_runtime=_runtime(tmp_path),
+    )
+    route = next(route for route in app.routes if route["route"].endswith("/chat"))
+    request_headers = {"Prefer": "respond-async"} if status_code == 202 else {}
+
+    response = asyncio.run(route["handler"](DummyRequest({"prompt": "hello"}, request_headers)))
+
+    assert response.status_code == status_code
+    assert response.headers["x-ms-trace-id"] == trace_id
+    assert response.headers["x-ms-session-id"] == headers["x-ms-session-id"]
+    assert response.headers["retry-after"] == headers["retry-after"]
+    assert json.loads(response.body) == body
+
+
+def test_builtin_chat_omits_trace_id_when_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.get_current_operation_id",
+        lambda: None,
+    )
+
+    async def fake_run_builtin_agent(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(session_id="session-1", content="answer", tool_calls=[])
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent",
+        fake_run_builtin_agent,
+    )
+    register_builtin_endpoints(
+        app,
+        _resolved_agent(
+            name="Test Agent",
+            is_main=False,
+            builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+            source_file=tmp_path / "test.agent.md",
+        ),
+        AgentCapabilities(),
+    )
+    route = next(route for route in app.routes if route["route"].endswith("/chat"))
+
+    response = asyncio.run(route["handler"](DummyRequest({"prompt": "hello"})))
+
+    assert response.status_code == 200
+    assert "x-ms-trace-id" not in response.headers
+
+
+def test_builtin_chatstream_submits_inside_run_span_and_returns_trace_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    trace_id = "c" * 32
+    active = False
+    helper_calls: list[bool] = []
+    spans: list[tuple[str, _CapturedSpan]] = []
+    backend_kwargs: dict[str, Any] = {}
+
+    @contextlib.contextmanager
+    def fake_start_span(
+        name: str,
+        *,
+        fault_domain: str | None = None,
+        lifecycle_stage: str | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> Iterator[_CapturedSpan]:
+        del fault_domain, lifecycle_stage
+        nonlocal active
+        active = True
+        span = _CapturedSpan(attributes or {})
+        spans.append((name, span))
+        try:
+            yield span
+        finally:
+            active = False
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.start_span",
+        fake_start_span,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.get_current_operation_id",
+        lambda: helper_calls.append(active) or (trace_id if active else None),
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        lambda **kwargs: backend_kwargs.update(kwargs) or object(),
+    )
+
+    async def fake_submit_run(*_args: Any, **_kwargs: Any) -> ControllerResponse:
+        assert active
+        return ControllerResponse(
+            status_code=202,
+            body={"session_id": "stream-session", "run_id": "run-1", "status": "accepted"},
+            headers={"x-ms-fha-session-id": "fhs1-" + ("b" * 52)},
+        )
+
+    async def fake_events() -> Any:
+        yield 'data: {"type":"done","content":"answer"}\n\n'
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.submit_run",
+        fake_submit_run,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.render_events",
+        lambda *_args, **_kwargs: fake_events(),
+    )
+    resolved = _resolved_agent(
+        name="Test Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+        source_file=tmp_path / "test.agent.md",
+        slug="test-agent",
+    )
+    register_builtin_endpoints(
+        app,
+        resolved,
+        AgentCapabilities(),
+        session_runtime=_runtime(tmp_path),
+    )
+    route = next(route for route in app.routes if route["route"].endswith("/chatstream"))
+
+    response = asyncio.run(route["handler"](DummyRequest({"prompt": "hello"})))
+
+    assert response.status_code == 200
+    assert response.media_type == "text/event-stream"
+    assert response.headers["x-ms-session-id"] == "stream-session"
+    assert response.headers["x-ms-fha-session-id"] == "fhs1-" + ("b" * 52)
+    assert response.headers["x-ms-trace-id"] == trace_id
+    assert backend_kwargs["stream_events"] is True
+    assert helper_calls == [True]
+    assert len(spans) == 1
+    name, span = spans[0]
+    assert name == "agent.run test-agent"
+    assert span.attributes["af.agent.name"] == "test-agent"
+    assert span.attributes["af.agent.display_name"] == "Test Agent"
+    assert span.attributes["af.agent.trigger_type"] == "builtin_chatstream"
+    assert span.attributes["af.agent.session_id"] is None
+    assert span.attributes["af.agent.model"] is None
+    assert span.attributes["af.agent.outcome"] == "success"
+
+
+def test_builtin_chatstream_async_acceptance_preserves_controller_and_trace_headers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    trace_id = "d" * 32
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.get_current_operation_id",
+        lambda: trace_id,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        lambda **_kwargs: object(),
+    )
+
+    async def fake_submit_run(*_args: Any, **kwargs: Any) -> ControllerResponse:
+        assert kwargs["respond_async"] is True
+        return ControllerResponse(
+            status_code=202,
+            body={"session_id": "async-session", "run_id": "run-1", "status": "accepted"},
+            headers={
+                "x-ms-session-id": "async-session",
+                "x-ms-fha-session-id": "fhs1-" + ("c" * 52),
+                "retry-after": "1",
+            },
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.submit_run",
+        fake_submit_run,
+    )
+    register_builtin_endpoints(
+        app,
+        _resolved_agent(
+            name="Test Agent",
+            is_main=False,
+            builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+            source_file=tmp_path / "test.agent.md",
+        ),
+        AgentCapabilities(),
+        session_runtime=_runtime(tmp_path),
+    )
+    route = next(route for route in app.routes if route["route"].endswith("/chatstream"))
+
+    response = asyncio.run(
+        route["handler"](
+            DummyRequest(
+                {"prompt": "hello"},
+                headers={"Prefer": "respond-async"},
+            )
+        )
+    )
+
+    assert response.status_code == 202
+    assert response.headers["x-ms-session-id"] == "async-session"
+    assert response.headers["x-ms-fha-session-id"] == "fhs1-" + ("c" * 52)
+    assert response.headers["retry-after"] == "1"
+    assert response.headers["x-ms-trace-id"] == trace_id
 
 
 def test_builtin_sandbox_http_maps_unknown_session_through_real_controller_response(

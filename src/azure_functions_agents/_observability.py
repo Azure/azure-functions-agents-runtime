@@ -55,6 +55,10 @@ ATTR_LIFECYCLE_STAGE = "af.lifecycle_stage"
 ATTR_OPERATION_ID = "af.operation_id"
 
 _TRACER_NAME = "azure.functions.AgentRuntime"
+FHA_RESPONSES_CREATE_SPAN_NAME = "fha.responses.create"
+ATTR_FHA_AGENT_NAME = "af.fha.agent.name"
+ATTR_FHA_RUNTIME_SESSION_ID = "af.fha.runtime_session_id"
+ATTR_FHA_RUNTIME_RUN_ID = "af.fha.runtime_run_id"
 
 
 class FaultDomain:
@@ -307,17 +311,29 @@ def get_tracer() -> Any:
             return None
 
 
-def current_operation_id() -> str | None:
-    """Return the active trace id as a 32-char hex operation id, or ``None``."""
+def current_trace_id() -> str | None:
+    """Return the active valid W3C trace id as 32 lowercase hex characters."""
     try:
         from opentelemetry import trace
 
         context = trace.get_current_span().get_span_context()
-        if context is not None and context.trace_id:
+        if context is not None and context.is_valid:
             return format(context.trace_id, "032x")
     except Exception:  # pragma: no cover - defensive
         return None
     return None
+
+
+def current_operation_id() -> str | None:
+    """Return the active trace id only when runtime telemetry has a real provider."""
+    if not _enabled or not _otel_provider_already_configured():
+        return None
+    return current_trace_id()
+
+
+def get_current_operation_id() -> str | None:
+    """Return the active trace id only when runtime telemetry has a real provider."""
+    return current_operation_id()
 
 
 def bounded_content(value: str) -> str:
@@ -399,6 +415,80 @@ class RuntimeSpan:
             self._span.set_attribute(ATTR_FAULT_DOMAIN, fault_domain)
         except Exception:  # pragma: no cover - defensive
             pass
+
+
+def _has_current_valid_trace_context() -> bool:
+    try:
+        from opentelemetry import trace
+
+        return trace.get_current_span().get_span_context().is_valid
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
+def _inject_trace_context_headers() -> dict[str, str] | None:
+    """Inject only W3C trace context from the current span."""
+    if not _has_current_valid_trace_context():
+        return None
+    try:
+        from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+        carrier: dict[str, str] = {}
+        TraceContextTextMapPropagator().inject(carrier)
+    except Exception:  # pragma: no cover - defensive
+        return None
+    traceparent = carrier.get("traceparent")
+    if not isinstance(traceparent, str):
+        return None
+    headers = {"traceparent": traceparent}
+    tracestate = carrier.get("tracestate")
+    if isinstance(tracestate, str):
+        headers["tracestate"] = tracestate
+    return headers
+
+
+@contextmanager
+def start_fha_responses_create_span(
+    *,
+    agent_name: str,
+    runtime_session_id: str,
+    runtime_run_id: str,
+) -> Iterator[Mapping[str, str] | None]:
+    """Start the FHA create client span and yield its W3C-only request headers."""
+    if not _enabled or not _has_current_valid_trace_context():
+        yield None
+        return
+    try:
+        from opentelemetry.trace import SpanKind
+
+        tracer = get_tracer()
+        if tracer is None:
+            yield None
+            return
+        manager = tracer.start_as_current_span(
+            FHA_RESPONSES_CREATE_SPAN_NAME,
+            kind=SpanKind.CLIENT,
+            record_exception=False,
+            set_status_on_exception=False,
+        )
+        raw_span = manager.__enter__()
+    except Exception:  # pragma: no cover - defensive
+        yield None
+        return
+
+    span = RuntimeSpan(raw_span)
+    span.set_attribute(ATTR_FHA_AGENT_NAME, agent_name)
+    span.set_attribute(ATTR_FHA_RUNTIME_SESSION_ID, runtime_session_id)
+    span.set_attribute(ATTR_FHA_RUNTIME_RUN_ID, runtime_run_id)
+    try:
+        yield _inject_trace_context_headers()
+    except BaseException as exc:
+        with suppress(Exception):  # pragma: no cover - defensive
+            manager.__exit__(type(exc), exc, exc.__traceback__)
+        raise
+    else:
+        with suppress(Exception):  # pragma: no cover - defensive
+            manager.__exit__(None, None, None)
 
 
 @contextmanager

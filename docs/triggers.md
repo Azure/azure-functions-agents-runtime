@@ -78,6 +78,20 @@ runnable example.
 | `generic_trigger` | `generic_trigger(...)` | Supported | Custom extension binding trigger. |
 | `connector_trigger` | `connector_trigger(...)` | Supported | Generic connector trigger. |
 
+### Experimental Foundry Hosted Agent Responses restriction
+
+The table above describes the normal Functions runtime. When the experimental
+Foundry Hosted Agent Responses (FHA) binding is enabled, its V0 catalog accepts
+HTTP routes and exactly one non-HTTP trigger:
+`service_bus_queue_trigger`. Every other non-HTTP trigger type, including
+Storage Queue, Event Hubs, Service Bus topics, timers, connectors, and generic
+bindings, fails FHA registration. This is a spike boundary, not a reduction in
+the normal Functions trigger surface. FHA V0 can execute custom Python tools,
+Agent Skills, remote HTTP MCP, and one-level delegation, but rejects system
+tools, Dynamic/Durable Workflows, nested delegation, and local MCP. A hosted
+handler crash before checkpointing can replay the whole turn and its external
+effects at least once. The queue handler is not a workflow starter.
+
 ## Unsupported Trigger Decorators
 
 These Azure Functions Python decorators are intentionally not supported as `.agent.md` triggers.
@@ -290,6 +304,35 @@ trigger:
 | `data_type` | No | Forwarded to the Azure Functions decorator. |
 
 Ref: [Azure Functions Service Bus trigger](https://learn.microsoft.com/azure/azure-functions/functions-bindings-service-bus-trigger)
+
+#### Experimental FHA execution
+
+With the FHA runtime selected, this is the only supported non-HTTP path. One
+delivery derives a stable idempotency input from the broker-assigned unsigned
+64-bit `sequence_number`, the agent and Function App identity, and a
+non-secret versioned fingerprint of the normalized Service Bus namespace and
+configured `queue_name`. It never treats `message_id` as the delivery
+authority. The namespace prefers the identity-based
+`<connection>__fullyQualifiedNamespace` setting; when a connection string is
+used, only its `Endpoint` hostname contributes to the fingerprint and its
+credential-bearing components are discarded. The fingerprint, not a raw
+namespace, queue connection string, credential, or token, is retained.
+
+The FHA prompt is stable across redelivery: it excludes volatile
+`delivery_count`, `locked_until`, and `lock_token` metadata before serializing
+the payload. The first delivery admits and submits one stored background
+Response; a lock-loss/redelivery with the same fingerprint and
+`sequence_number` reattaches to that run and polls it rather than submitting a
+second Response. The handler polls to a terminal outcome in the Function
+invocation. A non-successful terminal outcome, cancellation, indeterminate
+outcome, or deadline exhaustion raises so the normal Service Bus retry/DLQ
+path applies.
+
+Set `AZURE_FUNCTIONS_AGENTS_FHA_SERVICE_BUS_LOCK_BUDGET_SECONDS` to a positive
+lock budget that accounts for the host's lock-renewal behavior. The FHA handler
+uses one deadline for submission, polling, and cleanup; it reserves three
+seconds for cancellation/cleanup and rejects an agent timeout that cannot fit
+within that budget. It does not infer a budget from volatile message metadata.
 
 ### Service Bus Topic Trigger
 
@@ -617,6 +660,7 @@ application properties.
   "body": "process order 42",
   "body_encoding": "utf-8",
   "message_id": "message-42",
+  "sequence_number": 123,
   "subject": "order.created",
   "delivery_count": 1,
   "application_properties": {"tenant": "contoso"},

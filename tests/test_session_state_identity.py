@@ -232,7 +232,7 @@ def test_function_app_identity_fails_closed_on_invalid_subscription_guid() -> No
         resolve_function_app_identity(values.get)
 
 
-def test_owner_resolution_is_explicit_and_trigger_binding_is_reserved() -> None:
+def test_owner_resolution_is_explicit_for_supported_principals() -> None:
     app = _app()
     function_owner = resolve_owner_context(app, "main", FunctionAppPrincipal())
     entra_owner = resolve_owner_context(
@@ -240,15 +240,18 @@ def test_owner_resolution_is_explicit_and_trigger_binding_is_reserved() -> None:
         "main",
         EntraPrincipal.create(_TENANT_ID, _OBJECT_ID),
     )
+    trigger_owner = resolve_owner_context(app, "main", TriggerBindingPrincipal())
 
     assert isinstance(function_owner, FunctionAppOwnerContext)
     assert isinstance(entra_owner, EntraUserOwnerContext)
+    assert isinstance(trigger_owner, TriggerBindingOwnerContext)
+    assert compute_owner_hash(trigger_owner).startswith("o1-")
+    assert compute_owner_hash(trigger_owner) not in {
+        compute_owner_hash(function_owner),
+        compute_owner_hash(entra_owner),
+    }
     with pytest.raises(OwnerResolutionError, match="could not be resolved"):
         resolve_owner_context(app, "main", None)
-    with pytest.raises(OwnerResolutionError, match="reserved"):
-        resolve_owner_context(app, "main", TriggerBindingPrincipal())
-    with pytest.raises(OwnerResolutionError, match="reserved"):
-        compute_owner_hash(TriggerBindingOwnerContext.create(app, "main"))
 
 
 @pytest.mark.parametrize(

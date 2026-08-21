@@ -21,6 +21,9 @@ MAX_SNAPSHOT_IDS = 64
 MAX_SNAPSHOT_IDS_SERIALIZED_BYTES = 8192
 STATE_STORE_FINGERPRINT_VERSION = "s1"
 OWNER_IDEMPOTENCY_RECOVERY_SECONDS = 3600
+FOUNDRY_RESPONSES_PROVIDER = "foundry_responses"
+MAX_PROVIDER_ID_BYTES = 256
+MAX_PUBLIC_EVENT_SEQUENCE = (2**63) - 1
 
 type OwnerKind = Literal["entra_user", "function_app", "trigger_binding"]
 type SessionStatus = Literal[
@@ -68,6 +71,17 @@ type DurableOperationPhase = Literal[
     "aborted",
 ]
 type DurableOperationState = Literal["active", "completed", "aborted"]
+type ProviderRunMappingState = Literal[
+    "pending",
+    "submitting",
+    "bound",
+    "terminal",
+    "indeterminate",
+]
+type ProviderIndeterminateReason = Literal[
+    "provider_submission_indeterminate",
+    "provider_termination_indeterminate",
+]
 type TableEntityValue = str | int | bool | datetime
 type TableEntity = dict[str, TableEntityValue]
 
@@ -103,6 +117,12 @@ _OPERATION_KINDS: frozenset[str] = frozenset(
     {"provision_submit", "submit_run", "reclaim_backing"}
 )
 _OPERATION_STATES: frozenset[str] = frozenset({"active", "completed", "aborted"})
+_PROVIDER_RUN_MAPPING_STATES: frozenset[str] = frozenset(
+    {"pending", "submitting", "bound", "terminal", "indeterminate"}
+)
+_PROVIDER_INDETERMINATE_REASONS: frozenset[str] = frozenset(
+    {"provider_submission_indeterminate", "provider_termination_indeterminate"}
+)
 _OPERATION_PHASES: frozenset[str] = frozenset(
     {
         "provision_create",
@@ -199,6 +219,7 @@ _REASON_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 _REGION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$")
 _OPERATION_ID_PATTERN = re.compile(r"^op-([1-9][0-9]*)$")
 _OPERATION_LABEL_PATTERN = re.compile(r"^op-[a-z0-9-]{1,60}$")
+_PROVIDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
 _STATUSES_REQUIRING_ACTIVE_RUN: frozenset[str] = frozenset(
     {"running", "canceling"}
 )
@@ -273,6 +294,16 @@ def _validate_opaque_id(value: str, field_name: str) -> str:
             f"{field_name} must match {SESSION_ID_PATTERN.pattern}"
         )
     return value
+
+
+def _validate_provider_id(value: str, field_name: str) -> str:
+    normalized = unicodedata.normalize("NFC", value)
+    if (
+        len(normalized.encode("utf-8")) > MAX_PROVIDER_ID_BYTES
+        or _PROVIDER_ID_PATTERN.fullmatch(normalized) is None
+    ):
+        raise SessionStateContractError(f"{field_name} has an invalid private identifier shape")
+    return normalized
 
 
 def _validate_hash(value: str, field_name: str) -> str:
@@ -359,6 +390,20 @@ def validate_operation_sequence(sequence: int) -> int:
     """Validate a strictly positive, session-local operation sequence."""
     if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
         raise SessionStateContractError("operation sequence must be an integer >= 1")
+    return sequence
+
+
+def validate_public_event_sequence(sequence: int) -> int:
+    """Validate the public, provider-independent event watermark."""
+    if (
+        isinstance(sequence, bool)
+        or not isinstance(sequence, int)
+        or sequence < 0
+        or sequence > MAX_PUBLIC_EVENT_SEQUENCE
+    ):
+        raise SessionStateContractError(
+            "public event sequence must be a non-negative signed 64-bit integer"
+        )
     return sequence
 
 
@@ -534,7 +579,7 @@ class FunctionAppPrincipal:
 
 @dataclass(frozen=True, slots=True)
 class TriggerBindingPrincipal:
-    """Reserved owner input for FRD 0009; not yet supported."""
+    """Marker proving a supported trigger supplied a broker-scoped delivery identity."""
 
 
 type OwnerPrincipal = EntraPrincipal | FunctionAppPrincipal | TriggerBindingPrincipal
@@ -593,7 +638,7 @@ class FunctionAppOwnerContext:
 
 @dataclass(frozen=True, slots=True, repr=False)
 class TriggerBindingOwnerContext:
-    """Reserved owner-context discriminator; it cannot currently be resolved or hashed."""
+    """App-and-agent-scoped owner context for a supported trigger binding."""
 
     app_identity: AppIdentity
     agent_slug: str
@@ -610,7 +655,7 @@ class TriggerBindingOwnerContext:
     def __repr__(self) -> str:
         return (
             "TriggerBindingOwnerContext("
-            f"kind={self.kind!r}, agent_slug={self.agent_slug!r}, reserved=True)"
+            f"kind={self.kind!r}, agent_slug={self.agent_slug!r})"
         )
 
 
@@ -754,8 +799,46 @@ class OperationRowKey:
         return f"operation:{self.session_id}:{self.sequence}"
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderSessionBindingRowKey:
+    """Private provider-session binding beneath one runtime session."""
+
+    session_id: str
+
+    @classmethod
+    def create(cls, session_id: str) -> ProviderSessionBindingRowKey:
+        return cls(session_id=_validate_opaque_id(session_id, "session_id"))
+
+    def __str__(self) -> str:
+        return f"provider-session:{self.session_id}"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRunMappingRowKey:
+    """Private provider-response mapping beneath one runtime run."""
+
+    session_id: str
+    run_id: str
+
+    @classmethod
+    def create(cls, session_id: str, run_id: str) -> ProviderRunMappingRowKey:
+        return cls(
+            session_id=_validate_opaque_id(session_id, "session_id"),
+            run_id=_validate_opaque_id(run_id, "run_id"),
+        )
+
+    def __str__(self) -> str:
+        return f"provider-run:{self.session_id}:{self.run_id}"
+
+
 type DurableRowKey = (
-    SessionRowKey | RunRowKey | IdempotencyRowKey | OwnerIdempotencyRowKey | OperationRowKey
+    SessionRowKey
+    | RunRowKey
+    | IdempotencyRowKey
+    | OwnerIdempotencyRowKey
+    | OperationRowKey
+    | ProviderSessionBindingRowKey
+    | ProviderRunMappingRowKey
 )
 
 
@@ -774,6 +857,10 @@ def parse_row_key(value: str) -> DurableRowKey:
         if re.fullmatch(r"[1-9][0-9]*", parts[2]) is None:
             raise SessionStateContractError("operation row key sequence must be canonical")
         return OperationRowKey.create(parts[1], int(parts[2]))
+    if len(parts) == 2 and parts[0] == "provider-session":
+        return ProviderSessionBindingRowKey.create(parts[1])
+    if len(parts) == 3 and parts[0] == "provider-run":
+        return ProviderRunMappingRowKey.create(parts[1], parts[2])
     raise SessionStateContractError("invalid durable row key")
 
 def _validate_snapshot_id(value: str) -> str:
@@ -1353,6 +1440,202 @@ class DurableRunRecord:
             created_at=_require_datetime(entity, "created_at"),
             updated_at=_require_datetime(entity, "updated_at"),
             agent_slug=_optional_entity_str(entity, "agent_slug") or "",
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class DurableProviderSessionBinding:
+    """Private Foundry Responses session binding for one runtime session."""
+
+    owner_partition: OwnerPartition
+    session_id: str
+    provider_session_id: str
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        provider_session_id: str,
+        created_at: datetime,
+        updated_at: datetime,
+    ) -> DurableProviderSessionBinding:
+        created_at_n = _utc_datetime(created_at, "created_at")
+        updated_at_n = _utc_datetime(updated_at, "updated_at")
+        if updated_at_n < created_at_n:
+            raise SessionStateContractError("updated_at must not precede created_at")
+        return cls(
+            owner_partition=owner_partition,
+            session_id=_validate_opaque_id(session_id, "session_id"),
+            provider_session_id=_validate_provider_id(
+                provider_session_id,
+                "provider_session_id",
+            ),
+            created_at=created_at_n,
+            updated_at=updated_at_n,
+        )
+
+    def __repr__(self) -> str:
+        return "DurableProviderSessionBinding(<redacted>)"
+
+    @property
+    def row_key(self) -> ProviderSessionBindingRowKey:
+        return ProviderSessionBindingRowKey.create(self.session_id)
+
+    def to_table_entity(self) -> TableEntity:
+        entity = _base_entity(self.owner_partition, self.row_key)
+        entity.update(
+            {
+                "provider": FOUNDRY_RESPONSES_PROVIDER,
+                "provider_session_id": self.provider_session_id,
+                "created_at": self.created_at,
+                "updated_at": self.updated_at,
+            }
+        )
+        return entity
+
+    @classmethod
+    def from_table_entity(cls, entity: Mapping[str, object]) -> DurableProviderSessionBinding:
+        partition = _read_partition(entity)
+        row_key = parse_row_key(_require_str(entity, "RowKey"))
+        if not isinstance(row_key, ProviderSessionBindingRowKey):
+            raise SessionStateContractError("entity RowKey is not a provider session binding row")
+        _validate_entity_header(entity, partition)
+        if _require_str(entity, "provider") != FOUNDRY_RESPONSES_PROVIDER:
+            raise SessionStateContractError("unsupported private provider binding")
+        return cls.create(
+            owner_partition=partition,
+            session_id=row_key.session_id,
+            provider_session_id=_require_str(entity, "provider_session_id"),
+            created_at=_require_datetime(entity, "created_at"),
+            updated_at=_require_datetime(entity, "updated_at"),
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class DurableProviderRunMapping:
+    """Private Foundry Response mapping and public-sequence watermark for one run."""
+
+    owner_partition: OwnerPartition
+    session_id: str
+    run_id: str
+    response_state: ProviderRunMappingState
+    provider_response_id: str | None
+    max_public_event_sequence: int
+    indeterminate_reason: ProviderIndeterminateReason | None
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        run_id: str,
+        response_state: ProviderRunMappingState,
+        provider_response_id: str | None,
+        max_public_event_sequence: int,
+        indeterminate_reason: ProviderIndeterminateReason | None,
+        created_at: datetime,
+        updated_at: datetime,
+    ) -> DurableProviderRunMapping:
+        if response_state not in _PROVIDER_RUN_MAPPING_STATES:
+            raise SessionStateContractError("unsupported provider response mapping state")
+        response_id = (
+            None
+            if provider_response_id is None
+            else _validate_provider_id(provider_response_id, "provider_response_id")
+        )
+        reason = _validate_reason(indeterminate_reason, "indeterminate_reason")
+        if reason is not None and reason not in _PROVIDER_INDETERMINATE_REASONS:
+            raise SessionStateContractError("unsupported provider indeterminate reason")
+        watermark = validate_public_event_sequence(max_public_event_sequence)
+        if response_state in {"pending", "submitting"}:
+            if response_id is not None or reason is not None or watermark != 0:
+                raise SessionStateContractError(
+                    "unbound provider response mappings cannot contain provider state"
+                )
+        elif response_state == "bound":
+            if response_id is None or reason is not None:
+                raise SessionStateContractError(
+                    "bound provider response mappings require a response identifier"
+                )
+        elif response_state == "terminal":
+            if reason is not None:
+                raise SessionStateContractError(
+                    "terminal provider response mappings cannot be indeterminate"
+                )
+        elif reason is None:
+            raise SessionStateContractError(
+                "indeterminate provider response mappings require a reason"
+            )
+        created_at_n = _utc_datetime(created_at, "created_at")
+        updated_at_n = _utc_datetime(updated_at, "updated_at")
+        if updated_at_n < created_at_n:
+            raise SessionStateContractError("updated_at must not precede created_at")
+        return cls(
+            owner_partition=owner_partition,
+            session_id=_validate_opaque_id(session_id, "session_id"),
+            run_id=_validate_opaque_id(run_id, "run_id"),
+            response_state=response_state,
+            provider_response_id=response_id,
+            max_public_event_sequence=watermark,
+            indeterminate_reason=cast(ProviderIndeterminateReason | None, reason),
+            created_at=created_at_n,
+            updated_at=updated_at_n,
+        )
+
+    def __repr__(self) -> str:
+        return "DurableProviderRunMapping(<redacted>)"
+
+    @property
+    def row_key(self) -> ProviderRunMappingRowKey:
+        return ProviderRunMappingRowKey.create(self.session_id, self.run_id)
+
+    def to_table_entity(self) -> TableEntity:
+        entity = _base_entity(self.owner_partition, self.row_key)
+        entity.update(
+            {
+                "provider": FOUNDRY_RESPONSES_PROVIDER,
+                "response_state": self.response_state,
+                "provider_response_id": self.provider_response_id or "",
+                "max_public_event_sequence": self.max_public_event_sequence,
+                "indeterminate_reason": self.indeterminate_reason or "",
+                "created_at": self.created_at,
+                "updated_at": self.updated_at,
+            }
+        )
+        return entity
+
+    @classmethod
+    def from_table_entity(cls, entity: Mapping[str, object]) -> DurableProviderRunMapping:
+        partition = _read_partition(entity)
+        row_key = parse_row_key(_require_str(entity, "RowKey"))
+        if not isinstance(row_key, ProviderRunMappingRowKey):
+            raise SessionStateContractError("entity RowKey is not a provider run mapping row")
+        _validate_entity_header(entity, partition)
+        if _require_str(entity, "provider") != FOUNDRY_RESPONSES_PROVIDER:
+            raise SessionStateContractError("unsupported private provider binding")
+        state = _require_str(entity, "response_state")
+        if state not in _PROVIDER_RUN_MAPPING_STATES:
+            raise SessionStateContractError("unsupported provider response mapping state")
+        reason = _optional_entity_str(entity, "indeterminate_reason")
+        if reason is not None and reason not in _PROVIDER_INDETERMINATE_REASONS:
+            raise SessionStateContractError("unsupported provider indeterminate reason")
+        return cls.create(
+            owner_partition=partition,
+            session_id=row_key.session_id,
+            run_id=row_key.run_id,
+            response_state=cast(ProviderRunMappingState, state),
+            provider_response_id=_optional_entity_str(entity, "provider_response_id"),
+            max_public_event_sequence=_require_int(entity, "max_public_event_sequence"),
+            indeterminate_reason=cast(ProviderIndeterminateReason | None, reason),
+            created_at=_require_datetime(entity, "created_at"),
+            updated_at=_require_datetime(entity, "updated_at"),
         )
 
 

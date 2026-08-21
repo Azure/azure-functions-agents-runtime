@@ -18,6 +18,14 @@ _FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "config_scenarios" / "15_mu
 def test_rebuild_agent_catalog_uses_delivered_agent_files(monkeypatch) -> None:
     monkeypatch.setenv(SANDBOX_MARKER_ENV_VAR, "1")
 
+    def fail_app_startup_validation(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("remote catalog rebuild must not run app startup validation")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.project_composition.validate_session_runtime",
+        fail_app_startup_validation,
+    )
+
     catalog = rebuild_agent_catalog(_FIXTURE_ROOT)
 
     assert set(catalog) == {"billing", "coordinator", "shipping"}

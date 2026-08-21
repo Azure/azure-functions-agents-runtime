@@ -258,6 +258,34 @@ def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> No
     ]
 
 
+def test_run_agent_events_threads_an_explicit_history_provider(monkeypatch: Any) -> None:
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
+    captured: dict[str, object] = {}
+    history_provider = object()
+
+    async def fake_build_agent_session_history(
+        **kwargs: Any,
+    ) -> tuple[_Agent, object, str, None, InferenceTarget]:
+        captured.update(kwargs)
+        return _Agent(), object(), "test-session", None, InferenceTarget()
+
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+
+    async def collect() -> list[dict[str, object]]:
+        return [
+            event
+            async for event in runner.run_agent_events(
+                "prompt",
+                history_provider=history_provider,
+            )
+        ]
+
+    asyncio.run(collect())
+
+    assert captured["history_provider"] is history_provider
+
+
 def test_run_agent_stream_bounds_stalled_generator_by_coordinator_deadline(
     monkeypatch: Any,
 ) -> None:

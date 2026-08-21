@@ -14,7 +14,12 @@ import azure.functions as func
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
 from .._logger import logger
-from .._observability import FaultDomain, LifecycleStage, start_span
+from .._observability import (
+    FaultDomain,
+    LifecycleStage,
+    get_current_operation_id,
+    start_span,
+)
 from .._session_id import SESSION_ID_PATTERN
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
@@ -29,7 +34,7 @@ from ..controller.http import (
     read_status,
     submit_run,
 )
-from ..controller.readiness import SessionRuntimeBinding, touch_session_activity
+from ..controller.readiness import touch_session_activity
 from ..controller.streaming import render_events
 from ..execution.backend import SESSION_TOMBSTONED_ERROR_CODE, RunContext, StartRunRequest
 from ..execution.binding import AgentBinding
@@ -39,6 +44,10 @@ from ..execution.compat import (
     split_runner_call,
 )
 from ..execution.factory import create_execution_backend
+from ..execution.session_runtime import (
+    SessionExecutionRuntime,
+    is_aca_sandbox_runtime,
+)
 from ..execution.setup_budget import synchronous_wait_seconds
 from ..session_state import (
     FunctionAppPrincipal,
@@ -94,7 +103,7 @@ def _format_exception_message(exc: Exception) -> str:
 
 async def _run_agent(
     *args: Any,
-    session_runtime: SessionRuntimeBinding | None = None,
+    session_runtime: SessionExecutionRuntime | None = None,
     owner: OwnerPrincipal | None = None,
     **kwargs: Any,
 ) -> Any:
@@ -120,7 +129,7 @@ async def _run_agent(
 
 def _run_agent_stream(
     *args: Any,
-    session_runtime: SessionRuntimeBinding | None = None,
+    session_runtime: SessionExecutionRuntime | None = None,
     owner: OwnerPrincipal | None = None,
     **kwargs: Any,
 ) -> AsyncIterator[str]:
@@ -154,6 +163,8 @@ _PROVIDER_LABEL_VALUE_PATTERN = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$"
 )
 _MAX_HISTORY_REPLAY_MESSAGES = 200
+_TRACE_ID_HEADER = "x-ms-trace-id"
+_FHA_SESSION_ID_HEADER = "x-ms-fha-session-id"
 
 
 def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
@@ -188,7 +199,7 @@ def _resolve_builtin_endpoints_session_id(session_id: str | None) -> str:
 def _resolve_session_owner(
     get_header: Callable[[str], str | None],
     auth: EndpointAuthConfig,
-    session_runtime: SessionRuntimeBinding | None,
+    session_runtime: SessionExecutionRuntime | None,
 ) -> tuple[OwnerPrincipal | None, AuthError | None]:
     if session_runtime is None:
         return None, authorize_entra_request(get_header, auth)
@@ -258,7 +269,7 @@ async def _run_builtin_agent(
     workflow_system_addendum: str | None = None,
     durable_client: Any | None = None,
     catalog: AgentCatalog | None = None,
-    session_runtime: SessionRuntimeBinding | None = None,
+    session_runtime: SessionExecutionRuntime | None = None,
     owner: OwnerPrincipal | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Any:
@@ -310,7 +321,7 @@ def _run_builtin_agent_stream(
     workflow_system_addendum: str | None = None,
     durable_client: Any | None = None,
     catalog: AgentCatalog | None = None,
-    session_runtime: SessionRuntimeBinding | None = None,
+    session_runtime: SessionExecutionRuntime | None = None,
     owner: OwnerPrincipal | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Any:
@@ -368,6 +379,13 @@ def _json_error(message: str, status_code: int = 500) -> Response:
     )
 
 
+def _with_trace_id(response: Response, trace_id: str | None) -> Response:
+    """Attach the active worker trace id when runtime telemetry created one."""
+    if trace_id is not None:
+        response.headers[_TRACE_ID_HEADER] = trace_id
+    return response
+
+
 def _sse_error_response(message: str, status_code: int = 400) -> StreamingResponse:
     async def error_gen() -> AsyncIterator[str]:
         yield f"data: {json.dumps({'type': 'error', 'content': message})}\n\n"
@@ -415,7 +433,7 @@ def _register_http_chat(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
-    session_runtime: SessionRuntimeBinding | None = None,
+    session_runtime: SessionExecutionRuntime | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     async def handle_chat(req: Request, durable_client: Any | None) -> Response:
@@ -456,13 +474,17 @@ def _register_http_chat(
                 "af.agent.model": resolved.model,
             },
         ) as span:
+            trace_id = get_current_operation_id()
             try:
                 if session_runtime is None:
                     auth_error = authorize_entra_request(req.headers.get, auth)
                     if auth_error is not None:
                         span.set_attribute("af.agent.outcome", "error")
                         span.set_error(auth_error.message, fault_domain=FaultDomain.APP)
-                        return _json_error(auth_error.message, status_code=auth_error.status_code)
+                        return _with_trace_id(
+                            _json_error(auth_error.message, status_code=auth_error.status_code),
+                            trace_id,
+                        )
                 body = await req.json()
                 prompt = _extract_prompt_from_body(body)
                 if session_runtime is not None:
@@ -489,26 +511,41 @@ def _register_http_chat(
                         budget=budget,
                     )
                     if controller_response.status_code != 200:
-                        return _controller_response_to_fastapi(controller_response)
+                        return _with_trace_id(
+                            _controller_response_to_fastapi(controller_response),
+                            trace_id,
+                        )
                     controller_body = controller_response.body
                     if not isinstance(controller_body, dict) or not isinstance(
                         controller_body.get("response"), str
                     ):
-                        return _controller_response_to_fastapi(controller_response)
+                        return _with_trace_id(
+                            _controller_response_to_fastapi(controller_response),
+                            trace_id,
+                        )
                     controller_session_id = _controller_session_id(controller_response)
                     if controller_session_id is None:
-                        return _controller_response_to_fastapi(controller_response)
+                        return _with_trace_id(
+                            _controller_response_to_fastapi(controller_response),
+                            trace_id,
+                        )
                     span.set_attribute("af.agent.outcome", "success")
-                    return Response(
-                        json.dumps(
-                            {
-                                "session_id": controller_session_id,
-                                "response": controller_body["response"],
-                                "tool_calls": controller_body.get("tool_calls", []),
-                            }
+                    return _with_trace_id(
+                        Response(
+                            json.dumps(
+                                {
+                                    "session_id": controller_session_id,
+                                    "response": controller_body["response"],
+                                    "tool_calls": controller_body.get("tool_calls", []),
+                                }
+                            ),
+                            media_type="application/json",
+                            headers={
+                                **controller_response.headers,
+                                "x-ms-session-id": controller_session_id,
+                            },
                         ),
-                        media_type="application/json",
-                        headers={"x-ms-session-id": controller_session_id},
+                        trace_id,
                     )
                 result = await _run_builtin_agent(
                     prompt,
@@ -525,21 +562,24 @@ def _register_http_chat(
                 )
                 _set_run_result_attributes(span, result)
                 span.set_attribute("af.agent.outcome", "success")
-                return Response(
-                    json.dumps(
-                        {
-                            "session_id": result.session_id,
-                            "response": result.content,
-                            "tool_calls": result.tool_calls,
-                        }
+                return _with_trace_id(
+                    Response(
+                        json.dumps(
+                            {
+                                "session_id": result.session_id,
+                                "response": result.content,
+                                "tool_calls": result.tool_calls,
+                            }
+                        ),
+                        media_type="application/json",
+                        headers={"x-ms-session-id": result.session_id},
                     ),
-                    media_type="application/json",
-                    headers={"x-ms-session-id": result.session_id},
+                    trace_id,
                 )
             except ValueError as exc:
                 span.set_attribute("af.agent.outcome", "error")
                 span.set_error(str(exc), fault_domain=FaultDomain.APP)
-                return _json_error(str(exc), status_code=400)
+                return _with_trace_id(_json_error(str(exc), status_code=400), trace_id)
             except Exception as exc:
                 span.set_attribute("af.agent.outcome", "error")
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
@@ -549,7 +589,7 @@ def _register_http_chat(
                     source_marker(resolved.source_file),
                     error_msg,
                 )
-                return _json_error(error_msg)
+                return _with_trace_id(_json_error(error_msg), trace_id)
 
     decorated: Any
     if workflows_enabled:
@@ -566,13 +606,13 @@ def _register_http_chat(
     app.function_name(name=function_name)(decorated)
 
 
-async def _start_aca_stream(
+async def _start_session_stream(
     *,
     prompt: str,
     resolved: ResolvedAgent,
     session_id: str | None,
     idempotency_key: str | None,
-    session_runtime: SessionRuntimeBinding,
+    session_runtime: SessionExecutionRuntime,
     owner: OwnerPrincipal | None,
     respond_async: bool,
     after_sequence: int,
@@ -584,6 +624,7 @@ async def _start_aca_stream(
             agent_name=resolved.slug,
             output_validator=build_output_validator(resolved),
         ),
+        stream_events=not respond_async,
         session_runtime=session_runtime,
         owner=owner,
         setup_budget=budget.setup,
@@ -609,6 +650,10 @@ async def _start_aca_stream(
     run_id = body.get("run_id")
     if not isinstance(accepted_session_id, str) or not isinstance(run_id, str):
         return _json_error("sandbox run acceptance response was invalid")
+    response_headers = {"x-ms-session-id": accepted_session_id}
+    provider_session_id = accepted.headers.get(_FHA_SESSION_ID_HEADER)
+    if provider_session_id is not None:
+        response_headers[_FHA_SESSION_ID_HEADER] = provider_session_id
     return StreamingResponse(
         render_events(
             backend,
@@ -616,7 +661,7 @@ async def _start_aca_stream(
             after_sequence=after_sequence,
         ),
         media_type="text/event-stream",
-        headers={"x-ms-session-id": accepted_session_id},
+        headers=response_headers,
     )
 
 
@@ -631,48 +676,86 @@ def _register_http_chat_stream(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
-    session_runtime: SessionRuntimeBinding | None = None,
+    session_runtime: SessionExecutionRuntime | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     async def handle_chat_stream(
         req: Request,
         durable_client: Any | None,
     ) -> Response:
-        try:
-            owner, auth_error = _resolve_session_owner(
-                req.headers.get,
-                auth,
-                session_runtime,
+        owner, auth_error = _resolve_session_owner(
+            req.headers.get,
+            auth,
+            session_runtime,
+        )
+        if auth_error is not None:
+            return _sse_error_response(auth_error.message, status_code=auth_error.status_code)
+
+        requested_session_id = req.headers.get("x-ms-session-id")
+        session_id = (
+            requested_session_id
+            if requested_session_id is not None
+            else (
+                None
+                if session_runtime is not None
+                else _resolve_builtin_endpoints_session_id(None)
             )
-            if auth_error is not None:
-                return _sse_error_response(auth_error.message, status_code=auth_error.status_code)
+        )
+        if session_runtime is not None:
+            with start_span(
+                f"agent.run {resolved.slug}",
+                lifecycle_stage=LifecycleStage.AGENT_RUN,
+                attributes={
+                    "af.agent.name": resolved.slug,
+                    "af.agent.display_name": resolved.name,
+                    "af.agent.trigger_type": "builtin_chatstream",
+                    "af.agent.session_id": session_id,
+                    "af.agent.model": resolved.model,
+                },
+            ) as span:
+                trace_id = get_current_operation_id()
+                try:
+                    body = await req.json()
+                    prompt = _extract_prompt_from_body(body)
+                    try:
+                        after_sequence = parse_last_event_id(req.headers)
+                    except ValueError as exc:
+                        span.set_attribute("af.agent.outcome", "error")
+                        span.set_error(str(exc), fault_domain=FaultDomain.APP)
+                        return _with_trace_id(_json_error(str(exc), status_code=400), trace_id)
+                    response = await _start_session_stream(
+                        prompt=prompt,
+                        resolved=resolved,
+                        session_id=session_id,
+                        idempotency_key=req.headers.get("Idempotency-Key"),
+                        session_runtime=session_runtime,
+                        owner=owner,
+                        respond_async=prefers_respond_async(req.headers),
+                        after_sequence=after_sequence,
+                    )
+                    span.set_attribute(
+                        "af.agent.outcome",
+                        "success" if response.status_code < 400 else "error",
+                    )
+                    return _with_trace_id(response, trace_id)
+                except ValueError as exc:
+                    span.set_attribute("af.agent.outcome", "error")
+                    span.set_error(str(exc), fault_domain=FaultDomain.APP)
+                    return _with_trace_id(_sse_error_response(str(exc), status_code=400), trace_id)
+                except Exception as exc:
+                    span.set_attribute("af.agent.outcome", "error")
+                    span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                    error_msg = _format_exception_message(exc)
+                    logger.error(
+                        "Built-in chat stream error: source_file=%s error=%s",
+                        source_marker(resolved.source_file),
+                        error_msg,
+                    )
+                    return _with_trace_id(_sse_error_response(error_msg, status_code=500), trace_id)
+
+        try:
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
-            requested_session_id = req.headers.get("x-ms-session-id")
-            session_id = (
-                requested_session_id
-                if requested_session_id is not None
-                else (
-                    None
-                    if session_runtime is not None
-                    else _resolve_builtin_endpoints_session_id(None)
-                )
-            )
-            if session_runtime is not None:
-                try:
-                    after_sequence = parse_last_event_id(req.headers)
-                except ValueError as exc:
-                    return _json_error(str(exc), status_code=400)
-                return await _start_aca_stream(
-                    prompt=prompt,
-                    resolved=resolved,
-                    session_id=session_id,
-                    idempotency_key=req.headers.get("Idempotency-Key"),
-                    session_runtime=session_runtime,
-                    owner=owner,
-                    respond_async=prefers_respond_async(req.headers),
-                    after_sequence=after_sequence,
-                )
             return StreamingResponse(
                 _run_builtin_agent_stream(
                     prompt,
@@ -725,7 +808,7 @@ def _register_mcp_endpoint(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
-    session_runtime: SessionRuntimeBinding | None = None,
+    session_runtime: SessionExecutionRuntime | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     async def handle_mcp_agent_chat(context: str, durable_client: Any | None) -> str:
@@ -987,7 +1070,7 @@ def register_builtin_endpoints(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
-    session_runtime: SessionRuntimeBinding | None = None,
+    session_runtime: SessionExecutionRuntime | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     """Register built-in debug chat UI, REST chat, and MCP endpoints for one agent."""
@@ -1065,16 +1148,16 @@ def register_builtin_endpoints(
         )
 
 
-def register_sandbox_management_endpoints(
+def register_session_management_endpoints(
     app: func.FunctionApp,
     *,
     slug: str,
     auth: EndpointAuthConfig,
-    session_runtime: SessionRuntimeBinding,
+    session_runtime: SessionExecutionRuntime,
     binding: AgentBinding,
 ) -> None:
-    """Register one authenticated status/result/events/cancel set for an ACA agent."""
-    base_function_name = _safe_function_name(f"agent_{slug}_sandbox_management")
+    """Register one authenticated status/result/events/cancel set for a session runtime."""
+    base_function_name = _safe_function_name(f"agent_{slug}_session_management")
     route_base = f"agents/{slug}/sessions/{{session_id}}/runs/{{run_id}}"
 
     async def authorized_context(
@@ -1103,7 +1186,12 @@ def register_sandbox_management_endpoints(
             owner=owner,
         )
 
-    def touch_for(owner: OwnerPrincipal | None, context: RunContext) -> Callable[[], Awaitable[None]]:
+    def touch_for(
+        owner: OwnerPrincipal | None,
+        context: RunContext,
+    ) -> Callable[[], Awaitable[None]] | None:
+        if not is_aca_sandbox_runtime(session_runtime):
+            return None
         owner_context = resolve_owner_context(session_runtime.app_identity, slug, owner)
         return lambda: touch_session_activity(session_runtime, owner_context, context.session_id)
 
@@ -1151,7 +1239,9 @@ def register_sandbox_management_endpoints(
             and error.get("code") == SESSION_TOMBSTONED_ERROR_CODE
         ):
             return _controller_response_to_fastapi(preflight)
-        await touch_for(owner, context)()
+        touch = touch_for(owner, context)
+        if touch is not None:
+            await touch()
         return StreamingResponse(
             render_events(
                 backend,
@@ -1186,3 +1276,7 @@ def register_sandbox_management_endpoints(
             auth_level=resolve_endpoint_auth_level(auth),
         )(handler)
         app.function_name(name=function_name)(decorated)
+
+
+_start_aca_stream = _start_session_stream
+register_sandbox_management_endpoints = register_session_management_endpoints

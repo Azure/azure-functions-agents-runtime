@@ -10,7 +10,7 @@ from .._logger import logger
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
 from ..config.http_auth import resolve_http_trigger_auth
-from ..controller.readiness import SessionRuntimeBinding
+from ..execution.session_runtime import SessionExecutionRuntime, is_foundry_responses_runtime
 from . import _naming
 from ._auth import resolve_endpoint_auth_level
 from ._handlers import (
@@ -41,6 +41,7 @@ def _register_builtin_agent(
     trigger_type: str,
     catalog: AgentCatalog | None = None,
     *,
+    session_runtime: SessionExecutionRuntime | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
@@ -67,6 +68,7 @@ def _register_builtin_agent(
         trigger_type,
         capabilities,
         catalog,
+        session_runtime=session_runtime,
         workflows_enabled=workflows_enabled,
         workflow_system_addendum=workflow_system_addendum,
         workflow_policy=workflow_policy,
@@ -119,7 +121,7 @@ def _register_http_agent(
     trigger_params: dict[str, Any],
     catalog: AgentCatalog | None = None,
     *,
-    session_runtime: SessionRuntimeBinding | None = None,
+    session_runtime: SessionExecutionRuntime | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
@@ -174,7 +176,7 @@ def register_agent(
     function_name: str | None = None,
     catalog: AgentCatalog | None = None,
     *,
-    session_runtime: SessionRuntimeBinding | None = None,
+    session_runtime: SessionExecutionRuntime | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
@@ -223,6 +225,16 @@ def register_agent(
             registered_names.add(function_name)
         return
 
+    if (
+        session_runtime is not None
+        and is_foundry_responses_runtime(session_runtime)
+        and trigger_type != "service_bus_queue_trigger"
+    ):
+        raise ValueError(
+            "Foundry Hosted Agent Responses supports only service_bus_queue_trigger "
+            "for non-HTTP agents."
+        )
+
     _register_builtin_agent(
         app,
         resolved,
@@ -231,6 +243,7 @@ def register_agent(
         trigger_params,
         trigger_type,
         catalog,
+        session_runtime=session_runtime,
         workflows_enabled=workflows_enabled,
         workflow_system_addendum=workflow_system_addendum,
         workflow_policy=workflow_policy,

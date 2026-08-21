@@ -30,6 +30,13 @@ from azure_functions_agents.session_state import (
     validate_generation_transition,
     validate_operation_phase_transition,
 )
+from azure_functions_agents.session_state.session_models import (
+    DurableProviderRunMapping,
+    DurableProviderSessionBinding,
+    ProviderRunMappingRowKey,
+    ProviderSessionBindingRowKey,
+    parse_row_key,
+)
 from azure_functions_agents.transport.transport_models import SandboxProvisioningLabels
 
 _NOW = datetime(2026, 7, 30, 16, 0, tzinfo=UTC)
@@ -644,3 +651,113 @@ def test_row_timestamps_require_awareness_and_normalize_to_utc() -> None:
     assert record.created_at == _NOW
     assert record.created_at.tzinfo is UTC
     assert record.to_table_entity()["last_activity_at"] == _NOW
+
+
+def test_private_provider_mapping_rows_round_trip_without_prompt_or_event_content() -> None:
+    partition = _partition()
+    binding = DurableProviderSessionBinding.create(
+        owner_partition=partition,
+        session_id=_SESSION_ID,
+        provider_session_id="agent-session_123",
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    pending = DurableProviderRunMapping.create(
+        owner_partition=partition,
+        session_id=_SESSION_ID,
+        run_id=_RUN_ID,
+        response_state="pending",
+        provider_response_id=None,
+        max_public_event_sequence=0,
+        indeterminate_reason=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    bound = DurableProviderRunMapping.create(
+        owner_partition=partition,
+        session_id=_SESSION_ID,
+        run_id=_RUN_ID,
+        response_state="bound",
+        provider_response_id="caresp_0123456789",
+        max_public_event_sequence=4,
+        indeterminate_reason=None,
+        created_at=_NOW,
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+
+    assert isinstance(binding.row_key, ProviderSessionBindingRowKey)
+    assert isinstance(pending.row_key, ProviderRunMappingRowKey)
+    assert str(binding.row_key) == "provider-session:session-1"
+    assert str(pending.row_key) == "provider-run:session-1:run-1"
+    assert DurableProviderSessionBinding.from_table_entity(binding.to_table_entity()) == binding
+    assert DurableProviderRunMapping.from_table_entity(pending.to_table_entity()) == pending
+    assert DurableProviderRunMapping.from_table_entity(bound.to_table_entity()) == bound
+    assert parse_row_key(str(binding.row_key)) == binding.row_key
+    assert parse_row_key(str(bound.row_key)) == bound.row_key
+    assert set(bound.to_table_entity()) == {
+        "PartitionKey",
+        "RowKey",
+        "schema_version",
+        "owner_hash_version",
+        "app_hash",
+        "provider",
+        "response_state",
+        "provider_response_id",
+        "max_public_event_sequence",
+        "indeterminate_reason",
+        "created_at",
+        "updated_at",
+    }
+    assert "caresp_0123456789" not in repr(bound)
+    assert "agent-session_123" not in repr(binding)
+
+
+def test_private_provider_mapping_contract_rejects_ambiguous_or_unbounded_state() -> None:
+    kwargs = {
+        "owner_partition": _partition(),
+        "session_id": _SESSION_ID,
+        "run_id": _RUN_ID,
+        "created_at": _NOW,
+        "updated_at": _NOW,
+    }
+
+    with pytest.raises(SessionStateContractError, match="unbound"):
+        DurableProviderRunMapping.create(
+            **kwargs,
+            response_state="pending",
+            provider_response_id="caresp_0123456789",
+            max_public_event_sequence=0,
+            indeterminate_reason=None,
+        )
+    with pytest.raises(SessionStateContractError, match="bound"):
+        DurableProviderRunMapping.create(
+            **kwargs,
+            response_state="bound",
+            provider_response_id=None,
+            max_public_event_sequence=0,
+            indeterminate_reason=None,
+        )
+    with pytest.raises(SessionStateContractError, match="indeterminate"):
+        DurableProviderRunMapping.create(
+            **kwargs,
+            response_state="indeterminate",
+            provider_response_id=None,
+            max_public_event_sequence=0,
+            indeterminate_reason=None,
+        )
+    with pytest.raises(SessionStateContractError, match="private identifier"):
+        DurableProviderSessionBinding.create(
+            owner_partition=_partition(),
+            session_id=_SESSION_ID,
+            provider_session_id="provider id with spaces",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    with pytest.raises(SessionStateContractError, match="signed 64-bit"):
+        DurableProviderRunMapping.create(
+            **kwargs,
+            response_state="pending",
+            provider_response_id=None,
+            max_public_event_sequence=True,
+            indeterminate_reason=None,
+        )

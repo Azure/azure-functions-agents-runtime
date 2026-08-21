@@ -42,6 +42,52 @@ The runtime bootstraps everything from `create_function_app()`
 instrumentation and, when the `[monitor]` extra is installed and no OpenTelemetry provider is
 already active, the Azure Monitor exporter. When no OpenTelemetry provider is active it is a no-op.
 
+### Experimental FHA Responses tracing
+
+The FHA spike keeps the Functions worker as the trace root; correlating the
+Functions host request is optional. The initial Foundry Responses create call
+injects the active worker span's W3C `traceparent` and `tracestate`. Foundry's
+Responses front door and AgentServer preserve that context, so hosted
+`invoke_agent`, MAF, tool, and model `chat` spans use the same trace ID.
+Baggage and private request-envelope trace fields are not used.
+
+For one queryable transaction, the Function App and Foundry project must target
+the same Application Insights resource. The Foundry connection must use
+`ProjectManagedIdentity`, and both the hosted-agent instance and blueprint
+identities require:
+
+- `Reader` on the parent Foundry account, so AgentServer can resolve the
+  connection;
+- `Monitoring Metrics Publisher` on Application Insights, so the hosted process
+  can ingest telemetry.
+
+Bootstrap applies these exact roles when the deployment principal is
+authorized. Otherwise it stops before enabling FHA and emits a non-secret admin
+handoff. The Function runtime identity never receives role-assignment access.
+
+Hosted configuration uses Entra exporter authentication, enables GenAI tracing,
+and disables GenAI message-content capture by default. Built-in chat and
+chatstream responses return the shared non-secret trace ID in
+`x-ms-trace-id`; the debug UI displays it as a copyable run detail.
+Bootstrap's diagnostic-only `--capture-trace-content` flag enables hosted
+prompt/completion/tool content export explicitly. Treat that mode as
+privacy-sensitive and keep it off for ordinary spike runs.
+
+Application Insights and its backing Log Analytics workspace expose different
+KQL aliases:
+
+```kusto
+// Application Insights Logs blade
+dependencies
+| where name == "agent.run main"
+```
+
+```kusto
+// Log Analytics workspace Logs blade
+AppDependencies
+| where Name == "agent.run main"
+```
+
 ## Where the runtime's output shows up (traces, not logs)
 
 The runtime is instrumented **span-first**, so its telemetry surfaces as **spans** — look in

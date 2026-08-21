@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from .errors import (
@@ -36,6 +36,7 @@ from .errors import (
     IdempotencyConflictError,
     OperationRowNotFoundError,
     RowAlreadyExistsError,
+    RowNotFoundError,
     RunRowNotFoundError,
     SessionNotAdmissibleError,
     SessionRowNotFoundError,
@@ -54,6 +55,8 @@ from .session_models import (
     DurableOperationPhase,
     DurableOperationState,
     DurableOwnerIdempotencyRecord,
+    DurableProviderRunMapping,
+    DurableProviderSessionBinding,
     DurableRunRecord,
     DurableSessionOperation,
     DurableSessionRecord,
@@ -61,6 +64,9 @@ from .session_models import (
     NewSessionAdmissionRecords,
     OwnerIdempotencyRowKey,
     OwnerPartition,
+    ProviderIndeterminateReason,
+    ProviderRunMappingRowKey,
+    ProviderSessionBindingRowKey,
     ProvisionSubmitRecords,
     SessionOperationTarget,
     SessionStateContractError,
@@ -68,6 +74,7 @@ from .session_models import (
     parse_operation_id,
     validate_generation_transition,
     validate_operation_phase_transition,
+    validate_public_event_sequence,
 )
 
 if TYPE_CHECKING:
@@ -122,6 +129,34 @@ class RunRead:
 
     record: DurableRunRecord
     etag: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSessionBindingRead:
+    """A private provider-session binding plus the ETag it was read with."""
+
+    record: DurableProviderSessionBinding
+    etag: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRunMappingRead:
+    """A private provider-response mapping plus the ETag it was read with."""
+
+    record: DurableProviderRunMapping
+    etag: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderIndeterminateOutcome:
+    """The fail-closed mapping, run, and session state for one unknown provider outcome."""
+
+    mapping: DurableProviderRunMapping
+    mapping_etag: str
+    run: DurableRunRecord
+    run_etag: str
+    session: DurableSessionRecord
+    session_etag: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +337,81 @@ class SessionStateStore(Protocol):
         self, owner_partition: OwnerPartition, session_id: str, run_id: str
     ) -> RunRead:
         """Read a run row. Raises :class:`RunRowNotFoundError` if absent."""
+
+    async def create_provider_session_binding(
+        self,
+        record: DurableProviderSessionBinding,
+    ) -> str:
+        """Create a private provider-session binding."""
+
+    async def get_provider_session_binding(
+        self,
+        owner_partition: OwnerPartition,
+        session_id: str,
+    ) -> ProviderSessionBindingRead | None:
+        """Read a private provider-session binding when one has been established."""
+
+    async def create_provider_run_mapping(self, record: DurableProviderRunMapping) -> str:
+        """Reserve a pending private response mapping for an already-admitted run."""
+
+    async def get_provider_run_mapping(
+        self,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        run_id: str,
+    ) -> ProviderRunMappingRead | None:
+        """Read a private response mapping when one has been reserved."""
+
+    async def bind_provider_response_id(
+        self,
+        *,
+        previous: DurableProviderRunMapping,
+        etag: str,
+        provider_response_id: str,
+        updated_at: datetime,
+    ) -> str:
+        """CAS-bind one provider response identifier after submission is issued."""
+
+    async def mark_provider_submission_issued(
+        self,
+        *,
+        previous: DurableProviderRunMapping,
+        etag: str,
+        updated_at: datetime,
+    ) -> str:
+        """CAS-fence the narrow window in which provider acceptance is ambiguous."""
+
+    async def advance_provider_event_watermark(
+        self,
+        *,
+        previous: DurableProviderRunMapping,
+        etag: str,
+        max_public_event_sequence: int,
+        updated_at: datetime,
+    ) -> str:
+        """CAS-advance the provider mapping's public event sequence watermark."""
+
+    async def mark_provider_run_indeterminate(
+        self,
+        *,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        run_id: str,
+        reason: ProviderIndeterminateReason,
+        updated_at: datetime,
+    ) -> ProviderIndeterminateOutcome:
+        """Atomically abandon a provider run and quarantine its session."""
+
+    async def adopt_provider_terminal_run(self, terminal_run: DurableRunRecord) -> AdoptionOutcome:
+        """Adopt a proven terminal run and retain its private mapping for replay."""
+
+    async def clear_provider_run_mapping(
+        self,
+        *,
+        previous: DurableProviderRunMapping,
+        etag: str,
+    ) -> None:
+        """Delete a private mapping only after its durable run is terminal."""
 
     async def get_operation(
         self,
@@ -653,6 +763,345 @@ class AzureTableSessionStateStore:
     ) -> RunRead:
         entity = await self._get_entity(owner_partition, str(run_row_key(session_id, run_id)))
         return RunRead(record=_parse_run_entity(entity), etag=_etag_from_entity(entity))
+
+    # -- private provider mappings -----------------------------------------
+
+    async def create_provider_session_binding(
+        self,
+        record: DurableProviderSessionBinding,
+    ) -> str:
+        from azure.core.exceptions import HttpResponseError, ResourceExistsError
+
+        try:
+            result = await self._table_client.create_entity(record.to_table_entity())
+        except ResourceExistsError as exc:
+            raise RowAlreadyExistsError("provider session binding already exists") from exc
+        except HttpResponseError as exc:
+            raise _map_http_error(exc, context="create_provider_session_binding") from exc
+        return _etag_from_write_result(result)
+
+    async def get_provider_session_binding(
+        self,
+        owner_partition: OwnerPartition,
+        session_id: str,
+    ) -> ProviderSessionBindingRead | None:
+        try:
+            entity = await self._get_entity(
+                owner_partition,
+                str(ProviderSessionBindingRowKey.create(session_id)),
+                not_found_error=RowNotFoundError("provider session binding not found"),
+            )
+        except RowNotFoundError:
+            return None
+        return ProviderSessionBindingRead(
+            record=_parse_provider_session_binding_entity(entity),
+            etag=_etag_from_entity(entity),
+        )
+
+    async def create_provider_run_mapping(self, record: DurableProviderRunMapping) -> str:
+        from azure.core.exceptions import HttpResponseError
+        from azure.data.tables import TableTransactionError
+
+        if record.response_state != "pending":
+            raise SessionStateStoreError("provider run mappings must begin pending")
+        session = await self.get_session(record.owner_partition, record.session_id)
+        run = await self.get_run(record.owner_partition, record.session_id, record.run_id)
+        _validate_provider_run_mapping_admission(session.record, run.record, record)
+        try:
+            results = await self._table_client.submit_transaction(
+                [
+                    _update_op(session.record, etag=session.etag),
+                    _update_op(run.record, etag=run.etag),
+                    _create_op(record),
+                ]
+            )
+        except TableTransactionError as exc:
+            if exc.index == 2:
+                raise RowAlreadyExistsError("provider run mapping already exists") from exc
+            if exc.index in (0, 1):
+                raise ConcurrencyConflictError(
+                    "run admission changed before provider mapping reservation"
+                ) from exc
+            raise _map_http_error(exc, context="create_provider_run_mapping") from exc
+        except HttpResponseError as exc:
+            raise _map_http_error(exc, context="create_provider_run_mapping") from exc
+        return _etag_from_write_result(results[2])
+
+    async def get_provider_run_mapping(
+        self,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        run_id: str,
+    ) -> ProviderRunMappingRead | None:
+        try:
+            entity = await self._get_entity(
+                owner_partition,
+                str(ProviderRunMappingRowKey.create(session_id, run_id)),
+                not_found_error=RowNotFoundError("provider run mapping not found"),
+            )
+        except RowNotFoundError:
+            return None
+        return ProviderRunMappingRead(
+            record=_parse_provider_run_mapping_entity(entity),
+            etag=_etag_from_entity(entity),
+        )
+
+    async def bind_provider_response_id(
+        self,
+        *,
+        previous: DurableProviderRunMapping,
+        etag: str,
+        provider_response_id: str,
+        updated_at: datetime,
+    ) -> str:
+        bound = _bound_provider_run_mapping(
+            previous,
+            provider_response_id=provider_response_id,
+            updated_at=updated_at,
+        )
+        return await self._replace_entity(
+            bound.to_table_entity(),
+            etag=etag,
+            not_found_error=RowNotFoundError("provider run mapping not found"),
+            context="bind_provider_response_id",
+        )
+
+    async def mark_provider_submission_issued(
+        self,
+        *,
+        previous: DurableProviderRunMapping,
+        etag: str,
+        updated_at: datetime,
+    ) -> str:
+        issued = _provider_run_mapping_with_submission_issued(
+            previous,
+            updated_at=updated_at,
+        )
+        return await self._replace_entity(
+            issued.to_table_entity(),
+            etag=etag,
+            not_found_error=RowNotFoundError("provider run mapping not found"),
+            context="mark_provider_submission_issued",
+        )
+
+    async def advance_provider_event_watermark(
+        self,
+        *,
+        previous: DurableProviderRunMapping,
+        etag: str,
+        max_public_event_sequence: int,
+        updated_at: datetime,
+    ) -> str:
+        advanced = _provider_run_mapping_with_watermark(
+            previous,
+            max_public_event_sequence=max_public_event_sequence,
+            updated_at=updated_at,
+        )
+        return await self._replace_entity(
+            advanced.to_table_entity(),
+            etag=etag,
+            not_found_error=RowNotFoundError("provider run mapping not found"),
+            context="advance_provider_event_watermark",
+        )
+
+    async def mark_provider_run_indeterminate(
+        self,
+        *,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        run_id: str,
+        reason: ProviderIndeterminateReason,
+        updated_at: datetime,
+    ) -> ProviderIndeterminateOutcome:
+        from azure.core.exceptions import HttpResponseError
+        from azure.data.tables import TableTransactionError
+
+        for _attempt in range(_MAX_ADOPTION_ATTEMPTS):
+            mapping = await self.get_provider_run_mapping(owner_partition, session_id, run_id)
+            if mapping is None:
+                raise SessionStateStoreError("provider run mapping is missing")
+            run = await self.get_run(owner_partition, session_id, run_id)
+            session = await self.get_session(owner_partition, session_id)
+            operation: OperationRead | None = None
+            if session.record.active_operation_id is not None:
+                operation = await self.get_operation(
+                    owner_partition,
+                    session_id,
+                    session.record.active_operation_id,
+                )
+                _require_operation_matches_session(session.record, operation.record)
+                if (
+                    operation.record.state != "active"
+                    or operation.record.target.run_id != run_id
+                ):
+                    raise SessionStateStoreError(
+                        "provider indeterminate transition does not own the active operation"
+                    )
+            effective_updated_at = _provider_update_timestamp(
+                updated_at,
+                mapping.record.updated_at,
+                run.record.updated_at,
+                session.record.updated_at,
+            )
+            indeterminate_mapping = _indeterminate_provider_run_mapping(
+                mapping.record,
+                reason=reason,
+                updated_at=effective_updated_at,
+            )
+            indeterminate_run = _provider_indeterminate_run(
+                run.record,
+                reason=reason,
+                updated_at=effective_updated_at,
+            )
+            quarantined_session = _provider_quarantined_session(
+                session.record,
+                run_id=run_id,
+                reason=reason,
+                updated_at=effective_updated_at,
+            )
+            aborted_operation = (
+                None
+                if operation is None
+                else _operation_with(
+                    operation.record,
+                    target=operation.record.target,
+                    token=operation.record.token,
+                    phase="aborted",
+                    state="aborted",
+                    attempt_count=operation.record.attempt_count,
+                    error_code=reason,
+                    lease_expires_at=None,
+                    next_attempt_at=None,
+                    updated_at=effective_updated_at,
+                    finished_at=effective_updated_at,
+                )
+            )
+            if (
+                indeterminate_mapping == mapping.record
+                and indeterminate_run == run.record
+                and quarantined_session == session.record
+                and aborted_operation is None
+            ):
+                return ProviderIndeterminateOutcome(
+                    mapping=mapping.record,
+                    mapping_etag=mapping.etag,
+                    run=run.record,
+                    run_etag=run.etag,
+                    session=session.record,
+                    session_etag=session.etag,
+                )
+            try:
+                operations: list[_TransactionOp] = [
+                    _update_op(indeterminate_mapping, etag=mapping.etag),
+                    _update_op(indeterminate_run, etag=run.etag),
+                    _update_op(quarantined_session, etag=session.etag),
+                ]
+                if aborted_operation is not None:
+                    assert operation is not None
+                    operations.append(_update_op(aborted_operation, etag=operation.etag))
+                results = await self._table_client.submit_transaction(operations)
+            except TableTransactionError as exc:
+                if exc.index in range(len(operations)):
+                    continue
+                raise _map_http_error(exc, context="mark_provider_run_indeterminate") from exc
+            except HttpResponseError as exc:
+                raise _map_http_error(exc, context="mark_provider_run_indeterminate") from exc
+            return ProviderIndeterminateOutcome(
+                mapping=indeterminate_mapping,
+                mapping_etag=_etag_from_write_result(results[0]),
+                run=indeterminate_run,
+                run_etag=_etag_from_write_result(results[1]),
+                session=quarantined_session,
+                session_etag=_etag_from_write_result(results[2]),
+            )
+        raise ConcurrencyConflictError(
+            f"provider indeterminate transition for {run_id!r} did not converge after "
+            f"{_MAX_ADOPTION_ATTEMPTS} attempts"
+        )
+
+    async def adopt_provider_terminal_run(self, terminal_run: DurableRunRecord) -> AdoptionOutcome:
+        if terminal_run.status not in _TERMINAL_RUN_STATUSES:
+            raise SessionStateStoreError(
+                "adopt_provider_terminal_run requires a terminal run status"
+            )
+        mapping = await self.get_provider_run_mapping(
+            terminal_run.owner_partition,
+            terminal_run.session_id,
+            terminal_run.run_id,
+        )
+        if mapping is None:
+            raise SessionStateStoreError("provider run mapping is missing")
+        unbound_terminal = (
+            mapping.record.response_state in {"pending", "submitting"}
+            and terminal_run.status in {"failed", "canceled", "timed_out"}
+            and terminal_run.status_reason
+            in {
+                "provider_request_rejected",
+                "provider_submission_not_started",
+                "provider_canceled_before_submit",
+            }
+        )
+        if mapping.record.response_state not in {"bound", "terminal"} and not unbound_terminal:
+            raise SessionStateStoreError(
+                "provider response must be bound before terminal adoption"
+            )
+        outcome = await self.adopt_terminal_run(terminal_run)
+        for _attempt in range(_MAX_ADOPTION_ATTEMPTS):
+            current = await self.get_provider_run_mapping(
+                terminal_run.owner_partition,
+                terminal_run.session_id,
+                terminal_run.run_id,
+            )
+            if current is None:
+                raise SessionStateStoreError("provider run mapping disappeared after terminal adoption")
+            if current.record.response_state == "terminal":
+                return outcome
+            terminal_mapping = _terminal_provider_run_mapping(
+                current.record,
+                updated_at=_provider_update_timestamp(
+                    terminal_run.updated_at,
+                    current.record.updated_at,
+                ),
+                allow_unbound=unbound_terminal,
+            )
+            try:
+                await self._replace_entity(
+                    terminal_mapping.to_table_entity(),
+                    etag=current.etag,
+                    not_found_error=RowNotFoundError("provider run mapping not found"),
+                    context="adopt_provider_terminal_run",
+                )
+            except ConcurrencyConflictError:
+                continue
+            return outcome
+        raise ConcurrencyConflictError(
+            f"provider terminal mapping for {terminal_run.run_id!r} did not converge after "
+            f"{_MAX_ADOPTION_ATTEMPTS} attempts"
+        )
+
+    async def clear_provider_run_mapping(
+        self,
+        *,
+        previous: DurableProviderRunMapping,
+        etag: str,
+    ) -> None:
+        if previous.response_state != "terminal":
+            raise SessionStateStoreError("only terminal provider mappings may be cleared")
+        run = await self.get_run(
+            previous.owner_partition,
+            previous.session_id,
+            previous.run_id,
+        )
+        if run.record.status not in _TERMINAL_RUN_STATUSES:
+            raise TerminalStateConflictError(
+                "provider mapping cannot be cleared before its durable run is terminal"
+            )
+        await self._delete_entity(
+            previous.to_table_entity(),
+            etag=etag,
+            not_found_error=RowNotFoundError("provider run mapping not found"),
+            context="clear_provider_run_mapping",
+        )
 
     # -- durable operations (EGT) -----------------------------------------
 
@@ -2094,6 +2543,8 @@ def _create_op(
         | DurableSessionOperation
         | DurableIdempotencyRecord
         | DurableOwnerIdempotencyRecord
+        | DurableProviderSessionBinding
+        | DurableProviderRunMapping
     ),
 ) -> _TransactionOp:
     return ("create", record.to_table_entity())
@@ -2106,6 +2557,8 @@ def _update_op(
         | DurableSessionOperation
         | DurableIdempotencyRecord
         | DurableOwnerIdempotencyRecord
+        | DurableProviderSessionBinding
+        | DurableProviderRunMapping
     ),
     *,
     etag: str,
@@ -2151,6 +2604,230 @@ def _release_active_run(
         updated_at=updated_at,
         active_operation_id=session.active_operation_id,
         operation_sequence=session.operation_sequence,
+    )
+
+
+def _validate_provider_run_mapping_admission(
+    session: DurableSessionRecord,
+    run: DurableRunRecord,
+    mapping: DurableProviderRunMapping,
+) -> None:
+    if (
+        mapping.owner_partition.partition_key != session.owner_partition.partition_key
+        or run.owner_partition.partition_key != session.owner_partition.partition_key
+        or mapping.session_id != session.session_id
+        or run.session_id != session.session_id
+        or mapping.run_id != run.run_id
+        or session.active_run_id != run.run_id
+        or session.status not in {"creating", *_STATUSES_OWNING_ACTIVE_RUN}
+        or run.status not in {"accepted", "running"}
+    ):
+        raise SessionStateStoreError(
+            "provider run mappings may only be reserved for an admitted active run"
+        )
+
+
+def _provider_update_timestamp(requested: datetime, *existing: datetime) -> datetime:
+    if requested.tzinfo is None or requested.utcoffset() is None:
+        raise SessionStateStoreError("provider mapping updated_at must be timezone-aware")
+    return max(requested.astimezone(UTC), *existing)
+
+
+def _bound_provider_run_mapping(
+    mapping: DurableProviderRunMapping,
+    *,
+    provider_response_id: str,
+    updated_at: datetime,
+) -> DurableProviderRunMapping:
+    if mapping.response_state != "submitting" or mapping.provider_response_id is not None:
+        raise SessionStateStoreError(
+            "provider response identifier may only bind a submitting mapping"
+        )
+    return DurableProviderRunMapping.create(
+        owner_partition=mapping.owner_partition,
+        session_id=mapping.session_id,
+        run_id=mapping.run_id,
+        response_state="bound",
+        provider_response_id=provider_response_id,
+        max_public_event_sequence=0,
+        indeterminate_reason=None,
+        created_at=mapping.created_at,
+        updated_at=_provider_update_timestamp(updated_at, mapping.updated_at),
+    )
+
+
+def _provider_run_mapping_with_watermark(
+    mapping: DurableProviderRunMapping,
+    *,
+    max_public_event_sequence: int,
+    updated_at: datetime,
+) -> DurableProviderRunMapping:
+    watermark = validate_public_event_sequence(max_public_event_sequence)
+    if mapping.response_state not in {"bound", "terminal"}:
+        raise SessionStateStoreError(
+            "provider event watermark requires a bound or terminal response mapping"
+        )
+    if watermark < mapping.max_public_event_sequence:
+        raise SessionStateStoreError("provider event watermark may not move backward")
+    return DurableProviderRunMapping.create(
+        owner_partition=mapping.owner_partition,
+        session_id=mapping.session_id,
+        run_id=mapping.run_id,
+        response_state=mapping.response_state,
+        provider_response_id=mapping.provider_response_id,
+        max_public_event_sequence=watermark,
+        indeterminate_reason=None,
+        created_at=mapping.created_at,
+        updated_at=_provider_update_timestamp(updated_at, mapping.updated_at),
+    )
+
+
+def _indeterminate_provider_run_mapping(
+    mapping: DurableProviderRunMapping,
+    *,
+    reason: ProviderIndeterminateReason,
+    updated_at: datetime,
+) -> DurableProviderRunMapping:
+    if mapping.response_state == "terminal":
+        raise TerminalStateConflictError(
+            "a terminal provider response mapping cannot become indeterminate"
+        )
+    if (
+        mapping.response_state == "indeterminate"
+        and mapping.indeterminate_reason not in {None, reason}
+    ):
+        raise SessionStateStoreError("provider mapping already has a different indeterminate reason")
+    return DurableProviderRunMapping.create(
+        owner_partition=mapping.owner_partition,
+        session_id=mapping.session_id,
+        run_id=mapping.run_id,
+        response_state="indeterminate",
+        provider_response_id=mapping.provider_response_id,
+        max_public_event_sequence=mapping.max_public_event_sequence,
+        indeterminate_reason=reason,
+        created_at=mapping.created_at,
+        updated_at=_provider_update_timestamp(updated_at, mapping.updated_at),
+    )
+
+
+def _provider_run_mapping_with_submission_issued(
+    mapping: DurableProviderRunMapping,
+    *,
+    updated_at: datetime,
+) -> DurableProviderRunMapping:
+    if mapping.response_state != "pending":
+        raise SessionStateStoreError(
+            "only pending provider response mappings may begin submission"
+        )
+    return DurableProviderRunMapping.create(
+        owner_partition=mapping.owner_partition,
+        session_id=mapping.session_id,
+        run_id=mapping.run_id,
+        response_state="submitting",
+        provider_response_id=None,
+        max_public_event_sequence=0,
+        indeterminate_reason=None,
+        created_at=mapping.created_at,
+        updated_at=_provider_update_timestamp(updated_at, mapping.updated_at),
+    )
+
+
+def _provider_indeterminate_run(
+    run: DurableRunRecord,
+    *,
+    reason: ProviderIndeterminateReason,
+    updated_at: datetime,
+) -> DurableRunRecord:
+    if run.status in _TERMINAL_RUN_STATUSES:
+        if (
+            run.status == "abandoned"
+            and run.status_reason == reason
+            and not run.result_available
+        ):
+            return run
+        raise TerminalStateConflictError(
+            "a terminal durable run cannot become provider-indeterminate"
+        )
+    return DurableRunRecord.create(
+        owner_partition=run.owner_partition,
+        session_id=run.session_id,
+        run_id=run.run_id,
+        generation=run.generation,
+        status="abandoned",
+        result_available=False,
+        status_reason=reason,
+        expires_at=run.expires_at,
+        created_at=run.created_at,
+        updated_at=_provider_update_timestamp(updated_at, run.updated_at),
+        agent_slug=run.agent_slug,
+    )
+
+
+def _provider_quarantined_session(
+    session: DurableSessionRecord,
+    *,
+    run_id: str,
+    reason: ProviderIndeterminateReason,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    if session.status == "quarantined":
+        if session.quarantine_reason != reason:
+            raise SessionStateStoreError(
+                "session already has a different provider quarantine reason"
+            )
+    elif (
+        session.active_run_id != run_id
+        or session.status not in {"creating", *_STATUSES_OWNING_ACTIVE_RUN}
+    ):
+        raise SessionStateStoreError(
+            "provider indeterminate transition does not own the session active run"
+        )
+    effective_updated_at = _provider_update_timestamp(updated_at, session.updated_at)
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status="quarantined",
+        last_activity_at=max(session.last_activity_at, effective_updated_at),
+        expires_at=session.expires_at,
+        idle_policy_armed=session.idle_policy_armed,
+        active_run_id=None,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=effective_updated_at,
+        active_operation_id=None,
+        operation_sequence=session.operation_sequence,
+    )
+
+
+def _terminal_provider_run_mapping(
+    mapping: DurableProviderRunMapping,
+    *,
+    updated_at: datetime,
+    allow_unbound: bool = False,
+) -> DurableProviderRunMapping:
+    if mapping.response_state != "bound" and not (
+        allow_unbound and mapping.response_state in {"pending", "submitting"}
+    ):
+        raise SessionStateStoreError("only bound provider response mappings may become terminal")
+    return DurableProviderRunMapping.create(
+        owner_partition=mapping.owner_partition,
+        session_id=mapping.session_id,
+        run_id=mapping.run_id,
+        response_state="terminal",
+        provider_response_id=mapping.provider_response_id,
+        max_public_event_sequence=mapping.max_public_event_sequence,
+        indeterminate_reason=None,
+        created_at=mapping.created_at,
+        updated_at=_provider_update_timestamp(updated_at, mapping.updated_at),
     )
 
 
@@ -2399,6 +3076,28 @@ def _parse_run_entity(entity: Mapping[str, object]) -> DurableRunRecord:
         return DurableRunRecord.from_table_entity(entity)
     except SessionStateContractError as exc:
         raise CorruptEntityError(f"stored run entity failed validation: {exc}") from exc
+
+
+def _parse_provider_session_binding_entity(
+    entity: Mapping[str, object],
+) -> DurableProviderSessionBinding:
+    try:
+        return DurableProviderSessionBinding.from_table_entity(entity)
+    except SessionStateContractError as exc:
+        raise CorruptEntityError(
+            f"stored provider session binding failed validation: {exc}"
+        ) from exc
+
+
+def _parse_provider_run_mapping_entity(
+    entity: Mapping[str, object],
+) -> DurableProviderRunMapping:
+    try:
+        return DurableProviderRunMapping.from_table_entity(entity)
+    except SessionStateContractError as exc:
+        raise CorruptEntityError(
+            f"stored provider run mapping failed validation: {exc}"
+        ) from exc
 
 
 def _parse_operation_entity(entity: Mapping[str, object]) -> DurableSessionOperation:

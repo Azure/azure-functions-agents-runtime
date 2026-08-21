@@ -22,6 +22,7 @@ from azure_functions_agents.execution.backend import (
     RunHandle,
     RunResult,
     RunStatus,
+    SessionBindingUnavailableError,
     StartRunRequest,
 )
 from azure_functions_agents.execution.setup_budget import SetupBudget, SetupBudgetExpiredError
@@ -38,6 +39,7 @@ class FakeBackend:
         self.raise_on_cancel: Exception | None = None
         self.hang_on_get = False
         self.hang_on_cancel = False
+        self.provider_session_id: str | None = None
 
     async def start_run(self, request: StartRunRequest) -> RunHandle:
         del request
@@ -49,6 +51,7 @@ class FakeBackend:
             session_id=self.status.session_id,
             state=self.status.state,
             created_at=datetime.now(UTC),
+            provider_session_id=self.provider_session_id,
         )
 
     async def get_run(self, context: RunContext) -> RunStatus:
@@ -117,6 +120,7 @@ def _expired_budget() -> RequestBudget:
 @pytest.mark.asyncio
 async def test_async_submission_returns_shared_management_urls() -> None:
     backend = FakeBackend(_status())
+    backend.provider_session_id = "fhs1-" + ("a" * 52)
 
     response = await submit_run(
         backend,  # type: ignore[arg-type]
@@ -128,6 +132,7 @@ async def test_async_submission_returns_shared_management_urls() -> None:
 
     assert response.status_code == 202
     assert response.headers["Location"].endswith("/sessions/session-1/runs/run-1")
+    assert response.headers["x-ms-fha-session-id"] == backend.provider_session_id
     assert isinstance(response.body, dict)
     assert response.body["events_url"].endswith("/events")
 
@@ -147,6 +152,7 @@ async def test_sync_success_keeps_session_identity_in_the_response_header() -> N
             ),
         )
     )
+    backend.provider_session_id = "fhs1-" + ("b" * 52)
 
     response = await submit_run(
         backend,  # type: ignore[arg-type]
@@ -166,6 +172,7 @@ async def test_sync_success_keeps_session_identity_in_the_response_header() -> N
         "delegate_error_count": 0,
     }
     assert response.headers["x-ms-session-id"] == "session-1"
+    assert response.headers["x-ms-fha-session-id"] == backend.provider_session_id
 
 
 @pytest.mark.asyncio
@@ -321,6 +328,30 @@ async def test_unknown_session_submission_returns_sanitized_not_found() -> None:
 
     assert response.status_code == 404
     assert response.body == {"error": "session_not_found"}
+
+
+@pytest.mark.asyncio
+async def test_unavailable_provider_session_binding_requires_new_session() -> None:
+    backend = FakeBackend(_status())
+    backend.raise_on_start = SessionBindingUnavailableError("provider detail")
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello", session_id="existing-session"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 409
+    assert response.headers == {"x-ms-session-id": "existing-session"}
+    assert response.body == {
+        "error": "session_binding_unavailable",
+        "message": (
+            "This session's hosted provider state is no longer available. "
+            "Start a new session."
+        ),
+    }
 
 
 @pytest.mark.asyncio

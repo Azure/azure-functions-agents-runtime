@@ -440,11 +440,19 @@ A built-in single-page chat interface served at `/agents/{slug}/` when `builtin_
 
 On first load, you'll be prompted for the base URL and a function key (for deployed apps). These are stored in browser local storage and can be changed via the gear icon.
 
-The chat UI manages the session id for you. The active id is shown beneath the status line with a **Copy** button, and you can resume an existing conversation by pasting its id into the **Session ID (optional)** field in the settings dialog. Pasted ids are validated client-side against the same rule the server enforces (`^[A-Za-z0-9._-]{1,128}$`) and persist in browser local storage per base URL and agent (each `/agents/{slug}/`), so a resumed conversation survives page reloads and new tabs. Use **New session** to clear the id and start fresh.
+The chat UI manages the session id for you. The active id is shown beneath the status line with a **Copy** button, and you can resume an existing conversation by pasting its id into the **Session ID (optional)** field in the settings dialog. Pasted ids are validated client-side against the same rule the server enforces (`^[A-Za-z0-9._-]{1,128}$`) and persist in browser local storage per base URL and agent (each `/agents/{slug}/`), so a resumed conversation survives page reloads and new tabs. Use **New session** to clear the id and start fresh. In FHA mode, an authenticated chat response also shows the copyable private `fhs1-...` **FHA session** identifier for Foundry-side correlation. It is diagnostic metadata only: callers must continue conversations with the public runtime Session ID, not the FHA ID.
 
 The settings dialog also keeps a **Recent sessions** list (most-recent first, up to 8 per base URL and agent). Each turn adds or updates an entry, auto-titling it with your first message (renameable via **Rename**); pick one to fill the Session ID field and **Save** to resume it, or use **Remove** / **Clear recent** to prune the list. This list is a per-browser convenience stored in local storage — it is **not** synced across devices or browsers, and it does not include sessions created through the raw HTTP API from other clients.
 
 When you resume a session — whether by pasting an id or picking one from **Recent sessions** — the chat window reloads that conversation's earlier messages from the server (via a `GET /agents/{slug}/history` endpoint) so its history is visible right away, not just carried invisibly into your next turn. The replay is capped at the 200 most recent user and assistant messages; the UI shows a notice when older messages were omitted. Intermediate tool activity is not replayed. This requires the app's blob-backed [session storage](#session-storage) to be configured; without it — or on an older runtime that predates the history endpoint — the window simply starts empty and the resumed session still continues on your next message.
+
+After each turn, a copyable **Performance** strip shows browser-observed total
+response time, time to first assistant output, active streaming duration, text
+delta count, and whether the turn started or continued a session. Copying the
+strip also includes the current runtime Session ID, FHA session ID when
+available, and Run trace ID, making one screenshot or clipboard capture
+sufficient for spike demos. These are client timings, so they include network
+and browser processing rather than representing a service-side SLA.
 
 ### HTTP Chat API
 
@@ -612,6 +620,115 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 
 ## Deployment Notes
 
+### Experimental Foundry Hosted Agent Responses bootstrap (spike)
+
+After deploying the Functions application through its normal deployment path,
+you can opt into the experimental Foundry Hosted Agent (FHA) Responses runtime.
+This is a standalone post-deployment step: it does not change `azure.yaml`,
+Bicep, or Functions startup.
+
+The customer supplies an **existing** Foundry project and pre-grants the
+currently signed-in Azure CLI principal and Function App managed identity the
+required project-management and agent-invocation roles. The script verifies
+rather than grants those roles (its current preflight accepts Foundry/Azure AI
+project-manager roles for the setup principal and Foundry Agent Consumer/Azure
+AI User for the Function identity). After the hosted version becomes active,
+bootstrap resolves its instance and blueprint identities and configures the
+two tracing roles they cannot receive before deployment. Run it from the source
+checkout whose application content was deployed:
+
+```bash
+uv run --python 3.13 python eng/scripts/bootstrap_foundry_responses_fha.py \
+  --application-root <local-functions-app-root> \
+  --subscription-id <subscription-guid> \
+  --function-app-name <function-app-name> \
+  --resource-group <resource-group> \
+  --project-endpoint https://<project>.<region>.services.ai.azure.com/api/projects/<project> \
+  --project-resource-id <foundry-project-resource-id> \
+  --model-deployment-name <model-deployment> \
+  --execute
+```
+
+Add `--function-app-slot <slot>` when deploying to a slot. The argument list is
+intentionally limited to deployment-specific values. The script uses a
+temporary staging directory, infers the runtime version from the application's
+`requirements.txt` (including the sample's local wheel), and supplies the
+known-compatible Agent Server pins. `--stage-root`, `--setup-principal-id`, and
+the three `--*-pin` options remain optional troubleshooting/compatibility
+overrides. Use
+`uv run --python 3.13 python eng/scripts/bootstrap_foundry_responses_fha.py --help`
+for the current parser contract.
+
+By default, `--rbac-mode auto` idempotently adds `Reader` on the Foundry account
+and `Monitoring Metrics Publisher` on the Function App's Application Insights
+resource for the hosted instance and blueprint identities. The deployment
+principal therefore needs role-assignment write permission at those two scopes.
+When it does not, bootstrap emits a non-secret, copyable admin handoff and stops
+before publishing the FHA binding; apply the handoff and rerun the same command.
+Use `--rbac-mode plan` to always produce that handoff without changing RBAC.
+The Foundry default AppInsights connection must use
+`ProjectManagedIdentity` and target the same Application Insights resource as
+the Function App. Use `--app-insights-resource-id` only when the Function App
+hidden link is missing or ambiguous.
+
+The script compiles the same FHA V0 catalog used at Function startup and in the
+hosted process, seals a digest-verified local application snapshot, and stages
+that snapshot with a canonical non-secret runtime projection, the checkout's
+runtime source, and exact hosted dependency pins. It then checks existing-agent
+provenance, creates or versions one app-scoped FHA, and requires an exact
+`READY` smoke response from its active version. Only then does it publish all
+eight non-secret
+`AZURE_FUNCTIONS_AGENTS_FHA_*` binding settings and restart the Function App:
+`PROJECT_ENDPOINT`, `PROJECT_RESOURCE_ID`, `MANAGED_AGENT_NAME`,
+`MANAGED_AGENT_VERSION`, `APPLICATION_CONTENT_MANIFEST`,
+`APPLICATION_CONTENT_DIGEST`, `WRAPPER_DIGEST`, and `BINDING_FINGERPRINT`.
+Each hosted-agent version explicitly receives the same non-secret Foundry
+project/model variables (`FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL`, and
+`AZURE_AI_MODEL_DEPLOYMENT_NAME`) plus
+`APPLICATIONINSIGHTS_AUTH_MODE=entra`,
+`AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING=true`,
+`OTEL_TRACES_SAMPLER=always_on`, and
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=false`; no connection
+string, API key, prompt, tool argument/result, or model output is staged for
+telemetry. For an explicit diagnostic deployment, `--capture-trace-content`
+sets that final value to `true`; prompts, completions, and tool content may then
+be exported to Application Insights, so do not use the flag with sensitive
+workloads.
+
+With no FHA binding, the existing execution backend remains selected. If a
+normal Functions deployment changes the manifest-selected application content,
+the old binding is stale and FHA selection fails closed until this bootstrap
+step is run again; the runtime never silently falls back from a configured
+stale FHA binding.
+
+> **Spike boundary.** FHA V0 supports ordinary custom Python tools, Agent
+> Skills, remote HTTP/streamable-HTTP MCP, and one level of `subagents:` through
+> the existing MAF runner. A resilient-handler crash before checkpointing may
+> replay the whole turn, so tool, MCP, Skill-script, and delegated effects are
+> **at least once**, not exactly once. System tools (`web_request`, Dynamic
+> Sessions/code interpreter, and sandbox tools), Dynamic/Durable workflows,
+> nested delegation, local/stdio MCP, and built-in MCP exposure remain
+> unsupported.
+>
+> FHA V0 authoring is substitution-free: recognized environment placeholders
+> in agent markdown, `agents.config.yaml`, or `mcp.json` fail bootstrap and
+> startup. Remote MCP must use literal non-secret URLs/settings and the hosted
+> agent's managed identity (`auth.scope` plus optional `client_id`); grant that
+> identity access to each destination. Literal tokens, credentials,
+> authorization/cookie headers, and ACA-style `secretRef` or egress-proxy
+> injection are not supported.
+>
+> Built-in `/chatstream` calls retain the original stored background Response
+> reader and bridge its output-text deltas through the existing SSE `delta`
+> events, so the debug chat UI updates while the hosted agent is generating.
+> If that attached reader disconnects, the Response keeps running and later
+> readers recover durable lifecycle/terminal snapshots; Foundry does not replay
+> the earlier text deltas for this hosted path. Full hosted tool-event parity is
+> still outside the spike. Microsoft Learn currently notes performance issues
+> when background mode and streaming are combined, so time-to-first-delta and
+> total latency remain explicit spike measurements rather than production
+> guarantees.
+
 ### Required Azure App Settings
 
 Set the model provider env vars described above. The preview samples use Microsoft Foundry (`AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`, `FOUNDRY_PROJECT_ENDPOINT`, and `FOUNDRY_MODEL`). Azure OpenAI (`AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`) and OpenAI (`OPENAI_API_KEY` and optionally `AZURE_FUNCTIONS_AGENTS_MODEL`) are supported alternatives. For Microsoft Foundry and Azure OpenAI, the provider-specific model/deployment setting takes precedence over `AZURE_FUNCTIONS_AGENTS_MODEL`.
@@ -629,6 +746,9 @@ when `ENABLE_SENSITIVE_DATA=true`. The runtime emits an `agent.run` span for eac
 with `af.fault_domain`, and quiets noisy third-party loggers. For full setup and the span/attribute
 reference, see [`docs/observability.md`](docs/observability.md). If you also want host↔worker
 correlation, `host.json` `telemetryMode: OpenTelemetry` is optional and additive.
+In FHA mode, the worker propagates its active W3C trace to the hosted agent;
+built-in chat/chatstream responses return that shared value in
+`x-ms-trace-id`, and the debug UI shows it as a copyable run trace.
 
 ### Optional config overrides
 

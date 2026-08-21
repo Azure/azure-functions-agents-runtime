@@ -21,6 +21,10 @@ TERMINAL_EVENT_TYPES: frozenset[str] = frozenset({"done", "error"})
 SESSION_TOMBSTONED_ERROR_CODE = "session_tombstoned"
 
 
+class SessionBindingUnavailableError(RuntimeError):
+    """The private provider state for an existing session is unavailable."""
+
+
 @dataclass
 class StartRunRequest:
     """Serializable per-turn input for a run."""
@@ -39,6 +43,7 @@ class RunHandle:
     session_id: str
     state: RunState
     created_at: datetime
+    provider_session_id: str | None = None
 
 
 @dataclass

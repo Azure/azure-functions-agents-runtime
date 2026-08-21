@@ -2,6 +2,7 @@ import importlib.util
 import inspect
 import os
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,7 @@ class ProjectTools:
 
 
 _DISCOVERED_TOOLS_CACHE: dict[Path, _CachedProjectTools] = {}
+_TOOL_MODULE_LOAD_LOCK = threading.RLock()
 
 
 @dataclass
@@ -146,7 +148,7 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
     logger.debug("Tools directory exists: %s", os.path.exists(tools_dir))
 
     if not os.path.exists(tools_dir):
-        logger.warning("Tools directory not found: %s", tools_dir)
+        logger.debug("Tools directory not found: %s", tools_dir)
         _DISCOVERED_TOOLS_CACHE[resolved_root] = (tuple(tools), tuple(workflow_tools))
         return ProjectTools(
             user_tools=list(tools),
@@ -168,7 +170,13 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
                 continue
 
             module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            with _TOOL_MODULE_LOAD_LOCK:
+                previous_dont_write_bytecode = sys.dont_write_bytecode
+                try:
+                    sys.dont_write_bytecode = True
+                    spec.loader.exec_module(module)
+                finally:
+                    sys.dont_write_bytecode = previous_dont_write_bytecode
 
             picked: FunctionTool | None = None
             for name, obj in inspect.getmembers(module):

@@ -14,6 +14,7 @@ from ..execution.backend import (
     RunHandle,
     RunResult,
     RunStatus,
+    SessionBindingUnavailableError,
     StartRunRequest,
 )
 from ..execution.compat import collect_terminal_run
@@ -32,6 +33,8 @@ from .readiness import (
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
 )
+
+_FHA_SESSION_ID_HEADER = "x-ms-fha-session-id"
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +121,23 @@ async def submit_run(
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
     except SessionActivationNotFoundError:
         return ControllerResponse(status_code=404, body={"error": "session_not_found"})
+    except SessionBindingUnavailableError:
+        headers = (
+            {}
+            if request.session_id is None
+            else {"x-ms-session-id": request.session_id}
+        )
+        return ControllerResponse(
+            status_code=409,
+            body={
+                "error": "session_binding_unavailable",
+                "message": (
+                    "This session's hosted provider state is no longer available. "
+                    "Start a new session."
+                ),
+            },
+            headers=headers,
+        )
 
     context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
     if respond_async:
@@ -129,7 +149,10 @@ async def submit_run(
         try:
             status = await budget.wait_for_cleanup(backend.get_run(context))
             if status.state in TERMINAL_RUN_STATUSES:
-                return _synchronous_status_response(status)
+                return _synchronous_status_response(
+                    status,
+                    provider_session_id=handle.provider_session_id,
+                )
             await budget.wait_for_cleanup(backend.cancel_run(context))
         except Exception as exc:
             logger.warning(
@@ -139,7 +162,10 @@ async def submit_run(
                 type(exc).__name__,
             )
         return _run_timeout_response(context)
-    return _synchronous_status_response(status)
+    return _synchronous_status_response(
+        status,
+        provider_session_id=handle.provider_session_id,
+    )
 
 
 async def read_status(
@@ -243,6 +269,13 @@ def _accepted_response(
     context: RunContext,
 ) -> ControllerResponse:
     urls = management_urls(agent_slug=agent_slug, context=context)
+    headers = {
+        "Location": urls["status_url"],
+        "Retry-After": "2",
+        "x-ms-session-id": handle.session_id,
+    }
+    if handle.provider_session_id is not None:
+        headers[_FHA_SESSION_ID_HEADER] = handle.provider_session_id
     return ControllerResponse(
         status_code=202,
         body={
@@ -251,31 +284,34 @@ def _accepted_response(
             "status": handle.state,
             **urls,
         },
-        headers={
-            "Location": urls["status_url"],
-            "Retry-After": "2",
-            "x-ms-session-id": handle.session_id,
-        },
+        headers=headers,
     )
 
 
-def _synchronous_status_response(status: RunStatus) -> ControllerResponse:
+def _synchronous_status_response(
+    status: RunStatus,
+    *,
+    provider_session_id: str | None,
+) -> ControllerResponse:
+    headers = {"x-ms-session-id": status.session_id}
+    if provider_session_id is not None:
+        headers[_FHA_SESSION_ID_HEADER] = provider_session_id
     if status.state == "succeeded" and status.result is not None:
         return ControllerResponse(
             status_code=200,
             body=_result_payload(status.result),
-            headers={"x-ms-session-id": status.session_id},
+            headers=headers,
         )
     if status.state in TERMINAL_RUN_STATUSES and status.state != "succeeded":
         return ControllerResponse(
             status_code=500,
             body=status_payload(status),
-            headers={"x-ms-session-id": status.session_id},
+            headers=headers,
         )
     return ControllerResponse(
         status_code=500,
         body={"error": "run_did_not_reach_terminal_state", **status_payload(status)},
-        headers={"x-ms-session-id": status.session_id},
+        headers=headers,
     )
 
 

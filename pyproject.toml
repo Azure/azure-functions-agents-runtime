@@ -23,18 +23,17 @@ dependencies = [
     "azure-storage-blob>=12.28.0,<13",
     "jsonschema>=4.26.0,<5",
     "mcp>=1.28.1,<2",
+    "azure-ai-projects>=2.3,<3",
+    "azure-data-tables>=12.7,<13",
 ]
 
 [project.optional-dependencies]
 # ACA Sandbox session runtime (FRD 0008) — optional. Install
 # `azurefunctions-agents-runtime[aca_sandbox]` to enable `session_runtime.aca_sandbox`.
-# Bundles the pinned preview ACA Sandbox transport SDK and azure-data-tables
-# for the Table-backed session state store. Kept optional so the default
-# in-lang-worker runtime has no preview-SDK/Table-SDK dependency edge (session_state
-# lazily imports azure.data.tables only inside functions -- see connection.py/store.py).
+# Bundles only the pinned preview ACA Sandbox transport SDK. Table state is a
+# core dependency because the Foundry Responses runtime also uses it lazily.
 aca_sandbox = [
     "azure-containerapps-sandbox==0.1.0b4",
-    "azure-data-tables>=12.7.0,<13",
 ]
 # Azure Monitor exporter — optional. Install `azurefunctions-agents-runtime[monitor]` to export the
 # runtime's OpenTelemetry spans/metrics to Application Insights. Without it the runtime emits spans

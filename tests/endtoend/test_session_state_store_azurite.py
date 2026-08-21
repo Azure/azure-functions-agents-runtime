@@ -61,6 +61,10 @@ from azure_functions_agents.session_state import (
     operation_id_for_sequence,
     owner_partition,
 )
+from azure_functions_agents.session_state.session_models import (
+    DurableProviderRunMapping,
+    DurableProviderSessionBinding,
+)
 from azure_functions_agents.session_state.store import AzureTableSessionStateStore
 from azure_functions_agents.transport.transport_models import SandboxSummary
 from tests.endtoend._storage_probe import DEV_CONNECTION_STRING
@@ -198,6 +202,25 @@ def _run(
         result_available=result_available,
         status_reason=None,
         expires_at=_NOW + timedelta(minutes=15),
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
+def _pending_provider_mapping(
+    *,
+    partition: OwnerPartition,
+    session_id: str = "session-1",
+    run_id: str = "run-1",
+) -> DurableProviderRunMapping:
+    return DurableProviderRunMapping.create(
+        owner_partition=partition,
+        session_id=session_id,
+        run_id=run_id,
+        response_state="pending",
+        provider_response_id=None,
+        max_public_event_sequence=0,
+        indeterminate_reason=None,
         created_at=_NOW,
         updated_at=_NOW,
     )
@@ -1661,3 +1684,214 @@ async def test_fingerprint_and_errors_never_leak_the_connection_string_or_key() 
         except Exception as exc:
             assert "AccountKey" not in str(exc)
             assert "DefaultEndpointsProtocol" not in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Private Foundry Responses mapping rows
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_provider_mapping_lifecycle_uses_real_etags_and_retains_terminal_replay() -> None:
+    async with _one_store() as store:
+        partition = _partition()
+        await store.create_session(_session(partition=partition, status="ready"))
+        await store.admit_run(
+            AdmissionRecords.create(
+                _session(partition=partition, status="running", active_run_id="run-1"),
+                _run(partition=partition),
+                None,
+            )
+        )
+        mapping = _pending_provider_mapping(partition=partition)
+        mapping_etag = await store.create_provider_run_mapping(mapping)
+        binding = DurableProviderSessionBinding.create(
+            owner_partition=partition,
+            session_id=mapping.session_id,
+            provider_session_id="agent-session_123",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+        await store.create_provider_session_binding(binding)
+        assert (await store.get_provider_session_binding(partition, mapping.session_id)) is not None
+
+        pending = await store.get_provider_run_mapping(
+            partition,
+            mapping.session_id,
+            mapping.run_id,
+        )
+        assert pending is not None
+        assert pending.etag == mapping_etag
+        await store.mark_provider_submission_issued(
+            previous=pending.record,
+            etag=pending.etag,
+            updated_at=_NOW + timedelta(milliseconds=500),
+        )
+        submitting = await store.get_provider_run_mapping(
+            mapping.owner_partition,
+            mapping.session_id,
+            mapping.run_id,
+        )
+        assert submitting is not None
+        await store.bind_provider_response_id(
+            previous=submitting.record,
+            etag=submitting.etag,
+            provider_response_id="caresp_0123456789",
+            updated_at=_NOW + timedelta(seconds=1),
+        )
+        bound = await store.get_provider_run_mapping(
+            partition,
+            mapping.session_id,
+            mapping.run_id,
+        )
+        assert bound is not None
+        assert bound.record.response_state == "bound"
+        with pytest.raises(ConcurrencyConflictError):
+            await store.advance_provider_event_watermark(
+                previous=bound.record,
+                etag=pending.etag,
+                max_public_event_sequence=4,
+                updated_at=_NOW + timedelta(seconds=2),
+            )
+        watermark_etag = await store.advance_provider_event_watermark(
+            previous=bound.record,
+            etag=bound.etag,
+            max_public_event_sequence=4,
+            updated_at=_NOW + timedelta(seconds=2),
+        )
+        watermarked = await store.get_provider_run_mapping(
+            partition,
+            mapping.session_id,
+            mapping.run_id,
+        )
+        assert watermarked is not None
+        assert watermarked.etag == watermark_etag
+        assert watermarked.record.max_public_event_sequence == 4
+
+        outcome = await store.adopt_provider_terminal_run(
+            _run(partition=partition, status="succeeded", result_available=True)
+        )
+        terminal = await store.get_provider_run_mapping(
+            partition,
+            mapping.session_id,
+            mapping.run_id,
+        )
+        assert outcome.slot_released is True
+        assert terminal is not None
+        assert terminal.record.response_state == "terminal"
+        assert terminal.record.provider_response_id == "caresp_0123456789"
+        await store.clear_provider_run_mapping(previous=terminal.record, etag=terminal.etag)
+        assert (
+            await store.get_provider_run_mapping(partition, mapping.session_id, mapping.run_id)
+        ) is None
+
+
+@pytest.mark.asyncio
+async def test_provider_indeterminate_transition_quarantines_without_provider_lookup() -> None:
+    async with _two_controller_stores() as (store_a, store_b):
+        partition = _partition()
+        await store_a.create_session(_session(partition=partition, status="ready"))
+        await store_a.admit_run(
+            AdmissionRecords.create(
+                _session(partition=partition, status="running", active_run_id="run-1"),
+                _run(partition=partition),
+                None,
+            )
+        )
+        mapping = _pending_provider_mapping(partition=partition)
+        await store_a.create_provider_run_mapping(mapping)
+        pending = await store_a.get_provider_run_mapping(
+            partition,
+            mapping.session_id,
+            mapping.run_id,
+        )
+        assert pending is not None
+        await store_a.mark_provider_submission_issued(
+            previous=pending.record,
+            etag=pending.etag,
+            updated_at=_NOW + timedelta(milliseconds=500),
+        )
+        submitting = await store_a.get_provider_run_mapping(
+            mapping.owner_partition,
+            mapping.session_id,
+            mapping.run_id,
+        )
+        assert submitting is not None
+        await store_a.bind_provider_response_id(
+            previous=submitting.record,
+            etag=submitting.etag,
+            provider_response_id="caresp_0123456789",
+            updated_at=_NOW,
+        )
+
+        outcomes = await asyncio.gather(
+            store_a.mark_provider_run_indeterminate(
+                owner_partition=partition,
+                session_id=mapping.session_id,
+                run_id=mapping.run_id,
+                reason="provider_termination_indeterminate",
+                updated_at=_NOW + timedelta(seconds=1),
+            ),
+            store_b.mark_provider_run_indeterminate(
+                owner_partition=partition,
+                session_id=mapping.session_id,
+                run_id=mapping.run_id,
+                reason="provider_termination_indeterminate",
+                updated_at=_NOW + timedelta(seconds=1),
+            ),
+        )
+
+        assert {outcome.run.status for outcome in outcomes} == {"abandoned"}
+        stored_session = await store_a.get_session(partition, mapping.session_id)
+        stored_run = await store_a.get_run(partition, mapping.session_id, mapping.run_id)
+        stored_mapping = await store_a.get_provider_run_mapping(
+            partition,
+            mapping.session_id,
+            mapping.run_id,
+        )
+        assert stored_session.record.status == "quarantined"
+        assert stored_session.record.active_run_id is None
+        assert stored_run.record.status == "abandoned"
+        assert stored_run.record.status_reason == "provider_termination_indeterminate"
+        assert stored_mapping is not None
+        assert stored_mapping.record.response_state == "indeterminate"
+        assert stored_mapping.record.provider_response_id == "caresp_0123456789"
+
+
+@pytest.mark.asyncio
+async def test_aca_reconciler_scan_ignores_private_provider_mapping_rows() -> None:
+    async with _one_store() as store:
+        partition = _partition()
+        await store.create_session(_session(partition=partition, status="ready"))
+        await store.admit_run(
+            AdmissionRecords.create(
+                _session(partition=partition, status="running", active_run_id="run-1"),
+                _run(partition=partition),
+                None,
+            )
+        )
+        mapping = _pending_provider_mapping(partition=partition)
+        await store.create_provider_run_mapping(mapping)
+        await store.create_provider_session_binding(
+            DurableProviderSessionBinding.create(
+                owner_partition=partition,
+                session_id=mapping.session_id,
+                provider_session_id="agent-session_123",
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+
+        reconciler = SessionReconciler(
+            store=store,
+            provider=object(),  # type: ignore[arg-type]
+            app_hash=partition.app_hash,
+        )
+        sessions, runs, idempotencies, operations, _service_time = (
+            await reconciler._load_working_set()  # type: ignore[attr-defined]
+        )
+
+        assert [session.session_id for session in sessions] == [mapping.session_id]
+        assert [run.run_id for run in runs] == [mapping.run_id]
+        assert idempotencies == ()
+        assert operations == ()

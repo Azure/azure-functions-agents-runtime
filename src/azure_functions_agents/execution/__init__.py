@@ -11,6 +11,7 @@ from .backend import (
     RunResult,
     RunState,
     RunStatus,
+    SessionBindingUnavailableError,
     StartRunRequest,
 )
 from .binding import AgentBinding
@@ -24,8 +25,14 @@ from .compat import (
 from .factory import (
     ACA_SANDBOX_EXECUTION_PROVIDER,
     DEFAULT_EXECUTION_PROVIDER,
+    FOUNDRY_RESPONSES_EXECUTION_PROVIDER,
     create_execution_backend,
 )
+from .foundry_responses_execution_backend import (
+    FoundryResponsesBackendError,
+    FoundryResponsesExecutionBackend,
+)
+from .foundry_responses_runtime import FoundryResponsesRuntime
 from .in_lang_worker import LanguageWorkerExecutionBackend
 from .result import AgentResult
 from .run_control import (
@@ -41,12 +48,16 @@ from .unavailable import BackendUnavailableError, UnavailableBackend, unavailabl
 __all__ = [
     "ACA_SANDBOX_EXECUTION_PROVIDER",
     "DEFAULT_EXECUTION_PROVIDER",
+    "FOUNDRY_RESPONSES_EXECUTION_PROVIDER",
     "AcaSandboxExecutionBackend",
     "AgentBinding",
     "AgentExecutionBackend",
     "AgentResult",
     "BackendUnavailableError",
     "EventCursorExpiredError",
+    "FoundryResponsesBackendError",
+    "FoundryResponsesExecutionBackend",
+    "FoundryResponsesRuntime",
     "LanguageWorkerExecutionBackend",
     "RunContext",
     "RunControlError",
@@ -60,6 +71,7 @@ __all__ = [
     "RunSubmissionDefinitiveFailureError",
     "RunSubmissionIndeterminateError",
     "SandboxRunControl",
+    "SessionBindingUnavailableError",
     "SetupBudget",
     "SetupBudgetExpiredError",
     "StartRunRequest",

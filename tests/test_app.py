@@ -16,6 +16,32 @@ from azure_functions_agents.config.schema import (
     SessionRuntimeConfig,
 )
 from azure_functions_agents.discovery.mcp import MCPDiscoveryResult, MCPServerDefinition
+from azure_functions_agents.execution.foundry_application_content import (
+    ApplicationContentManifest,
+    build_application_content_manifest,
+    compute_application_content_digest,
+    serialize_application_content_manifest,
+)
+from azure_functions_agents.execution.foundry_responses_binding import (
+    FHA_APPLICATION_CONTENT_DIGEST_ENV,
+    FHA_APPLICATION_CONTENT_MANIFEST_ENV,
+    FHA_BINDING_FINGERPRINT_ENV,
+    FHA_MANAGED_AGENT_NAME_ENV,
+    FHA_MANAGED_AGENT_VERSION_ENV,
+    FHA_PROJECT_ENDPOINT_ENV,
+    FHA_PROJECT_RESOURCE_ID_ENV,
+    FHA_WRAPPER_DIGEST_ENV,
+    compute_foundry_responses_binding_fingerprint,
+)
+from azure_functions_agents.foundry_responses.fha_model_catalog_gate import (
+    compile_fha_v0_project,
+)
+from azure_functions_agents.foundry_responses.fha_resilient_responses_entrypoint import (
+    render_fha_hosted_responses_entrypoint,
+)
+from azure_functions_agents.foundry_responses.fha_runtime_projection import (
+    compute_fha_wrapper_digest,
+)
 from azure_functions_agents.session_state import AppIdentity
 
 # On-disk fixtures shared with test_config_fixtures.py's loader-level tests
@@ -24,6 +50,7 @@ from azure_functions_agents.session_state import AppIdentity
 # convincing a proof — e.g. "this fixture registers identically to before"
 # needs a fixture that already existed pre-change.
 FIXTURES_ROOT = Path(__file__).resolve().parent / "fixtures" / "config_scenarios"
+_FHA_PROJECT_ENDPOINT = "https://project.services.ai.azure.com/api/projects/demo"
 
 
 def _write_agent(
@@ -52,6 +79,204 @@ def _http_routes(functions: list[Any]) -> list[str]:
             if route is not None:
                 routes.append(route)
     return routes
+
+
+def _fha_environment(
+    root: Path,
+    app_identity: AppIdentity,
+    *,
+    projection_endpoint: str = _FHA_PROJECT_ENDPOINT,
+    binding_endpoint: str | None = None,
+    include_runtime_projection: bool = True,
+) -> dict[str, str]:
+    compilation = compile_fha_v0_project(
+        root,
+        project_endpoint=projection_endpoint,
+        default_model="gpt-model",
+    )
+    source_manifest = build_application_content_manifest(root)
+    manifest = ApplicationContentManifest.create(
+        entries=source_manifest.entries,
+        runtime_projection=(
+            compilation.projection.serialize() if include_runtime_projection else None
+        ),
+    )
+    environment = {
+        "AZURE_FUNCTIONS_AGENTS_MODEL": "gpt-model",
+        FHA_PROJECT_ENDPOINT_ENV: binding_endpoint or projection_endpoint,
+        FHA_PROJECT_RESOURCE_ID_ENV: (
+            "/subscriptions/11111111-2222-3333-4444-555555555555"
+            "/resourceGroups/agents-rg/providers/Microsoft.CognitiveServices/accounts/project/projects/demo"
+        ),
+        FHA_MANAGED_AGENT_NAME_ENV: "hosted-agent",
+        FHA_MANAGED_AGENT_VERSION_ENV: "v1",
+        FHA_APPLICATION_CONTENT_MANIFEST_ENV: serialize_application_content_manifest(manifest),
+        FHA_APPLICATION_CONTENT_DIGEST_ENV: compute_application_content_digest(root, manifest),
+        FHA_WRAPPER_DIGEST_ENV: compute_fha_wrapper_digest(
+            compilation.projection,
+            render_fha_hosted_responses_entrypoint(),
+        ),
+    }
+    environment[FHA_BINDING_FINGERPRINT_ENV] = compute_foundry_responses_binding_fingerprint(
+        app_identity=app_identity,
+        project_endpoint=environment[FHA_PROJECT_ENDPOINT_ENV],
+        project_resource_id=environment[FHA_PROJECT_RESOURCE_ID_ENV],
+        managed_agent_name=environment[FHA_MANAGED_AGENT_NAME_ENV],
+        managed_agent_version=environment[FHA_MANAGED_AGENT_VERSION_ENV],
+        application_content_manifest=environment[FHA_APPLICATION_CONTENT_MANIFEST_ENV],
+        application_content_digest=environment[FHA_APPLICATION_CONTENT_DIGEST_ENV],
+        wrapper_digest=environment[FHA_WRAPPER_DIGEST_ENV],
+    )
+    return environment
+
+
+def test_foundry_responses_binding_registers_session_routes_without_a_reconciler(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_agent(
+        tmp_path,
+        "main.agent.md",
+        """
+        name: Model only
+        description: Model-only HTTP agent.
+        tools: false
+        mcp: false
+        skills: false
+        system_tools:
+          web_request: false
+        trigger:
+          type: http_trigger
+          args:
+            route: model
+        """,
+    )
+    identity = AppIdentity.create(
+        subscription_id="11111111-2222-3333-4444-555555555555",
+        site_name="agent-app",
+    )
+    monkeypatch.setattr(app_module, "resolve_function_app_identity", lambda: identity)
+    environment = _fha_environment(tmp_path, identity)
+    environment["AZURE_FUNCTIONS_AGENTS_MODEL"] = "ambient-different-model"
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    app = create_function_app(tmp_path)
+    functions = app.get_functions()
+
+    assert "model" in _http_routes(functions)
+    assert "agents/main/sessions/{session_id}/runs/{run_id}" in _http_routes(functions)
+    assert "azure_functions_agents_reconciler" not in _function_names(functions)
+
+
+def test_foundry_responses_binding_rejects_manifest_projection_endpoint_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_agent(
+        tmp_path,
+        "main.agent.md",
+        """
+        name: Model only
+        description: Model-only HTTP agent.
+        tools: false
+        mcp: false
+        skills: false
+        system_tools:
+          web_request: false
+        trigger:
+          type: http_trigger
+          args:
+            route: model
+        """,
+    )
+    identity = AppIdentity.create(
+        subscription_id="11111111-2222-3333-4444-555555555555",
+        site_name="agent-app",
+    )
+    monkeypatch.setattr(app_module, "resolve_function_app_identity", lambda: identity)
+    for name, value in _fha_environment(
+        tmp_path,
+        identity,
+        projection_endpoint="https://other.services.ai.azure.com/api/projects/demo",
+        binding_endpoint=_FHA_PROJECT_ENDPOINT,
+    ).items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match="project endpoint"):
+        create_function_app(tmp_path)
+
+
+def test_foundry_responses_binding_rejects_missing_manifest_runtime_projection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_agent(
+        tmp_path,
+        "main.agent.md",
+        """
+        name: Model only
+        description: Model-only HTTP agent.
+        tools: false
+        mcp: false
+        skills: false
+        system_tools:
+          web_request: false
+        trigger:
+          type: http_trigger
+          args:
+            route: model
+        """,
+    )
+    identity = AppIdentity.create(
+        subscription_id="11111111-2222-3333-4444-555555555555",
+        site_name="agent-app",
+    )
+    monkeypatch.setattr(app_module, "resolve_function_app_identity", lambda: identity)
+    for name, value in _fha_environment(
+        tmp_path,
+        identity,
+        include_runtime_projection=False,
+    ).items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match="projection is unavailable"):
+        create_function_app(tmp_path)
+
+
+def test_foundry_responses_binding_fails_closed_when_fingerprint_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_agent(
+        tmp_path,
+        "main.agent.md",
+        """
+        name: Model only
+        description: Model-only HTTP agent.
+        tools: false
+        mcp: false
+        skills: false
+        system_tools:
+          web_request: false
+        trigger:
+          type: http_trigger
+          args:
+            route: model
+        """,
+    )
+    identity = AppIdentity.create(
+        subscription_id="11111111-2222-3333-4444-555555555555",
+        site_name="agent-app",
+    )
+    monkeypatch.setattr(app_module, "resolve_function_app_identity", lambda: identity)
+    environment = _fha_environment(tmp_path, identity)
+    environment[FHA_BINDING_FINGERPRINT_ENV] = "fha1-" + ("b" * 52)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match="FHA_BINDING_FINGERPRINT"):
+        create_function_app(tmp_path)
 
 
 def test_composition_builds_a_lazy_app_scoped_session_runtime_binding(

@@ -260,6 +260,22 @@ def test_start_span_gated_when_observability_disabled(monkeypatch) -> None:  # t
         assert span._span is None
 
 
+def test_current_operation_id_requires_enabled_real_provider(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(obs, "current_trace_id", lambda: "1" * 32)
+    monkeypatch.setattr(obs, "_enabled", False)
+    monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: True)
+
+    assert obs.current_operation_id() is None
+
+    monkeypatch.setattr(obs, "_enabled", True)
+    monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: False)
+    assert obs.current_operation_id() is None
+
+    monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: True)
+    assert obs.current_operation_id() == "1" * 32
+    assert obs.get_current_operation_id() == "1" * 32
+
+
 def test_runtime_span_add_event_noops_without_span() -> None:
     span = obs.RuntimeSpan(None)
     span.add_event("unit.test.event", {"ignored": "value"})

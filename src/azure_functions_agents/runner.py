@@ -767,6 +767,7 @@ async def _build_agent_session_history(
     catalog: AgentCatalog | None = None,
     coordinator_deadline: float | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
+    history_provider: ContextProvider | None = None,
 ) -> tuple[Any, Any, str, _DelegateErrorTracker | None, InferenceTarget]:
     """Construct the chat client, agent, AgentSession, and history provider.
 
@@ -794,7 +795,9 @@ async def _build_agent_session_history(
         resolved_id = validated_id
         session = AgentSession(session_id=resolved_id)
 
-    history_provider = _build_history_provider()
+    resolved_history_provider = (
+        _build_history_provider() if history_provider is None else history_provider
+    )
 
     delegate_tools: list[Any] | None = None
     delegate_error_tracker: _DelegateErrorTracker | None = None
@@ -821,7 +824,7 @@ async def _build_agent_session_history(
         workflow_durable_client=workflow_durable_client,
         agent_name=agent_name,
         resolved_id=resolved_id,
-        history_provider=history_provider,
+        history_provider=resolved_history_provider,
         delegate_tools=delegate_tools,
         workflow_policy=workflow_policy,
     )
@@ -910,6 +913,7 @@ async def run_agent(
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
+    history_provider: ContextProvider | None = None,
 ) -> AgentResult:
     """Execute a single prompt against the configured agent backend.
 
@@ -962,6 +966,9 @@ async def run_agent(
         The process-wide :class:`AgentCatalog` (slug -> resolved specialist +
         capabilities) used to build any ``subagents`` reference. Required
         whenever ``subagents`` is non-empty; ignored otherwise.
+    history_provider:
+        Optional MAF history context provider. When omitted, the existing
+        Blob-or-file provider selection is preserved.
 
     Notes
     -----
@@ -995,6 +1002,7 @@ async def run_agent(
             catalog=catalog,
             coordinator_deadline=coordinator_deadline,
             workflow_policy=workflow_policy,
+            history_provider=history_provider,
         )
     )
 
@@ -1103,6 +1111,7 @@ async def _run_agent_event_stream(
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
+    history_provider: ContextProvider | None = None,
 ) -> AsyncGenerator[dict[str, object]]:
     """Yield the stable runner event vocabulary as structured documents.
 
@@ -1169,6 +1178,7 @@ async def _run_agent_event_stream(
                 catalog=catalog,
                 coordinator_deadline=deadline,
                 workflow_policy=workflow_policy,
+                history_provider=history_provider,
             )
         )
     except Exception as exc:

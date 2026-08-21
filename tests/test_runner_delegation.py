@@ -394,6 +394,61 @@ def test_build_role_agent_direct_role_has_full_tool_superset(
     assert captured["policy"] is policy
 
 
+@pytest.mark.asyncio
+async def test_build_agent_session_history_uses_an_explicit_history_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_client_manager(_FakeClientManager())
+    history_provider = SimpleNamespace()
+
+    def unexpected_default_history_provider() -> object:
+        raise AssertionError("an explicit history provider must bypass the default provider")
+
+    monkeypatch.setattr(runner, "_build_history_provider", unexpected_default_history_provider)
+
+    agent, _session, _session_id, _tracker, _target = await runner._build_agent_session_history(
+        instructions="answer",
+        session_id="session-1",
+        tools=[],
+        mcp_tools=[],
+        skill_paths=[],
+        model=None,
+        sandbox_tools=None,
+        system_addendum=None,
+        workflow_enabled=False,
+        workflow_durable_client=None,
+        agent_name="agent",
+        history_provider=history_provider,
+    )
+
+    assert agent.context_providers == [history_provider]
+
+
+@pytest.mark.asyncio
+async def test_build_agent_session_history_keeps_the_default_history_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_client_manager(_FakeClientManager())
+    default_history_provider = SimpleNamespace()
+    monkeypatch.setattr(runner, "_build_history_provider", lambda: default_history_provider)
+
+    agent, _session, _session_id, _tracker, _target = await runner._build_agent_session_history(
+        instructions="answer",
+        session_id="session-1",
+        tools=[],
+        mcp_tools=[],
+        skill_paths=[],
+        model=None,
+        sandbox_tools=None,
+        system_addendum=None,
+        workflow_enabled=False,
+        workflow_durable_client=None,
+        agent_name="agent",
+    )
+
+    assert agent.context_providers == [default_history_provider]
+
+
 # ---------------------------------------------------------------------------
 # _build_delegated_agent: "runs as itself" + never wires its own subagents
 # ---------------------------------------------------------------------------

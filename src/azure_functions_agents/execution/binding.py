@@ -35,6 +35,7 @@ class AgentBinding:
     web_request_tools: list[Any] | None = None
     subagents: list[SubagentRef] | None = None
     catalog: AgentCatalog | None = None
+    history_provider: Any | None = None
     output_validator: OutputValidator | None = None
 
     def runner_kwargs(self, *, stream: bool) -> dict[str, Any]:
@@ -57,4 +58,6 @@ class AgentBinding:
         }
         if stream:
             kwargs["display_name"] = self.display_name
+        else:
+            kwargs["history_provider"] = self.history_provider
         return kwargs

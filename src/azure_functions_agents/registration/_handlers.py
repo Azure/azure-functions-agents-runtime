@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
+import math
+import os
 import re
 import uuid
 from collections.abc import Callable
@@ -22,15 +26,33 @@ from .._observability import (
     start_span,
 )
 from .._source_marker import source_marker
-from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
+from ..config import DEFAULT_TIMEOUT, EndpointAuthConfig, ResolvedAgent, _to_bool
 from ..controller.budget import RequestBudget
 from ..controller.http import ControllerResponse, prefers_respond_async, submit_run
-from ..controller.readiness import SessionRuntimeBinding
-from ..execution.backend import RunError, RunResult
+from ..execution.backend import (
+    AgentExecutionBackend,
+    RunContext,
+    RunError,
+    RunResult,
+    StartRunRequest,
+)
+from ..execution.binding import AgentBinding
 from ..execution.compat import run_to_agent_result, split_runner_call
 from ..execution.factory import create_execution_backend
+from ..execution.session_runtime import SessionExecutionRuntime, is_foundry_responses_runtime
 from ..execution.setup_budget import synchronous_wait_seconds
-from ..session_state import OwnerPrincipal
+from ..service_bus_delivery_identity import (
+    ServiceBusDeliveryIdentity,
+    ServiceBusDeliveryIdentityError,
+)
+from ..session_state import (
+    TERMINAL_RUN_STATUSES,
+    OwnerPrincipal,
+    TriggerBindingPrincipal,
+    compute_app_hash,
+    encode_label_safe_digest,
+    frame_canonical_components,
+)
 from ._auth import AuthError, authorize_entra_request, resolve_owner_principal
 from ._trigger_serialization import serialize_trigger_data
 from .capabilities import AgentCapabilities
@@ -45,10 +67,16 @@ AUTH_LEVEL_MAP = {
     "admin": func.AuthLevel.ADMIN,
 }
 _SESSION_ID_HEADER = "x-ms-session-id"
+_FHA_SERVICE_BUS_LOCK_BUDGET_ENV = "AZURE_FUNCTIONS_AGENTS_FHA_SERVICE_BUS_LOCK_BUDGET_SECONDS"
+_FHA_SERVICE_BUS_POLL_INTERVAL_SECONDS = 0.25
+_FHA_SERVICE_BUS_CLEANUP_RESERVE_SECONDS = 3.0
+_FHA_SERVICE_BUS_VOLATILE_FIELDS = frozenset(
+    {"delivery_count", "deliverycount", "locked_until", "lock_token"}
+)
 
 
 class _SessionRuntimeKwargs(TypedDict):
-    session_runtime: SessionRuntimeBinding
+    session_runtime: SessionExecutionRuntime
     owner: OwnerPrincipal | None
 
 
@@ -216,7 +244,7 @@ def _response_format_instructions(resolved: ResolvedAgent) -> list[str]:
 
 async def _run_agent(
     *args: Any,
-    session_runtime: SessionRuntimeBinding | None = None,
+    session_runtime: SessionExecutionRuntime | None = None,
     owner: OwnerPrincipal | None = None,
     **kwargs: Any,
 ) -> Any:
@@ -262,7 +290,7 @@ def _new_session_id() -> str:
 
 
 def _session_runtime_kwargs(
-    session_runtime: SessionRuntimeBinding | None,
+    session_runtime: SessionExecutionRuntime | None,
     owner: OwnerPrincipal | None,
 ) -> _SessionRuntimeKwargs | None:
     if session_runtime is None:
@@ -377,11 +405,23 @@ def make_agent_handler(
     capabilities: AgentCapabilities,
     catalog: AgentCatalog | None = None,
     *,
+    session_runtime: SessionExecutionRuntime | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Callable[..., Any]:
     """Create an async handler function for a non-HTTP triggered agent."""
+    if session_runtime is not None and is_foundry_responses_runtime(session_runtime):
+        if trigger_type != "service_bus_queue_trigger":
+            raise ValueError(
+                "Foundry Hosted Agent Responses supports only service_bus_queue_trigger "
+                "for non-HTTP agents."
+            )
+        return _make_fha_service_bus_handler(
+            resolved,
+            trigger_type=trigger_type,
+            session_runtime=session_runtime,
+        )
 
     # NOTE: deliberately omit a type annotation on `trigger_data`. The Azure
     # Functions Python worker validates annotations against the binding's
@@ -475,13 +515,186 @@ def make_agent_handler(
     return handler
 
 
+def _make_fha_service_bus_handler(
+    resolved: ResolvedAgent,
+    *,
+    trigger_type: str,
+    session_runtime: SessionExecutionRuntime,
+) -> Callable[..., Any]:
+    """Create the bounded Service Bus submit-and-poll handler for Foundry Responses."""
+    if not is_foundry_responses_runtime(session_runtime):
+        raise ValueError("Foundry Responses Service Bus handler requires a Foundry runtime.")
+    trigger_args = dict(resolved.trigger.args or {}) if resolved.trigger is not None else {}
+    connection_name = trigger_args.get("connection")
+    queue_name = trigger_args.get("queue_name")
+    if not isinstance(connection_name, str) or not connection_name.strip():
+        raise ValueError("Foundry Responses Service Bus trigger requires a connection setting name.")
+    if not isinstance(queue_name, str) or not queue_name.strip():
+        raise ValueError("Foundry Responses Service Bus trigger requires a queue_name.")
+    lock_budget_seconds = _fha_service_bus_lock_budget_seconds()
+    authored_timeout = resolved.timeout if resolved.timeout is not None else DEFAULT_TIMEOUT
+    if authored_timeout + _FHA_SERVICE_BUS_CLEANUP_RESERVE_SECONDS > lock_budget_seconds:
+        raise ValueError(
+            "Foundry Responses Service Bus lock budget cannot cover execution and cleanup."
+        )
+
+    async def handle(trigger_data) -> None:  # type: ignore[no-untyped-def]
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + lock_budget_seconds
+        execution_deadline = deadline - _FHA_SERVICE_BUS_CLEANUP_RESERVE_SECONDS
+        data_json = serialize_trigger_data(trigger_data)
+        try:
+            serialized = json.loads(data_json)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Service Bus trigger data is invalid.") from exc
+        sequence_number = (
+            serialized.get("sequence_number") if isinstance(serialized, dict) else None
+        )
+        if isinstance(sequence_number, bool) or not isinstance(sequence_number, int):
+            raise RuntimeError("Service Bus trigger is missing a valid sequence number.")
+        stable_payload = _stable_service_bus_payload(serialized)
+        data_json = json.dumps(
+            stable_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        try:
+            delivery = ServiceBusDeliveryIdentity.create(
+                environment=os.environ,
+                connection_name=connection_name,
+                queue_name=queue_name,
+                sequence_number=sequence_number,
+                app_hash=compute_app_hash(session_runtime.app_identity),
+                agent_slug=resolved.slug,
+            )
+        except ServiceBusDeliveryIdentityError as exc:
+            raise RuntimeError("Service Bus delivery identity is unavailable.") from exc
+
+        prompt = (
+            f"Triggered by: {trigger_type}\n\n"
+            f"Trigger data:\n```json\n{data_json}\n```"
+        )
+        backend = create_execution_backend(
+            binding=AgentBinding(
+                agent_name=resolved.slug,
+                output_validator=build_output_validator(resolved),
+            ),
+            session_runtime=session_runtime,
+            owner=TriggerBindingPrincipal(),
+        )
+        try:
+            async with asyncio.timeout(max(0.0, execution_deadline - loop.time())):
+                handle = await backend.start_run(
+                    StartRunRequest(
+                        prompt=prompt,
+                        session_id=_fha_service_bus_runtime_session_id(delivery),
+                        idempotency_key=delivery.idempotency_key,
+                        timeout=authored_timeout,
+                    )
+                )
+        except TimeoutError:
+            raise RuntimeError(
+                "Hosted Service Bus response exceeded its lock budget during submission."
+            ) from None
+        context = RunContext(session_id=handle.session_id, run_id=handle.run_id)
+        while True:
+            remaining = execution_deadline - loop.time()
+            if remaining <= 0:
+                await _cancel_service_bus_run_with_deadline(
+                    backend,
+                    context,
+                    deadline=deadline,
+                )
+                raise RuntimeError("Hosted Service Bus response exceeded its lock budget.")
+            try:
+                async with asyncio.timeout(remaining):
+                    status = await backend.get_run(context)
+            except TimeoutError:
+                await _cancel_service_bus_run_with_deadline(
+                    backend,
+                    context,
+                    deadline=deadline,
+                )
+                raise RuntimeError("Hosted Service Bus response exceeded its lock budget.") from None
+            if status.state in TERMINAL_RUN_STATUSES:
+                if status.state == "succeeded":
+                    return
+                raise RuntimeError("Hosted Service Bus response did not complete successfully.")
+            await asyncio.sleep(
+                min(
+                    _FHA_SERVICE_BUS_POLL_INTERVAL_SECONDS,
+                    max(0.0, execution_deadline - loop.time()),
+                )
+            )
+
+    handle.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
+    return handle
+
+
+def _stable_service_bus_payload(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: _stable_service_bus_payload(item)
+            for key, item in value.items()
+            if key.casefold() not in _FHA_SERVICE_BUS_VOLATILE_FIELDS
+        }
+    if isinstance(value, list):
+        return [_stable_service_bus_payload(item) for item in value]
+    return value
+
+
+async def _cancel_service_bus_run_with_deadline(
+    backend: AgentExecutionBackend,
+    context: RunContext,
+    *,
+    deadline: float,
+) -> None:
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        raise RuntimeError("Hosted Service Bus cleanup exceeded its lock budget.")
+    try:
+        async with asyncio.timeout(remaining):
+            await backend.cancel_run(context)
+    except TimeoutError:
+        raise RuntimeError(
+            "Hosted Service Bus cleanup exceeded its lock budget."
+        ) from None
+
+
+def _fha_service_bus_lock_budget_seconds() -> float:
+    raw_value = os.getenv(_FHA_SERVICE_BUS_LOCK_BUDGET_ENV)
+    try:
+        value = float(raw_value) if raw_value is not None else math.nan
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(
+            "Foundry Responses Service Bus requires an explicit positive lock budget setting."
+        )
+    return value
+
+
+def _fha_service_bus_runtime_session_id(delivery: ServiceBusDeliveryIdentity) -> str:
+    digest = hashlib.sha256(
+        frame_canonical_components(
+            (
+                "foundry_responses_service_bus_session",
+                "v1",
+                delivery.idempotency_key,
+            )
+        )
+    ).digest()
+    return f"sbs1-{encode_label_safe_digest(digest)}"
+
+
 def make_http_agent_handler(
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
     catalog: AgentCatalog | None = None,
     auth: EndpointAuthConfig | None = None,
     *,
-    session_runtime: SessionRuntimeBinding | None = None,
+    session_runtime: SessionExecutionRuntime | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,

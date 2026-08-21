@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 import textwrap
 import types
@@ -121,10 +122,19 @@ def test_clear_tool_discovery_cache_reruns_discovery(
     assert counter.IMPORT_COUNT == 2
 
 
-def test_discover_user_tools_returns_empty_when_tools_dir_missing(tmp_path: Path) -> None:
-    result = discover_user_tools(tmp_path)
+def test_discover_user_tools_returns_empty_when_tools_dir_missing(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.DEBUG):
+        result = discover_user_tools(tmp_path)
+
     assert result.tools == []
     assert result.failed_loads == []
+    assert not any(
+        record.levelno >= logging.WARNING and "Tools directory not found" in record.message
+        for record in caplog.records
+    )
 
 
 def test_workflow_tool_only_is_not_normal_user_tool(tmp_path: Path) -> None:

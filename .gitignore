@@ -438,3 +438,4 @@ __azurite_*
 __blobstorage__/
 **/local.settings.json
 .tmp-validation/
+.azure

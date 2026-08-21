@@ -32,6 +32,7 @@ from azure_functions_agents.session_state import (
     CorruptEntityError,
     DurableIdempotencyRecord,
     DurableRunRecord,
+    DurableSessionOperation,
     DurableSessionRecord,
     FunctionAppOwnerContext,
     GenerationConflictError,
@@ -39,11 +40,17 @@ from azure_functions_agents.session_state import (
     RowAlreadyExistsError,
     RunRowNotFoundError,
     SessionNotAdmissibleError,
+    SessionOperationTarget,
     SessionRowNotFoundError,
     SessionStateStoreError,
     StateStoreUnavailableError,
     TerminalStateConflictError,
+    operation_correlation_label,
     owner_partition,
+)
+from azure_functions_agents.session_state.session_models import (
+    DurableProviderRunMapping,
+    DurableProviderSessionBinding,
 )
 from azure_functions_agents.session_state.store import (
     AzureTableSessionStateStore,
@@ -127,6 +134,24 @@ class _FakeTableClient:
         self._entities[key] = dict(entity)
         self._etags[key] = new_etag
         return {"etag": new_etag}
+
+    async def delete_entity(
+        self,
+        partition_key: str,
+        row_key: str,
+        *,
+        etag: str | None = None,
+        match_condition: Any = None,
+    ) -> None:
+        del match_condition
+        self._maybe_raise("delete_entity")
+        key = (partition_key, row_key)
+        if key not in self._entities:
+            raise ResourceNotFoundError("entity not found")
+        if etag is not None and self._etags[key] != etag:
+            raise ResourceModifiedError("etag mismatch")
+        del self._entities[key]
+        del self._etags[key]
 
     async def submit_transaction(self, operations: list[Any]) -> list[dict[str, object]]:
         self._maybe_raise("submit_transaction")
@@ -232,6 +257,53 @@ def _run(
         expires_at=_NOW + timedelta(minutes=15),
         created_at=_NOW,
         updated_at=_NOW,
+    )
+
+
+def _pending_provider_mapping(
+    *,
+    session_id: str = "session-1",
+    run_id: str = "run-1",
+) -> DurableProviderRunMapping:
+    return DurableProviderRunMapping.create(
+        owner_partition=_partition(),
+        session_id=session_id,
+        run_id=run_id,
+        response_state="pending",
+        provider_response_id=None,
+        max_public_event_sequence=0,
+        indeterminate_reason=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
+def _session_with_active_operation(
+    session: DurableSessionRecord,
+    operation: DurableSessionOperation,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status=session.status,
+        last_activity_at=session.last_activity_at,
+        expires_at=session.expires_at,
+        idle_policy_armed=session.idle_policy_armed,
+        active_run_id=session.active_run_id,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
     )
 
 
@@ -1088,6 +1160,177 @@ async def test_build_store_from_service_client_binds_the_named_table() -> None:
     )
     assert isinstance(store, AzureTableSessionStateStore)
     assert service_client.requested_table_name == "CustomTableName"
+
+
+@pytest.mark.asyncio
+async def test_provider_mapping_binds_watermarks_and_clears_only_after_terminal_adoption() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    await store.create_session(_session(status="ready", active_run_id=None))
+    await store.admit_run(
+        AdmissionRecords.create(_session(status="running", active_run_id="run-1"), _run(), None)
+    )
+    mapping = _pending_provider_mapping()
+    mapping_etag = await store.create_provider_run_mapping(mapping)
+    binding = DurableProviderSessionBinding.create(
+        owner_partition=_partition(),
+        session_id="session-1",
+        provider_session_id="agent-session_123",
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    await store.create_provider_session_binding(binding)
+
+    session_binding = await store.get_provider_session_binding(_partition(), "session-1")
+    pending = await store.get_provider_run_mapping(_partition(), "session-1", "run-1")
+    assert session_binding is not None
+    assert session_binding.record == binding
+    assert pending is not None
+    assert pending.record == mapping
+    assert pending.etag == mapping_etag
+
+    await store.mark_provider_submission_issued(
+        previous=pending.record,
+        etag=pending.etag,
+        updated_at=_NOW + timedelta(milliseconds=500),
+    )
+    submitting = await store.get_provider_run_mapping(_partition(), "session-1", "run-1")
+    assert submitting is not None
+    assert submitting.record.response_state == "submitting"
+    bound_etag = await store.bind_provider_response_id(
+        previous=submitting.record,
+        etag=submitting.etag,
+        provider_response_id="caresp_0123456789",
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+    bound = await store.get_provider_run_mapping(_partition(), "session-1", "run-1")
+    assert bound is not None
+    assert bound.record.response_state == "bound"
+    assert bound.etag == bound_etag
+
+    watermark_etag = await store.advance_provider_event_watermark(
+        previous=bound.record,
+        etag=bound.etag,
+        max_public_event_sequence=4,
+        updated_at=_NOW + timedelta(seconds=2),
+    )
+    watermarked = await store.get_provider_run_mapping(_partition(), "session-1", "run-1")
+    assert watermarked is not None
+    assert watermarked.record.max_public_event_sequence == 4
+    assert watermarked.etag == watermark_etag
+    with pytest.raises(SessionStateStoreError, match="backward"):
+        await store.advance_provider_event_watermark(
+            previous=watermarked.record,
+            etag=watermarked.etag,
+            max_public_event_sequence=3,
+            updated_at=_NOW + timedelta(seconds=3),
+        )
+    with pytest.raises(SessionStateStoreError, match="terminal provider mappings"):
+        await store.clear_provider_run_mapping(
+            previous=watermarked.record,
+            etag=watermarked.etag,
+        )
+
+    await store.adopt_provider_terminal_run(
+        _run(status="succeeded", result_available=True)
+    )
+    terminal = await store.get_provider_run_mapping(_partition(), "session-1", "run-1")
+    assert terminal is not None
+    assert terminal.record.response_state == "terminal"
+    assert terminal.record.provider_response_id == "caresp_0123456789"
+    await store.clear_provider_run_mapping(previous=terminal.record, etag=terminal.etag)
+    assert await store.get_provider_run_mapping(_partition(), "session-1", "run-1") is None
+
+
+@pytest.mark.asyncio
+async def test_provider_unknown_create_outcome_is_atomic_abandonment_and_quarantine() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    await store.create_session(_session(status="ready", active_run_id=None))
+    await store.admit_run(
+        AdmissionRecords.create(_session(status="running", active_run_id="run-1"), _run(), None)
+    )
+    await store.create_provider_run_mapping(_pending_provider_mapping())
+
+    outcome = await store.mark_provider_run_indeterminate(
+        owner_partition=_partition(),
+        session_id="session-1",
+        run_id="run-1",
+        reason="provider_submission_indeterminate",
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+
+    assert outcome.mapping.response_state == "indeterminate"
+    assert outcome.mapping.provider_response_id is None
+    assert outcome.mapping.indeterminate_reason == "provider_submission_indeterminate"
+    assert outcome.run.status == "abandoned"
+    assert outcome.run.status_reason == "provider_submission_indeterminate"
+    assert outcome.session.status == "quarantined"
+    assert outcome.session.quarantine_reason == "provider_submission_indeterminate"
+    assert outcome.session.active_run_id is None
+    with pytest.raises(SessionNotAdmissibleError):
+        await store.admit_run(
+            AdmissionRecords.create(
+                _session(status="running", active_run_id="run-2"),
+                _run(run_id="run-2"),
+                None,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_provider_indeterminate_transition_aborts_an_owned_active_operation() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    run = _run()
+    active = _session(status="running", active_run_id=run.run_id)
+    operation = DurableSessionOperation.create(
+        owner_partition=active.owner_partition,
+        target=SessionOperationTarget.create(
+            session_id=active.session_id,
+            sandbox_id=active.sandbox_id,
+            generation=active.generation,
+            digest_kind=active.digest_kind,
+            digest=active.digest,
+            run_id=run.run_id,
+        ),
+        sequence=1,
+        kind="submit_run",
+        phase="submit_launching",
+        state="active",
+        correlation_label=operation_correlation_label(active.session_id, 1),
+        token="a" * 32,
+        attempt_count=0,
+        error_code=None,
+        lease_expires_at=_NOW + timedelta(seconds=60),
+        next_attempt_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        finished_at=None,
+    )
+    session = _session_with_active_operation(active, operation)
+    await store.create_session(session)
+    await store.create_run(run)
+    await fake.create_entity(operation.to_table_entity())
+    await store.create_provider_run_mapping(_pending_provider_mapping())
+
+    outcome = await store.mark_provider_run_indeterminate(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        run_id=run.run_id,
+        reason="provider_submission_indeterminate",
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+
+    stored_operation = await store.get_operation(
+        session.owner_partition,
+        session.session_id,
+        operation.operation_id,
+    )
+    assert outcome.session.active_operation_id is None
+    assert stored_operation.record.state == "aborted"
+    assert stored_operation.record.phase == "aborted"
+    assert stored_operation.record.error_code == "provider_submission_indeterminate"
 
 
 def _http_error(status_code: int, error_code: str) -> HttpResponseError:

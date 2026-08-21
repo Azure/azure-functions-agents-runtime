@@ -105,8 +105,13 @@ def _canonicalize_owner_o1(owner: OwnerContext) -> bytes:
             )
         )
     if isinstance(owner, TriggerBindingOwnerContext):
-        raise OwnerResolutionError(
-            "trigger_binding owner contexts are reserved for FRD 0009"
+        return frame_canonical_components(
+            (
+                owner.kind,
+                _OWNER_HASH_V1,
+                app_hash,
+                owner.agent_slug,
+            )
         )
     raise OwnerResolutionError("unsupported owner context")
 
@@ -256,8 +261,9 @@ def resolve_owner_context(
             agent_slug=agent_slug,
         )
     if isinstance(principal, TriggerBindingPrincipal):
-        raise OwnerResolutionError(
-            "trigger_binding owner resolution is reserved for FRD 0009"
+        return TriggerBindingOwnerContext.create(
+            app_identity=app_identity,
+            agent_slug=agent_slug,
         )
     raise OwnerResolutionError("authenticated owner principal could not be resolved")
 

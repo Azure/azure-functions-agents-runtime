@@ -15,16 +15,8 @@ from ._logger import logger
 from ._observability import configure_observability
 from ._source_marker import source_marker
 from .config.http_auth import resolve_aca_submission_auth
-from .config.loader import load_agent_specs, load_global_config
-from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
 from .config.schema import GlobalConfig, ResolvedAgent, WorkflowConfig
-from .config.validation import (
-    validate_resolved_agent,
-    validate_session_runtime,
-    validate_subagent_references,
-    validate_workflow_subagent_references,
-)
 from .controller.package import build_expected_manifest_binding
 from .controller.readiness import (
     DEFAULT_AUTO_SUSPEND_SECONDS,
@@ -40,21 +32,25 @@ from .controller.reconciler import (
     resolve_reconciler_cadence,
 )
 from .controller.sandbox_config import SandboxCreateProfile, build_sandbox_create_profile
-from .discovery.mcp import discover_mcp_servers
-from .discovery.skills import discover_skills
-from .discovery.tools import discover_project_tools
 from .egress import build_header_transform_rule, compile_mcp_headers
 from .execution.backend import RunContext, RunStatus
 from .execution.binding import AgentBinding
+from .execution.foundry_responses_binding import resolve_foundry_responses_runtime_binding
+from .execution.foundry_responses_runtime import FoundryResponsesRuntime
 from .execution.run_control import RunControlError, SandboxRunControl
+from .execution.session_runtime import SessionExecutionRuntime
+from .foundry_responses.fha_model_catalog_gate import compile_fha_v0_project
+from .foundry_responses.fha_runtime_projection import (
+    FhaRuntimeProjectionError,
+    parse_fha_runtime_projection,
+)
 from .harness.delegation import validate_delegation_graph
 from .journal_paths import heartbeat_path
+from .project_composition import compose_project
 from .registration._handlers import build_output_validator
-from .registration.capabilities import build_capabilities, validate_subagent_tool_names
-from .registration.catalog import AgentCatalog, CatalogEntry, build_catalog
 from .registration.endpoints import (
     register_builtin_endpoints,
-    register_sandbox_management_endpoints,
+    register_session_management_endpoints,
 )
 from .registration.triggers import register_agent
 from .session_state import (
@@ -427,35 +423,6 @@ def _compile_sandbox_mcp_headers(
     return filtered
 
 
-def _fail_on_duplicate_slugs(resolved_agents: list[ResolvedAgent]) -> set[str]:
-    """Fail fast on colliding agent identity slugs and return the known-slug set.
-
-    A slug (sanitized file stem) doubles as the function name, the
-    ``/agents/<slug>/`` route, and the ``delegate_<slug>`` tool name, so a
-    collision is a hard startup error, not the old silent auto-suffix behavior.
-    Must run first (two-pass composition, pass 1) so
-    ``known_slugs`` can be handed to ``validate_subagent_references``.
-    """
-    sources_by_slug: dict[str, list[str]] = {}
-    for resolved in resolved_agents:
-        sources_by_slug.setdefault(resolved.slug, []).append(source_marker(resolved.source_file))
-
-    for slug, sources in sorted(sources_by_slug.items()):
-        if len(sources) > 1:
-            listed = ", ".join(sorted(sources))
-            raise ValueError(
-                f"Duplicate agent slug {slug!r} is used by {len(sources)} source "
-                f"files: {listed}. Agent identity slugs must be globally unique "
-                "across the app (a slug doubles as the registered function "
-                "name, the `/agents/<slug>/` built-in endpoint route, and the "
-                "`delegate_<slug>` tool name). Rename one of the colliding "
-                "source files (e.g. its file stem) to resolve this. See "
-                "docs/front-matter-spec.md#subagents."
-            )
-
-    return set(sources_by_slug)
-
-
 def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     """Build and return a fully-configured Azure Functions app.
 
@@ -468,19 +435,39 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         set_app_root(app_root)
     resolved_root = get_app_root()
 
-    global_config = load_global_config(resolved_root)
-
     # Bootstrap observability before anything runs so MAF gen_ai spans + runtime spans/metrics
     # flow to Application Insights with zero app code. No-op unless a telemetry provider is active.
     configure_observability()
 
-    agent_specs = load_agent_specs(resolved_root)
-    tool_result = discover_project_tools(resolved_root)
-    mcp_result = discover_mcp_servers(resolved_root)
-    skill_result = discover_skills(resolved_root)
+    # Resolve the binding before ordinary composition so the FHA compiler can reject raw
+    # substitutions before the normal loader is allowed to resolve them.
+    fha_binding = resolve_foundry_responses_runtime_binding(aca_sandbox_configured=False)
+    fha_compilation = None
+    if fha_binding is not None:
+        runtime_projection = fha_binding.application_content_manifest.runtime_projection
+        if runtime_projection is None:
+            raise FhaRuntimeProjectionError("FHA runtime projection is unavailable.")
+        expected_projection = parse_fha_runtime_projection(runtime_projection)
+        if expected_projection.project_endpoint != fha_binding.project_endpoint:
+            raise FhaRuntimeProjectionError(
+                "FHA runtime projection project endpoint does not match the binding."
+            )
+        fha_compilation = compile_fha_v0_project(
+            resolved_root,
+            project_endpoint=expected_projection.project_endpoint,
+            default_model=expected_projection.default_model,
+            expected_projection=expected_projection,
+        )
+        composition = fha_compilation.composition
+    else:
+        composition = compose_project(resolved_root)
 
+    global_config = composition.global_config
+    agent_specs = composition.agent_specs
+    tool_result = composition.tool_result
+    mcp_result = composition.mcp_result
+    skill_result = composition.skill_result
     user_tools = tool_result.user_tools
-    workflow_tools = tool_result.workflow_tools
     mcp_tools = mcp_result.servers
     skills = skill_result.skills
     skill_names = list(skills)
@@ -495,35 +482,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         discovered_user_tool_names,
     )
 
-    resolved_agents = [
-        compose(
-            spec,
-            global_config,
-            discovered_mcp_names=mcp_names,
-            discovered_skill_names=skill_names,
-        )
-        for spec in agent_specs
-    ]
-
-    # FRD 0008: enforce the `session_runtime` startup validation matrix before
-    # any other cross-agent validation/registration runs. A no-op (returns
-    # immediately) unless `session_runtime` is configured at all; configuring
-    # `aca_sandbox` always fails here (capability gate), never at request time.
-    validate_session_runtime(global_config, resolved_agents)
-
-    # --- Two-pass composition, pass 1a: app-wide identity index (FRD 0007 §4.2). ---
-    # Must run before any other cross-agent validation: `validate_subagent_references`
-    # needs a collision-free slug set, and nothing below may assume slugs are unique
-    # until this has actually verified it.
-    known_slugs = _fail_on_duplicate_slugs(resolved_agents)
-
-    referenced_slugs: set[str] = set()
-    for resolved in resolved_agents:
-        validate_subagent_references(resolved, known_slugs=known_slugs)
-        validate_workflow_subagent_references(resolved, known_slugs=known_slugs)
-        referenced_slugs.update(ref.agent for ref in resolved.subagents)
-        if resolved.workflows is not None:
-            referenced_slugs.update(ref.agent for ref in resolved.workflows.subagents)
+    resolved_agents = list(composition.resolved_agents)
     if (
         global_config.session_runtime is not None
         and global_config.session_runtime.aca_sandbox is not None
@@ -533,11 +492,6 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     workflows_requested = any(
         resolved.is_main and _workflows_requested(resolved.workflows)
         for resolved in resolved_agents
-    )
-    app: func.FunctionApp = (
-        df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
-        if workflows_requested
-        else func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
     )
 
     # Collect indexing summary for structured logging
@@ -553,32 +507,9 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     if not (global_config.system_tools and global_config.system_tools.web_request is False):
         system_tools_used.add("web_request")
 
-    # --- Two-pass composition, pass 1b (FRD 0007 §4.2): validate + build capabilities ---
-    # for every agent and freeze the result into a read-only AgentCatalog. Nothing here
-    # touches `app` — a coordinator's `delegate_<slug>` tools must be able to resolve
-    # *any* specialist by slug at request time, including ones registered later in
-    # `resolved_agents` than the coordinator itself, so the full catalog has to exist
-    # before pass 2 (FunctionApp registration) begins.
-    catalog_entries: dict[str, CatalogEntry] = {}
-    for resolved in resolved_agents:
-        # Validation is owned by the app factory; compose() stays a pure translation step.
-        validate_resolved_agent(
-            resolved,
-            discovered_mcp_names=mcp_names,
-            discovered_skills=skill_names,
-            is_referenced_as_subagent=resolved.slug in referenced_slugs,
-        )
-        capabilities = build_capabilities(
-            resolved,
-            discovered_user_tools=user_tools,
-            discovered_workflow_tools=workflow_tools,
-            discovered_mcp_tools=mcp_tools,
-            discovered_skills=skills,
-        )
-        validate_subagent_tool_names(resolved, capabilities)
-        catalog_entries[resolved.slug] = CatalogEntry(resolved, capabilities)
-
-    catalog: AgentCatalog = build_catalog(catalog_entries)
+    catalog = (
+        fha_compilation.catalog if fha_compilation is not None else composition.catalog
+    )
     terminal_bindings = {
         resolved.slug: AgentBinding(
             agent_name=resolved.slug,
@@ -597,12 +528,35 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         terminal_bindings=terminal_bindings,
         create_profile=create_profile,
     )
+    fha_runtime: FoundryResponsesRuntime | None = None
+    if fha_binding is not None:
+        if (
+            global_config.session_runtime is not None
+            and global_config.session_runtime.aca_sandbox is not None
+        ):
+            resolve_foundry_responses_runtime_binding(aca_sandbox_configured=True)
+        assert fha_compilation is not None
+        fha_binding.validate_application_content(resolved_root)
+        app_identity = resolve_function_app_identity()
+        fha_binding.validate_fingerprint(app_identity)
+        fha_binding.validate_runtime_projection(fha_compilation.projection)
+        fha_runtime = FoundryResponsesRuntime.create(
+            binding=fha_binding,
+            app_identity=app_identity,
+        )
+    execution_runtime: SessionExecutionRuntime | None = session_runtime or fha_runtime
+
+    app: func.FunctionApp = (
+        df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
+        if workflows_requested
+        else func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+    )
 
     # --- Two-pass composition, pass 2 (FRD 0007 §4.2): mutate `app` --------------------
     for resolved in resolved_agents:
         capabilities = catalog[resolved.slug].capabilities
         management_auth = (
-            _sandbox_management_auth(resolved) if session_runtime is not None else None
+            _sandbox_management_auth(resolved) if execution_runtime is not None else None
         )
 
         workflows_enabled = False
@@ -649,7 +603,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         # used directly as the registered function name / built-in endpoint slug —
         # no allocator or de-duplication pass is needed here anymore.
         if resolved.trigger is not None:
-            if session_runtime is None:
+            if execution_runtime is None:
                 register_agent(
                     app,
                     resolved,
@@ -667,13 +621,13 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                     capabilities,
                     function_name=resolved.slug,
                     catalog=catalog,
-                    session_runtime=session_runtime,
+                    session_runtime=execution_runtime,
                     workflows_enabled=workflows_enabled,
                     workflow_system_addendum=trigger_workflow_system_addendum,
                     workflow_policy=workflow_policy,
                 )
         if _builtin_endpoints_enabled(resolved.builtin_endpoints):
-            if session_runtime is None:
+            if execution_runtime is None:
                 register_builtin_endpoints(
                     app,
                     resolved,
@@ -694,14 +648,14 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                     workflow_system_addendum=workflow_system_addendum,
                     workflow_policy=workflow_policy,
                     catalog=catalog,
-                    session_runtime=session_runtime,
+                    session_runtime=execution_runtime,
                 )
-        if session_runtime is not None and management_auth is not None:
-            register_sandbox_management_endpoints(
+        if execution_runtime is not None and management_auth is not None:
+            register_session_management_endpoints(
                 app,
                 slug=resolved.slug,
                 auth=management_auth,
-                session_runtime=session_runtime,
+                session_runtime=execution_runtime,
                 binding=terminal_bindings[resolved.slug],
             )
 
