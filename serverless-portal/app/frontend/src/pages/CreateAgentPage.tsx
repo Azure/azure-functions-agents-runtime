@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { useIdentity } from '../identity'
-import { SearchableSelect, Icon } from '../components/ui'
+import { CreationSteps, SearchableSelect, Icon } from '../components/ui'
 import { Button } from '@coreai/fluentui-react'
 import { type Draft, loadDraft, saveDraft, clearDraft, deriveName } from '../agentDraft'
 
 export default function CreateAgentPage() {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const { selected, subscriptions } = useIdentity()
   const [draft, setDraft] = useState<Draft>(loadDraft)
 
@@ -84,10 +85,9 @@ export default function CreateAgentPage() {
 
   const [generating, setGenerating] = useState(false)
   const [genError, setGenError] = useState<string | null>(null)
-  const [step, setStep] = useState<1 | 2>(draft.foundryModel ? 2 : 1)
-  const [generated, setGenerated] = useState(!!draft.name && !!draft.description)
   const canGenerate =
     !!draft.foundryAccount && !!draft.foundryOpenaiEndpoint && !!draft.description.trim() && !generating
+  const generationKey = [foundrySub, draft.foundryAccount, draft.foundryModel, draft.description.trim()].join('|')
 
   const generateSkill = async () => {
     if (!canGenerate) return
@@ -106,10 +106,9 @@ export default function CreateAgentPage() {
           model: draft.foundryModel,
         },
       })
-      const updated: Draft = { ...draft, name, instructions: r.content, mdOverride: null }
+      const updated: Draft = { ...draft, name, instructions: r.content, generatedFor: generationKey, mdOverride: null }
       setDraft(updated)
       saveDraft(updated)
-      setGenerated(true)
     } catch (e) {
       setGenError((e as Error).message)
     } finally {
@@ -118,6 +117,20 @@ export default function CreateAgentPage() {
   }
 
   const foundryReady = !!draft.foundryModel && !!draft.foundryAccount
+  const skillReady =
+    !!draft.name.trim() && !!draft.instructions.trim() && draft.generatedFor === generationKey
+  const targetReady =
+    draft.target === 'existing'
+      ? !!draft.existingApp
+      : !!draft.newApp.appName && !!draft.newApp.resourceGroup && !!draft.newApp.region
+  const step: 1 | 2 = searchParams.get('step') === '2' && foundryReady ? 2 : 1
+
+  const navigateToStep = (nextStep: number) => {
+    if (nextStep === 1) setSearchParams({ step: '1' })
+    else if (nextStep === 2 && foundryReady) setSearchParams({ step: '2' })
+    else if (nextStep === 3 && skillReady) navigate('/new-app/draft')
+    else if (nextStep === 4 && skillReady && targetReady) navigate('/new-app/draft?step=4')
+  }
 
   const cancel = () => {
     clearDraft()
@@ -129,23 +142,22 @@ export default function CreateAgentPage() {
       <div className="breadcrumb">
         Home / <Link to={`/agents/${selected}`}>Hosted Skills</Link> / Create
       </div>
-      <div className="page-title">
-        <h1>New Skill</h1>
-      </div>
+      <div className="create-flow">
+        <div className="create-flow-header">
+          <h1>Create a New Skill</h1>
+          <p>Set up the app and its first Hosted Skill. You can change everything except the app name later.</p>
+        </div>
 
-      <div className="steps">
-        <span className={'step' + (step === 1 ? ' active' : ' done')}>1 · Model</span>
-        <span className="step-sep">→</span>
-        <span className={'step' + (step === 2 ? ' active' : '')}>2 · Generate skill</span>
-        <span className="step-sep">→</span>
-        <span className="step">3 · Deployment target</span>
-        <span className="step-sep">→</span>
-        <span className="step">4 · Review and deploy</span>
-      </div>
+        <CreationSteps
+          current={step}
+          completed={[foundryReady, skillReady, skillReady && targetReady, false]}
+          available={[true, foundryReady, skillReady, skillReady && targetReady]}
+          onNavigate={navigateToStep}
+        />
 
       {step === 1 && (
         <>
-          <div className="card">
+          <div className="card create-flow-card">
             <h3>Choose a Microsoft Foundry model</h3>
             <p className="muted" style={{ marginTop: 0 }}>
               Select the subscription, Foundry resource, project, and deployed model that will generate and run this skill.
@@ -221,7 +233,7 @@ export default function CreateAgentPage() {
           </div>
 
           <div className="toolbar" style={{ marginTop: 16 }}>
-            <Button appearance="primary" disabled={!foundryReady} onClick={() => setStep(2)}>
+            <Button appearance="primary" disabled={!foundryReady} onClick={() => navigateToStep(2)}>
               Continue to generate →
             </Button>
             <Button onClick={cancel}>Cancel</Button>
@@ -237,7 +249,7 @@ export default function CreateAgentPage() {
       {step === 2 && (
         <>
           <div className="toolbar" style={{ marginBottom: 8 }}>
-            <button className="btn sm" onClick={() => setStep(1)}>
+            <button className="btn sm" onClick={() => navigateToStep(1)}>
               ← Model
             </button>
             <span className="badge blue">
@@ -248,7 +260,7 @@ export default function CreateAgentPage() {
             )}
           </div>
 
-          <div className="card" style={{ maxWidth: 760 }}>
+          <div className="card create-flow-card">
             <h3>
               <Icon name="sparkles" size={15} style={{ verticalAlign: '-2px' }} /> Generate your skill
             </h3>
@@ -259,6 +271,7 @@ export default function CreateAgentPage() {
               className="editor"
               style={{ minHeight: 150 }}
               spellCheck={false}
+              disabled={generating}
               placeholder="e.g. Triage inbound support tickets: classify urgency, summarize the issue, and draft a concise reply."
               value={draft.description}
               onChange={(e) => set('description', e.target.value)}
@@ -286,7 +299,7 @@ export default function CreateAgentPage() {
                 Generation failed: {genError}
               </p>
             )}
-            {generated && (
+            {skillReady && (
               <>
                 <div className="field" style={{ marginTop: 18 }}>
                   <label>Generated prompt</label>
@@ -300,7 +313,7 @@ export default function CreateAgentPage() {
                   />
                   <div className="hint">Review and edit this prompt before choosing where the skill will run.</div>
                 </div>
-                <Button appearance="primary" onClick={() => navigate('/new-app/draft')}>
+                <Button appearance="primary" onClick={() => navigateToStep(3)}>
                   Continue to deployment target →
                 </Button>
               </>
@@ -308,6 +321,7 @@ export default function CreateAgentPage() {
           </div>
         </>
       )}
+      </div>
     </>
   )
 }

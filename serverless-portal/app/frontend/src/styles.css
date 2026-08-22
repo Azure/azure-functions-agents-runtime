@@ -428,13 +428,24 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
 .check input { width: auto; margin-right: 4px; }
 
 /* Create-agent wizard steps */
-.steps { display: flex; align-items: center; gap: 10px; margin: 0 0 20px; flex-wrap: wrap; }
-.steps .step { font-size: 13px; font-weight: 600; color: var(--text-faint); padding: 4px 12px;
-  border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); }
+.create-flow { width: min(100%, 880px); margin: 0 auto; }
+.create-flow-header { margin: 6px auto 28px; text-align: center; }
+.create-flow-header h1 { margin: 0 0 8px; }
+.create-flow-header p { margin: 0; color: var(--text-muted); font-size: 14px; }
+.steps { display: flex; justify-content: center; align-items: center; gap: 10px; margin: 0 0 24px; flex-wrap: wrap; }
+.steps .step-group { display: inline-flex; align-items: center; gap: 10px; }
+.steps .step { display: inline-flex; align-items: center; gap: 7px; font: 600 13px/1.2 inherit; color: var(--text-faint);
+  padding: 6px 12px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); }
+.steps button.step:not(:disabled) { cursor: pointer; }
+.steps button.step:disabled { cursor: default; opacity: .7; }
+.steps button.step:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .steps .step.active { color: var(--brand-dark); background: var(--brand-soft); border-color: color-mix(in srgb, var(--brand) 34%, transparent); }
-.steps .step.done { color: var(--text-muted); }
+.steps .step.done { color: var(--text); }
+.steps .step-mark { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--surface); color: var(--text-faint); font-size: 11px; }
+.steps .step.done .step-mark { background: var(--green); color: #fff; }
 .steps .step-sep { color: var(--text-faint); }
-.create-flow-card { max-width: 880px; }
+.create-flow-card { width: 100%; max-width: 880px; }
 .create-flow-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px;
   margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
 .review-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--border);

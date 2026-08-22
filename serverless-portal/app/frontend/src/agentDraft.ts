@@ -30,6 +30,7 @@ export interface Draft {
   sandbox: boolean
   trigger: Trigger
   instructions: string
+  generatedFor: string
   mdOverride: string | null
   targetSubscription: string
   target: 'existing' | 'new'
@@ -68,6 +69,7 @@ export const DEFAULT_DRAFT: Draft = {
   sandbox: false,
   trigger: 'http',
   instructions: 'You are a helpful assistant. Answer the user clearly and concisely.',
+  generatedFor: '',
   mdOverride: null,
   targetSubscription: '',
   target: 'new',

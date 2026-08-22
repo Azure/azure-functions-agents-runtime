@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button } from '@coreai/fluentui-react'
 import { api, type LiveAgent, type LiveAgentApp, type LiveDiscovery } from '../api'
 import { useDeployJob, DeploymentStatus } from '../deploy'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
-import { DeployTargetPicker, Icon, SearchableSelect } from '../components/ui'
+import { CreationSteps, DeployTargetPicker, Icon, SearchableSelect } from '../components/ui'
 import {
   type Draft,
   clearDraft,
@@ -22,10 +22,10 @@ import {
 
 export default function DraftAppPage() {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
   const { selected, subscriptions, identity } = useIdentity()
   const [draft, setDraft] = useState<Draft>(loadDraft)
-  const [step, setStep] = useState<3 | 4>(3)
   const [nameStatus, setNameStatus] = useState<'idle' | 'checking' | 'available' | 'taken' | 'error'>('idle')
   const [nameMessage, setNameMessage] = useState('')
   const cachedRef = useRef(false)
@@ -87,6 +87,14 @@ export default function DraftAppPage() {
   const foundryValid = !!draft.foundryModel && (draft.target === 'existing' || !!draft.foundryEndpoint)
   const canReview = !!draft.name.trim() && targetValid && foundryValid && !!targetSubscription
   const canDeploy = canReview && deployJob.phase !== 'running'
+  const step: 3 | 4 = searchParams.get('step') === '4' && canReview ? 4 : 3
+
+  const navigateToStep = (nextStep: number) => {
+    if (nextStep === 1) navigate('/create-agent?step=1')
+    else if (nextStep === 2) navigate('/create-agent?step=2')
+    else if (nextStep === 3) setSearchParams({})
+    else if (nextStep === 4 && canReview) setSearchParams({ step: '4' })
+  }
 
   const runDeploy = () => {
     const target =
@@ -198,13 +206,17 @@ export default function DraftAppPage() {
   return (
     <>
       <div className="breadcrumb">Home / <Link to={`/agents/${selected}`}>Hosted Skills</Link> / New Skill</div>
-      <div className="page-title"><h1>New Skill</h1></div>
-      <div className="steps">
-        <span className="step done">1 · Model</span><span className="step-sep">→</span>
-        <span className="step done">2 · Generate skill</span><span className="step-sep">→</span>
-        <span className={'step' + (step === 3 ? ' active' : ' done')}>3 · Deployment target</span><span className="step-sep">→</span>
-        <span className={'step' + (step === 4 ? ' active' : '')}>4 · Review and deploy</span>
-      </div>
+      <div className="create-flow">
+        <div className="create-flow-header">
+          <h1>Create a New Skill</h1>
+          <p>Set up the app and its first Hosted Skill. You can change everything except the app name later.</p>
+        </div>
+        <CreationSteps
+          current={step}
+          completed={[true, true, canReview, deployJob.phase === 'deployed']}
+          available={[true, true, true, canReview]}
+          onNavigate={navigateToStep}
+        />
 
       {step === 3 && (
         <div className="card create-flow-card">
@@ -259,8 +271,8 @@ export default function DraftAppPage() {
             </div>
           )}
           <div className="create-flow-actions">
-            <Button onClick={() => navigate('/create-agent')}>← Back</Button>
-            <Button appearance="primary" disabled={!canReview} onClick={() => setStep(4)}>Review and deploy →</Button>
+            <Button onClick={() => navigateToStep(2)}>← Back</Button>
+            <Button appearance="primary" disabled={!canReview} onClick={() => navigateToStep(4)}>Review and deploy →</Button>
           </div>
         </div>
       )}
@@ -281,7 +293,7 @@ export default function DraftAppPage() {
             <strong>Ready to deploy</strong><br />The model, skill prompt, and Function App target are configured.
           </div>
           <div className="create-flow-actions">
-            <Button onClick={() => setStep(3)} disabled={deployJob.phase === 'running'}>← Back</Button>
+            <Button onClick={() => navigateToStep(3)} disabled={deployJob.phase === 'running'}>← Back</Button>
             <Button appearance="primary" disabled={!canDeploy} onClick={runDeploy} icon={<Icon name="rocket" size={14} />}>
               {deployJob.phase === 'running' ? 'Deploying…' : draft.target === 'new' ? 'Create app and deploy' : 'Deploy skill'}
             </Button>
@@ -310,6 +322,7 @@ export default function DraftAppPage() {
           )}
         </div>
       )}
+      </div>
     </>
   )
 }
