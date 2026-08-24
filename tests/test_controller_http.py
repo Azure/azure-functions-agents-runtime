@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
+import azure_functions_agents.transport.aca_sdk as aca_sdk
 from azure_functions_agents.controller.budget import RequestBudget
 from azure_functions_agents.controller.http import (
     cancel_run,
@@ -19,6 +21,8 @@ from azure_functions_agents.controller.readiness import (
     SessionActivationAuthorizationError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
+    SessionRuntimeBinding,
+    StateStoreBinding,
 )
 from azure_functions_agents.execution.backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
@@ -44,9 +48,12 @@ from azure_functions_agents.execution.setup_budget import (
 )
 from azure_functions_agents.session_state import (
     ActiveRunConflictError,
+    AppIdentity,
     IdempotencyConflictError,
     RunRowNotFoundError,
 )
+from azure_functions_agents.transport.ports import SandboxSessionProvider
+from azure_functions_agents.transport.transport_models import SandboxGroupBindingError
 
 
 class FakeBackend:
@@ -892,3 +899,135 @@ async def test_tombstoned_abandoned_run_keeps_status_but_result_is_gone() -> Non
 
     assert status_response.status_code == 200
     assert result_response.status_code == 410
+
+
+# ---------------------------------------------------------------------------
+# Cross-layer regression: an ARM status must reach the caller as an HTTP status.
+#
+# The transport tests prove classification and the handler tests prove response
+# shape, but the defect this guards against lived in the seam between them: the
+# transport raised a typed error that nothing on the request path caught, so it
+# escaped as an untyped 500. Testing either side alone would have stayed green.
+# ---------------------------------------------------------------------------
+
+
+def _arm_status_session(status: int) -> object:
+    """Fake an aiohttp session whose ARM GET answers with ``status``."""
+
+    class _Response:
+        def __init__(self) -> None:
+            self.status = status
+
+        async def __aenter__(self) -> _Response:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def json(self, *, content_type: object) -> dict[str, str]:
+            del content_type
+            return {"error": {"code": "TooManyRequests"}}
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        def get(self, *args: object, **kwargs: object) -> _Response:
+            del args, kwargs
+            return _Response()
+
+    return _Session()
+
+
+class _ArmBoundBackend:
+    """A backend whose start_run resolves the provider, as the real one does."""
+
+    def __init__(self, runtime: SessionRuntimeBinding) -> None:
+        self._runtime = runtime
+
+    async def start_run(self, *args: object, **kwargs: object) -> RunHandle:
+        del args, kwargs
+        await self._runtime.get_provider()
+        raise AssertionError("provider resolution should not have succeeded")
+
+
+def _arm_bound_runtime(tmp_path: Path) -> SessionRuntimeBinding:
+    async def provider_factory() -> SandboxSessionProvider:
+        await aca_sdk._read_arm_group(
+            _ArmCredential(),
+            "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/sandboxGroups/g",
+        )
+        raise AssertionError("the ARM read should have raised")
+
+    async def state_store_factory() -> StateStoreBinding:
+        raise AssertionError("the state store must not be resolved for this path")
+
+    return SessionRuntimeBinding.create(
+        app_identity=AppIdentity.create(
+            subscription_id="11111111-2222-3333-4444-555555555555",
+            site_name="agent-app",
+        ),
+        sandbox_group_resource_id=(
+            "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/sandboxGroups/g"
+        ),
+        script_root=tmp_path,
+        provider_factory=provider_factory,
+        state_store_factory=state_store_factory,
+    )
+
+
+class _ArmCredential:
+    async def get_token(self, *scopes: str) -> object:
+        del scopes
+
+        class _Token:
+            token = "redacted"
+
+        return _Token()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+async def test_transient_arm_status_reaches_the_caller_as_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """A retryable ARM status must become 503 with Retry-After, not an untyped 500."""
+    monkeypatch.setattr(aca_sdk.aiohttp, "ClientSession", lambda **_: _arm_status_session(status))
+    backend = _ArmBoundBackend(_arm_bound_runtime(tmp_path))
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 503
+    assert response.headers.get("Retry-After") == "2"
+    assert response.body == {
+        "error": "sandbox_group_transient",
+        "reason": "sandbox_group_transient",
+    }
+    assert str(status) not in str(response.body)
+
+
+@pytest.mark.asyncio
+async def test_permanent_arm_status_is_not_reported_as_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing group is a permanent fault and must not be advertised as retryable."""
+    monkeypatch.setattr(aca_sdk.aiohttp, "ClientSession", lambda **_: _arm_status_session(404))
+    backend = _ArmBoundBackend(_arm_bound_runtime(tmp_path))
+
+    with pytest.raises(SandboxGroupBindingError):
+        await submit_run(
+            backend,  # type: ignore[arg-type]
+            StartRunRequest(prompt="hello"),
+            agent_slug="main",
+            respond_async=True,
+            budget=_expired_budget(),
+        )
