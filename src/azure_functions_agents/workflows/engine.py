@@ -21,9 +21,11 @@ What is intentionally still *not* here: retries and per-task timeouts.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, NotRequired, TypedDict
 
 import azure.durable_functions as df
@@ -34,6 +36,12 @@ from azure_functions_agents.registration.catalog import AgentCatalog
 from azure_functions_agents.runner import run_leaf_agent_task
 
 from . import registry
+from .context import (
+    WorkflowTaskContext,
+    _reset_workflow_task_context,
+    _set_workflow_task_context,
+    _workflow_task_idempotency_key,
+)
 from .schema import (
     ECHO_TOOL_NAME,
     MAX_NODES,
@@ -42,11 +50,14 @@ from .schema import (
     SUB_AGENT_TASK_TYPE,
     TOOL_TASK_TYPE,
     WAIT_TASK_TYPE,
+    EffectiveWorkflowTaskExecution,
     TemplateResolutionError,
     WorkflowCondition,
     WorkflowPayload,
     WorkflowPlanPolicy,
+    WorkflowRetryableError,
     WorkflowTaskInput,
+    WorkflowTerminalError,
     evaluate_condition,
     parse_iso8601_datetime,
     parse_iso8601_duration,
@@ -65,6 +76,12 @@ class _ActivityInputBase(TypedDict):
     id: str
     workflow_agent_slug: str
     workflow_id: str
+    execution: NotRequired[EffectiveWorkflowTaskExecution]
+    task_id: NotRequired[str]
+    node_instance_id: NotRequired[str]
+    attempt: NotRequired[int]
+    max_attempts: NotRequired[int]
+    idempotency_key: NotRequired[str]
 
 
 class _ToolActivityInput(_ActivityInputBase):
@@ -78,6 +95,251 @@ class _SubAgentActivityInput(_ActivityInputBase):
 
 
 type _ActivityInput = _ToolActivityInput | _SubAgentActivityInput
+
+
+type _ActivityFailureKind = Literal[
+    "timeout",
+    "handler_transient",
+    "handler_terminal",
+    "execution_unknown",
+    "handler_contract",
+]
+
+
+class _ActivityFailure(TypedDict):
+    error_code: str
+    error: str
+    kind: _ActivityFailureKind
+    retryable: bool
+    continuable: bool
+
+
+class _ActivitySuccessOutcome(TypedDict):
+    id: str
+    ok: Literal[True]
+    result: Any
+
+
+class _ActivityFailureOutcome(TypedDict):
+    id: str
+    ok: Literal[False]
+    failure: _ActivityFailure
+
+
+type _ActivityOutcome = _ActivitySuccessOutcome | _ActivityFailureOutcome
+
+
+def _policy_activity_context(task: Mapping[str, Any]) -> tuple[WorkflowTaskContext, float]:
+    """Validate persisted policy-aware Activity fields without repairing bad history."""
+    execution = task.get("execution")
+    if not isinstance(execution, dict) or set(execution) != {
+        "timeout_ms",
+        "max_attempts",
+        "retry_delays_ms",
+        "continue_on_error",
+        "timeout_source",
+        "retry_source",
+    }:
+        raise ValueError("malformed workflow task execution policy")
+    timeout_ms = execution["timeout_ms"]
+    effective_attempts = execution["max_attempts"]
+    delays = execution["retry_delays_ms"]
+    if (
+        not isinstance(timeout_ms, int)
+        or isinstance(timeout_ms, bool)
+        or not 1_000 <= timeout_ms <= 600_000
+        or not isinstance(effective_attempts, int)
+        or isinstance(effective_attempts, bool)
+        or not 1 <= effective_attempts <= 5
+        or not isinstance(delays, list)
+        or len(delays) != effective_attempts - 1
+        or any(
+            not isinstance(delay, int)
+            or isinstance(delay, bool)
+            or not 0 <= delay <= 900_000
+            for delay in delays
+        )
+        or effective_attempts * timeout_ms + sum(delays) > 3_600_000
+        or not isinstance(execution["continue_on_error"], bool)
+        or execution["timeout_source"] not in {"decorator", "task", "runtime_default"}
+        or execution["retry_source"] not in {"decorator", "task", "runtime_default"}
+    ):
+        raise ValueError("malformed workflow task execution policy")
+
+    required = ("task_id", "node_instance_id", "attempt", "max_attempts", "idempotency_key")
+    if any(name not in task for name in required):
+        raise ValueError("malformed policy-aware workflow Activity input")
+    task_id = task["task_id"]
+    node_instance_id = task["node_instance_id"]
+    attempt = task["attempt"]
+    max_attempts = task["max_attempts"]
+    workflow_id = task.get("workflow_id")
+    activity_id = task.get("id")
+    idempotency_key = task["idempotency_key"]
+    if (
+        not isinstance(workflow_id, str)
+        or not workflow_id
+        or not isinstance(task_id, str)
+        or not task_id
+        or not isinstance(node_instance_id, str)
+        or not node_instance_id
+        or activity_id != node_instance_id
+        or not isinstance(attempt, int)
+        or isinstance(attempt, bool)
+        or not 1 <= attempt <= effective_attempts
+        or not isinstance(max_attempts, int)
+        or isinstance(max_attempts, bool)
+        or max_attempts != effective_attempts
+        or not isinstance(idempotency_key, str)
+        or idempotency_key
+        != _workflow_task_idempotency_key(workflow_id, node_instance_id)
+    ):
+        raise ValueError("malformed policy-aware workflow Activity input")
+    deadline = datetime.now(UTC) + timedelta(milliseconds=timeout_ms)
+    return (
+        WorkflowTaskContext(
+            workflow_id=workflow_id,
+            task_id=task_id,
+            node_instance_id=node_instance_id,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            idempotency_key=idempotency_key,
+            deadline=deadline,
+        ),
+        timeout_ms / 1000,
+    )
+
+
+def _failure_outcome(
+    task_id: str,
+    *,
+    error_code: str,
+    error: str,
+    kind: _ActivityFailureKind,
+    retryable: bool,
+    continuable: bool,
+) -> _ActivityFailureOutcome:
+    return {
+        "id": task_id,
+        "ok": False,
+        "failure": {
+            "error_code": error_code,
+            "error": error,
+            "kind": kind,
+            "retryable": retryable,
+            "continuable": continuable,
+        },
+    }
+
+
+async def _invoke_policy_handler(
+    handler: Any,
+    args: dict[str, Any],
+    *,
+    task: Mapping[str, Any],
+    target: str,
+) -> _ActivityOutcome:
+    context, timeout = _policy_activity_context(task)
+    token = _set_workflow_task_context(context)
+    task_id = str(task["id"])
+    try:
+        timeout_scope = asyncio.timeout(timeout)
+        try:
+            async with timeout_scope:
+                if inspect.iscoroutinefunction(handler):
+                    result = await handler(args)
+                else:
+                    result = await asyncio.to_thread(handler, args)
+                    if inspect.isawaitable(result):
+                        result = await result
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            if timeout_scope.expired():
+                return _failure_outcome(
+                    task_id,
+                    error_code="workflow_task_timeout",
+                    error="Task attempt timed out.",
+                    kind="timeout",
+                    retryable=True,
+                    continuable=True,
+                )
+            logger.exception(
+                "workflow task execution failed: workflow_id=%s node_id=%s target=%s",
+                context.workflow_id,
+                context.node_instance_id,
+                target,
+            )
+            return _failure_outcome(
+                task_id,
+                error_code="workflow_task_execution_unknown",
+                error="Task execution failed.",
+                kind="execution_unknown",
+                retryable=False,
+                continuable=True,
+            )
+        except WorkflowRetryableError as exc:
+            return _failure_outcome(
+                task_id,
+                error_code=exc.error_code,
+                error=exc.message,
+                kind="handler_transient",
+                retryable=True,
+                continuable=True,
+            )
+        except WorkflowTerminalError as exc:
+            return _failure_outcome(
+                task_id,
+                error_code=exc.error_code,
+                error=exc.message,
+                kind="handler_terminal",
+                retryable=False,
+                continuable=True,
+            )
+        except Exception:
+            logger.exception(
+                "workflow task execution failed: workflow_id=%s node_id=%s target=%s",
+                context.workflow_id,
+                context.node_instance_id,
+                target,
+            )
+            return _failure_outcome(
+                task_id,
+                error_code="workflow_task_execution_unknown",
+                error="Task execution failed.",
+                kind="execution_unknown",
+                retryable=False,
+                continuable=True,
+            )
+        try:
+            json.dumps(result, allow_nan=False)
+        except (TypeError, ValueError):
+            logger.error(
+                "workflow task returned a non-JSON result: workflow_id=%s node_id=%s target=%s",
+                context.workflow_id,
+                context.node_instance_id,
+                target,
+            )
+            return _failure_outcome(
+                task_id,
+                error_code="workflow_task_handler_contract",
+                error="Task handler returned an invalid result.",
+                kind="handler_contract",
+                retryable=False,
+                continuable=False,
+            )
+        return {"id": task_id, "ok": True, "result": result}
+    finally:
+        _reset_workflow_task_context(token)
+
+
+async def _invoke_handler_once(handler: Any, args: dict[str, Any]) -> Any:
+    if inspect.iscoroutinefunction(handler):
+        return await handler(args)
+    result = await asyncio.to_thread(handler, args)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 def _run_echo(args: dict[str, Any]) -> dict[str, Any]:
@@ -989,7 +1251,7 @@ def register_workflows(
         return workflow_agent_slug, policy
 
     @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
-    def agents_workflow_run_tool(task: _ToolActivityInput) -> dict[str, Any]:
+    async def agents_workflow_run_tool(task: _ToolActivityInput) -> dict[str, Any]:
         task_id = task["id"]
         tool_name = task["tool"]
         args = task["args"]
@@ -1025,8 +1287,19 @@ def register_workflows(
             task_id,
             tool_name,
         )
+        if "execution" in task:
+            return dict(
+                await _invoke_policy_handler(
+                    entry.handler,
+                    args,
+                    task=task,
+                    target=tool_name,
+                )
+            )
         try:
-            result = entry.handler(args)
+            result = await _invoke_handler_once(entry.handler, args)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.exception(
                 "workflow activity failed: "
@@ -1088,6 +1361,30 @@ def register_workflows(
             workflow_agent_slug,
             agent_slug,
         )
+        if "execution" in task:
+
+            async def run_policy_sub_agent(_: dict[str, Any]) -> str:
+                execution = task["execution"]
+                return await run_leaf_agent_task(
+                    entry.resolved,
+                    entry.capabilities,
+                    task["task"],
+                    timeout=execution["timeout_ms"] / 1000,
+                    execution_role="workflow_subagent",
+                )
+
+            outcome = await _invoke_policy_handler(
+                run_policy_sub_agent,
+                {},
+                task=task,
+                target=agent_slug,
+            )
+            if outcome["ok"]:
+                outcome["result"] = {
+                    "agent": agent_slug,
+                    "text": outcome["result"],
+                }
+            return dict(outcome)
         try:
             text = await run_leaf_agent_task(
                 entry.resolved,

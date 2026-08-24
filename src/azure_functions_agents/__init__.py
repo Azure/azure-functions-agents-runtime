@@ -127,6 +127,10 @@ from .runner import (  # noqa: E402
 )
 from .system_tools.sandbox import create_sandbox_tools  # noqa: E402
 from .system_tools.web_request import create_web_request_tools  # noqa: E402
+from .workflows.context import (  # noqa: E402
+    WorkflowTaskContext,
+    current_workflow_task_context,
+)
 from .workflows.schema import (  # noqa: E402
     WorkflowRetryableError,
     WorkflowRetryBackoff,
@@ -144,12 +148,14 @@ __all__ = [
     "WorkflowRetryBackoff",
     "WorkflowRetryPolicy",
     "WorkflowRetryableError",
+    "WorkflowTaskContext",
     "WorkflowTaskExecution",
     "WorkflowTerminalError",
     "__version__",
     "create_function_app",
     "create_sandbox_tools",
     "create_web_request_tools",
+    "current_workflow_task_context",
     "get_client_manager",
     "resolve_config_dir",
     "run_agent",

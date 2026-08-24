@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
+from datetime import datetime
 from threading import Lock
 
 from azure.durable_functions import DurableOrchestrationClient
@@ -77,6 +79,49 @@ class WorkflowSessionContext:
     session_id: str
     agent_name: str
     durable_client: DurableOrchestrationClient
+
+
+@dataclass(frozen=True)
+class WorkflowTaskContext:
+    """Read-only metadata for the currently executing workflow task attempt."""
+
+    workflow_id: str
+    task_id: str
+    node_instance_id: str
+    attempt: int
+    max_attempts: int
+    idempotency_key: str
+    deadline: datetime
+
+
+_current_workflow_task_context: ContextVar[WorkflowTaskContext | None] = ContextVar(
+    "current_workflow_task_context",
+    default=None,
+)
+
+
+def current_workflow_task_context() -> WorkflowTaskContext | None:
+    """Return the current workflow task attempt context, if one is executing."""
+    return _current_workflow_task_context.get()
+
+
+def _set_workflow_task_context(
+    context: WorkflowTaskContext,
+) -> Token[WorkflowTaskContext | None]:
+    return _current_workflow_task_context.set(context)
+
+
+def _reset_workflow_task_context(token: Token[WorkflowTaskContext | None]) -> None:
+    _current_workflow_task_context.reset(token)
+
+
+def _workflow_task_idempotency_key(workflow_id: str, node_instance_id: str) -> str:
+    digest = hashlib.sha256()
+    for value in (workflow_id, node_instance_id):
+        encoded = value.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, byteorder="big"))
+        digest.update(encoded)
+    return f"af-wf-task-v1:{digest.hexdigest()}"
 
 
 @dataclass(frozen=True)
@@ -147,6 +192,8 @@ __all__ = [
     "AGENT_SESSION_PREFIX_LEN",
     "SESSION_PREFIX_LEN",
     "WorkflowSessionContext",
+    "WorkflowTaskContext",
+    "current_workflow_task_context",
     "get_workflow_session",
     "new_workflow_instance_id",
     "register_workflow_session",

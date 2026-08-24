@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +19,10 @@ from azure_functions_agents.config.schema import (
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows import engine, integration
+from azure_functions_agents.workflows.context import (
+    _workflow_task_idempotency_key,
+    current_workflow_task_context,
+)
 from azure_functions_agents.workflows.schema import (
     MAX_NODES,
     MAX_PARALLELISM,
@@ -24,6 +30,8 @@ from azure_functions_agents.workflows.schema import (
     TOOL_TASK_TYPE,
     WAIT_TASK_TYPE,
     WorkflowPlanPolicy,
+    WorkflowRetryableError,
+    WorkflowTerminalError,
     validate_plan,
 )
 
@@ -92,6 +100,254 @@ def _registered_function(
                 return registered.__closure__[0].cell_contents
             return registered
     raise AssertionError(f"workflow function {name!r} was not registered")
+
+
+def _policy_activity_payload(
+    *,
+    tool: str = "run",
+    timeout_ms: int = 1_000,
+) -> dict[str, Any]:
+    workflow_id = "workflow-1"
+    node_instance_id = "logical[0]"
+    return {
+        "id": node_instance_id,
+        "task_id": "logical",
+        "node_instance_id": node_instance_id,
+        "tool": tool,
+        "args": {"value": 1},
+        "workflow_agent_slug": "coordinator",
+        "workflow_id": workflow_id,
+        "attempt": 1,
+        "max_attempts": 1,
+        "idempotency_key": _workflow_task_idempotency_key(
+            workflow_id, node_instance_id
+        ),
+        "execution": {
+            "timeout_ms": timeout_ms,
+            "max_attempts": 1,
+            "retry_delays_ms": [],
+            "continue_on_error": False,
+            "timeout_source": "task",
+            "retry_source": "runtime_default",
+        },
+    }
+
+
+def _policy_tool_activity(handler: Callable[[dict[str, Any]], Any]) -> Callable[..., Any]:
+    return _registered_function(
+        engine._ACTIVITY_NAME,
+        handler_catalog=integration.build_workflow_handler_catalog(
+            [WorkflowTool("run", "Run", handler)]
+        ),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(
+                allowed_tools=frozenset({"run"}),
+            )
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler_kind", ["sync", "async", "sync_awaitable"])
+async def test_policy_tool_invokes_once_with_context_and_thread_propagation(
+    handler_kind: str,
+) -> None:
+    calls = 0
+    seen = []
+    activity_thread = threading.get_ident()
+
+    async def finish() -> dict[str, bool]:
+        seen.append(current_workflow_task_context())
+        return {"ok": True}
+
+    async def async_handler(args: dict[str, Any]) -> dict[str, bool]:
+        nonlocal calls
+        calls += 1
+        seen.append(current_workflow_task_context())
+        return await finish()
+
+    def sync_handler(args: dict[str, Any]) -> Any:
+        nonlocal calls
+        calls += 1
+        context = current_workflow_task_context()
+        seen.append(context)
+        assert threading.get_ident() != activity_thread
+        return finish() if handler_kind == "sync_awaitable" else {"ok": True}
+
+    handler = async_handler if handler_kind == "async" else sync_handler
+    result = await _policy_tool_activity(handler)(_policy_activity_payload())
+
+    assert result == {
+        "id": "logical[0]",
+        "ok": True,
+        "result": {"ok": True},
+    }
+    assert calls == 1
+    assert all(context is not None for context in seen)
+    assert seen[0].deadline.tzinfo is UTC
+    assert current_workflow_task_context() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "kind", "retryable", "continuable"),
+    [
+        (
+            WorkflowRetryableError("service_busy", " Try\nagain "),
+            "handler_transient",
+            True,
+            True,
+        ),
+        (
+            WorkflowTerminalError("invalid_record", " Bad\trecord "),
+            "handler_terminal",
+            False,
+            True,
+        ),
+    ],
+)
+async def test_policy_tool_classifies_declared_handler_failures(
+    error: Exception,
+    kind: str,
+    retryable: bool,
+    continuable: bool,
+) -> None:
+    def fail(args: dict[str, Any]) -> None:
+        raise error
+
+    outcome = await _policy_tool_activity(fail)(_policy_activity_payload())
+
+    assert outcome["failure"] == {
+        "error_code": error.error_code,
+        "error": error.message,
+        "kind": kind,
+        "retryable": retryable,
+        "continuable": continuable,
+    }
+
+
+@pytest.mark.asyncio
+async def test_policy_tool_does_not_treat_handler_timeout_error_as_deadline() -> None:
+    def fail(args: dict[str, Any]) -> None:
+        raise TimeoutError("provider timeout")
+
+    outcome = await _policy_tool_activity(fail)(_policy_activity_payload())
+
+    assert outcome["failure"] == {
+        "error_code": "workflow_task_execution_unknown",
+        "error": "Task execution failed.",
+        "kind": "execution_unknown",
+        "retryable": False,
+        "continuable": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_policy_tool_sanitizes_unknown_and_rejects_non_json(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "provider-secret"
+
+    def fail(args: dict[str, Any]) -> None:
+        raise RuntimeError(secret)
+
+    unknown = await _policy_tool_activity(fail)(_policy_activity_payload())
+    contract = await _policy_tool_activity(lambda args: {object()})(
+        _policy_activity_payload()
+    )
+
+    assert unknown["failure"] == {
+        "error_code": "workflow_task_execution_unknown",
+        "error": "Task execution failed.",
+        "kind": "execution_unknown",
+        "retryable": False,
+        "continuable": True,
+    }
+    assert secret not in unknown["failure"]["error"]
+    assert secret in caplog.text
+    assert contract["failure"]["kind"] == "handler_contract"
+    assert contract["failure"]["continuable"] is False
+
+
+@pytest.mark.asyncio
+async def test_policy_tool_timeout_clears_context_and_sync_thread_exits() -> None:
+    exited = threading.Event()
+
+    def bounded(args: dict[str, Any]) -> None:
+        try:
+            threading.Event().wait(1.1)
+        finally:
+            exited.set()
+
+    outcome = await _policy_tool_activity(bounded)(_policy_activity_payload())
+
+    assert outcome["failure"]["error_code"] == "workflow_task_timeout"
+    assert current_workflow_task_context() is None
+    assert await asyncio.to_thread(exited.wait, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_policy_async_tool_timeout_cancels_handler() -> None:
+    canceled = asyncio.Event()
+
+    async def blocked(args: dict[str, Any]) -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            canceled.set()
+
+    outcome = await _policy_tool_activity(blocked)(_policy_activity_payload())
+
+    assert outcome["failure"]["kind"] == "timeout"
+    assert canceled.is_set()
+    assert current_workflow_task_context() is None
+
+
+@pytest.mark.asyncio
+async def test_policy_tool_cancelled_error_propagates_and_cleans_context() -> None:
+    async def cancel(args: dict[str, Any]) -> None:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await _policy_tool_activity(cancel)(_policy_activity_payload())
+    assert current_workflow_task_context() is None
+
+
+@pytest.mark.asyncio
+async def test_policy_tool_reauthorizes_before_handler_invocation() -> None:
+    called = False
+
+    def handler(args: dict[str, Any]) -> None:
+        nonlocal called
+        called = True
+
+    activity = _registered_function(
+        engine._ACTIVITY_NAME,
+        handler_catalog=integration.build_workflow_handler_catalog(
+            [WorkflowTool("run", "Run", handler)]
+        ),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(allowed_tools=frozenset())
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="not authorized"):
+        await activity(_policy_activity_payload())
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_policy_tool_rejects_malformed_effective_input() -> None:
+    payload = _policy_activity_payload()
+    payload["attempt"] = True
+
+    with pytest.raises(ValueError, match="malformed policy-aware"):
+        await _policy_tool_activity(lambda args: args)(payload)
+
+    payload = _policy_activity_payload()
+    payload["max_attempts"] = True
+    with pytest.raises(ValueError, match="malformed policy-aware"):
+        await _policy_tool_activity(lambda args: args)(payload)
 
 
 @pytest.mark.asyncio
@@ -260,6 +516,70 @@ async def test_sub_agent_activity_sanitizes_leaf_failure(
         "(error_code=workflow_subagent_execution_failed)"
     )
     assert secret not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_policy_sub_agent_uses_effective_timeout_and_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[float, Any]] = []
+
+    async def run_leaf(*args: Any, timeout: float, **kwargs: Any) -> str:
+        seen.append((timeout, current_workflow_task_context()))
+        return "done"
+
+    monkeypatch.setattr(engine, "run_leaf_agent_task", run_leaf)
+    activity = _registered_function(
+        engine.SUB_AGENT_ACTIVITY_NAME,
+        catalog=_catalog("specialist"),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(
+                allowed_tools=frozenset(),
+                allowed_subagents=frozenset({"specialist"}),
+            )
+        },
+    )
+    payload = _policy_activity_payload(timeout_ms=2_000)
+    payload.pop("tool")
+    payload.pop("args")
+    payload.update({"agent": "specialist", "task": "work"})
+
+    assert await activity(payload) == {
+        "id": "logical[0]",
+        "ok": True,
+        "result": {"agent": "specialist", "text": "done"},
+    }
+    assert seen[0][0] == 2.0
+    assert seen[0][1].task_id == "logical"
+    assert current_workflow_task_context() is None
+
+
+@pytest.mark.asyncio
+async def test_policy_sub_agent_classifies_unknown_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail(*args: Any, **kwargs: Any) -> str:
+        raise RuntimeError("private provider response")
+
+    monkeypatch.setattr(engine, "run_leaf_agent_task", fail)
+    activity = _registered_function(
+        engine.SUB_AGENT_ACTIVITY_NAME,
+        catalog=_catalog("specialist"),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(
+                allowed_tools=frozenset(),
+                allowed_subagents=frozenset({"specialist"}),
+            )
+        },
+    )
+    payload = _policy_activity_payload()
+    payload.pop("tool")
+    payload.pop("args")
+    payload.update({"agent": "specialist", "task": "work"})
+
+    outcome = await activity(payload)
+    assert outcome["failure"]["kind"] == "execution_unknown"
+    assert outcome["failure"]["error"] == "Task execution failed."
 
 
 class _Task:
@@ -455,7 +775,8 @@ def test_orchestrator_threads_workflow_agent_slug_to_tool_activity() -> None:
     ]
 
 
-def test_tool_activity_reauthorizes_current_agent_policy() -> None:
+@pytest.mark.asyncio
+async def test_tool_activity_reauthorizes_current_agent_policy() -> None:
     handler_catalog = integration.build_workflow_handler_catalog(
         [WorkflowTool("publish", "Publish", lambda args: {"published": args})]
     )
@@ -487,16 +808,17 @@ def test_tool_activity_reauthorizes_current_agent_policy() -> None:
         "workflow_id": "workflow-1",
     }
 
-    assert allowed(payload) == {
+    assert await allowed(payload) == {
         "id": "publish",
         "result": {"published": {"value": 1}},
     }
     with pytest.raises(RuntimeError, match="not authorized"):
-        revoked(payload)
+        await revoked(payload)
 
 
 @pytest.mark.parametrize("workflow_agent_policies", [None, {}])
-def test_tool_activity_missing_agent_policy_fails_closed(
+@pytest.mark.asyncio
+async def test_tool_activity_missing_agent_policy_fails_closed(
     workflow_agent_policies,
 ) -> None:
     handler_catalog = integration.build_workflow_handler_catalog(
@@ -509,7 +831,7 @@ def test_tool_activity_missing_agent_policy_fails_closed(
     )
 
     with pytest.raises(RuntimeError, match="agent policy"):
-        activity(
+        await activity(
             {
                 "id": "publish",
                 "tool": "publish",

@@ -41,8 +41,9 @@ payloads, scheduler path, and status versions.
   metadata, async discovery, immutable registry metadata, authoritative precedence,
   start-time resolution, Durable serialization, and exports. The focused Milestone 1
   suite passed 245 tests; ruff and strict mypy passed.
-- [ ] Implement and test Activity-owned sync/async deadlines, outcome envelopes,
-  sanitization, idempotency context, and policy-aware Sub Agent execution.
+- [x] (2026-08-24 01:30Z) Implemented Activity-owned sync/async deadlines, outcome
+  envelopes, sanitization, idempotency context, and policy-aware Sub Agent execution.
+  The focused Activity/context suite passed 56 tests; ruff and strict mypy passed.
 - [ ] Implement and test persisted retry state, precomputed backoff timers,
   continued-failure behavior, cancellation, and policy-aware scheduler routing.
 - [ ] Implement and test status schema version 3, UI rendering, and replay-safe telemetry.
@@ -87,6 +88,12 @@ payloads, scheduler path, and status versions.
   Evidence: `WorkflowPlanPolicy` now stores a floor-normalized millisecond bound, while the
   execution resolver applies the new minimum only when a task is policy-aware.
 
+- Observation: A handler may raise Python `TimeoutError` independently of the wrapper-owned
+  deadline. Classifying every such exception as a retryable attempt timeout can duplicate
+  side effects.
+  Evidence: The Activity wrapper now checks `asyncio.Timeout.expired()` and treats an
+  unexpired handler `TimeoutError` as terminal `execution_unknown`.
+
 ## Decision Log
 
 - Decision: Use the presence of authored `execution`, even an empty object, or any
@@ -125,11 +132,13 @@ payloads, scheduler path, and status versions.
 
 ## Outcomes & Retrospective
 
-Planning and Milestone 1 are complete. Authors can construct and export strict retry,
+Planning and Milestones 1-2 are complete. Authors can construct and export strict retry,
 backoff, execution, and classified-error types; `@workflow_tool` preserves authoritative
 declarations for sync and async handlers; and `start_workflow` persists an effective policy
-only for policy-aware tasks. Policy-free task input remains unchanged. Activity execution,
-scheduler retry, status v3, and documentation remain.
+only for policy-aware tasks. Policy-aware Activities now publish frozen attempt context to
+sync, async, and sync-returning-awaitable handlers, enforce one Activity-owned deadline, and
+return sanitized outcomes. Policy-free task inputs and Activity behavior remain unchanged.
+Scheduler retry, status v3, and documentation remain.
 
 ## Context and Orientation
 
@@ -591,3 +600,6 @@ later milestones can distinguish regressions from newly introduced failures.
 Revision note (2026-08-24): Recorded Milestone 1 completion, its 245-test/ruff/mypy evidence,
 and the compatibility decision to floor existing Sub Agent timeout seconds only for stored
 resolution metadata.
+
+Revision note (2026-08-24): Recorded Milestone 2 completion and independent review fixes for
+handler-originated `TimeoutError` and boolean persisted `max_attempts`.
