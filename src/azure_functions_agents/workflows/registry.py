@@ -23,29 +23,29 @@ the workflow control plane.
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
+
+from .schema import WorkflowRetryPolicy, WorkflowTaskExecution
 
 
 @dataclass(frozen=True)
 class WorkflowToolEntry:
     """One row in the registry.
 
-    ``handler`` runs inside the orchestrator's activity. It must be a
-    plain (synchronous) callable taking a ``dict`` of args and returning
-    a JSON-serializable value. Async handlers are rejected at
-    registration time — supporting them needs a wrapper that doesn't
-    exist yet, and silently returning a coroutine to the activity would
-    surface as a confusing serialization error later.
+    ``handler`` runs inside the orchestrator's activity. It may be synchronous
+    or asynchronous, takes a ``dict`` of args, and returns a JSON-serializable
+    value (or an awaitable resolving to one).
     """
 
     name: str
     description: str
     handler: Callable[[dict[str, Any]], Any]
     public: bool
+    timeout: str | None = None
+    retry: WorkflowRetryPolicy | None = None
 
 
 type WorkflowHandlerCatalog = Mapping[str, WorkflowToolEntry]
@@ -75,6 +75,8 @@ def make_workflow_tool_entry(
     handler: Callable[[dict[str, Any]], Any],
     *,
     public: bool = True,
+    timeout: str | None = None,
+    retry: WorkflowRetryPolicy | None = None,
 ) -> WorkflowToolEntry:
     """Validate and construct one workflow handler-catalog entry."""
     if not isinstance(name, str) or not name:
@@ -89,16 +91,16 @@ def make_workflow_tool_entry(
             f"workflow tool {name!r}: handler must be a callable taking a "
             "dict of args and returning a JSON-serializable value"
         )
-    if inspect.iscoroutinefunction(handler):
-        raise ValueError(
-            f"workflow tool {name!r}: async handlers are not supported; "
-            "register a synchronous wrapper instead"
-        )
+    validated_timeout = WorkflowTaskExecution(timeout=timeout).timeout
+    if retry is not None and not isinstance(retry, WorkflowRetryPolicy):
+        raise ValueError("workflow tool retry must be a WorkflowRetryPolicy")
     return WorkflowToolEntry(
         name=name,
         description=description,
         handler=handler,
         public=public,
+        timeout=validated_timeout,
+        retry=retry,
     )
 
 
@@ -115,13 +117,14 @@ def register_workflow_tool(
     handler: Callable[[dict[str, Any]], Any],
     *,
     public: bool = True,
+    timeout: str | None = None,
+    retry: WorkflowRetryPolicy | None = None,
 ) -> None:
     """Register a workflow-safe tool.
 
     Raises :class:`ValueError` on collision with an existing entry, on a
     name that collides with a reserved workflow-management tool, or on
-    an obviously-wrong handler shape (async functions are rejected so
-    the orchestrator's activity can stay synchronous in M1).
+    an obviously-wrong handler shape.
     """
     if name in _REGISTRY:
         raise ValueError(f"workflow tool {name!r} is already registered")
@@ -130,6 +133,8 @@ def register_workflow_tool(
         description,
         handler,
         public=public,
+        timeout=timeout,
+        retry=retry,
     )
 
 

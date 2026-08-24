@@ -35,8 +35,12 @@ payloads, scheduler path, and status versions.
   policy-aware routing, status v3, backoff rounding, error bounds, cancellation, Sub Agent
   timeout, async dual-decorator, and sync-timeout concurrency ambiguities in Decision 81.
 - [x] (2026-08-24 00:40Z) Created this self-contained implementation plan.
-- [ ] Implement and test public policy models, errors, task context, decorator metadata,
-  discovery, immutable registry metadata, precedence, and exports.
+- [x] (2026-08-24 00:43Z) Established a focused baseline: 226 workflow schema,
+  discovery, registry, engine, and UI tests passed in 4.14 seconds.
+- [x] (2026-08-24 01:10Z) Implemented public policy models and errors, decorator
+  metadata, async discovery, immutable registry metadata, authoritative precedence,
+  start-time resolution, Durable serialization, and exports. The focused Milestone 1
+  suite passed 245 tests; ruff and strict mypy passed.
 - [ ] Implement and test Activity-owned sync/async deadlines, outcome envelopes,
   sanitization, idempotency context, and policy-aware Sub Agent execution.
 - [ ] Implement and test persisted retry state, precomputed backoff timers,
@@ -71,6 +75,17 @@ payloads, scheduler path, and status versions.
   handler.
   Evidence: FRD Decision 81 removes the previous unimplementable active-Activity cancellation
   claim and requires late results to be ignored.
+
+- Observation: The focused pre-change workflow baseline is fast enough to run after every
+  scheduler milestone.
+  Evidence: The five-module command in `Concrete Steps` completed with `226 passed in
+  4.14s`.
+
+- Observation: Existing Sub Agent timeouts are floats in seconds and may not resolve to an
+  exact millisecond. Rejecting those values during app composition would break policy-free
+  applications.
+  Evidence: `WorkflowPlanPolicy` now stores a floor-normalized millisecond bound, while the
+  execution resolver applies the new minimum only when a task is policy-aware.
 
 ## Decision Log
 
@@ -110,9 +125,11 @@ payloads, scheduler path, and status versions.
 
 ## Outcomes & Retrospective
 
-Planning is complete and the FRD is implementation-ready. No product code has yet changed.
-Update this section after every major milestone with behavior delivered, validation evidence,
-remaining gaps, and lessons that affect later milestones.
+Planning and Milestone 1 are complete. Authors can construct and export strict retry,
+backoff, execution, and classified-error types; `@workflow_tool` preserves authoritative
+declarations for sync and async handlers; and `start_workflow` persists an effective policy
+only for policy-aware tasks. Policy-free task input remains unchanged. Activity execution,
+scheduler retry, status v3, and documentation remain.
 
 ## Context and Orientation
 
@@ -567,3 +584,10 @@ unless the FRD explicitly makes them public.
 Revision note (2026-08-24): Initial ExecPlan created after human sign-off, two implementation
 mapping passes, and the final architecture review. It incorporates Decision 81 so a novice
 implementer does not need to invent replay, status, cancellation, or validation behavior.
+
+Revision note (2026-08-24): Recorded the 226-test focused baseline before product changes so
+later milestones can distinguish regressions from newly introduced failures.
+
+Revision note (2026-08-24): Recorded Milestone 1 completion, its 245-test/ruff/mypy evidence,
+and the compatibility decision to floor existing Sub Agent timeout seconds only for stored
+resolution metadata.

@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 
 from azure_functions_agents.workflows.schema import (
     ECHO_TOOL_NAME,
@@ -27,11 +28,19 @@ from azure_functions_agents.workflows.schema import (
     TemplateResolutionError,
     WorkflowCondition,
     WorkflowPlanPolicy,
+    WorkflowRetryableError,
+    WorkflowRetryBackoff,
+    WorkflowRetryPolicy,
+    WorkflowTask,
+    WorkflowTaskExecution,
+    WorkflowTerminalError,
     evaluate_condition,
     parse_iso8601_datetime,
     parse_iso8601_duration,
     plan_to_activity_inputs,
+    precompute_retry_delays_ms,
     resolve_template_value,
+    resolve_workflow_task_execution,
 )
 from azure_functions_agents.workflows.schema import validate_plan as _validate_plan
 
@@ -83,6 +92,217 @@ def _subagent(tid, agent="pr_status_analyst", task="Analyze one PR.", depends_on
 
 def _plan(*tasks):
     return {"version": 1, "tasks": list(tasks)}
+
+
+def _retry(
+    *,
+    attempts: int = 3,
+    initial: str = "PT1S",
+    multiplier: float = 2.0,
+    maximum: str = "PT10S",
+) -> WorkflowRetryPolicy:
+    return WorkflowRetryPolicy(
+        max_attempts=attempts,
+        backoff=WorkflowRetryBackoff(
+            initial=initial,
+            multiplier=multiplier,
+            max=maximum,
+        ),
+    )
+
+
+def test_execution_policy_models_are_strict_bounded_and_frozen() -> None:
+    execution = WorkflowTaskExecution(timeout="PT1S", retry=_retry())
+    assert execution.model_dump() == {
+        "timeout": "PT1S",
+        "retry": {
+            "max_attempts": 3,
+            "backoff": {"initial": "PT1S", "multiplier": 2.0, "max": "PT10S"},
+        },
+        "continue_on_error": False,
+    }
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        WorkflowTaskExecution.model_validate({"unknown": True})
+    with pytest.raises(ValidationError, match="Instance is frozen"):
+        execution.timeout = "PT2S"
+
+
+@pytest.mark.parametrize("attempts", [0, 6])
+def test_retry_policy_rejects_attempts_outside_fixed_bounds(attempts: int) -> None:
+    with pytest.raises(ValidationError):
+        WorkflowRetryPolicy(max_attempts=attempts)
+
+
+def test_retry_policy_requires_backoff_only_for_multiple_attempts() -> None:
+    with pytest.raises(ValidationError, match="backoff is required"):
+        WorkflowRetryPolicy(max_attempts=2)
+    retry = WorkflowRetryPolicy(
+        max_attempts=1,
+        backoff=WorkflowRetryBackoff(initial="PT0S", multiplier=1.0, max="PT0S"),
+    )
+    assert precompute_retry_delays_ms(retry) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("timeout", "PT0.999S"),
+        ("timeout", "PT10M0.001S"),
+        ("timeout", "PT1.0001S"),
+    ],
+)
+def test_execution_timeout_rejects_bounds_and_fractional_milliseconds(
+    field: str, value: str
+) -> None:
+    with pytest.raises(ValidationError):
+        WorkflowTaskExecution.model_validate({field: value})
+
+
+@pytest.mark.parametrize(
+    "backoff",
+    [
+        {"initial": "PT5M0.001S", "multiplier": 1.0, "max": "PT6M"},
+        {"initial": "PT1S", "multiplier": 0.99, "max": "PT1S"},
+        {"initial": "PT1S", "multiplier": 10.01, "max": "PT1S"},
+        {"initial": "PT2S", "multiplier": 2.0, "max": "PT1S"},
+        {"initial": "PT1S", "multiplier": 2.0, "max": "PT15M0.001S"},
+        {"initial": "PT0.0001S", "multiplier": 2.0, "max": "PT1S"},
+    ],
+)
+def test_retry_backoff_rejects_invalid_fixed_bounds(backoff: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        WorkflowRetryBackoff.model_validate(backoff)
+
+
+def test_retry_delays_are_precomputed_with_decimal_floor_and_cap() -> None:
+    retry = _retry(
+        attempts=5,
+        initial="PT0.001S",
+        multiplier=1.5,
+        maximum="PT0.003S",
+    )
+    assert precompute_retry_delays_ms(retry) == [1, 1, 2, 3]
+
+
+def test_policy_free_task_dump_and_activity_input_remain_unchanged() -> None:
+    task = WorkflowTask.model_validate(_task("plain"))
+    assert "execution" not in task.model_dump()
+    plan = validate_plan(_plan(_task("plain")))
+    assert resolve_workflow_task_execution(plan.tasks[0]) is None
+    assert plan_to_activity_inputs(plan) == [
+        {"id": "plain", "type": "tool", "tool": ECHO_TOOL_NAME, "args": {}, "depends_on": []}
+    ]
+
+
+def test_authored_empty_execution_is_policy_aware_with_bounded_defaults() -> None:
+    raw = _task("bounded")
+    raw["execution"] = {}
+    task = validate_plan(_plan(raw)).tasks[0]
+    assert "execution" in task.model_fields_set
+    assert resolve_workflow_task_execution(task) == {
+        "timeout_ms": 600_000,
+        "max_attempts": 1,
+        "retry_delays_ms": [],
+        "continue_on_error": False,
+        "timeout_source": "runtime_default",
+        "retry_source": "runtime_default",
+    }
+
+
+def test_plan_to_activity_inputs_persists_only_supplied_effective_policy() -> None:
+    raw = _task("bounded")
+    raw["execution"] = {}
+    plan = validate_plan(_plan(_task("plain"), raw))
+    effective = resolve_workflow_task_execution(plan.tasks[1])
+    assert effective is not None
+
+    assert plan_to_activity_inputs(plan, {"bounded": effective}) == [
+        {"id": "plain", "type": "tool", "tool": ECHO_TOOL_NAME, "args": {}, "depends_on": []},
+        {
+            "id": "bounded",
+            "type": "tool",
+            "tool": ECHO_TOOL_NAME,
+            "args": {},
+            "depends_on": [],
+            "execution": effective,
+        },
+    ]
+
+
+def test_execution_resolver_applies_authoritative_fields_independently() -> None:
+    raw = _task("bounded")
+    raw["execution"] = {
+        "timeout": "PT20S",
+        "retry": _retry(attempts=2).model_dump(),
+        "continue_on_error": True,
+    }
+    task = validate_plan(_plan(raw)).tasks[0]
+    resolved = resolve_workflow_task_execution(
+        task,
+        decorator_timeout="PT5S",
+        decorator_retry=WorkflowRetryPolicy(max_attempts=1),
+    )
+    assert resolved == {
+        "timeout_ms": 5_000,
+        "max_attempts": 1,
+        "retry_delays_ms": [],
+        "continue_on_error": True,
+        "timeout_source": "decorator",
+        "retry_source": "decorator",
+    }
+
+
+def test_execution_resolver_rejects_elapsed_total_over_one_hour() -> None:
+    raw = _task("too_long")
+    raw["execution"] = {
+        "timeout": "PT10M",
+        "retry": _retry(
+            attempts=5,
+            initial="PT5M",
+            multiplier=1.0,
+            maximum="PT5M",
+        ).model_dump(),
+    }
+    task = validate_plan(_plan(raw)).tasks[0]
+    with pytest.raises(ValueError, match="must not exceed PT1H"):
+        resolve_workflow_task_execution(task)
+
+
+def test_subagent_execution_resolver_enforces_specialist_timeout() -> None:
+    raw = _subagent("analyze")
+    raw["execution"] = {"timeout": "PT2M"}
+    task = validate_plan(_plan(raw)).tasks[0]
+    with pytest.raises(ValueError, match="resolved agent timeout"):
+        resolve_workflow_task_execution(task, subagent_timeout_ms=60_000)
+    raw["execution"] = {}
+    task = validate_plan(_plan(raw)).tasks[0]
+    assert resolve_workflow_task_execution(task, subagent_timeout_ms=900_000)["timeout_ms"] == 600_000
+
+
+def test_wait_task_rejects_execution_even_when_empty() -> None:
+    raw = _wait("pause", duration="PT1S")
+    raw["execution"] = {}
+    with pytest.raises(PlanValidationError, match="'execution' is not valid"):
+        validate_plan(_plan(raw))
+
+
+@pytest.mark.parametrize("error_type", [WorkflowRetryableError, WorkflowTerminalError])
+def test_workflow_execution_errors_normalize_public_message(error_type: type[Exception]) -> None:
+    error = error_type("inventory_unavailable", "\x00  Inventory\t unavailable.\x85 ")
+    assert error.error_code == "inventory_unavailable"
+    assert str(error) == "Inventory unavailable."
+    assert error.message == "Inventory unavailable."
+    assert len(str(error_type("bounded", "x" * 300))) == 256
+    assert str(error_type("empty", "\x00\t")) == "Task execution failed."
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["", "Upper", "two-words", "_leading", "workflow_reserved", "a" * 65],
+)
+def test_workflow_execution_errors_reject_invalid_or_reserved_codes(code: str) -> None:
+    with pytest.raises(ValueError, match="error_code"):
+        WorkflowRetryableError(code, "safe")
 
 
 # ---------------------------------------------------------------------------

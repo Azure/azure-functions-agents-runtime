@@ -22,6 +22,10 @@ import pytest
 
 from azure_functions_agents._function_tool import WorkflowTool
 from azure_functions_agents.workflows import integration, registry
+from azure_functions_agents.workflows.schema import (
+    WorkflowRetryBackoff,
+    WorkflowRetryPolicy,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -355,3 +359,31 @@ def test_enabled_builds_channel_specific_workflow_guidance():
     assert "final tool task" in result.trigger_system_addendum
     assert "Activity" not in result.trigger_system_addendum
     assert "Durable timers" not in result.trigger_system_addendum
+
+
+def test_handler_catalog_preserves_immutable_execution_declarations() -> None:
+    retry = WorkflowRetryPolicy(
+        max_attempts=2,
+        backoff=WorkflowRetryBackoff(
+            initial="PT1S",
+            multiplier=2.0,
+            max="PT2S",
+        ),
+    )
+    catalog = integration.build_workflow_handler_catalog(
+        [
+            WorkflowTool(
+                "publish_result",
+                "Publish the final result.",
+                lambda args: args,
+                timeout="PT5S",
+                retry=retry,
+            )
+        ]
+    )
+
+    entry = catalog["publish_result"]
+    assert entry.timeout == "PT5S"
+    assert entry.retry is retry
+    with pytest.raises(TypeError):
+        catalog["other"] = entry

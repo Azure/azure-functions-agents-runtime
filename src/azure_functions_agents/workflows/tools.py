@@ -34,9 +34,12 @@ from .context import (
 )
 from .engine import CANCEL_EVENT_NAME, ORCHESTRATOR_NAME
 from .schema import (
+    EffectiveWorkflowTaskExecution,
     PlanValidationError,
     WorkflowPlanPolicy,
+    WorkflowTaskExecution,
     plan_to_activity_inputs,
+    resolve_workflow_task_execution,
     validate_plan,
 )
 
@@ -104,6 +107,11 @@ class _ToolTaskSpec(_TaskSpecBase):
             "One task instance is created for each array item."
         ),
     )
+    execution: WorkflowTaskExecution | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Optional bounded timeout, retry, and failure-continuation policy.",
+    )
 
 
 class _WaitTaskSpec(_TaskSpecBase):
@@ -147,6 +155,11 @@ class _SubAgentTaskSpec(_TaskSpecBase):
             "Optional full upstream-result reference resolving to a JSON array. "
             "One Sub Agent task is created for each array item."
         ),
+    )
+    execution: WorkflowTaskExecution | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Optional bounded timeout, retry, and failure-continuation policy.",
     )
 
 
@@ -406,6 +419,7 @@ async def start_workflow(
             "workflow tools are registered but the per-app allowlist was "
             "never configured (build_workflow_integration was not called)"
         )
+    effective_policies: dict[str, EffectiveWorkflowTaskExecution] = {}
     try:
         if policy is None:
             assert allowed_tools is not None
@@ -417,6 +431,27 @@ async def start_workflow(
             params.model_dump(exclude_unset=True),
             policy=policy,
         )
+        for task in plan.tasks:
+            if task.type == "tool":
+                declarations = policy.tool_execution.get(task.tool or "")
+                effective = resolve_workflow_task_execution(
+                    task,
+                    decorator_timeout=(
+                        declarations.timeout if declarations is not None else None
+                    ),
+                    decorator_retry=(
+                        declarations.retry if declarations is not None else None
+                    ),
+                )
+            elif task.type == "sub_agent":
+                effective = resolve_workflow_task_execution(
+                    task,
+                    subagent_timeout_ms=policy.subagent_timeout_ms.get(task.agent or ""),
+                )
+            else:
+                effective = resolve_workflow_task_execution(task)
+            if effective is not None:
+                effective_policies[task.id] = effective
     except PlanValidationError as exc:
         metadata: dict[str, str | None] = {}
         if exc.error_code is not None:
@@ -424,6 +459,8 @@ async def start_workflow(
             metadata["node_id"] = exc.node_id
             metadata["path"] = exc.path
         return _error(str(exc), **metadata)
+    except ValueError as exc:
+        return _error(str(exc))
 
     workflow_agent = {
         "workflow_agent_slug": session.workflow_agent_slug,
@@ -461,7 +498,7 @@ async def start_workflow(
             ORCHESTRATOR_NAME,
             instance_id=instance_id,
             client_input={
-                "tasks": plan_to_activity_inputs(plan),
+                "tasks": plan_to_activity_inputs(plan, effective_policies),
                 "workflow_agent_slug": session.workflow_agent_slug,
                 "workflow_agent": workflow_agent,
                 "policy": {

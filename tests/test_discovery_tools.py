@@ -299,6 +299,48 @@ def test_multiple_workflow_tools_can_be_declared_in_one_file(tmp_path: Path) -> 
     ]
 
 
+def test_async_dual_decorators_preserve_execution_metadata_in_both_orders(
+    tmp_path: Path,
+) -> None:
+    _write_tool_file(
+        tmp_path,
+        "async_workflow_tools",
+        """
+        from azure_functions_agents import (
+            WorkflowRetryBackoff,
+            WorkflowRetryPolicy,
+            tool,
+            workflow_tool,
+        )
+
+        RETRY = WorkflowRetryPolicy(
+            max_attempts=2,
+            backoff=WorkflowRetryBackoff(initial="PT1S", multiplier=2.0, max="PT2S"),
+        )
+
+        @tool
+        @workflow_tool(timeout="PT5S", retry=RETRY)
+        async def inner_marked(args: dict[str, object]) -> dict[str, object]:
+            return args
+
+        @workflow_tool(timeout="PT7S", retry=RETRY)
+        @tool
+        async def outer_marked(args: dict[str, object]) -> dict[str, object]:
+            return args
+        """,
+    )
+
+    discovered = discover_project_tools(tmp_path)
+
+    assert _tool_names(discovered.user_tools) == ["inner_marked"]
+    assert [tool.name for tool in discovered.workflow_tools] == [
+        "inner_marked",
+        "outer_marked",
+    ]
+    assert [tool.timeout for tool in discovered.workflow_tools] == ["PT5S", "PT7S"]
+    assert [tool.retry.max_attempts for tool in discovered.workflow_tools] == [2, 2]
+
+
 def test_discover_user_tools_tracks_failed_loads(tmp_path: Path) -> None:
     """Test that failed tool loads are tracked and reported."""
     _write_tool_file(
