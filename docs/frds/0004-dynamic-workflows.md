@@ -1727,7 +1727,7 @@ replay duplicates.
   - a sample discovers a collection, dynamically fans out, skips one item, and
     aggregates results;
   - the scenario completes with deterministic output on Azure Storage and DTS.
-- [ ] Evolution #1278: schema, metadata, and precedence
+- [x] Evolution #1278: schema, metadata, and precedence
   - validate task `execution`, exported retry/error/context types, decorator
     declarations, fixed bounds, decorator-field precedence, whole-object retry
     selection, and rejection on wait tasks;
@@ -1742,14 +1742,14 @@ replay duplicates.
     is omitted;
   - persist the effective policy so replay and deployment metadata changes do not
     alter attempts or deadlines.
-- [ ] Evolution #1278: sync/async Activity execution and timeout
+- [x] Evolution #1278: sync/async Activity execution and timeout
   - execute sync, async, and sync-returning-awaitable handlers exactly once per
     delivered attempt;
   - propagate and clear `WorkflowTaskContext` across awaits and executor threads;
   - cover success, cooperative async timeout, non-cooperative sync timeout,
     host/infrastructure failure, cancellation, sanitized exceptions, and
     non-JSON results.
-- [ ] Evolution #1278: retry, backoff, and idempotency
+- [x] Evolution #1278: retry, backoff, and idempotency
   - replay produces identical attempt numbers, millisecond delays, timer
     deadlines, idempotency keys, and scheduling order;
   - verify Decimal `ROUND_FLOOR` delay precomputation for fractional products and
@@ -1759,7 +1759,7 @@ replay duplicates.
     one-hour admission rejection, duplicate delivery, and no random/wall-clock
     access;
   - reauthorize every attempt and fail closed without invoking a revoked target.
-- [ ] Evolution #1278: continued failures and dynamic control flow
+- [x] Evolution #1278: continued failures and dynamic control flow
   - fail-fast stops new scheduling after deterministically applying current-wave
     outcomes;
   - continued normal-task failures satisfy dependencies and support downstream
@@ -1769,13 +1769,13 @@ replay duplicates.
     and `failed_continued` entries in source order;
   - authorization, contract, template, condition, iteration, cancellation, and
     termination failures cannot be continued.
-- [ ] Evolution #1278: Workflow Sub Agents
+- [x] Evolution #1278: Workflow Sub Agents
   - use the resolved specialist timeout as fallback and reject a task timeout
     above either that value or the fixed runtime bound;
   - retry only when explicitly requested, preserve stateless leaf capabilities,
     expose correlation/idempotency context to leaf execution, and keep
     `{agent, text}` success results.
-- [ ] Evolution #1278: cancellation, status, and observability
+- [x] Evolution #1278: cancellation, status, and observability
   - cancel active wait/backoff timers, schedule no later attempt, preserve
     committed results, do not claim to signal already-dispatched async or sync
     Activities, and ignore late Activity completion;
@@ -1823,18 +1823,18 @@ replay duplicates.
   project-discovered skills, and direct/delegated capability paths.
 - [ ] Evolution #1276: update the selected workflow sample and its README with a
   collection-driven fan-out/fan-in scenario.
-- [ ] Evolution #1278: update `docs/workflows.md` with task/decorator policy
+- [x] Evolution #1278: update `docs/workflows.md` with task/decorator policy
   syntax, precedence, failure taxonomy, timeout ownership, idempotency guidance,
   continued results, Sub Agent caveats, cancellation, limits, and status v3.
-- [ ] Evolution #1278: update `docs/architecture.md` for effective-policy
+- [x] Evolution #1278: update `docs/architecture.md` for effective-policy
   translation, Activity outcome/context ownership, deterministic retry timers,
   reauthorization, and structured status/telemetry.
-- [ ] Evolution #1278: update `docs/front-matter-spec.md` only to cross-reference
+- [x] Evolution #1278: update `docs/front-matter-spec.md` only to cross-reference
   workflow execution policy; no new frontmatter key is proposed.
-- [ ] Evolution #1278: update the public API reference/README for async
+- [x] Evolution #1278: update the public API reference/README for async
   `@workflow_tool`, exported policy/error/context types, and the explicit
   at-least-once contract.
-- [ ] Evolution #1278: add a sample or focused sample mode demonstrating
+- [x] Evolution #1278: add a sample or focused sample mode demonstrating
   idempotent retry and partial continued failure without relying on live
   nondeterministic provider faults.
 
