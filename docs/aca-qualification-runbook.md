@@ -55,41 +55,31 @@ That makes the current arrangement a reprieve, not a fix. The durable fix is an
 allow-list entry for `management.*.azuredevcompute.io`; until then, treat a
 future enrollment of 1777 as a scheduled outage for these stages.
 
-### ⚠ Open: remote build is not producing a loadable app
+### Resolved: remote build now produces a loadable app
 
-**Found by live testing; not yet resolved.**
+Early live testing hit a state where `az functionapp deployment source config-zip`
+reported *"Deployment was successful"* while the app registered **zero functions**
+(`az functionapp function list` returned `[]`), so `/api/__buildinfo` and every
+agent route returned 404. The host stayed healthy and Easy Auth still answered
+401, which is why a simple reachability check did not reveal it.
 
-After `az functionapp deployment source config-zip` reports
-*"Deployment was successful"*, the app registers **zero functions**
-(`az functionapp function list` returns `[]`), so `/api/__buildinfo` and every
-agent route return 404. The host is otherwise healthy and Easy Auth answers 401
-as expected, which is why this is not visible from a simple reachability check.
+The cause was not the remote build. The fixture's build-info route was annotated
+with `azure.functions.HttpRequest`, but the runtime registers routes with the
+FastAPI `Request`/`Response` types from
+`azurefunctions.extensions.http.fastapi`. The worker rejects that binding, and
+because indexing is all-or-nothing, one bad route takes down the whole app —
+reported only as the generic *"No job functions found"*.
 
-Confirmed so far:
+Deployments now index 16 functions. `tests/test_aca_qualification_pipeline.py`
+carries a guard asserting the route's parameter and return annotations, so the
+same mistake fails the unit gate rather than a 40-minute live run.
 
-- `SCM_DO_BUILD_DURING_DEPLOYMENT` is rejected by Flex outright (*"not supported
-  with this SKU"*) and must not be set — this was fixed.
-- Deployment reports success both with and without `--build-remote true`.
-- The apps stay healthy; the failure is that no functions load, which means the
-  runtime import fails and therefore the dependency install did not produce a
-  usable environment.
+Two Flex Consumption facts worth keeping:
 
-Leading hypothesis: the generated `requirements.txt` installs the runtime from a
-**relative** wheel path (`./azurefunctions_agents_runtime-<version>.whl`), and
-the remote build may not resolve that path from the build working directory. The
-next diagnostic step is to read the Oryx build log for a deployment — note that
-SCM basic auth is disabled on these apps, so the log must be reached with an
-Entra token rather than publishing credentials.
-
-Alternatives if the relative path is the cause: reference the wheel by absolute
-path within the deployment root, vendor the dependencies into
-`.python_packages` at assemble time and skip the remote build, or publish the
-wheel to the internal feed and reference it by version.
-
-**Current state of the test apps:** the py3.13 app has been deployed with this
-fixture and does not currently load functions. These apps are disposable and are
-redeployed by every run, but anyone relying on the previously deployed content
-should redeploy it.
+- `SCM_DO_BUILD_DURING_DEPLOYMENT` is rejected outright (*"not supported with
+  this SKU"*) and must not be set. Remote build is implicit.
+- SCM basic auth is disabled on these apps, so build logs need an Entra token
+  rather than publishing credentials.
 
 ## Prerequisites
 
