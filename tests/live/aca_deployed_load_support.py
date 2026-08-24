@@ -12,7 +12,9 @@ from typing import Protocol
 
 import pytest
 from tests.aca_smoke_diagnostics import AcaSmokeEnvironmentError
-from tests.live.aca_deployed_agent_support import response_header
+from tests.live.aca_deployed_agent_support import (
+    optional_retry_after_seconds,
+)
 
 _LOAD_CONCURRENCY_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY"
 _MIN_CONCURRENCY = 1
@@ -26,16 +28,9 @@ THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS = 10.0
 
 def throttle_retry_after_seconds(headers: Mapping[str, str]) -> float | None:
     """Return Retry-After if present and within bounds, else None."""
-    value = response_header(headers, "retry-after")
-    if value is None:
-        return None
-    try:
-        seconds = int(value.strip())
-    except ValueError:
-        return None
-    if not 1 <= seconds <= int(THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS):
-        return None
-    return float(seconds)
+    return optional_retry_after_seconds(
+        headers, maximum_seconds=THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS
+    )
 
 
 THROTTLED_ADMISSION_STATUSES = frozenset({429, 503})

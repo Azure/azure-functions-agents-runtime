@@ -33,6 +33,9 @@ _SETUP_RETRY_AFTER_SECONDS = 120.0
 _CANCEL_RETRY_AFTER_SECONDS = 2.0
 _TIMEOUT_RECOVERY_AGENT_SLUG = "deployed_setup_timeout"
 _TIMEOUT_RECOVERY_MINIMUM_TIMEOUT_SECONDS = 120.0
+_SSE_THROTTLE_MAX_ATTEMPTS = 4
+_SSE_THROTTLE_STATUSES = frozenset({429, 503})
+_SSE_THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS = 10.0
 
 
 class _TokenCredential(Protocol):
@@ -55,6 +58,45 @@ def cancel_retry_after_seconds(headers: Mapping[str, str]) -> float:
         fallback_seconds=_CANCEL_RETRY_AFTER_SECONDS,
         maximum_seconds=_SETUP_RETRY_AFTER_SECONDS,
     )
+
+
+def sse_throttle_retry_delay(
+    status: int,
+    headers: Mapping[str, str],
+    *,
+    is_final_attempt: bool,
+) -> float | None:
+    """Return the delay before retrying a throttled SSE response, or None to give up."""
+    if status not in _SSE_THROTTLE_STATUSES:
+        return None
+    if is_final_attempt:
+        return None
+    return optional_retry_after_seconds(
+        headers, maximum_seconds=_SSE_THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS
+    )
+
+
+def optional_retry_after_seconds(
+    headers: Mapping[str, str],
+    *,
+    maximum_seconds: float,
+) -> float | None:
+    """Return a bounded ``Retry-After``, or None when the server did not ask for one.
+
+    Distinct from the fallback variant below: a caller deciding *whether* to
+    retry must not invent a delay the server never sent, or it would retry
+    responses that carry no backpressure signal at all.
+    """
+    value = response_header(headers, "retry-after")
+    if value is None:
+        return None
+    try:
+        seconds = int(value.strip())
+    except ValueError:
+        return None
+    if not 1 <= seconds <= int(maximum_seconds):
+        return None
+    return float(seconds)
 
 
 def response_header(headers: Mapping[str, str], name: str) -> str | None:
@@ -378,21 +420,30 @@ async def read_sse_until_matching_event(
     """Read one public SSE stream until one strictly ordered matching event arrives."""
     try:
         async with asyncio.timeout(overall_timeout_seconds):
-            async with session.get(url, headers=headers) as response:
-                status = response.status
-                response_headers = dict(response.headers)
-                if status != 200:
-                    raise SseResponseStatusError(url, status)
-                events: list[SseEvent] = []
-                pending = ""
-                async for chunk in response.content:
-                    pending += chunk.decode("utf-8").replace("\r\n", "\n")
-                    frames = pending.split("\n\n")
-                    pending = frames.pop()
-                    for event in parse_sse_frames(frames):
-                        events = append_contiguous_sse_events(events, [event])
-                        if matches(event):
-                            return status, event, response_headers
+            for attempt in range(1, _SSE_THROTTLE_MAX_ATTEMPTS + 1):
+                is_final = attempt == _SSE_THROTTLE_MAX_ATTEMPTS
+                async with session.get(url, headers=headers) as response:
+                    status = response.status
+                    response_headers = dict(response.headers)
+                    if status != 200:
+                        delay = sse_throttle_retry_delay(
+                            status, response_headers, is_final_attempt=is_final
+                        )
+                        if delay is None:
+                            raise SseResponseStatusError(url, status)
+                        await asyncio.sleep(delay)
+                        continue
+                    events: list[SseEvent] = []
+                    pending = ""
+                    async for chunk in response.content:
+                        pending += chunk.decode("utf-8").replace("\r\n", "\n")
+                        frames = pending.split("\n\n")
+                        pending = frames.pop()
+                        for event in parse_sse_frames(frames):
+                            events = append_contiguous_sse_events(events, [event])
+                            if matches(event):
+                                return status, event, response_headers
+            raise SseResponseStatusError(url, status)
     except TimeoutError as exc:
         raise AcaSmokeEnvironmentError(
             "Function App SSE stream did not emit the required event before the overall deadline."
@@ -483,44 +534,53 @@ async def _read_sse_response(
     headers: Mapping[str, str],
 ) -> tuple[int, list[SseEvent], Mapping[str, str], float | None, tuple[float, ...]]:
     """Read one public SSE response, which may end at the server lease boundary."""
-    try:
-        async with session.get(url, headers=headers) as response:
-            status = response.status
-            response_headers = dict(response.headers)
-            if status != 200:
-                raise SseResponseStatusError(url, status)
-            events: list[SseEvent] = []
-            observed_at: list[float] = []
-            first_event_at: float | None = None
-            pending = ""
-            async for chunk in response.content:
-                decoded = chunk.decode("utf-8")
-                pending += decoded.replace("\r\n", "\n")
-                frames = pending.split("\n\n")
-                pending = frames.pop()
-                parsed = parse_sse_frames(frames)
-                if parsed:
-                    timestamp = time.perf_counter()
-                    if first_event_at is None:
-                        first_event_at = timestamp
-                    events.extend(parsed)
-                    observed_at.extend([timestamp] * len(parsed))
-            if pending.strip():
-                parsed = parse_sse_frames([pending])
-                if parsed:
-                    timestamp = time.perf_counter()
-                    if first_event_at is None:
-                        first_event_at = timestamp
-                    events.extend(parsed)
-                    observed_at.extend([timestamp] * len(parsed))
-            return status, events, response_headers, first_event_at, tuple(observed_at)
-    except AcaSmokeEnvironmentError:
-        raise
-    except (TimeoutError, OSError, UnicodeDecodeError) as exc:
-        raise AcaSmokeEnvironmentError(
-            f"Function App SSE endpoint was unavailable at {redact_deployed_aca_evidence(url)}: "
-            f"{type(exc).__name__}"
-        ) from exc
+    for attempt in range(1, _SSE_THROTTLE_MAX_ATTEMPTS + 1):
+        is_final = attempt == _SSE_THROTTLE_MAX_ATTEMPTS
+        try:
+            async with session.get(url, headers=headers) as response:
+                status = response.status
+                response_headers = dict(response.headers)
+                if status != 200:
+                    delay = sse_throttle_retry_delay(
+                        status, response_headers, is_final_attempt=is_final
+                    )
+                    if delay is None:
+                        raise SseResponseStatusError(url, status)
+                    await asyncio.sleep(delay)
+                    continue
+                events: list[SseEvent] = []
+                observed_at: list[float] = []
+                first_event_at: float | None = None
+                pending = ""
+                async for chunk in response.content:
+                    decoded = chunk.decode("utf-8")
+                    pending += decoded.replace("\r\n", "\n")
+                    frames = pending.split("\n\n")
+                    pending = frames.pop()
+                    parsed = parse_sse_frames(frames)
+                    if parsed:
+                        timestamp = time.perf_counter()
+                        if first_event_at is None:
+                            first_event_at = timestamp
+                        events.extend(parsed)
+                        observed_at.extend([timestamp] * len(parsed))
+                if pending.strip():
+                    parsed = parse_sse_frames([pending])
+                    if parsed:
+                        timestamp = time.perf_counter()
+                        if first_event_at is None:
+                            first_event_at = timestamp
+                        events.extend(parsed)
+                        observed_at.extend([timestamp] * len(parsed))
+                return status, events, response_headers, first_event_at, tuple(observed_at)
+        except AcaSmokeEnvironmentError:
+            raise
+        except (TimeoutError, OSError, UnicodeDecodeError) as exc:
+            raise AcaSmokeEnvironmentError(
+                f"Function App SSE endpoint was unavailable at "
+                f"{redact_deployed_aca_evidence(url)}: {type(exc).__name__}"
+            ) from exc
+    raise SseResponseStatusError(url, status)
 
 
 def append_contiguous_sse_events(
@@ -650,3 +710,6 @@ async def _json_body(response: ClientResponse) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise AssertionError("Expected a JSON object response.")
     return payload
+
+
+
