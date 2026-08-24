@@ -23,10 +23,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -103,6 +104,8 @@ type _ActivityFailureKind = Literal[
     "handler_terminal",
     "execution_unknown",
     "handler_contract",
+    "activity_infrastructure",
+    "authorization",
 ]
 
 
@@ -342,6 +345,47 @@ async def _invoke_handler_once(handler: Any, args: dict[str, Any]) -> Any:
     return result
 
 
+def _authorization_outcome(task_id: str) -> _ActivityFailureOutcome:
+    return _failure_outcome(
+        task_id,
+        error_code="workflow_task_authorization",
+        error="Task target is not authorized.",
+        kind="authorization",
+        retryable=False,
+        continuable=False,
+    )
+
+
+def _handler_contract_outcome(task_id: str) -> _ActivityFailureOutcome:
+    return _failure_outcome(
+        task_id,
+        error_code="workflow_task_handler_contract",
+        error="Task Activity returned an invalid outcome.",
+        kind="handler_contract",
+        retryable=False,
+        continuable=False,
+    )
+
+
+def _validate_policy_activity_input(
+    task: Mapping[str, Any],
+    *,
+    target_type: str,
+) -> _ActivityFailureOutcome | None:
+    try:
+        _policy_activity_context(task)
+    except (KeyError, TypeError, ValueError):
+        logger.exception(
+            "malformed policy-aware workflow Activity input: target_type=%s",
+            target_type,
+        )
+        task_id = task.get("id")
+        return _handler_contract_outcome(
+            task_id if isinstance(task_id, str) else "<invalid>"
+        )
+    return None
+
+
 def _run_echo(args: dict[str, Any]) -> dict[str, Any]:
     """Trivial workflow-safe tool used by unit tests.
 
@@ -397,7 +441,9 @@ def _plan_is_dynamic(tasks: list[WorkflowTaskInput]) -> bool:
     behavior, so existing regression coverage is unchanged.
     """
     return any(
-        task.get("when") is not None or task.get("for_each") is not None
+        task.get("when") is not None
+        or task.get("for_each") is not None
+        or task.get("execution") is not None
         for task in tasks
     )
 
@@ -590,14 +636,37 @@ def _failure_envelope(
 type _LogicalState = Literal[
     "pending",
     "running",
+    "retry_wait",
     "skipped",
     "expanded",
     "aggregated",
+    "aggregated_with_errors",
     "completed",
+    "failed_continued",
     "failed",
 ]
-type _InstanceState = Literal["pending", "running", "skipped", "completed"]
-type _InstanceKind = Literal["activity", "timer"]
+type _InstanceState = Literal[
+    "pending",
+    "running",
+    "retry_wait",
+    "skipped",
+    "completed",
+    "failed_continued",
+]
+type _InstanceKind = Literal["activity", "timer", "retry_timer"]
+
+_ACTIVITY_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_ACTIVITY_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_ACTIVITY_WHITESPACE_RE = re.compile(r"\s+")
+_FAILURE_CLASSIFICATION: dict[_ActivityFailureKind, tuple[bool, bool]] = {
+    "timeout": (True, True),
+    "handler_transient": (True, True),
+    "activity_infrastructure": (True, True),
+    "handler_terminal": (False, True),
+    "execution_unknown": (False, True),
+    "handler_contract": (False, False),
+    "authorization": (False, False),
+}
 
 
 class _MaterializedInstance(TypedDict):
@@ -609,6 +678,63 @@ class _MaterializedInstance(TypedDict):
     resolved: NotRequired[Any]
     kind: NotRequired[_InstanceKind]
     deadline: NotRequired[str]
+    execution: NotRequired[EffectiveWorkflowTaskExecution]
+    attempt: NotRequired[int]
+    idempotency_key: NotRequired[str]
+    last_failure: NotRequired[_ActivityFailure]
+    retry_deadline: NotRequired[str]
+    retry_ready: NotRequired[bool]
+
+
+def _validated_policy_activity_result(
+    instance: _MaterializedInstance,
+    raw: Any,
+) -> tuple[bool, Any | _ActivityFailure]:
+    if not isinstance(raw, dict) or raw.get("id") != instance["instance_id"]:
+        return False, _handler_contract_outcome(instance["instance_id"])["failure"]
+    if raw.get("ok") is True:
+        if set(raw) != {"id", "ok", "result"}:
+            return False, _handler_contract_outcome(instance["instance_id"])["failure"]
+        return True, raw["result"]
+    if raw.get("ok") is not False or set(raw) != {"id", "ok", "failure"}:
+        return False, _handler_contract_outcome(instance["instance_id"])["failure"]
+    failure = raw["failure"]
+    if not isinstance(failure, dict) or set(failure) != {
+        "error_code",
+        "error",
+        "kind",
+        "retryable",
+        "continuable",
+    }:
+        return False, _handler_contract_outcome(instance["instance_id"])["failure"]
+    error_code = failure["error_code"]
+    error = failure["error"]
+    kind = failure["kind"]
+    retryable = failure["retryable"]
+    continuable = failure["continuable"]
+    normalized_error = (
+        _ACTIVITY_WHITESPACE_RE.sub(
+            " ",
+            _ACTIVITY_CONTROL_RE.sub(" ", error),
+        ).strip()
+        if isinstance(error, str)
+        else None
+    )
+    if (
+        not isinstance(error_code, str)
+        or _ACTIVITY_ERROR_CODE_RE.fullmatch(error_code) is None
+        or not isinstance(error, str)
+        or not error
+        or len(error) > 256
+        or normalized_error != error
+        or not isinstance(kind, str)
+        or kind not in _FAILURE_CLASSIFICATION
+        or type(retryable) is not bool
+        or type(continuable) is not bool
+        or (retryable, continuable) != _FAILURE_CLASSIFICATION[kind]
+    ):
+        return False, _handler_contract_outcome(instance["instance_id"])["failure"]
+    return False, cast(_ActivityFailure, failure)
 
 
 @dataclass
@@ -789,7 +915,45 @@ def _aggregate_dynamic_node(state: _DynamicWorkflowState, logical_id: str) -> No
         }
         for instance in instances
     ]
-    state.logical_state[logical_id] = "aggregated"
+    state.logical_state[logical_id] = (
+        "aggregated_with_errors"
+        if any(instance["state"] == "failed_continued" for instance in instances)
+        else "aggregated"
+    )
+
+
+def _new_materialized_instance(
+    *,
+    context: df.DurableOrchestrationContext,
+    task: WorkflowTaskInput,
+    logical_id: str,
+    instance_id: str,
+    index: int | None,
+    state: _InstanceState,
+    result: Any,
+    resolved: Any = _UNBOUND,
+) -> _MaterializedInstance:
+    instance: _MaterializedInstance = {
+        "logical_id": logical_id,
+        "index": index,
+        "instance_id": instance_id,
+        "state": state,
+        "result": result,
+    }
+    if resolved is not _UNBOUND:
+        instance["resolved"] = resolved
+    if "execution" in task:
+        execution = cast(
+            EffectiveWorkflowTaskExecution,
+            cast(Mapping[str, Any], task)["execution"],
+        )
+        instance["execution"] = execution
+        instance["attempt"] = 0
+        instance["idempotency_key"] = _workflow_task_idempotency_key(
+            context.instance_id,
+            instance_id,
+        )
+    return instance
 
 
 def _materialize_for_each_node(
@@ -868,13 +1032,17 @@ def _materialize_for_each_node(
                     logical_id=logical_id,
                 )
             if not should_run:
-                instances.append({
-                    "logical_id": logical_id,
-                    "index": index,
-                    "instance_id": instance_id,
-                    "state": "skipped",
-                    "result": None,
-                })
+                instances.append(
+                    _new_materialized_instance(
+                        context=context,
+                        task=task,
+                        logical_id=logical_id,
+                        instance_id=instance_id,
+                        index=index,
+                        state="skipped",
+                        result=None,
+                    )
+                )
                 continue
         try:
             resolved = _resolve_dynamic_args(
@@ -894,14 +1062,18 @@ def _materialize_for_each_node(
                 path=None,
                 logical_id=logical_id,
             )
-        instances.append({
-            "logical_id": logical_id,
-            "index": index,
-            "instance_id": instance_id,
-            "state": "pending",
-            "result": None,
-            "resolved": resolved,
-        })
+        instances.append(
+            _new_materialized_instance(
+                context=context,
+                task=task,
+                logical_id=logical_id,
+                instance_id=instance_id,
+                index=index,
+                state="pending",
+                result=None,
+                resolved=resolved,
+            )
+        )
 
     state.node_instances[logical_id] = instances
     if not any(instance["state"] == "pending" for instance in instances):
@@ -936,13 +1108,17 @@ def _materialize_normal_node(
         if not should_run:
             state.results[logical_id] = None
             state.logical_state[logical_id] = "skipped"
-            state.node_instances[logical_id] = [{
-                "logical_id": logical_id,
-                "index": None,
-                "instance_id": logical_id,
-                "state": "skipped",
-                "result": None,
-            }]
+            state.node_instances[logical_id] = [
+                _new_materialized_instance(
+                    context=context,
+                    task=task,
+                    logical_id=logical_id,
+                    instance_id=logical_id,
+                    index=None,
+                    state="skipped",
+                    result=None,
+                )
+            ]
             return None
 
     resolved: Any = None
@@ -959,14 +1135,18 @@ def _materialize_normal_node(
                 path=None,
                 logical_id=logical_id,
             )
-    state.node_instances[logical_id] = [{
-        "logical_id": logical_id,
-        "index": None,
-        "instance_id": logical_id,
-        "state": "pending",
-        "result": None,
-        "resolved": resolved,
-    }]
+    state.node_instances[logical_id] = [
+        _new_materialized_instance(
+            context=context,
+            task=task,
+            logical_id=logical_id,
+            instance_id=logical_id,
+            index=None,
+            state="pending",
+            result=None,
+            resolved=resolved,
+        )
+    ]
     return None
 
 
@@ -1009,12 +1189,15 @@ def _materialize_ready_nodes(
             task_id
             for task_id, task in state.by_id.items()
             if task.get("for_each") is not None
-            and state.logical_state[task_id] in {"expanded", "running"}
+            and state.logical_state[task_id] in {
+                "expanded",
+                "running",
+            }
         )
         for logical_id in aggregatable:
             instances = state.node_instances.get(logical_id, [])
             if instances and all(
-                instance["state"] in {"completed", "skipped"}
+                instance["state"] in {"completed", "skipped", "failed_continued"}
                 for instance in instances
             ):
                 _aggregate_dynamic_node(state, logical_id)
@@ -1024,7 +1207,14 @@ def _materialize_ready_nodes(
 
 def _dynamic_workflow_complete(state: _DynamicWorkflowState) -> bool:
     return all(
-        node_state in {"completed", "skipped", "aggregated"}
+        node_state
+        in {
+            "completed",
+            "failed_continued",
+            "skipped",
+            "aggregated",
+            "aggregated_with_errors",
+        }
         for node_state in state.logical_state.values()
     )
 
@@ -1032,19 +1222,19 @@ def _dynamic_workflow_complete(state: _DynamicWorkflowState) -> bool:
 def _collect_runnable_instances(
     state: _DynamicWorkflowState,
 ) -> list[_MaterializedInstance]:
-    runnable = [
+    pending = [
         instance
         for instances in state.node_instances.values()
         for instance in instances
         if instance["state"] == "pending"
     ]
-    runnable.sort(
-        key=lambda instance: (
+    def order(instance: _MaterializedInstance) -> tuple[str, int]:
+        return (
             instance["logical_id"],
             instance["index"] if instance["index"] is not None else -1,
         )
-    )
-    return runnable[:MAX_PARALLELISM]
+    pending.sort(key=order)
+    return pending[:MAX_PARALLELISM]
 
 
 def _dispatch_dynamic_wave(
@@ -1056,22 +1246,38 @@ def _dispatch_dynamic_wave(
     for instance in wave:
         logical_id = instance["logical_id"]
         task = state.by_id[logical_id]
+        if instance.get("retry_ready"):
+            instance["attempt"] += 1
+            instance.pop("retry_ready", None)
+        elif "execution" in instance:
+            instance["attempt"] = 1
         if task["type"] == TOOL_TASK_TYPE:
             if task["tool"] not in state.allowed_tools:
                 raise RuntimeError(
                     f"task {instance['instance_id']!r}: tool {task['tool']!r} is "
                     "outside the persisted workflow owner policy"
                 )
+            activity_input: dict[str, Any] = {
+                "id": instance["instance_id"],
+                "tool": task["tool"],
+                "args": instance["resolved"],
+                "workflow_agent_slug": state.workflow_agent_slug,
+                "workflow_id": context.instance_id,
+            }
+            if "execution" in instance:
+                execution = instance["execution"]
+                activity_input.update({
+                    "execution": execution,
+                    "task_id": logical_id,
+                    "node_instance_id": instance["instance_id"],
+                    "attempt": instance["attempt"],
+                    "max_attempts": execution["max_attempts"],
+                    "idempotency_key": instance["idempotency_key"],
+                })
             wave_tasks.append(
                 context.call_activity(
                     _ACTIVITY_NAME,
-                    {
-                        "id": instance["instance_id"],
-                        "tool": task["tool"],
-                        "args": instance["resolved"],
-                        "workflow_agent_slug": state.workflow_agent_slug,
-                        "workflow_id": context.instance_id,
-                    },
+                    activity_input,
                 )
             )
             instance["kind"] = "activity"
@@ -1081,16 +1287,27 @@ def _dispatch_dynamic_wave(
                     f"task {instance['instance_id']!r}: Sub Agent "
                     f"{task['agent']!r} is outside the persisted workflow owner policy"
                 )
+            subagent_input: dict[str, Any] = {
+                "id": instance["instance_id"],
+                "agent": task["agent"],
+                "task": instance["resolved"],
+                "workflow_id": context.instance_id,
+                "workflow_agent_slug": state.workflow_agent_slug,
+            }
+            if "execution" in instance:
+                execution = instance["execution"]
+                subagent_input.update({
+                    "execution": execution,
+                    "task_id": logical_id,
+                    "node_instance_id": instance["instance_id"],
+                    "attempt": instance["attempt"],
+                    "max_attempts": execution["max_attempts"],
+                    "idempotency_key": instance["idempotency_key"],
+                })
             wave_tasks.append(
                 context.call_activity(
                     SUB_AGENT_ACTIVITY_NAME,
-                    {
-                        "id": instance["instance_id"],
-                        "agent": task["agent"],
-                        "task": instance["resolved"],
-                        "workflow_id": context.instance_id,
-                        "workflow_agent_slug": state.workflow_agent_slug,
-                    },
+                    subagent_input,
                 )
             )
             instance["kind"] = "activity"
@@ -1114,7 +1331,7 @@ def _cancel_dynamic_wave_timers(
     wave_tasks: list[Any],
 ) -> None:
     for instance, task in zip(wave, wave_tasks, strict=True):
-        if instance.get("kind") == "timer" and not task.is_completed:
+        if instance.get("kind") in {"timer", "retry_timer"} and not task.is_completed:
             task.cancel()
 
 
@@ -1125,30 +1342,118 @@ def _restore_canceled_dynamic_wave(
 ) -> None:
     _cancel_dynamic_wave_timers(wave, wave_tasks)
     for instance in wave:
-        instance["state"] = "pending"
+        if instance.get("kind") != "retry_timer":
+            instance["state"] = "pending"
     for logical_id in {instance["logical_id"] for instance in wave}:
-        state.logical_state[logical_id] = (
-            "expanded"
-            if state.by_id[logical_id].get("for_each") is not None
-            else "pending"
-        )
+        if not all(
+            instance.get("kind") == "retry_timer"
+            for instance in wave
+            if instance["logical_id"] == logical_id
+        ):
+            state.logical_state[logical_id] = (
+                "expanded"
+                if state.by_id[logical_id].get("for_each") is not None
+                else "pending"
+            )
 
 
 def _apply_dynamic_wave_results(
+    context: df.DurableOrchestrationContext,
     state: _DynamicWorkflowState,
     wave: list[_MaterializedInstance],
     wave_results: list[Any],
-) -> None:
-    for instance, raw in zip(wave, wave_results, strict=True):
-        if instance.get("kind") == "timer":
+) -> dict[str, Any] | None:
+    failures: list[tuple[_MaterializedInstance, _ActivityFailure]] = []
+    ordered = sorted(
+        zip(wave, wave_results, strict=True),
+        key=lambda pair: (
+            pair[0]["logical_id"],
+            pair[0]["index"] if pair[0]["index"] is not None else -1,
+        ),
+    )
+    for instance, raw in ordered:
+        kind = instance.get("kind")
+        if kind == "retry_timer":
+            instance["state"] = "pending"
+            instance["retry_ready"] = True
+            instance.pop("retry_deadline", None)
+            continue
+        if kind == "timer":
             instance["result"] = {"waited_until": instance["deadline"]}
-        else:
+            instance["state"] = "completed"
+        elif "execution" not in instance:
+            if isinstance(raw, BaseException):
+                raise raw
             instance["result"] = raw["result"]
-        instance["state"] = "completed"
-        if instance["index"] is None:
+            instance["state"] = "completed"
+        else:
+            if isinstance(raw, BaseException):
+                failure: _ActivityFailure | None = {
+                    "error_code": "workflow_task_activity_infrastructure",
+                    "error": "Task Activity failed before returning an outcome.",
+                    "kind": "activity_infrastructure",
+                    "retryable": True,
+                    "continuable": True,
+                }
+            else:
+                succeeded, outcome = _validated_policy_activity_result(instance, raw)
+                if succeeded:
+                    instance["result"] = outcome
+                    instance["state"] = "completed"
+                    failure = None
+                else:
+                    failure = cast(_ActivityFailure, outcome)
+            if failure is not None:
+                instance["last_failure"] = failure
+                execution = instance["execution"]
+                attempt = instance["attempt"]
+                if failure["retryable"] and attempt < execution["max_attempts"]:
+                    delay_ms = execution["retry_delays_ms"][attempt - 1]
+                    retry_deadline = context.current_utc_datetime + timedelta(
+                        milliseconds=delay_ms
+                    )
+                    instance["retry_deadline"] = retry_deadline.isoformat()
+                    instance["state"] = "retry_wait"
+                    state.logical_state[instance["logical_id"]] = (
+                        "retry_wait" if instance["index"] is None else "running"
+                    )
+                    continue
+                if failure["continuable"] and execution["continue_on_error"]:
+                    instance["result"] = {
+                        "failed": True,
+                        "error_code": failure["error_code"],
+                        "error": failure["error"],
+                        "kind": failure["kind"],
+                        "attempts": attempt,
+                    }
+                    instance["state"] = "failed_continued"
+                else:
+                    failures.append((instance, failure))
+                    continue
+        if instance["index"] is None and instance["state"] in {
+            "completed",
+            "failed_continued",
+        }:
             logical_id = instance["logical_id"]
             state.results[logical_id] = instance["result"]
-            state.logical_state[logical_id] = "completed"
+            state.logical_state[logical_id] = (
+                "failed_continued"
+                if instance["state"] == "failed_continued"
+                else "completed"
+            )
+
+    if failures:
+        instance, failure = failures[0]
+        return _dynamic_failure(
+            context,
+            state,
+            error=failure["error"],
+            error_code=failure["error_code"],
+            node_id=instance["instance_id"],
+            path=None,
+            logical_id=instance["logical_id"],
+        )
+    return None
 
 
 def _run_dynamic_workflow(
@@ -1159,20 +1464,53 @@ def _run_dynamic_workflow(
     """Execute a data-driven plan with deterministic phase helpers."""
     state = _new_dynamic_workflow_state(payload, tasks)
     cancel_task = context.wait_for_external_event(CANCEL_EVENT_NAME)
+    retry_timers: dict[str, tuple[_MaterializedInstance, Any]] = {}
+
+    def cancel_retry_timers() -> None:
+        for _, timer in retry_timers.values():
+            if not timer.is_completed:
+                timer.cancel()
+
+    def complete_retry_timer(instance: _MaterializedInstance) -> None:
+        retry_timers.pop(instance["instance_id"], None)
+        instance["state"] = "pending"
+        instance["retry_ready"] = True
+        instance.pop("retry_deadline", None)
 
     while True:
         failure = _materialize_ready_nodes(context, state)
         if failure is not None:
+            cancel_retry_timers()
             return failure
         if _dynamic_workflow_complete(state):
             break
 
+        for instances in state.node_instances.values():
+            for instance in instances:
+                if (
+                    instance["state"] == "retry_wait"
+                    and instance["instance_id"] not in retry_timers
+                ):
+                    deadline = parse_iso8601_datetime(instance["retry_deadline"])
+                    retry_timers[instance["instance_id"]] = (
+                        instance,
+                        context.create_timer(deadline),
+                    )
+
         wave = _collect_runnable_instances(state)
-        if not wave:
+        wave_tasks = _dispatch_dynamic_wave(context, state, wave) if wave else []
+        if not wave_tasks and not retry_timers:
             active_count = sum(
                 1
                 for node_state in state.logical_state.values()
-                if node_state not in {"completed", "skipped", "aggregated"}
+                if node_state
+                not in {
+                    "completed",
+                    "failed_continued",
+                    "skipped",
+                    "aggregated",
+                    "aggregated_with_errors",
+                }
             )
             raise RuntimeError(
                 "workflow stalled: no runnable instances but "
@@ -1180,33 +1518,101 @@ def _run_dynamic_workflow(
                 "a scheduler invariant violation."
             )
 
-        wave_tasks = _dispatch_dynamic_wave(context, state, wave)
         _publish_dynamic_status(context, state)
-        wave_task = context.task_all(wave_tasks)
-        winner = yield context.task_any([cancel_task, wave_task])
-        if winner is cancel_task:
-            reason = cancel_task.result
-            _restore_canceled_dynamic_wave(state, wave, wave_tasks)
-            _publish_dynamic_status(context, state)
-            logger.info(
-                "workflow canceled: instance=%s workflow_agent=%s reason=%r",
-                context.instance_id,
-                state.workflow_agent_slug,
-                reason,
+        pending_wave = list(zip(wave, wave_tasks, strict=True))
+        wave_results_by_id: dict[str, Any] = {}
+        while pending_wave:
+            retry_waitables = [timer for _, timer in retry_timers.values()]
+            winner = yield context.task_any(
+                [cancel_task, *[task for _, task in pending_wave], *retry_waitables]
             )
-            return {
-                "results": state.results,
-                "canceled": True,
-                "reason": reason,
-                "completed_count": len(state.results),
-                "total_count": len(state.by_id),
-            }
+            if winner is cancel_task:
+                reason = cancel_task.result
+                _restore_canceled_dynamic_wave(state, wave, wave_tasks)
+                cancel_retry_timers()
+                _publish_dynamic_status(context, state)
+                logger.info(
+                    "workflow canceled: instance=%s workflow_agent=%s reason=%r",
+                    context.instance_id,
+                    state.workflow_agent_slug,
+                    reason,
+                )
+                return {
+                    "results": state.results,
+                    "canceled": True,
+                    "reason": reason,
+                    "completed_count": len(state.results),
+                    "total_count": len(state.by_id),
+                }
+            retry_instance = next(
+                (
+                    instance
+                    for instance, timer in retry_timers.values()
+                    if winner is timer
+                ),
+                None,
+            )
+            if retry_instance is not None:
+                complete_retry_timer(retry_instance)
+                continue
+            completed_index = next(
+                (
+                    index
+                    for index, (_, task) in enumerate(pending_wave)
+                    if winner is task
+                ),
+                None,
+            )
+            if completed_index is None:
+                raise RuntimeError("workflow task_any returned an unknown task")
+            instance, completed_task = pending_wave.pop(completed_index)
+            try:
+                completed_result = completed_task.result
+            except Exception as exc:
+                completed_result = exc
+            wave_results_by_id[instance["instance_id"]] = completed_result
 
-        wave_results = wave_task.result
-        if isinstance(wave_results, BaseException):
+        if not wave:
+            retry_waitables = [timer for _, timer in retry_timers.values()]
+            winner = yield context.task_any([cancel_task, *retry_waitables])
+            if winner is cancel_task:
+                reason = cancel_task.result
+                cancel_retry_timers()
+                _publish_dynamic_status(context, state)
+                return {
+                    "results": state.results,
+                    "canceled": True,
+                    "reason": reason,
+                    "completed_count": len(state.results),
+                    "total_count": len(state.by_id),
+                }
+            retry_instance = next(
+                (
+                    instance
+                    for instance, timer in retry_timers.values()
+                    if winner is timer
+                ),
+                None,
+            )
+            if retry_instance is None:
+                raise RuntimeError("workflow task_any returned an unknown retry timer")
+            complete_retry_timer(retry_instance)
+            continue
+
+        wave_results = [
+            wave_results_by_id[instance["instance_id"]]
+            for instance in wave
+        ]
+        try:
+            failure = _apply_dynamic_wave_results(context, state, wave, wave_results)
+        except BaseException:
             _cancel_dynamic_wave_timers(wave, wave_tasks)
-            raise wave_results
-        _apply_dynamic_wave_results(state, wave, wave_results)
+            cancel_retry_timers()
+            raise
+        if failure is not None:
+            _cancel_dynamic_wave_timers(wave, wave_tasks)
+            cancel_retry_timers()
+            return failure
         _publish_dynamic_status(context, state)
 
     _publish_dynamic_status(context, state)
@@ -1252,10 +1658,20 @@ def register_workflows(
 
     @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
     async def agents_workflow_run_tool(task: _ToolActivityInput) -> dict[str, Any]:
+        policy_aware = "execution" in task
+        if policy_aware:
+            invalid = _validate_policy_activity_input(task, target_type="tool")
+            if invalid is not None:
+                return dict(invalid)
         task_id = task["id"]
         tool_name = task["tool"]
         args = task["args"]
-        workflow_agent_slug, policy = require_workflow_agent_policy(task)
+        try:
+            workflow_agent_slug, policy = require_workflow_agent_policy(task)
+        except RuntimeError:
+            if policy_aware:
+                return dict(_authorization_outcome(task_id))
+            raise
         workflow_id = task["workflow_id"]
         if tool_name not in policy.allowed_tools:
             logger.error(
@@ -1266,15 +1682,17 @@ def register_workflows(
                 workflow_agent_slug,
                 tool_name,
             )
-            raise RuntimeError(
-                f"task {task_id!r}: workflow tool {tool_name!r} is not authorized"
-            )
+            if policy_aware:
+                return dict(_authorization_outcome(task_id))
+            raise RuntimeError(f"task {task_id!r}: workflow tool {tool_name!r} is not authorized")
         entry = (
             handler_catalog.get(tool_name)
             if handler_catalog is not None
             else registry.get_entry(tool_name)
         )
         if entry is None:
+            if policy_aware:
+                return dict(_authorization_outcome(task_id))
             raise ValueError(
                 f"task {task_id!r}: tool {tool_name!r} is not registered "
                 "in the workflow-safe tool registry"
@@ -1287,7 +1705,7 @@ def register_workflows(
             task_id,
             tool_name,
         )
-        if "execution" in task:
+        if policy_aware:
             return dict(
                 await _invoke_policy_handler(
                     entry.handler,
@@ -1323,10 +1741,20 @@ def register_workflows(
     async def agents_workflow_run_sub_agent(
         task: _SubAgentActivityInput,
     ) -> dict[str, Any]:
+        policy_aware = "execution" in task
+        if policy_aware:
+            invalid = _validate_policy_activity_input(task, target_type="sub_agent")
+            if invalid is not None:
+                return dict(invalid)
         task_id = task["id"]
         agent_slug = task["agent"]
         workflow_id = task["workflow_id"]
-        workflow_agent_slug, policy = require_workflow_agent_policy(task)
+        try:
+            workflow_agent_slug, policy = require_workflow_agent_policy(task)
+        except RuntimeError:
+            if policy_aware:
+                return dict(_authorization_outcome(task_id))
+            raise
         if agent_slug not in policy.allowed_subagents:
             logger.error(
                 "workflow sub-agent authorization denied: "
@@ -1336,6 +1764,8 @@ def register_workflows(
                 workflow_agent_slug,
                 agent_slug,
             )
+            if policy_aware:
+                return dict(_authorization_outcome(task_id))
             raise RuntimeError(
                 f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} is not authorized"
             )
@@ -1348,6 +1778,8 @@ def register_workflows(
                 workflow_agent_slug,
                 agent_slug,
             )
+            if policy_aware:
+                return dict(_authorization_outcome(task_id))
             raise RuntimeError(
                 f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} is not available"
             )
@@ -1361,7 +1793,7 @@ def register_workflows(
             workflow_agent_slug,
             agent_slug,
         )
-        if "execution" in task:
+        if policy_aware:
 
             async def run_policy_sub_agent(_: dict[str, Any]) -> str:
                 execution = task["execution"]

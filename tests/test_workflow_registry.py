@@ -649,7 +649,8 @@ def test_addendum_documents_workflow_notification_contract():
 # ---- workflow activity failure handling -------------------------------------
 
 
-def test_workflow_activity_logs_tool_exceptions_without_raising_raw_details(caplog):
+@pytest.mark.asyncio
+async def test_workflow_activity_logs_tool_exceptions_without_raising_raw_details(caplog):
     secret_message = "downstream API token and account details"
 
     def exploding_tool(args):
@@ -667,7 +668,7 @@ def test_workflow_activity_logs_tool_exceptions_without_raising_raw_details(capl
     )
 
     with pytest.raises(RuntimeError) as excinfo:
-        activity(
+        await activity(
             {
                 "id": "explode",
                 "tool": "exploding",

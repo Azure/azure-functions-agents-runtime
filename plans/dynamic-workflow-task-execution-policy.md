@@ -44,8 +44,9 @@ payloads, scheduler path, and status versions.
 - [x] (2026-08-24 01:30Z) Implemented Activity-owned sync/async deadlines, outcome
   envelopes, sanitization, idempotency context, and policy-aware Sub Agent execution.
   The focused Activity/context suite passed 56 tests; ruff and strict mypy passed.
-- [ ] Implement and test persisted retry state, precomputed backoff timers,
-  continued-failure behavior, cancellation, and policy-aware scheduler routing.
+- [x] (2026-08-24 02:15Z) Implemented persisted retry state, precomputed backoff
+  timers, continued-failure behavior, cancellation, and policy-aware scheduler
+  routing. The focused workflow suite passed 325 tests; ruff and strict mypy passed.
 - [ ] Implement and test status schema version 3, UI rendering, and replay-safe telemetry.
 - [ ] Run an independent testing review and close all coverage gaps, including a
   deterministic sample or sample mode.
@@ -94,6 +95,18 @@ payloads, scheduler path, and status versions.
   Evidence: The Activity wrapper now checks `asyncio.Timeout.expired()` and treats an
   unexpired handler `TimeoutError` as terminal `execution_unknown`.
 
+- Observation: Durable `task_all` can complete on the first failed child rather than after
+  every dispatched sibling reaches a terminal state. Applying its children immediately can
+  mistake pending results for handler-contract failures.
+  Evidence: The structured scheduler now races individual dispatched tasks and drains the
+  complete wave before applying outcomes in stable node/instance order.
+
+- Observation: Activity-boundary exceptions are indistinguishable from infrastructure
+  failures after Durable serialization. Authorization and malformed-input failures therefore
+  need explicit nonretryable outcomes inside policy-aware Activities.
+  Evidence: Policy-aware authorization and input-contract failures now return strict,
+  sanitized outcomes; only an invocation with no runtime outcome enters infrastructure retry.
+
 ## Decision Log
 
 - Decision: Use the presence of authored `execution`, even an empty object, or any
@@ -132,13 +145,16 @@ payloads, scheduler path, and status versions.
 
 ## Outcomes & Retrospective
 
-Planning and Milestones 1-2 are complete. Authors can construct and export strict retry,
+Planning and Milestones 1-3 are complete. Authors can construct and export strict retry,
 backoff, execution, and classified-error types; `@workflow_tool` preserves authoritative
 declarations for sync and async handlers; and `start_workflow` persists an effective policy
 only for policy-aware tasks. Policy-aware Activities now publish frozen attempt context to
 sync, async, and sync-returning-awaitable handlers, enforce one Activity-owned deadline, and
 return sanitized outcomes. Policy-free task inputs and Activity behavior remain unchanged.
-Scheduler retry, status v3, and documentation remain.
+The structured scheduler routes every policy-aware plan, uses independent Durable backoff
+timers and stable idempotency across attempts, applies same-wave outcomes deterministically,
+and supports exact continued-failure results for normal and `for_each` tasks. Status v3,
+observability, independent testing review, sample coverage, and documentation remain.
 
 ## Context and Orientation
 
@@ -603,3 +619,7 @@ resolution metadata.
 
 Revision note (2026-08-24): Recorded Milestone 2 completion and independent review fixes for
 handler-originated `TimeoutError` and boolean persisted `max_attempts`.
+
+Revision note (2026-08-24): Recorded Milestone 3 completion and review-driven corrections for
+failed-wave draining, independent backoff timers, persisted authorization, strict outcome
+validation, and timer cleanup.

@@ -4,7 +4,7 @@ import asyncio
 import importlib.util
 import threading
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -331,8 +331,14 @@ async def test_policy_tool_reauthorizes_before_handler_invocation() -> None:
         },
     )
 
-    with pytest.raises(RuntimeError, match="not authorized"):
-        await activity(_policy_activity_payload())
+    outcome = await activity(_policy_activity_payload())
+    assert outcome["failure"] == {
+        "error_code": "workflow_task_authorization",
+        "error": "Task target is not authorized.",
+        "kind": "authorization",
+        "retryable": False,
+        "continuable": False,
+    }
     assert called is False
 
 
@@ -341,13 +347,15 @@ async def test_policy_tool_rejects_malformed_effective_input() -> None:
     payload = _policy_activity_payload()
     payload["attempt"] = True
 
-    with pytest.raises(ValueError, match="malformed policy-aware"):
-        await _policy_tool_activity(lambda args: args)(payload)
+    outcome = await _policy_tool_activity(lambda args: args)(payload)
+    assert outcome["failure"]["kind"] == "handler_contract"
+    assert outcome["failure"]["retryable"] is False
+    assert outcome["failure"]["continuable"] is False
 
     payload = _policy_activity_payload()
     payload["max_attempts"] = True
-    with pytest.raises(ValueError, match="malformed policy-aware"):
-        await _policy_tool_activity(lambda args: args)(payload)
+    outcome = await _policy_tool_activity(lambda args: args)(payload)
+    assert outcome["failure"]["kind"] == "handler_contract"
 
 
 @pytest.mark.asyncio
@@ -596,7 +604,7 @@ class _FakeOrchestrationContext:
     def __init__(
         self,
         tasks: list[dict[str, Any]],
-        result_for: Callable[[str, dict[str, Any]], dict[str, Any]],
+        result_for: Callable[[str, dict[str, Any]], Any],
     ) -> None:
         self.instance_id = "workflow-parent"
         self._input = {"workflow_agent_slug": "coordinator", "tasks": tasks}
@@ -636,7 +644,12 @@ def _run_orchestrator(
     try:
         next(generator)
         while True:
-            generator.send(context.last_wave)
+            selected = context.last_wave
+            selected.is_completed = True
+            if isinstance(context, _DynamicContext) and selected in context.timers:
+                deadline = context.timer_deadlines[context.timers.index(selected)]
+                context._now = max(context._now, deadline)
+            generator.send(selected)
     except StopIteration as stop:
         return stop.value
 
@@ -853,7 +866,7 @@ class _DynamicContext(_FakeOrchestrationContext):
     def __init__(
         self,
         tasks: list[dict[str, Any]],
-        result_for: Callable[[str, dict[str, Any]], dict[str, Any]],
+        result_for: Callable[[str, dict[str, Any]], Any],
         *,
         policy: dict[str, Any] | None = None,
         now: datetime | None = None,
@@ -862,6 +875,7 @@ class _DynamicContext(_FakeOrchestrationContext):
         self._input["policy"] = policy or {}
         self._now = now or datetime(2024, 1, 1, tzinfo=UTC)
         self.timers: list[_Task] = []
+        self.timer_deadlines: list[datetime] = []
 
     @property
     def current_utc_datetime(self) -> datetime:
@@ -871,14 +885,33 @@ class _DynamicContext(_FakeOrchestrationContext):
         timer = _Task()
         timer.is_completed = False
         self.timers.append(timer)
+        self.timer_deadlines.append(deadline)
         return timer
+
+    def task_any(self, tasks: list[_Task]) -> _Task:
+        candidates = [task for task in tasks if task is not self.cancel_task]
+        selected = next((task for task in candidates if task.is_completed), None)
+        if selected is None:
+            timers = [
+                (self.timer_deadlines[self.timers.index(task)], task)
+                for task in candidates
+                if task in self.timers
+            ]
+            if timers:
+                _, selected = min(timers, key=lambda pair: pair[0])
+            elif candidates:
+                selected = candidates[0]
+            else:
+                selected = self.cancel_task
+        self.last_wave = selected
+        return _Task()
 
 
 def _run_dynamic(
     tasks: list[dict[str, Any]],
     *,
     policy: dict[str, Any],
-    result_for: Callable[[str, dict[str, Any]], dict[str, Any]],
+    result_for: Callable[[str, dict[str, Any]], Any],
     now: datetime | None = None,
 ) -> tuple[dict[str, Any], _DynamicContext]:
     context = _DynamicContext(tasks, result_for, policy=policy, now=now)
@@ -927,14 +960,14 @@ def test_dynamic_activity_failure_cancels_pending_wave_timer() -> None:
     class _FailedSecondWaveContext(_DynamicContext):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
-            self.wave_count = 0
+            self.activity_count = 0
 
-        def task_all(self, tasks: list[_Task]) -> _Task:
-            self.wave_count += 1
-            if self.wave_count == 2:
-                self.last_wave = _Task(RuntimeError("dynamic activity failed"))
-                return self.last_wave
-            return super().task_all(tasks)
+        def call_activity(self, name: str, payload: dict[str, Any]) -> _Task:
+            self.activity_count += 1
+            if self.activity_count == 2:
+                self.calls.append((name, payload))
+                return _Task(RuntimeError("dynamic activity failed"))
+            return super().call_activity(name, payload)
 
     tasks = [
         {
@@ -980,7 +1013,7 @@ def test_dynamic_activity_failure_cancels_pending_wave_timer() -> None:
         _run_orchestrator(orchestrator, context)
 
     assert len(context.timers) == 1
-    assert context.timers[0].cancelled is True
+    assert context.timers[0].is_completed is True
 
 
 # --- Static-path preservation ---------------------------------------------
@@ -1991,8 +2024,9 @@ def test_dynamic_cancellation_preserves_completed_iteration_instances() -> None:
 
     gen = orchestrator(context)
     next(gen)  # discover
-    gen.send(context.last_wave)  # first inspect wave
-    gen.send(context.last_wave)  # final inspect instance
+    gen.send(context.last_wave)  # dispatches first inspect wave
+    for _ in range(MAX_PARALLELISM):
+        gen.send(context.last_wave)
     result: dict[str, Any] = {}
     try:
         gen.send(context.cancel_task)
@@ -2007,3 +2041,630 @@ def test_dynamic_cancellation_preserves_completed_iteration_instances() -> None:
         inspect_status["instances"][f"inspect[{i}]"]["state"]
         for i in range(count)
     ] == [*(["completed"] * MAX_PARALLELISM), "pending"]
+
+
+def _effective_execution(
+    *,
+    attempts: int = 3,
+    delays: list[int] | None = None,
+    continue_on_error: bool = False,
+) -> dict[str, Any]:
+    return {
+        "timeout_ms": 1_000,
+        "max_attempts": attempts,
+        "retry_delays_ms": delays if delays is not None else [0] * (attempts - 1),
+        "continue_on_error": continue_on_error,
+        "timeout_source": "task",
+        "retry_source": "task",
+    }
+
+
+def _policy_task(
+    task_id: str,
+    *,
+    attempts: int = 3,
+    delays: list[int] | None = None,
+    continue_on_error: bool = False,
+    depends_on: list[str] | None = None,
+    args: dict[str, Any] | None = None,
+    when: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    task = {
+        "id": task_id,
+        "type": TOOL_TASK_TYPE,
+        "tool": "run",
+        "args": args or {},
+        "depends_on": depends_on or [],
+        "execution": _effective_execution(
+            attempts=attempts,
+            delays=delays,
+            continue_on_error=continue_on_error,
+        ),
+    }
+    if when is not None:
+        task["when"] = when
+    return task
+
+
+def _activity_failure(
+    *,
+    task_id: str = "work",
+    code: str = "service_busy",
+    kind: str = "handler_transient",
+    retryable: bool = True,
+    continuable: bool = True,
+) -> dict[str, Any]:
+    return {
+        "id": task_id,
+        "ok": False,
+        "failure": {
+            "error_code": code,
+            "error": "Safe failure.",
+            "kind": kind,
+            "retryable": retryable,
+            "continuable": continuable,
+        },
+    }
+
+
+def _activity_success(task_id: str, result: Any) -> dict[str, Any]:
+    return {"id": task_id, "ok": True, "result": result}
+
+
+def test_policy_task_routes_dynamic_and_dispatches_retry_contract() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append(payload)
+        if payload["attempt"] < 3:
+            return _activity_failure(task_id=payload["id"])
+        return _activity_success(payload["id"], {"done": True})
+
+    result, context = _run_dynamic(
+        [_policy_task("work", delays=[0, 2_000], args={"fixed": "value"})],
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+
+    assert result == {"results": {"work": {"done": True}}}
+    assert [call["attempt"] for call in calls] == [1, 2, 3]
+    assert [call["max_attempts"] for call in calls] == [3, 3, 3]
+    assert len({call["idempotency_key"] for call in calls}) == 1
+    assert all(call["task_id"] == "work" for call in calls)
+    assert all(call["node_instance_id"] == "work" for call in calls)
+    assert all(call["args"] == {"fixed": "value"} for call in calls)
+    initial = datetime(2024, 1, 1, tzinfo=UTC)
+    assert context.timer_deadlines == [initial, initial + timedelta(seconds=2)]
+    assert context.statuses[0]["schema_version"] == 2
+
+
+def test_policy_retry_sequence_is_deterministic_across_replay() -> None:
+    def execute() -> tuple[list[tuple[int, str, dict[str, Any]]], list[datetime]]:
+        observed: list[tuple[int, str, dict[str, Any]]] = []
+
+        def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+            observed.append(
+                (payload["attempt"], payload["idempotency_key"], payload["args"])
+            )
+            if payload["attempt"] == 1:
+                return _activity_failure(task_id=payload["id"])
+            return _activity_success(payload["id"], "ok")
+
+        _, context = _run_dynamic(
+            [_policy_task("work", attempts=2, delays=[1_250], args={"x": 1})],
+            policy={"allowed_tools": ["run"], "allowed_subagents": []},
+            result_for=result_for,
+        )
+        return observed, context.timer_deadlines
+
+    assert execute() == execute()
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        (
+            _activity_failure(
+                code="invalid",
+                kind="handler_terminal",
+                retryable=False,
+            ),
+            "invalid",
+        ),
+        (
+            _activity_failure(
+                code="workflow_task_execution_unknown",
+                kind="execution_unknown",
+                retryable=False,
+            ),
+            "workflow_task_execution_unknown",
+        ),
+    ],
+)
+def test_terminal_and_unknown_outcomes_do_not_retry(
+    failure: dict[str, Any],
+    expected_code: str,
+) -> None:
+    result, context = _run_dynamic(
+        [_policy_task("work")],
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=lambda _name, _payload: failure,
+    )
+    assert result["failed"] is True
+    assert result["error_code"] == expected_code
+    assert len(context.calls) == 1
+    assert context.timers == []
+
+
+def test_bare_activity_exception_retries_then_succeeds() -> None:
+    def result_for(name: str, payload: dict[str, Any]) -> Any:
+        if payload["attempt"] == 1:
+            return RuntimeError("ambiguous worker failure")
+        return _activity_success(payload["id"], "recovered")
+
+    result, context = _run_dynamic(
+        [_policy_task("work", attempts=2, delays=[0])],
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+    assert result["results"]["work"] == "recovered"
+    assert [payload["attempt"] for _, payload in context.calls] == [1, 2]
+    assert len(context.timers) == 1
+
+
+def test_retry_exhaustion_reports_final_attempt_count_when_continued() -> None:
+    result, context = _run_dynamic(
+        [_policy_task("work", attempts=3, delays=[0, 0], continue_on_error=True)],
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=lambda _name, _payload: _activity_failure(),
+    )
+
+    assert result["results"]["work"]["attempts"] == 3
+    assert [payload["attempt"] for _, payload in context.calls] == [1, 2, 3]
+    assert len(context.timers) == 2
+
+
+def test_retry_reuses_initial_template_resolution() -> None:
+    source = {
+        "id": "source",
+        "type": TOOL_TASK_TYPE,
+        "tool": "collect",
+        "args": {},
+        "depends_on": [],
+    }
+    target = _policy_task(
+        "work",
+        attempts=2,
+        delays=[0],
+        depends_on=["source"],
+        args={"value": "${source.result.value}"},
+    )
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "source":
+            return {"id": "source", "result": {"value": "frozen"}}
+        if payload["attempt"] == 1:
+            return _activity_failure(task_id=payload["id"])
+        return _activity_success(payload["id"], payload["args"])
+
+    result, context = _run_dynamic(
+        [source, target],
+        policy={"allowed_tools": ["collect", "run"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+    work_calls = [payload for _, payload in context.calls if payload["id"] == "work"]
+    assert [payload["args"] for payload in work_calls] == [
+        {"value": "frozen"},
+        {"value": "frozen"},
+    ]
+    assert result["results"]["work"] == {"value": "frozen"}
+
+
+def test_exhausted_failure_stops_after_same_wave_success_is_committed() -> None:
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "a_fail":
+            return _activity_failure(task_id=payload["id"])
+        return _activity_success(payload["id"], {"saved": True})
+
+    result, context = _run_dynamic(
+        [_policy_task("a_fail", attempts=1), _policy_task("b_success", attempts=1)],
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+    assert result["failed"] is True
+    assert result["node_id"] == "a_fail"
+    assert result["results"] == {"b_success": {"saved": True}}
+    assert len(context.calls) == 2
+
+
+def test_continued_failure_unlocks_condition_and_template() -> None:
+    tasks = [
+        _policy_task("work", attempts=1, continue_on_error=True),
+        _policy_task(
+            "recover",
+            attempts=1,
+            depends_on=["work"],
+            args={"code": "${work.result.error_code}"},
+            when={
+                "ref": "${work.result.failed}",
+                "operator": "equals",
+                "value": True,
+            },
+        ),
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "work":
+            return _activity_failure(
+                task_id=payload["id"],
+                code="service_down",
+                kind="handler_terminal",
+                retryable=False,
+            )
+        return _activity_success(payload["id"], payload["args"])
+
+    result, context = _run_dynamic(
+        tasks,
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+    assert result["results"]["work"] == {
+        "failed": True,
+        "error_code": "service_down",
+        "error": "Safe failure.",
+        "kind": "handler_terminal",
+        "attempts": 1,
+    }
+    assert result["results"]["recover"] == {"code": "service_down"}
+    assert context.calls[-1][1]["args"] == {"code": "service_down"}
+
+
+@pytest.mark.parametrize("kind", ["handler_contract", "authorization"])
+def test_noncontinuable_failure_never_continues(kind: str) -> None:
+    code = (
+        "workflow_task_handler_contract"
+        if kind == "handler_contract"
+        else "workflow_task_authorization"
+    )
+    tasks = [
+        _policy_task("work", attempts=1, continue_on_error=True),
+        _policy_task("downstream", attempts=1, depends_on=["work"]),
+    ]
+    result, context = _run_dynamic(
+        tasks,
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=lambda _name, _payload: _activity_failure(
+            code=code,
+            kind=kind,
+            retryable=False,
+            continuable=False,
+        ),
+    )
+    assert result["failed"] is True
+    assert result["error_code"] == code
+    assert [payload["id"] for _, payload in context.calls] == ["work"]
+
+
+def test_for_each_instances_retry_independently_and_aggregate_errors() -> None:
+    source = {
+        "id": "source",
+        "type": TOOL_TASK_TYPE,
+        "tool": "collect",
+        "args": {},
+        "depends_on": [],
+    }
+    iterated = _policy_task(
+        "inspect",
+        attempts=2,
+        delays=[0],
+        continue_on_error=True,
+        depends_on=["source"],
+        args={"index": "${index}"},
+    )
+    iterated["for_each"] = "${source.result.items}"
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "source":
+            return {"id": "source", "result": {"items": [{}, {}]}}
+        if payload["id"] == "inspect[0]" and payload["attempt"] == 1:
+            return _activity_failure(task_id=payload["id"])
+        if payload["id"] == "inspect[1]":
+            return _activity_failure(
+                task_id=payload["id"],
+                code="bad_item",
+                kind="handler_terminal",
+                retryable=False,
+            )
+        return _activity_success(payload["id"], payload["args"])
+
+    result, context = _run_dynamic(
+        [source, iterated],
+        policy={"allowed_tools": ["collect", "run"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+    assert [entry["status"] for entry in result["results"]["inspect"]] == [
+        "completed",
+        "failed_continued",
+    ]
+    assert result["results"]["inspect"][1]["result"]["attempts"] == 1
+    inspect_calls = [
+        payload for _, payload in context.calls if payload["id"].startswith("inspect")
+    ]
+    assert [(call["id"], call["attempt"]) for call in inspect_calls] == [
+        ("inspect[0]", 1),
+        ("inspect[1]", 1),
+        ("inspect[0]", 2),
+    ]
+    assert context.statuses[-1]["nodes"]["inspect"]["state"] == "aggregated_with_errors"
+
+
+def test_cancellation_during_retry_timer_dispatches_nothing_later() -> None:
+    context = _DynamicContext(
+        [_policy_task("work", attempts=2, delays=[5_000])],
+        lambda _name, _payload: _activity_failure(),
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+    )
+    context.cancel_task.result = "stop"
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+    generator = orchestrator(context)
+
+    next(generator)
+    generator.send(context.last_wave)
+    result: dict[str, Any] = {}
+    try:
+        generator.send(context.cancel_task)
+    except StopIteration as stop:
+        result = stop.value
+
+    assert result["canceled"] is True
+    assert len(context.calls) == 1
+    assert len(context.timers) == 1
+    assert context.timers[0].cancelled is True
+
+
+def test_cancellation_during_policy_activity_does_not_cancel_activity() -> None:
+    class _TrackingContext(_DynamicContext):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.activity_tasks: list[_Task] = []
+
+        def call_activity(self, name: str, payload: dict[str, Any]) -> _Task:
+            task = super().call_activity(name, payload)
+            self.activity_tasks.append(task)
+            return task
+
+    context = _TrackingContext(
+        [_policy_task("work")],
+        lambda _name, payload: _activity_success(payload["id"], "late"),
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+    )
+    context.cancel_task.result = "stop"
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+    generator = orchestrator(context)
+
+    next(generator)
+    result: dict[str, Any] = {}
+    try:
+        generator.send(context.cancel_task)
+    except StopIteration as stop:
+        result = stop.value
+
+    assert result["canceled"] is True
+    assert len(context.calls) == 1
+    assert context.activity_tasks[0].cancelled is False
+
+
+def test_infrastructure_failure_waits_for_pending_sibling_before_application() -> None:
+    class _DeferredSiblingContext(_DynamicContext):
+        def call_activity(self, name: str, payload: dict[str, Any]) -> _Task:
+            self.calls.append((name, payload))
+            if payload["id"] == "a_fail":
+                return _Task(RuntimeError("worker disappeared"))
+            task = _Task(_activity_success(payload["id"], {"sibling": "applied"}))
+            task.is_completed = False
+            return task
+
+    tasks = [
+        _policy_task("a_fail", attempts=1),
+        _policy_task("b_later", attempts=1),
+    ]
+    context = _DeferredSiblingContext(
+        tasks,
+        lambda _name, _payload: None,
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+    )
+    result = _run_orchestrator(_registered_function(engine.ORCHESTRATOR_NAME), context)
+
+    assert result["error_code"] == "workflow_task_activity_infrastructure"
+    assert result["results"] == {"b_later": {"sibling": "applied"}}
+    assert result["error_code"] != "workflow_task_handler_contract"
+
+
+def test_retry_timers_release_independently_in_deadline_order() -> None:
+    tasks = [
+        _policy_task("early", attempts=2, delays=[1_000]),
+        _policy_task("late", attempts=2, delays=[300_000]),
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["attempt"] == 1:
+            return _activity_failure(task_id=payload["id"])
+        return _activity_success(payload["id"], payload["id"])
+
+    result, context = _run_dynamic(
+        tasks,
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+
+    assert result["results"] == {"early": "early", "late": "late"}
+    assert [(payload["id"], payload["attempt"]) for _, payload in context.calls] == [
+        ("early", 1),
+        ("late", 1),
+        ("early", 2),
+        ("late", 2),
+    ]
+    initial = datetime(2024, 1, 1, tzinfo=UTC)
+    assert context.timer_deadlines == [
+        initial + timedelta(seconds=1),
+        initial + timedelta(minutes=5),
+    ]
+
+
+def test_pending_activity_capacity_is_not_blocked_by_long_retry_timer() -> None:
+    tasks = [_policy_task("a_long_retry", attempts=2, delays=[300_000])]
+    tasks.extend(
+        _policy_task(f"b_{index}", attempts=1)
+        for index in range(MAX_PARALLELISM)
+    )
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "a_long_retry" and payload["attempt"] == 1:
+            return _activity_failure(task_id=payload["id"])
+        return _activity_success(payload["id"], payload["id"])
+
+    _, context = _run_dynamic(
+        tasks,
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+    calls = [(payload["id"], payload["attempt"]) for _, payload in context.calls]
+
+    assert calls[MAX_PARALLELISM] == (f"b_{MAX_PARALLELISM - 1}", 1)
+    assert calls[-1] == ("a_long_retry", 2)
+
+
+def test_policy_aware_target_outside_persisted_allowlist_never_dispatches() -> None:
+    context = _DynamicContext(
+        [_policy_task("crafted", attempts=1)],
+        lambda _name, _payload: {"ok": True, "result": "must not run"},
+        policy={"allowed_tools": [], "allowed_subagents": []},
+    )
+
+    with pytest.raises(RuntimeError, match="outside the persisted workflow owner policy"):
+        _run_orchestrator(_registered_function(engine.ORCHESTRATOR_NAME), context)
+
+    assert context.calls == []
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        {
+            "id": "other",
+            "ok": True,
+            "result": "forged",
+        },
+        {
+            "id": "work",
+            "ok": False,
+            "failure": {
+                "error_code": "service_busy",
+                "error": "Safe failure.",
+                "kind": "handler_transient",
+                "retryable": True,
+            },
+        },
+        {
+            "id": "work",
+            "ok": False,
+            "failure": {
+                "error_code": "workflow_task_authorization",
+                "error": "Task target is not authorized.",
+                "kind": "authorization",
+                "retryable": True,
+                "continuable": True,
+            },
+        },
+    ],
+)
+def test_malformed_or_forged_activity_outcome_becomes_contract_failure(
+    outcome: dict[str, Any],
+) -> None:
+    result, context = _run_dynamic(
+        [_policy_task("work", attempts=3, delays=[0, 0], continue_on_error=True)],
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=lambda _name, _payload: outcome,
+    )
+
+    assert result["error_code"] == "workflow_task_handler_contract"
+    assert result["failed"] is True
+    assert len(context.calls) == 1
+    assert context.timers == []
+
+
+def test_non_iterated_retry_wait_sets_logical_state() -> None:
+    context = _DynamicContext(
+        [_policy_task("work", attempts=2, delays=[60_000])],
+        lambda _name, payload: _activity_failure(task_id=payload["id"]),
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+    )
+    context.cancel_task.result = "stop"
+    generator = _registered_function(engine.ORCHESTRATOR_NAME)(context)
+
+    next(generator)
+    generator.send(context.last_wave)
+
+    assert context.statuses[-1]["nodes"]["work"]["state"] == "retry_wait"
+    with pytest.raises(StopIteration):
+        generator.send(context.cancel_task)
+
+
+@pytest.mark.asyncio
+async def test_policy_sub_agent_malformed_context_returns_contract_outcome() -> None:
+    activity = _registered_function(
+        engine.SUB_AGENT_ACTIVITY_NAME,
+        catalog=_catalog("specialist"),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(
+                allowed_tools=frozenset(),
+                allowed_subagents=frozenset({"specialist"}),
+            )
+        },
+    )
+    payload = _policy_activity_payload()
+    payload.pop("tool")
+    payload.pop("args")
+    payload.update({"agent": "specialist", "task": "work", "attempt": False})
+
+    outcome = await activity(payload)
+
+    assert outcome["failure"]["error_code"] == "workflow_task_handler_contract"
+    assert outcome["failure"]["retryable"] is False
+    assert outcome["failure"]["continuable"] is False
+
+
+def test_control_plane_failure_cancels_existing_retry_timer() -> None:
+    tasks = [_policy_task("a_retry", attempts=2, delays=[300_000])]
+    tasks.extend(
+        _policy_task(f"f_{index}", attempts=1)
+        for index in range(MAX_PARALLELISM - 1)
+    )
+    tasks.extend([
+        _policy_task("z_source", attempts=1),
+        _policy_task(
+            "z_bad",
+            attempts=1,
+            depends_on=["z_source"],
+            when={
+                "ref": "${z_source.result.missing}",
+                "operator": "equals",
+                "value": True,
+            },
+        ),
+    ])
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "a_retry":
+            return _activity_failure(task_id=payload["id"])
+        return _activity_success(payload["id"], {"ready": True})
+
+    result, context = _run_dynamic(
+        tasks,
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+
+    assert result["error_code"] == "workflow_reference_unresolved"
+    assert len(context.timers) == 1
+    assert context.timers[0].cancelled is True
