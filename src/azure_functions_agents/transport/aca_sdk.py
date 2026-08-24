@@ -59,6 +59,7 @@ from .transport_models import (
     SandboxGroupBinding,
     SandboxGroupBindingError,
     SandboxGroupIdentity,
+    SandboxGroupTransientError,
     SandboxLifecyclePolicy,
     SandboxProvisioningError,
     SandboxSnapshot,
@@ -92,6 +93,8 @@ _ARM_HOST = "https://management.azure.com"
 _ARM_SCOPE = f"{_ARM_HOST}/.default"
 _ARM_API_VERSION = "2026-02-01-preview"
 _ARM_REQUEST_TIMEOUT_SECONDS = 30
+_ARM_AUTHORIZATION_STATUS_CODES = frozenset({401, 403})
+_ARM_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 _PROVISIONING_ATTEMPT_LABEL = "provisioning_attempt_id"
 _OPERATION_LABEL = "operation_label"
 _CONTROL_OPERATION_TIMEOUT_SECONDS = 30
@@ -170,6 +173,20 @@ _SDK_FACTORIES: Callable[[], SdkFactories] = _load_sdk_factories
 _CREDENTIAL_FACTORY: Callable[[], AsyncTokenCredential] = build_async_credential
 
 
+def _raise_for_arm_status(status: int) -> None:
+    """Classify an ARM response status and raise the appropriate typed error."""
+    if status in _ARM_AUTHORIZATION_STATUS_CODES:
+        raise SandboxGroupAuthorizationError()
+    if status in _ARM_RETRYABLE_STATUS_CODES:
+        raise SandboxGroupTransientError(
+            f"Sandbox Group ARM lookup received retryable status {status}."
+        )
+    if status != 200:
+        raise SandboxGroupBindingError(
+            f"Sandbox Group ARM lookup failed with status {status}."
+        )
+
+
 async def _read_arm_group(
     credential: AsyncTokenCredential, resource_id: str
 ) -> Mapping[str, object]:
@@ -189,15 +206,15 @@ async def _read_arm_group(
                 headers={"Authorization": f"Bearer {token.token}"},
             ) as response,
         ):
-            if response.status != 200:
-                raise SandboxGroupBindingError(
-                    "Configured Sandbox Group could not be resolved under the "
-                    "controller credential."
-                )
+            _raise_for_arm_status(response.status)
             payload = await response.json(content_type=None)
-    except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        raise SandboxGroupTransientError(
+            "Sandbox Group ARM lookup failed due to a transient transport error."
+        ) from exc
+    except ValueError as exc:
         raise SandboxGroupBindingError(
-            "Configured Sandbox Group ARM lookup failed due to a transport or decode error."
+            "Sandbox Group ARM lookup failed due to a decode error."
         ) from exc
 
     if not isinstance(payload, dict):

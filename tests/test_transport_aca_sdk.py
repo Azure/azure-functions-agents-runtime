@@ -40,6 +40,7 @@ from azure_functions_agents.transport.transport_models import (
     SandboxGroupAuthorizationError,
     SandboxGroupBinding,
     SandboxGroupBindingError,
+    SandboxGroupTransientError,
     SandboxLifecyclePolicy,
     SandboxProvisioningError,
     SandboxProvisioningLabels,
@@ -276,7 +277,7 @@ async def test_read_arm_group_uses_an_explicit_timeout_and_translates_transport_
     monkeypatch.setattr(aca_sdk.aiohttp, "ClientSession", _FailingSession)
     credential = FakeCredential()
 
-    with pytest.raises(SandboxGroupBindingError, match="transport or decode error"):
+    with pytest.raises(SandboxGroupTransientError, match=r"retryable|transient"):
         await aca_sdk._read_arm_group(credential, "/subscriptions/sub-123/resourceGroups/rg-agent")
 
     assert isinstance(session_kwargs.get("timeout"), aiohttp.ClientTimeout)
@@ -321,6 +322,178 @@ async def test_read_arm_group_sends_bearer_token_without_logging_it(
     await aca_sdk._read_arm_group(credential, _GROUP_ID)
 
     assert captured_headers["Authorization"] == "Bearer test-token"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: _read_arm_group error classification
+# ---------------------------------------------------------------------------
+
+
+def _make_status_response(status: int) -> type:
+    """Build a fake aiohttp response context manager with the given status."""
+
+    class _Response:
+        def __init__(self) -> None:
+            self.status = status
+
+        async def __aenter__(self) -> _Response:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def json(self, *, content_type: object) -> dict[str, str]:
+            del content_type
+            return {"error": {"code": "SomeError"}}
+
+    return _Response
+
+
+def _make_session_class(response_factory: type) -> type:
+    """Build a fake aiohttp.ClientSession that returns the given response."""
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        def get(self, *args: object, **kwargs: object) -> Any:
+            del args, kwargs
+            return response_factory()
+
+    return _Session
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_read_arm_group_authorization_status_raises_authorization_error(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """401/403 from ARM must surface as SandboxGroupAuthorizationError."""
+    monkeypatch.setattr(
+        aca_sdk.aiohttp, "ClientSession", lambda **_: _make_session_class(_make_status_response(status))()
+    )
+    with pytest.raises(SandboxGroupAuthorizationError):
+        await aca_sdk._read_arm_group(FakeCredential(), _GROUP_ID)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+async def test_read_arm_group_retryable_status_raises_transient_error(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """Retryable ARM status codes must surface as SandboxGroupTransientError."""
+    monkeypatch.setattr(
+        aca_sdk.aiohttp, "ClientSession", lambda **_: _make_session_class(_make_status_response(status))()
+    )
+    with pytest.raises(SandboxGroupTransientError, match=r"retryable|transient"):
+        await aca_sdk._read_arm_group(FakeCredential(), _GROUP_ID)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 400])
+async def test_read_arm_group_permanent_status_raises_binding_error(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """Non-retryable, non-auth statuses (e.g. 404) remain permanent binding errors."""
+    monkeypatch.setattr(
+        aca_sdk.aiohttp, "ClientSession", lambda **_: _make_session_class(_make_status_response(status))()
+    )
+    with pytest.raises(SandboxGroupBindingError):
+        await aca_sdk._read_arm_group(FakeCredential(), _GROUP_ID)
+
+
+@pytest.mark.asyncio
+async def test_read_arm_group_timeout_raises_transient_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timeout during ARM call is transient, not permanent."""
+
+    class _TimeoutSession:
+        async def __aenter__(self) -> _TimeoutSession:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        def get(self, *args: Any, **kwargs: Any) -> Any:
+            raise TimeoutError()
+
+    monkeypatch.setattr(aca_sdk.aiohttp, "ClientSession", lambda **_: _TimeoutSession())
+    with pytest.raises(SandboxGroupTransientError, match=r"retryable|transient"):
+        await aca_sdk._read_arm_group(FakeCredential(), _GROUP_ID)
+
+
+@pytest.mark.asyncio
+async def test_read_arm_group_value_error_raises_binding_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A JSON decode error (ValueError) is a permanent binding error."""
+
+    class _BadJsonResponse:
+        status = 200
+
+        async def __aenter__(self) -> _BadJsonResponse:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def json(self, *, content_type: object) -> dict[str, str]:
+            raise ValueError("malformed JSON")
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        def get(self, *args: object, **kwargs: object) -> _BadJsonResponse:
+            del args, kwargs
+            return _BadJsonResponse()
+
+    monkeypatch.setattr(aca_sdk.aiohttp, "ClientSession", lambda **_: _Session())
+    with pytest.raises(SandboxGroupBindingError, match="decode"):
+        await aca_sdk._read_arm_group(FakeCredential(), _GROUP_ID)
+
+
+@pytest.mark.asyncio
+async def test_read_arm_group_success_returns_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """200 with valid JSON still returns a SandboxGroupBinding."""
+
+    class _OkResponse:
+        status = 200
+
+        async def __aenter__(self) -> _OkResponse:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def json(self, *, content_type: object) -> dict[str, str]:
+            del content_type
+            return {"id": _GROUP_ID, "location": "westus2"}
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        def get(self, *args: object, **kwargs: object) -> _OkResponse:
+            del args, kwargs
+            return _OkResponse()
+
+    monkeypatch.setattr(aca_sdk.aiohttp, "ClientSession", lambda **_: _Session())
+    result = await aca_sdk._read_arm_group(FakeCredential(), _GROUP_ID)
+    assert result["id"] == _GROUP_ID
+    assert result["location"] == "westus2"
 
 
 @pytest.mark.asyncio

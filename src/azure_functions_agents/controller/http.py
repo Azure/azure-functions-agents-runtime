@@ -41,6 +41,7 @@ from .readiness import (
     SessionActivationGoneError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
+    SessionActivationTransientError,
 )
 
 _RESPOND_ASYNC_PREFERENCE = "respond-async"
@@ -170,6 +171,8 @@ async def _start_run_or_response(
         )
     except SessionActivationAuthorizationError:
         return _sandbox_group_authorization_response()
+    except SessionActivationTransientError:
+        return _sandbox_group_transient_response()
     except LinkedActiveRunConflictError as exc:
         return _linked_active_run_response(
             agent_slug,
@@ -229,6 +232,8 @@ async def read_status(
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
     except SessionActivationAuthorizationError:
         return _sandbox_group_authorization_response()
+    except SessionActivationTransientError:
+        return _sandbox_group_transient_response()
 
 
 async def read_result(
@@ -250,6 +255,8 @@ async def read_result(
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
     except SessionActivationAuthorizationError:
         return _sandbox_group_authorization_response()
+    except SessionActivationTransientError:
+        return _sandbox_group_transient_response()
     if (
         status.error is not None
         and status.error.code == SESSION_TOMBSTONED_ERROR_CODE
@@ -298,6 +305,8 @@ async def cancel_run(
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
     except SessionActivationAuthorizationError:
         return _sandbox_group_authorization_response()
+    except SessionActivationTransientError:
+        return _sandbox_group_transient_response()
 
 
 def status_payload(status: RunStatus) -> dict[str, object]:
@@ -421,6 +430,21 @@ def _sandbox_group_authorization_response() -> ControllerResponse:
             "reason": SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
             "message": SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
         },
+    )
+
+
+_SANDBOX_GROUP_TRANSIENT_ERROR_CODE = "sandbox_group_transient"
+_SANDBOX_GROUP_TRANSIENT_RETRY_AFTER_SECONDS = 2
+
+
+def _sandbox_group_transient_response() -> ControllerResponse:
+    return ControllerResponse(
+        status_code=503,
+        body={
+            "error": _SANDBOX_GROUP_TRANSIENT_ERROR_CODE,
+            "reason": _SANDBOX_GROUP_TRANSIENT_ERROR_CODE,
+        },
+        headers={"Retry-After": str(_SANDBOX_GROUP_TRANSIENT_RETRY_AFTER_SECONDS)},
     )
 
 

@@ -89,6 +89,7 @@ from ..transport.transport_models import (
     SandboxFileOperationError,
     SandboxGroupAuthorizationError,
     SandboxGroupBinding,
+    SandboxGroupTransientError,
     SandboxLifecyclePolicy,
     SandboxProvisioningLabels,
 )
@@ -196,6 +197,10 @@ class SessionActivationSetupTimeoutError(SessionActivationError):
 
 class SessionActivationAuthorizationError(SessionActivationError):
     """The controller lacks required Sandbox Group data-plane authorization."""
+
+
+class SessionActivationTransientError(SessionActivationError):
+    """A transient infrastructure failure prevents activation right now (retryable)."""
 
 
 class SessionCreationUnavailableError(SessionActivationError):
@@ -403,7 +408,14 @@ class SessionRuntimeBinding:
 
     async def get_provider(self) -> SandboxSessionProvider:
         """Return the one lazily opened provider for this app's Sandbox Group."""
-        return await self._provider.get()
+        try:
+            return await self._provider.get()
+        except SandboxGroupAuthorizationError:
+            raise SessionActivationAuthorizationError(
+                SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+            ) from None
+        except SandboxGroupTransientError as exc:
+            raise SessionActivationTransientError(str(exc)) from None
 
     async def get_state_store(self) -> StateStoreBinding:
         """Return the one lazily resolved state-store binding for this app."""

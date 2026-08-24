@@ -43,6 +43,10 @@ class SandboxGroupBindingError(SandboxTransportError):
     """Raised when a configured, persisted, ARM, or live group binding disagrees."""
 
 
+class SandboxGroupTransientError(SandboxTransportError):
+    """Raised when a Sandbox Group ARM lookup fails transiently (retryable)."""
+
+
 class AcaSandboxDependencyError(SandboxTransportError):
     """Raised when the optional ACA Sandbox SDK extra is unavailable."""
 
