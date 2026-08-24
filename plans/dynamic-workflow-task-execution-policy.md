@@ -62,7 +62,7 @@ payloads, scheduler path, and status versions.
   does not alter the minimal quickstart.
 - [x] (2026-08-24 04:00Z) Passed the complete repository gate: Ruff reported no
   findings, strict mypy reported no issues across 42 source files, and the
-  CI-equivalent coverage run passed 1,152 tests with 52 E2E tests deselected
+  CI-equivalent coverage run passed 1,153 tests with 52 E2E tests deselected
   after final-review regressions were added.
 - [ ] Complete the final branch review and push the implementation branch.
 
@@ -147,6 +147,11 @@ payloads, scheduler path, and status versions.
   output.
   Evidence: Fail-fast instances now enter terminal `failed` state before status publication;
   v3 counts and the built-in UI expose a matching `failed` bucket.
+
+- Observation: A subsequent review found that multiple failures drained from one wave updated
+  every instance state but only the selected terminal failure's logical node state.
+  Evidence: Each fail-fast outcome now marks its logical node failed before the deterministic
+  lowest-ordered failure publishes terminal status; a two-node same-wave regression covers it.
 
 ## Decision Log
 

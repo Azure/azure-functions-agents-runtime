@@ -1590,6 +1590,7 @@ def _apply_dynamic_wave_results(
                     instance["state"] = "failed_continued"
                 else:
                     instance["state"] = "failed"
+                    state.logical_state[instance["logical_id"]] = "failed"
                     failures.append((instance, failure))
                     continue
         if instance["index"] is None and instance["state"] in {

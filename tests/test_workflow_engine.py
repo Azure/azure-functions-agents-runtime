@@ -2447,6 +2447,21 @@ def test_terminal_and_unknown_outcomes_do_not_retry(
     assert terminal_status["counts"]["failed"] == 1
 
 
+def test_same_wave_failures_publish_every_logical_node_as_failed() -> None:
+    result, context = _run_dynamic(
+        [_policy_task("alpha", attempts=1), _policy_task("beta", attempts=1)],
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=lambda _name, payload: _activity_failure(task_id=payload["id"]),
+    )
+
+    assert result["failed"] is True
+    terminal_status = context.statuses[-1]
+    assert terminal_status["nodes"]["alpha"]["state"] == "failed"
+    assert terminal_status["nodes"]["beta"]["state"] == "failed"
+    assert terminal_status["counts"]["running"] == 0
+    assert terminal_status["counts"]["failed"] == 2
+
+
 def test_bare_activity_exception_retries_then_succeeds() -> None:
     def result_for(name: str, payload: dict[str, Any]) -> Any:
         if payload["attempt"] == 1:
