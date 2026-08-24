@@ -99,13 +99,20 @@ bug fixes.
    terminal result**. Unit or integration tests that inject model output or call
    the parser/runtime directly cannot substitute for this E2E.
 6. Give each live E2E dependency a uniquely named Foundry environment variable
-   documented in the sample and FRD. When those variables are absent, the live
-   sample E2E must skip with a clear reason rather than fail. When they are
-   present, a sample-owned setup/test script may:
-   - generate an ignored `local.settings.json`;
-   - run the real-model E2E and capture concise evidence;
-   - clean up only the files that script created.
-   Record the exact commands and resulting evidence in both the FRD and PR.
+   documented in the sample and FRD. When the opt-in variables are absent, the
+   live sample E2E must skip with a clear reason rather than fail; partial
+   configuration should fail with an actionable message. When they are present,
+   a sample-owned setup/test script may:
+   - generate an ignored `local.settings.json`, but must refuse to overwrite an
+     existing or concurrently created user file;
+   - run the real-model E2E and capture exact evidence of the authored tool
+     arguments, dependency graph, or configuration plus the observable result;
+   - track file ownership and clean up only the files that script created.
+   Record the exact commands, prompt, relevant model-authored structured input,
+   and resulting terminal evidence in both the FRD and PR without exposing secrets.
+   The `samples/workflow-retry-policy/scripts/run-e2e.py` proposed in PR #170 is
+   a concrete example of this pattern when available, but these gates are generic
+   and do not depend on that unmerged implementation.
 7. Treat independent sample review and the required live boundary as a sample
    validation gate. Do not accept bypass-model tests as evidence that it passed.
 8. Run the full CI-equivalent gate:

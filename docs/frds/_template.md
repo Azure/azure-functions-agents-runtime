@@ -81,10 +81,14 @@ branch: <user>/<slug>
 - **Uniquely named Foundry environment variables:** …
 - **Sample-owned setup/test script:** …
 - **Exact setup, run, and test commands:** …
-- **Concise evidence to capture in the PR:** …
-- **Generated ignored files (for example, `local.settings.json`):** …
-- **Cleanup:** … (remove only files created by the sample-owned script)
-- **Missing-environment behavior:** Skip clearly rather than fail.
+- **Exact evidence to capture in the PR:** … (prompt, relevant model-authored
+  tool arguments / dependency graph / configuration, and observable result)
+- **Generated ignored files (for example, `local.settings.json`):** … (refuse
+  to overwrite an existing or concurrently created user file)
+- **Cleanup:** … (track ownership and remove only files created by the
+  sample-owned script)
+- **Missing-environment behavior:** Skip clearly when not opted in; fail with an
+  actionable message when only part of the required configuration is present.
 
 ## 6. Decisions log
 
@@ -114,8 +118,10 @@ branch: <user>/<slug>
 - [ ] Opt-in real-model E2E (if required): prompt → model → tool call →
       parser/runtime → observable terminal result
 - [ ] Missing E2E environment variables skip clearly rather than fail.
-- [ ] Exact commands and concise evidence recorded in the FRD and PR.
-- [ ] Sample-owned script cleans up only the files it created.
+- [ ] Exact commands, prompt, structured model output, and terminal evidence
+      recorded in the FRD and PR without exposing secrets.
+- [ ] Sample-owned script refuses to overwrite user files and cleans up only
+      the files it created.
 
 ## 8. Docs impact
 
