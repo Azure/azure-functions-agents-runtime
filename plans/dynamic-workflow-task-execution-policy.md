@@ -54,8 +54,13 @@ payloads, scheduler path, and status versions.
   deterministic incident-triage policy plan plus coverage for revocation between
   attempts, duplicate delivery, and one-time `when` evaluation. The targeted sample
   and engine suite passed 110 tests.
-- [ ] Update architecture and user documentation, maintain this plan, and run the complete
-  repository gate.
+- [x] (2026-08-24 03:45Z) Updated architecture and user documentation across
+  `docs/workflows.md`, `docs/architecture.md`, `docs/front-matter-spec.md`,
+  `docs/index.md`, and `README.md`; regenerated the unchanged front-matter reference,
+  invoked the schema-doc synchronization workflow, and passed `mkdocs build --strict`.
+  `docs/getting-started.md` did not change because execution policy is optional and
+  does not alter the minimal quickstart.
+- [ ] Run the complete repository gate and final branch review.
 
 ## Surprises & Discoveries
 
@@ -177,7 +182,10 @@ and supports exact continued-failure results for normal and `for_each` tasks. St
 reports executable-unit counts and bounded attempt state, the built-in UI renders all three
 status versions, and Activity telemetry records actual deliveries without replay metrics.
 The independent testing checkpoint now passes, including the deterministic sample mode and
-cross-attempt authorization/redelivery regressions. Documentation and the complete gate remain.
+cross-attempt authorization/redelivery regressions. Architecture, workflow authoring,
+front-matter cross-reference, landing-page, README, and deterministic sample documentation now
+describe the implemented contract, and the strict MkDocs build passes. The complete repository
+gate remains.
 
 ## Context and Orientation
 
