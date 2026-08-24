@@ -21,6 +21,21 @@ def _script_text() -> str:
     return html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
 
 
+def _css_rule(selector: str) -> str:
+    html = CHAT_UI_PATH.read_text(encoding="utf-8")
+    start = html.index(f"{selector} {{")
+    end = html.index("}", start)
+    return html[start:end]
+
+
+def test_workflow_card_wraps_long_structured_status_inside_chat_width() -> None:
+    card_rule = _css_rule(".workflow-card")
+    status_rule = _css_rule(".workflow-card-custom-status")
+
+    assert "min-width: 0;" in card_rule
+    assert "overflow-wrap: anywhere;" in status_rule
+
+
 def _history_replay_functions(script: str) -> str:
     start = script.index("function invalidateHistoryReplay()")
     end = script.index("\n\t\tfunction renderWaitingBubble()", start)

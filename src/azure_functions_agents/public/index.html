@@ -299,6 +299,8 @@
 
 		.workflow-card {
 			max-width: 85%;
+			min-width: 0;
+			box-sizing: border-box;
 			padding: 10px 12px;
 			border-radius: 12px;
 			border-bottom-left-radius: 4px;
@@ -360,6 +362,7 @@
 		.workflow-card-custom-status {
 			color: var(--muted);
 			margin-bottom: 4px;
+			overflow-wrap: anywhere;
 		}
 
 		.workflow-card-output {
