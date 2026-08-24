@@ -143,3 +143,43 @@ def test_throttle_retry_returns_none_for_out_of_bounds(value: str) -> None:
 def test_throttle_retry_is_case_insensitive() -> None:
     """Header lookup is case-insensitive (delegated to response_header)."""
     assert support.throttle_retry_after_seconds({"retry-after": "3"}) == 3.0
+
+
+class TestThrottledAdmissionRetryDelay:
+    """Cover the branch that decides whether a throttled admission is retried.
+
+    Mutating that branch to ignore Retry-After previously left every test green,
+    so the client behavior honoring backpressure was unprotected.
+    """
+
+    def test_throttled_status_with_a_valid_header_retries(self) -> None:
+        for status in (429, 503):
+            assert support.throttled_admission_retry_delay(
+                status, {"retry-after": "2"}, is_final_attempt=False
+            ) == pytest.approx(2.0)
+
+    def test_final_attempt_never_retries(self) -> None:
+        """Bounding the retry is what preserves the run's ability to fail."""
+        assert (
+            support.throttled_admission_retry_delay(503, {"retry-after": "2"}, is_final_attempt=True)
+            is None
+        )
+
+    def test_a_missing_header_declines_to_retry(self) -> None:
+        assert support.throttled_admission_retry_delay(503, {}, is_final_attempt=False) is None
+
+    def test_an_out_of_range_header_declines_to_retry(self) -> None:
+        """A server asking for an implausible wait is not honored blindly."""
+        assert (
+            support.throttled_admission_retry_delay(503, {"retry-after": "600"}, is_final_attempt=False)
+            is None
+        )
+
+    def test_non_throttled_statuses_are_not_retried(self) -> None:
+        for status in (202, 400, 401, 403, 404, 500, 504):
+            assert (
+                support.throttled_admission_retry_delay(
+                    status, {"retry-after": "2"}, is_final_attempt=False
+                )
+                is None
+            ), f"status {status} must not be treated as throttling"

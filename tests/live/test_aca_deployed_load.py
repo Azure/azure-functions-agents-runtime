@@ -44,6 +44,7 @@ from tests.live.aca_deployed_lifecycle_support import (
     read_session_operations,
 )
 from tests.live.aca_deployed_load_support import (
+    THROTTLED_ADMISSION_STATUSES,
     CommonActiveInterval,
     LoadLatencyMetrics,
     latency_metrics,
@@ -51,6 +52,7 @@ from tests.live.aca_deployed_load_support import (
     render_load_report,
     require_load_concurrency,
     throttle_retry_after_seconds,
+    throttled_admission_retry_delay,
     utc_now,
 )
 
@@ -1131,9 +1133,13 @@ async def _admission_response_outcome(
             response,
             retries,
         )
-    if response.status in {429, 503}:
-        retry_after = _throttle_retry_after_seconds(response.response_headers)
-        if retry_after is not None and not is_final_attempt:
+    if response.status in THROTTLED_ADMISSION_STATUSES:
+        retry_after = throttled_admission_retry_delay(
+            response.status,
+            response.response_headers,
+            is_final_attempt=is_final_attempt,
+        )
+        if retry_after is not None:
             return _SetupRetry(retry_after)
         return await _recover_ambiguous_http_outcome(
             resources,

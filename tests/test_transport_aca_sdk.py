@@ -555,15 +555,17 @@ def test_arm_group_retry_budget_stays_small_against_the_setup_budget() -> None:
 
     Retrying here spends wall-clock the caller already budgeted for setup, and
     the sleep is patched out in every other retry test, so nothing else notices
-    if the attempt count or delay grows. Five percent of the setup budget leaves
-    room for the current one second while still catching a runaway constant.
+    if the attempt count or delay grows. The intended worst case is one second;
+    the setup budget is asserted alongside it so the ratio stays visible.
     """
     worst_case_seconds = (aca_sdk._ARM_GROUP_RETRY_ATTEMPTS - 1) * (
         aca_sdk._ARM_GROUP_RETRY_DELAY_SECONDS
     )
-    assert worst_case_seconds <= SETUP_BUDGET_SECONDS / 20, (
-        f"ARM retry can add {worst_case_seconds}s to a {SETUP_BUDGET_SECONDS}s setup budget."
+    assert worst_case_seconds == pytest.approx(1.0), (
+        f"ARM retry worst case moved to {worst_case_seconds}s against a "
+        f"{SETUP_BUDGET_SECONDS}s setup budget; raise it deliberately or not at all."
     )
+    assert worst_case_seconds <= SETUP_BUDGET_SECONDS / 20
 
 
 @pytest.mark.asyncio

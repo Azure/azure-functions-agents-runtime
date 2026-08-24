@@ -38,6 +38,28 @@ def throttle_retry_after_seconds(headers: Mapping[str, str]) -> float | None:
     return float(seconds)
 
 
+THROTTLED_ADMISSION_STATUSES = frozenset({429, 503})
+
+
+def throttled_admission_retry_delay(
+    status: int,
+    headers: Mapping[str, str],
+    *,
+    is_final_attempt: bool,
+) -> float | None:
+    """Return the delay before retrying a throttled admission, or None to give up.
+
+    Honoring the server's backpressure is what a correct client does, but the
+    caller must still fail when admissions never recover, so the final attempt
+    always declines to retry.
+    """
+    if status not in THROTTLED_ADMISSION_STATUSES:
+        return None
+    if is_final_attempt:
+        return None
+    return throttle_retry_after_seconds(headers)
+
+
 # Events delivered by a single journal poll are parsed from the stream
 # microseconds apart. This window is wide enough to hold one such burst together
 # and far narrower than any plausible poll interval, so it separates bursts
