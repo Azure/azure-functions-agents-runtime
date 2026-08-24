@@ -17,14 +17,27 @@ import dataclasses
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import get_type_hints
 
 import pytest
 
-from azure_functions_agents._function_tool import WorkflowTool
+from azure_functions_agents._function_tool import (
+    WorkflowTool,
+    WorkflowToolMetadata,
+    workflow_tool,
+)
 from azure_functions_agents.config.schema import WorkflowSubagentRef
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows import context, engine, integration, registry, schema, tools
+
+
+def test_workflow_tool_public_annotations_resolve_at_runtime() -> None:
+    expected = schema.WorkflowRetryPolicy | None
+
+    assert get_type_hints(WorkflowTool)["retry"] == expected
+    assert get_type_hints(WorkflowToolMetadata)["retry"] == expected
+    assert get_type_hints(workflow_tool)["retry"] == expected
 
 
 @pytest.fixture(autouse=True)

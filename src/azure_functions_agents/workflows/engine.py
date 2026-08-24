@@ -1039,9 +1039,10 @@ def _publish_dynamic_status(
 def _terminalize_abandoned_retries(state: _DynamicWorkflowState) -> None:
     for instances in state.node_instances.values():
         for instance in instances:
-            if instance["state"] == "retry_wait":
+            if instance["state"] == "retry_wait" or instance.get("retry_ready") is True:
                 instance["state"] = "failed"
-                del instance["retry_deadline"]
+                instance.pop("retry_deadline", None)
+                instance.pop("retry_ready", None)
                 state.logical_state[instance["logical_id"]] = "failed"
 
 

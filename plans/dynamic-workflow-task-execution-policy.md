@@ -62,7 +62,7 @@ payloads, scheduler path, and status versions.
   does not alter the minimal quickstart.
 - [x] (2026-08-24 04:00Z) Passed the complete repository gate: Ruff reported no
   findings, strict mypy reported no issues across 42 source files, and the
-  CI-equivalent coverage run passed 1,156 tests with 52 E2E tests deselected
+  CI-equivalent coverage run passed 1,157 tests with 52 E2E tests deselected
   after final-review regressions were added.
 - [ ] Complete the final branch review and push the implementation branch.
 
@@ -164,6 +164,12 @@ payloads, scheduler path, and status versions.
   failures raised during post-wave materialization rather than Activity outcome application.
   Evidence: Abandoned-retry terminalization is now centralized in `_dynamic_failure()` so every
   controlled fail-fast path clears impossible retry state before publishing terminal status.
+
+- Observation: Final type/runtime review found that a matured retry can be `pending` with
+  `retry_ready` when a sibling failure terminates the workflow, and that public retry-policy
+  annotations referenced a type imported only for static checking.
+  Evidence: Terminal cleanup now covers both waiting and matured retry markers, while annotations
+  resolve through the initialized public package and are exercised with `typing.get_type_hints()`.
 
 ## Decision Log
 

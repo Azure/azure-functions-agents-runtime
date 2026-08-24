@@ -4,13 +4,12 @@ import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import wraps
-from typing import TYPE_CHECKING, Any, TypeVar, overload
+from typing import Any, TypeVar, overload
 
 from agent_framework import FunctionTool
 from pydantic import BaseModel
 
-if TYPE_CHECKING:
-    from .workflows.schema import WorkflowRetryPolicy
+import azure_functions_agents as _package
 
 __all__ = [
     "FunctionTool",
@@ -33,7 +32,7 @@ class WorkflowToolMetadata:
     description: str | None = None
     public: bool = True
     timeout: str | None = None
-    retry: WorkflowRetryPolicy | None = None
+    retry: _package.WorkflowRetryPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -45,7 +44,7 @@ class WorkflowTool:
     handler: Callable[..., Any] | None
     public: bool = True
     timeout: str | None = None
-    retry: WorkflowRetryPolicy | None = None
+    retry: _package.WorkflowRetryPolicy | None = None
 
 
 def get_workflow_tool_metadata(target: object) -> WorkflowToolMetadata | None:
@@ -147,7 +146,7 @@ def workflow_tool[DecoratedT](
     description: str | None = None,
     public: bool = True,
     timeout: str | None = None,
-    retry: WorkflowRetryPolicy | None = None,
+    retry: _package.WorkflowRetryPolicy | None = None,
     **kwargs: Any,
 ) -> DecoratedT: ...
 
@@ -159,7 +158,7 @@ def workflow_tool[DecoratedT](
     description: str | None = None,
     public: bool = True,
     timeout: str | None = None,
-    retry: WorkflowRetryPolicy | None = None,
+    retry: _package.WorkflowRetryPolicy | None = None,
     **kwargs: Any,
 ) -> Callable[[DecoratedT], DecoratedT]: ...
 
@@ -171,7 +170,7 @@ def workflow_tool[DecoratedT](
     description: str | None = None,
     public: bool = True,
     timeout: str | None = None,
-    retry: WorkflowRetryPolicy | None = None,
+    retry: _package.WorkflowRetryPolicy | None = None,
     **kwargs: Any,
 ) -> DecoratedT | Callable[[DecoratedT], DecoratedT]:
     """Mark a ``tools/`` callable as a Dynamic Workflow tool.
