@@ -455,6 +455,8 @@ def resolve_workflow_task_execution(
     if task.type == SUB_AGENT_TASK_TYPE:
         if subagent_timeout_ms is None or subagent_timeout_ms <= 0:
             raise ValueError("a positive resolved Sub Agent timeout is required")
+        if subagent_timeout_ms < MIN_POLICY_TIMEOUT_MS:
+            raise ValueError("resolved Sub Agent timeout must be at least PT1S")
         bounded_subagent_ms = min(subagent_timeout_ms, MAX_POLICY_TIMEOUT_MS)
         if timeout_text is None:
             timeout_ms = bounded_subagent_ms

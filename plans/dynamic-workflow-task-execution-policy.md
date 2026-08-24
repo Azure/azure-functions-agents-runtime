@@ -62,7 +62,8 @@ payloads, scheduler path, and status versions.
   does not alter the minimal quickstart.
 - [x] (2026-08-24 04:00Z) Passed the complete repository gate: Ruff reported no
   findings, strict mypy reported no issues across 42 source files, and the
-  CI-equivalent coverage run passed 1,151 tests with 52 E2E tests deselected.
+  CI-equivalent coverage run passed 1,152 tests with 52 E2E tests deselected
+  after final-review regressions were added.
 - [ ] Complete the final branch review and push the implementation branch.
 
 ## Surprises & Discoveries
@@ -134,6 +135,12 @@ payloads, scheduler path, and status versions.
   Evidence: `scripts/policy-demo-plan.json` now deterministically combines two transient
   failures then success, exhausted async timeout, continued per-item failure, and conditioned
   recovery without provider faults.
+
+- Observation: The first final branch review found that policy-aware fail-fast envelopes
+  omitted `attempts`/`kind`, a resolved Sub Agent timeout below one second could persist an
+  engine-invalid policy, and the README retry example omitted the required maximum delay.
+  Evidence: Regression tests now require fail-fast diagnostics and reject subsecond specialist
+  timeouts at submission; the public example constructs a complete bounded backoff policy.
 
 ## Decision Log
 

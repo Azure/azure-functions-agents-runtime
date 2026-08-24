@@ -279,6 +279,15 @@ def test_subagent_execution_resolver_enforces_specialist_timeout() -> None:
     assert resolve_workflow_task_execution(task, subagent_timeout_ms=900_000)["timeout_ms"] == 600_000
 
 
+def test_subagent_execution_resolver_rejects_specialist_timeout_below_policy_minimum() -> None:
+    raw = _subagent("analyze")
+    raw["execution"] = {}
+    task = validate_plan(_plan(raw)).tasks[0]
+
+    with pytest.raises(ValueError, match="at least PT1S"):
+        resolve_workflow_task_execution(task, subagent_timeout_ms=500)
+
+
 def test_wait_task_rejects_execution_even_when_empty() -> None:
     raw = _wait("pause", duration="PT1S")
     raw["execution"] = {}

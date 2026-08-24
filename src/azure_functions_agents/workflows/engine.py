@@ -1601,7 +1601,7 @@ def _apply_dynamic_wave_results(
 
     if failures:
         instance, failure = failures[0]
-        return _dynamic_failure(
+        result = _dynamic_failure(
             context,
             state,
             error=failure["error"],
@@ -1610,6 +1610,9 @@ def _apply_dynamic_wave_results(
             path=None,
             logical_id=instance["logical_id"],
         )
+        result["attempts"] = instance["attempt"]
+        result["kind"] = failure["kind"]
+        return result
     return None
 
 

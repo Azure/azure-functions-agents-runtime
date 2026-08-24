@@ -432,7 +432,11 @@ from azure_functions_agents import (
     timeout="PT30S",
     retry=WorkflowRetryPolicy(
         max_attempts=3,
-        backoff=WorkflowRetryBackoff(initial="PT1S", multiplier=2.0),
+        backoff=WorkflowRetryBackoff(
+            initial="PT1S",
+            multiplier=2.0,
+            max="PT10S",
+        ),
     ),
 )
 async def fetch_logs(args: dict[str, Any]) -> dict[str, Any]:

@@ -2436,6 +2436,8 @@ def test_terminal_and_unknown_outcomes_do_not_retry(
     )
     assert result["failed"] is True
     assert result["error_code"] == expected_code
+    assert result["attempts"] == 1
+    assert result["kind"] == failure["failure"]["kind"]
     assert len(context.calls) == 1
     assert context.timers == []
 
