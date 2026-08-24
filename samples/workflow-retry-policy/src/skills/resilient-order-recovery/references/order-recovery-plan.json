@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "load_order",
+      "type": "tool",
+      "tool": "load_order",
+      "args": {"order_id": "ORD-1001"},
+      "depends_on": []
+    },
+    {
+      "id": "reserve_inventory",
+      "type": "tool",
+      "tool": "reserve_inventory",
+      "args": {"order": "${load_order.result}"},
+      "depends_on": ["load_order"],
+      "execution": {
+        "timeout": "PT30S",
+        "retry": {
+          "max_attempts": 5,
+          "backoff": {
+            "initial": "PT1S",
+            "multiplier": 2.0,
+            "max": "PT4S"
+          }
+        }
+      }
+    },
+    {
+      "id": "confirm_order",
+      "type": "tool",
+      "tool": "confirm_order",
+      "args": {"reservation": "${reserve_inventory.result}"},
+      "depends_on": ["reserve_inventory"]
+    }
+  ]
+}

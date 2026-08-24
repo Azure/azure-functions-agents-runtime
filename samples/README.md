@@ -11,6 +11,7 @@ app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure
 | [daily-tech-news-email](daily-tech-news-email/) | Timer | | ✅ Office 365 Outlook | ✅ Office 365 Outlook | | ✅ | |
 | [daily-azure-report](daily-azure-report/) | Timer + HTTP | ✅ azure_rest | ✅ Office 365 Outlook | ✅ MS Learn + Office 365 Outlook | ✅ azure-resources | | ✅ |
 | [workflow-incident-triage](workflow-incident-triage/) | HTTP | | | | | | ✅ |
+| [workflow-retry-policy](workflow-retry-policy/) | HTTP | ✅ workflow-safe | | | ✅ resilient-order-recovery | | ✅ |
 | [workflow-queue-p0-report](workflow-queue-p0-report/) | Queue | ✅ workflow-safe | | | | | |
 | [per-agent-workflows](per-agent-workflows/) | HTTP | ✅ workflow-safe | | | | | ✅ |
 | [workflow-subagents-preview](workflow-subagents-preview/) | Queue | ✅ workflow-safe | | | ✅ | | |

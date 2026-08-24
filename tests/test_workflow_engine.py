@@ -1669,15 +1669,21 @@ def test_incident_sample_plan_runs_through_dynamic_scheduler() -> None:
     assert final_status["nodes"]["summarize"] == {"state": "completed"}
 
 
-def test_incident_policy_demo_plan_exercises_retry_timeout_and_recovery() -> None:
+def test_retry_policy_sample_plan_exercises_decorator_precedence() -> None:
     sample_root = (
         Path(__file__).resolve().parents[1]
         / "samples"
-        / "workflow-incident-triage"
+        / "workflow-retry-policy"
     )
     sample_src = sample_root / "src"
     raw_plan = json.loads(
-        (sample_root / "scripts" / "policy-demo-plan.json").read_text(encoding="utf-8")
+        (
+            sample_src
+            / "skills"
+            / "resilient-order-recovery"
+            / "references"
+            / "order-recovery-plan.json"
+        ).read_text(encoding="utf-8")
     )
     discovered = discover_project_tools(sample_src)
     tools_by_name = {tool.name: tool for tool in discovered.workflow_tools}
@@ -1703,39 +1709,20 @@ def test_incident_policy_demo_plan_exercises_retry_timeout_and_recovery() -> Non
     def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         task_id = payload["id"]
         tool_name = payload["tool"]
-        if tool_name == "policy_retry_probe":
+        if tool_name == "reserve_inventory":
             if payload["attempt"] < 3:
                 return _activity_failure(task_id=task_id)
             return {
                 "id": task_id,
                 "ok": True,
                 "result": {
-                    "recovered": True,
+                    "order_id": "ORD-1001",
+                    "sku": "trail-shoes-blue-42",
+                    "reserved": True,
                     "attempt": payload["attempt"],
                     "idempotency_key": payload["idempotency_key"],
                 },
             }
-        if tool_name == "policy_timeout_probe":
-            return _activity_failure(
-                task_id=task_id,
-                code="workflow_task_timeout",
-                kind="timeout",
-            )
-        if tool_name == "discover_services":
-            handler = tools_by_name[tool_name].handler
-            assert handler is not None
-            return {"id": task_id, "result": handler(payload["args"])}
-        if tool_name == "policy_inspect_service":
-            if payload["args"]["service"] == "payments-api":
-                return _activity_failure(
-                    task_id=task_id,
-                    code="sample_service_unavailable",
-                    kind="handler_terminal",
-                    retryable=False,
-                )
-            handler = tools_by_name["inspect_service"].handler
-            assert handler is not None
-            return {"id": task_id, "ok": True, "result": handler(payload["args"])}
         handler = tools_by_name[tool_name].handler
         assert handler is not None
         return {"id": task_id, "result": handler(payload["args"])}
@@ -1752,22 +1739,17 @@ def test_incident_policy_demo_plan_exercises_retry_timeout_and_recovery() -> Non
     retry_calls = [
         payload
         for _, payload in context.calls
-        if payload["id"] == "retry_probe"
+        if payload["id"] == "reserve_inventory"
     ]
     assert [payload["attempt"] for payload in retry_calls] == [1, 2, 3]
+    assert all(payload["max_attempts"] == 3 for payload in retry_calls)
     assert len({payload["idempotency_key"] for payload in retry_calls}) == 1
-    assert result["results"]["retry_probe"]["recovered"] is True
-    assert result["results"]["timeout_probe"] == {
-        "failed": True,
-        "error_code": "workflow_task_timeout",
-        "error": "Safe failure.",
-        "kind": "timeout",
-        "attempts": 2,
+    assert result["results"]["reserve_inventory"]["reserved"] is True
+    assert result["results"]["confirm_order"] == {
+        "order_id": "ORD-1001",
+        "status": "confirmed",
+        "reservation_attempt": 3,
     }
-    aggregate = result["results"]["inspect"]
-    assert any(entry["status"] == "failed_continued" for entry in aggregate)
-    assert any(entry["status"] == "skipped" for entry in aggregate)
-    assert result["results"]["recover"]["recovered"] is True
     assert context.statuses[-1]["schema_version"] == 3
 
 

@@ -1595,6 +1595,7 @@ replay duplicates.
 | 79 | Bounds, routing, and status compatibility | Configurable limits now / unbounded policy / fixed limits plus versioned status | Use fixed attempts/duration/elapsed bounds pending issue #1279; route any policy-aware plan through the structured scheduler, preserve status versions 1/2 for unchanged plans, and emit version 3 only for policy-aware plans | Agent proposal, architecture review | 2026-08-19 |
 | 80 | Task execution policy design approval | Revise individual Decisions 67 and 69-79 / approve the reviewed proposal set / defer implementation | Approve Decisions 67 and 69-79 as proposed, retain the separately approved precedence in Decision 68, finalize the task execution policy extension, and authorize implementation under the repository ExecPlan process | Human (TsuyoshiUshio) | 2026-08-23 |
 | 81 | Final implementation-contract clarifications | Leave details to implementation / define replay-safe public contracts before coding | Make authored `execution` presence the policy-aware switch; specify status v3 ownership/counts/nullability, decimal floor backoff precomputation, bounded error codes/messages, orchestrator-side-only cancellation, policy-aware Sub Agent clamping, async dual decorators, and the sync-timeout concurrency caveat | Agent, final architecture review | 2026-08-23 |
+| 82 | Execution-policy sample design and validation | Add a system-test mode to `workflow-incident-triage` / create a focused user-story sample / document only | Extract the policy demonstration into a dedicated retry sample with one order-recovery story. Keep its canonical DAG as a deployed Skill resource instead of duplicating JSON in agent instructions, and require opt-in Foundry E2E across natural language, Skill resource loading, tool-call generation, Durable execution, and terminal status. Re-run the incident-triage sample after extraction. | Human (TsuyoshiUshio) | 2026-08-24 |
 
 ## 6. Test plan
 
@@ -1627,10 +1628,21 @@ replay duplicates.
 - [ ] Fixture scenario:
   `tests/fixtures/config_scenarios/<next>_dynamic_workflow_tools/`
   - `tools/` contains normal-only, workflow-only, both, and helper functions.
-- [ ] Sample tests: update `tests/test_incident_tools.py` for the decorator-based
-  sample layout.
-- [ ] E2E: run the `workflow-incident-triage` sample locally with Azurite/Durable
-  storage and confirm a workflow can start, execute sample tools, and complete.
+- [x] Sample tests:
+  - keep `tests/test_incident_tools.py` focused on the incident-triage story after
+    extracting execution-policy probes;
+  - add focused contracts for the dedicated retry sample's tools, canonical
+    Skill resource, and decorator-over-DAG policy demonstration.
+- [x] Model-backed sample E2E:
+  - use uniquely named opt-in Foundry endpoint/model environment variables;
+  - have the dedicated sample script create ignored `local.settings.json` only
+    when opted in, refuse to overwrite user settings, and clean up only files
+    it created;
+  - prove natural-language prompt → Skill/resource tools → `start_workflow` →
+    Durable terminal status, including three attempts under the authoritative
+    decorator retry;
+  - re-run `workflow-incident-triage` with Azurite/Durable storage after
+    extraction and confirm its original incident workflow still completes.
 - [x] Evolution #112: workflow-enabled HTTP and non-HTTP handlers receive the
   Durable client and trigger addendum while workflow-disabled handlers keep
   their existing signatures.
@@ -1837,9 +1849,10 @@ replay duplicates.
 - [x] Evolution #1278: update the public API reference/README for async
   `@workflow_tool`, exported policy/error/context types, and the explicit
   at-least-once contract.
-- [x] Evolution #1278: add a sample or focused sample mode demonstrating
-  idempotent retry and partial continued failure without relying on live
-  nondeterministic provider faults.
+- [x] Evolution #1278: replace the incident-triage system-test mode with a
+  dedicated, user-centered retry sample. Store the exact demonstration plan as
+  a deployed Skill resource so agent instructions do not duplicate JSON, and
+  document why the immutable resource is needed for a precedence demonstration.
 
 ## 8. Status & sign-off
 

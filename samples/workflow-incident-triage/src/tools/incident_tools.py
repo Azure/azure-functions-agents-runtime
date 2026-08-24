@@ -8,9 +8,7 @@ and no plain public normal tool is exported from this module.
 
 Design notes:
 
-- Each handler takes a single ``args`` dict and returns a JSON-serializable
-  dict. Most are synchronous; ``policy_timeout_probe`` demonstrates an async
-  handler under an Activity-owned deadline.
+- Each handler takes a single ``args`` dict and returns a JSON-serializable dict.
 - Outputs are deterministic functions of their inputs so workflow
   replays produce stable results and so the demo narrative is
   reproducible. (Durable journals activity output, so this isn't a
@@ -49,18 +47,10 @@ Collection (data-driven) tools — Issue #1276:
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 from typing import Any, Dict, List
 
-from azure_functions_agents import (
-    WorkflowRetryBackoff,
-    WorkflowRetryableError,
-    WorkflowRetryPolicy,
-    WorkflowTerminalError,
-    current_workflow_task_context,
-    workflow_tool,
-)
+from azure_functions_agents import workflow_tool
 
 
 def _seeded_int(seed: str, lo: int, hi: int) -> int:
@@ -446,116 +436,12 @@ def summarize_scan(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-_IMMEDIATE_RETRY = WorkflowRetryBackoff(
-    initial="PT0S",
-    multiplier=1.0,
-    max="PT0S",
-)
-
-
-@workflow_tool(
-    description=(
-        "Deterministic execution-policy demo. It reports transient failure on attempts "
-        "one and two, then succeeds on attempt three with its stable idempotency key."
-    ),
-    timeout="PT5S",
-    retry=WorkflowRetryPolicy(max_attempts=3, backoff=_IMMEDIATE_RETRY),
-)
-def policy_retry_probe(args: Dict[str, Any]) -> Dict[str, Any]:
-    context = current_workflow_task_context()
-    if context is None:
-        raise RuntimeError("policy_retry_probe must run as a policy-aware workflow task")
-    if context.attempt < 3:
-        raise WorkflowRetryableError(
-            "sample_transient",
-            f"Deterministic transient failure on attempt {context.attempt}.",
-        )
-    return {
-        "recovered": True,
-        "attempt": context.attempt,
-        "idempotency_key": context.idempotency_key,
-        "label": str(args.get("label") or "policy-demo"),
-    }
-
-
-@workflow_tool(
-    description=(
-        "Deterministic async timeout demo. It waits until the Activity-owned deadline "
-        "cancels it; use continue_on_error to inspect the exhausted failure result."
-    ),
-    timeout="PT1S",
-    retry=WorkflowRetryPolicy(max_attempts=2, backoff=_IMMEDIATE_RETRY),
-)
-async def policy_timeout_probe(args: Dict[str, Any]) -> Dict[str, Any]:
-    await asyncio.Event().wait()
-    return {"unexpected": True}
-
-
-@workflow_tool(
-    description=(
-        "Deterministic continued-failure scan item. The payments-api item raises a "
-        "terminal sample failure; other services return inspect_service evidence."
-    ),
-    timeout="PT5S",
-    retry=WorkflowRetryPolicy(max_attempts=1),
-)
-def policy_inspect_service(args: Dict[str, Any]) -> Dict[str, Any]:
-    service = _require_service(args, "policy_inspect_service")
-    if service == "payments-api":
-        raise WorkflowTerminalError(
-            "sample_service_unavailable",
-            "The deterministic payments-api probe is unavailable.",
-        )
-    return inspect_service(args)
-
-
-@workflow_tool(
-    description=(
-        "Assess a policy_inspect_service for_each aggregate. Returns "
-        "{needs_recovery, failure_codes}; pass the whole aggregate as findings."
-    )
-)
-def policy_assess_scan(args: Dict[str, Any]) -> Dict[str, Any]:
-    findings = args.get("findings")
-    if not isinstance(findings, list):
-        raise ValueError("policy_assess_scan: 'findings' must be the whole aggregate")
-    failure_codes = [
-        envelope["result"]["error_code"]
-        for envelope in findings
-        if isinstance(envelope, dict)
-        and envelope.get("status") == "failed_continued"
-        and isinstance(envelope.get("result"), dict)
-    ]
-    return {
-        "needs_recovery": bool(failure_codes),
-        "failure_codes": failure_codes,
-    }
-
-
-@workflow_tool(
-    description=(
-        "Run the explicitly conditioned recovery step for the policy demo. "
-        "Returns {recovered, failures}."
-    )
-)
-def policy_recover_scan(args: Dict[str, Any]) -> Dict[str, Any]:
-    failures = args.get("failures")
-    if not isinstance(failures, list):
-        raise ValueError("policy_recover_scan: 'failures' must be an array")
-    return {"recovered": True, "failures": failures}
-
-
 __all__ = [
     "discover_services",
     "fetch_deploys",
     "fetch_logs",
     "fetch_metrics",
     "inspect_service",
-    "policy_assess_scan",
-    "policy_inspect_service",
-    "policy_recover_scan",
-    "policy_retry_probe",
-    "policy_timeout_probe",
     "summarize_findings",
     "summarize_scan",
 ]

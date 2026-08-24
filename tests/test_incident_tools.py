@@ -11,7 +11,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -19,15 +18,6 @@ import pytest
 from azure_functions_agents.discovery.tools import (
     clear_tool_discovery_cache,
     discover_project_tools,
-)
-from azure_functions_agents.workflows.context import (
-    WorkflowTaskContext,
-    _reset_workflow_task_context,
-    _set_workflow_task_context,
-)
-from azure_functions_agents.workflows.schema import (
-    WorkflowRetryableError,
-    WorkflowTerminalError,
 )
 
 _SAMPLE_SRC = Path(__file__).resolve().parents[1] / "samples" / "workflow-incident-triage" / "src"
@@ -134,11 +124,6 @@ def test_sample_workflow_tools_are_auto_discovered():
         "summarize_findings",
         "discover_services",
         "inspect_service",
-        "policy_assess_scan",
-        "policy_inspect_service",
-        "policy_recover_scan",
-        "policy_retry_probe",
-        "policy_timeout_probe",
         "summarize_scan",
     }
 
@@ -218,77 +203,3 @@ def test_summarize_scan_rejects_non_aggregate_findings():
 def test_summarize_scan_rejects_malformed_envelope():
     with pytest.raises(ValueError, match="envelope"):
         incident_tools.summarize_scan({"findings": ["not-a-dict"]})
-
-
-def test_policy_retry_probe_fails_twice_then_reuses_stable_key() -> None:
-    key = "af-wf-task-v1:sample"
-    observed: list[str] = []
-    for attempt in (1, 2, 3):
-        context = WorkflowTaskContext(
-            workflow_id="workflow",
-            task_id="retry_probe",
-            node_instance_id="retry_probe",
-            attempt=attempt,
-            max_attempts=3,
-            idempotency_key=key,
-            deadline=datetime(2026, 8, 24, tzinfo=UTC),
-        )
-        token = _set_workflow_task_context(context)
-        try:
-            if attempt < 3:
-                with pytest.raises(WorkflowRetryableError, match="transient"):
-                    incident_tools.policy_retry_probe({})
-            else:
-                result = incident_tools.policy_retry_probe({})
-                observed.append(result["idempotency_key"])
-                assert result["attempt"] == 3
-        finally:
-            _reset_workflow_task_context(token)
-
-    assert observed == [key]
-
-
-def test_policy_inspection_and_recovery_are_deterministic() -> None:
-    with pytest.raises(WorkflowTerminalError) as exc_info:
-        incident_tools.policy_inspect_service({"service": "payments-api"})
-    assert exc_info.value.error_code == "sample_service_unavailable"
-
-    assessment = incident_tools.policy_assess_scan({
-        "findings": [
-            {
-                "index": 0,
-                "status": "failed_continued",
-                "result": {"error_code": "sample_service_unavailable"},
-            }
-        ]
-    })
-    assert assessment == {
-        "needs_recovery": True,
-        "failure_codes": ["sample_service_unavailable"],
-    }
-    assert incident_tools.policy_recover_scan({
-        "failures": assessment["failure_codes"]
-    }) == {
-        "recovered": True,
-        "failures": ["sample_service_unavailable"],
-    }
-
-
-def test_policy_demo_plan_is_a_valid_discoverable_sample() -> None:
-    plan_text = (
-        _SAMPLE_SRC.parent
-        / "scripts"
-        / "policy-demo-plan.json"
-    ).read_text(encoding="utf-8").strip()
-    plan = json.loads(plan_text)
-    assert plan["version"] == 1
-    assert {task["id"] for task in plan["tasks"]} == {
-        "retry_probe",
-        "timeout_probe",
-        "discover",
-        "inspect",
-        "assess",
-        "recover",
-    }
-    agent_instructions = (_SAMPLE_SRC / "main.agent.md").read_text(encoding="utf-8")
-    assert plan_text in agent_instructions

@@ -69,6 +69,11 @@ payloads, scheduler path, and status versions.
   significant issues.
 - [x] (2026-08-24 04:50Z) Pushed the completed implementation to PR #170's
   `tsuyoshiushio-workflow-task-execution-policy` head branch.
+- [x] (2026-08-24 22:05Z) Replaced the incident-triage policy system-test mode
+  with the approved focused retry sample, Skill resource, and opt-in model-backed
+  E2E harness. The hardened harness completed with Skill resource loading,
+  decorator `max_attempts=3`, and order confirmation. The extracted incident
+  scan also completed through the real model and Durable host.
 
 ## Surprises & Discoveries
 
@@ -175,6 +180,19 @@ payloads, scheduler path, and status versions.
   Evidence: Terminal cleanup now covers both waiting and matured retry markers, while annotations
   resolve through the initialized public package and are exercised with `typing.get_type_hints()`.
 
+- Observation: Unit, fake-Durable, and direct-plan tests did not exercise the boundary where
+  a model turns a natural-language sample prompt into `start_workflow` arguments. The original
+  incident-triage policy prompt therefore produced an invalid DAG during human review.
+  Evidence: The first real-model run referenced a nonexistent upstream `services` result and
+  misplaced `continue_on_error`; exact canonical JSON succeeded only when pasted into the
+  prompt or duplicated in `main.agent.md`.
+
+- Observation: An E2E host can import an editable checkout from a different worktree even when
+  it starts in the intended sample directory.
+  Evidence: The new harness initially loaded `azure_functions_agents` from another worktree and
+  failed to discover the policy tools. It now prepends this repository's `src/` to the host
+  process `PYTHONPATH`, and the repeated model-backed run completed.
+
 ## Decision Log
 
 - Decision: Use the presence of authored `execution`, even an empty object, or any
@@ -211,6 +229,14 @@ payloads, scheduler path, and status versions.
   closed.
   Date/Author: 2026-08-19, Agent architecture review; FRD Decisions 70, 73, 74, and 78.
 
+- Decision: Extract execution-policy teaching from `workflow-incident-triage` into one focused
+  order-recovery sample. Store the exact DAG under the sample's deployed Skill `references/`
+  directory and load it with MAF's Skill resource tool before calling `start_workflow`.
+  Rationale: Samples should teach one primary capability through a user story. A Skill resource
+  keeps the policy-precedence DAG as one source of truth without embedding a large test fixture
+  in the agent persona, while opt-in Foundry E2E covers the previously missed model boundary.
+  Date/Author: 2026-08-24, Human (TsuyoshiUshio); FRD Decision 82.
+
 ## Outcomes & Retrospective
 
 Planning and Milestones 1-3 are complete. Authors can construct and export strict retry,
@@ -224,12 +250,16 @@ timers and stable idempotency across attempts, applies same-wave outcomes determ
 and supports exact continued-failure results for normal and `for_each` tasks. Status v3 now
 reports executable-unit counts and bounded attempt state, the built-in UI renders all three
 status versions, and Activity telemetry records actual deliveries without replay metrics.
-The independent testing checkpoint now passes, including the deterministic sample mode and
-cross-attempt authorization/redelivery regressions. Architecture, workflow authoring,
+The independent testing checkpoint now passes, including the focused order-recovery sample and
+cross-attempt authorization/redelivery regressions. The sample stores its canonical precedence
+plan as one deployed Skill resource and its opt-in harness covers natural language through
+terminal Durable status. The incident-triage sample remains focused on its original evidence
+and data-driven scan stories and completed a model-backed run after extraction. Architecture,
+workflow authoring,
 front-matter cross-reference, landing-page, README, and deterministic sample documentation now
 describe the implemented contract, and the strict MkDocs build passes. Ruff, strict mypy, and
-the complete CI-equivalent non-E2E coverage suite pass. Independent release review is clean,
-and the completed branch is published to PR #170.
+the complete CI-equivalent non-E2E coverage suite pass with 1,160 tests. Independent release
+review is clean, and the completed branch is published to PR #170.
 
 ## Context and Orientation
 
@@ -524,8 +554,11 @@ After documentation:
 
     python -m mkdocs build --strict
 
-Run sample E2E commands only through existing sample scripts or existing pytest `e2e` tests,
-and record the exact command and backend in this plan.
+Run sample E2E commands only through sample-owned scripts or existing pytest `e2e` tests, and
+record the exact command and backend in this plan. For the dedicated retry sample, the script
+must skip clearly unless both uniquely named Foundry E2E variables are present, generate ignored
+local settings without overwriting user files, exercise the natural-language/model boundary,
+and clean up only resources it created.
 
 ## Validation and Acceptance
 
@@ -562,6 +595,13 @@ about recalling an already-running Activity.
 
 Ruff, strict mypy, the full non-E2E coverage suite, and strict documentation build all exit
 zero.
+
+The dedicated retry sample starts from a natural-language order-recovery request. The model
+loads its sample Skill and canonical JSON resource before calling `start_workflow`. The Durable
+workflow completes, `reserve_inventory` reports attempt 3 with the decorator's maximum of 3 even
+though the DAG asks for a different retry policy, and the final confirmation node completes.
+After policy helpers are removed from incident triage, its original natural-language incident
+story still starts and completes end to end.
 
 ## Idempotence and Recovery
 
@@ -608,6 +648,18 @@ Expected continued aggregate evidence should resemble:
         "attempts": 3
       }}
     ]
+
+Model-backed sample evidence recorded on 2026-08-24:
+
+    workflow-retry-policy
+    workflow id: 2a0b7d39887e0d377eb3418990abb043-4f8dec2d99de4724b7e3745ca826458c
+    tool path: load_skill -> read_skill_resource -> start_workflow
+    final: Completed; reserve_inventory attempt=3 max_attempts=3; confirm_order completed
+
+    workflow-incident-triage after extraction
+    workflow id: 02338808128559449e2387112c5f5ffb-f5092ab9520642e2a2c23d138e401401
+    scenario: natural-language data-driven incident scan
+    final: Completed
 
 ## Interfaces and Dependencies
 

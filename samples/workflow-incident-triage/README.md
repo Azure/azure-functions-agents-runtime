@@ -21,11 +21,10 @@ the optional Durable Task Scheduler backend. It also demonstrates the
 data-driven control flow from Issue #1276: a discovery tool returns a
 bounded array, a per-service task fans out over it with `for_each`, an
 item-level `when` predicate skips out-of-scope services, and a downstream
-task consumes the ordered `{index, status, result}` aggregate. It also includes
-a deterministic execution-policy mode that demonstrates authoritative
-decorator retry, Activity-owned timeout, a stable idempotency key, continued
-`for_each` failure, and explicitly conditioned recovery. It deliberately does
-not demonstrate sub-orchestrations or Sub Agent tasks.
+task consumes the ordered `{index, status, result}` aggregate. It deliberately
+does not demonstrate task execution policies, sub-orchestrations, or Sub Agent
+tasks. See the focused
+[`workflow-retry-policy`](../workflow-retry-policy/) sample for retry policy.
 
 ## Run locally
 
@@ -183,11 +182,6 @@ from that module:
 | `discover_services` | `{incident}` | `{incident, count, services: [{name, tier, in_scope}]}` (bounded 3–5, low-tier items `in_scope: false`) |
 | `inspect_service` | `{service, index?: int = 0}` | `{service, index, errors, saturation, healthy, headline}` |
 | `summarize_scan` | `{incident?, findings}` (whole ordered `${node.result}` aggregate of `{index, status, result}` envelopes) | `{incident, scanned, skipped, unhealthy: [str], headline}` |
-| `policy_retry_probe` | `{label?}` | Fails attempts 1–2, then returns `{recovered, attempt, idempotency_key, label}` |
-| `policy_timeout_probe` | `{}` | Exhausts its declared async deadline and retry policy |
-| `policy_inspect_service` | `{service, index?}` | Deterministically fails `payments-api`; otherwise returns inspection evidence |
-| `policy_assess_scan` | `{findings}` | `{needs_recovery, failure_codes}` |
-| `policy_recover_scan` | `{failures}` | `{recovered, failures}` |
 
 Outputs are deterministic functions of inputs so the demo narrative is
 reproducible across runs and replays. The summary tools deliberately
@@ -256,22 +250,6 @@ If a discovery, inspection, or aggregation step hits a controlled error
 (for example an out-of-range fan-out or an unresolved reference), the engine
 returns a stable failure envelope and the workflow surfaces as `Failed`
 rather than crashing the host — the live card reflects that terminal state.
-
-## Demo prompt (execution policy)
-
-The canonical authored plan is
-[`scripts/policy-demo-plan.json`](scripts/policy-demo-plan.json). Ask:
-
-> *"Run the deterministic execution-policy demo exactly as documented."*
-
-The workflow shows `policy_retry_probe` fail twice and succeed on attempt three
-with one stable idempotency key. `policy_timeout_probe` exhausts two async
-attempts and becomes a continued failure. The service scan records the
-deterministic `payments-api` failure as `failed_continued`, then
-`policy_assess_scan` causes the explicitly conditioned `policy_recover_scan`
-node to run. The live card uses status schema v3 to show attempts, retry wait,
-continued failure, and `aggregated_with_errors`. No provider fault or random
-input is required.
 
 ## Demo dry-run script
 
