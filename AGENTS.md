@@ -128,7 +128,13 @@ the Decisions log is durable history. Start from
 
 ---
 
-## 5. Code conventions
+## 5. Exec Plans
+
+When you write complex feature or significant refacotr use ExecPlan (as described in PLANS.md).
+Store each ExecPlan file under `/plans` with a descriptive name, and create the directory if it is not exists.
+---
+
+## 6. Code conventions
 
 Grounded in `pyproject.toml` and current code:
 
@@ -151,7 +157,7 @@ Grounded in `pyproject.toml` and current code:
 
 ---
 
-## 6. Testing conventions
+## 7. Testing conventions
 
 - Tests live in `tests/` and **mirror source modules**
   (`tests/test_<module>.py`). `tests/conftest.py` puts `src/` on `sys.path`.
@@ -163,7 +169,7 @@ Grounded in `pyproject.toml` and current code:
 
 ---
 
-## 7. Documentation conventions
+## 8. Documentation conventions
 
 - `docs/architecture.md` is the design source of truth — its **module map** and
   **pipeline stages** must stay accurate. Update it in the same PR as behavior
@@ -201,7 +207,7 @@ When modifying `src/azure_functions_agents/config/schema.py`:
 
 ---
 
-## 8. Definition of Done
+## 9. Definition of Done
 
 - [ ] Change made in a dedicated worktree off `main`.
 - [ ] (medium+) FRD finalized with a completed Decisions log.
