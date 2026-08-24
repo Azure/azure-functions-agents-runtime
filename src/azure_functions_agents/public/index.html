@@ -1304,6 +1304,7 @@
 			const skipped = num(counts.skipped);
 			const retryWait = num(counts.retry_wait);
 			const failedContinued = num(counts.failed_continued);
+			const failed = num(counts.failed);
 			// Prefer the materialized denominator (it includes expanded
 			// instances); fall back to the logical count for plans that
 			// never expanded a collection.
@@ -1313,6 +1314,7 @@
 			if (skipped) parts.push(`${skipped} skipped`);
 			if (retryWait) parts.push(`${retryWait} retrying`);
 			if (failedContinued) parts.push(`${failedContinued} continued failure`);
+			if (failed) parts.push(`${failed} failed`);
 			let summary = parts.join(" · ");
 
 			const nodes = (status.nodes && typeof status.nodes === "object") ? status.nodes : null;

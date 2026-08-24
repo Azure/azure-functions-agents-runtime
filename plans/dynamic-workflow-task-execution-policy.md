@@ -142,6 +142,12 @@ payloads, scheduler path, and status versions.
   Evidence: Regression tests now require fail-fast diagnostics and reject subsecond specialist
   timeouts at submission; the public example constructs a complete bounded backoff policy.
 
+- Observation: Re-review found that terminal fail-fast instances retained their pre-result
+  `running` state in status v3, leaving the terminal counts inconsistent with the failed
+  output.
+  Evidence: Fail-fast instances now enter terminal `failed` state before status publication;
+  v3 counts and the built-in UI expose a matching `failed` bucket.
+
 ## Decision Log
 
 - Decision: Use the presence of authored `execution`, even an empty object, or any

@@ -748,6 +748,7 @@ type _InstanceState = Literal[
     "skipped",
     "completed",
     "failed_continued",
+    "failed",
 ]
 type _InstanceKind = Literal["activity", "timer", "retry_timer"]
 
@@ -894,7 +895,7 @@ def _dynamic_status(state: _DynamicWorkflowState) -> dict[str, Any]:
     Version 2 preserves the data-driven workflow shape. Version 3 classifies
     executable units and adds bounded execution fields for policy-aware plans.
     """
-    completed = skipped = running = pending = retry_wait = failed_continued = 0
+    completed = skipped = running = pending = retry_wait = failed_continued = failed = 0
     for insts in state.node_instances.values():
         for inst in insts:
             instance_state = inst["state"]
@@ -910,6 +911,8 @@ def _dynamic_status(state: _DynamicWorkflowState) -> dict[str, Any]:
                 retry_wait += 1
             elif instance_state == "failed_continued":
                 failed_continued += 1
+            elif instance_state == "failed":
+                failed += 1
 
     def execution_fields(instance: _MaterializedInstance) -> dict[str, Any]:
         execution = instance.get("execution")
@@ -982,6 +985,7 @@ def _dynamic_status(state: _DynamicWorkflowState) -> dict[str, Any]:
             "completed": completed,
             "skipped": skipped,
             "failed_continued": failed_continued,
+            "failed": failed,
         }
     return {
         "schema_version": 3 if state.policy_aware else 2,
@@ -1585,6 +1589,7 @@ def _apply_dynamic_wave_results(
                     }
                     instance["state"] = "failed_continued"
                 else:
+                    instance["state"] = "failed"
                     failures.append((instance, failure))
                     continue
         if instance["index"] is None and instance["state"] in {

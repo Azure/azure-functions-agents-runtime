@@ -710,7 +710,7 @@ Logical node states are `pending`, `running`, `skipped`, `expanded`,
 result array is committed.
 
 Version 3 counts executable units with `pending`, `running`, `retry_wait`,
-`completed`, `skipped`, and `failed_continued` buckets. A policy-aware normal
+`completed`, `skipped`, `failed_continued`, and terminal `failed` buckets. A policy-aware normal
 node or individual `for_each` instance reports `max_attempts`, reports
 `attempt` after first dispatch, reports `next_retry_time` only in
 `retry_wait`, and retains `last_failure_kind` / `last_error_code` after a later
@@ -729,7 +729,8 @@ keys.
     "retry_wait": 1,
     "completed": 0,
     "skipped": 0,
-    "failed_continued": 0
+    "failed_continued": 0,
+    "failed": 0
   },
   "nodes": {
     "fetch": {

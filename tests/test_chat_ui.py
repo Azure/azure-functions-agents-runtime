@@ -387,7 +387,7 @@ def test_format_workflow_status_renders_v3_execution_state_safely() -> None:
           counts: {
             logical_total: 2, materialized_total: 2, pending: 0,
             running: 0, retry_wait: 1, completed: 0, skipped: 0,
-            failed_continued: 1
+            failed_continued: 1, failed: 1
           },
           nodes: {
             retry: {
@@ -404,7 +404,7 @@ def test_format_workflow_status_renders_v3_execution_state_safely() -> None:
         };
         const rendered = formatWorkflowStatus(status);
         for (const expected of [
-          "1 retrying", "1 continued failure", "retry: retry_wait (2/3)",
+          "1 retrying", "1 continued failure", "1 failed", "retry: retry_wait (2/3)",
           "fan: aggregated_with_errors", "fan[0] failed_continued 1/1"
         ]) {
           if (!rendered.includes(expected)) throw new Error("missing " + expected + ": " + rendered);

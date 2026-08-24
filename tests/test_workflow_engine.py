@@ -2328,6 +2328,7 @@ def test_policy_task_routes_dynamic_and_dispatches_retry_contract() -> None:
         "completed",
         "skipped",
         "failed_continued",
+        "failed",
     }
     for status in context.statuses:
         counts = status["counts"]
@@ -2440,6 +2441,10 @@ def test_terminal_and_unknown_outcomes_do_not_retry(
     assert result["kind"] == failure["failure"]["kind"]
     assert len(context.calls) == 1
     assert context.timers == []
+    terminal_status = context.statuses[-1]
+    assert terminal_status["nodes"]["work"]["state"] == "failed"
+    assert terminal_status["counts"]["running"] == 0
+    assert terminal_status["counts"]["failed"] == 1
 
 
 def test_bare_activity_exception_retries_then_succeeds() -> None:

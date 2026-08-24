@@ -1416,7 +1416,7 @@ policy-aware:
 - any policy-aware plan, including an otherwise static DAG, emits version 3,
   which is version 2 plus execution state.
 
-Version 3 adds node/instance states `retry_wait`, `failed_continued`, and
+Version 3 adds node/instance states `retry_wait`, `failed_continued`, `failed`, and
 `aggregated_with_errors`, plus bounded fields `attempt`, `max_attempts`,
 `next_retry_time`, `last_failure_kind`, and `last_error_code`. It never includes
 args, results, exception text, session identity, or the idempotency key. Status
@@ -1434,6 +1434,7 @@ Policy-free units in a version-3 plan omit all five execution fields.
 Version-3 `counts` classify executable units, not retry attempts or logical
 aggregate nodes. They contain `logical_total`, `materialized_total`, `pending`,
 `running`, `retry_wait`, `completed`, `skipped`, and `failed_continued`;
+terminal fail-fast units are counted in `failed`, and
 `aggregated_with_errors` is represented only by its logical node state. The
 state buckets sum to `materialized_total`. For example:
 
@@ -1448,7 +1449,8 @@ state buckets sum to `materialized_total`. For example:
     "retry_wait": 2,
     "completed": 2,
     "skipped": 0,
-    "failed_continued": 1
+    "failed_continued": 1,
+    "failed": 0
   },
   "nodes": {
     "discover": {"state": "completed"},
