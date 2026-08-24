@@ -943,13 +943,11 @@ The Dynamic Workflow sample for this extension must demonstrate:
 4. status output showing expanded, running, skipped, and aggregated states; and
 5. deterministic completion on both Azure Storage and DTS Durable backends.
 
-### Task execution policy (planning issue #1278; in review)
+### Task execution policy (planning issue #1278; finalized)
 
-> **Extension status:** In review. All choices in this section other than the
-> single-FRD process decision are Agent proposals pending explicit human sign-off.
-> No implementation may begin until that sign-off is appended to the Decisions
-> log. The FRD's top-level `Finalized` status continues to describe the previously
-> approved Dynamic Workflows contract, not this extension.
+> **Extension status:** Finalized. Decisions 67-79 were independently reviewed;
+> Decision 68 was approved on 2026-08-20, and Decision 80 records human approval
+> of the remaining proposal set and authorizes implementation.
 
 Durable Activities are delivered at least once: a worker can finish external
 side effects and fail before its completion is checkpointed, causing the same
@@ -1495,6 +1493,7 @@ replay duplicates.
 | 77 | Async workflow handlers | Keep sync-only / separate async decorator / accept sync and async uniformly | Keep one `@workflow_tool` decorator and Activity contract, remove the registry rejection, await awaitables once, and apply identical context, timeout, failure, serialization, and retry semantics | Agent proposal, architecture review | 2026-08-19 |
 | 78 | Authorization during retries | Trust start-time policy / retry under persisted grant / reauthorize every attempt | Reauthorize every attempt against the deployed owner policy; revocation is terminal, non-retryable, and non-continuable | Agent proposal | 2026-08-19 |
 | 79 | Bounds, routing, and status compatibility | Configurable limits now / unbounded policy / fixed limits plus versioned status | Use fixed attempts/duration/elapsed bounds pending issue #1279; route any policy-aware plan through the structured scheduler, preserve status versions 1/2 for unchanged plans, and emit version 3 only for policy-aware plans | Agent proposal, architecture review | 2026-08-19 |
+| 80 | Task execution policy design approval | Revise individual Decisions 67 and 69-79 / approve the reviewed proposal set / defer implementation | Approve Decisions 67 and 69-79 as proposed, retain the separately approved precedence in Decision 68, finalize the task execution policy extension, and authorize implementation under the repository ExecPlan process | Human (TsuyoshiUshio) | 2026-08-23 |
 
 ## 6. Test plan
 
@@ -1794,7 +1793,7 @@ replay duplicates.
   Approved authoritative per-field `@workflow_tool` declarations with DAG values
   filling only undeclared fields, whole-object retry selection, and Sub Agent
   timeout bounded by its resolved timeout. Decision 68 is human-approved.
-  This extension remains **In review**; Decisions 67 and 69-79 remain Agent
-  proposals and require explicit human approval before implementation. The FRD's
-  top-level `Finalized` status continues to apply only to the previously approved
-  Dynamic Workflows design.
+- **Task execution policy human sign-off:** TsuyoshiUshio, 2026-08-23. Approved
+  Decisions 67 and 69-79 as proposed, retained Decision 68, finalized the
+  extension, and authorized implementation through the repository's ExecPlan
+  process.
