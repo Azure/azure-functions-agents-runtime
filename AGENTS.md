@@ -130,8 +130,10 @@ the Decisions log is durable history. Start from
 
 ## 5. Exec Plans
 
-When you write complex feature or significant refacotr use ExecPlan (as described in PLANS.md).
-Store each ExecPlan file under `/plans` with a descriptive name, and create the directory if it is not exists.
+When writing a complex feature or significant refactor, use an ExecPlan (as described
+in `PLANS.md`). Store each ExecPlan under `plans/` with a descriptive name, and create
+the directory if it does not exist.
+
 ---
 
 ## 6. Code conventions
