@@ -62,7 +62,7 @@ payloads, scheduler path, and status versions.
   does not alter the minimal quickstart.
 - [x] (2026-08-24 04:00Z) Passed the complete repository gate: Ruff reported no
   findings, strict mypy reported no issues across 42 source files, and the
-  CI-equivalent coverage run passed 1,155 tests with 52 E2E tests deselected
+  CI-equivalent coverage run passed 1,156 tests with 52 E2E tests deselected
   after final-review regressions were added.
 - [ ] Complete the final branch review and push the implementation branch.
 
@@ -159,6 +159,11 @@ payloads, scheduler path, and status versions.
   Evidence: Fail-fast cleanup now terminalizes abandoned retries and clears their deadlines;
   every public task variant publishes the same bounded task-id pattern as runtime validation,
   and the migration note calls out the experimental compatibility break.
+
+- Observation: The release review found the same abandoned-retry status problem on controlled
+  failures raised during post-wave materialization rather than Activity outcome application.
+  Evidence: Abandoned-retry terminalization is now centralized in `_dynamic_failure()` so every
+  controlled fail-fast path clears impossible retry state before publishing terminal status.
 
 ## Decision Log
 

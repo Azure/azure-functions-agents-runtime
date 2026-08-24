@@ -2486,6 +2486,33 @@ def test_fail_fast_marks_same_wave_abandoned_retry_as_failed() -> None:
     assert terminal_status["counts"]["failed"] == 2
 
 
+def test_materialization_failure_terminalizes_abandoned_retry() -> None:
+    fan = _policy_task("fan", attempts=1, depends_on=["source"])
+    fan["for_each"] = "${source.result.items}"
+
+    def result_for(_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "retrying":
+            return _activity_failure(task_id="retrying")
+        return _activity_success("source", {"items": "not-an-array"})
+
+    result, context = _run_dynamic(
+        [
+            _policy_task("retrying", attempts=2, delays=[60_000]),
+            _policy_task("source", attempts=1),
+            fan,
+        ],
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+
+    assert result["failed"] is True
+    assert result["error_code"] == "workflow_iteration_not_array"
+    terminal_status = context.statuses[-1]
+    assert terminal_status["nodes"]["retrying"]["state"] == "failed"
+    assert "next_retry_time" not in terminal_status["nodes"]["retrying"]
+    assert terminal_status["counts"]["retry_wait"] == 0
+
+
 def test_bare_activity_exception_retries_then_succeeds() -> None:
     def result_for(name: str, payload: dict[str, Any]) -> Any:
         if payload["attempt"] == 1:

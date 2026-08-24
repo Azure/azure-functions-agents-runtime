@@ -1036,6 +1036,15 @@ def _publish_dynamic_status(
     context.set_custom_status(_dynamic_status(state))
 
 
+def _terminalize_abandoned_retries(state: _DynamicWorkflowState) -> None:
+    for instances in state.node_instances.values():
+        for instance in instances:
+            if instance["state"] == "retry_wait":
+                instance["state"] = "failed"
+                del instance["retry_deadline"]
+                state.logical_state[instance["logical_id"]] = "failed"
+
+
 def _dynamic_failure(
     context: df.DurableOrchestrationContext,
     state: _DynamicWorkflowState,
@@ -1047,6 +1056,7 @@ def _dynamic_failure(
     logical_id: str,
 ) -> dict[str, Any]:
     state.logical_state[logical_id] = "failed"
+    _terminalize_abandoned_retries(state)
     _publish_dynamic_status(context, state)
     logger.info(
         "workflow failed: instance=%s node=%s code=%s",
@@ -1606,12 +1616,6 @@ def _apply_dynamic_wave_results(
             )
 
     if failures:
-        for instances in state.node_instances.values():
-            for abandoned in instances:
-                if abandoned["state"] == "retry_wait":
-                    abandoned["state"] = "failed"
-                    del abandoned["retry_deadline"]
-                    state.logical_state[abandoned["logical_id"]] = "failed"
         instance, failure = failures[0]
         result = _dynamic_failure(
             context,
