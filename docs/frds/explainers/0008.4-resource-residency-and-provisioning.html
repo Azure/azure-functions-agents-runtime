@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FRD 0008.4 — Resource residency &amp; provisioning boundary · ACA Sandbox Session Runtime</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef; --cp-bg-elevated: #fcfbf8; --cp-surface: #ffffff; --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede; --cp-border-strong: #919191; --cp-text: #242424; --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f; --cp-accent: #b11f4b; --cp-accent-hover: #9a1a41; --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff; --cp-success: #16a34a; --cp-danger: #dc2626; --cp-warning: #f59e0b; --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12); --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86); --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55); --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a; --cp-bg-elevated: #343231; --cp-surface: #292929; --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747; --cp-border-strong: #5f5f5f; --cp-text: #dedede; --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0; --cp-accent: #fd8ea1; --cp-accent-hover: #fb7b91; --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a; --cp-success: #4ade80; --cp-danger: #f87171; --cp-warning: #fbbf24; --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32); --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72); --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04); --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--cp-bg); color: var(--cp-text);
+  font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+code, .mono { font-family: Consolas, "Courier New", Courier, monospace; font-size: 0.9em; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 96px; }
+header.hero {
+  background: var(--cp-bg-elevated); border-bottom: 1px solid var(--cp-border); padding: 30px 24px 32px; margin-bottom: 40px;
+}
+.hero-inner { max-width: 1080px; margin: 0 auto; }
+.backlink { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; font-weight: 600; color: var(--cp-link); text-decoration: none; margin-bottom: 14px; }
+.backlink:hover { text-decoration: underline; }
+.eyebrow { color: var(--cp-accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .72rem; }
+h1 { font-size: 2.0rem; margin: 8px 0 6px; letter-spacing: -0.01em; }
+.tagline { font-size: 1.14rem; color: var(--cp-text-muted); margin: 0 0 18px; max-width: 760px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.badge { font-size: .74rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text-muted); }
+.badge.accent { background: var(--cp-accent-soft); border-color: transparent; color: var(--cp-accent); }
+.badge.warn { color: var(--cp-warning); }
+h2 { font-size: 1.5rem; margin: 48px 0 4px; letter-spacing: -0.01em; }
+h2 .n { color: var(--cp-accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+.lead { color: var(--cp-text-muted); margin: 0 0 20px; }
+.card { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 20px 22px; box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14); }
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.card h3 { margin: 0 0 6px; font-size: 1.06rem; }
+.card h3 .ic { color: var(--cp-accent); margin-right: 8px; }
+.card p { margin: 0; color: var(--cp-text-muted); font-size: .95rem; }
+.plain { background: var(--cp-accent-soft); border-left: 3px solid var(--cp-accent); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+.plain strong { color: var(--cp-accent); }
+.kv { color: var(--cp-text); }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: .92rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+th { color: var(--cp-text-soft); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+td.v1 { color: var(--cp-success); font-weight: 600; }
+td.v2 { color: var(--cp-text-muted); }
+.pill { display: inline-block; font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+.pill.v1 { background: rgba(22,163,74,.14); color: var(--cp-success); }
+.pill.v2 { background: var(--cp-surface-soft); color: var(--cp-text-muted); border: 1px solid var(--cp-border); }
+.pill.no { background: rgba(220,38,38,.12); color: var(--cp-danger); }
+.diagram { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 8px; overflow-x: auto; box-shadow: 0 0 2px rgba(0,0,0,0.12); }
+.flow { counter-reset: step; display: grid; gap: 10px; }
+.flow .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+.flow .step .num { width: 30px; height: 30px; border-radius: 50%; background: var(--cp-accent); color: var(--cp-accent-fg); display: grid; place-items: center; font-weight: 700; font-size: .85rem; }
+.flow .step .txt { padding-top: 3px; }
+.flow .step .txt b { color: var(--cp-text); }
+.flow .step .txt span { color: var(--cp-text-muted); }
+.decision { border-left: 3px solid var(--cp-border-strong); padding: 4px 0 4px 16px; margin: 0 0 18px; }
+.decision h4 { margin: 0 0 3px; font-size: 1rem; }
+.decision .why { color: var(--cp-text-muted); font-size: .93rem; }
+.reject { border-left-color: var(--cp-danger); }
+.reject h4 { color: var(--cp-danger); }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--cp-border); color: var(--cp-text-soft); font-size: .86rem; }
+.note { color: var(--cp-text-soft); font-size: .82rem; margin-top: 6px; }
+a { color: var(--cp-link); }
+.legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+/* ===== shared animation toolkit (pure CSS; reduced-motion aware) ===== */
+.viz{ position:relative; margin:18px 0 4px; }
+.viz .cap{ text-align:center; font-size:.76rem; color:var(--cp-text-soft); margin-top:10px; }
+.flow-row{ position:relative; display:flex; gap:8px; align-items:stretch; overflow:hidden; padding:2px; border-radius:12px; }
+.fnode{ position:relative; flex:1 1 0; min-width:0; text-align:center; padding:12px 6px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); font-size:.74rem; font-weight:700; color:var(--cp-text); z-index:1; }
+.fnode .fico{ display:block; font-size:1.05rem; margin-bottom:3px; color:var(--cp-accent); }
+.fnode .fsub{ display:block; font-size:.62rem; font-weight:500; color:var(--cp-text-muted); margin-top:2px; }
+.fnode.term{ border-color:var(--cp-danger); color:var(--cp-danger); } .fnode.term .fico{ color:var(--cp-danger); }
+.flow-row .beam{ position:absolute; top:0; bottom:0; left:-30%; width:28%; z-index:2; pointer-events:none; background:linear-gradient(90deg, transparent, var(--cp-accent-soft) 40%, var(--cp-accent-soft) 60%, transparent); animation:beam 4.6s linear infinite; }
+@keyframes beam{ 0%{ left:-30%; } 100%{ left:104%; } }
+.breather{ width:120px; height:52px; margin:6px auto 16px; border-radius:14px; background:var(--cp-accent-soft); border:1.5px solid var(--cp-accent); display:flex; align-items:center; justify-content:center; font-size:.72rem; font-weight:700; letter-spacing:.04em; color:var(--cp-accent); animation:breathe 8s ease-in-out infinite; }
+@keyframes breathe{ 0%{transform:scale(1);box-shadow:0 0 0 0 var(--cp-accent-soft);} 15%{transform:scale(1.07);box-shadow:0 0 0 9px var(--cp-accent-soft);} 40%{transform:scale(.9);opacity:.55;box-shadow:none;background:var(--cp-surface-soft);border-color:var(--cp-border);color:var(--cp-text-muted);} 58%{transform:scale(1.07);opacity:1;box-shadow:0 0 0 9px var(--cp-accent-soft);background:var(--cp-accent-soft);border-color:var(--cp-accent);color:var(--cp-accent);} 86%{transform:scale(1);} 93%{transform:scale(.85);opacity:.4;background:var(--cp-surface-soft);border-color:var(--cp-danger);color:var(--cp-danger);box-shadow:none;} 100%{transform:scale(1);opacity:1;} }
+.gate-row{ position:relative; display:flex; align-items:center; gap:10px; padding:10px 0; }
+.gate-end{ flex:0 0 auto; text-align:center; font-size:.72rem; font-weight:700; color:var(--cp-text); padding:10px 12px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); }
+.gate-track{ position:relative; flex:1 1 0; height:44px; }
+.gate-node{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); min-width:56px; height:42px; padding:0 8px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:.9rem; font-weight:700; border:1.5px solid var(--cp-border); background:var(--cp-surface); animation:gverdict 4.4s ease-in-out infinite; }
+@keyframes gverdict{ 0%,42%{ border-color:var(--cp-success); color:var(--cp-success); box-shadow:0 0 0 4px rgba(22,163,74,.12);} 56%,100%{ border-color:var(--cp-danger); color:var(--cp-danger); box-shadow:0 0 0 4px rgba(220,38,38,.12);} }
+.gate-tok{ position:absolute; top:50%; margin-top:-6px; left:0; width:12px; height:12px; border-radius:50%; background:var(--cp-accent); box-shadow:0 0 0 4px var(--cp-accent-soft); animation:gtok 4.4s ease-in-out infinite; }
+@keyframes gtok{ 0%{left:0;opacity:0;background:var(--cp-accent);} 8%{opacity:1;} 38%{left:42%;} 46%{left:100%;opacity:1;background:var(--cp-success);} 50%{opacity:0;} 58%{left:0;opacity:0;background:var(--cp-accent);} 66%{opacity:1;} 92%{left:42%;background:var(--cp-danger);} 100%{left:42%;opacity:0;} }
+.chip-row{ display:flex; gap:6px; flex-wrap:wrap; margin-top:16px; }
+.chip{ font-size:.72rem; font-weight:600; padding:3px 10px; border-radius:999px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); color:var(--cp-text-muted); }
+.chip.k{ color:var(--cp-accent); background:var(--cp-accent-soft); border-color:transparent; }
+.chip.no{ color:var(--cp-danger); background:rgba(220,38,38,.10); border-color:transparent; }
+/* motion plays regardless of OS reduce-motion (author intent for these explainers) */
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-inner">
+    <a class="backlink" href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">‹ ACA Sandbox Runtime — Simple Guide</a>
+    <div class="eyebrow">FRD 0008.4 · Sub-FRD · for team feedback</div>
+    <h1>Resource residency &amp; provisioning boundary</h1>
+    <p class="tagline">Who owns the Azure resources, where they live, and what the runtime is allowed to create when a session starts.</p>
+    <div class="badges">
+      <span class="badge accent">Owns Decision 30</span>
+      <span class="badge">Customer-owned Sandbox Group</span>
+      <span class="badge warn">v1 · 1 group per app/env</span>
+      <span class="badge">Finalized</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h2><span class="n">1</span>The big idea</h2>
+  <p class="lead">FRD 0008.4 draws a hard line between the customer-owned Azure infrastructure that must already exist and the per-session sandbox that the runtime creates on demand.</p>
+  <div class="plain">
+    <strong>In plain terms:</strong> there is exactly <b>one customer-owned Sandbox Group per Function App / environment</b>. The customer's own IaC provisions that group, its region, policies, identities, egress setup, state account, image reference, and scoped RBAC. At request time, the runtime creates only an <b>individual sandbox</b> inside that pre-provisioned group.
+  </div>
+  <div class="grid g3" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>Customer plane</h3><p>ARM/IaC creates the durable resources once per app/environment, in the customer's subscription and chosen region.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Runtime plane</h3><p>The controller holds only the data-plane right to create, resume, and delete per-session sandboxes inside that one group.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Residency stays local</h3><p>Because the group is customer-provisioned, subscription, region, quota, billing, and cleanup remain under the app owner's control.</p></div>
+  </div>
+
+  <h2><span class="n">2</span>IaC plane vs runtime plane</h2>
+  <p class="lead">The split is intentionally simple: powerful infrastructure rights never sit in the request-time runtime.</p>
+  <div class="card">
+    <div class="viz" role="img" aria-label="Customer IaC provisions one customer-owned Sandbox Group, and the runtime spawns per-session sandboxes only inside that group.">
+      <div class="flow-row">
+        <span class="beam"></span>
+        <div class="fnode"><span class="fico">◇</span>Customer IaC<span class="fsub">provisions once</span></div>
+        <div class="fnode"><span class="fico">▣</span>Sandbox Group<span class="fsub">customer-owned</span></div>
+        <div class="fnode"><span class="fico">▶</span>Sandbox<span class="fsub">runtime spawns per session</span></div>
+      </div>
+      <div class="chip-row">
+        <span class="chip k">customer-owned group</span>
+        <span class="chip">data residency stays in-region</span>
+        <span class="chip">runtime only spawns within the group</span>
+        <span class="chip">IaC-plane vs runtime-plane</span>
+      </div>
+      <div class="cap">Provisioning boundary: durable infrastructure is IaC-owned; runtime actions stay inside the configured group. Session content still arrives via <a href="https://gistpreview.github.io/?cdea2c7ee2a3dbd3705240579f69559e">0008.6</a>; outbound auth remains mediated by <a href="https://gistpreview.github.io/?7ff281c651e0c0dcfa24487de5dd9bb3">0008.9</a>.</div>
+    </div>
+  </div>
+  <div class="decision reject" style="margin-top:18px"><h4>✗ Rejected: a central shared Sandbox Group</h4>
+  <p class="why">A Microsoft-owned multi-tenant group would centralize customer content, billing, quotas, and blast radius, and would require a new always-on operator plane. Decision 30 keeps the trust boundary in the customer's tenant instead.</p></div>
+
+  <h2><span class="n">3</span>What each side owns</h2>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Boundary</th><th>Customer IaC / deployment identity</th><th>Runtime controller</th></tr></thead>
+      <tbody>
+        <tr><td>Resources</td><td class="v1">Creates the Sandbox Group and standing dependencies</td><td class="v2">Creates only per-session sandboxes</td></tr>
+        <tr><td>Region</td><td class="v1">Chooses the group's Azure region</td><td class="v2">Co-locates every session sandbox in that group</td></tr>
+        <tr><td>Privileges</td><td class="v1">Can create ARM resources and scoped RBAC</td><td class="v2">Has SandboxGroup Data Owner scoped to one group</td></tr>
+        <tr><td>Lifecycle</td><td class="v1">Sets group defaults and later deletes standing resources</td><td class="v2">May set per-sandbox overrides at create, then reclaims session sandboxes</td></tr>
+        <tr><td>Cost / quota</td><td class="v1">Owns subscription billing, capacity, and preview quota requests</td><td class="v2">Consumes capacity only within the customer-owned group</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note">The runtime never creates or updates ARM resources. That is the practical least-privilege meaning of this sub-FRD.</p>
+
+  <h2><span class="n">4</span>Residency, image, and identity</h2>
+  <p class="lead">Three adjacent design areas all preserve the same boundary: customer-owned placement, runtime-published generic bits, and no identity inside the sandbox.</p>
+  <div class="grid g2" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>Data residency</h3><p>The customer selects the Sandbox Group region in IaC. v1 is single-region per app/environment; multi-region and DR are deferred customer-IaC concerns. The state account should stay co-regional with the group.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Bootstrap image</h3><p>Customer IaC references a runtime-published, digest-pinned stdlib-only bootstrap image. The customer controls where and which version runs; the image contains no MAF or app code. Packaging details live in <a href="https://gistpreview.github.io/?cdea2c7ee2a3dbd3705240579f69559e">0008.6</a>.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Identity-less sandbox</h3><p>The sandbox has no storage access and no secrets. The controller delivers captured content; outbound authentication is mediated by the egress proxy, keeping tokens outside the sandbox (<a href="https://gistpreview.github.io/?7ff281c651e0c0dcfa24487de5dd9bb3">0008.9</a>).</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Authoring values</h3><p>Retention uses a hierarchy: group default from ARM, app-level <span class="mono">session_runtime.retention</span> in v1, and a deferred per-agent override. The authoring surface is owned by <a href="https://gistpreview.github.io/?993488caa6648524400224af6baf8255">0008.10</a>.</p></div>
+  </div>
+
+  <h2><span class="n">5</span>Why this split matters</h2>
+  <p class="lead">Decision 30 is not just deployment bookkeeping; it is the safety model for the whole feature.</p>
+  <div class="grid g3" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>Blast radius</h3><p>A runaway app consumes only the customer's own group capacity and scoped quota, not a shared central pool used by other tenants.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Ownership</h3><p>The party that creates durable resources also pays for them, chooses their region, grants roles, and removes them when the app/environment goes away.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Least privilege</h3><p>The runtime can manage the sandboxes it creates, but cannot quietly expand infrastructure, alter residency, or broaden access beyond the one configured group.</p></div>
+  </div>
+
+  <h2><span class="n">6</span>v1 today vs later</h2>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Topic</th><th>v1</th><th>Deferred / later</th></tr></thead>
+      <tbody>
+        <tr><td>Group mapping</td><td class="v1"><span class="pill v1">hard 1:1</span> one group per Function App / environment</td><td class="v2">Multiple groups per app would require explicit redesign</td></tr>
+        <tr><td>Provisioning DX</td><td class="v1">Composable sample IaC the customer runs</td><td class="v2">Polished one-command composite quickstart module</td></tr>
+        <tr><td>Region strategy</td><td class="v1">Customer-chosen single region; runtime co-locates</td><td class="v2">Multi-region / DR, still checked against this boundary</td></tr>
+        <tr><td>Image path</td><td class="v1">Reference generic bootstrap image + controller-delivered content</td><td class="v2">Optional deploy-time committed disk images, deploy-owned cleanup</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer>
+    <p><strong>FRD 0008.4 · Finalized</strong> (whole-FRD sign-off, 2026-07-27). Owns Decision 30: customer-subscription residency, one Sandbox Group per Function App/environment, and the customer-IaC-vs-runtime-data-plane provisioning split; cross-cutting with 0008.6 packaging, 0008.9 egress/identity, and 0008.10 retention authoring.</p>
+    <p class="note">Part of <a href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">FRD 0008 — ACA Sandbox Session Runtime</a>. A companion to the FRD for team feedback; the FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
+  </footer>
+</div>
+</body>
+</html>

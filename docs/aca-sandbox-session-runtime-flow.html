@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ACA Sandbox Session Runtime — Simple Guide (FRD 0008)</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef; --cp-bg-elevated: #fcfbf8; --cp-surface: #ffffff; --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede; --cp-border-strong: #919191; --cp-text: #242424; --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f; --cp-accent: #b11f4b; --cp-accent-hover: #9a1a41; --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff; --cp-success: #16a34a; --cp-danger: #dc2626; --cp-warning: #f59e0b; --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12); --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86); --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55); --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a; --cp-bg-elevated: #343231; --cp-surface: #292929; --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747; --cp-border-strong: #5f5f5f; --cp-text: #dedede; --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0; --cp-accent: #fd8ea1; --cp-accent-hover: #fb7b91; --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a; --cp-success: #4ade80; --cp-danger: #f87171; --cp-warning: #fbbf24; --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32); --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72); --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04); --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--cp-bg); color: var(--cp-text);
+  font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+code, .mono { font-family: Consolas, "Courier New", Courier, monospace; font-size: 0.9em; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 96px; }
+header.hero {
+  background: var(--cp-bg-elevated); border-bottom: 1px solid var(--cp-border); padding: 44px 24px 36px; margin-bottom: 40px;
+}
+.hero-inner { max-width: 1080px; margin: 0 auto; }
+.eyebrow { color: var(--cp-accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .72rem; }
+h1 { font-size: 2.1rem; margin: 8px 0 6px; letter-spacing: -0.01em; }
+.tagline { font-size: 1.18rem; color: var(--cp-text-muted); margin: 0 0 18px; max-width: 760px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.badge { font-size: .74rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text-muted); }
+.badge.accent { background: var(--cp-accent-soft); border-color: transparent; color: var(--cp-accent); }
+.badge.warn { color: var(--cp-warning); }
+h2 { font-size: 1.5rem; margin: 48px 0 4px; letter-spacing: -0.01em; }
+h2 .n { color: var(--cp-accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+.lead { color: var(--cp-text-muted); margin: 0 0 20px; }
+.card { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 20px 22px; box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14); }
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.card h3 { margin: 0 0 6px; font-size: 1.06rem; }
+.card h3 .ic { color: var(--cp-accent); margin-right: 8px; }
+.card p { margin: 0; color: var(--cp-text-muted); font-size: .95rem; }
+.plain { background: var(--cp-accent-soft); border-left: 3px solid var(--cp-accent); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+.plain strong { color: var(--cp-accent); }
+.kv { color: var(--cp-text); }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: .92rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+th { color: var(--cp-text-soft); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+td.v1 { color: var(--cp-success); font-weight: 600; }
+td.v2 { color: var(--cp-text-muted); }
+.pill { display: inline-block; font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+.pill.v1 { background: rgba(22,163,74,.14); color: var(--cp-success); }
+.pill.v2 { background: var(--cp-surface-soft); color: var(--cp-text-muted); border: 1px solid var(--cp-border); }
+.diagram { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 8px; overflow-x: auto; box-shadow: 0 0 2px rgba(0,0,0,0.12); }
+.flow { counter-reset: step; display: grid; gap: 10px; }
+.flow .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+.flow .step .num { width: 30px; height: 30px; border-radius: 50%; background: var(--cp-accent); color: var(--cp-accent-fg); display: grid; place-items: center; font-weight: 700; font-size: .85rem; }
+.flow .step .txt { padding-top: 3px; }
+.flow .step .txt b { color: var(--cp-text); }
+.flow .step .txt span { color: var(--cp-text-muted); }
+.decision { border-left: 3px solid var(--cp-border-strong); padding: 4px 0 4px 16px; margin: 0 0 18px; }
+.decision h4 { margin: 0 0 3px; font-size: 1rem; }
+.decision .why { color: var(--cp-text-muted); font-size: .93rem; }
+.subfrd { display: grid; grid-template-columns: 52px 1fr auto; gap: 10px; padding: 11px 10px; border-bottom: 1px solid var(--cp-border); font-size: .92rem; align-items: center; }
+.subfrd .id { font-weight: 700; color: var(--cp-accent); font-variant-numeric: tabular-nums; }
+.subfrd .d { color: var(--cp-text-muted); }
+.subfrd .d b { color: var(--cp-text); font-weight: 600; }
+a.subfrd { text-decoration: none; color: inherit; border-radius: 8px; transition: background .12s ease; }
+a.subfrd:hover { background: var(--cp-accent-soft); }
+a.subfrd:hover .d b { color: var(--cp-accent); }
+.subfrd .open { color: var(--cp-link); font-size: .8rem; font-weight: 700; white-space: nowrap; opacity: .8; }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--cp-border); color: var(--cp-text-soft); font-size: .86rem; }
+.note { color: var(--cp-text-soft); font-size: .82rem; margin-top: 6px; }
+a { color: var(--cp-link); }
+.legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+/* ===== animated diagrams (sections 4 & 5) — pure CSS, respects reduced-motion ===== */
+.viz-hint{ color:var(--cp-text-soft); font-weight:500; }
+.reqcard h3 .mode{ font-size:.74rem; font-weight:600; color:var(--cp-text-soft); }
+.reqviz{ position:relative; margin-top:18px; }
+.reqrow{ display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+.rnode{ text-align:center; }
+.rnode .box{ min-height:54px; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:6px 4px; border-radius:12px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); font-size:.8rem; font-weight:700; color:var(--cp-text); }
+.rnode .box .sub{ font-size:.64rem; font-weight:500; color:var(--cp-text-muted); margin-top:2px; }
+.rnode.run .box{ animation:runglow 1.8s ease-in-out infinite; }
+@keyframes runglow{ 0%,100%{ box-shadow:0 0 0 0 var(--cp-accent-soft); border-color:var(--cp-border);} 50%{ box-shadow:0 0 0 6px var(--cp-accent-soft); border-color:var(--cp-accent);} }
+.lane{ position:relative; height:22px; margin-top:10px; }
+.reqrail{ position:absolute; left:16.6%; right:16.6%; top:50%; height:3px; margin-top:-1.5px; background:var(--cp-border); border-radius:3px; }
+.packet{ position:absolute; top:50%; margin-top:-7px; left:16.6%; width:14px; height:14px; border-radius:50%; background:var(--cp-accent); box-shadow:0 0 0 4px var(--cp-accent-soft); }
+.reqviz.sync .packet{ animation:pktSync 4.2s cubic-bezier(.55,0,.45,1) infinite; }
+@keyframes pktSync{ 0%{left:16.6%;opacity:0;background:var(--cp-accent);} 7%{opacity:1;} 44%{left:83.4%;background:var(--cp-accent);} 55%{left:83.4%;background:var(--cp-success);} 93%{left:16.6%;opacity:1;background:var(--cp-success);} 100%{left:16.6%;opacity:0;} }
+.reqviz.async .packet{ animation:pkt202 5s ease-in-out infinite; }
+@keyframes pkt202{ 0%{left:16.6%;opacity:0;background:var(--cp-accent);} 7%{opacity:1;} 22%{left:50%;background:var(--cp-accent);} 26%{background:var(--cp-success);} 42%{left:16.6%;background:var(--cp-success);opacity:1;} 48%{opacity:0;} 100%{left:16.6%;opacity:0;} }
+.sdot{ position:absolute; top:50%; margin-top:-4px; left:83.4%; width:8px; height:8px; border-radius:50%; background:var(--cp-link); opacity:0; }
+.reqviz.async .sdot{ animation:stream 1.7s linear infinite; }
+.reqviz.async .sdot:nth-of-type(2){ animation-delay:.57s; }
+.reqviz.async .sdot:nth-of-type(3){ animation-delay:1.14s; }
+@keyframes stream{ 0%{left:83.4%;opacity:0;} 12%{opacity:1;} 82%{opacity:1;} 100%{left:16.6%;opacity:0;} }
+.chip-row{ display:flex; gap:6px; flex-wrap:wrap; margin-top:16px; }
+.chip{ font-size:.72rem; font-weight:600; padding:3px 10px; border-radius:999px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); color:var(--cp-text-muted); }
+.chip.k{ color:var(--cp-accent); background:var(--cp-accent-soft); border-color:transparent; }
+.life{ padding:8px 2px 2px; }
+.breather{ width:120px; height:52px; margin:4px auto 20px; border-radius:14px; background:var(--cp-accent-soft); border:1.5px solid var(--cp-accent); display:flex; align-items:center; justify-content:center; font-size:.72rem; font-weight:700; letter-spacing:.04em; color:var(--cp-accent); animation:breathe 8s ease-in-out infinite; }
+@keyframes breathe{ 0%{transform:scale(1);box-shadow:0 0 0 0 var(--cp-accent-soft);} 15%{transform:scale(1.07);box-shadow:0 0 0 9px var(--cp-accent-soft);} 40%{transform:scale(.9);opacity:.55;box-shadow:none;background:var(--cp-surface-soft);border-color:var(--cp-border);color:var(--cp-text-muted);} 58%{transform:scale(1.07);opacity:1;box-shadow:0 0 0 9px var(--cp-accent-soft);background:var(--cp-accent-soft);border-color:var(--cp-accent);color:var(--cp-accent);} 86%{transform:scale(1);} 93%{transform:scale(.85);opacity:.4;background:var(--cp-surface-soft);border-color:var(--cp-danger);color:var(--cp-danger);box-shadow:none;} 100%{transform:scale(1);opacity:1;box-shadow:0 0 0 0 var(--cp-accent-soft);} }
+.lchips{ display:grid; grid-template-columns:repeat(7,1fr); gap:6px; }
+.lchip{ text-align:center; font-size:.66rem; font-weight:600; line-height:1.25; padding:8px 3px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); color:var(--cp-text-muted); opacity:.55; animation:lchip 8s ease-in-out infinite; }
+.lchip .ico{ display:block; font-size:1.05rem; margin-bottom:3px; color:var(--cp-accent); }
+.lchip:nth-child(1){animation-delay:0s;} .lchip:nth-child(2){animation-delay:1.14s;} .lchip:nth-child(3){animation-delay:2.29s;} .lchip:nth-child(4){animation-delay:3.43s;} .lchip:nth-child(5){animation-delay:4.57s;} .lchip:nth-child(6){animation-delay:5.71s;} .lchip:nth-child(7){animation-delay:6.86s;}
+@keyframes lchip{ 0%,100%{opacity:.5;transform:translateY(0);} 5%{opacity:1;transform:translateY(-3px);border-color:var(--cp-accent);} 15%{opacity:.5;transform:translateY(0);} }
+.lchip.term{ animation-name:lchipTerm; }
+.lchip.term .ico{ color:var(--cp-danger); }
+@keyframes lchipTerm{ 0%,100%{opacity:.5;transform:translateY(0);} 5%{opacity:1;transform:translateY(-3px);border-color:var(--cp-danger);color:var(--cp-danger);} 15%{opacity:.5;transform:translateY(0);} }
+/* motion plays regardless of OS reduce-motion (author intent for these explainers) */
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-inner">
+    <div class="eyebrow">FRD 0008 · Simple Guide · for team feedback</div>
+    <h1>ACA Sandbox Session Runtime</h1>
+    <p class="tagline">Run the <strong>entire</strong> AI-agent loop inside one ephemeral Azure Container Apps sandbox per session — with Azure Functions as a thin, secure controller.</p>
+    <div class="badges">
+      <span class="badge accent">Validated · 5 rubber-duck rounds</span>
+      <span class="badge">70 recorded decisions</span>
+      <a class="badge accent" href="#deepdives">14 visual deep-dives ↓</a>
+      <span class="badge warn">v1 scope · MAF-only</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h2><span class="n">1</span>The big idea</h2>
+  <p class="lead">Today, an agent's "thinking" runs in the Python Functions worker, but any LLM-generated code runs on a <em>separate</em> Dynamic Session — two different computes, and state can be lost between invocations. This feature collapses that into one place.</p>
+  <div class="plain">
+    <strong>In plain terms:</strong> give every agent conversation its own private, disposable computer (an ACA "sandbox"). The <strong>whole</strong> agent — the model loop, its tools, its memory — lives on that one computer for the life of the session. Azure Functions stops being the compute and becomes the <strong>doorman</strong>: it authenticates callers, routes them to the right sandbox, and is the only thing allowed to write down "what happened."
+  </div>
+  <div class="grid g3" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>One sandbox / session</h3><p>Not one per invocation. The sandbox (and its snapshot) lives for the whole session, so agentic context is never scattered across computes — no state loss.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Functions = controller</h3><p>A thin, authenticated proxy: auth, session lookup, routing, and the single writer of session state. It never runs the agent itself.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Brain + hands together</h3><p>The MAF "brain" and its tool "hands" run in the same sandbox — the full agent loop runs end-to-end in one ephemeral, isolated container.</p></div>
+  </div>
+
+  <h2><span class="n">2</span>Why an ACA sandbox</h2>
+  <p class="lead">Four properties of ACA sandboxes map directly onto hard requirements.</p>
+  <div class="grid g2">
+    <div class="card"><h3><span class="ic">🔒</span>No secrets ever enter the sandbox</h3><p>An <b>egress proxy</b> injects credentials into outbound calls, so tokens/keys never live inside the sandbox. The sandbox is <b>identity-less</b> — no managed identity, no AAD token, nothing to steal.</p></div>
+    <div class="card"><h3><span class="ic">🎫</span>Enterprise auth (OBO-ready)</h3><p>The egress/identity broker pattern gives a path to on-behalf-of flows that several enterprise customers need — without baking credentials into agent code.</p></div>
+    <div class="card"><h3><span class="ic">💾</span>Snapshot &amp; resume</h3><p>ACA can suspend an idle sandbox and resume it later with disk (and memory) intact — enabling durable, long-lived sessions that scale to zero between turns.</p></div>
+    <div class="card"><h3><span class="ic">📦</span>Real container harness</h3><p>A container makes it straightforward to host the agent harness (and, later, richer first-party harnesses) instead of only the vanilla in-worker model.</p></div>
+  </div>
+
+  <h2><span class="n">3</span>How it fits together</h2>
+  <p class="lead">One authenticated control path in; one credential-injecting egress path out; the controller owns the durable record.</p>
+  <div class="diagram">
+    <svg viewBox="0 0 940 430" width="100%" role="img" aria-label="Architecture diagram" font-family="Segoe UI, sans-serif">
+      <defs>
+        <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="var(--cp-border-strong)"/></marker>
+        <marker id="arrA" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="var(--cp-accent)"/></marker>
+      </defs>
+      <!-- Client -->
+      <rect x="24" y="176" width="120" height="72" rx="12" fill="var(--cp-surface-soft)" stroke="var(--cp-border-strong)"/>
+      <text x="84" y="208" text-anchor="middle" fill="var(--cp-text)" font-size="15" font-weight="700">Client</text>
+      <text x="84" y="228" text-anchor="middle" fill="var(--cp-text-muted)" font-size="11">HTTP / trigger</text>
+      <!-- Controller -->
+      <rect x="220" y="150" width="210" height="124" rx="14" fill="var(--cp-surface)" stroke="var(--cp-accent)" stroke-width="2"/>
+      <text x="325" y="180" text-anchor="middle" fill="var(--cp-text)" font-size="15" font-weight="700">Azure Functions</text>
+      <text x="325" y="199" text-anchor="middle" fill="var(--cp-accent)" font-size="12" font-weight="700">CONTROLLER</text>
+      <text x="325" y="223" text-anchor="middle" fill="var(--cp-text-muted)" font-size="10.5">auth · routing · sole state-writer</text>
+      <text x="325" y="240" text-anchor="middle" fill="var(--cp-text-muted)" font-size="10.5">provisions &amp; drives the sandbox</text>
+      <text x="325" y="257" text-anchor="middle" fill="var(--cp-text-muted)" font-size="10.5">captures /app from its own disk</text>
+      <!-- State store -->
+      <rect x="230" y="330" width="190" height="66" rx="12" fill="var(--cp-surface-soft)" stroke="var(--cp-border-strong)"/>
+      <text x="325" y="358" text-anchor="middle" fill="var(--cp-text)" font-size="13" font-weight="700">Azure Table state</text>
+      <text x="325" y="377" text-anchor="middle" fill="var(--cp-text-muted)" font-size="10.5">session/run rows · digest · generation</text>
+      <!-- Sandbox -->
+      <rect x="520" y="120" width="290" height="190" rx="16" fill="var(--cp-accent-soft)" stroke="var(--cp-accent)" stroke-width="2"/>
+      <text x="665" y="147" text-anchor="middle" fill="var(--cp-text)" font-size="15" font-weight="700">ACA Sandbox</text>
+      <text x="665" y="165" text-anchor="middle" fill="var(--cp-text-muted)" font-size="10.5">one per session · identity-less</text>
+      <rect x="545" y="182" width="240" height="52" rx="10" fill="var(--cp-surface)" stroke="var(--cp-border)"/>
+      <text x="665" y="203" text-anchor="middle" fill="var(--cp-text)" font-size="12.5" font-weight="700">MAF harness (the "brain")</text>
+      <text x="665" y="221" text-anchor="middle" fill="var(--cp-text-muted)" font-size="10.5">runs the full agent loop + tools</text>
+      <rect x="545" y="244" width="240" height="48" rx="10" fill="var(--cp-surface)" stroke="var(--cp-border)"/>
+      <text x="665" y="264" text-anchor="middle" fill="var(--cp-text)" font-size="12" font-weight="700">captured /app + .python_packages</text>
+      <text x="665" y="281" text-anchor="middle" fill="var(--cp-text-muted)" font-size="10.5">one pip-resolved env · stdlib bootstrap</text>
+      <!-- Egress proxy -->
+      <rect x="520" y="342" width="180" height="60" rx="12" fill="var(--cp-surface)" stroke="var(--cp-border-strong)"/>
+      <text x="610" y="367" text-anchor="middle" fill="var(--cp-text)" font-size="12.5" font-weight="700">Egress proxy</text>
+      <text x="610" y="385" text-anchor="middle" fill="var(--cp-text-muted)" font-size="10">injects creds · deny-by-default</text>
+      <!-- External -->
+      <rect x="740" y="342" width="176" height="60" rx="12" fill="var(--cp-surface-soft)" stroke="var(--cp-border)"/>
+      <text x="828" y="367" text-anchor="middle" fill="var(--cp-text)" font-size="12.5" font-weight="700">Models · MCP</text>
+      <text x="828" y="385" text-anchor="middle" fill="var(--cp-text-muted)" font-size="10">allow-listed only</text>
+      <!-- arrows -->
+      <line x1="146" y1="212" x2="216" y2="212" stroke="var(--cp-border-strong)" stroke-width="2" marker-end="url(#arr)"/>
+      <line x1="432" y1="200" x2="516" y2="200" stroke="var(--cp-accent)" stroke-width="2.5" marker-end="url(#arrA)"/>
+      <text x="474" y="192" text-anchor="middle" fill="var(--cp-accent)" font-size="10" font-weight="700">transport</text>
+      <text x="474" y="216" text-anchor="middle" fill="var(--cp-text-muted)" font-size="9">6-verb file/exec plane</text>
+      <line x1="325" y1="276" x2="325" y2="328" stroke="var(--cp-border-strong)" stroke-width="2" marker-end="url(#arr)"/>
+      <line x1="665" y1="312" x2="640" y2="340" stroke="var(--cp-border-strong)" stroke-width="2" marker-end="url(#arr)"/>
+      <line x1="702" y1="372" x2="738" y2="372" stroke="var(--cp-border-strong)" stroke-width="2" marker-end="url(#arr)"/>
+    </svg>
+    <div class="legend">
+      <span><span class="sw" style="background:var(--cp-accent)"></span>authenticated control path (only way in)</span>
+      <span><span class="sw" style="background:var(--cp-border-strong)"></span>data / dependency</span>
+      <span><span class="sw" style="background:var(--cp-accent-soft);border:1px solid var(--cp-accent)"></span>identity-less sandbox</span>
+    </div>
+  </div>
+  <p class="note">The controller reaches the sandbox over a single authenticated file/exec plane (six verbs) that carries run-control traffic, the exec/journal data plane, and the session content package — no other inbound path exists.</p>
+
+  <h2><span class="n">4</span>What a request looks like</h2>
+  <p class="lead">One authenticated call in; the agent runs inside the sandbox; the answer comes back. <span class="viz-hint">Sync waits for it — async hands you a ticket and streams. (Animated — watch the request travel.)</span></p>
+  <div class="grid g2">
+    <div class="card reqcard">
+      <h3><span class="ic">⚡</span>Synchronous <span class="mode">· default chat</span></h3>
+      <div class="reqviz sync" role="img" aria-label="A request travels Client to Functions to Sandbox and the answer returns within 180 seconds">
+        <div class="reqrow">
+          <div class="rnode"><div class="box">Client<span class="sub">HTTP</span></div></div>
+          <div class="rnode"><div class="box">Functions<span class="sub">controller</span></div></div>
+          <div class="rnode run"><div class="box">Sandbox<span class="sub">MAF runs</span></div></div>
+        </div>
+        <div class="lane"><span class="reqrail"></span><span class="packet"></span></div>
+      </div>
+      <div class="chip-row"><span class="chip k">one call</span><span class="chip">answer ≤ 180s</span><span class="chip">response = the HTTP body</span></div>
+    </div>
+    <div class="card reqcard">
+      <h3><span class="ic">⏳</span>Async / streaming <span class="mode">· long work</span></h3>
+      <div class="reqviz async" role="img" aria-label="Submit returns 202 and a result_url immediately, then the sandbox streams events while it keeps running">
+        <div class="reqrow">
+          <div class="rnode"><div class="box">Client<span class="sub">gets 202</span></div></div>
+          <div class="rnode"><div class="box">Functions<span class="sub">controller</span></div></div>
+          <div class="rnode run"><div class="box">Sandbox<span class="sub">keeps running</span></div></div>
+        </div>
+        <div class="lane"><span class="reqrail"></span><span class="packet"></span><span class="sdot"></span><span class="sdot"></span><span class="sdot"></span></div>
+      </div>
+      <div class="chip-row"><span class="chip k">202 + result_url</span><span class="chip">SSE stream</span><span class="chip">/result</span><span class="chip">disconnect ≠ cancel</span></div>
+    </div>
+  </div>
+
+  <h2><span class="n">5</span>The session's life</h2>
+  <p class="lead">One sandbox, one content epoch, from birth to reap — it breathes (active → suspended → resumed) and always ends on a clear terminal state. <span class="viz-hint">(Animated — the sandbox pulses; the stage highlight sweeps left to right.)</span></p>
+  <div class="card">
+    <div class="life" role="img" aria-label="The sandbox breathes between active and suspended, and the lifecycle sweeps from Create through Run and commit, Suspend, Resume, Crash-resume, Redeploy-drain, to a 410 tombstone">
+      <div class="breather">SANDBOX</div>
+      <div class="lchips">
+        <div class="lchip"><span class="ico">▶</span>Create</div>
+        <div class="lchip"><span class="ico">✎</span>Run + commit</div>
+        <div class="lchip"><span class="ico">💤</span>Suspend</div>
+        <div class="lchip"><span class="ico">⤴</span>Resume</div>
+        <div class="lchip"><span class="ico">✱</span>Crash → resume</div>
+        <div class="lchip"><span class="ico">⤳</span>Redeploy → drain</div>
+        <div class="lchip term"><span class="ico">✝</span>410 tombstone</div>
+      </div>
+    </div>
+    <div class="chip-row" style="justify-content:center; margin-top:18px">
+      <span class="chip k">all-or-nothing per-turn commit</span>
+      <span class="chip">suspend / resume = same generation</span>
+      <span class="chip">crash + disk intact → resume</span>
+      <span class="chip">loss / redeploy → 410, start fresh</span>
+      <span class="chip">cross-deploy continuity = v2</span>
+    </div>
+  </div>
+
+  <h2><span class="n">6</span>Key design decisions</h2>
+  <p class="lead">The choices that most shaped the design — several deliberately <em>remove</em> complexity.</p>
+
+  <div class="decision"><h4>Model-1 packaging — run from the captured app environment</h4>
+  <p class="why">The runtime ships as a normal pip dependency (<span class="mono">azurefunctions-agents-runtime</span>, which pulls in MAF). So the customer's build already resolves runtime + MAF + their tools into <b>one coherent environment</b>. The sandbox image is a tiny <b>stdlib-only bootstrap</b> that simply runs that captured environment — it bakes no MAF. <b>Result: the dependency-isolation problem disappears</b> (there's only ever one MAF, already resolved together).</p></div>
+
+  <div class="decision"><h4>Identity-less sandbox</h4>
+  <p class="why">No managed identity or token lives inside the sandbox. Outbound auth is injected by the egress proxy. This also makes the controller the <b>sole writer</b> of session state — the sandbox physically can't tamper with the record.</p></div>
+
+  <div class="decision"><h4>Drain-on-deploy (the v1 version story)</h4>
+  <p class="why">Rather than build machinery to keep old sessions compatible across a redeploy, v1 simply <b>drains</b> a session when the app's content digest changes — so a session never spans a deploy, and controller &amp; sandbox are always the same version. Simple, and it dissolved two would-be subsystems.</p></div>
+
+  <div class="decision"><h4>Sandbox loss ⇒ tombstone (never a silent recovery)</h4>
+  <p class="why">In v1 there's no external mirror, so a lost sandbox honestly fails the session (<span class="mono">410</span>, start fresh). A crash with the disk intact is different — that resumes. The "generation" counter that would let a session move to a <em>new</em> backing while preserving state is a <b>v2-only</b> capability (it needs the mirror).</p></div>
+
+  <div class="decision"><h4>Durability is platform-only in v1</h4>
+  <p class="why">v1 relies on ACA snapshot + auto-suspend/resume for warm continuity; only control-plane <em>status</em> is externally durable. A full owner-scoped external checkpoint mirror (so losing a sandbox never loses the conversation) is the headline <b>v2</b> add.</p></div>
+
+  <div class="decision"><h4>MAF-only for v1</h4>
+  <p class="why">v1 ships only the Microsoft Agent Framework harness, gated by a golden-trace conformance check. A custom sandbox image is allowed but must still be MAF-conformant; a non-MAF / bring-your-own harness is deferred to its own FRD.</p></div>
+
+  <h2><span class="n">7</span>What's in v1 vs v2</h2>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Capability</th><th>v1</th><th>v2 / later</th></tr></thead>
+      <tbody>
+        <tr><td>Full agent loop in one sandbox per session</td><td class="v1">✓ shipped</td><td class="v2">—</td></tr>
+        <tr><td>Identity-less sandbox + egress-proxy credential injection</td><td class="v1">✓</td><td class="v2">per-session / per-tool egress scoping</td></tr>
+        <tr><td>Sync + async + streaming API</td><td class="v1">✓</td><td class="v2">—</td></tr>
+        <tr><td>Durability</td><td class="v1">platform snapshot + per-turn commit</td><td class="v2">external checkpoint mirror</td></tr>
+        <tr><td>Sandbox loss</td><td class="v1">tombstone → new session</td><td class="v2">rebuild &amp; continue (generation advance)</td></tr>
+        <tr><td>Redeploy of a live app</td><td class="v1">drain &amp; tombstone</td><td class="v2">cross-deploy continuity</td></tr>
+        <tr><td>Harness</td><td class="v1">MAF-only (conformance-gated)</td><td class="v2">non-MAF / bring-your-own</td></tr>
+        <tr><td>Concurrency</td><td class="v1">one active run / session</td><td class="v2">per-owner quotas / fairness</td></tr>
+        <tr><td>Dynamic workflows inside the sandbox</td><td class="v1"><span class="pill v2">fail-closed</span></td><td class="v2">compatibility FRD</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="deepdives"><span class="n">8</span>Explore the deep-dives</h2>
+  <p class="lead">Each sub-FRD has its own visual explainer — <strong>click any row to open it</strong>. This guide is the parent overview's visual companion; the 14 focused pages below go one level deeper.</p>
+  <div class="card">
+    <div class="subfrd"><div class="id">0008</div><div class="d"><b>Parent overview</b> — problem, goals, component map, and the 70-row master decisions log. <em>(You're reading its visual companion.)</em></div><span class="open"></span></div>
+    <a class="subfrd" href="https://gistpreview.github.io/?373f6153175e5f8e8b2cb08f508cd92f"><div class="id">.1</div><div class="d"><b>Execution backend &amp; controller</b> — the controller-as-proxy model and the execution-backend seam.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?cb1c20c3927659a4026ece50fb9186c7"><div class="id">.2</div><div class="d"><b>Session identity, ownership &amp; concurrency</b> — session_id, one-active-run, compare-and-set, verified-kill.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?56accce5f0fbdd849669f1709a64d3b4"><div class="id">.3</div><div class="d"><b>State store &amp; tamper-evident trust</b> — the Azure Table schema, digest/generation, sole-writer model.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?2a47ed8d57959b47c9022721b7d522ae"><div class="id">.4</div><div class="d"><b>Resource residency &amp; provisioning</b> — the customer-owned Sandbox Group + IaC boundary.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?bc4e1c21fe17cc60259702118101c17d"><div class="id">.5</div><div class="d"><b>Controller ↔ sandbox transport</b> — the six-verb file/exec plane, run journal, event cursor.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?cdea2c7ee2a3dbd3705240579f69559e"><div class="id">.6</div><div class="d"><b>Packaging, image &amp; content</b> — stdlib bootstrap image, capture-from-disk, content digest.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?99f20e91c634fe20e0fcd92004dd9222"><div class="id">.7</div><div class="d"><b>Harness compatibility &amp; conformance</b> — MAF harness, ABI, golden-trace, output validation.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?6946f4a98ea7bb4f7106337fdbaf625e"><div class="id">.8</div><div class="d"><b>Snapshot, suspend &amp; durability</b> — atomic per-turn commit, auto-suspend/resume.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?7ff281c651e0c0dcfa24487de5dd9bb3"><div class="id">.9</div><div class="d"><b>Network egress &amp; OBO</b> — deny-by-default egress, credential injection, identity-less.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?993488caa6648524400224af6baf8255"><div class="id">.10</div><div class="d"><b>Authoring surface &amp; config</b> — the <span class="mono">aca_sandbox</span> block and startup validation matrix.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?3c5024c951d6fbaa8b6026cc51359f7b"><div class="id">.11</div><div class="d"><b>HTTP API</b> — sync / async / streaming routes, the LRO status model, SSE.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?7be1e2792abad0a18f9d6862ec1412ae"><div class="id">.12</div><div class="d"><b>Lifecycle, failure &amp; reconciler</b> — state machines, drain-on-deploy, the reaper, crash-liveness.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?f7a28d45f9d50b246514aa98fae2bdce"><div class="id">.13</div><div class="d"><b>Subagent delegation compatibility</b> — how multi-agent delegation co-locates in the sandbox.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?e19b1afbe34fc256d4a3db7c66242399"><div class="id">.14</div><div class="d"><b>Dynamic workflows compatibility</b> — analysis only; the combination stays fail-closed in v1.</div><span class="open">open ↗</span></a>
+  </div>
+
+  <footer>
+    <p><strong>Status:</strong> FRD 0008 validated and human-signed-off (2026-07-27). Hardened over five independent max-reasoning rubber-duck rounds — from 8 cross-layer seam gaps down to a clean set — across a parent overview and 14 sub-FRDs (70 recorded decisions).</p>
+    <p class="note">This Simple Guide is the hub for a set of <strong>14 visual deep-dive explainers</strong> (one per sub-FRD, linked in section 8) — companions to the FRD for team feedback. The FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
+  </footer>
+</div>
+</body>
+</html>

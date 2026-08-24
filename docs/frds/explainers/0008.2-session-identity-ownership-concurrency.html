@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FRD 0008.2 — Session identity, ownership &amp; concurrency · ACA Sandbox Session Runtime</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef; --cp-bg-elevated: #fcfbf8; --cp-surface: #ffffff; --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede; --cp-border-strong: #919191; --cp-text: #242424; --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f; --cp-accent: #b11f4b; --cp-accent-hover: #9a1a41; --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff; --cp-success: #16a34a; --cp-danger: #dc2626; --cp-warning: #f59e0b; --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12); --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86); --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55); --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a; --cp-bg-elevated: #343231; --cp-surface: #292929; --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747; --cp-border-strong: #5f5f5f; --cp-text: #dedede; --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0; --cp-accent: #fd8ea1; --cp-accent-hover: #fb7b91; --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a; --cp-success: #4ade80; --cp-danger: #f87171; --cp-warning: #fbbf24; --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32); --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72); --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04); --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--cp-bg); color: var(--cp-text);
+  font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+code, .mono { font-family: Consolas, "Courier New", Courier, monospace; font-size: 0.9em; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 96px; }
+header.hero {
+  background: var(--cp-bg-elevated); border-bottom: 1px solid var(--cp-border); padding: 30px 24px 32px; margin-bottom: 40px;
+}
+.hero-inner { max-width: 1080px; margin: 0 auto; }
+.backlink { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; font-weight: 600; color: var(--cp-link); text-decoration: none; margin-bottom: 14px; }
+.backlink:hover { text-decoration: underline; }
+.eyebrow { color: var(--cp-accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .72rem; }
+h1 { font-size: 2.0rem; margin: 8px 0 6px; letter-spacing: -0.01em; }
+.tagline { font-size: 1.14rem; color: var(--cp-text-muted); margin: 0 0 18px; max-width: 760px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.badge { font-size: .74rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text-muted); }
+.badge.accent { background: var(--cp-accent-soft); border-color: transparent; color: var(--cp-accent); }
+.badge.warn { color: var(--cp-warning); }
+h2 { font-size: 1.5rem; margin: 48px 0 4px; letter-spacing: -0.01em; }
+h2 .n { color: var(--cp-accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+.lead { color: var(--cp-text-muted); margin: 0 0 20px; }
+.card { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 20px 22px; box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14); }
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.card h3 { margin: 0 0 6px; font-size: 1.06rem; }
+.card h3 .ic { color: var(--cp-accent); margin-right: 8px; }
+.card p { margin: 0; color: var(--cp-text-muted); font-size: .95rem; }
+.plain { background: var(--cp-accent-soft); border-left: 3px solid var(--cp-accent); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+.plain strong { color: var(--cp-accent); }
+.kv { color: var(--cp-text); }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: .92rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+th { color: var(--cp-text-soft); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+td.v1 { color: var(--cp-success); font-weight: 600; }
+td.v2 { color: var(--cp-text-muted); }
+.pill { display: inline-block; font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+.pill.v1 { background: rgba(22,163,74,.14); color: var(--cp-success); }
+.pill.v2 { background: var(--cp-surface-soft); color: var(--cp-text-muted); border: 1px solid var(--cp-border); }
+.pill.no { background: rgba(220,38,38,.12); color: var(--cp-danger); }
+.diagram { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 8px; overflow-x: auto; box-shadow: 0 0 2px rgba(0,0,0,0.12); }
+.flow { counter-reset: step; display: grid; gap: 10px; }
+.flow .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+.flow .step .num { width: 30px; height: 30px; border-radius: 50%; background: var(--cp-accent); color: var(--cp-accent-fg); display: grid; place-items: center; font-weight: 700; font-size: .85rem; }
+.flow .step .txt { padding-top: 3px; }
+.flow .step .txt b { color: var(--cp-text); }
+.flow .step .txt span { color: var(--cp-text-muted); }
+.decision { border-left: 3px solid var(--cp-border-strong); padding: 4px 0 4px 16px; margin: 0 0 18px; }
+.decision h4 { margin: 0 0 3px; font-size: 1rem; }
+.decision .why { color: var(--cp-text-muted); font-size: .93rem; }
+.reject { border-left-color: var(--cp-danger); }
+.reject h4 { color: var(--cp-danger); }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--cp-border); color: var(--cp-text-soft); font-size: .86rem; }
+.note { color: var(--cp-text-soft); font-size: .82rem; margin-top: 6px; }
+a { color: var(--cp-link); }
+.legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+/* ===== shared animation toolkit (pure CSS; reduced-motion aware) ===== */
+.viz{ position:relative; margin:18px 0 4px; }
+.viz .cap{ text-align:center; font-size:.76rem; color:var(--cp-text-soft); margin-top:10px; }
+.flow-row{ position:relative; display:flex; gap:8px; align-items:stretch; overflow:hidden; padding:2px; border-radius:12px; }
+.fnode{ position:relative; flex:1 1 0; min-width:0; text-align:center; padding:12px 6px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); font-size:.74rem; font-weight:700; color:var(--cp-text); z-index:1; }
+.fnode .fico{ display:block; font-size:1.05rem; margin-bottom:3px; color:var(--cp-accent); }
+.fnode .fsub{ display:block; font-size:.62rem; font-weight:500; color:var(--cp-text-muted); margin-top:2px; }
+.fnode.term{ border-color:var(--cp-danger); color:var(--cp-danger); } .fnode.term .fico{ color:var(--cp-danger); }
+.flow-row .beam{ position:absolute; top:0; bottom:0; left:-30%; width:28%; z-index:2; pointer-events:none; background:linear-gradient(90deg, transparent, var(--cp-accent-soft) 40%, var(--cp-accent-soft) 60%, transparent); animation:beam 4.6s linear infinite; }
+@keyframes beam{ 0%{ left:-30%; } 100%{ left:104%; } }
+.breather{ width:120px; height:52px; margin:6px auto 16px; border-radius:14px; background:var(--cp-accent-soft); border:1.5px solid var(--cp-accent); display:flex; align-items:center; justify-content:center; font-size:.72rem; font-weight:700; letter-spacing:.04em; color:var(--cp-accent); animation:breathe 8s ease-in-out infinite; }
+@keyframes breathe{ 0%{transform:scale(1);box-shadow:0 0 0 0 var(--cp-accent-soft);} 15%{transform:scale(1.07);box-shadow:0 0 0 9px var(--cp-accent-soft);} 40%{transform:scale(.9);opacity:.55;box-shadow:none;background:var(--cp-surface-soft);border-color:var(--cp-border);color:var(--cp-text-muted);} 58%{transform:scale(1.07);opacity:1;box-shadow:0 0 0 9px var(--cp-accent-soft);background:var(--cp-accent-soft);border-color:var(--cp-accent);color:var(--cp-accent);} 86%{transform:scale(1);} 93%{transform:scale(.85);opacity:.4;background:var(--cp-surface-soft);border-color:var(--cp-danger);color:var(--cp-danger);box-shadow:none;} 100%{transform:scale(1);opacity:1;} }
+.gate-row{ position:relative; display:flex; align-items:center; gap:10px; padding:10px 0; }
+.gate-end{ flex:0 0 auto; text-align:center; font-size:.72rem; font-weight:700; color:var(--cp-text); padding:10px 12px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); }
+.gate-track{ position:relative; flex:1 1 0; height:44px; }
+.gate-node{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); min-width:56px; height:42px; padding:0 8px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:.9rem; font-weight:700; border:1.5px solid var(--cp-border); background:var(--cp-surface); animation:gverdict 4.4s ease-in-out infinite; }
+@keyframes gverdict{ 0%,42%{ border-color:var(--cp-success); color:var(--cp-success); box-shadow:0 0 0 4px rgba(22,163,74,.12);} 56%,100%{ border-color:var(--cp-danger); color:var(--cp-danger); box-shadow:0 0 0 4px rgba(220,38,38,.12);} }
+.gate-tok{ position:absolute; top:50%; margin-top:-6px; left:0; width:12px; height:12px; border-radius:50%; background:var(--cp-accent); box-shadow:0 0 0 4px var(--cp-accent-soft); animation:gtok 4.4s ease-in-out infinite; }
+@keyframes gtok{ 0%{left:0;opacity:0;background:var(--cp-accent);} 8%{opacity:1;} 38%{left:42%;} 46%{left:100%;opacity:1;background:var(--cp-success);} 50%{opacity:0;} 58%{left:0;opacity:0;background:var(--cp-accent);} 66%{opacity:1;} 92%{left:42%;background:var(--cp-danger);} 100%{left:42%;opacity:0;} }
+.chip-row{ display:flex; gap:6px; flex-wrap:wrap; margin-top:16px; }
+.chip{ font-size:.72rem; font-weight:600; padding:3px 10px; border-radius:999px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); color:var(--cp-text-muted); }
+.chip.k{ color:var(--cp-accent); background:var(--cp-accent-soft); border-color:transparent; }
+.chip.no{ color:var(--cp-danger); background:rgba(220,38,38,.10); border-color:transparent; }
+/* motion plays regardless of OS reduce-motion (author intent for these explainers) */
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-inner">
+    <a class="backlink" href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">‹ ACA Sandbox Runtime — Simple Guide</a>
+    <div class="eyebrow">FRD 0008.2 · Sub-FRD · for team feedback</div>
+    <h1>Session identity, ownership &amp; concurrency</h1>
+    <p class="tagline">Why a session is the durable unit for routing, state, ownership, and admission — and why v1 allows only one active run inside it.</p>
+    <div class="badges">
+      <span class="badge accent">Owns Decisions 6 &amp; 15</span>
+      <span class="badge">session_id is the anchor</span>
+      <span class="badge warn">v1 · one active run</span>
+      <span class="badge">Finalized</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h2><span class="n">1</span>The big idea</h2>
+  <p class="lead">A sandbox-backed agent conversation is not just a request. It is a long-lived <b>session</b>: the thing that owns memory, files, the active run slot, and the backing ACA sandbox. The public <span class="mono">session_id</span> is the lookup key for all of that — but it is never proof that the caller is allowed to use it.</p>
+  <div class="plain">
+    <strong>In plain terms:</strong> every call says, “I want to use this <span class="mono">session_id</span>.” The Azure Functions <strong>controller</strong> then checks who the caller is, compares that caller to the session's stored owner, and only then routes work to the sandbox. The sandbox is <strong>identity-less</strong>, so it cannot decide ownership or write session state for itself.
+  </div>
+
+  <div class="viz" role="img" aria-label="A session request passes owner check and compare-and-set admission so one active run proceeds while a concurrent second request is rejected with 409">
+    <div class="flow-row">
+      <span class="beam"></span>
+      <div class="fnode">Request <span class="fsub">for a session</span></div>
+      <div class="fnode">Owner check</div>
+      <div class="fnode">Compare-and-set <span class="fsub">on the state row</span></div>
+      <div class="fnode">One active run</div>
+      <div class="fnode term">2nd request → 409</div>
+    </div>
+    <div class="chip-row">
+      <span class="chip k">one active run / session</span>
+      <span class="chip">verified-kill before reuse</span>
+      <span class="chip">disconnect ≠ cancel</span>
+      <span class="chip no">409 active_run_exists</span>
+    </div>
+  </div>
+  <div class="grid g3" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>Routing key</h3><p>The <span class="mono">session_id</span> points to one controller-authoritative state row, one owner binding, one content epoch, and the current backing sandbox when the session is alive.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Owner binding</h3><p>Ownership comes from the Functions platform gate: either an Entra user surfaced by Easy Auth or the Function App itself for app-level calls such as function-key access.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Active-run slot</h3><p>v1 admits at most one top-level run per session. A second overlapping submission on the same session gets <span class="mono">409 Conflict</span> with the active <span class="mono">run_id</span>.</p></div>
+  </div>
+
+  <h2><span class="n">2</span>What the controller stores and checks</h2>
+  <p class="lead">The controller is the trusted boundary. It is the only component that resolves caller identity, authorizes session access, and writes the control-plane row that every later decision uses.</p>
+  <div class="card">
+    <div class="flow">
+      <div class="step"><div class="num">1</div><div class="txt"><b>Platform auth runs first</b> <span>— function keys or App Service Authentication / Easy Auth gate the endpoint before controller code runs. The runtime does not invent a second identity system.</span></div></div>
+      <div class="step"><div class="num">2</div><div class="txt"><b>Controller resolves an owner</b> <span>— <span class="mono">entra_user</span> when Easy Auth provides a stable user principal; otherwise <span class="mono">function_app</span>, bound to the app identity plus the agent slug.</span></div></div>
+      <div class="step"><div class="num">3</div><div class="txt"><b>Owner is stored with the session</b> <span>— raw claims stay out of the <span class="mono">session_id</span> and labels. A versioned SHA-256 owner hash is used for paths/labels, with the canonicalization version on the state row owned by <a href="https://gistpreview.github.io/?56accce5f0fbdd849669f1709a64d3b4">0008.3</a>.</span></div></div>
+      <div class="step"><div class="num">4</div><div class="txt"><b>Every call is re-authorized</b> <span>— any controller instance recomputes the incoming owner from the request and compares it to the session binding before reading, writing, running, canceling, or routing.</span></div></div>
+      <div class="step"><div class="num">5</div><div class="txt"><b>Only then does the sandbox run</b> <span>— the sandbox receives typed run work over the authenticated transport. It never receives raw owner claims and cannot write the state store itself.</span></div></div>
+    </div>
+  </div>
+  <div class="plain">
+    <strong>Important consequence:</strong> when the owner is <span class="mono">function_app</span>, the app is the trust boundary. The runtime cannot separate two end users who share the same app-level credential; apps that need per-user isolation should use Easy Auth / Entra.
+  </div>
+
+  <h2><span class="n">3</span>How one-active-run admission works</h2>
+  <p class="lead">The concurrency rule is intentionally small: one top-level run may occupy the session's active slot. Nested in-process agent delegation is still part of that same run, not a second run.</p>
+  <div class="grid g2">
+    <div class="card"><h3><span class="ic">◆</span>Start is compare-and-set</h3><p>Run start updates the session row with an ETag-conditional <span class="mono">active_run_id: null → run_id</span>. If two callers race, only one wins the compare-and-set; the loser sees the already-active run.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>The sandbox also locks locally</h3><p>Inside the sandbox, an OS file lock and run journal are the live-process authority while a detached run is active. The short storage lease used for submit is not treated as proof that the process stopped.</p></div>
+  </div>
+  <div class="card" style="margin-top:16px; padding:6px 22px">
+    <table>
+      <thead><tr><th>Situation</th><th>v1 behavior</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>First caller starts a run</td><td class="v1">CAS claims the empty slot</td><td>Creates one linear admission point for the session.</td></tr>
+        <tr><td>Second caller submits during that run</td><td class="v1"><span class="pill v1">409 Conflict</span></td><td>No queue, fan-out, or supersede in v1; cancel-then-submit is the escape hatch.</td></tr>
+        <tr><td>Run reaches a terminal state</td><td class="v1">slot is cleared by an idempotent ETag write</td><td>Any terminal state frees the next submission to proceed.</td></tr>
+        <tr><td>Stale active slot after crash</td><td class="v1">inline reconcile, opportunistic cleanup, or timer backstop</td><td>A phantom active run must not wedge a session at <span class="mono">409</span>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note">The HTTP shape for submitting, polling, and explicitly canceling runs is owned by <a href="https://gistpreview.github.io/?3c5024c951d6fbaa8b6026cc51359f7b">0008.11</a>; lifecycle and terminal adoption paths are owned by <a href="https://gistpreview.github.io/?7be1e2792abad0a18f9d6862ec1412ae">0008.12</a>.</p>
+
+  <h2><span class="n">4</span>Verified kill and disconnect semantics</h2>
+  <p class="lead">The controller must never free or reuse a backing just because a lease expired or a client disappeared. It must prove the old run/process is gone, then record that fact in state.</p>
+  <div class="grid g2">
+    <div class="card"><h3><span class="ic">◆</span>Verified kill prevents split-brain</h3><p>Before a session frees or reuses its sandbox backing, the controller confirms the prior process is actually dead. That check pairs the control row with sandbox liveness evidence so two processes cannot both believe they own the same session.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Disconnect is not cancel</h3><p>If the client drops the HTTP connection, the run continues. Only an explicit cancel request moves the run toward cancellation; lifecycle owns how that process is stopped and adopted terminally.</p></div>
+  </div>
+  <div class="decision"><h4>Crash with disk intact resumes; true loss tombstones</h4><p class="why">If the harness crashes but the sandbox disk is intact, the session resumes from the last committed checkpoint on the same backing. If the sandbox or snapshot is truly lost, the session is tombstoned: the same <span class="mono">session_id</span> returns <span class="mono">410 Gone</span>, and the client creates a new session.</p></div>
+  <div class="decision reject"><h4>✗ Rejected: treating disconnect or lease expiry as process death</h4><p class="why">A dropped client connection and a released submit lease are control-plane signals, not proof about the sandbox process. v1 requires verified liveness before freeing the active slot or backing, which is the split-brain guard coordinated with <a href="https://gistpreview.github.io/?7be1e2792abad0a18f9d6862ec1412ae">0008.12</a>.</p></div>
+
+  <h2><span class="n">5</span>v1 today vs later</h2>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Aspect</th><th>v1</th><th>Deferred / v2</th></tr></thead>
+      <tbody>
+        <tr><td>Concurrency per session</td><td class="v1">one active top-level run</td><td class="v2">queueing, fan-out, or supersede/interrupt</td></tr>
+        <tr><td>Second submit</td><td class="v1">flat <span class="mono">409</span> naming active <span class="mono">run_id</span></td><td class="v2">richer admission policy if needed</td></tr>
+        <tr><td>Ownership modes</td><td class="v1">Easy Auth user or Function-App owner</td><td class="v2">per-key segmentation only if host support + orphan story exist</td></tr>
+        <tr><td>Owner-hash evolution</td><td class="v1">versioned canonicalizers; no eager migration</td><td class="v2">physical re-key only to retire an old version</td></tr>
+        <tr><td>Durability</td><td class="v1">platform snapshot only; loss tombstones</td><td class="v2">external owner-scoped checkpoint mirror</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer>
+    <p><strong>FRD 0008.2 · Finalized</strong> (whole-FRD sign-off, 2026-07-27). Defines the session identity boundary: <span class="mono">session_id</span> anchors routing/state/ownership, the controller is the sole state writer, and one-active-run admission is enforced with optimistic concurrency plus verified liveness.</p>
+    <p class="note">Part of <a href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">FRD 0008 — ACA Sandbox Session Runtime</a>. A companion to the FRD for team feedback; the FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
+  </footer>
+</div>
+</body>
+</html>
