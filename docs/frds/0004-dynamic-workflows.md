@@ -220,9 +220,11 @@ def get_service_health(args: dict[str, object]) -> dict[str, object]:
     return {"service": args["service"], "status": "healthy"}
 ```
 
-The single-callable "both" pattern is only viable for synchronous callables that
-can satisfy both the MAF and workflow Activity contracts. Async normal tools must
-use the separate-adapter pattern below for workflow support.
+The single-callable "both" pattern is viable for synchronous or asynchronous
+callables that satisfy both the MAF and workflow Activity contracts. Both
+decorator orders are supported for `async def` just as they are for `def`.
+Authors should use the separate-adapter pattern below when the normal-tool and
+workflow Activity contracts require different argument models or behavior.
 
 When normal tools use a Pydantic model but workflow Activities use `dict`
 arguments, authors should share internal business logic and expose separate
@@ -1065,13 +1067,16 @@ The JSON task surface and Python decorator use the same nested
 `WorkflowRetryPolicy` / `WorkflowRetryBackoff` shape; there is no second flat
 decorator-only representation.
 
-A task becomes **policy-aware** when it has an `execution` object or its workflow
-tool has timeout/retry decorator metadata. A policy-aware task always receives
-an effective timeout: omitted tool timeout becomes `PT10M`; omitted Sub Agent
-timeout becomes the smaller of its resolved agent timeout and `PT10M`. This
-policy-aware default makes retry admission bounded. A policy-free task preserves
-existing behavior exactly: a tool has no library-owned deadline, and a Sub Agent
-uses its existing resolved timeout without the new clamp.
+A task becomes **policy-aware** when its authored JSON contains the `execution`
+key, including an empty or all-default object, or its workflow tool has
+timeout/retry decorator metadata. Presence, rather than whether the resolved
+values differ from defaults, is the scheduler and status-version switch. A
+policy-aware task always receives an effective timeout: omitted tool timeout
+becomes `PT10M`; omitted Sub Agent timeout becomes the smaller of its resolved
+agent timeout and `PT10M`. This policy-aware default makes retry admission
+bounded. A policy-free task preserves existing behavior exactly: a tool has no
+library-owned deadline, and a Sub Agent uses its existing resolved timeout
+without the new clamp.
 
 The effective policy is validated and persisted in each policy-aware task's
 Durable input at workflow start. Replay never re-reads decorator metadata,
@@ -1114,13 +1119,20 @@ not exceed either its resolved agent timeout or `PT10M`; exceeding either limit
 is rejected. Policy-free tasks are outside these new admission calculations and
 retain their existing deadline behavior.
 
-All policy durations are normalized to integer milliseconds before Durable persistence.
-NaN, infinity, negative values, fractional milliseconds, overflow, an omitted
-backoff for multiple attempts, and a policy whose computed worst case exceeds
-one hour are rejected at submission. Attempts do not consume additional
-`MAX_NODES`; every attempt does consume execution capacity and appears in
-status/telemetry. Active Activity attempts remain subject to
-`MAX_PARALLELISM`; retry-delay timers do not occupy a parallel Activity slot.
+All authored policy durations are normalized to integer milliseconds before
+Durable persistence. NaN, infinity, negative values, authored fractional
+milliseconds, overflow, an omitted backoff for multiple attempts, and a policy
+whose computed worst case exceeds one hour are rejected at submission. Derived
+backoff delays follow the deterministic rounding rule below. Attempts do not
+consume additional `MAX_NODES`; every attempt does consume execution capacity
+and appears in status/telemetry. Active Durable Activity attempts remain subject
+to `MAX_PARALLELISM`; retry-delay timers do not occupy a parallel Activity slot.
+`MAX_PARALLELISM` does not bound operating-system threads after an Activity
+deadline: a timed-out sync handler can continue in the event loop's worker
+executor after its Activity attempt has returned, so real handler work may
+temporarily exceed the Durable dispatch bound and repeated sync timeouts can
+consume worker threads. Authors of blocking handlers must set upstream deadlines
+or prefer async I/O.
 
 The runtime bounds are admission limits, not a promise that an Azure Functions
 hosting plan will permit the full duration. Operators must configure the host's
@@ -1163,10 +1175,16 @@ Failures are classified as follows:
 | cooperative cancel or hard terminate | control signal | no | no |
 
 `WorkflowRetryableError` and `WorkflowTerminalError` carry a stable,
-application-chosen `error_code` plus a safe public message. Codes must match a
-bounded identifier grammar and cannot use the runtime-reserved `workflow_`
-prefix. Unknown exceptions are terminal by default: retry must be an explicit
-handler signal or a runtime-owned timeout/infrastructure classification.
+application-chosen `error_code` plus a safe public message. `error_code` must
+match the ASCII grammar `^[a-z][a-z0-9_]{0,63}$` and cannot use the
+runtime-reserved `workflow_` prefix. Their constructors raise `ValueError` for an
+invalid code. Public messages are normalized by replacing C0/C1 control
+characters with spaces, collapsing whitespace, trimming the result, and
+truncating it to 256 Unicode code points. An empty normalized message becomes
+`"Task execution failed."`. Runtime-owned messages obey the same 256-code-point
+limit. These bounds are part of the public compatibility contract. Unknown
+exceptions are terminal by default: retry must be an explicit handler signal or
+a runtime-owned timeout/infrastructure classification.
 
 The runtime's own `error_code` values are stable API; messages may improve.
 Provider-specific retry inference is intentionally out of scope because SDK
@@ -1236,20 +1254,26 @@ Selective retry is orchestrator-owned rather than delegated to
 `call_activity_with_retry`, because the orchestration must distinguish returned
 retryable outcomes from terminal, authorization, and contract failures.
 
-For failed attempt number `n` (the first attempt is `1`), the delay before
-attempt `n + 1` is:
+For failed attempt number `n` (the first attempt is `1`), the unrounded delay
+before attempt `n + 1` is:
 
 ```text
 min(max_backoff, initial_backoff * multiplier ** (n - 1))
 ```
 
-The prevalidated millisecond value is computed without random jitter, and the
-deadline is `context.current_utc_datetime + delay`. The orchestrator persists
-attempt state and uses a Durable timer; it never calls wall-clock, random, sleep,
-network, or provider APIs. The same persisted inputs and Activity outcomes
-therefore reproduce the same attempts, deadlines, and scheduling order on replay.
-Jitter is out of scope until it can be derived deterministically from persisted
-identity without changing existing histories.
+Submission converts the JSON multiplier to `Decimal` from its canonical decimal
+string and computes every possible delay with decimal exponentiation. Each value
+is rounded down with `ROUND_FLOOR` to integer milliseconds and then capped at
+`max_backoff`. The complete `max_attempts - 1` integer-millisecond delay sequence
+is validated against the one-hour bound and persisted with the effective policy.
+The orchestrator indexes that sequence rather than recomputing floating-point
+exponentiation during replay. Its deadline is
+`context.current_utc_datetime + delay`; it persists attempt state and uses a
+Durable timer, never wall-clock, random, sleep, network, or provider APIs. The
+same persisted inputs and Activity outcomes therefore reproduce the same
+attempts, deadlines, and scheduling order on replay. Jitter is out of scope until
+it can be derived deterministically from persisted identity without changing
+existing histories.
 
 Retries re-resolve no plan templates: each task instance's resolved args or Sub
 Agent instruction, target, effective policy, and idempotency key are frozen
@@ -1331,9 +1355,12 @@ the existing external `cancel` event:
 - pending Durable backoff timers and wait-task timers are canceled;
 - completed results and `failed_continued` results already committed are
   preserved in the cancellation output;
-- active async handlers receive cancellation from the wrapper when possible;
-- active sync handlers, SDK calls, and already-dispatched Sub Agent work may
-  continue, and late results are ignored by the canceled orchestration.
+- Activities not yet dispatched are abandoned;
+- already-dispatched async handlers, sync handlers, SDK calls, and Sub Agent
+  work do not receive the orchestrator's external event and may continue until
+  their own Activity deadline or host termination; late results are ignored by
+  the canceled orchestration. An Activity-owned timeout may cooperatively cancel
+  an async handler, but orchestrator cancellation cannot recall it.
 
 Hard termination remains Durable's abrupt `terminate` operation. It creates no
 continued result, performs no retry, and cannot promise to recall an Activity
@@ -1345,8 +1372,10 @@ otherwise eligible retry once the orchestrator observes it.
 Execution policy applies to both capability-bearing task types:
 
 - Workflow Sub Agents retain their stateless leaf boundary and fixed
-  `{agent, text}` success result. Their resolved agent timeout is the fallback
-  and an upper bound; a task may request a shorter timeout. Automatic retry
+  `{agent, text}` success result. For a policy-aware task, both the omitted
+  timeout default and the upper bound are
+  `min(resolved_agent_timeout, PT10M)`; a task may request a shorter timeout.
+  A policy-free task retains the unclamped resolved timeout. Automatic retry
   remains opt-in with `max_attempts > 1`. Every attempt is a fresh model
   invocation, can call tools, can be billed separately, and receives the stable
   task context for correlation and idempotent leaf tools.
@@ -1378,9 +1407,9 @@ Agent/session management isolation and non-existence semantics are unchanged.
 #### Structured status, results, and observability
 
 The top-level status envelope remains unchanged. Orchestrator routing treats
-`when`, `for_each`, or a non-default effective execution policy as requiring the
-structured scheduler. `custom_status` gains schema version 3 only when at least
-one task has a non-default execution policy:
+`when`, `for_each`, or any policy-aware task as requiring the structured
+scheduler. `custom_status` gains schema version 3 whenever at least one task is
+policy-aware:
 
 - static plans with no execution policy keep the version-1 status string;
 - dynamic `when` / `for_each` plans with no execution policy keep version 2;
@@ -1392,6 +1421,74 @@ Version 3 adds node/instance states `retry_wait`, `failed_continued`, and
 `next_retry_time`, `last_failure_kind`, and `last_error_code`. It never includes
 args, results, exception text, session identity, or the idempotency key. Status
 consumers continue accepting all three experimental shapes.
+
+The execution fields belong to one executable unit: a non-iterated logical node,
+or an individual materialized `for_each` instance. A `for_each` logical node
+never reports a synthetic attempt or failure roll-up. A policy-aware executable
+unit always reports `max_attempts`; it reports one-based `attempt` after its
+first dispatch. `next_retry_time` is an RFC 3339 UTC timestamp present only in
+`retry_wait`. `last_failure_kind` and `last_error_code` appear only after a
+failure and remain as diagnostic history if a later attempt succeeds.
+Policy-free units in a version-3 plan omit all five execution fields.
+
+Version-3 `counts` classify executable units, not retry attempts or logical
+aggregate nodes. They contain `logical_total`, `materialized_total`, `pending`,
+`running`, `retry_wait`, `completed`, `skipped`, and `failed_continued`;
+`aggregated_with_errors` is represented only by its logical node state. The
+state buckets sum to `materialized_total`. For example:
+
+```json
+{
+  "schema_version": 3,
+  "counts": {
+    "logical_total": 3,
+    "materialized_total": 5,
+    "pending": 0,
+    "running": 0,
+    "retry_wait": 2,
+    "completed": 2,
+    "skipped": 0,
+    "failed_continued": 1
+  },
+  "nodes": {
+    "discover": {"state": "completed"},
+    "fetch": {
+      "state": "retry_wait",
+      "attempt": 1,
+      "max_attempts": 3,
+      "next_retry_time": "2026-08-23T17:08:00Z",
+      "last_failure_kind": "timeout",
+      "last_error_code": "workflow_task_timeout"
+    },
+    "analyze": {
+      "state": "running",
+      "expanded_count": 3,
+      "instances": {
+        "analyze[0]": {
+          "state": "completed",
+          "attempt": 1,
+          "max_attempts": 3
+        },
+        "analyze[1]": {
+          "state": "failed_continued",
+          "attempt": 3,
+          "max_attempts": 3,
+          "last_failure_kind": "handler_transient",
+          "last_error_code": "inventory_unavailable"
+        },
+        "analyze[2]": {
+          "state": "retry_wait",
+          "attempt": 1,
+          "max_attempts": 3,
+          "next_retry_time": "2026-08-23T17:08:00Z",
+          "last_failure_kind": "timeout",
+          "last_error_code": "workflow_task_timeout"
+        }
+      }
+    }
+  }
+}
+```
 
 A fail-fast execution failure returns the existing flat controlled-failure form
 with `failed: true`, sanitized `error`, stable `error_code`, `node_id`,
@@ -1494,6 +1591,7 @@ replay duplicates.
 | 78 | Authorization during retries | Trust start-time policy / retry under persisted grant / reauthorize every attempt | Reauthorize every attempt against the deployed owner policy; revocation is terminal, non-retryable, and non-continuable | Agent proposal | 2026-08-19 |
 | 79 | Bounds, routing, and status compatibility | Configurable limits now / unbounded policy / fixed limits plus versioned status | Use fixed attempts/duration/elapsed bounds pending issue #1279; route any policy-aware plan through the structured scheduler, preserve status versions 1/2 for unchanged plans, and emit version 3 only for policy-aware plans | Agent proposal, architecture review | 2026-08-19 |
 | 80 | Task execution policy design approval | Revise individual Decisions 67 and 69-79 / approve the reviewed proposal set / defer implementation | Approve Decisions 67 and 69-79 as proposed, retain the separately approved precedence in Decision 68, finalize the task execution policy extension, and authorize implementation under the repository ExecPlan process | Human (TsuyoshiUshio) | 2026-08-23 |
+| 81 | Final implementation-contract clarifications | Leave details to implementation / define replay-safe public contracts before coding | Make authored `execution` presence the policy-aware switch; specify status v3 ownership/counts/nullability, decimal floor backoff precomputation, bounded error codes/messages, orchestrator-side-only cancellation, policy-aware Sub Agent clamping, async dual decorators, and the sync-timeout concurrency caveat | Agent, final architecture review | 2026-08-23 |
 
 ## 6. Test plan
 
@@ -1637,6 +1735,9 @@ replay duplicates.
     field is absent, while a declared decorator field remains authoritative;
   - verify decorator `retry` with `max_attempts=1` suppresses a task-requested
     retry policy with more than one attempt;
+  - treat present-but-empty `execution` as policy-aware while preserving
+    policy-free serialization when the key is absent;
+  - enforce the public error-code grammar and deterministic message normalization;
   - preserve byte-for-byte-equivalent model dumps and Durable inputs when policy
     is omitted;
   - persist the effective policy so replay and deployment metadata changes do not
@@ -1651,6 +1752,8 @@ replay duplicates.
 - [ ] Evolution #1278: retry, backoff, and idempotency
   - replay produces identical attempt numbers, millisecond delays, timer
     deadlines, idempotency keys, and scheduling order;
+  - verify Decimal `ROUND_FLOOR` delay precomputation for fractional products and
+    persist the integer-millisecond sequence;
   - retry only explicit transient, timeout, and infrastructure failures;
   - verify max-attempt exhaustion, zero/maximum delay, multiplier clamping,
     one-hour admission rejection, duplicate delivery, and no random/wall-clock
@@ -1674,9 +1777,11 @@ replay duplicates.
     `{agent, text}` success results.
 - [ ] Evolution #1278: cancellation, status, and observability
   - cancel active wait/backoff timers, schedule no later attempt, preserve
-    committed results, and ignore late Activity completion;
+    committed results, do not claim to signal already-dispatched async or sync
+    Activities, and ignore late Activity completion;
   - keep v1/v2 status for unchanged plans and verify v3 retry/timeout/continued
-    states through tools, HTTP status, list results, and the built-in UI;
+    states, field omission, executable-unit counts, and `for_each` ownership
+    through tools, HTTP status, list results, and the built-in UI;
   - prove Activity telemetry represents actual deliveries without orchestrator
     replay double-counting and without sensitive fields.
 - [ ] Evolution #1278: E2E on Azure Storage and DTS
@@ -1797,3 +1902,10 @@ replay duplicates.
   Decisions 67 and 69-79 as proposed, retained Decision 68, finalized the
   extension, and authorized implementation through the repository's ExecPlan
   process.
+- **Task execution policy final architecture review:** An independent rubber-duck
+  review on 2026-08-23 identified implementation-blocking ambiguity in the
+  policy-aware routing predicate, status v3 wire shape, fractional backoff
+  rounding, public failure bounds, and cancellation of already-dispatched
+  Activities. Decision 81 records the concrete replay-safe resolutions; the
+  re-review also aligned Sub Agent clamping, async dual decorators, and the sync
+  timeout concurrency caveat. No implementation ambiguity remains.
