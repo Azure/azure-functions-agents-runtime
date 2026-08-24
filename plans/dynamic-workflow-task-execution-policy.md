@@ -67,7 +67,8 @@ payloads, scheduler path, and status versions.
 - [x] (2026-08-24 04:45Z) Completed iterative independent branch review. All
   findings were fixed with regressions, and the final release review reported no
   significant issues.
-- [ ] Push the implementation branch to PR #170.
+- [x] (2026-08-24 04:50Z) Pushed the completed implementation to PR #170's
+  `tsuyoshiushio-workflow-task-execution-policy` head branch.
 
 ## Surprises & Discoveries
 
@@ -227,8 +228,8 @@ The independent testing checkpoint now passes, including the deterministic sampl
 cross-attempt authorization/redelivery regressions. Architecture, workflow authoring,
 front-matter cross-reference, landing-page, README, and deterministic sample documentation now
 describe the implemented contract, and the strict MkDocs build passes. Ruff, strict mypy, and
-the complete CI-equivalent non-E2E coverage suite pass. Independent release review is clean;
-only publication remains.
+the complete CI-equivalent non-E2E coverage suite pass. Independent release review is clean,
+and the completed branch is published to PR #170.
 
 ## Context and Orientation
 
