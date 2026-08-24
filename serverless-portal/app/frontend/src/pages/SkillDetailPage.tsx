@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Button } from '@coreai/fluentui-react'
 import { api, type LiveAgent, type LiveAgentApp } from '../api'
@@ -97,7 +97,6 @@ export default function SkillDetailPage() {
     app: string
     name: string
   }>()
-  const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const { selected, setSelected } = useIdentity()
   const deployJob = useDeployJob()
@@ -177,6 +176,7 @@ export default function SkillDetailPage() {
   const appFunctions = hostApp?.supportingFunctions ?? []
   const urls = agent ? endpointUrls(agent) : []
   const hasDraft = definition?.source === 'draft'
+  const hasDeployableEdits = hasDraft || !!sourceList?.files.some((file) => file.source === 'draft' || file.source === 'both')
   const capabilityCount = mcpServers.length + pythonTools.length + knowledge.length + appFunctions.length
   const definitionMetadata = agentFrontMatter(definition?.content || fallback)
 
@@ -221,26 +221,28 @@ export default function SkillDetailPage() {
 
   return (
     <>
-      <div className="breadcrumb">Home / <Link to={backTo}>Hosted Skills</Link> / {name}</div>
+      {!agent && <div className="breadcrumb">Home / <Link to={backTo}>Hosted Skills</Link> / {name}</div>}
       {scanning && <p className="page-sub">Scanning subscription…</p>}
       {error && <p className="page-sub">Failed to load Hosted Skill: {error}</p>}
       {agent && (
         <>
           <div className="skill-draft-bar">
-            <span className={'draft-dot' + (hasDraft ? ' active' : '')} />
-            <strong>{hasDraft ? 'Draft changes' : 'Deployed'}</strong>
-            <span className="muted">{hasDraft ? `${agent.name}.agent.md has unpublished edits` : 'No unpublished instruction changes'}</span>
-            <span className="draft-spacer" />
-            {agent.builtinEndpoints && <Link className="btn sm" to={`/playground/${subForQuery}/${encodeURIComponent(agent.app)}/${encodeURIComponent(agent.name)}`}>Test</Link>}
-            <Button size="small" appearance="primary" disabled={deployJob.phase === 'running'} onClick={() => deployJob.redeploy({ subscription: subForQuery, resourceGroup: agent.resourceGroup, app: agent.app })}>
-              {deployJob.phase === 'running' ? 'Deploying…' : 'Review and deploy'}
-            </Button>
+            <div className="breadcrumb skill-bar-breadcrumb">Home / <Link to={backTo}>Hosted Skills</Link> / {name}</div>
+            <div className="skill-draft-actions">
+              <span className="skill-deploy-state">
+                <span className={'draft-dot' + (hasDeployableEdits ? ' active' : '')} />
+                <strong>{hasDeployableEdits ? 'Draft changes' : 'Deployed'}</strong>
+              </span>
+              {agent.builtinEndpoints && <Link className="btn sm" to={`/playground/${subForQuery}/${encodeURIComponent(agent.app)}/${encodeURIComponent(agent.name)}`}>Test</Link>}
+              <Button size="small" appearance="primary" disabled={!hasDeployableEdits || deployJob.phase === 'running'} onClick={() => deployJob.redeploy({ subscription: subForQuery, resourceGroup: agent.resourceGroup, app: agent.app })}>
+                {deployJob.phase === 'running' ? 'Deploying…' : 'Deploy'}
+              </Button>
+            </div>
           </div>
 
           <div className="skill-title-row">
             <div>
-              <div className="page-title"><button className="btn ghost sm" onClick={() => navigate(backTo)}>← Back</button><h1>{agent.name}</h1>{hasDraft && <span className="badge blue">Draft differs from deployed</span>}</div>
-              <p className="page-sub"><span className="mono">{agent.name}.agent.md</span> · {triggerLabel(agent.trigger)} · Function App <span className="mono">{agent.app}</span></p>
+              <div className="page-title"><h1>{agent.name}</h1></div>
             </div>
           </div>
 
@@ -279,37 +281,33 @@ export default function SkillDetailPage() {
           {tab === 'instructions' && (
             <div className="skill-editor-layout">
               <section className="skill-instructions-panel">
-                <div className="skill-panel-head"><div><h2>Instructions</h2><p>Edit what this Hosted Skill should do. YAML configuration stays unchanged.</p></div></div>
-                <div className="agent-file-frame">
-                  <div className="agent-file-heading">
-                    <div>
-                      <span className="agent-file-label">Agent file</span>
-                      <strong className="mono">{agent.name}.agent.md</strong>
-                    </div>
-                    <span className={'badge ' + (definition?.source === 'draft' ? 'amber' : definition?.source === 'deployed' ? 'green' : 'gray')}>
-                      {definition?.source === 'draft' ? 'Portal draft' : definition?.source === 'deployed' ? 'Deployed' : 'Discovered metadata'}
-                    </span>
-                  </div>
-                  <details className="agent-file-config" open>
-                    <summary>YAML configuration</summary>
-                    <pre>{definitionMetadata || 'No YAML front matter found.'}</pre>
-                  </details>
-                  <div className="agent-instructions-label">
-                    <strong>Markdown instructions</strong>
-                    <span>The content below the YAML front matter</span>
-                  </div>
+                <div className="agent-instructions-editor">
+                  <DraftEditor
+                    queryKey={definitionKey}
+                    load={() => api.getAgentDefinition({ subscription: subForQuery, app: agent.app, resourceGroup: agent.resourceGroup, name: agent.name })}
+                    save={(content) => api.saveAgentDefinition({ subscription: subForQuery, app: agent.app, name: agent.name, content })}
+                    fallback={fallback}
+                    toolbarLead={(
+                      <div className="skill-instructions-head">
+                        <h2>Instructions</h2>
+                        <strong className="mono">{agent.name}.agent.md</strong>
+                      </div>
+                    )}
+                    beforeEditor={(
+                      <div className="agent-file-frame">
+                        <details className="agent-file-config">
+                          <summary>YAML configuration</summary>
+                          <pre>{definitionMetadata || 'No YAML front matter found.'}</pre>
+                        </details>
+                      </div>
+                    )}
+                    mode="instructions"
+                    ariaLabel="Hosted Skill instructions"
+                    renderActions={renderPrAction}
+                    onSaved={() => { setPrResult(null); setPrError(null) }}
+                    validationKind="agent.md"
+                  />
                 </div>
-                <DraftEditor
-                  queryKey={definitionKey}
-                  load={() => api.getAgentDefinition({ subscription: subForQuery, app: agent.app, resourceGroup: agent.resourceGroup, name: agent.name })}
-                  save={(content) => api.saveAgentDefinition({ subscription: subForQuery, app: agent.app, name: agent.name, content })}
-                  fallback={fallback}
-                  mode="instructions"
-                  ariaLabel="Hosted Skill instructions"
-                  renderActions={renderPrAction}
-                  onSaved={() => { setPrResult(null); setPrError(null) }}
-                  validationKind="agent.md"
-                />
                 {prError && <p className="muted" style={{ color: 'var(--red)' }}>{prError}</p>}
               </section>
               <aside className="skill-aside-stack">

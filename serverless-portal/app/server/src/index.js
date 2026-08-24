@@ -157,7 +157,7 @@ app.get(
 // ---------------------------------------------------------------------------
 // Agent definition — read the deployed `*.agent.md` (or the portal draft) and
 // save edits to a portal-side working copy. Publishing a draft to the live app
-// is a separate, not-yet-wired step.
+// happens through deploy/redeploy, which clears the published working copy.
 // ---------------------------------------------------------------------------
 
 const DRAFTS_DIR = path.join(__dirname, '..', '.data', 'agent-drafts')
@@ -186,6 +186,26 @@ async function writeDraft(subscription, appName, name, content) {
   const filePath = draftPath(subscription, appName, name)
   await fs.promises.mkdir(path.dirname(filePath), { recursive: true })
   await fs.promises.writeFile(filePath, content, 'utf-8')
+}
+
+function agentSlug(value) {
+  const slug = String(value ?? '')
+    .replace(/\.agent\.md$/i, '')
+    .replace(/[^a-zA-Z0-9_]/g, '_')
+    .replace(/^_+|_+$/g, '')
+  if (!slug) return 'agent_function'
+  return /^[0-9]/.test(slug) ? `fn_${slug}` : slug
+}
+
+async function readPublishedAgentDefinition(subscription, appName, name) {
+  const sourceDir = path.join(APP_SOURCES_DIR, safeSegment(subscription), safeSegment(appName))
+  const target = agentSlug(name)
+  const files = await readDirRecursive(sourceDir)
+  const match = files.find((file) => {
+    const base = file.name.split('/').pop() ?? ''
+    return /\.agent\.md$/i.test(base) && agentSlug(base) === target
+  })
+  return match?.data.toString('utf-8') ?? null
 }
 
 // Read the optional storage-scoped AAD token the browser forwards so the backend
@@ -250,6 +270,9 @@ app.get(
     if (resourceGroup) {
       const site = await azure.getSite(token, subscription, resourceGroup, appName)
       if (site) deployedContent = await azure.readAgentDefinition(token, subscription, site, name, storageToken)
+    }
+    if (deployedContent == null) {
+      deployedContent = await readPublishedAgentDefinition(subscription, appName, name)
     }
     // Fallback: read the source straight from the app's connected GitHub repo.
     if (deployedContent == null) {
@@ -1075,11 +1098,16 @@ async function readDirRecursive(dir, base = dir) {
   for (const e of entries) {
     const full = path.join(dir, e.name)
     if (e.isDirectory()) out.push(...(await readDirRecursive(full, base)))
-    else
-      out.push({
-        name: path.relative(base, full).split(path.sep).join('/'),
-        data: await fs.promises.readFile(full),
-      })
+    else {
+      try {
+        out.push({
+          name: path.relative(base, full).split(path.sep).join('/'),
+          data: await fs.promises.readFile(full),
+        })
+      } catch (err) {
+        if (err?.code !== 'ENOENT') throw err
+      }
+    }
   }
   return out
 }
@@ -1131,6 +1159,66 @@ async function overlayDrafts(subscription, appName, baseFiles) {
     apply(f.name, f.data.toString('utf-8'))
   }
   return [...byName].map(([name, data]) => ({ name, data }))
+}
+
+async function cachePublishedSource(subscription, appName, files) {
+  const sourceDir = path.join(APP_SOURCES_DIR, safeSegment(subscription), safeSegment(appName))
+  let complete = true
+  const expected = new Set()
+  for (const file of files) {
+    const segments = String(file.name).replace(/\\/g, '/').split('/').filter(Boolean)
+    if (!segments.length || segments.includes('..')) continue
+    expected.add(segments.join('/'))
+    const filePath = path.join(sourceDir, ...segments)
+    try {
+      await fs.promises.mkdir(path.dirname(filePath), { recursive: true })
+      await fs.promises.writeFile(filePath, file.data)
+    } catch {
+      complete = false
+    }
+  }
+  for (const cached of await readDirRecursive(sourceDir)) {
+    if (expected.has(cached.name)) continue
+    try {
+      await fs.promises.unlink(path.join(sourceDir, ...cached.name.split('/')))
+    } catch (err) {
+      if (err?.code !== 'ENOENT') complete = false
+    }
+  }
+  return complete
+}
+
+// Remove drafts whose exact content was included in a successful deployment.
+// A draft changed while deployment was running is intentionally retained.
+async function clearPublishedDrafts(subscription, appName, deployedFiles) {
+  const byName = new Map(deployedFiles.map((f) => [f.name, f.data]))
+  const basenameToName = new Map(deployedFiles.map((f) => [f.name.split('/').pop(), f.name]))
+  const failures = []
+  const clearIfPublished = async (root, fileName, data) => {
+    const target = byName.has(fileName) ? fileName : (basenameToName.get(fileName) ?? fileName)
+    const deployed = byName.get(target)
+    if (deployed && Buffer.compare(deployed, data) === 0) {
+      try {
+        await fs.promises.unlink(path.join(root, ...fileName.split('/')))
+      } catch (err) {
+        if (err?.code !== 'ENOENT') failures.push(fileName)
+      }
+    }
+  }
+
+  const agentDir = path.join(DRAFTS_DIR, safeSegment(subscription), safeSegment(appName))
+  for (const file of await listDirFiles(agentDir)) {
+    try {
+      await clearIfPublished(agentDir, file, await fs.promises.readFile(path.join(agentDir, file)))
+    } catch (err) {
+      if (err?.code !== 'ENOENT') failures.push(file)
+    }
+  }
+  const sourceDir = path.join(SOURCE_DRAFTS_DIR, safeSegment(subscription), safeSegment(appName))
+  for (const file of await readDirRecursive(sourceDir)) {
+    await clearIfPublished(sourceDir, file.name, file.data)
+  }
+  return failures
 }
 
 // Gather this app's SKILL.md files (portal source drafts + the working copy) as
@@ -1221,10 +1309,16 @@ async function runDeployJob(id, token, ctx) {
     const files = await overlayDrafts(subscription, appName, await readDirFiles(dir))
     setJob(id, { files: files.map((f) => f.name).sort() })
     await pushFilesToSite(id, token, site, files)
+    const sourceCached = await cachePublishedSource(subscription, appName, files)
+    const unclearedDrafts = sourceCached ? await clearPublishedDrafts(subscription, appName, files) : []
 
     setJob(id, {
       status: 'deployed',
-      message: `Deployed "${fileName}" to ${appName}.`,
+      message: !sourceCached
+        ? `Deployed "${fileName}" to ${appName}, but the local published-source cache could not be updated.`
+        : unclearedDrafts.length
+        ? `Deployed "${fileName}" to ${appName}, but ${unclearedDrafts.length} local draft(s) could not be cleared.`
+        : `Deployed "${fileName}" to ${appName}.`,
       url: `https://${site.defaultHostName}`,
       ...(target.kind === 'new' && principalId ? { principalId } : {}),
       ...(grantOutcome ? { grantOutcome } : {}),
@@ -1274,10 +1368,16 @@ async function runRedeployJob(id, token, ctx) {
     const files = await overlayDrafts(subscription, appName, base)
     setJob(id, { files: files.map((f) => f.name).sort() })
     await pushFilesToSite(id, token, site, files)
+    const sourceCached = await cachePublishedSource(subscription, appName, files)
+    const unclearedDrafts = sourceCached ? await clearPublishedDrafts(subscription, appName, files) : []
 
     setJob(id, {
       status: 'deployed',
-      message: `Redeployed ${appName} with your saved edits.`,
+      message: !sourceCached
+        ? `Redeployed ${appName}, but the local published-source cache could not be updated.`
+        : unclearedDrafts.length
+        ? `Redeployed ${appName}, but ${unclearedDrafts.length} local draft(s) could not be cleared.`
+        : `Redeployed ${appName} with your saved edits.`,
       url: `https://${site.defaultHostName}`,
     })
     await recordDeployHistory(subscription, appName, {

@@ -4,6 +4,7 @@
 // waiting; the hook also polls the job to a terminal state in the background.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   api,
   type DeployResult,
@@ -20,6 +21,7 @@ import { SearchableSelect } from './components/ui'
 export type DeployPhase = 'idle' | 'running' | 'deployed' | 'error'
 
 export function useDeployJob() {
+  const queryClient = useQueryClient()
   const [phase, setPhase] = useState<DeployPhase>('idle')
   const [result, setResult] = useState<DeployResult | null>(null)
   const [portalUrl, setPortalUrl] = useState<string | undefined>(undefined)
@@ -41,6 +43,13 @@ export function useDeployJob() {
       setMessage(state.message ?? '')
       if (state.status !== 'running') {
         setResult(state)
+        if (state.status === 'deployed') {
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ['agentDefinition'] }),
+            queryClient.invalidateQueries({ queryKey: ['source'] }),
+            queryClient.invalidateQueries({ queryKey: ['sourceList'] }),
+          ])
+        }
         setPhase(state.status === 'deployed' ? 'deployed' : 'error')
         return
       }
@@ -49,7 +58,7 @@ export function useDeployJob() {
       setPhase('error')
       setResult({ status: 'error', message: 'Deploy timed out. Check the Azure portal.', files: [] })
     }
-  }, [])
+  }, [queryClient])
 
   const begin = useCallback(
     async (start: () => Promise<{ jobId: string; portalUrl?: string }>) => {

@@ -3,7 +3,7 @@
 // saves edits to the portal working copy. Publishing a draft to the live app is
 // a separate "Deploy edits" step. Extracted so multiple pages reuse it.
 
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, Tooltip } from '@coreai/fluentui-react'
 import { CopyRegular, CheckmarkRegular } from '@fluentui/react-icons'
@@ -45,6 +45,8 @@ export function DraftEditor({
   load,
   save,
   fallback,
+  toolbarLead,
+  beforeEditor,
   renderActions,
   onSaved,
   validationKind,
@@ -55,6 +57,8 @@ export function DraftEditor({
   load: () => Promise<{ content: string; source: string }>
   save: (content: string) => Promise<unknown>
   fallback: string
+  toolbarLead?: ReactNode
+  beforeEditor?: ReactNode
   renderActions?: (s: { source: string; dirty: boolean }) => ReactNode
   onSaved?: () => void
   // When set to 'agent.md', the current content is validated against the
@@ -66,6 +70,7 @@ export function DraftEditor({
 }) {
   const qc = useQueryClient()
   const [grantBusy, setGrantBusy] = useState(false)
+  const editorRef = useRef<HTMLTextAreaElement>(null)
   const { data, isLoading, error } = useQuery({
     queryKey,
     queryFn: load,
@@ -121,19 +126,27 @@ export function DraftEditor({
     return () => clearTimeout(handle)
   }, [text, data?.content, fallback, mode, validationKind])
 
-  if (isLoading) return <p className="muted">Loading…</p>
-  if (error) return <p className="muted">Couldn’t load: {(error as Error).message}</p>
-
   const fullSource = data?.content || fallback
   const base = mode === 'instructions' ? splitAgentMarkdown(fullSource).instructions : fullSource
   const value = text ?? base
+
+  useLayoutEffect(() => {
+    if (mode !== 'instructions' || !editorRef.current) return
+    editorRef.current.style.height = 'auto'
+    editorRef.current.style.height = `${editorRef.current.scrollHeight + 2}px`
+  }, [mode, value])
+
+  if (isLoading) return <p className="muted">Loading…</p>
+  if (error) return <p className="muted">Couldn’t load: {(error as Error).message}</p>
+
   const dirty = value !== base
   const source = data?.source ?? 'none'
   const unreadable = !data?.content
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+      <div className="draft-editor-toolbar">
+        {toolbarLead && <div className="draft-editor-toolbar-lead">{toolbarLead}</div>}
         {source === 'draft' ? (
           <span className="badge amber">
             <span className="dot" /> Draft (unpublished)
@@ -155,7 +168,7 @@ export function DraftEditor({
             · saved
           </span>
         )}
-        <div style={{ flex: 1 }} />
+        <div className="draft-editor-toolbar-spacer" />
         <Button
           appearance="subtle"
           size="small"
@@ -175,6 +188,7 @@ export function DraftEditor({
         </Button>
         {renderActions?.({ source, dirty })}
       </div>
+      {beforeEditor}
       {unreadable && (
         <div style={{ margin: '0 0 8px' }}>
           <p className="muted" style={{ fontSize: 12, margin: '0 0 6px' }}>
@@ -200,6 +214,7 @@ export function DraftEditor({
         </div>
       )}
       <textarea
+        ref={editorRef}
         className={'editor' + (mode === 'instructions' ? ' instructions-editor' : '')}
         spellCheck={false}
         value={value}

@@ -12,6 +12,7 @@ export default function CreateAgentPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const { selected, subscriptions } = useIdentity()
   const [draft, setDraft] = useState<Draft>(loadDraft)
+  const [providerExpanded, setProviderExpanded] = useState(true)
 
   // Persist to sessionStorage on every change (auto-save for the session).
   useEffect(() => {
@@ -158,11 +159,67 @@ export default function CreateAgentPage() {
       {step === 1 && (
         <>
           <div className="card create-flow-card">
-            <h3>Choose a Microsoft Foundry model</h3>
+            {providerExpanded ? (
+              <>
+                <h3>Choose a model provider</h3>
+                <p className="muted" style={{ marginTop: 0 }}>
+                  Microsoft Foundry is available for this preview.
+                </p>
+                <div className="model-provider-list" role="radiogroup" aria-label="Model provider">
+                  <label className="model-provider-row selected" onClick={() => setProviderExpanded(false)}>
+                    <input
+                      type="radio"
+                      name="model-provider"
+                      value="foundry"
+                      checked={draft.provider === 'foundry'}
+                      onChange={() => {
+                        set('provider', 'foundry')
+                        setProviderExpanded(false)
+                      }}
+                    />
+                    <span className="model-provider-copy">
+                      <strong>Microsoft Foundry</strong>
+                      <span>Use a governed model deployment with managed identity.</span>
+                    </span>
+                    <span className="badge green">Available</span>
+                  </label>
+                  <label className="model-provider-row disabled" aria-disabled="true">
+                    <input type="radio" name="model-provider" value="azure-openai" disabled />
+                    <span className="model-provider-copy">
+                      <strong>Azure OpenAI</strong>
+                      <span>Connect an Azure OpenAI resource and deployment.</span>
+                    </span>
+                    <span className="badge gray">Coming soon</span>
+                  </label>
+                  <label className="model-provider-row disabled" aria-disabled="true">
+                    <input type="radio" name="model-provider" value="openai" disabled />
+                    <span className="model-provider-copy">
+                      <strong>OpenAI</strong>
+                      <span>Connect with an API key stored in app settings.</span>
+                    </span>
+                    <span className="badge gray">Coming soon</span>
+                  </label>
+                </div>
+              </>
+            ) : (
+              <div className="model-provider-summary">
+                <div>
+                  <span className="model-provider-summary-label">Model provider</span>
+                  <strong>Microsoft Foundry</strong>
+                  <span>Governed deployment with managed identity</span>
+                </div>
+                <span className="badge green">Selected</span>
+                <Button appearance="subtle" size="small" onClick={() => setProviderExpanded(true)}>Change</Button>
+              </div>
+            )}
+          </div>
+
+          <div className="card create-flow-card model-configuration-card">
+            <h3>Configure Microsoft Foundry</h3>
             <p className="muted" style={{ marginTop: 0 }}>
-              Select the subscription, Foundry resource, project, and deployed model that will generate and run this skill.
+              Select the resource, project, and model deployment that will generate and run this skill.
             </p>
-            <>
+            <div className="model-provider-fields">
                 <div className="field" style={{ marginBottom: 8 }}>
                   <label>Subscription</label>
                   <SearchableSelect
@@ -229,7 +286,7 @@ export default function CreateAgentPage() {
                   </a>
                   , then ↻ Refresh. A selected model powers ✨ Generate.
                 </div>
-              </>
+            </div>
           </div>
 
           <div className="toolbar" style={{ marginTop: 16 }}>

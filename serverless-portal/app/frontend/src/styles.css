@@ -292,7 +292,7 @@ a.card:hover { text-decoration: none; }
 .sample-card:hover { border-color: var(--brand); text-decoration: none; }
 .sample-title { margin-bottom: 6px; font-weight: 600; }
 .sample-blurb { font-size: 12.5px; color: var(--text-muted); line-height: 1.45; margin-bottom: 8px;
-  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  display: -webkit-box; line-clamp: 3; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .sample-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 
 /* Post-deploy "what's next" checklist on the draft-app confirmation card. */
@@ -446,6 +446,25 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
 .steps .step.done .step-mark { background: var(--green); color: #fff; }
 .steps .step-sep { color: var(--text-faint); }
 .create-flow-card { width: 100%; max-width: 880px; }
+.model-provider-list { display: grid; gap: 8px; margin: 18px 0; }
+.model-provider-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px;
+  min-height: 68px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+  cursor: pointer; }
+.model-provider-row:hover { border-color: color-mix(in srgb, var(--brand) 55%, var(--border)); }
+.model-provider-row.selected { border-color: var(--brand); background: var(--brand-soft); box-shadow: inset 0 0 0 1px var(--brand); }
+.model-provider-row.disabled { background: var(--surface-2); cursor: not-allowed; opacity: .72; }
+.model-provider-row.disabled:hover { border-color: var(--border); }
+.model-provider-row input { width: 16px; height: 16px; margin: 0; accent-color: var(--brand); }
+.model-provider-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.model-provider-copy strong { font-size: 14px; }
+.model-provider-copy > span { color: var(--text-muted); font-size: 12.5px; }
+.model-provider-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; }
+.model-provider-summary > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.model-provider-summary strong { font-size: 15px; }
+.model-provider-summary > div > span:last-child { color: var(--text-muted); font-size: 12.5px; }
+.model-provider-summary-label { color: var(--text-faint); font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+.model-configuration-card { margin-top: 12px; }
+.model-provider-fields { margin-top: 16px; }
 .create-flow-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px;
   margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
 .review-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--border);
@@ -459,6 +478,10 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
   color: var(--text); font: 12.5px/1.55 "Cascadia Code", "SF Mono", Consolas, monospace; }
 .review-validation { margin-top: 16px; }
 @media (max-width: 760px) {
+  .model-provider-row { grid-template-columns: auto minmax(0, 1fr); }
+  .model-provider-row > .badge { grid-column: 2; justify-self: start; }
+  .model-provider-summary { grid-template-columns: minmax(0, 1fr) auto; }
+  .model-provider-summary > button { grid-column: 1 / -1; justify-self: start; }
   .review-grid { grid-template-columns: 1fr 1fr; }
   .review-grid > div:nth-child(3) { border-left: 0; }
   .review-grid > div:nth-child(n+3) { border-top: 1px solid var(--border); }
@@ -467,11 +490,13 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
 
 /* Hosted Skill detail */
 .skill-draft-bar { position: sticky; top: var(--header-h); z-index: 8; display: flex; align-items: center;
-  gap: 10px; min-height: 48px; margin: -12px 0 22px; padding: 8px 12px; border: 1px solid var(--border);
+  gap: 16px; min-height: 48px; margin: 0 0 22px; padding: 8px 12px; border: 1px solid var(--border);
   border-radius: 8px; background: color-mix(in srgb, var(--surface) 94%, var(--brand-soft)); box-shadow: var(--shadow); }
+.skill-bar-breadcrumb { min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-draft-actions, .skill-deploy-state { display: flex; align-items: center; gap: 8px; }
+.skill-draft-actions { flex: 0 0 auto; margin-left: auto; }
 .skill-draft-bar .draft-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex: 0 0 auto; }
 .skill-draft-bar .draft-dot.active { background: var(--brand); }
-.skill-draft-bar .draft-spacer { flex: 1; }
 .skill-title-row { display: flex; justify-content: space-between; align-items: start; gap: 16px; }
 .skill-title-row .page-title { margin-bottom: 3px; }
 .skill-file-switcher { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
@@ -492,26 +517,26 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
 .skill-editor-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px; align-items: start; }
 .skill-instructions-panel { min-width: 0; padding: 18px; border: 1px solid var(--border); border-radius: 8px;
   background: var(--surface); box-shadow: var(--shadow); }
+.draft-editor-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.draft-editor-toolbar-lead { min-width: 0; }
+.draft-editor-toolbar-spacer { flex: 1; }
+.skill-instructions-head { display: flex; align-items: baseline; gap: 12px; }
+.skill-instructions-head h2 { margin: 0; font-size: 19px; }
+.skill-instructions-head strong { min-width: 0; overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; white-space: nowrap; }
 .skill-panel-head { display: flex; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
 .skill-panel-head h2, .skill-section-head h2 { margin: 0 0 4px; font-size: 19px; }
 .skill-panel-head p, .skill-section-head p { margin: 0; color: var(--text-muted); font-size: 13px; }
-.agent-file-frame { margin: 0 -18px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-.agent-file-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 18px;
-  background: var(--surface-2); }
-.agent-file-heading > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.agent-file-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.agent-file-label { color: var(--text-faint); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
-.agent-file-config { border-top: 1px solid var(--border); background: var(--surface); }
+.agent-file-frame { margin: 0 -18px 10px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.agent-file-config { background: var(--surface); }
 .agent-file-config summary { padding: 9px 18px; color: var(--text-muted); cursor: pointer; font-size: 12px; font-weight: 600; }
 .agent-file-config pre { max-height: 240px; margin: 0; padding: 12px 18px; overflow: auto; border-top: 1px solid var(--border);
   background: var(--surface-2); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere;
   font: 12px/1.55 "Aptos Mono", "Cascadia Code", monospace; }
-.agent-instructions-label { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 12px 18px 9px; }
-.agent-instructions-label strong { font-size: 13px; }
-.agent-instructions-label span { color: var(--text-faint); font-size: 11.5px; }
-.instructions-editor { min-height: 430px; border: 0; border-radius: 0; padding: 10px 2px; box-shadow: none;
-  background: transparent; font: 14px/1.7 "Aptos Mono", "Cascadia Code", monospace; }
-.instructions-editor:focus { outline: none; }
+.agent-instructions-editor { margin: -8px -18px -18px; padding: 10px 18px 14px; }
+textarea.instructions-editor { min-height: 430px; border: 1px solid var(--border); border-radius: 6px; padding: 16px 18px; box-shadow: none;
+  overflow-y: hidden; background: var(--surface); color: var(--text); white-space: pre-wrap; tab-size: 2;
+  font: 14px/1.75 "Aptos Mono", "Cascadia Code", monospace; }
+textarea.instructions-editor:focus { outline: none; }
 .skill-aside-stack { display: flex; flex-direction: column; gap: 12px; }
 .skill-aside-card { display: flex; flex-direction: column; gap: 7px; padding: 14px 16px; border: 1px solid var(--border);
   border-radius: 8px; background: var(--surface); }
@@ -563,11 +588,10 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
   .skill-aside-stack { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (max-width: 720px) {
-  .skill-draft-bar { margin-top: 0; flex-wrap: wrap; }
-  .skill-draft-bar .muted { display: none; }
-  .skill-draft-bar .draft-spacer { min-width: 10px; }
+  .skill-draft-bar { flex-wrap: wrap; }
+  .skill-bar-breadcrumb { flex-basis: 100%; }
+  .skill-draft-actions { width: 100%; justify-content: flex-end; }
   .skill-file-switcher { align-items: stretch; flex-direction: column; gap: 7px; }
-  .agent-instructions-label { align-items: flex-start; flex-direction: column; gap: 2px; }
   .skill-aside-stack, .github-migration-steps { grid-template-columns: 1fr; }
   .github-migration-steps > div + div { border-left: 0; border-top: 1px solid var(--border); }
   .skill-section-head { flex-direction: column; }
