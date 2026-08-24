@@ -47,7 +47,9 @@ payloads, scheduler path, and status versions.
 - [x] (2026-08-24 02:15Z) Implemented persisted retry state, precomputed backoff
   timers, continued-failure behavior, cancellation, and policy-aware scheduler
   routing. The focused workflow suite passed 325 tests; ruff and strict mypy passed.
-- [ ] Implement and test status schema version 3, UI rendering, and replay-safe telemetry.
+- [x] (2026-08-24 02:40Z) Implemented and tested status schema version 3, UI
+  rendering, and Activity-delivery telemetry. The expanded focused suite passed
+  367 tests; ruff and strict mypy passed.
 - [ ] Run an independent testing review and close all coverage gaps, including a
   deterministic sample or sample mode.
 - [ ] Update architecture and user documentation, maintain this plan, and run the complete
@@ -107,6 +109,16 @@ payloads, scheduler path, and status versions.
   Evidence: Policy-aware authorization and input-contract failures now return strict,
   sanitized outcomes; only an invocation with no runtime outcome enters infrastructure retry.
 
+- Observation: Policy-aware status must count blocked non-iterated nodes before their
+  scheduler instances exist, while unexpanded `for_each` nodes have no executable units yet.
+  Evidence: Version 3 derives its pending/materialized base from persisted normal tasks and
+  adds only actually materialized iteration instances; version 2 keeps its prior accounting.
+
+- Observation: Workflow task telemetry belongs inside the Activity delivery rather than the
+  orchestrator.
+  Evidence: Policy-aware Activities emit one bounded start/completion pair and span per actual
+  delivery, including cancellation, while replayed scheduler decisions emit no metrics.
+
 ## Decision Log
 
 - Decision: Use the presence of authored `execution`, even an empty object, or any
@@ -153,8 +165,10 @@ sync, async, and sync-returning-awaitable handlers, enforce one Activity-owned d
 return sanitized outcomes. Policy-free task inputs and Activity behavior remain unchanged.
 The structured scheduler routes every policy-aware plan, uses independent Durable backoff
 timers and stable idempotency across attempts, applies same-wave outcomes deterministically,
-and supports exact continued-failure results for normal and `for_each` tasks. Status v3,
-observability, independent testing review, sample coverage, and documentation remain.
+and supports exact continued-failure results for normal and `for_each` tasks. Status v3 now
+reports executable-unit counts and bounded attempt state, the built-in UI renders all three
+status versions, and Activity telemetry records actual deliveries without replay metrics.
+Independent testing review, sample coverage, and documentation remain.
 
 ## Context and Orientation
 
@@ -623,3 +637,6 @@ handler-originated `TimeoutError` and boolean persisted `max_attempts`.
 Revision note (2026-08-24): Recorded Milestone 3 completion and review-driven corrections for
 failed-wave draining, independent backoff timers, persisted authorization, strict outcome
 validation, and timer cleanup.
+
+Revision note (2026-08-24): Recorded Milestone 4 completion and review-driven corrections for
+blocked-unit accounting, cancellation completion telemetry, and isolated metric creation.

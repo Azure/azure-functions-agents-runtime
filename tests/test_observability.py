@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import types
+from contextlib import nullcontext
 
 import pytest
 
@@ -276,6 +277,80 @@ def test_runtime_span_add_event_forwards_name_and_non_none_attributes() -> None:
     span.add_event("unit.test.event", {"kept": "value", "count": 2, "dropped": None})
 
     assert events == [("unit.test.event", {"kept": "value", "count": 2})]
+
+
+def test_workflow_task_activity_telemetry_counts_start_and_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    starts: list[tuple[int, dict[str, object]]] = []
+    completions: list[tuple[int, dict[str, object]]] = []
+    monkeypatch.setattr(obs, "_enabled", True)
+    monkeypatch.setattr(obs, "_metrics_ready", True)
+    monkeypatch.setattr(
+        obs,
+        "_workflow_task_start_counter",
+        types.SimpleNamespace(add=lambda count, attrs: starts.append((count, attrs))),
+    )
+    monkeypatch.setattr(
+        obs,
+        "_workflow_task_completion_counter",
+        types.SimpleNamespace(add=lambda count, attrs: completions.append((count, attrs))),
+    )
+    monkeypatch.setattr(
+        obs,
+        "start_span",
+        lambda *args, **kwargs: nullcontext(obs.RuntimeSpan(None)),
+    )
+
+    with obs.workflow_task_activity_telemetry({
+        "af.workflow_task.workflow_id": "workflow",
+        "af.workflow_task.attempt": 1,
+    }) as telemetry:
+        telemetry.complete(
+            outcome_kind="handler_transient",
+            error_code="busy",
+            retry_decision="retry",
+            selected_delay_ms=125,
+        )
+
+    assert starts[0][0] == completions[0][0] == 1
+    assert completions[0][1]["af.workflow_task.retry_decision"] == "retry"
+    assert "error" not in completions[0][1]
+
+
+def test_workflow_counter_creation_failure_does_not_clear_other_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_framework import observability as maf_observability
+
+    created: dict[str, object] = {}
+
+    class _Meter:
+        def create_counter(self, name: str, *, description: str) -> object:
+            if name == "azure_functions_agents.workflow_task.starts":
+                raise RuntimeError("unsupported instrument")
+            counter = object()
+            created[name] = counter
+            return counter
+
+    monkeypatch.setattr(obs, "_metrics_ready", False)
+    monkeypatch.setattr(maf_observability, "get_meter", lambda: _Meter())
+
+    obs._ensure_metrics()
+
+    assert obs._workflow_task_start_counter is None
+    assert obs._workflow_task_completion_counter is created[
+        "azure_functions_agents.workflow_task.completions"
+    ]
+    assert obs._sandbox_execution_counter is created[
+        "azure_functions_agents.dynamic_session.executions"
+    ]
+    assert obs._web_request_counter is created[
+        "azure_functions_agents.web_request.requests"
+    ]
+    assert obs._delegate_call_counter is created[
+        "azure_functions_agents.delegate.calls"
+    ]
 
 
 def test_record_sandbox_execution_gated_when_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]

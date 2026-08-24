@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -2135,7 +2136,79 @@ def test_policy_task_routes_dynamic_and_dispatches_retry_contract() -> None:
     assert all(call["args"] == {"fixed": "value"} for call in calls)
     initial = datetime(2024, 1, 1, tzinfo=UTC)
     assert context.timer_deadlines == [initial, initial + timedelta(seconds=2)]
-    assert context.statuses[0]["schema_version"] == 2
+    assert context.statuses[0]["schema_version"] == 3
+    retry_status = next(
+        status for status in context.statuses
+        if status["nodes"]["work"]["state"] == "retry_wait"
+    )
+    assert retry_status["nodes"]["work"]["attempt"] in {1, 2}
+    assert retry_status["nodes"]["work"]["max_attempts"] == 3
+    assert retry_status["nodes"]["work"]["next_retry_time"].endswith("+00:00")
+    final_status = context.statuses[-1]
+    assert final_status["nodes"]["work"]["last_failure_kind"] == "handler_transient"
+    assert final_status["nodes"]["work"]["last_error_code"] == "service_busy"
+    assert "next_retry_time" not in final_status["nodes"]["work"]
+    assert set(final_status["counts"]) == {
+        "logical_total",
+        "materialized_total",
+        "pending",
+        "running",
+        "retry_wait",
+        "completed",
+        "skipped",
+        "failed_continued",
+    }
+    for status in context.statuses:
+        counts = status["counts"]
+        assert sum(
+            counts[key]
+            for key in (
+                "pending",
+                "running",
+                "retry_wait",
+                "completed",
+                "skipped",
+                "failed_continued",
+            )
+        ) == counts["materialized_total"]
+        serialized = json.dumps(status)
+        for secret_key in ("args", "result", "idempotency", "session"):
+            assert secret_key not in serialized
+
+
+def test_v3_counts_blocked_normal_units_from_start() -> None:
+    policy_blocked = _policy_task(
+        "policy_blocked",
+        attempts=4,
+        depends_on=["root"],
+    )
+    policy_free_blocked = {
+        "id": "plain_blocked",
+        "type": TOOL_TASK_TYPE,
+        "tool": "run",
+        "args": {},
+        "depends_on": ["root"],
+    }
+    context = _DynamicContext(
+        [_policy_task("root", attempts=1), policy_blocked, policy_free_blocked],
+        lambda _name, payload: _activity_success(payload["id"], "done"),
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+    )
+    generator = _registered_function(engine.ORCHESTRATOR_NAME)(context)
+
+    next(generator)
+    status = context.statuses[-1]
+
+    assert status["schema_version"] == 3
+    assert status["counts"]["materialized_total"] == 3
+    assert status["counts"]["running"] == 1
+    assert status["counts"]["pending"] == 2
+    assert status["nodes"]["policy_blocked"] == {
+        "state": "pending",
+        "max_attempts": 4,
+    }
+    assert status["nodes"]["plain_blocked"] == {"state": "pending"}
+    generator.close()
 
 
 def test_policy_retry_sequence_is_deterministic_across_replay() -> None:
@@ -2396,6 +2469,14 @@ def test_for_each_instances_retry_independently_and_aggregate_errors() -> None:
         ("inspect[0]", 2),
     ]
     assert context.statuses[-1]["nodes"]["inspect"]["state"] == "aggregated_with_errors"
+    inspect_status = context.statuses[-1]["nodes"]["inspect"]
+    assert "max_attempts" not in inspect_status
+    assert inspect_status["instances"]["inspect[0]"]["max_attempts"] == 2
+    assert inspect_status["instances"]["inspect[0]"]["attempt"] == 2
+    assert inspect_status["instances"]["inspect[0]"]["last_failure_kind"] == (
+        "handler_transient"
+    )
+    assert inspect_status["instances"]["inspect[1]"]["state"] == "failed_continued"
 
 
 def test_cancellation_during_retry_timer_dispatches_nothing_later() -> None:
@@ -2668,3 +2749,128 @@ def test_control_plane_failure_cancels_existing_retry_timer() -> None:
     assert result["error_code"] == "workflow_reference_unresolved"
     assert len(context.timers) == 1
     assert context.timers[0].cancelled is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "decision"),
+    [
+        ("success", "complete"),
+        ("retry", "retry"),
+        ("continue", "continue"),
+        ("fail", "fail"),
+    ],
+)
+async def test_policy_activity_emits_safe_actual_delivery_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    decision: str,
+) -> None:
+    starts: list[dict[str, Any]] = []
+    completions: list[dict[str, Any]] = []
+
+    class _Recorder:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            return None
+
+        def complete(self, **kwargs: Any) -> None:
+            completions.append(kwargs)
+
+    def telemetry(attributes: dict[str, Any]) -> _Recorder:
+        starts.append(attributes)
+        return _Recorder()
+
+    monkeypatch.setattr(engine, "workflow_task_activity_telemetry", telemetry)
+
+    def handler(args: dict[str, Any]) -> dict[str, bool]:
+        if mode == "retry":
+            raise WorkflowRetryableError("busy", "Safe.")
+        if mode in {"continue", "fail"}:
+            raise WorkflowTerminalError("terminal", "Safe.")
+        return {"ok": True}
+
+    payload = _policy_activity_payload()
+    if mode == "retry":
+        payload["max_attempts"] = 2
+        payload["execution"]["max_attempts"] = 2
+        payload["execution"]["retry_delays_ms"] = [125]
+    if mode == "continue":
+        payload["execution"]["continue_on_error"] = True
+    await _policy_tool_activity(handler)(payload)
+
+    assert len(starts) == len(completions) == 1
+    assert completions[0]["retry_decision"] == decision
+    serialized = json.dumps([starts, completions])
+    for forbidden in ("provider-secret", "idempotency_key", '"args"', '"result"', "session"):
+        assert forbidden not in serialized
+
+
+@pytest.mark.asyncio
+async def test_policy_free_activity_emits_no_workflow_task_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        engine,
+        "workflow_task_activity_telemetry",
+        lambda attributes: calls.append(attributes),
+    )
+    activity = _registered_function(
+        engine._ACTIVITY_NAME,
+        handler_catalog=integration.build_workflow_handler_catalog(
+            [WorkflowTool("run", "Run", lambda args: args)]
+        ),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(allowed_tools=frozenset({"run"}))
+        },
+    )
+    await activity({
+        "id": "work",
+        "tool": "run",
+        "args": {},
+        "workflow_agent_slug": "coordinator",
+        "workflow_id": "workflow",
+    })
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_activity_records_completion_and_exceptional_span_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completions: list[dict[str, Any]] = []
+    exits: list[tuple[Any, Any, Any]] = []
+
+    class _Recorder:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            exits.append(args)
+
+        def complete(self, **kwargs: Any) -> None:
+            completions.append(kwargs)
+
+    monkeypatch.setattr(
+        engine,
+        "workflow_task_activity_telemetry",
+        lambda _attributes: _Recorder(),
+    )
+
+    async def cancel(_args: dict[str, Any]) -> None:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await _policy_tool_activity(cancel)(_policy_activity_payload())
+
+    assert completions == [{
+        "outcome_kind": "canceled",
+        "error_code": "workflow_task_canceled",
+        "retry_decision": "fail",
+        "selected_delay_ms": None,
+    }]
+    assert exits[0][0] is asyncio.CancelledError
+    assert isinstance(exits[0][1], asyncio.CancelledError)

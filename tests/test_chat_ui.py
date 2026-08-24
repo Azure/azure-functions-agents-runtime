@@ -374,3 +374,44 @@ def test_format_workflow_status_renders_v2_dynamic_snapshot() -> None:
     ).replace("__STATUS_FUNCTIONS__", functions)
 
     _run_node(harness)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_format_workflow_status_renders_v3_execution_state_safely() -> None:
+    functions = _status_formatter_functions(_script_text())
+    harness = textwrap.dedent(
+        """
+        __STATUS_FUNCTIONS__
+        const status = {
+          schema_version: 3,
+          counts: {
+            logical_total: 2, materialized_total: 2, pending: 0,
+            running: 0, retry_wait: 1, completed: 0, skipped: 0,
+            failed_continued: 1
+          },
+          nodes: {
+            retry: {
+              state: "retry_wait", attempt: 2, max_attempts: 3,
+              next_retry_time: "2026-08-24T01:00:00+00:00"
+            },
+            fan: {
+              state: "aggregated_with_errors", expanded_count: 1,
+              instances: {
+                "fan[0]": { state: "failed_continued", attempt: 1, max_attempts: 1 }
+              }
+            }
+          }
+        };
+        const rendered = formatWorkflowStatus(status);
+        for (const expected of [
+          "1 retrying", "1 continued failure", "retry: retry_wait (2/3)",
+          "fan: aggregated_with_errors", "fan[0] failed_continued 1/1"
+        ]) {
+          if (!rendered.includes(expected)) throw new Error("missing " + expected + ": " + rendered);
+        }
+        if (rendered.includes("idempotency") || rendered.includes("<script>")) {
+          throw new Error("v3 formatter exposed hidden or injectable content");
+        }
+        """
+    ).replace("__STATUS_FUNCTIONS__", functions)
+    _run_node(harness)

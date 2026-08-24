@@ -33,6 +33,7 @@ import azure.durable_functions as df
 import azure.functions as func
 
 from azure_functions_agents._logger import logger
+from azure_functions_agents._observability import workflow_task_activity_telemetry
 from azure_functions_agents.registration.catalog import AgentCatalog
 from azure_functions_agents.runner import run_leaf_agent_task
 
@@ -241,10 +242,56 @@ async def _invoke_policy_handler(
     *,
     task: Mapping[str, Any],
     target: str,
+    target_type: str = "tool",
 ) -> _ActivityOutcome:
     context, timeout = _policy_activity_context(task)
     token = _set_workflow_task_context(context)
     task_id = str(task["id"])
+    execution = cast(Mapping[str, Any], task["execution"])
+    telemetry_manager = workflow_task_activity_telemetry({
+        "af.workflow_task.workflow_id": context.workflow_id,
+        "af.workflow_task.task_id": context.task_id,
+        "af.workflow_task.node_instance_id": context.node_instance_id,
+        "af.workflow_task.attempt": context.attempt,
+        "af.workflow_task.max_attempts": context.max_attempts,
+        "af.workflow_task.target_type": target_type,
+        "af.workflow_task.target_name": target,
+        "af.workflow_task.timeout_source": execution["timeout_source"],
+        "af.workflow_task.retry_source": execution["retry_source"],
+        "af.workflow_task.timeout_ms": execution["timeout_ms"],
+    })
+    telemetry = telemetry_manager.__enter__()
+    telemetry_open = True
+
+    def finish(outcome: _ActivityOutcome) -> _ActivityOutcome:
+        if outcome["ok"]:
+            kind = "success"
+            error_code = None
+            decision = "complete"
+            delay = None
+        else:
+            failure = outcome["failure"]
+            kind = failure["kind"]
+            error_code = failure["error_code"]
+            if (
+                failure["retryable"]
+                and context.attempt < context.max_attempts
+            ):
+                decision = "retry"
+                delay = execution["retry_delays_ms"][context.attempt - 1]
+            elif failure["continuable"] and execution["continue_on_error"]:
+                decision = "continue"
+                delay = None
+            else:
+                decision = "fail"
+                delay = None
+        telemetry.complete(
+            outcome_kind=kind,
+            error_code=error_code,
+            retry_decision=decision,
+            selected_delay_ms=delay,
+        )
+        return outcome
     try:
         timeout_scope = asyncio.timeout(timeout)
         try:
@@ -259,46 +306,46 @@ async def _invoke_policy_handler(
             raise
         except TimeoutError:
             if timeout_scope.expired():
-                return _failure_outcome(
+                return finish(_failure_outcome(
                     task_id,
                     error_code="workflow_task_timeout",
                     error="Task attempt timed out.",
                     kind="timeout",
                     retryable=True,
                     continuable=True,
-                )
+                ))
             logger.exception(
                 "workflow task execution failed: workflow_id=%s node_id=%s target=%s",
                 context.workflow_id,
                 context.node_instance_id,
                 target,
             )
-            return _failure_outcome(
+            return finish(_failure_outcome(
                 task_id,
                 error_code="workflow_task_execution_unknown",
                 error="Task execution failed.",
                 kind="execution_unknown",
                 retryable=False,
                 continuable=True,
-            )
+            ))
         except WorkflowRetryableError as exc:
-            return _failure_outcome(
+            return finish(_failure_outcome(
                 task_id,
                 error_code=exc.error_code,
                 error=exc.message,
                 kind="handler_transient",
                 retryable=True,
                 continuable=True,
-            )
+            ))
         except WorkflowTerminalError as exc:
-            return _failure_outcome(
+            return finish(_failure_outcome(
                 task_id,
                 error_code=exc.error_code,
                 error=exc.message,
                 kind="handler_terminal",
                 retryable=False,
                 continuable=True,
-            )
+            ))
         except Exception:
             logger.exception(
                 "workflow task execution failed: workflow_id=%s node_id=%s target=%s",
@@ -306,14 +353,14 @@ async def _invoke_policy_handler(
                 context.node_instance_id,
                 target,
             )
-            return _failure_outcome(
+            return finish(_failure_outcome(
                 task_id,
                 error_code="workflow_task_execution_unknown",
                 error="Task execution failed.",
                 kind="execution_unknown",
                 retryable=False,
                 continuable=True,
-            )
+            ))
         try:
             json.dumps(result, allow_nan=False)
         except (TypeError, ValueError):
@@ -323,16 +370,28 @@ async def _invoke_policy_handler(
                 context.node_instance_id,
                 target,
             )
-            return _failure_outcome(
+            return finish(_failure_outcome(
                 task_id,
                 error_code="workflow_task_handler_contract",
                 error="Task handler returned an invalid result.",
                 kind="handler_contract",
                 retryable=False,
                 continuable=False,
-            )
-        return {"id": task_id, "ok": True, "result": result}
+            ))
+        return finish({"id": task_id, "ok": True, "result": result})
+    except asyncio.CancelledError as exc:
+        telemetry.complete(
+            outcome_kind="canceled",
+            error_code="workflow_task_canceled",
+            retry_decision="fail",
+            selected_delay_ms=None,
+        )
+        telemetry_manager.__exit__(type(exc), exc, exc.__traceback__)
+        telemetry_open = False
+        raise
     finally:
+        if telemetry_open:
+            telemetry_manager.__exit__(None, None, None)
         _reset_workflow_task_context(token)
 
 
@@ -384,6 +443,43 @@ def _validate_policy_activity_input(
             task_id if isinstance(task_id, str) else "<invalid>"
         )
     return None
+
+
+def _early_policy_outcome_with_telemetry(
+    task: Mapping[str, Any],
+    *,
+    target_type: str,
+    target_name: Any,
+    outcome: _ActivityFailureOutcome,
+) -> dict[str, Any]:
+    execution = task.get("execution")
+    execution_map = execution if isinstance(execution, Mapping) else {}
+    attributes = {
+        "af.workflow_task.workflow_id": task.get("workflow_id"),
+        "af.workflow_task.task_id": task.get("task_id"),
+        "af.workflow_task.node_instance_id": task.get("node_instance_id"),
+        "af.workflow_task.attempt": task.get("attempt"),
+        "af.workflow_task.max_attempts": task.get("max_attempts"),
+        "af.workflow_task.target_type": target_type,
+        "af.workflow_task.target_name": target_name,
+        "af.workflow_task.timeout_source": execution_map.get("timeout_source"),
+        "af.workflow_task.retry_source": execution_map.get("retry_source"),
+        "af.workflow_task.timeout_ms": execution_map.get("timeout_ms"),
+    }
+    safe_attributes = {
+        key: value
+        for key, value in attributes.items()
+        if isinstance(value, (str, int)) and not isinstance(value, bool)
+    }
+    with workflow_task_activity_telemetry(safe_attributes) as telemetry:
+        failure = outcome["failure"]
+        telemetry.complete(
+            outcome_kind=failure["kind"],
+            error_code=failure["error_code"],
+            retry_decision="fail",
+            selected_delay_ms=None,
+        )
+    return dict(outcome)
 
 
 def _run_echo(args: dict[str, Any]) -> dict[str, Any]:
@@ -443,7 +539,7 @@ def _plan_is_dynamic(tasks: list[WorkflowTaskInput]) -> bool:
     return any(
         task.get("when") is not None
         or task.get("for_each") is not None
-        or task.get("execution") is not None
+        or "execution" in task
         for task in tasks
     )
 
@@ -749,6 +845,7 @@ class _DynamicWorkflowState:
     node_instances: dict[str, list[_MaterializedInstance]]
     expanded_count: dict[str, int]
     budget_used: int
+    policy_aware: bool
 
 
 def _new_dynamic_workflow_state(
@@ -781,6 +878,7 @@ def _new_dynamic_workflow_state(
         node_instances={},
         expanded_count={},
         budget_used=sum(1 for task in tasks if task.get("for_each") is None),
+        policy_aware=any("execution" in task for task in tasks),
     )
 
 
@@ -791,14 +889,12 @@ def _materialized_total(
 
 
 def _dynamic_status(state: _DynamicWorkflowState) -> dict[str, Any]:
-    """Build the versioned (schema_version=2) structured ``custom_status`` object.
+    """Build the versioned structured ``custom_status`` object.
 
-    ``counts`` are instance-level for completed/skipped/running and node-level
-    for ``logical_total``; ``materialized_total`` counts every materialized
-    instance (including skipped ones). ``nodes`` renders logical node state,
-    plus per-instance state for expanded ``for_each`` nodes.
+    Version 2 preserves the data-driven workflow shape. Version 3 classifies
+    executable units and adds bounded execution fields for policy-aware plans.
     """
-    completed = skipped = running = 0
+    completed = skipped = running = pending = retry_wait = failed_continued = 0
     for insts in state.node_instances.values():
         for inst in insts:
             instance_state = inst["state"]
@@ -808,6 +904,28 @@ def _dynamic_status(state: _DynamicWorkflowState) -> dict[str, Any]:
                 skipped += 1
             elif instance_state == "running":
                 running += 1
+            elif instance_state == "pending":
+                pending += 1
+            elif instance_state == "retry_wait":
+                retry_wait += 1
+            elif instance_state == "failed_continued":
+                failed_continued += 1
+
+    def execution_fields(instance: _MaterializedInstance) -> dict[str, Any]:
+        execution = instance.get("execution")
+        if execution is None:
+            return {}
+        fields: dict[str, Any] = {"max_attempts": execution["max_attempts"]}
+        attempt = instance.get("attempt", 0)
+        if attempt > 0:
+            fields["attempt"] = attempt
+        if instance["state"] == "retry_wait" and "retry_deadline" in instance:
+            fields["next_retry_time"] = instance["retry_deadline"]
+        failure = instance.get("last_failure")
+        if failure is not None:
+            fields["last_failure_kind"] = failure["kind"]
+            fields["last_error_code"] = failure["error_code"]
+        return fields
 
     nodes: dict[str, Any] = {}
     for lid, task in state.by_id.items():
@@ -815,20 +933,59 @@ def _dynamic_status(state: _DynamicWorkflowState) -> dict[str, Any]:
         if task.get("for_each") is not None and lid in state.expanded_count:
             node["expanded_count"] = state.expanded_count[lid]
             node["instances"] = {
-                inst["instance_id"]: {"state": inst["state"]}
+                inst["instance_id"]: {
+                    "state": inst["state"],
+                    **execution_fields(inst),
+                }
                 for inst in state.node_instances.get(lid, [])
             }
+        elif state.policy_aware and lid in state.node_instances:
+            node.update(execution_fields(state.node_instances[lid][0]))
+        elif state.policy_aware and task.get("for_each") is None:
+            if "execution" in task:
+                execution = cast(
+                    EffectiveWorkflowTaskExecution,
+                    cast(Mapping[str, Any], task)["execution"],
+                )
+                node["max_attempts"] = execution["max_attempts"]
         nodes[lid] = node
 
-    return {
-        "schema_version": 2,
-        "counts": {
+    counts = {
             "logical_total": len(state.by_id),
             "materialized_total": _materialized_total(state.node_instances),
             "completed": completed,
             "skipped": skipped,
             "running": running,
-        },
+    }
+    if state.policy_aware:
+        unmaterialized_normal = sum(
+            1
+            for task_id, task in state.by_id.items()
+            if task.get("for_each") is None
+            and task_id not in state.node_instances
+        )
+        pending += unmaterialized_normal
+        materialized_total = (
+            sum(1 for task in state.by_id.values() if task.get("for_each") is None)
+            + sum(
+                len(state.node_instances.get(task_id, []))
+                for task_id, task in state.by_id.items()
+                if task.get("for_each") is not None
+            )
+        )
+        counts = {
+            "logical_total": len(state.by_id),
+            "materialized_total": materialized_total,
+            "pending": pending,
+            "running": running,
+            "retry_wait": retry_wait,
+            "completed": completed,
+            "skipped": skipped,
+            "failed_continued": failed_continued,
+        }
+    return {
+        "schema_version": 3 if state.policy_aware else 2,
+        "counts": counts,
         "nodes": nodes,
     }
 
@@ -1662,7 +1819,9 @@ def register_workflows(
         if policy_aware:
             invalid = _validate_policy_activity_input(task, target_type="tool")
             if invalid is not None:
-                return dict(invalid)
+                return _early_policy_outcome_with_telemetry(
+                    task, target_type="tool", target_name=task.get("tool"), outcome=invalid
+                )
         task_id = task["id"]
         tool_name = task["tool"]
         args = task["args"]
@@ -1670,7 +1829,10 @@ def register_workflows(
             workflow_agent_slug, policy = require_workflow_agent_policy(task)
         except RuntimeError:
             if policy_aware:
-                return dict(_authorization_outcome(task_id))
+                return _early_policy_outcome_with_telemetry(
+                    task, target_type="tool", target_name=tool_name,
+                    outcome=_authorization_outcome(task_id),
+                )
             raise
         workflow_id = task["workflow_id"]
         if tool_name not in policy.allowed_tools:
@@ -1683,7 +1845,10 @@ def register_workflows(
                 tool_name,
             )
             if policy_aware:
-                return dict(_authorization_outcome(task_id))
+                return _early_policy_outcome_with_telemetry(
+                    task, target_type="tool", target_name=tool_name,
+                    outcome=_authorization_outcome(task_id),
+                )
             raise RuntimeError(f"task {task_id!r}: workflow tool {tool_name!r} is not authorized")
         entry = (
             handler_catalog.get(tool_name)
@@ -1692,7 +1857,10 @@ def register_workflows(
         )
         if entry is None:
             if policy_aware:
-                return dict(_authorization_outcome(task_id))
+                return _early_policy_outcome_with_telemetry(
+                    task, target_type="tool", target_name=tool_name,
+                    outcome=_authorization_outcome(task_id),
+                )
             raise ValueError(
                 f"task {task_id!r}: tool {tool_name!r} is not registered "
                 "in the workflow-safe tool registry"
@@ -1745,7 +1913,10 @@ def register_workflows(
         if policy_aware:
             invalid = _validate_policy_activity_input(task, target_type="sub_agent")
             if invalid is not None:
-                return dict(invalid)
+                return _early_policy_outcome_with_telemetry(
+                    task, target_type="sub_agent", target_name=task.get("agent"),
+                    outcome=invalid,
+                )
         task_id = task["id"]
         agent_slug = task["agent"]
         workflow_id = task["workflow_id"]
@@ -1753,7 +1924,10 @@ def register_workflows(
             workflow_agent_slug, policy = require_workflow_agent_policy(task)
         except RuntimeError:
             if policy_aware:
-                return dict(_authorization_outcome(task_id))
+                return _early_policy_outcome_with_telemetry(
+                    task, target_type="sub_agent", target_name=agent_slug,
+                    outcome=_authorization_outcome(task_id),
+                )
             raise
         if agent_slug not in policy.allowed_subagents:
             logger.error(
@@ -1765,7 +1939,10 @@ def register_workflows(
                 agent_slug,
             )
             if policy_aware:
-                return dict(_authorization_outcome(task_id))
+                return _early_policy_outcome_with_telemetry(
+                    task, target_type="sub_agent", target_name=agent_slug,
+                    outcome=_authorization_outcome(task_id),
+                )
             raise RuntimeError(
                 f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} is not authorized"
             )
@@ -1779,7 +1956,10 @@ def register_workflows(
                 agent_slug,
             )
             if policy_aware:
-                return dict(_authorization_outcome(task_id))
+                return _early_policy_outcome_with_telemetry(
+                    task, target_type="sub_agent", target_name=agent_slug,
+                    outcome=_authorization_outcome(task_id),
+                )
             raise RuntimeError(
                 f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} is not available"
             )
@@ -1810,6 +1990,7 @@ def register_workflows(
                 {},
                 task=task,
                 target=agent_slug,
+                target_type="sub_agent",
             )
             if outcome["ok"]:
                 outcome["result"] = {
@@ -1866,9 +2047,9 @@ def register_workflows(
         A plan is *static* when no task carries a ``when`` predicate or a
         ``for_each`` expansion; it runs through :func:`_run_static_workflow`
         with its exact pre-#1276 wave scheduling and string ``custom_status``
-        behavior. Any ``when`` / ``for_each`` selects
+        behavior. Any ``when`` / ``for_each`` / execution policy selects
         :func:`_run_dynamic_workflow`, which materializes instances, aggregates
-        results, and publishes structured (schema_version=2) status.
+        results, and publishes structured version 2 or 3 status.
 
         Determinism contract (both paths):
         - Ready/runnable sets ordered deterministically before each wave.
