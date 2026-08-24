@@ -54,11 +54,8 @@ interface CodeFile {
 // deployment package tree, but these are the standard runtime files; each is
 // read on demand via the ranged getSource API (missing ones render an editable
 // blank via the DraftEditor's "not readable" path).
-function buildCodeFiles(app: LiveAgentApp): CodeFile[] {
+function buildCodeFiles(): CodeFile[] {
   const files: CodeFile[] = [{ path: 'function_app.py', label: 'function_app.py', icon: '🐍' }]
-  for (const a of app.agents) {
-    files.push({ path: `${a.name}.agent.md`, label: `${a.name}.agent.md`, icon: '📄' })
-  }
   files.push({ path: 'mcp.json', label: 'mcp.json', icon: '🔌' })
   files.push({ path: 'agents.config.yaml', label: 'agents.config.yaml', icon: '⚙️' })
   files.push({ path: 'host.json', label: 'host.json', icon: '⚙️' })
@@ -166,6 +163,7 @@ function buildFileTree(
   }
 
   for (const f of listed) {
+    if (f.path.endsWith('.agent.md')) continue
     insert({
       path: f.path,
       name: f.path.split('/').pop() ?? f.path,
@@ -250,7 +248,7 @@ export default function AppDetailPage() {
   // used to organize the side panel and gate the "Try it" action.
   const selectedAgent =
     sel.kind === 'agent' && app ? app.agents.find((a) => a.name === sel.name) : undefined
-  const codeFiles = app ? buildCodeFiles(app) : []
+  const codeFiles = app ? buildCodeFiles() : []
   const builtinCount = app?.agents.filter((a) => a.builtinEndpoints).length ?? 0
   const supportingCount = app?.supportingFunctions?.length ?? 0
 
@@ -547,10 +545,10 @@ export default function AppDetailPage() {
                 <button
                   key={a.name}
                   className={'node' + (sel.kind === 'agent' && sel.name === a.name ? ' active' : '')}
-                  onClick={() => setSel({ kind: 'agent', name: a.name })}
-                  title={`${a.name}.agent.md`}
+                  onClick={() => navigate(`/agents/${enc(subForQuery)}/${enc(app.name)}/${enc(a.name)}`)}
+                  title={`Open ${a.name} instructions`}
                 >
-                  📄 <span className="mono">{a.name}.agent.md</span>
+                  ✦ <span>{a.name}</span>
                 </button>
               ))}
 
@@ -666,7 +664,8 @@ export default function AppDetailPage() {
                     ]}
                   />
                   <p className="muted" style={{ fontSize: 12, marginTop: 12 }}>
-                    Select an agent, MCP server, or file on the left to view and edit its source.
+                    Open a Hosted Skill to edit its instructions, trigger, and capabilities. Select an MCP server or
+                    app file to edit shared source.
                   </p>
                 </>
               )}

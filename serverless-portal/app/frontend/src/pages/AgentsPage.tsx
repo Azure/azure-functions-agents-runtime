@@ -21,8 +21,8 @@ function formatCachedAt(ms: number): string {
 }
 // The dashboard: Azure Function Apps identified as Hosted Skills apps by the
 // `AZURE_FUNCTIONS_AGENTS_PROVIDER` app setting (the backend's sole "is this an
-// Hosted Skills app?" signal), scoped to the selected subscription. Each app is
-// a flat row linking through to the app detail page.
+// Hosted Skills app?" signal), scoped to the selected subscription. Each skill
+// is a flat row linking through to its detail page.
 export default function AgentsPage() {
   const {
     subscriptions,
@@ -161,15 +161,31 @@ export default function AgentsPage() {
           <div className="hosted-skill-table-head" aria-hidden="true">
             <span>App</span><span>Hosted Skills</span><span>Model</span><span>Region</span><span>Health</span><span />
           </div>
-          {apps.map((app) => (
-            <HostedSkillRow
-              key={app.name}
-              app={app}
-              renderAppLink={(children) => (
-                <Link to={`/apps/${encodeURIComponent(selected)}/${encodeURIComponent(app.name)}`}>{children}</Link>
-              )}
-            />
-          ))}
+          {apps.flatMap((app) => {
+            if (app.agents.length === 0) {
+              return (
+                <HostedSkillRow
+                  key={app.name}
+                  app={app}
+                  renderAppLink={(children) => (
+                    <Link to={`/apps/${encodeURIComponent(selected)}/${encodeURIComponent(app.name)}`}>{children}</Link>
+                  )}
+                />
+              )
+            }
+
+            return app.agents.map((agent) => (
+              <HostedSkillRow
+                key={`${app.name}/${agent.name}`}
+                app={{ ...app, agents: [agent] }}
+                renderAppLink={(children) => (
+                  <Link to={`/agents/${encodeURIComponent(selected)}/${encodeURIComponent(app.name)}/${encodeURIComponent(agent.name)}`}>
+                    {children}
+                  </Link>
+                )}
+              />
+            ))
+          })}
         </div>
       )}
 

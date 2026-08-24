@@ -393,28 +393,40 @@ function agentSlugFromFileName(fileName) {
 async function agentSourceFiles(accessToken, site) {
   const scm = scmHostName(site)
   if (!scm) return { files: [], ok: false }
-  const dirs = ['site/wwwroot', 'site/wwwroot/agents']
-  let rootOk = false
-  const perDir = await Promise.all(
-    dirs.map(async (dir, index) => {
-      try {
-        const res = await fetch(`https://${scm}/api/vfs/${dir}/`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-          signal: AbortSignal.timeout(2500),
-        })
-        if (!res.ok) return []
-        if (index === 0) rootOk = true
-        const entries = await res.json()
-        if (!Array.isArray(entries)) return []
-        return entries
+  try {
+    const rootRes = await fetch(`https://${scm}/api/vfs/site/wwwroot/`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(2500),
+    })
+    if (!rootRes.ok) return { files: [], ok: false }
+    const rootEntries = await rootRes.json()
+    if (!Array.isArray(rootEntries)) return { files: [], ok: false }
+
+    const files = rootEntries
+      .map((entry) => String(entry?.name ?? ''))
+      .filter((name) => name.toLowerCase().endsWith('.agent.md'))
+    const agentsDirectory = rootEntries.find(
+      (entry) => String(entry?.name ?? '').toLowerCase() === 'agents' && String(entry?.mime ?? '') === 'inode/directory',
+    )
+    if (!agentsDirectory?.name) return { files, ok: true }
+
+    const agentsRes = await fetch(`https://${scm}/api/vfs/site/wwwroot/${encodeURIComponent(String(agentsDirectory.name))}/`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(2500),
+    })
+    if (!agentsRes.ok) return { files, ok: true }
+    const agentEntries = await agentsRes.json()
+    if (Array.isArray(agentEntries)) {
+      files.push(
+        ...agentEntries
           .map((entry) => String(entry?.name ?? ''))
-          .filter((name) => name.toLowerCase().endsWith('.agent.md'))
-      } catch {
-        return [] // VFS unavailable or timed out — keep function-based results
-      }
-    }),
-  )
-  return { files: perDir.flat(), ok: rootOk }
+          .filter((name) => name.toLowerCase().endsWith('.agent.md')),
+      )
+    }
+    return { files, ok: true }
+  } catch {
+    return { files: [], ok: false }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -740,9 +752,10 @@ function readZipEntryContent(blob, size, matchFn) {
 
 // Read the `*.agent.md` entry whose slug matches `agentName` from a package zip.
 function readAgentFileFromZip(blob, size, agentName) {
+  const targetSlug = safeFunctionName(agentName)
   return readZipEntryContent(blob, size, (fullName) => {
     const base = fullName.split('/').pop() ?? ''
-    return /\.agent\.md$/i.test(base) && agentSlugFromFileName(base) === agentName
+    return /\.agent\.md$/i.test(base) && agentSlugFromFileName(base) === targetSlug
   })
 }
 
@@ -763,7 +776,26 @@ async function flexPackageAgentDefinition(accessToken, subscriptionId, site, age
 async function kuduAgentDefinition(accessToken, site, agentName) {
   const scm = scmHostName(site)
   if (!scm) return null
-  for (const dir of ['site/wwwroot', 'site/wwwroot/agents']) {
+  const targetSlug = safeFunctionName(agentName)
+  let agentsDirectory = 'agents'
+  try {
+    const rootRes = await fetch(`https://${scm}/api/vfs/site/wwwroot/`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(8000),
+    })
+    if (rootRes.ok) {
+      const rootEntries = await rootRes.json()
+      if (Array.isArray(rootEntries)) {
+        const directory = rootEntries.find(
+          (entry) => String(entry?.name ?? '').toLowerCase() === 'agents' && String(entry?.mime ?? '') === 'inode/directory',
+        )
+        if (directory?.name) agentsDirectory = String(directory.name)
+      }
+    }
+  } catch {
+    /* probe the conventional directory names below */
+  }
+  for (const dir of ['site/wwwroot', `site/wwwroot/${agentsDirectory}`]) {
     try {
       const listRes = await fetch(`https://${scm}/api/vfs/${dir}/`, {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -774,7 +806,7 @@ async function kuduAgentDefinition(accessToken, site, agentName) {
       if (!Array.isArray(entries)) continue
       const match = entries
         .map((e) => String(e?.name ?? ''))
-        .find((n) => n.toLowerCase().endsWith('.agent.md') && agentSlugFromFileName(n) === agentName)
+        .find((n) => n.toLowerCase().endsWith('.agent.md') && agentSlugFromFileName(n) === targetSlug)
       if (!match) continue
       const fileRes = await fetch(`https://${scm}/api/vfs/${dir}/${encodeURIComponent(match)}`, {
         headers: { Authorization: `Bearer ${accessToken}` },

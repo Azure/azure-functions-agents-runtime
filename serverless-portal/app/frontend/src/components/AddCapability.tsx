@@ -37,6 +37,8 @@ export function AddCapability({
   agentName: agentNameProp,
   agents,
   variant = 'card',
+  scope = 'all',
+  buttonLabel,
 }: {
   subscription: string
   resourceGroup: string
@@ -48,6 +50,8 @@ export function AddCapability({
   // 'card' renders the standalone explanatory card (per-agent panel); 'button'
   // renders just a compact trigger for a toolbar (app-level).
   variant?: 'card' | 'button'
+  scope?: 'all' | 'triggers' | 'capabilities'
+  buttonLabel?: string
 }) {
   const qc = useQueryClient()
   // The agent a trigger will be written to. Seeded from the prop; retargetable
@@ -114,6 +118,7 @@ export function AddCapability({
       const next = addMcpServer(current, name, server)
       await api.saveSource({ subscription, app, path: 'mcp.json', content: next })
       qc.invalidateQueries({ queryKey: ['source', subscription, app, 'mcp.json'] })
+      qc.invalidateQueries({ queryKey: ['sourceList', subscription, resourceGroup, app] })
       setMcpPreview(next)
       setMsg(`Saved a draft of mcp.json with the "${name}" server — available to this app's agents.`)
     } catch (e) {
@@ -152,6 +157,7 @@ export function AddCapability({
       const content = buildSkillMd(skillName, skillDesc, skillBody)
       await api.saveSource({ subscription, app, path, content })
       qc.invalidateQueries({ queryKey: ['source', subscription, app, path] })
+      qc.invalidateQueries({ queryKey: ['sourceList', subscription, resourceGroup, app] })
       setMsg(`Saved a draft of ${path} — the runtime auto-discovers it as a skill.`)
     } catch (e) {
       setError((e as Error).message)
@@ -179,7 +185,7 @@ export function AddCapability({
     <>
       {variant === 'button' ? (
         <Button size="small" onClick={openModal} title="Add a trigger, tool, or skill to this app">
-          ＋ Add capability
+          ＋ {buttonLabel ?? (scope === 'triggers' ? 'Change trigger' : 'Add capability')}
         </Button>
       ) : (
         <div className="card" style={{ marginBottom: 18 }}>
@@ -230,49 +236,25 @@ export function AddCapability({
                   </div>
                 </div>
               )}
-              <div className="recipe-section-label">Make it run — triggers</div>
-              <div className="recipe-grid">
-                <RecipeCard
-                  icon="clock"
-                  title="On a schedule"
-                  desc="Run every hour, daily, or weekly."
-                  onClick={() => {
-                    setView('schedule')
-                    reset()
-                  }}
-                />
-                <RecipeCard
-                  icon="globe"
-                  title="HTTP endpoint"
-                  desc="Call the agent with a web request."
-                  onClick={() => {
-                    setHttpRoute(agentName)
-                    setView('http')
-                    reset()
-                  }}
-                />
-                <RecipeCard
-                  icon="mail"
-                  title="On new Outlook email"
-                  desc="React to incoming mail (connector)."
-                  onClick={() => {
-                    setView('outlook')
-                    reset()
-                  }}
-                />
-                <RecipeCard
-                  icon="zap"
-                  title="More trigger types…"
-                  desc="Queue, Service Bus, Blob, Event Grid."
-                  onClick={() => {
-                    setView('trigger-advanced')
-                    reset()
-                  }}
-                />
-              </div>
+              {scope !== 'capabilities' && (
+                <>
+                  <div className="recipe-section-label">Make it run — triggers</div>
+                  <div className="recipe-grid">
+                    <RecipeCard icon="clock" title="On a schedule" desc="Run every hour, daily, or weekly." onClick={() => { setView('schedule'); reset() }} />
+                    <RecipeCard icon="globe" title="HTTP endpoint" desc="Call the agent with a web request." onClick={() => { setHttpRoute(agentName); setView('http'); reset() }} />
+                    <RecipeCard icon="mail" title="On new Outlook email" desc="React to incoming mail (connector)." onClick={() => { setView('outlook'); reset() }} />
+                    <RecipeCard icon="zap" title="More trigger types…" desc="Queue, Service Bus, Blob, Event Grid." onClick={() => { setView('trigger-advanced'); reset() }} />
+                  </div>
+                </>
+              )}
 
-              <div className="recipe-section-label">Give it tools &amp; knowledge</div>
-              <div className="recipe-grid">
+              {scope !== 'triggers' && (
+                <>
+                  <div className="recipe-section-label">Give it tools &amp; knowledge</div>
+                  <div className="recipe-grid">
+                {scope === 'capabilities' && (
+                  <RecipeCard icon="mail" title="Connector trigger" desc="Start this skill from a connected service event." onClick={() => { setView('outlook'); reset() }} />
+                )}
                 {MCP_PRESETS.map((p) => (
                   <RecipeCard
                     key={p.name}
@@ -310,7 +292,9 @@ export function AddCapability({
                     reset()
                   }}
                 />
-              </div>
+                  </div>
+                </>
+              )}
             </>
           )}
 
@@ -773,11 +757,13 @@ function AiGenerate({
         const path = `tools/${slug}.py`
         await api.saveSource({ subscription, app, path, content })
         qc.invalidateQueries({ queryKey: ['source', subscription, app, path] })
+        qc.invalidateQueries({ queryKey: ['sourceList', subscription] })
         setApplied(`Saved a draft of ${path}.`)
       } else if (kind === 'skill') {
         const path = `skills/${skillSlug(toolName)}/SKILL.md`
         await api.saveSource({ subscription, app, path, content })
         qc.invalidateQueries({ queryKey: ['source', subscription, app, path] })
+        qc.invalidateQueries({ queryKey: ['sourceList', subscription] })
         setApplied(`Saved a draft of ${path}.`)
       } else {
         await api.saveAgentDefinition({ subscription, app, name: agentName, content })

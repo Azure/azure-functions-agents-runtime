@@ -10,6 +10,12 @@ import { CopyRegular, CheckmarkRegular } from '@fluentui/react-icons'
 import { consentStorageAccess } from '../auth'
 import { api, type ValidationIssue } from '../api'
 
+function splitAgentMarkdown(content: string): { prefix: string; instructions: string } {
+  const match = content.match(/^(---\r?\n[\s\S]*?\r?\n---\r?\n)([\s\S]*)$/)
+  if (!match) return { prefix: '', instructions: content }
+  return { prefix: match[1], instructions: match[2].replace(/^\r?\n/, '') }
+}
+
 export function CopyButton({ text, title }: { text: string; title: string }) {
   const [copied, setCopied] = useState(false)
   return (
@@ -42,6 +48,8 @@ export function DraftEditor({
   renderActions,
   onSaved,
   validationKind,
+  mode = 'source',
+  ariaLabel = 'Source editor',
 }: {
   queryKey: unknown[]
   load: () => Promise<{ content: string; source: string }>
@@ -53,6 +61,8 @@ export function DraftEditor({
   // runtime's schema on every keystroke (debounced) and errors are shown inline
   // below the editor. Prevents users from discovering typos on deploy.
   validationKind?: 'agent.md'
+  mode?: 'source' | 'instructions'
+  ariaLabel?: string
 }) {
   const qc = useQueryClient()
   const [grantBusy, setGrantBusy] = useState(false)
@@ -72,7 +82,12 @@ export function DraftEditor({
   }, [data])
 
   const saveMutation = useMutation({
-    mutationFn: (content: string) => save(content),
+    mutationFn: (content: string) => {
+      if (mode !== 'instructions') return save(content)
+      const { prefix } = splitAgentMarkdown(data?.content || fallback)
+      if (!prefix) throw new Error('The YAML front matter could not be read. Edit the full source instead.')
+      return save(`${prefix}\n${content}`)
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey })
       onSaved?.()
@@ -84,7 +99,15 @@ export function DraftEditor({
   const [validation, setValidation] = useState<{ errors: ValidationIssue[]; warnings: ValidationIssue[] } | null>(null)
   useEffect(() => {
     if (validationKind !== 'agent.md') return
-    const current = text ?? data?.content ?? ''
+    if (!data?.content) {
+      setValidation(null)
+      return
+    }
+    const fullSource = data?.content || fallback
+    const current =
+      mode === 'instructions'
+        ? `${splitAgentMarkdown(fullSource).prefix}\n${text ?? splitAgentMarkdown(fullSource).instructions}`
+        : text ?? fullSource
     if (!current.trim()) {
       setValidation(null)
       return
@@ -92,16 +115,17 @@ export function DraftEditor({
     const handle = setTimeout(() => {
       api
         .validateAgentMd(current)
-        .then((r) => setValidation({ errors: r.errors, warnings: r.warnings }))
+        .then((r) => setValidation({ errors: r.errors ?? [], warnings: r.warnings ?? [] }))
         .catch(() => setValidation(null))
     }, 350)
     return () => clearTimeout(handle)
-  }, [text, data?.content, validationKind])
+  }, [text, data?.content, fallback, mode, validationKind])
 
   if (isLoading) return <p className="muted">Loading…</p>
   if (error) return <p className="muted">Couldn’t load: {(error as Error).message}</p>
 
-  const base = data?.content || fallback
+  const fullSource = data?.content || fallback
+  const base = mode === 'instructions' ? splitAgentMarkdown(fullSource).instructions : fullSource
   const value = text ?? base
   const dirty = value !== base
   const source = data?.source ?? 'none'
@@ -176,14 +200,18 @@ export function DraftEditor({
         </div>
       )}
       <textarea
-        className="editor"
+        className={'editor' + (mode === 'instructions' ? ' instructions-editor' : '')}
         spellCheck={false}
         value={value}
         onChange={(e) => setText(e.target.value)}
-        aria-label="Source editor"
+        aria-label={ariaLabel}
       />
       {validationKind === 'agent.md' && validation && (validation.errors.length > 0 || validation.warnings.length > 0) && (
-        <div className={'validation-panel' + (validation.errors.length > 0 ? ' has-errors' : ' has-warnings')}>
+        <div
+          className={'validation-panel' + (validation.errors.length > 0 ? ' has-errors' : ' has-warnings')}
+          role="status"
+          aria-live="polite"
+        >
           <div className="validation-head">
             {validation.errors.length > 0 ? (
               <span className="badge red">
@@ -218,8 +246,9 @@ export function DraftEditor({
         </p>
       )}
       <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-        Edits are saved to a portal-side working copy. Use <strong>Deploy edits</strong> above to publish
-        this app with your saved changes.
+        {mode === 'instructions'
+          ? 'Saving updates the instruction body while preserving the file’s YAML configuration.'
+          : <>Edits are saved to a portal-side working copy. Use <strong>Deploy edits</strong> above to publish this app with your saved changes.</>}
       </p>
     </div>
   )
