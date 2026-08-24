@@ -69,9 +69,73 @@ When you don't know which services are involved, let the workflow discover and f
 
 ### Deterministic execution-policy demonstration
 
-When the user explicitly asks for the execution-policy demo, follow
-`scripts/policy-demo-plan.json`: run `policy_retry_probe` until its declared
-third attempt succeeds, continue the exhausted `policy_timeout_probe` failure,
-fan out `policy_inspect_service` with `continue_on_error`, assess the aggregate,
-and run `policy_recover_scan` only when the assessment says recovery is needed.
-Do not replace these deterministic probes with the normal incident tools.
+When the user explicitly asks for the execution-policy demo, call
+`start_workflow` once with exactly the plan below. Do not add, remove, rename,
+or move fields, and do not copy decorator timeout/retry declarations into the
+DAG. After `start_workflow` returns, report the workflow id and do not poll.
+
+```json
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "retry_probe",
+      "type": "tool",
+      "tool": "policy_retry_probe",
+      "args": {"label": "incident-policy-demo"},
+      "depends_on": [],
+      "execution": {}
+    },
+    {
+      "id": "timeout_probe",
+      "type": "tool",
+      "tool": "policy_timeout_probe",
+      "args": {},
+      "depends_on": [],
+      "execution": {"continue_on_error": true}
+    },
+    {
+      "id": "discover",
+      "type": "tool",
+      "tool": "discover_services",
+      "args": {"incident": "deterministic policy demonstration"},
+      "depends_on": []
+    },
+    {
+      "id": "inspect",
+      "type": "tool",
+      "tool": "policy_inspect_service",
+      "args": {"service": "${item.name}", "index": "${index}"},
+      "depends_on": ["discover"],
+      "for_each": "${discover.result.services}",
+      "when": {
+        "ref": "${item.in_scope}",
+        "operator": "equals",
+        "value": true
+      },
+      "execution": {"continue_on_error": true}
+    },
+    {
+      "id": "assess",
+      "type": "tool",
+      "tool": "policy_assess_scan",
+      "args": {"findings": "${inspect.result}"},
+      "depends_on": ["inspect"]
+    },
+    {
+      "id": "recover",
+      "type": "tool",
+      "tool": "policy_recover_scan",
+      "args": {"failures": "${assess.result.failure_codes}"},
+      "depends_on": ["assess"],
+      "when": {
+        "ref": "${assess.result.needs_recovery}",
+        "operator": "equals",
+        "value": true
+      }
+    }
+  ]
+}
+```
+
+This is the same canonical plan stored at `scripts/policy-demo-plan.json`.

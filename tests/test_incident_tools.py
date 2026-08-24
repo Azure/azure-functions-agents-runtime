@@ -275,13 +275,12 @@ def test_policy_inspection_and_recovery_are_deterministic() -> None:
 
 
 def test_policy_demo_plan_is_a_valid_discoverable_sample() -> None:
-    plan = json.loads(
-        (
-            _SAMPLE_SRC.parent
-            / "scripts"
-            / "policy-demo-plan.json"
-        ).read_text(encoding="utf-8")
-    )
+    plan_text = (
+        _SAMPLE_SRC.parent
+        / "scripts"
+        / "policy-demo-plan.json"
+    ).read_text(encoding="utf-8").strip()
+    plan = json.loads(plan_text)
     assert plan["version"] == 1
     assert {task["id"] for task in plan["tasks"]} == {
         "retry_probe",
@@ -291,3 +290,5 @@ def test_policy_demo_plan_is_a_valid_discoverable_sample() -> None:
         "assess",
         "recover",
     }
+    agent_instructions = (_SAMPLE_SRC / "main.agent.md").read_text(encoding="utf-8")
+    assert plan_text in agent_instructions
