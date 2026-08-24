@@ -64,7 +64,15 @@ class _ConditionSpec(BaseModel):
 class _TaskSpecBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    id: str = Field(description="Unique identifier for this task within the plan.")
+    id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description=(
+            "Unique task identifier using letters, numbers, underscore, or hyphen. "
+            "The names 'item' and 'index' are reserved."
+        ),
+    )
     depends_on: list[str] = Field(
         default_factory=list,
         description=(

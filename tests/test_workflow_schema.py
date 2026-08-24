@@ -43,6 +43,7 @@ from azure_functions_agents.workflows.schema import (
     resolve_workflow_task_execution,
 )
 from azure_functions_agents.workflows.schema import validate_plan as _validate_plan
+from azure_functions_agents.workflows.tools import StartWorkflowParams
 
 # Schema tests use the internal echo tool; the production allowlist is
 # computed at app start by ``build_workflow_integration``. Wrap once so
@@ -1439,6 +1440,15 @@ def test_iteration_local_names_are_reserved_task_ids(task_id: str) -> None:
     assert exc_info.value.error_code == "workflow_task_id_reserved"
     assert exc_info.value.node_id == task_id
     assert exc_info.value.path == "id"
+
+
+def test_start_workflow_schema_exposes_task_id_constraints() -> None:
+    definitions = StartWorkflowParams.model_json_schema()["$defs"]
+    for task_type in ("_ToolTaskSpec", "_WaitTaskSpec", "_SubAgentTaskSpec"):
+        task_id = definitions[task_type]["properties"]["id"]
+        assert task_id["pattern"] == r"^[A-Za-z0-9_-]+$"
+        assert task_id["minLength"] == 1
+        assert task_id["maxLength"] == 64
 
 
 def test_evaluate_condition_is_scalar_and_type_sensitive() -> None:

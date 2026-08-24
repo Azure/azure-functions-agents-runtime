@@ -566,9 +566,10 @@ optional fields to each existing task type:
   materializes one instance of the task per array element.
 
 No frontmatter field is added. Existing plans that omit both fields retain their
-current validation, scheduling, result, and status behavior. The optional fields
-are omitted with exclude-unset/exclude-none serialization when absent so static
-plan model dumps and Durable wire payloads do not gain `null` fields.
+scheduling, result, and status behavior, except for the explicitly approved
+task-id namespace restriction in Decisions 53 and 55. The optional fields are
+omitted with exclude-unset/exclude-none serialization when absent so static plan
+model dumps and Durable wire payloads do not gain `null` fields.
 
 #### Before and after
 

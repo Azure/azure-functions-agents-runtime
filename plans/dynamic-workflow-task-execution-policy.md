@@ -62,7 +62,7 @@ payloads, scheduler path, and status versions.
   does not alter the minimal quickstart.
 - [x] (2026-08-24 04:00Z) Passed the complete repository gate: Ruff reported no
   findings, strict mypy reported no issues across 42 source files, and the
-  CI-equivalent coverage run passed 1,153 tests with 52 E2E tests deselected
+  CI-equivalent coverage run passed 1,155 tests with 52 E2E tests deselected
   after final-review regressions were added.
 - [ ] Complete the final branch review and push the implementation branch.
 
@@ -152,6 +152,13 @@ payloads, scheduler path, and status versions.
   every instance state but only the selected terminal failure's logical node state.
   Evidence: Each fail-fast outcome now marks its logical node failed before the deterministic
   lowest-ordered failure publishes terminal status; a two-node same-wave regression covers it.
+
+- Observation: Final review found that a retry selected in the same wave as a terminal sibling
+  failure remained advertised as `retry_wait`, and that the public start-tool schema did not
+  expose the task-id restriction approved for data-driven workflows.
+  Evidence: Fail-fast cleanup now terminalizes abandoned retries and clears their deadlines;
+  every public task variant publishes the same bounded task-id pattern as runtime validation,
+  and the migration note calls out the experimental compatibility break.
 
 ## Decision Log
 

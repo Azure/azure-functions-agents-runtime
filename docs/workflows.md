@@ -379,7 +379,9 @@ Authored task ids allow letters, numbers, underscore, and hyphen only.
 always identify `for_each` iteration locals.
 `[` and `]` are rejected — the runtime reserves the `<id>[<index>]`
 namespace for the materialized `for_each` instance ids it renders (see
-below), so you can neither author them nor reference them.
+below), so you can neither author them nor reference them. This is stricter
+than the initial static-DAG preview: rename legacy ids containing punctuation
+(for example, `fetch.logs` to `fetch_logs`) before upgrading.
 
 ### Data-driven control flow (`when` / `for_each`)
 

@@ -2462,6 +2462,30 @@ def test_same_wave_failures_publish_every_logical_node_as_failed() -> None:
     assert terminal_status["counts"]["failed"] == 2
 
 
+def test_fail_fast_marks_same_wave_abandoned_retry_as_failed() -> None:
+    def result_for(_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "alpha":
+            return _activity_failure(
+                task_id="alpha",
+                kind="handler_terminal",
+                retryable=False,
+            )
+        return _activity_failure(task_id="beta")
+
+    result, context = _run_dynamic(
+        [_policy_task("alpha", attempts=1), _policy_task("beta", attempts=2)],
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+
+    assert result["failed"] is True
+    terminal_status = context.statuses[-1]
+    assert terminal_status["nodes"]["beta"]["state"] == "failed"
+    assert "next_retry_time" not in terminal_status["nodes"]["beta"]
+    assert terminal_status["counts"]["retry_wait"] == 0
+    assert terminal_status["counts"]["failed"] == 2
+
+
 def test_bare_activity_exception_retries_then_succeeds() -> None:
     def result_for(name: str, payload: dict[str, Any]) -> Any:
         if payload["attempt"] == 1:

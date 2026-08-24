@@ -1606,6 +1606,12 @@ def _apply_dynamic_wave_results(
             )
 
     if failures:
+        for instances in state.node_instances.values():
+            for abandoned in instances:
+                if abandoned["state"] == "retry_wait":
+                    abandoned["state"] = "failed"
+                    del abandoned["retry_deadline"]
+                    state.logical_state[abandoned["logical_id"]] = "failed"
         instance, failure = failures[0]
         result = _dynamic_failure(
             context,
