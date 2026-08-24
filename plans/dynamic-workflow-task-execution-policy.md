@@ -50,8 +50,10 @@ payloads, scheduler path, and status versions.
 - [x] (2026-08-24 02:40Z) Implemented and tested status schema version 3, UI
   rendering, and Activity-delivery telemetry. The expanded focused suite passed
   367 tests; ruff and strict mypy passed.
-- [ ] Run an independent testing review and close all coverage gaps, including a
-  deterministic sample or sample mode.
+- [x] (2026-08-24 03:15Z) Passed the independent testing review after adding a
+  deterministic incident-triage policy plan plus coverage for revocation between
+  attempts, duplicate delivery, and one-time `when` evaluation. The targeted sample
+  and engine suite passed 110 tests.
 - [ ] Update architecture and user documentation, maintain this plan, and run the complete
   repository gate.
 
@@ -119,6 +121,12 @@ payloads, scheduler path, and status versions.
   Evidence: Policy-aware Activities emit one bounded start/completion pair and span per actual
   delivery, including cancellation, while replayed scheduler decisions emit no metrics.
 
+- Observation: The existing incident-triage sample is the smallest user-visible surface that
+  already exercises the structured scheduler and `for_each`.
+  Evidence: `scripts/policy-demo-plan.json` now deterministically combines two transient
+  failures then success, exhausted async timeout, continued per-item failure, and conditioned
+  recovery without provider faults.
+
 ## Decision Log
 
 - Decision: Use the presence of authored `execution`, even an empty object, or any
@@ -168,7 +176,8 @@ timers and stable idempotency across attempts, applies same-wave outcomes determ
 and supports exact continued-failure results for normal and `for_each` tasks. Status v3 now
 reports executable-unit counts and bounded attempt state, the built-in UI renders all three
 status versions, and Activity telemetry records actual deliveries without replay metrics.
-Independent testing review, sample coverage, and documentation remain.
+The independent testing checkpoint now passes, including the deterministic sample mode and
+cross-attempt authorization/redelivery regressions. Documentation and the complete gate remain.
 
 ## Context and Orientation
 
@@ -640,3 +649,6 @@ validation, and timer cleanup.
 
 Revision note (2026-08-24): Recorded Milestone 4 completion and review-driven corrections for
 blocked-unit accounting, cancellation completion telemetry, and isolated metric creation.
+
+Revision note (2026-08-24): Recorded the passing independent testing checkpoint and its
+deterministic incident-triage execution-policy demonstration.

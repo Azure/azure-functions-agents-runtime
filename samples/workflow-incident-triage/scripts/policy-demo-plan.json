@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "retry_probe",
+      "type": "tool",
+      "tool": "policy_retry_probe",
+      "args": {"label": "incident-policy-demo"},
+      "depends_on": [],
+      "execution": {}
+    },
+    {
+      "id": "timeout_probe",
+      "type": "tool",
+      "tool": "policy_timeout_probe",
+      "args": {},
+      "depends_on": [],
+      "execution": {"continue_on_error": true}
+    },
+    {
+      "id": "discover",
+      "type": "tool",
+      "tool": "discover_services",
+      "args": {"incident": "deterministic policy demonstration"},
+      "depends_on": []
+    },
+    {
+      "id": "inspect",
+      "type": "tool",
+      "tool": "policy_inspect_service",
+      "args": {"service": "${item.name}", "index": "${index}"},
+      "depends_on": ["discover"],
+      "for_each": "${discover.result.services}",
+      "when": {
+        "ref": "${item.in_scope}",
+        "operator": "equals",
+        "value": true
+      },
+      "execution": {"continue_on_error": true}
+    },
+    {
+      "id": "assess",
+      "type": "tool",
+      "tool": "policy_assess_scan",
+      "args": {"findings": "${inspect.result}"},
+      "depends_on": ["inspect"]
+    },
+    {
+      "id": "recover",
+      "type": "tool",
+      "tool": "policy_recover_scan",
+      "args": {"failures": "${assess.result.failure_codes}"},
+      "depends_on": ["assess"],
+      "when": {
+        "ref": "${assess.result.needs_recovery}",
+        "operator": "equals",
+        "value": true
+      }
+    }
+  ]
+}

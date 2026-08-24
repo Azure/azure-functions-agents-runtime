@@ -17,6 +17,7 @@ from azure_functions_agents.config.schema import (
     ResolvedAgent,
     ToolsFilter,
 )
+from azure_functions_agents.discovery.tools import discover_project_tools
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows import engine, integration
@@ -33,6 +34,7 @@ from azure_functions_agents.workflows.schema import (
     WorkflowPlanPolicy,
     WorkflowRetryableError,
     WorkflowTerminalError,
+    resolve_workflow_task_execution,
     validate_plan,
 )
 
@@ -341,6 +343,73 @@ async def test_policy_tool_reauthorizes_before_handler_invocation() -> None:
         "continuable": False,
     }
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_policy_retry_reauthorizes_after_backoff_revocation() -> None:
+    calls = 0
+
+    def handler(args: dict[str, Any]) -> None:
+        nonlocal calls
+        calls += 1
+        raise WorkflowRetryableError("temporary", "Try again.")
+
+    catalog = integration.build_workflow_handler_catalog(
+        [WorkflowTool("run", "Run", handler)]
+    )
+    allowed = _registered_function(
+        engine._ACTIVITY_NAME,
+        handler_catalog=catalog,
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(allowed_tools=frozenset({"run"}))
+        },
+    )
+    revoked = _registered_function(
+        engine._ACTIVITY_NAME,
+        handler_catalog=catalog,
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(allowed_tools=frozenset())
+        },
+    )
+    first = _policy_activity_payload()
+    first["max_attempts"] = 2
+    first["execution"]["max_attempts"] = 2
+    first["execution"]["retry_delays_ms"] = [1_000]
+    second = {**first, "attempt": 2}
+
+    first_outcome = await allowed(first)
+    second_outcome = await revoked(second)
+
+    assert first_outcome["failure"]["retryable"] is True
+    assert second_outcome["failure"] == {
+        "error_code": "workflow_task_authorization",
+        "error": "Task target is not authorized.",
+        "kind": "authorization",
+        "retryable": False,
+        "continuable": False,
+    }
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_redelivered_attempt_reuses_attempt_and_idempotency_key() -> None:
+    observed: list[tuple[int, str]] = []
+
+    def handler(args: dict[str, Any]) -> dict[str, bool]:
+        context = current_workflow_task_context()
+        assert context is not None
+        observed.append((context.attempt, context.idempotency_key))
+        return {"ok": True}
+
+    activity = _policy_tool_activity(handler)
+    payload = _policy_activity_payload()
+
+    assert (await activity(payload))["ok"] is True
+    assert (await activity(payload))["ok"] is True
+    assert observed == [
+        (payload["attempt"], payload["idempotency_key"]),
+        (payload["attempt"], payload["idempotency_key"]),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1600,6 +1669,108 @@ def test_incident_sample_plan_runs_through_dynamic_scheduler() -> None:
     assert final_status["nodes"]["summarize"] == {"state": "completed"}
 
 
+def test_incident_policy_demo_plan_exercises_retry_timeout_and_recovery() -> None:
+    sample_root = (
+        Path(__file__).resolve().parents[1]
+        / "samples"
+        / "workflow-incident-triage"
+    )
+    sample_src = sample_root / "src"
+    raw_plan = json.loads(
+        (sample_root / "scripts" / "policy-demo-plan.json").read_text(encoding="utf-8")
+    )
+    discovered = discover_project_tools(sample_src)
+    tools_by_name = {tool.name: tool for tool in discovered.workflow_tools}
+    allowed_tools = frozenset(task["tool"] for task in raw_plan["tasks"])
+    policy = WorkflowPlanPolicy(
+        allowed_tools=allowed_tools,
+        allowed_subagents=frozenset(),
+    )
+    plan = validate_plan(raw_plan, policy=policy)
+    persisted: list[dict[str, Any]] = []
+    for task in plan.tasks:
+        dumped = task.model_dump(mode="json")
+        declaration = tools_by_name[task.tool]
+        execution = resolve_workflow_task_execution(
+            task,
+            decorator_timeout=declaration.timeout,
+            decorator_retry=declaration.retry,
+        )
+        if execution is not None:
+            dumped["execution"] = execution
+        persisted.append(dumped)
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        task_id = payload["id"]
+        tool_name = payload["tool"]
+        if tool_name == "policy_retry_probe":
+            if payload["attempt"] < 3:
+                return _activity_failure(task_id=task_id)
+            return {
+                "id": task_id,
+                "ok": True,
+                "result": {
+                    "recovered": True,
+                    "attempt": payload["attempt"],
+                    "idempotency_key": payload["idempotency_key"],
+                },
+            }
+        if tool_name == "policy_timeout_probe":
+            return _activity_failure(
+                task_id=task_id,
+                code="workflow_task_timeout",
+                kind="timeout",
+            )
+        if tool_name == "discover_services":
+            handler = tools_by_name[tool_name].handler
+            assert handler is not None
+            return {"id": task_id, "result": handler(payload["args"])}
+        if tool_name == "policy_inspect_service":
+            if payload["args"]["service"] == "payments-api":
+                return _activity_failure(
+                    task_id=task_id,
+                    code="sample_service_unavailable",
+                    kind="handler_terminal",
+                    retryable=False,
+                )
+            handler = tools_by_name["inspect_service"].handler
+            assert handler is not None
+            return {"id": task_id, "ok": True, "result": handler(payload["args"])}
+        handler = tools_by_name[tool_name].handler
+        assert handler is not None
+        return {"id": task_id, "result": handler(payload["args"])}
+
+    result, context = _run_dynamic(
+        persisted,
+        policy={
+            "allowed_tools": sorted(allowed_tools),
+            "allowed_subagents": [],
+        },
+        result_for=result_for,
+    )
+
+    retry_calls = [
+        payload
+        for _, payload in context.calls
+        if payload["id"] == "retry_probe"
+    ]
+    assert [payload["attempt"] for payload in retry_calls] == [1, 2, 3]
+    assert len({payload["idempotency_key"] for payload in retry_calls}) == 1
+    assert result["results"]["retry_probe"]["recovered"] is True
+    assert result["results"]["timeout_probe"] == {
+        "failed": True,
+        "error_code": "workflow_task_timeout",
+        "error": "Safe failure.",
+        "kind": "timeout",
+        "attempts": 2,
+    }
+    aggregate = result["results"]["inspect"]
+    assert any(entry["status"] == "failed_continued" for entry in aggregate)
+    assert any(entry["status"] == "skipped" for entry in aggregate)
+    assert result["results"]["recover"]["recovered"] is True
+    assert context.statuses[-1]["schema_version"] == 3
+
+
 def test_multiple_expansions_run_in_sorted_logical_id_order() -> None:
     tasks = [
         {"id": "disc", "type": TOOL_TASK_TYPE, "tool": "collect", "args": {}, "depends_on": []},
@@ -2331,6 +2502,54 @@ def test_retry_reuses_initial_template_resolution() -> None:
         {"value": "frozen"},
     ]
     assert result["results"]["work"] == {"value": "frozen"}
+
+
+def test_retry_does_not_reevaluate_when(monkeypatch: pytest.MonkeyPatch) -> None:
+    evaluations = 0
+    original = engine.evaluate_condition
+
+    def count_evaluation(*args: Any, **kwargs: Any) -> bool:
+        nonlocal evaluations
+        evaluations += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "evaluate_condition", count_evaluation)
+    tasks = [
+        {
+            "id": "gate",
+            "type": TOOL_TASK_TYPE,
+            "tool": "collect",
+            "args": {},
+            "depends_on": [],
+        },
+        _policy_task(
+            "work",
+            attempts=2,
+            delays=[0],
+            depends_on=["gate"],
+            when={
+                "ref": "${gate.result.run}",
+                "operator": "equals",
+                "value": True,
+            },
+        ),
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "gate":
+            return {"id": "gate", "result": {"run": True}}
+        if payload["attempt"] == 1:
+            return _activity_failure(task_id="work")
+        return {"id": "work", "ok": True, "result": "done"}
+
+    result, _ = _run_dynamic(
+        tasks,
+        policy={"allowed_tools": ["collect", "run"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+
+    assert result["results"]["work"] == "done"
+    assert evaluations == 1
 
 
 def test_exhausted_failure_stops_after_same_wave_success_is_committed() -> None:

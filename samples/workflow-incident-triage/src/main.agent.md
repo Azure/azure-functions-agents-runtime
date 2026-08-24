@@ -66,3 +66,12 @@ When you don't know which services are involved, let the workflow discover and f
    ```
 
    Depend on the logical `for_each` id (`inspect`), never an individual `inspect[0]` instance — those are runtime-owned. Pass the whole `${inspect.result}` aggregate as a single value; `summarize_scan` walks the envelopes itself.
+
+### Deterministic execution-policy demonstration
+
+When the user explicitly asks for the execution-policy demo, follow
+`scripts/policy-demo-plan.json`: run `policy_retry_probe` until its declared
+third attempt succeeds, continue the exhausted `policy_timeout_probe` failure,
+fan out `policy_inspect_service` with `continue_on_error`, assess the aggregate,
+and run `policy_recover_scan` only when the assessment says recovery is needed.
+Do not replace these deterministic probes with the normal incident tools.
