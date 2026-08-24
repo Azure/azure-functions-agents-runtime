@@ -726,7 +726,12 @@ export default function PlaygroundPage() {
   return (
     <>
       <div className="breadcrumb">
-        Home / <Link to={`/agents/${subForQuery}`}>Hosted Skills</Link> / Playground
+        Home / <Link to={`/agents/${subForQuery}`}>Hosted Skills</Link>
+        {appParam && nameParam ? (
+          <> / <Link to={`/agents/${subForQuery}/${enc(appParam)}/${enc(nameParam)}`}>{nameParam}</Link> / Test</>
+        ) : (
+          <> / Playground</>
+        )}
       </div>
       <div className="page-title">
         <h1>Playground</h1>

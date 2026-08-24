@@ -7,6 +7,7 @@
 !app/frontend/dist/**
 **/.env
 **/.env.*
+**/.data
 **/npm-debug.log*
 .git
 .gitignore

@@ -5,9 +5,10 @@ interface CreationStepsProps {
   completed: boolean[]
   available: boolean[]
   onNavigate: (step: number) => void
+  disabled?: boolean
 }
 
-export function CreationSteps({ current, completed, available, onNavigate }: CreationStepsProps) {
+export function CreationSteps({ current, completed, available, onNavigate, disabled = false }: CreationStepsProps) {
   return (
     <nav className="steps" aria-label="Skill creation progress">
       {labels.map((label, index) => {
@@ -19,7 +20,7 @@ export function CreationSteps({ current, completed, available, onNavigate }: Cre
             <button
               type="button"
               className={'step' + (step === current ? ' active' : '') + (isComplete ? ' done' : '')}
-              disabled={!canNavigate}
+              disabled={disabled || !canNavigate}
               onClick={() => canNavigate && onNavigate(step)}
               aria-current={step === current ? 'step' : undefined}
               aria-label={`Step ${step} of ${labels.length}: ${label}${isComplete ? ', completed' : ''}`}

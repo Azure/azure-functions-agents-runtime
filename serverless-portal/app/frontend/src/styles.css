@@ -465,6 +465,18 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
 .model-provider-summary-label { color: var(--text-faint); font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
 .model-configuration-card { margin-top: 12px; }
 .model-provider-fields { margin-top: 16px; }
+.foundry-resource-field { margin: 8px 0; }
+.foundry-resource-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: 8px; }
+.foundry-resource-control > button { min-width: 32px; }
+.generate-skill-card { position: relative; overflow: hidden; }
+.generate-skill-card.is-generating textarea { opacity: .65; }
+.generate-shimmer { height: 4px; margin: -16px -18px 14px; overflow: hidden; position: relative;
+  background: color-mix(in srgb, var(--brand) 10%, transparent); }
+.generate-shimmer::after { content: ''; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--brand) 70%, transparent), transparent);
+  animation: shimmer 1.4s ease-in-out infinite; }
+.generate-status { color: var(--brand-dark); font-size: 12.5px; font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { .generate-shimmer::after { animation: none; transform: none; } }
 .create-flow-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px;
   margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
 .review-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--border);
@@ -514,6 +526,9 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
   background: transparent; color: var(--text-muted); font: 600 13.5px/1.2 inherit; text-decoration: none; cursor: pointer; }
 .skill-subtab:hover { color: var(--text); }
 .skill-subtab.active { color: var(--brand-dark); border-bottom-color: var(--brand); }
+.skill-subtab:disabled { color: var(--text-faint); cursor: not-allowed; }
+.skill-subtab:disabled:hover { color: var(--text-faint); }
+.skill-subtab .badge { margin-left: 5px; vertical-align: 1px; }
 .skill-editor-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px; align-items: start; }
 .skill-instructions-panel { min-width: 0; padding: 18px; border: 1px solid var(--border); border-radius: 8px;
   background: var(--surface); box-shadow: var(--shadow); }

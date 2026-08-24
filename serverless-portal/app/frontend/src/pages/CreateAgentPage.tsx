@@ -154,6 +154,7 @@ export default function CreateAgentPage() {
           completed={[foundryReady, skillReady, skillReady && targetReady, false]}
           available={[true, foundryReady, skillReady, skillReady && targetReady]}
           onNavigate={navigateToStep}
+          disabled={generating}
         />
 
       {step === 1 && (
@@ -230,8 +231,9 @@ export default function CreateAgentPage() {
                     ariaLabel="Foundry subscription"
                   />
                 </div>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0' }}>
-                  <div style={{ flex: 1 }}>
+                <div className="field foundry-resource-field">
+                  <label>Foundry resource</label>
+                  <div className="foundry-resource-control">
                     <SearchableSelect
                       value={draft.foundryAccount}
                       onChange={selectAccount}
@@ -242,15 +244,15 @@ export default function CreateAgentPage() {
                       loading={foundryLoading}
                       ariaLabel="Foundry resource"
                     />
+                    <Button
+                      appearance="subtle"
+                      size="small"
+                      icon={<Icon name="refresh" size={14} />}
+                      onClick={() => void refetchFoundry()}
+                      title="Refresh Foundry list"
+                      aria-label="Refresh Foundry list"
+                    />
                   </div>
-                  <Button
-                    appearance="subtle"
-                    size="small"
-                    icon={<Icon name="refresh" size={14} />}
-                    onClick={() => void refetchFoundry()}
-                    title="Refresh Foundry list"
-                    aria-label="Refresh Foundry list"
-                  />
                 </div>
 
                 {selectedAccount && (
@@ -306,7 +308,7 @@ export default function CreateAgentPage() {
       {step === 2 && (
         <>
           <div className="toolbar" style={{ marginBottom: 8 }}>
-            <button className="btn sm" onClick={() => navigateToStep(1)}>
+            <button className="btn sm" onClick={() => navigateToStep(1)} disabled={generating}>
               ← Model
             </button>
             <span className="badge blue">
@@ -317,7 +319,8 @@ export default function CreateAgentPage() {
             )}
           </div>
 
-          <div className="card create-flow-card">
+          <div className={'card create-flow-card generate-skill-card' + (generating ? ' is-generating' : '')} aria-busy={generating}>
+            {generating && <div className="generate-shimmer" aria-hidden="true" />}
             <h3>
               <Icon name="sparkles" size={15} style={{ verticalAlign: '-2px' }} /> Generate your skill
             </h3>
@@ -344,9 +347,10 @@ export default function CreateAgentPage() {
                   </>
                 )}
               </button>
-              <button className="btn" onClick={cancel}>
+              <button className="btn" onClick={cancel} disabled={generating}>
                 Cancel
               </button>
+              {generating && <span className="generate-status" role="status">Generating skill with {draft.foundryModel}…</span>}
               {!draft.description.trim() && (
                 <span className="muted" style={{ fontSize: 12 }}>Describe the agent to generate.</span>
               )}
@@ -364,13 +368,14 @@ export default function CreateAgentPage() {
                     className="editor"
                     style={{ minHeight: 260 }}
                     spellCheck={false}
+                    disabled={generating}
                     value={draft.instructions}
                     onChange={(e) => set('instructions', e.target.value)}
                     aria-label="Generated skill prompt"
                   />
                   <div className="hint">Review and edit this prompt before choosing where the skill will run.</div>
                 </div>
-                <Button appearance="primary" onClick={() => navigateToStep(3)}>
+                <Button appearance="primary" disabled={generating} onClick={() => navigateToStep(3)}>
                   Continue to deployment target →
                 </Button>
               </>

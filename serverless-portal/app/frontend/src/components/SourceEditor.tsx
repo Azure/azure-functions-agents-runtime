@@ -93,8 +93,8 @@ export function DraftEditor({
       if (!prefix) throw new Error('The YAML front matter could not be read. Edit the full source instead.')
       return save(`${prefix}\n${content}`)
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey })
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey })
       onSaved?.()
     },
   })
@@ -260,11 +260,11 @@ export function DraftEditor({
           Save failed: {(saveMutation.error as Error).message}
         </p>
       )}
-      <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-        {mode === 'instructions'
-          ? 'Saving updates the instruction body while preserving the file’s YAML configuration.'
-          : <>Edits are saved to a portal-side working copy. Use <strong>Deploy edits</strong> above to publish this app with your saved changes.</>}
-      </p>
+      {mode !== 'instructions' && (
+        <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+          Edits are saved to a portal-side working copy. Use <strong>Deploy edits</strong> above to publish this app with your saved changes.
+        </p>
+      )}
     </div>
   )
 }
