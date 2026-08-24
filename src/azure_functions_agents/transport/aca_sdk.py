@@ -101,6 +101,8 @@ _CONTROL_OPERATION_TIMEOUT_SECONDS = 30
 _CONTROL_OPERATION_POLL_INTERVAL_SECONDS = 3
 _FAILED_CREATE_LOOKUP_ATTEMPTS = 3
 _FAILED_CREATE_LOOKUP_DELAY_SECONDS = 1.0
+_ARM_GROUP_RETRY_ATTEMPTS = 3
+_ARM_GROUP_RETRY_DELAY_SECONDS = 0.5
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.5
 _RETRYABLE_MANIFEST_STATUS_CODES = frozenset({409, 423, 425, 429, 500, 502, 503, 504})
 _RECONCILIATION_ERRORS = (AzureError, TimeoutError, RuntimeError, ValueError)
@@ -227,6 +229,25 @@ _ARM_GROUP_READER: Callable[[AsyncTokenCredential, str], Awaitable[Mapping[str, 
 )
 
 
+async def _read_arm_group_with_retry(
+    credential: AsyncTokenCredential, resource_id: str
+) -> Mapping[str, object]:
+    """Absorb single-instance transient ARM blips with bounded backoff."""
+    for attempt in range(_ARM_GROUP_RETRY_ATTEMPTS):
+        try:
+            return await _ARM_GROUP_READER(credential, resource_id)
+        except SandboxGroupTransientError:
+            if attempt + 1 >= _ARM_GROUP_RETRY_ATTEMPTS:
+                raise
+            logger.warning(
+                "Transient ARM group resolution failure (attempt %d/%d), retrying.",
+                attempt + 1,
+                _ARM_GROUP_RETRY_ATTEMPTS,
+            )
+            await _sleep(_ARM_GROUP_RETRY_DELAY_SECONDS)
+    raise SandboxGroupTransientError("Sandbox Group ARM lookup exhausted its retry budget.")
+
+
 class AcaSandboxAdapter:
     """Binds one controller instance to one pre-provisioned customer Sandbox Group."""
 
@@ -265,7 +286,7 @@ class AcaSandboxAdapter:
         group_client: SandboxGroupClient | None = None
         succeeded = False
         try:
-            arm_group = await _ARM_GROUP_READER(credential, configured.resource_id)
+            arm_group = await _read_arm_group_with_retry(credential, configured.resource_id)
             resolved = _resolve_group_identity(configured.resource_id, arm_group)
             if persisted_group is not None:
                 _verify_group_binding(persisted_group, resolved)

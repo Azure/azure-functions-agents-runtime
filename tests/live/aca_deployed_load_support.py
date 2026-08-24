@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import pairwise
@@ -12,6 +12,7 @@ from typing import Protocol
 
 import pytest
 from tests.aca_smoke_diagnostics import AcaSmokeEnvironmentError
+from tests.live.aca_deployed_agent_support import response_header
 
 _LOAD_CONCURRENCY_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY"
 _MIN_CONCURRENCY = 1
@@ -20,6 +21,23 @@ _PROVISION_CONCURRENCY_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY"
 _DEFAULT_PROVISION_CONCURRENCY = 4
 _MIN_PROVISION_CONCURRENCY = 1
 _MAX_PROVISION_CONCURRENCY = 4
+THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS = 10.0
+
+
+def throttle_retry_after_seconds(headers: Mapping[str, str]) -> float | None:
+    """Return Retry-After if present and within bounds, else None."""
+    value = response_header(headers, "retry-after")
+    if value is None:
+        return None
+    try:
+        seconds = int(value.strip())
+    except ValueError:
+        return None
+    if not 1 <= seconds <= int(THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS):
+        return None
+    return float(seconds)
+
+
 # Events delivered by a single journal poll are parsed from the stream
 # microseconds apart. This window is wide enough to hold one such burst together
 # and far narrower than any plausible poll interval, so it separates bursts

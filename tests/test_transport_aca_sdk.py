@@ -14,6 +14,7 @@ import aiohttp
 import pytest
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError, ServiceRequestError
 
+from azure_functions_agents.execution.setup_budget import SETUP_BUDGET_SECONDS
 from azure_functions_agents.transport import aca_sdk
 from azure_functions_agents.transport.manifest import (
     SESSION_MANIFEST_PATH,
@@ -494,6 +495,113 @@ async def test_read_arm_group_success_returns_binding(
     result = await aca_sdk._read_arm_group(FakeCredential(), _GROUP_ID)
     assert result["id"] == _GROUP_ID
     assert result["location"] == "westus2"
+
+
+# -- Regression tests: _read_arm_group_with_retry bounded retry ----------------
+
+
+async def _noop_sleep(_seconds: float) -> None:
+    """Zero-delay drop-in for ``aca_sdk._sleep`` in tests."""
+
+
+@pytest.mark.asyncio
+async def test_arm_group_retry_succeeds_after_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry absorbs a single transient failure and returns the successful result."""
+    call_count = 0
+
+    async def _flaky(_: object, resource_id: str) -> dict[str, object]:
+        nonlocal call_count
+        call_count += 1
+        if call_count < 2:
+            raise SandboxGroupTransientError("transient")
+        return {"id": resource_id, "location": "westus2"}
+
+    sleep_calls: list[float] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(aca_sdk, "_ARM_GROUP_READER", _flaky)
+    monkeypatch.setattr(aca_sdk, "_sleep", _fake_sleep)
+    result = await aca_sdk._read_arm_group_with_retry(FakeCredential(), _GROUP_ID)
+    assert result["id"] == _GROUP_ID
+    assert call_count == 2
+    assert sleep_calls == [aca_sdk._ARM_GROUP_RETRY_DELAY_SECONDS]
+
+
+@pytest.mark.asyncio
+async def test_arm_group_retry_raises_after_all_attempts_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry stops after the bounded attempt count and raises the last error."""
+    call_count = 0
+
+    async def _always_fail(_: object, resource_id: str) -> dict[str, object]:
+        nonlocal call_count
+        call_count += 1
+        raise SandboxGroupTransientError("still failing")
+
+    monkeypatch.setattr(aca_sdk, "_ARM_GROUP_READER", _always_fail)
+    monkeypatch.setattr(aca_sdk, "_sleep", _noop_sleep)
+    with pytest.raises(SandboxGroupTransientError, match="still failing"):
+        await aca_sdk._read_arm_group_with_retry(FakeCredential(), _GROUP_ID)
+    assert call_count == aca_sdk._ARM_GROUP_RETRY_ATTEMPTS
+
+
+def test_arm_group_retry_budget_stays_small_against_the_setup_budget() -> None:
+    """Bound the retry budget itself, not just the loop that consumes it.
+
+    Retrying here spends wall-clock the caller already budgeted for setup, and
+    the sleep is patched out in every other retry test, so nothing else notices
+    if the attempt count or delay grows. Five percent of the setup budget leaves
+    room for the current one second while still catching a runaway constant.
+    """
+    worst_case_seconds = (aca_sdk._ARM_GROUP_RETRY_ATTEMPTS - 1) * (
+        aca_sdk._ARM_GROUP_RETRY_DELAY_SECONDS
+    )
+    assert worst_case_seconds <= SETUP_BUDGET_SECONDS / 20, (
+        f"ARM retry can add {worst_case_seconds}s to a {SETUP_BUDGET_SECONDS}s setup budget."
+    )
+
+
+@pytest.mark.asyncio
+async def test_arm_group_retry_does_not_catch_authorization_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authorization errors must not be retried."""
+    call_count = 0
+
+    async def _auth_fail(_: object, resource_id: str) -> dict[str, object]:
+        nonlocal call_count
+        call_count += 1
+        raise SandboxGroupAuthorizationError()
+
+    monkeypatch.setattr(aca_sdk, "_ARM_GROUP_READER", _auth_fail)
+    monkeypatch.setattr(aca_sdk, "_sleep", _noop_sleep)
+    with pytest.raises(SandboxGroupAuthorizationError):
+        await aca_sdk._read_arm_group_with_retry(FakeCredential(), _GROUP_ID)
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_arm_group_retry_does_not_catch_binding_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Permanent binding errors must not be retried."""
+    call_count = 0
+
+    async def _bind_fail(_: object, resource_id: str) -> dict[str, object]:
+        nonlocal call_count
+        call_count += 1
+        raise SandboxGroupBindingError("bad config")
+
+    monkeypatch.setattr(aca_sdk, "_ARM_GROUP_READER", _bind_fail)
+    monkeypatch.setattr(aca_sdk, "_sleep", _noop_sleep)
+    with pytest.raises(SandboxGroupBindingError):
+        await aca_sdk._read_arm_group_with_retry(FakeCredential(), _GROUP_ID)
+    assert call_count == 1
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from tests.live import aca_deployed_load_support as support
 
 
@@ -111,3 +113,33 @@ def test_latency_metrics_reports_visibility_attribution_and_warning() -> None:
     assert "visibility_attribution=poll_timing_dominates" in report
     assert "does not capture true sandbox-write-to-client-observe delta" in report
     assert "clock-skew correction would add error comparable to the 2s budget" in report
+
+
+# ---------------------------------------------------------------------------
+# throttle_retry_after_seconds
+# ---------------------------------------------------------------------------
+
+
+def test_throttle_retry_returns_seconds_for_valid_retry_after() -> None:
+    """A 503/429 with Retry-After: 2 yields 2.0 seconds."""
+    assert support.throttle_retry_after_seconds({"Retry-After": "2"}) == 2.0
+
+
+def test_throttle_retry_returns_none_when_header_missing() -> None:
+    """No Retry-After header means no throttle delay."""
+    assert support.throttle_retry_after_seconds({}) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["0", "-1", "11", "abc", "1.5"],
+    ids=["zero", "negative", "exceeds_max", "non_numeric", "float"],
+)
+def test_throttle_retry_returns_none_for_out_of_bounds(value: str) -> None:
+    """Out-of-range or non-integer Retry-After is ignored."""
+    assert support.throttle_retry_after_seconds({"Retry-After": value}) is None
+
+
+def test_throttle_retry_is_case_insensitive() -> None:
+    """Header lookup is case-insensitive (delegated to response_header)."""
+    assert support.throttle_retry_after_seconds({"retry-after": "3"}) == 3.0

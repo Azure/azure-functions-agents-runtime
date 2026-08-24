@@ -50,6 +50,7 @@ from tests.live.aca_deployed_load_support import (
     provision_concurrency_from_option_or_environment,
     render_load_report,
     require_load_concurrency,
+    throttle_retry_after_seconds,
     utc_now,
 )
 
@@ -72,6 +73,7 @@ _EVENT_STREAM_GRACE_SECONDS = 360.0
 _HOLD_SECONDS = 300.0
 _MINIMUM_HOLD_TERMINAL_SECONDS = _HOLD_SECONDS - 1.0
 _SETUP_DEADLINE_ATTEMPTS = 2
+_MAX_ADMISSION_ATTEMPTS = 5
 _SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 105.0
 _PROVISION_BATCH_TIMEOUT_SECONDS = 330.0
 _PHASE_B_ADMISSION_TIMEOUT_SECONDS = 330.0
@@ -200,6 +202,16 @@ class _AdmissionResponse:
 @dataclass(frozen=True, slots=True)
 class _SetupRetry:
     retry_after_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class _SetupDeadlineRetry:
+    retry_after_seconds: float
+
+
+def _throttle_retry_after_seconds(headers: Mapping[str, str]) -> float | None:
+    """Delegate to the support module's testable implementation."""
+    return throttle_retry_after_seconds(headers)
 
 
 class _AdmissionFailureError(AcaSmokeEnvironmentError):
@@ -1085,9 +1097,9 @@ async def _setup_deadline_response_outcome(
     retries: int,
     *,
     is_final_attempt: bool,
-) -> _AdmissionOutcome | _SetupRetry:
+) -> _AdmissionOutcome | _SetupDeadlineRetry:
     if not is_final_attempt:
-        return _SetupRetry(setup_retry_after_seconds(response.response_headers))
+        return _SetupDeadlineRetry(setup_retry_after_seconds(response.response_headers))
     return await _recover_admission_outcome(
         resources,
         config,
@@ -1108,7 +1120,8 @@ async def _admission_response_outcome(
     retries: int,
     *,
     is_final_attempt: bool,
-) -> _AdmissionOutcome | _SetupRetry:
+    is_final_setup_deadline_attempt: bool,
+) -> _AdmissionOutcome | _SetupRetry | _SetupDeadlineRetry:
     if response.status == 202:
         return await _accepted_admission_outcome(
             resources,
@@ -1119,6 +1132,9 @@ async def _admission_response_outcome(
             retries,
         )
     if response.status in {429, 503}:
+        retry_after = _throttle_retry_after_seconds(response.response_headers)
+        if retry_after is not None and not is_final_attempt:
+            return _SetupRetry(retry_after)
         return await _recover_ambiguous_http_outcome(
             resources,
             config,
@@ -1138,7 +1154,7 @@ async def _admission_response_outcome(
             request,
             response,
             retries,
-            is_final_attempt=is_final_attempt,
+            is_final_attempt=is_final_setup_deadline_attempt,
         )
     if response.status in {400, 401, 403, 404}:
         return _AdmissionOutcome(
@@ -1182,7 +1198,8 @@ async def _submit_one(
     deadline: float | None = None,
 ) -> _AdmissionOutcome:
     request = _new_admission_request(attempted_idempotency_keys, session_id)
-    for retries in range(_SETUP_DEADLINE_ATTEMPTS):
+    setup_deadline_attempts = 0
+    for retries in range(_MAX_ADMISSION_ATTEMPTS):
         if _admission_deadline_elapsed(deadline):
             return _setup_deadline_outcome(request.idempotency_key, retries)
         try:
@@ -1211,15 +1228,19 @@ async def _submit_one(
             request,
             response,
             retries,
-            is_final_attempt=retries + 1 == _SETUP_DEADLINE_ATTEMPTS,
+            is_final_attempt=retries + 1 == _MAX_ADMISSION_ATTEMPTS,
+            is_final_setup_deadline_attempt=setup_deadline_attempts + 1
+            >= _SETUP_DEADLINE_ATTEMPTS,
         )
         if isinstance(outcome, _AdmissionOutcome):
             return outcome
+        if isinstance(outcome, _SetupDeadlineRetry):
+            setup_deadline_attempts += 1
         retry_count = retries + 1
         if _retry_would_exceed_setup_deadline(deadline, outcome.retry_after_seconds):
             return _setup_deadline_outcome(request.idempotency_key, retry_count)
         await asyncio.sleep(outcome.retry_after_seconds)
-    raise AssertionError("setup-deadline admission loop must return an outcome")
+    raise AssertionError("admission loop must return an outcome")
 
 
 def _setup_deadline_outcome(idempotency_key: str, retries: int) -> _AdmissionOutcome:
