@@ -11,6 +11,7 @@ import { Avatar, Button, Tooltip, makeStyles, mergeClasses, shorthands, tokens }
 import { useIdentity } from '../identity'
 import { signOut } from '../auth'
 import { useTheme } from '../theme'
+import { DeploymentNotifications } from '../deploy'
 import { Icon, type IconName } from './ui'
 
 const useStyles = makeStyles({
@@ -258,6 +259,7 @@ export default function Shell({ children }: { children: ReactNode }) {
           >
             New Skill
           </Button>
+          <DeploymentNotifications />
           <Tooltip content={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} relationship="label">
             <Button
               appearance="subtle"

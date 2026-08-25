@@ -3,10 +3,11 @@
 // Azure portal link, so the user can watch progress in the portal instead of
 // waiting; the hook also polls the job to a terminal state in the background.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   api,
+  ApiError,
   type DeployResult,
   type DeployTarget,
   type GitHubStatus,
@@ -15,17 +16,68 @@ import {
   type GitHubAppConnection,
 } from './api'
 import { Button, Input } from '@coreai/fluentui-react'
-import { DismissRegular } from '@fluentui/react-icons'
+import { AlertFilled, AlertRegular, DismissRegular } from '@fluentui/react-icons'
 import { SearchableSelect } from './components/ui'
 
 export type DeployPhase = 'idle' | 'running' | 'deployed' | 'error'
 
-export function useDeployJob() {
+interface DeployJobValue {
+  phase: DeployPhase
+  result: DeployResult | null
+  portalUrl?: string
+  message: string
+  deploy: (p: { subscription: string; agent: { fileName: string; content: string }; target: DeployTarget }) => Promise<void>
+  redeploy: (p: { subscription: string; resourceGroup: string; app: string }) => Promise<void>
+}
+
+interface DeployContextValue {
+  phase: DeployPhase
+  result: DeployResult | null
+  portalUrl?: string
+  message: string
+  owner: symbol | null
+  notificationUnread: boolean
+  completedAt: number | null
+  markNotificationRead: () => void
+  begin: (start: () => Promise<{ jobId: string; portalUrl?: string }>, owner: symbol) => Promise<void>
+}
+
+interface StoredDeployJob {
+  jobId: string
+  portalUrl?: string
+}
+
+const DeployContext = createContext<DeployContextValue | null>(null)
+const ACTIVE_DEPLOY_KEY = 'serverless-portal:active-deploy'
+
+function readActiveDeploy(): StoredDeployJob | null {
+  try {
+    const value = JSON.parse(localStorage.getItem(ACTIVE_DEPLOY_KEY) ?? 'null') as unknown
+    if (!value || typeof value !== 'object' || !('jobId' in value) || typeof value.jobId !== 'string') return null
+    return value as StoredDeployJob
+  } catch {
+    return null
+  }
+}
+
+function storeActiveDeploy(job: StoredDeployJob | null): void {
+  try {
+    if (job) localStorage.setItem(ACTIVE_DEPLOY_KEY, JSON.stringify(job))
+    else localStorage.removeItem(ACTIVE_DEPLOY_KEY)
+  } catch {
+    // Deployment polling still works when browser storage is unavailable.
+  }
+}
+
+export function DeployProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
   const [phase, setPhase] = useState<DeployPhase>('idle')
   const [result, setResult] = useState<DeployResult | null>(null)
   const [portalUrl, setPortalUrl] = useState<string | undefined>(undefined)
   const [message, setMessage] = useState<string>('')
+  const [notificationVisible, setNotificationVisible] = useState(false)
+  const [completedAt, setCompletedAt] = useState<number | null>(null)
+  const [owner, setOwner] = useState<symbol | null>(null)
   const activeJob = useRef<string | null>(null)
 
   const poll = useCallback(async (jobId: string) => {
@@ -36,62 +88,192 @@ export function useDeployJob() {
       let state: DeployResult
       try {
         state = await api.getDeployStatus(jobId)
-      } catch {
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) {
+          activeJob.current = null
+          storeActiveDeploy(null)
+          setPhase('error')
+          setResult({ status: 'error', message: 'Deployment status expired. Check the Azure portal.', files: [] })
+          setCompletedAt(Date.now())
+          setNotificationVisible(true)
+          return
+        }
         continue // transient poll error — keep trying
       }
       if (state.portalUrl) setPortalUrl(state.portalUrl)
       setMessage(state.message ?? '')
       if (state.status !== 'running') {
+        activeJob.current = null
+        storeActiveDeploy(null)
         setResult(state)
+        setPhase(state.status === 'deployed' ? 'deployed' : 'error')
+        setCompletedAt(Date.now())
+        setNotificationVisible(true)
         if (state.status === 'deployed') {
-          await Promise.all([
+          void Promise.all([
             queryClient.invalidateQueries({ queryKey: ['agentDefinition'] }),
             queryClient.invalidateQueries({ queryKey: ['source'] }),
             queryClient.invalidateQueries({ queryKey: ['sourceList'] }),
           ])
         }
-        setPhase(state.status === 'deployed' ? 'deployed' : 'error')
         return
       }
     }
     if (activeJob.current === jobId) {
       setPhase('error')
       setResult({ status: 'error', message: 'Deploy timed out. Check the Azure portal.', files: [] })
+      setCompletedAt(Date.now())
+      activeJob.current = null
+      storeActiveDeploy(null)
+      setNotificationVisible(true)
     }
   }, [queryClient])
 
   const begin = useCallback(
-    async (start: () => Promise<{ jobId: string; portalUrl?: string }>) => {
+    async (start: () => Promise<{ jobId: string; portalUrl?: string }>, jobOwner: symbol) => {
+      if (activeJob.current) return
+      activeJob.current = 'starting'
       setPhase('running')
       setResult(null)
       setPortalUrl(undefined)
       setMessage('Starting…')
+      setOwner(jobOwner)
+      setCompletedAt(null)
+      setNotificationVisible(true)
       try {
         const started = await start()
         activeJob.current = started.jobId
         if (started.portalUrl) setPortalUrl(started.portalUrl)
+        storeActiveDeploy({ jobId: started.jobId, portalUrl: started.portalUrl })
         void poll(started.jobId)
       } catch (e) {
         activeJob.current = null
+        storeActiveDeploy(null)
         setPhase('error')
         setResult({ status: 'error', message: (e as Error).message, files: [] })
+        setCompletedAt(Date.now())
+        setNotificationVisible(true)
       }
     },
     [poll],
   )
 
+  useEffect(() => {
+    const stored = readActiveDeploy()
+    if (!stored || activeJob.current) return
+    activeJob.current = stored.jobId
+    setPhase('running')
+    setOwner(null)
+    setPortalUrl(stored.portalUrl)
+    setMessage('Resuming deployment status…')
+    setCompletedAt(null)
+    setNotificationVisible(true)
+    void poll(stored.jobId)
+    return () => {
+      activeJob.current = null
+    }
+  }, [poll])
+
+  const markNotificationRead = useCallback(() => setNotificationVisible(false), [])
+  const value: DeployContextValue = {
+    phase,
+    result,
+    portalUrl,
+    message,
+    owner,
+    notificationUnread: notificationVisible,
+    completedAt,
+    markNotificationRead,
+    begin,
+  }
+
+  return (
+    <DeployContext.Provider value={value}>
+      {children}
+    </DeployContext.Provider>
+  )
+}
+
+export function DeploymentNotifications() {
+  const context = useContext(DeployContext)
+  const [open, setOpen] = useState(false)
+  const [attention, setAttention] = useState(false)
+
+  useEffect(() => {
+    if (!context?.notificationUnread || context.phase === 'running' || !context.completedAt) {
+      setAttention(false)
+      return
+    }
+    const remaining = 5 * 60_000 - (Date.now() - context.completedAt)
+    if (remaining <= 0) return
+    setAttention(true)
+    const timer = window.setTimeout(() => setAttention(false), remaining)
+    return () => window.clearTimeout(timer)
+  }, [context?.completedAt, context?.notificationUnread, context?.phase])
+
+  if (!context) return null
+  const title = context.phase === 'running' ? 'Deployment in progress' : context.phase === 'deployed' ? 'Deployment complete' : 'Deployment failed'
+  const toggle = () => {
+    const next = !open
+    setOpen(next)
+    if (next) context.markNotificationRead()
+  }
+
+  return (
+    <div className="notification-center">
+      <Button appearance="subtle" className={'notification-trigger' + (attention ? ' attention' : '')} icon={context.notificationUnread ? <AlertFilled /> : <AlertRegular />} aria-label="Notifications" aria-expanded={open} onClick={toggle} />
+      {context.notificationUnread && <span className="notification-dot" aria-hidden="true" />}
+      {open && (
+        <section className="notification-panel" aria-label="Notifications">
+          <div className="notification-panel-head">
+            <strong>Notifications</strong>
+            <button type="button" onClick={() => setOpen(false)} aria-label="Close notifications"><DismissRegular /></button>
+          </div>
+          {context.phase === 'idle' ? <div className="notification-empty">No notifications yet.</div> : (
+            <div className={`notification-item ${context.phase}`} role={context.phase === 'error' ? 'alert' : 'status'}>
+              <span className="notification-status" aria-hidden="true" />
+              <div>
+                <strong>{title}</strong>
+                <span>{context.phase === 'running' ? context.message || 'Starting…' : context.result?.message || context.message}</span>
+                {context.completedAt && <small>{new Date(context.completedAt).toLocaleString()}</small>}
+                <div className="notification-links">
+                  {context.portalUrl && <a href={context.portalUrl} target="_blank" rel="noreferrer">Azure portal</a>}
+                  {context.phase === 'deployed' && context.result?.url && <a href={context.result.url} target="_blank" rel="noreferrer">Open app</a>}
+                </div>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+    </div>
+  )
+}
+
+export function useDeployJob(): DeployJobValue {
+  const context = useContext(DeployContext)
+  const owner = useRef(Symbol('deploy-owner'))
+  const begin = context?.begin
   const deploy = useCallback(
     (p: { subscription: string; agent: { fileName: string; content: string }; target: DeployTarget }) =>
-      begin(() => api.startDeploy(p)),
+      begin ? begin(() => api.startDeploy(p), owner.current) : Promise.reject(new Error('Deploy provider is unavailable.')),
     [begin],
   )
-
   const redeploy = useCallback(
-    (p: { subscription: string; resourceGroup: string; app: string }) => begin(() => api.startRedeploy(p)),
+    (p: { subscription: string; resourceGroup: string; app: string }) =>
+      begin ? begin(() => api.startRedeploy(p), owner.current) : Promise.reject(new Error('Deploy provider is unavailable.')),
     [begin],
   )
-
-  return { phase, result, portalUrl, message, deploy, redeploy }
+  if (!context) throw new Error('useDeployJob must be used within DeployProvider.')
+  const ownsJob = context.owner === owner.current
+  const phase = context.phase === 'running' ? 'running' : ownsJob ? context.phase : 'idle'
+  return {
+    phase,
+    result: ownsJob ? context.result : null,
+    portalUrl: ownsJob ? context.portalUrl : undefined,
+    message: ownsJob ? context.message : '',
+    deploy,
+    redeploy,
+  }
 }
 
 function GrantAccess({

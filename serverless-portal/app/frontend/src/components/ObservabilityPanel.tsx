@@ -296,6 +296,7 @@ export function ObservabilityPanel({
   const timeRange: TimeRange = rangeMode === 'custom' ? '24h' : rangeMode
   const startTime = rangeMode === 'custom' ? customRange?.startTime : undefined
   const endTime = rangeMode === 'custom' ? customRange?.endTime : undefined
+  const rangeReady = rangeMode !== 'custom' || !!customRange
   const query = useQuery({
     queryKey: ['ai:invocations', subscription, resourceGroup, app, agentName, rangeMode, startTime, endTime, page, pageSize],
     queryFn: () => api.appInsightsQuery({
@@ -310,7 +311,7 @@ export function ObservabilityPanel({
       page,
       pageSize,
     }),
-    enabled: rangeMode !== 'custom' || !!customRange,
+    enabled: rangeReady,
     staleTime: 60_000,
     retry: false,
   })
@@ -346,7 +347,7 @@ export function ObservabilityPanel({
           <div className="copy-as-tabs" role="tablist" aria-label="Invocation time range">
             {(['1h', '24h', 'custom'] as const).map((range) => (
               <button key={range} type="button" role="tab" aria-selected={rangeMode === range} className={'copy-as-tab' + (rangeMode === range ? ' is-active' : '')} onClick={() => { setRangeMode(range); setPage(1) }}>
-                {range}
+                {range === 'custom' ? 'Custom' : range}
               </button>
             ))}
           </div>
@@ -365,10 +366,10 @@ export function ObservabilityPanel({
         </div>
       )}
 
-      {query.isLoading && <div className="skeleton shimmer-bar" />}
-      {query.error && <div className="note warn" role="alert"><strong>Couldn’t load invocation spans.</strong><br />{(query.error as Error).message}</div>}
-      {!query.isLoading && !query.error && responseError && <div className="note warn" role="alert"><strong>Application Insights returned an error.</strong><br />{responseError}</div>}
-      {!query.isLoading && !query.error && !responseError && (
+      {rangeReady && query.isLoading && <div className="skeleton shimmer-bar" />}
+      {rangeReady && query.error && <div className="note warn" role="alert"><strong>Couldn’t load invocation spans.</strong><br />{(query.error as Error).message}</div>}
+      {rangeReady && !query.isLoading && !query.error && responseError && <div className="note warn" role="alert"><strong>Application Insights returned an error.</strong><br />{responseError}</div>}
+      {rangeReady && !query.isLoading && !query.error && !responseError && (
         <>
           <MetricsCard spans={spans} />
           {spans.length === 0 ? (

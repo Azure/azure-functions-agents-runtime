@@ -408,6 +408,33 @@ a.card:hover { text-decoration: none; }
 .toast { background: var(--code-bg); color: var(--code-fg); padding: 10px 14px; border-radius: 8px; box-shadow: var(--shadow-lg); font-size: 13px; }
 .toast.err { background: var(--red); color: #fff; }
 .toast.ok { background: var(--green); color: #fff; }
+.notification-center { position: relative; }
+.notification-trigger.attention { animation: notification-attention 1.4s ease-in-out infinite; }
+.notification-dot { position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; border: 2px solid var(--surface);
+  border-radius: 50%; background: var(--red); pointer-events: none; }
+.notification-panel { position: absolute; top: calc(100% + 9px); right: 0; z-index: 100; width: min(360px, calc(100vw - 24px));
+  overflow: hidden; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); box-shadow: var(--shadow-lg); }
+.notification-panel-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.notification-panel-head button { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0;
+  border: 0; border-radius: 4px; background: transparent; color: var(--text); cursor: pointer; }
+.notification-panel-head button:hover { background: var(--surface-2); }
+.notification-item { display: grid; grid-template-columns: 9px minmax(0, 1fr); gap: 10px; padding: 12px; }
+.notification-item > div { display: grid; gap: 4px; min-width: 0; }
+.notification-item span, .notification-item small, .notification-empty { color: var(--text-muted); font-size: 12px; }
+.notification-status { width: 9px; height: 9px; margin-top: 4px; border-radius: 50%; background: var(--brand); }
+.notification-item.deployed .notification-status { background: var(--green); }
+.notification-item.error .notification-status { background: var(--red); }
+.notification-links { display: flex; gap: 12px; margin-top: 3px; }
+.notification-links a { color: var(--brand-dark); font-size: 12px; font-weight: 650; }
+.notification-empty { padding: 18px 12px; }
+@keyframes notification-attention {
+  0%, 72%, 100% { transform: translateY(0) rotate(0); }
+  78% { transform: translateY(-3px) rotate(-8deg); }
+  84% { transform: translateY(0) rotate(8deg); }
+  90% { transform: translateY(-2px) rotate(-5deg); }
+  96% { transform: translateY(0) rotate(0); }
+}
+@media (prefers-reduced-motion: reduce) { .notification-trigger.attention { animation: none; outline: 2px solid var(--brand); } }
 
 /* Agent detail page */
 .meta-grid { display: grid; grid-template-columns: 130px 1fr; gap: 8px 14px; margin: 0; }

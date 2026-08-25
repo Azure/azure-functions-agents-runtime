@@ -10,6 +10,7 @@ import { IdentityProvider } from './identity'
 import { initMsal, getManualToken, subscribeManualToken } from './auth'
 import { createQueryClient } from './query'
 import { useThemeMode } from './theme'
+import { DeployProvider } from './deploy'
 import '@fontsource-variable/inter'
 import '@coreai/fluentui-react/fonts/fonts.css'
 import './styles.css'
@@ -24,7 +25,9 @@ function AuthGate() {
   if (msalAuthed || manualToken) {
     return (
       <IdentityProvider>
-        <App />
+        <DeployProvider>
+          <App />
+        </DeployProvider>
       </IdentityProvider>
     )
   }
