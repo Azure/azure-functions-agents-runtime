@@ -20,6 +20,35 @@ import { api, type Identity, type Subscription } from './api'
 import { queryKeys, staleTimes } from './query'
 
 const SELECTED_SUB_KEY = 'serverless-portal:selected-subscription'
+const SUBSCRIPTIONS_CACHE_KEY = 'serverless-portal:subscriptions'
+
+interface SubscriptionsSnapshot {
+  subscriptions: Subscription[]
+  updatedAt: number
+}
+
+function readSubscriptionsSnapshot(): SubscriptionsSnapshot | undefined {
+  try {
+    const raw = localStorage.getItem(SUBSCRIPTIONS_CACHE_KEY)
+    if (!raw) return undefined
+    const parsed = JSON.parse(raw) as Partial<SubscriptionsSnapshot>
+    if (!Array.isArray(parsed.subscriptions) || typeof parsed.updatedAt !== 'number') return undefined
+    return { subscriptions: parsed.subscriptions, updatedAt: parsed.updatedAt }
+  } catch {
+    return undefined
+  }
+}
+
+function writeSubscriptionsSnapshot(subscriptions: Subscription[], updatedAt: number): void {
+  try {
+    localStorage.setItem(
+      SUBSCRIPTIONS_CACHE_KEY,
+      JSON.stringify({ subscriptions, updatedAt } satisfies SubscriptionsSnapshot),
+    )
+  } catch {
+    /* storage full / disabled — React Query still retains the list in memory */
+  }
+}
 
 interface IdentityState {
   identity: Identity | null
@@ -37,6 +66,7 @@ interface IdentityState {
 const IdentityContext = createContext<IdentityState | null>(null)
 
 export function IdentityProvider({ children }: { children: ReactNode }) {
+  const [subscriptionsSnapshot] = useState(readSubscriptionsSnapshot)
   const identityQuery = useQuery({
     queryKey: queryKeys.identity,
     queryFn: () => api.identity(),
@@ -46,6 +76,8 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     queryKey: queryKeys.subscriptions,
     queryFn: () => api.listSubscriptions(),
     staleTime: staleTimes.subscriptions,
+    initialData: subscriptionsSnapshot?.subscriptions,
+    initialDataUpdatedAt: subscriptionsSnapshot?.updatedAt,
     refetchOnMount: 'always',
     refetchOnReconnect: true,
     refetchOnWindowFocus: true,
@@ -71,14 +103,21 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  // Once identity + subscriptions load, pick a default if the persisted
-  // selection is empty or no longer valid for this tenant.
   useEffect(() => {
-    if (!identity || subscriptions.length === 0) return
+    if (subsQuery.data && subsQuery.dataUpdatedAt > 0) {
+      writeSubscriptionsSnapshot(subsQuery.data, subsQuery.dataUpdatedAt)
+    }
+  }, [subsQuery.data, subsQuery.dataUpdatedAt])
+
+  // Restore a valid selection from the subscription list itself. The identity
+  // request can fail when its configured default subscription is inaccessible,
+  // but that must not leave an otherwise healthy picker unusable.
+  useEffect(() => {
+    if (subscriptions.length === 0) return
     if (selected && subscriptions.some((s) => s.id === selected)) return
-    const preferred = subscriptions.some((s) => s.id === identity.subscription.id)
+    const preferred = identity && subscriptions.some((s) => s.id === identity.subscription.id)
       ? identity.subscription.id
-      : (subscriptions[0]?.id ?? identity.subscription.id)
+      : subscriptions[0].id
     setSelected(preferred)
   }, [identity, subscriptions, selected, setSelected])
 

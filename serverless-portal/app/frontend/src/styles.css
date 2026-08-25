@@ -187,6 +187,7 @@ textarea { resize: vertical; }
    inline; the popover is position:fixed against the trigger, clamped to a
    fixed max-height so it never overflows the viewport. ─────────────────── */
 .ss-root { position: relative; width: 100%; }
+.ss-root.has-refresh .ss-trigger { padding-right: 42px; }
 .ss-trigger {
   display: flex; align-items: center; gap: 8px; width: 100%;
   padding: 8px 11px; border: 1px solid var(--border-strong); border-radius: 8px;
@@ -199,8 +200,19 @@ textarea { resize: vertical; }
 .ss-trigger:disabled { opacity: 0.6; cursor: not-allowed; }
 .ss-trigger.is-empty .ss-trigger-label { color: var(--text-muted); }
 .ss-trigger-label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-spinner { flex: 0 0 auto; width: 14px; height: 14px; border: 2px solid var(--border-strong);
+  border-top-color: var(--brand); border-radius: 50%; animation: ss-spin .8s linear infinite; }
 .ss-trigger-caret { flex: 0 0 auto; font-size: 11px; color: var(--text-muted); }
 .ss-trigger.is-open .ss-trigger-caret { transform: rotate(180deg); }
+.ss-refresh { position: absolute; z-index: 1; top: 50%; right: 4px; transform: translateY(-50%);
+  display: grid; place-items: center; width: 30px; height: 28px; padding: 0; border: 0;
+  border-left: 1px solid var(--border); background: transparent; color: var(--text-muted);
+  font-size: 17px; line-height: 1; cursor: pointer; }
+.ss-refresh:hover:not(:disabled) { color: var(--brand-dark); }
+.ss-refresh:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; border-radius: 4px; }
+.ss-refresh:disabled { cursor: wait; opacity: .55; }
+@keyframes ss-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .ss-spinner { animation: none; } }
 
 .ss-popover {
   z-index: 4000;
@@ -471,8 +483,8 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
 .model-configuration-card { margin-top: 12px; }
 .model-provider-fields { margin-top: 16px; }
 .foundry-resource-field { margin: 8px 0; }
-.foundry-resource-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: 8px; }
-.foundry-resource-control > button { min-width: 32px; }
+.foundry-dependent-fields { display: grid; gap: 8px; }
+.foundry-dependent-fields .field { margin-bottom: 0; }
 .generate-skill-card { position: relative; overflow: hidden; }
 .generate-skill-card.is-generating textarea { opacity: .65; }
 .generate-shimmer { height: 4px; margin: -16px -18px 14px; overflow: hidden; position: relative;

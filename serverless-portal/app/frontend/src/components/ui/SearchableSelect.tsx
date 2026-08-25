@@ -21,6 +21,8 @@ interface SearchableSelectProps {
   placeholder?: string
   disabled?: boolean
   loading?: boolean
+  loadingLabel?: string
+  onRefresh?: () => void
   ariaLabel?: string
 }
 
@@ -75,6 +77,8 @@ export const SearchableSelect = ({
   placeholder = 'Select…',
   disabled = false,
   loading = false,
+  loadingLabel = 'Loading…',
+  onRefresh,
   ariaLabel,
 }: SearchableSelectProps) => {
   const selected = options.find((o) => o.value === value)
@@ -241,14 +245,14 @@ export const SearchableSelect = ({
   }
 
   const triggerText = loading
-    ? 'Loading…'
+    ? loadingLabel
     : selected?.label
       ? selected.label
       : placeholder
   const isEmpty = !selected
 
   return (
-    <div className="ss-root">
+    <div className={'ss-root' + (onRefresh ? ' has-refresh' : '')}>
       <button
         ref={triggerRef}
         type="button"
@@ -261,10 +265,24 @@ export const SearchableSelect = ({
         aria-expanded={open}
       >
         <span className="ss-trigger-label">{triggerText}</span>
+        {loading && <span className="ss-spinner" aria-hidden />}
         <span className="ss-trigger-caret" aria-hidden>
           ▾
         </span>
       </button>
+
+      {onRefresh && (
+        <button
+          type="button"
+          className="ss-refresh"
+          onClick={onRefresh}
+          disabled={loading}
+          title="Refresh options"
+          aria-label={`Refresh ${ariaLabel ?? 'options'}`}
+        >
+          ↻
+        </button>
+      )}
 
       {open && rect && createPortal(
         <div

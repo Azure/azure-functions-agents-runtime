@@ -233,32 +233,24 @@ export default function CreateAgentPage() {
                 </div>
                 <div className="field foundry-resource-field">
                   <label>Foundry resource</label>
-                  <div className="foundry-resource-control">
-                    <SearchableSelect
-                      value={draft.foundryAccount}
-                      onChange={selectAccount}
-                      options={accountOptions}
-                      placeholder={
-                        foundryAccounts.length ? 'Select a Foundry resource…' : 'No Foundry resources found'
-                      }
-                      loading={foundryLoading}
-                      ariaLabel="Foundry resource"
-                    />
-                    <Button
-                      appearance="subtle"
-                      size="small"
-                      icon={<Icon name="refresh" size={14} />}
-                      onClick={() => void refetchFoundry()}
-                      title="Refresh Foundry list"
-                      aria-label="Refresh Foundry list"
-                    />
-                  </div>
+                  <SearchableSelect
+                    value={draft.foundryAccount}
+                    onChange={selectAccount}
+                    options={accountOptions}
+                    placeholder={
+                      foundryAccounts.length ? 'Select a Foundry resource…' : 'No Foundry resources found'
+                    }
+                    loading={foundryLoading}
+                    loadingLabel="Loading Foundry resources…"
+                    onRefresh={() => void refetchFoundry()}
+                    ariaLabel="Foundry resource"
+                  />
                 </div>
 
                 {selectedAccount && (
-                  <div className="grid cols-2" style={{ gap: 12 }}>
+                  <div className="foundry-dependent-fields">
                     {selectedAccount.projects.length > 0 && (
-                      <div className="field" style={{ marginBottom: 0 }}>
+                      <div className="field">
                         <label>Project</label>
                         <SearchableSelect
                           value={draft.foundryEndpoint}
@@ -269,7 +261,7 @@ export default function CreateAgentPage() {
                         />
                       </div>
                     )}
-                    <div className="field" style={{ marginBottom: 0 }}>
+                    <div className="field">
                       <label>Model deployment</label>
                       <SearchableSelect
                         value={draft.foundryModel}
