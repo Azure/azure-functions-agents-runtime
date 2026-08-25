@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -43,6 +44,10 @@ from .context import (
     _reset_workflow_task_context,
     _set_workflow_task_context,
     _workflow_task_idempotency_key,
+)
+from .durable_retry_2x_spike import (
+    RETRY_NODE_ORCHESTRATOR_NAME,
+    durable_retry_node_orchestrator,
 )
 from .schema import (
     ECHO_TOOL_NAME,
@@ -133,21 +138,59 @@ class _ActivityFailureOutcome(TypedDict):
 type _ActivityOutcome = _ActivitySuccessOutcome | _ActivityFailureOutcome
 
 
+def _valid_durable_retry_policy(
+    value: Any,
+    *,
+    expected_attempts: int,
+) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "first_retry_interval_ms",
+        "max_number_of_attempts",
+        "backoff_coefficient",
+        "max_retry_interval_ms",
+    }:
+        return False
+    first = value["first_retry_interval_ms"]
+    attempts = value["max_number_of_attempts"]
+    coefficient = value["backoff_coefficient"]
+    maximum = value["max_retry_interval_ms"]
+    return (
+        isinstance(first, int)
+        and not isinstance(first, bool)
+        and first >= 0
+        and isinstance(attempts, int)
+        and not isinstance(attempts, bool)
+        and attempts == expected_attempts
+        and isinstance(coefficient, (int, float))
+        and not isinstance(coefficient, bool)
+        and math.isfinite(coefficient)
+        and coefficient >= 1
+        and isinstance(maximum, int)
+        and not isinstance(maximum, bool)
+        and maximum >= first
+    )
+
+
 def _policy_activity_context(task: Mapping[str, Any]) -> tuple[WorkflowTaskContext, float]:
     """Validate persisted policy-aware Activity fields without repairing bad history."""
     execution = task.get("execution")
-    if not isinstance(execution, dict) or set(execution) != {
+    required_execution_fields = {
         "timeout_ms",
         "max_attempts",
         "retry_delays_ms",
         "continue_on_error",
         "timeout_source",
         "retry_source",
-    }:
+    }
+    allowed_execution_fields = required_execution_fields | {"durable_retry_policy"}
+    if not isinstance(execution, dict) or not (
+        required_execution_fields <= set(execution) <= allowed_execution_fields
+    ):
         raise ValueError("malformed workflow task execution policy")
     timeout_ms = execution["timeout_ms"]
     effective_attempts = execution["max_attempts"]
     delays = execution["retry_delays_ms"]
+    durable_policy = execution.get("durable_retry_policy")
     if (
         not isinstance(timeout_ms, int)
         or isinstance(timeout_ms, bool)
@@ -167,6 +210,13 @@ def _policy_activity_context(task: Mapping[str, Any]) -> tuple[WorkflowTaskConte
         or not isinstance(execution["continue_on_error"], bool)
         or execution["timeout_source"] not in {"decorator", "task", "runtime_default"}
         or execution["retry_source"] not in {"decorator", "task", "runtime_default"}
+        or (
+            durable_policy is not None
+            and not _valid_durable_retry_policy(
+                durable_policy,
+                expected_attempts=effective_attempts,
+            )
+        )
     ):
         raise ValueError("malformed workflow task execution policy")
 
@@ -1810,6 +1860,10 @@ def register_workflows(
     at worker index time.
     """
     bp = df.Blueprint()
+    bp.orchestration_trigger(
+        context_name="context",
+        orchestration=RETRY_NODE_ORCHESTRATOR_NAME,
+    )(durable_retry_node_orchestrator)
 
     def require_workflow_agent_policy(
         task: _ActivityInput,
@@ -1833,7 +1887,7 @@ def register_workflows(
             )
         return workflow_agent_slug, policy
 
-    @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
+    @bp.activity_trigger(input_name="task")
     async def agents_workflow_run_tool(task: _ToolActivityInput) -> dict[str, Any]:
         policy_aware = "execution" in task
         if policy_aware:
@@ -1925,7 +1979,7 @@ def register_workflows(
         json.dumps(result)
         return {"id": task_id, "result": result}
 
-    @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
+    @bp.activity_trigger(input_name="task")
     async def agents_workflow_run_sub_agent(
         task: _SubAgentActivityInput,
     ) -> dict[str, Any]:
@@ -2060,7 +2114,7 @@ def register_workflows(
         json.dumps(result)
         return result
 
-    @bp.orchestration_trigger(context_name="context")  # type: ignore[untyped-decorator]
+    @bp.orchestration_trigger(context_name="context")  # type: ignore[arg-type]
     def agents_workflow_orchestrator(context: df.DurableOrchestrationContext) -> Any:
         """Execute a workflow plan, selecting the static or dynamic scheduler.
 

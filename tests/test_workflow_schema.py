@@ -207,6 +207,12 @@ def test_authored_empty_execution_is_policy_aware_with_bounded_defaults() -> Non
         "continue_on_error": False,
         "timeout_source": "runtime_default",
         "retry_source": "runtime_default",
+        "durable_retry_policy": {
+            "first_retry_interval_ms": 0,
+            "max_number_of_attempts": 1,
+            "backoff_coefficient": 1.0,
+            "max_retry_interval_ms": 0,
+        },
     }
 
 
@@ -250,6 +256,12 @@ def test_execution_resolver_applies_authoritative_fields_independently() -> None
         "continue_on_error": True,
         "timeout_source": "decorator",
         "retry_source": "decorator",
+        "durable_retry_policy": {
+            "first_retry_interval_ms": 0,
+            "max_number_of_attempts": 1,
+            "backoff_coefficient": 1.0,
+            "max_retry_interval_ms": 0,
+        },
     }
 
 

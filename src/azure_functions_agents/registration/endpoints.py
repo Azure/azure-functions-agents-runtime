@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import azure.functions as func
+from azure.durable_functions import DurableOrchestrationClient
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
 from .._logger import logger
@@ -544,7 +545,10 @@ def _register_workflow_status_endpoints(
 
     auth_level = resolve_endpoint_auth_level(auth)
 
-    async def list_session_workflows(req: Request, client: str) -> Response:
+    async def list_session_workflows(
+        req: Request,
+        client: DurableOrchestrationClient,
+    ) -> Response:
         auth_error = authorize_entra_request(req.headers.get, auth)
         if auth_error is not None:
             return _json_error(auth_error.message, status_code=auth_error.status_code)
@@ -581,7 +585,10 @@ def _register_workflow_status_endpoints(
         decorated_list
     )
 
-    async def get_session_workflow_status(req: Request, client: str) -> Response:
+    async def get_session_workflow_status(
+        req: Request,
+        client: DurableOrchestrationClient,
+    ) -> Response:
         auth_error = authorize_entra_request(req.headers.get, auth)
         if auth_error is not None:
             return _json_error(auth_error.message, status_code=auth_error.status_code)

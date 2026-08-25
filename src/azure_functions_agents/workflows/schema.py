@@ -259,6 +259,15 @@ class WorkflowRetryPolicy(BaseModel):
         return self
 
 
+class DurableRetryPolicyInput(TypedDict):
+    """JSON-safe native Durable retry policy retained beside the 1.x schedule."""
+
+    first_retry_interval_ms: int
+    max_number_of_attempts: int
+    backoff_coefficient: float
+    max_retry_interval_ms: int
+
+
 class WorkflowTaskExecution(BaseModel):
     """Authored bounded execution policy for a tool or Sub Agent task."""
 
@@ -288,6 +297,7 @@ class EffectiveWorkflowTaskExecution(TypedDict):
     continue_on_error: bool
     timeout_source: Literal["decorator", "task", "runtime_default"]
     retry_source: Literal["decorator", "task", "runtime_default"]
+    durable_retry_policy: NotRequired[DurableRetryPolicyInput]
 
 
 def precompute_retry_delays_ms(retry: WorkflowRetryPolicy) -> list[int]:
@@ -308,6 +318,29 @@ def precompute_retry_delays_ms(retry: WorkflowRetryPolicy) -> list[int]:
         )
         for index in range(retry.max_attempts - 1)
     ]
+
+
+def durable_retry_policy_input(retry: WorkflowRetryPolicy) -> DurableRetryPolicyInput:
+    """Preserve the author-selected exponential shape for a future 2.x driver."""
+    if retry.backoff is None:
+        return {
+            "first_retry_interval_ms": 0,
+            "max_number_of_attempts": retry.max_attempts,
+            "backoff_coefficient": 1.0,
+            "max_retry_interval_ms": 0,
+        }
+    return {
+        "first_retry_interval_ms": _policy_duration_ms(
+            retry.backoff.initial,
+            field_name="backoff.initial",
+        ),
+        "max_number_of_attempts": retry.max_attempts,
+        "backoff_coefficient": retry.backoff.multiplier,
+        "max_retry_interval_ms": _policy_duration_ms(
+            retry.backoff.max,
+            field_name="backoff.max",
+        ),
+    }
 
 
 class WorkflowConditionInput(TypedDict):
@@ -494,6 +527,7 @@ def resolve_workflow_task_execution(
         continue_on_error=execution.continue_on_error,
         timeout_source=timeout_source,
         retry_source=retry_source,
+        durable_retry_policy=durable_retry_policy_input(retry),
     )
 
 
@@ -1396,6 +1430,7 @@ __all__ = [
     "SUPPORTED_TASK_TYPES",
     "TOOL_TASK_TYPE",
     "WAIT_TASK_TYPE",
+    "DurableRetryPolicyInput",
     "EffectiveWorkflowTaskExecution",
     "PlanValidationError",
     "TemplateResolutionError",
@@ -1409,6 +1444,7 @@ __all__ = [
     "WorkflowTaskExecution",
     "WorkflowTerminalError",
     "WorkflowToolExecutionPolicy",
+    "durable_retry_policy_input",
     "evaluate_condition",
     "parse_iso8601_datetime",
     "parse_iso8601_duration",

@@ -154,7 +154,11 @@ def test_workflow_routes_register_durable_client_binding(tmp_path: Path):
         "get_session_workflow_status",
     ]:
         assert "durableClient" in _binding_types(function_app, function_name)
-        assert get_type_hints(_registered_function(function_app, function_name))["client"] is str
+        client_type = get_type_hints(_registered_function(function_app, function_name))["client"]
+        if function_name in {"list_session_workflows", "get_session_workflow_status"}:
+            assert client_type is df.DurableOrchestrationClient
+        else:
+            assert client_type is str
 
 
 def test_workflow_timer_trigger_registers_durable_client_binding(tmp_path: Path):
