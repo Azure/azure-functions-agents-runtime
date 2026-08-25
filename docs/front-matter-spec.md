@@ -9,7 +9,7 @@ Azure Functions agents use a **two-tier configuration system**:
 
 Each agent is defined in a `.agent.md` file with YAML front matter followed by markdown instructions. The front matter configures the agent-specific behavior, while the markdown body contains the agent's system prompt.
 
-> **Smart agent input binding:** A definition referenced by `AiApp.agent()` or `agent(app, ...)` has a deliberately smaller projection. The binding requires only non-empty string `name` and `description` fields and uses the markdown body as instructions. It recognizes `substitute_variables` only to control environment substitution in those recognized fields and the markdown body, and ignores every other per-agent field even if that ignored value would be invalid for declarative `create_function_app()` usage. Model, timeout, system tools, user tools, skills, and MCP servers come from `agents.config.yaml` and app-level discovery. Capability discovery runs app-wide before global tool exclusions; because binding front matter has no per-agent capability filters, any malformed tool, skill, or MCP asset prevents all smart bindings in the app from registering rather than silently producing a partial capability inventory. `agent_name` resolves the filename stem first and then its normalized slug; it never resolves the display `name`.
+> **Smart markdown agent binding:** A definition referenced by `AiApp.markdown_agent()` or `markdown_agent(app, ...)` has a deliberately smaller projection. The binding requires only non-empty string `name` and `description` fields and uses the markdown body as instructions. It recognizes `substitute_variables` only to control environment substitution in those recognized fields and the markdown body, and ignores every other per-agent field even if that ignored value would be invalid for declarative `create_function_app()` usage. Model, timeout, system tools, user tools, skills, and MCP servers come from `agents.config.yaml` and app-level discovery. Capability discovery runs app-wide before global tool exclusions; because binding front matter has no per-agent capability filters, any malformed tool, skill, or MCP asset prevents all smart bindings in the app from registering rather than silently producing a partial capability inventory. `agent_name` resolves the filename stem first and then its normalized slug; it never resolves the display `name`.
 
 ### Configuration Model
 
@@ -173,7 +173,7 @@ Fields are organized into categories based on how they can be used:
 also have either a `trigger` or at least one enabled `builtin_endpoints` value,
 unless another agent references it through `subagents` or
 `workflows.subagents` as an internal specialist. Binding-only definitions
-referenced by `agent` need no trigger or endpoint.
+referenced by `markdown_agent` need no trigger or endpoint.
 
 #### `name`
 - **Type:** `string`

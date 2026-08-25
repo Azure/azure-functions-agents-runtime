@@ -87,7 +87,8 @@ def _worker_signature(handler: Callable[..., Any], arg_name: str) -> inspect.Sig
     parameter = signature.parameters.get(arg_name)
     if parameter is None:
         raise TypeError(
-            f"agent arg_name {arg_name!r} is not present in handler {handler.__name__!r}"
+            f"markdown_agent arg_name {arg_name!r} is not present in handler "
+            f"{handler.__name__!r}"
         )
     if parameter.kind in {
         inspect.Parameter.POSITIONAL_ONLY,
@@ -95,7 +96,7 @@ def _worker_signature(handler: Callable[..., Any], arg_name: str) -> inspect.Sig
         inspect.Parameter.VAR_KEYWORD,
     }:
         raise TypeError(
-            f"agent parameter {arg_name!r} must be positional-or-keyword or keyword-only"
+            f"markdown_agent parameter {arg_name!r} must be positional-or-keyword or keyword-only"
         )
     return signature.replace(
         parameters=[
@@ -116,7 +117,7 @@ def _source_call(
     injected: Any,
 ) -> Any:
     if arg_name in kwargs:
-        raise TypeError(f"agent parameter {arg_name!r} is runtime-managed")
+        raise TypeError(f"markdown_agent parameter {arg_name!r} is runtime-managed")
     bound = worker_signature.bind(*args, **kwargs)
     bound.apply_defaults()
     values = dict(bound.arguments)
@@ -150,7 +151,7 @@ def _invocation_metadata(
     return InvocationMetadata()
 
 
-def agent(
+def markdown_agent(
     app: func.FunctionApp,
     *,
     arg_name: str,
@@ -162,13 +163,13 @@ def agent(
     def decorate(handler: _F) -> _F:
         if not inspect.isfunction(handler):
             raise TypeError(
-                "agent must be the innermost decorator, immediately above the handler"
+                "markdown_agent must be the innermost decorator, immediately above the handler"
             )
         source_signature = inspect.signature(handler)
         visible_signature = _worker_signature(handler, arg_name)
         if not inspect.iscoroutinefunction(handler):
             raise TypeError(
-                "agent requires an async def handler because "
+                "markdown_agent requires an async def handler because "
                 "MAF Agent execution and lifecycle are asynchronous"
             )
 
@@ -216,7 +217,7 @@ def agent(
 
 
 class AiApp(func.FunctionApp):
-    """FunctionApp with the smart ``agent`` decorator."""
+    """FunctionApp with the smart ``markdown_agent`` decorator."""
 
     def __init__(
         self,
@@ -227,14 +228,14 @@ class AiApp(func.FunctionApp):
         super().__init__(http_auth_level=http_auth_level)
         self._agent_binding_root = app_root
 
-    def agent(
+    def markdown_agent(
         self,
         *,
         arg_name: str,
         agent_name: str,
     ) -> Callable[[_F], _F]:
         _runtime_for(self, self._agent_binding_root)
-        return agent(
+        return markdown_agent(
             self,
             arg_name=arg_name,
             agent_name=agent_name,
@@ -253,14 +254,14 @@ class DurableAiApp(df.DFApp):  # type: ignore[misc]
         super().__init__(http_auth_level=http_auth_level)
         self._agent_binding_root = app_root
 
-    def agent(
+    def markdown_agent(
         self,
         *,
         arg_name: str,
         agent_name: str,
     ) -> Callable[[_F], _F]:
         _runtime_for(self, self._agent_binding_root)
-        return agent(
+        return markdown_agent(
             self,
             arg_name=arg_name,
             agent_name=agent_name,

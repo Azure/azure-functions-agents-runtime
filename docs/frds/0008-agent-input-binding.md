@@ -1,6 +1,6 @@
 ---
 frd: 0008
-title: Python agent input binding
+title: Python markdown agent binding
 status: Finalized
 author: hallvictoria
 created: 2026-08-11
@@ -10,11 +10,11 @@ pull_requests: []
 branch: hallvictoria/agent-binding
 ---
 
-# FRD 0008 — Python agent input binding
+# FRD 0008 — Python markdown agent binding
 
 ## 1. Summary
 
-Add a Python smart input decorator that lets an existing Azure Function resolve a
+Add a Python `markdown_agent` decorator that lets an existing Azure Function resolve a
 markdown agent definition and receive a fresh, hydrated Microsoft Agent Framework
 `Agent`. The customer keeps ordinary Functions and Durable Functions triggers and
 application logic; the runtime resolves and caches an immutable hydration blueprint at
@@ -49,8 +49,8 @@ host round trip.
 
 - Let async Python v2 Functions and customer-owned Durable activities declare a raw
   injected Agent by logical agent name.
-- Support both a concise `AiApp.agent()` API and existing caller-owned
-  `FunctionApp` objects through the same free `agent(app, ...)` implementation.
+- Support both a concise `AiApp.markdown_agent()` API and existing caller-owned
+  `FunctionApp` objects through the same free `markdown_agent(app, ...)` implementation.
 - Establish `AiApp` as the long-term primary application composition surface, with
   the eventual goal of phasing out `create_function_app()` after its declarative
   behavior is available through `AiApp` and a separately planned migration and
@@ -88,7 +88,7 @@ host round trip.
 - Per-agent binding overrides for model, timeout, tools, skills, MCP, system tools,
   subagents, workflows, schemas, triggers, or built-in endpoints. These front-matter
   properties remain available to the declarative `create_function_app()` path but are
-  ignored by `agent`.
+  ignored by `markdown_agent`.
 - Bound-agent subagent delegation or Dynamic Workflow management tools in v1.
 - End-user token exchange, on-behalf-of authentication, or caller-token forwarding.
 - Multi-agent orchestration, A2A, new provider policy, or changes to MAF's public API.
@@ -122,7 +122,7 @@ app = AiApp()
 
 @app.function_name(name="ProcessOrder")
 @app.route(route="orders/{orderId}", methods=["POST"])
-@app.agent(arg_name="order_agent", agent_name="order-fulfillment")
+@app.markdown_agent(arg_name="order_agent", agent_name="order-fulfillment")
 async def process_order(
     req: Request,
     order_agent: Agent,
@@ -138,7 +138,7 @@ async def process_order(
     return Response(content=response.text)
 ```
 
-  `agent` must be the innermost decorator, immediately above the handler.
+  `markdown_agent` must be the innermost decorator, immediately above the handler.
   Python applies it first, so the standard Azure decorators receive the runtime's
   worker-facing wrapper rather than the source handler's injected parameter.
 
@@ -151,14 +151,14 @@ import azure.functions as func
 from agent_framework import Agent
 from azurefunctions.extensions.http.fastapi import Request, Response
 
-from azure_functions_agents import agent
+from azure_functions_agents import markdown_agent
 
 app = func.FunctionApp()
 
 
 @app.function_name(name="ProcessOrder")
 @app.route(route="orders/{orderId}", methods=["POST"])
-@agent(app, arg_name="order_agent", agent_name="order-fulfillment")
+@markdown_agent(app, arg_name="order_agent", agent_name="order-fulfillment")
 async def process_order(
     req: Request,
     order_agent: Agent,
@@ -182,7 +182,7 @@ does not resolve the mutable front-matter display `name`. Existing app-wide dupl
 slug validation makes this fallback unambiguous; diagnostics list filename stems and
 slugs side by side.
 
-A definition referenced by at least one `agent` decorator is reachable and may
+A definition referenced by at least one `markdown_agent` decorator is reachable and may
 omit a standalone trigger and built-in endpoints. The binding projection requires only
 string `name` and `description` values and treats the markdown body as instructions.
 It honors `substitute_variables` to control standard environment substitution in those
@@ -195,8 +195,8 @@ configuration. The existing declarative loader continues to recognize and valida
 the complete front-matter schema unchanged. Lookup errors explicitly state that
 `agent_name` is a filename stem or normalized slug, not the front-matter display name.
 
-`AiApp.agent()` injects into ordinary Functions, while
-`DurableAiApp.agent()` injects into customer-owned Durable activities.
+`AiApp.markdown_agent()` injects into ordinary Functions, while
+`DurableAiApp.markdown_agent()` injects into customer-owned Durable activities.
 Orchestrators call those activities explicitly:
 
 ```python
@@ -211,7 +211,7 @@ app = DurableAiApp()
 
 
 @app.activity_trigger(input_name="request")
-@app.agent(
+@app.markdown_agent(
   arg_name="planner",
   agent_name="order-fulfillment",
 )
@@ -238,7 +238,7 @@ Agent execution or lifecycle protocol for a synchronous Function or activity han
 
 Orchestrators remain synchronous generators and receive no injected Agent or proxy.
 They explicitly schedule an application activity whose async handler uses
-`DurableAiApp.agent()`. This keeps Durable concepts visible: the customer owns the activity
+`DurableAiApp.markdown_agent()`. This keeps Durable concepts visible: the customer owns the activity
 name, JSON payload and result contracts, retries, idempotency behavior, and which
 response or transcript fields enter Durable history. The library owns Agent hydration
 and lifecycle only within the activity invocation. A standardized one-line proxy is
@@ -260,8 +260,8 @@ separate function/activity selector to validate.
 
 `DurableAiApp` is an optional convenience type, not a runtime requirement. It preserves
 the Durable SDK's activity and orchestration decorators while adding the bound
-`@app.agent(...)` method and explicit `app_root` configuration. A caller-owned
-`azure.durable_functions.DFApp` used with the free `agent(app, ...)` decorator
+`@app.markdown_agent(...)` method and explicit `app_root` configuration. A caller-owned
+`azure.durable_functions.DFApp` used with the free `markdown_agent(app, ...)` decorator
 has equivalent binding behavior. No generated activity is registered by constructing
 or subclassing `DurableAiApp`. Non-Durable applications can continue to use `AiApp` or
 a caller-owned `azure.functions.FunctionApp`.
@@ -273,7 +273,7 @@ preserves handler metadata with `functools.wraps`, exposes an `inspect.Signature
 when called. The source signature remains available through `__wrapped__` for tooling.
 
 Because this depends on Python's bottom-up decorator application, v1 supports one
-order only: `agent` is innermost, then the standard trigger/binding decorator,
+order only: `markdown_agent` is innermost, then the standard trigger/binding decorator,
 then optional `function_name`. Applying it to an Azure `FunctionBuilder` fails at
 import with an error showing the supported order. The implementation accepts only a
 plain function, coroutine function, or generator function, which rejects a
@@ -434,7 +434,7 @@ For orchestrators, the customer declares and schedules a normal Durable activity
 payload must satisfy the application's own JSON contract, and its result determines
 what Durable records in orchestration history. Retry options, idempotency behavior,
 activity naming, and any transcript projection are likewise application decisions.
-The activity's async handler can use `DurableAiApp.agent()` to receive a fresh
+The activity's async handler can use `DurableAiApp.markdown_agent()` to receive a fresh
 Agent without moving those Durable semantics into the binding library.
 
 Cancellation of an async handler naturally cancels its current-loop work and still
@@ -471,9 +471,9 @@ Binding parsing fails only for invalid YAML, missing/non-string `name` or
 `agent_name`, invalid decorator order, or an incompatible handler shape. Ignored
 front-matter fields never make a binding target invalid.
 
-Functions and activities using `agent` require coroutine functions. Async
+Functions and activities using `markdown_agent` require coroutine functions. Async
 handlers receive raw MAF Agents and support the complete MAF API. Orchestrators and
-entities do not use `agent`; orchestrators call explicit activities instead.
+entities do not use `markdown_agent`; orchestrators call explicit activities instead.
 
 Subagent, workflow, trigger, endpoint, schema, and per-agent capability declarations
 are ignored by the binding projection rather than rejected. They continue to affect
@@ -553,6 +553,7 @@ shims for MAF 1.3 are not part of v1.
 | 33 | Function/activity selection | explicit `mode` / infer from outer decorator metadata / app-type convention | Remove `mode`: `AiApp.agent()` is the ordinary Function surface and `DurableAiApp.agent()` is the Durable activity surface. Both use identical hydration and lifecycle behavior, so an explicit selector adds no runtime value | Human | 2026-08-19 |
 | 34 | Decorator name | `agent_input` / `agent` / retain both as aliases | Rename the preview-only decorator to `agent` across the free function and both app classes; do not retain an `agent_input` compatibility alias | Human | 2026-08-19 |
 | 35 | Application composition direction | retain `create_function_app()` indefinitely / immediate replacement / phased migration to `AiApp` | Make `AiApp` the long-term primary composition API and eventually phase out `create_function_app()`; preserve it unchanged in v1 and require a separately planned migration and deprecation cycle before removal | Human | 2026-08-19 |
+| 36 | Decorator name clarification | retain `agent` / `markdown_agent` / expose both | Supersede #34 and rename the preview-only decorator to `markdown_agent` across the free function and both app classes; retain neither `agent` nor `agent_input` as a compatibility alias | Human | 2026-08-25 |
 
 ## 6. Test plan
 

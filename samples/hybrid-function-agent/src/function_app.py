@@ -12,7 +12,7 @@ app = AiApp()
 
 
 @app.route(route="orders/{orderId}", methods=["POST"])
-@app.agent(arg_name="order_agent", agent_name="order-fulfillment")
+@app.markdown_agent(arg_name="order_agent", agent_name="order-fulfillment")
 async def process_order(
     req: Request,
     order_agent: Agent,
@@ -47,7 +47,7 @@ async def process_order(
     queue_name="orders",
     connection="AzureWebJobsStorage",
 )
-@app.agent(arg_name="order_agent", agent_name="order-fulfillment")
+@app.markdown_agent(arg_name="order_agent", agent_name="order-fulfillment")
 async def process_order_event(
     message: func.QueueMessage,
     order_agent: Agent,

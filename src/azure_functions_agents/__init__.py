@@ -113,7 +113,7 @@ from .app import create_function_app  # noqa: E402
 from .bindings import (  # noqa: E402
     AiApp,
     DurableAiApp,
-    agent,
+    markdown_agent,
 )
 from .client_manager import (  # noqa: E402
     ClientManager,
@@ -142,11 +142,11 @@ __all__ = [
     "DurableAiApp",
     "MAFClientManager",
     "__version__",
-    "agent",
     "create_function_app",
     "create_sandbox_tools",
     "create_web_request_tools",
     "get_client_manager",
+    "markdown_agent",
     "resolve_config_dir",
     "run_agent",
     "run_agent_stream",

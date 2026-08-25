@@ -21,7 +21,7 @@ handling can take effect.
 
 The binding projection reads `name`, `description`, the markdown body, and its `substitute_variables` parsing control from `order-fulfillment.agent.md`. Model, timeout, tools, skills, MCP servers, and system tools come from app-level configuration and discovery.
 
-Functions using `agent` must be declared with `async def`. Each invocation receives its own entered Agent and may control sessions, options, middleware, streaming, and model-call timeout. The runtime closes the Agent when the handler exits; do not retain it beyond that invocation.
+Functions using `markdown_agent` must be declared with `async def`. Each invocation receives its own entered Agent and may control sessions, options, middleware, streaming, and model-call timeout. The runtime closes the Agent when the handler exits; do not retain it beyond that invocation.
 
 ## Run locally
 

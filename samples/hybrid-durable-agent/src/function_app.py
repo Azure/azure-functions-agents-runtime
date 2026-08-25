@@ -40,7 +40,7 @@ def prepare_order_activity(order: dict) -> dict[str, object]:
 
 
 @app.activity_trigger(input_name="order")
-@app.agent(
+@app.markdown_agent(
     arg_name="order_agent",
     agent_name="order-fulfillment",
 )
@@ -57,7 +57,7 @@ async def assess_order_activity(order: dict, order_agent: Agent) -> str:
 
 
 @app.activity_trigger(input_name="request")
-@app.agent(
+@app.markdown_agent(
     arg_name="order_agent",
     agent_name="order-fulfillment",
 )
