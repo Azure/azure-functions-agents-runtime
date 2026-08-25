@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -43,6 +42,16 @@ from .context import (
     _reset_workflow_task_context,
     _set_workflow_task_context,
     _workflow_task_idempotency_key,
+)
+from .retry import (
+    ActivityFailure,
+    ActivityFailureKind,
+    ActivityFailureOutcome,
+    ActivityOutcome,
+    PolicyActivityInputModel,
+    decide_retry,
+    handler_contract_failure,
+    validate_activity_result,
 )
 from .schema import (
     ECHO_TOOL_NAME,
@@ -99,118 +108,26 @@ class _SubAgentActivityInput(_ActivityInputBase):
 type _ActivityInput = _ToolActivityInput | _SubAgentActivityInput
 
 
-type _ActivityFailureKind = Literal[
-    "timeout",
-    "handler_transient",
-    "handler_terminal",
-    "execution_unknown",
-    "handler_contract",
-    "activity_infrastructure",
-    "authorization",
-]
-
-
-class _ActivityFailure(TypedDict):
-    error_code: str
-    error: str
-    kind: _ActivityFailureKind
-    retryable: bool
-    continuable: bool
-
-
-class _ActivitySuccessOutcome(TypedDict):
-    id: str
-    ok: Literal[True]
-    result: Any
-
-
-class _ActivityFailureOutcome(TypedDict):
-    id: str
-    ok: Literal[False]
-    failure: _ActivityFailure
-
-
-type _ActivityOutcome = _ActivitySuccessOutcome | _ActivityFailureOutcome
-
-
-def _policy_activity_context(task: Mapping[str, Any]) -> tuple[WorkflowTaskContext, float]:
+def _policy_activity_context(
+    task: Mapping[str, Any],
+) -> tuple[WorkflowTaskContext, float, EffectiveWorkflowTaskExecution]:
     """Validate persisted policy-aware Activity fields without repairing bad history."""
-    execution = task.get("execution")
-    if not isinstance(execution, dict) or set(execution) != {
-        "timeout_ms",
-        "max_attempts",
-        "retry_delays_ms",
-        "continue_on_error",
-        "timeout_source",
-        "retry_source",
-    }:
-        raise ValueError("malformed workflow task execution policy")
+    validated = PolicyActivityInputModel.model_validate(task)
+    execution = validated.execution.to_wire()
     timeout_ms = execution["timeout_ms"]
-    effective_attempts = execution["max_attempts"]
-    delays = execution["retry_delays_ms"]
-    if (
-        not isinstance(timeout_ms, int)
-        or isinstance(timeout_ms, bool)
-        or not 1_000 <= timeout_ms <= 600_000
-        or not isinstance(effective_attempts, int)
-        or isinstance(effective_attempts, bool)
-        or not 1 <= effective_attempts <= 5
-        or not isinstance(delays, list)
-        or len(delays) != effective_attempts - 1
-        or any(
-            not isinstance(delay, int)
-            or isinstance(delay, bool)
-            or not 0 <= delay <= 900_000
-            for delay in delays
-        )
-        or effective_attempts * timeout_ms + sum(delays) > 3_600_000
-        or not isinstance(execution["continue_on_error"], bool)
-        or execution["timeout_source"] not in {"decorator", "task", "runtime_default"}
-        or execution["retry_source"] not in {"decorator", "task", "runtime_default"}
-    ):
-        raise ValueError("malformed workflow task execution policy")
-
-    required = ("task_id", "node_instance_id", "attempt", "max_attempts", "idempotency_key")
-    if any(name not in task for name in required):
-        raise ValueError("malformed policy-aware workflow Activity input")
-    task_id = task["task_id"]
-    node_instance_id = task["node_instance_id"]
-    attempt = task["attempt"]
-    max_attempts = task["max_attempts"]
-    workflow_id = task.get("workflow_id")
-    activity_id = task.get("id")
-    idempotency_key = task["idempotency_key"]
-    if (
-        not isinstance(workflow_id, str)
-        or not workflow_id
-        or not isinstance(task_id, str)
-        or not task_id
-        or not isinstance(node_instance_id, str)
-        or not node_instance_id
-        or activity_id != node_instance_id
-        or not isinstance(attempt, int)
-        or isinstance(attempt, bool)
-        or not 1 <= attempt <= effective_attempts
-        or not isinstance(max_attempts, int)
-        or isinstance(max_attempts, bool)
-        or max_attempts != effective_attempts
-        or not isinstance(idempotency_key, str)
-        or idempotency_key
-        != _workflow_task_idempotency_key(workflow_id, node_instance_id)
-    ):
-        raise ValueError("malformed policy-aware workflow Activity input")
     deadline = datetime.now(UTC) + timedelta(milliseconds=timeout_ms)
     return (
         WorkflowTaskContext(
-            workflow_id=workflow_id,
-            task_id=task_id,
-            node_instance_id=node_instance_id,
-            attempt=attempt,
-            max_attempts=max_attempts,
-            idempotency_key=idempotency_key,
+            workflow_id=validated.workflow_id,
+            task_id=validated.task_id,
+            node_instance_id=validated.node_instance_id,
+            attempt=validated.attempt,
+            max_attempts=validated.max_attempts,
+            idempotency_key=validated.idempotency_key,
             deadline=deadline,
         ),
         timeout_ms / 1000,
+        execution,
     )
 
 
@@ -219,10 +136,10 @@ def _failure_outcome(
     *,
     error_code: str,
     error: str,
-    kind: _ActivityFailureKind,
+    kind: ActivityFailureKind,
     retryable: bool,
     continuable: bool,
-) -> _ActivityFailureOutcome:
+) -> ActivityFailureOutcome:
     return {
         "id": task_id,
         "ok": False,
@@ -243,11 +160,10 @@ async def _invoke_policy_handler(
     task: Mapping[str, Any],
     target: str,
     target_type: str = "tool",
-) -> _ActivityOutcome:
-    context, timeout = _policy_activity_context(task)
+) -> ActivityOutcome:
+    context, timeout, execution = _policy_activity_context(task)
     token = _set_workflow_task_context(context)
     task_id = str(task["id"])
-    execution = cast(Mapping[str, Any], task["execution"])
     telemetry_manager = workflow_task_activity_telemetry({
         "af.workflow_task.workflow_id": context.workflow_id,
         "af.workflow_task.task_id": context.task_id,
@@ -263,7 +179,7 @@ async def _invoke_policy_handler(
     telemetry = telemetry_manager.__enter__()
     telemetry_open = True
 
-    def finish(outcome: _ActivityOutcome) -> _ActivityOutcome:
+    def finish(outcome: ActivityOutcome) -> ActivityOutcome:
         if outcome["ok"]:
             kind = "success"
             error_code = None
@@ -273,18 +189,13 @@ async def _invoke_policy_handler(
             failure = outcome["failure"]
             kind = failure["kind"]
             error_code = failure["error_code"]
-            if (
-                failure["retryable"]
-                and context.attempt < context.max_attempts
-            ):
-                decision = "retry"
-                delay = execution["retry_delays_ms"][context.attempt - 1]
-            elif failure["continuable"] and execution["continue_on_error"]:
-                decision = "continue"
-                delay = None
-            else:
-                decision = "fail"
-                delay = None
+            disposition = decide_retry(
+                execution,
+                attempt=context.attempt,
+                failure=failure,
+            )
+            decision = disposition.action
+            delay = disposition.delay_ms
         telemetry.complete(
             outcome_kind=kind,
             error_code=error_code,
@@ -404,7 +315,7 @@ async def _invoke_handler_once(handler: Any, args: dict[str, Any]) -> Any:
     return result
 
 
-def _authorization_outcome(task_id: str) -> _ActivityFailureOutcome:
+def _authorization_outcome(task_id: str) -> ActivityFailureOutcome:
     return _failure_outcome(
         task_id,
         error_code="workflow_task_authorization",
@@ -415,26 +326,19 @@ def _authorization_outcome(task_id: str) -> _ActivityFailureOutcome:
     )
 
 
-def _handler_contract_outcome(task_id: str) -> _ActivityFailureOutcome:
-    return _failure_outcome(
-        task_id,
-        error_code="workflow_task_handler_contract",
-        error="Task Activity returned an invalid outcome.",
-        kind="handler_contract",
-        retryable=False,
-        continuable=False,
-    )
+def _handler_contract_outcome(task_id: str) -> ActivityFailureOutcome:
+    return {"id": task_id, "ok": False, "failure": handler_contract_failure()}
 
 
 def _validate_policy_activity_input(
     task: Mapping[str, Any],
     *,
     target_type: str,
-) -> _ActivityFailureOutcome | None:
+) -> ActivityFailureOutcome | None:
     try:
         _policy_activity_context(task)
     except (KeyError, TypeError, ValueError):
-        logger.exception(
+        logger.error(
             "malformed policy-aware workflow Activity input: target_type=%s",
             target_type,
         )
@@ -450,7 +354,7 @@ def _early_policy_outcome_with_telemetry(
     *,
     target_type: str,
     target_name: Any,
-    outcome: _ActivityFailureOutcome,
+    outcome: ActivityFailureOutcome,
 ) -> dict[str, Any]:
     execution = task.get("execution")
     execution_map = execution if isinstance(execution, Mapping) else {}
@@ -752,19 +656,6 @@ type _InstanceState = Literal[
 ]
 type _InstanceKind = Literal["activity", "timer", "retry_timer"]
 
-_ACTIVITY_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-_ACTIVITY_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-_ACTIVITY_WHITESPACE_RE = re.compile(r"\s+")
-_FAILURE_CLASSIFICATION: dict[_ActivityFailureKind, tuple[bool, bool]] = {
-    "timeout": (True, True),
-    "handler_transient": (True, True),
-    "activity_infrastructure": (True, True),
-    "handler_terminal": (False, True),
-    "execution_unknown": (False, True),
-    "handler_contract": (False, False),
-    "authorization": (False, False),
-}
-
 
 class _MaterializedInstance(TypedDict):
     logical_id: str
@@ -778,60 +669,9 @@ class _MaterializedInstance(TypedDict):
     execution: NotRequired[EffectiveWorkflowTaskExecution]
     attempt: NotRequired[int]
     idempotency_key: NotRequired[str]
-    last_failure: NotRequired[_ActivityFailure]
+    last_failure: NotRequired[ActivityFailure]
     retry_deadline: NotRequired[str]
     retry_ready: NotRequired[bool]
-
-
-def _validated_policy_activity_result(
-    instance: _MaterializedInstance,
-    raw: Any,
-) -> tuple[bool, Any | _ActivityFailure]:
-    if not isinstance(raw, dict) or raw.get("id") != instance["instance_id"]:
-        return False, _handler_contract_outcome(instance["instance_id"])["failure"]
-    if raw.get("ok") is True:
-        if set(raw) != {"id", "ok", "result"}:
-            return False, _handler_contract_outcome(instance["instance_id"])["failure"]
-        return True, raw["result"]
-    if raw.get("ok") is not False or set(raw) != {"id", "ok", "failure"}:
-        return False, _handler_contract_outcome(instance["instance_id"])["failure"]
-    failure = raw["failure"]
-    if not isinstance(failure, dict) or set(failure) != {
-        "error_code",
-        "error",
-        "kind",
-        "retryable",
-        "continuable",
-    }:
-        return False, _handler_contract_outcome(instance["instance_id"])["failure"]
-    error_code = failure["error_code"]
-    error = failure["error"]
-    kind = failure["kind"]
-    retryable = failure["retryable"]
-    continuable = failure["continuable"]
-    normalized_error = (
-        _ACTIVITY_WHITESPACE_RE.sub(
-            " ",
-            _ACTIVITY_CONTROL_RE.sub(" ", error),
-        ).strip()
-        if isinstance(error, str)
-        else None
-    )
-    if (
-        not isinstance(error_code, str)
-        or _ACTIVITY_ERROR_CODE_RE.fullmatch(error_code) is None
-        or not isinstance(error, str)
-        or not error
-        or len(error) > 256
-        or normalized_error != error
-        or not isinstance(kind, str)
-        or kind not in _FAILURE_CLASSIFICATION
-        or type(retryable) is not bool
-        or type(continuable) is not bool
-        or (retryable, continuable) != _FAILURE_CLASSIFICATION[kind]
-    ):
-        return False, _handler_contract_outcome(instance["instance_id"])["failure"]
-    return False, cast(_ActivityFailure, failure)
 
 
 @dataclass
@@ -1409,6 +1249,15 @@ def _collect_runnable_instances(
     return pending[:MAX_PARALLELISM]
 
 
+def _prepare_dynamic_attempt(instance: _MaterializedInstance) -> None:
+    """Advance the explicit runtime attempt before Activity dispatch."""
+    if instance.get("retry_ready"):
+        instance["attempt"] += 1
+        instance.pop("retry_ready", None)
+    elif "execution" in instance:
+        instance["attempt"] = 1
+
+
 def _dispatch_dynamic_wave(
     context: df.DurableOrchestrationContext,
     state: _DynamicWorkflowState,
@@ -1418,11 +1267,7 @@ def _dispatch_dynamic_wave(
     for instance in wave:
         logical_id = instance["logical_id"]
         task = state.by_id[logical_id]
-        if instance.get("retry_ready"):
-            instance["attempt"] += 1
-            instance.pop("retry_ready", None)
-        elif "execution" in instance:
-            instance["attempt"] = 1
+        _prepare_dynamic_attempt(instance)
         if task["type"] == TOOL_TASK_TYPE:
             if task["tool"] not in state.allowed_tools:
                 raise RuntimeError(
@@ -1498,6 +1343,37 @@ def _dispatch_dynamic_wave(
     return wave_tasks
 
 
+def _mark_dynamic_retry_wait(
+    context: df.DurableOrchestrationContext,
+    state: _DynamicWorkflowState,
+    instance: _MaterializedInstance,
+    *,
+    delay_ms: int,
+) -> None:
+    """Persist the next explicit retry deadline without creating its Durable timer."""
+    retry_deadline = context.current_utc_datetime + timedelta(milliseconds=delay_ms)
+    instance["retry_deadline"] = retry_deadline.isoformat()
+    instance["state"] = "retry_wait"
+    state.logical_state[instance["logical_id"]] = (
+        "retry_wait" if instance["index"] is None else "running"
+    )
+
+
+def _mark_dynamic_continued_failure(
+    instance: _MaterializedInstance,
+    failure: ActivityFailure,
+) -> None:
+    """Materialize the existing sanitized continued-failure result."""
+    instance["result"] = {
+        "failed": True,
+        "error_code": failure["error_code"],
+        "error": failure["error"],
+        "kind": failure["kind"],
+        "attempts": instance["attempt"],
+    }
+    instance["state"] = "failed_continued"
+
+
 def _cancel_dynamic_wave_timers(
     wave: list[_MaterializedInstance],
     wave_tasks: list[Any],
@@ -1535,7 +1411,7 @@ def _apply_dynamic_wave_results(
     wave: list[_MaterializedInstance],
     wave_results: list[Any],
 ) -> dict[str, Any] | None:
-    failures: list[tuple[_MaterializedInstance, _ActivityFailure]] = []
+    failures: list[tuple[_MaterializedInstance, ActivityFailure]] = []
     ordered = sorted(
         zip(wave, wave_results, strict=True),
         key=lambda pair: (
@@ -1560,7 +1436,7 @@ def _apply_dynamic_wave_results(
             instance["state"] = "completed"
         else:
             if isinstance(raw, BaseException):
-                failure: _ActivityFailure | None = {
+                failure: ActivityFailure | None = {
                     "error_code": "workflow_task_activity_infrastructure",
                     "error": "Task Activity failed before returning an outcome.",
                     "kind": "activity_infrastructure",
@@ -1568,37 +1444,38 @@ def _apply_dynamic_wave_results(
                     "continuable": True,
                 }
             else:
-                succeeded, outcome = _validated_policy_activity_result(instance, raw)
+                succeeded, outcome = validate_activity_result(
+                    instance["instance_id"],
+                    raw,
+                )
                 if succeeded:
                     instance["result"] = outcome
                     instance["state"] = "completed"
                     failure = None
                 else:
-                    failure = cast(_ActivityFailure, outcome)
+                    failure = cast(ActivityFailure, outcome)
             if failure is not None:
                 instance["last_failure"] = failure
                 execution = instance["execution"]
                 attempt = instance["attempt"]
-                if failure["retryable"] and attempt < execution["max_attempts"]:
-                    delay_ms = execution["retry_delays_ms"][attempt - 1]
-                    retry_deadline = context.current_utc_datetime + timedelta(
-                        milliseconds=delay_ms
-                    )
-                    instance["retry_deadline"] = retry_deadline.isoformat()
-                    instance["state"] = "retry_wait"
-                    state.logical_state[instance["logical_id"]] = (
-                        "retry_wait" if instance["index"] is None else "running"
+                disposition = decide_retry(
+                    execution,
+                    attempt=attempt,
+                    failure=failure,
+                )
+                if disposition.action == "retry":
+                    delay_ms = disposition.delay_ms
+                    if delay_ms is None:
+                        raise RuntimeError("retry disposition is missing its delay")
+                    _mark_dynamic_retry_wait(
+                        context,
+                        state,
+                        instance,
+                        delay_ms=delay_ms,
                     )
                     continue
-                if failure["continuable"] and execution["continue_on_error"]:
-                    instance["result"] = {
-                        "failed": True,
-                        "error_code": failure["error_code"],
-                        "error": failure["error"],
-                        "kind": failure["kind"],
-                        "attempts": attempt,
-                    }
-                    instance["state"] = "failed_continued"
+                if disposition.action == "continue":
+                    _mark_dynamic_continued_failure(instance, failure)
                 else:
                     instance["state"] = "failed"
                     state.logical_state[instance["logical_id"]] = "failed"

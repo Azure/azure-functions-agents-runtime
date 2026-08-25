@@ -429,6 +429,88 @@ async def test_policy_tool_rejects_malformed_effective_input() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing_execution_field",
+        "extra_execution_field",
+        "retry_delay_count",
+        "retry_delay_bool",
+        "retry_delay_range",
+        "elapsed_limit",
+        "timeout_source",
+        "retry_source",
+        "activity_id",
+        "empty_task_id",
+        "attempt_range",
+        "maximum_attempts",
+        "idempotency_key",
+    ],
+)
+async def test_policy_tool_rejects_every_malformed_boundary_invariant(case: str) -> None:
+    payload = _policy_activity_payload()
+    execution = payload["execution"]
+    if case == "missing_execution_field":
+        execution.pop("retry_source")
+    elif case == "extra_execution_field":
+        execution["unknown"] = True
+    elif case == "retry_delay_count":
+        execution["retry_delays_ms"] = [100]
+    elif case == "retry_delay_bool":
+        execution["max_attempts"] = 2
+        payload["max_attempts"] = 2
+        execution["retry_delays_ms"] = [True]
+    elif case == "retry_delay_range":
+        execution["max_attempts"] = 2
+        payload["max_attempts"] = 2
+        execution["retry_delays_ms"] = [900_001]
+    elif case == "elapsed_limit":
+        execution["timeout_ms"] = 600_000
+        execution["max_attempts"] = 5
+        payload["max_attempts"] = 5
+        execution["retry_delays_ms"] = [200_000] * 4
+    elif case == "timeout_source":
+        execution["timeout_source"] = "forged"
+    elif case == "retry_source":
+        execution["retry_source"] = "forged"
+    elif case == "activity_id":
+        payload["id"] = "another-node"
+    elif case == "empty_task_id":
+        payload["task_id"] = ""
+    elif case == "attempt_range":
+        payload["attempt"] = 2
+    elif case == "maximum_attempts":
+        payload["max_attempts"] = 2
+    elif case == "idempotency_key":
+        payload["idempotency_key"] = "forged"
+
+    outcome = await _policy_tool_activity(lambda args: args)(payload)
+
+    assert outcome["failure"] == {
+        "error_code": "workflow_task_handler_contract",
+        "error": "Task Activity returned an invalid outcome.",
+        "kind": "handler_contract",
+        "retryable": False,
+        "continuable": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_policy_boundary_validation_does_not_log_input_values(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    payload = _policy_activity_payload()
+    payload["id"] = "another-node"
+    payload["args"] = {"api_key": "SUPER_SECRET"}
+
+    outcome = await _policy_tool_activity(lambda args: args)(payload)
+
+    assert outcome["failure"]["kind"] == "handler_contract"
+    assert "SUPER_SECRET" not in caplog.text
+    assert "api_key" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_sub_agent_activity_uses_catalog_timeout_and_result_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
