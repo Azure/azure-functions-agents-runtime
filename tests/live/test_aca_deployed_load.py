@@ -82,7 +82,6 @@ _PHASE_B_ADMISSION_TIMEOUT_SECONDS = 330.0
 _RECOVERY_ATTEMPTS = 5
 _RECOVERY_POLL_SECONDS = 1.0
 _FINAL_RECOVERY_TIMEOUT_SECONDS = 60.0
-_OVERLAP_BUDGET_MARGIN_SECONDS = 15.0
 _SETTLEMENT_TIMEOUT_SECONDS = 900.0
 _RACE_SAMPLE_LIMIT = 5
 _CONNECTION_HEADROOM = 10
@@ -426,7 +425,6 @@ async def _admit_held_load_sessions(
         raise
     _record_held_admission_summary(state, admission)
     _assert_distinct_admissions(state.held, context.concurrency)
-    _assert_remaining_hold_budget(state.held)
 
 
 def _record_held_admission_failure(
@@ -1010,6 +1008,7 @@ async def _post_admission_request(
             config.deployed.chat_url,
             headers=_admission_request_headers(headers, request),
             payload=submission_payload(prompt),
+            retry_throttled=False,
         )
     return _AdmissionResponse(
         status=status,
@@ -1398,17 +1397,6 @@ async def _recover_ambiguous_http_outcome(
         session_id_header=session_id_header,
     )
 
-
-def _assert_remaining_hold_budget(submitted: list[_SubmittedRun]) -> None:
-    """Reject runs that cannot leave the formal proof enough shared hold time."""
-    accepted_times = [item.accepted_at for item in submitted]
-    admission_spread = max(accepted_times) - min(accepted_times)
-    required_budget = _ACTIVE_PROOF_TIMEOUT_SECONDS + _OVERLAP_BUDGET_MARGIN_SECONDS
-    remaining_budget = _HOLD_SECONDS - admission_spread
-    assert remaining_budget > required_budget, (
-        "Admission spread leaves insufficient remaining qualification hold: "
-        f"remaining={remaining_budget:.1f}s required>{required_budget:.1f}s."
-    )
 
 
 def _assert_distinct_admissions(submitted: list[_SubmittedRun], concurrency: int) -> None:

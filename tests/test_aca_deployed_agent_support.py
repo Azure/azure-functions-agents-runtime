@@ -206,3 +206,252 @@ class TestSseReaderRetryLoop:
             headers={"Authorization": "Bearer x", "Last-Event-ID": "3"},
         )
         assert [h.get("Last-Event-ID") for h in session.request_headers] == ["3", "3"]
+
+
+# ---------------------------------------------------------------------------
+# json_request throttle-retry tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeJsonResponse:
+    """One aiohttp-shaped response for json_request faking."""
+
+    def __init__(self, status: int, headers: dict[str, str], body: dict[str, object]) -> None:
+        self.status = status
+        self.headers = headers
+        self._body = body
+
+    async def __aenter__(self) -> _FakeJsonResponse:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+    async def json(self, content_type: object = None) -> dict[str, object]:
+        return self._body
+
+    async def read(self) -> bytes:
+        import json as _json
+
+        return _json.dumps(self._body).encode()
+
+
+class _FakeJsonSession:
+    """Serve scripted JSON responses and record requests made."""
+
+    def __init__(self, responses: list[_FakeJsonResponse]) -> None:
+        self._responses = list(responses)
+        self.requests: list[tuple[str, str]] = []
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: object = None,
+        json: object = None,
+    ) -> _FakeJsonResponse:
+        self.requests.append((method, url))
+        return self._responses.pop(0)
+
+
+class TestJsonRequestThrottleRetry:
+    """Cover the json_request retry loop for transient backpressure."""
+
+    @pytest.fixture(autouse=True)
+    def _no_real_sleeping(self, monkeypatch: pytest.MonkeyPatch) -> list[float]:
+        slept: list[float] = []
+
+        async def _record(seconds: float) -> None:
+            slept.append(seconds)
+
+        monkeypatch.setattr(support.asyncio, "sleep", _record)
+        self.slept = slept
+        return slept
+
+    @pytest.mark.asyncio
+    async def test_503_with_valid_retry_after_then_200_succeeds(self) -> None:
+        """A single transient 503 with Retry-After is retried and the success returned."""
+        session = _FakeJsonSession(
+            [
+                _FakeJsonResponse(503, {"Retry-After": "5"}, {}),
+                _FakeJsonResponse(200, {}, {"result": "ok"}),
+            ]
+        )
+        status, body, _headers = await support.json_request(
+            session,  # type: ignore[arg-type]
+            "GET",
+            "https://example.invalid/status",
+        )
+        assert status == 200
+        assert body == {"result": "ok"}
+        assert self.slept == [5.0], "must sleep exactly the server-requested delay"
+        assert len(session.requests) == 2
+
+    @pytest.mark.asyncio
+    async def test_503_exhausts_all_attempts_returns_last_response(self) -> None:
+        """When all attempts are throttled, the last 503 is returned (not raised)."""
+        responses = [
+            _FakeJsonResponse(503, {"Retry-After": "1"}, {"error": "busy"})
+            for _ in range(support._JSON_THROTTLE_MAX_ATTEMPTS)
+        ]
+        session = _FakeJsonSession(responses)
+        status, body, _ = await support.json_request(
+            session,  # type: ignore[arg-type]
+            "GET",
+            "https://example.invalid/status",
+        )
+        assert status == 503
+        assert body == {"error": "busy"}
+        assert len(session.requests) == support._JSON_THROTTLE_MAX_ATTEMPTS
+        assert len(self.slept) == support._JSON_THROTTLE_MAX_ATTEMPTS - 1
+
+    @pytest.mark.asyncio
+    async def test_429_handled_same_as_503(self) -> None:
+        session = _FakeJsonSession(
+            [
+                _FakeJsonResponse(429, {"Retry-After": "3"}, {}),
+                _FakeJsonResponse(200, {}, {"ok": True}),
+            ]
+        )
+        status, _body, _ = await support.json_request(
+            session,  # type: ignore[arg-type]
+            "GET",
+            "https://example.invalid/status",
+        )
+        assert status == 200
+        assert self.slept == [3.0]
+
+    @pytest.mark.asyncio
+    async def test_504_setup_deadline_exceeded_is_not_retried(self) -> None:
+        """504 with setup_deadline_exceeded is a meaningful assertion target."""
+        session = _FakeJsonSession(
+            [
+                _FakeJsonResponse(
+                    504,
+                    {"Retry-After": "120"},
+                    {"error": "setup_deadline_exceeded"},
+                ),
+            ]
+        )
+        status, body, _ = await support.json_request(
+            session,  # type: ignore[arg-type]
+            "GET",
+            "https://example.invalid/status",
+        )
+        assert status == 504
+        assert body["error"] == "setup_deadline_exceeded"
+        assert len(session.requests) == 1
+        assert self.slept == []
+
+    @pytest.mark.asyncio
+    async def test_500_is_not_retried(self) -> None:
+        session = _FakeJsonSession([_FakeJsonResponse(500, {"Retry-After": "2"}, {})])
+        status, _, _ = await support.json_request(
+            session,  # type: ignore[arg-type]
+            "GET",
+            "https://example.invalid/status",
+        )
+        assert status == 500
+        assert len(session.requests) == 1
+        assert self.slept == []
+
+    @pytest.mark.asyncio
+    async def test_404_is_not_retried(self) -> None:
+        session = _FakeJsonSession([_FakeJsonResponse(404, {}, {})])
+        status, _, _ = await support.json_request(
+            session,  # type: ignore[arg-type]
+            "GET",
+            "https://example.invalid/status",
+        )
+        assert status == 404
+        assert len(session.requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_409_is_not_retried(self) -> None:
+        session = _FakeJsonSession([_FakeJsonResponse(409, {}, {})])
+        status, _, _ = await support.json_request(
+            session,  # type: ignore[arg-type]
+            "GET",
+            "https://example.invalid/status",
+        )
+        assert status == 409
+        assert len(session.requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_retry_after_on_503_is_not_retried(self) -> None:
+        """No Retry-After means no server backpressure signal — do not invent one."""
+        session = _FakeJsonSession([_FakeJsonResponse(503, {}, {"error": "busy"})])
+        status, _, _ = await support.json_request(
+            session,  # type: ignore[arg-type]
+            "GET",
+            "https://example.invalid/status",
+        )
+        assert status == 503
+        assert len(session.requests) == 1
+        assert self.slept == []
+
+    @pytest.mark.asyncio
+    async def test_malformed_retry_after_on_503_is_not_retried(self) -> None:
+        session = _FakeJsonSession(
+            [_FakeJsonResponse(503, {"Retry-After": "abc"}, {})]
+        )
+        status, _, _ = await support.json_request(
+            session,  # type: ignore[arg-type]
+            "GET",
+            "https://example.invalid/status",
+        )
+        assert status == 503
+        assert len(session.requests) == 1
+        assert self.slept == []
+
+    @pytest.mark.asyncio
+    async def test_out_of_range_retry_after_on_503_is_not_retried(self) -> None:
+        session = _FakeJsonSession(
+            [_FakeJsonResponse(503, {"Retry-After": "999"}, {})]
+        )
+        status, _, _ = await support.json_request(
+            session,  # type: ignore[arg-type]
+            "GET",
+            "https://example.invalid/status",
+        )
+        assert status == 503
+        assert len(session.requests) == 1
+        assert self.slept == []
+
+    @pytest.mark.asyncio
+    async def test_retry_disabled_returns_503_immediately(self) -> None:
+        """Callers with their own retry logic can opt out."""
+        session = _FakeJsonSession(
+            [_FakeJsonResponse(503, {"Retry-After": "5"}, {"error": "busy"})]
+        )
+        status, _body, _ = await support.json_request(
+            session,  # type: ignore[arg-type]
+            "GET",
+            "https://example.invalid/status",
+            retry_throttled=False,
+        )
+        assert status == 503
+        assert len(session.requests) == 1
+        assert self.slept == []
+
+    def test_max_attempts_constant_is_bounded(self) -> None:
+        """Guard: attempt limit is positive and not accidentally huge."""
+        assert 2 <= support._JSON_THROTTLE_MAX_ATTEMPTS <= 10
+
+
+def test_json_retry_budget_cannot_exhaust_a_caller_deadline() -> None:
+    """Bound the retry budget itself, not just the loop that spends it.
+
+    The sleep is patched out in every other retry test, so nothing else notices
+    if the ceiling grows. Every 503 this service emits asks for two seconds, so
+    a ten second cap is generous; admitting the 120 second setup-timeout value
+    here would let one request sleep for minutes and exhaust the very budgets
+    these suites stopped asserting on.
+    """
+    worst_case = (
+        support._JSON_THROTTLE_MAX_ATTEMPTS - 1
+    ) * support._JSON_THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS
+    assert worst_case <= 30.0, (
+        f"json_request can now sleep {worst_case}s across its retries."
+    )

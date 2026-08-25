@@ -37,6 +37,14 @@ _SSE_THROTTLE_MAX_ATTEMPTS = 4
 _SSE_THROTTLE_STATUSES = frozenset({429, 503})
 _SSE_THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS = 10.0
 
+_JSON_THROTTLE_MAX_ATTEMPTS = 4
+_JSON_THROTTLE_STATUSES = frozenset({429, 503})
+# Every 503 this service emits asks for two seconds; ten leaves headroom without
+# admitting a wait long enough to exhaust a caller's own budget. The 120-second
+# Retry-After belongs to the 504 setup-timeout path, which is a real outcome
+# these suites assert on and is deliberately not retried here.
+_JSON_THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS = 10.0
+
 
 class _TokenCredential(Protocol):
     async def get_token(self, *scopes: str) -> object: ...
@@ -381,17 +389,38 @@ async def json_request(
     *,
     headers: Mapping[str, str] | None = None,
     payload: dict[str, object] | None = None,
+    retry_throttled: bool = True,
 ) -> tuple[int, dict[str, object], Mapping[str, str]]:
     """Make one public JSON request without logging prompt, result, or credentials."""
 
-    try:
-        async with session.request(method, url, headers=headers, json=payload) as response:
-            return response.status, await _json_body(response), dict(response.headers)
-    except (TimeoutError, OSError) as exc:
-        raise AcaSmokeEnvironmentError(
-            f"Function App was unavailable at {redact_deployed_aca_evidence(url)}: "
-            f"{type(exc).__name__}"
-        ) from exc
+    for attempt in range(1, _JSON_THROTTLE_MAX_ATTEMPTS + 1):
+        try:
+            async with session.request(method, url, headers=headers, json=payload) as response:
+                status = response.status
+                body = await _json_body(response)
+                resp_headers: Mapping[str, str] = dict(response.headers)
+        except (TimeoutError, OSError) as exc:
+            raise AcaSmokeEnvironmentError(
+                f"Function App was unavailable at {redact_deployed_aca_evidence(url)}: "
+                f"{type(exc).__name__}"
+            ) from exc
+
+        if not retry_throttled:
+            return status, body, resp_headers
+        if status not in _JSON_THROTTLE_STATUSES:
+            return status, body, resp_headers
+        is_final = attempt == _JSON_THROTTLE_MAX_ATTEMPTS
+        if is_final:
+            return status, body, resp_headers
+        delay = optional_retry_after_seconds(
+            resp_headers, maximum_seconds=_JSON_THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS
+        )
+        if delay is None:
+            return status, body, resp_headers
+        await asyncio.sleep(delay)
+
+    # Unreachable — the loop always returns.
+    raise AssertionError("unreachable")
 
 
 async def read_sse_events(
@@ -710,6 +739,7 @@ async def _json_body(response: ClientResponse) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise AssertionError("Expected a JSON object response.")
     return payload
+
 
 
 

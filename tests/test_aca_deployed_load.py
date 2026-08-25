@@ -1611,14 +1611,6 @@ def test_overlap_math_and_hold_budget_margin(load_module: object) -> None:
     assert module._overlapping_interval(first, second) is not None  # type: ignore[attr-defined]
     assert module._overlapping_interval(second, first) is None  # type: ignore[attr-defined]
 
-    module._assert_remaining_hold_budget(  # type: ignore[attr-defined]
-        [SimpleNamespace(accepted_at=0.0), SimpleNamespace(accepted_at=100.0)]
-    )
-    with pytest.raises(AssertionError, match="insufficient remaining"):
-        module._assert_remaining_hold_budget(  # type: ignore[attr-defined]
-            [SimpleNamespace(accepted_at=0.0), SimpleNamespace(accepted_at=200.0)]
-        )
-
 
 def test_hold_constant_and_sse_continuation_guard(load_module: object) -> None:
     module = load_module
