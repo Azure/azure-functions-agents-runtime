@@ -19,6 +19,7 @@ from azure_functions_agents.controller.http import (
 from azure_functions_agents.controller.idempotency import IdempotencyResultUnavailableError
 from azure_functions_agents.controller.readiness import (
     SessionActivationAuthorizationError,
+    SessionActivationConflictError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
     SessionRuntimeBinding,
@@ -1031,3 +1032,48 @@ async def test_permanent_arm_status_is_not_reported_as_retryable(
             respond_async=True,
             budget=_expired_budget(),
         )
+
+
+@pytest.mark.asyncio
+async def test_invalid_state_resume_409_produces_structured_response_not_untyped_500() -> None:
+    """A sandbox invalid-state error must become a structured 409, not an unparseable 500."""
+    backend = FakeBackend(_status())
+    backend.raise_on_start = SessionActivationConflictError(
+        "sandbox_invalid_state"
+    )
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 409
+    assert response.body == {
+        "error": "sandbox_invalid_state",
+        "reason": "sandbox_invalid_state",
+    }
+    # No provider payload leaks into the structured response.
+    body_text = str(response.body)
+    assert "traceId" not in body_text
+    assert "requestId" not in body_text
+    assert "sandboxGroups" not in body_text
+
+
+@pytest.mark.asyncio
+async def test_invalid_state_on_get_run_produces_structured_409() -> None:
+    """The get_run path also catches conflict errors as structured 409."""
+    backend = FakeBackend(_status())
+    backend.raise_on_get = SessionActivationConflictError(
+        "sandbox_invalid_state"
+    )
+
+    response = await read_result(backend, RunContext(run_id="run-1", session_id="session-1"))  # type: ignore[arg-type]
+
+    assert response.status_code == 409
+    assert response.body == {
+        "error": "sandbox_invalid_state",
+        "reason": "sandbox_invalid_state",
+    }

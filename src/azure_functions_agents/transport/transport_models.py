@@ -39,6 +39,10 @@ class SandboxCreateOutcomeUnknownError(SandboxProvisioningError):
     """A create was accepted but its durable outcome cannot yet be reconciled."""
 
 
+class SandboxInvalidStateError(SandboxProvisioningError):
+    """Raised when a sandbox lifecycle operation is rejected due to an incompatible state."""
+
+
 class SandboxGroupBindingError(SandboxTransportError):
     """Raised when a configured, persisted, ARM, or live group binding disagrees."""
 

@@ -90,6 +90,7 @@ from ..transport.transport_models import (
     SandboxGroupAuthorizationError,
     SandboxGroupBinding,
     SandboxGroupTransientError,
+    SandboxInvalidStateError,
     SandboxLifecyclePolicy,
     SandboxProvisioningLabels,
 )
@@ -201,6 +202,10 @@ class SessionActivationAuthorizationError(SessionActivationError):
 
 class SessionActivationTransientError(SessionActivationError):
     """A transient infrastructure failure prevents activation right now (retryable)."""
+
+
+class SessionActivationConflictError(SessionActivationError):
+    """The sandbox is in a state that does not permit the requested lifecycle operation."""
 
 
 class SessionCreationUnavailableError(SessionActivationError):
@@ -634,6 +639,9 @@ async def _activate_existing_session(
     except SandboxGroupAuthorizationError:
         await _close_handle_if_open(handle)
         raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
+    except SandboxInvalidStateError as exc:
+        await _close_handle_if_open(handle)
+        raise SessionActivationConflictError(str(exc)) from None
     except SandboxManifestMismatchError:
         await _quarantine_detected_binding(
             store,

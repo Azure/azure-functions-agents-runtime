@@ -38,6 +38,7 @@ from .budget import RequestBudget, RunDeadlineExceededError
 from .idempotency import IdempotencyResultUnavailableError
 from .readiness import (
     SessionActivationAuthorizationError,
+    SessionActivationConflictError,
     SessionActivationGoneError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
@@ -173,6 +174,8 @@ async def _start_run_or_response(
         return _sandbox_group_authorization_response()
     except SessionActivationTransientError:
         return _sandbox_group_transient_response()
+    except SessionActivationConflictError:
+        return _sandbox_invalid_state_response()
     except LinkedActiveRunConflictError as exc:
         return _linked_active_run_response(
             agent_slug,
@@ -234,6 +237,8 @@ async def read_status(
         return _sandbox_group_authorization_response()
     except SessionActivationTransientError:
         return _sandbox_group_transient_response()
+    except SessionActivationConflictError:
+        return _sandbox_invalid_state_response()
 
 
 async def read_result(
@@ -257,6 +262,8 @@ async def read_result(
         return _sandbox_group_authorization_response()
     except SessionActivationTransientError:
         return _sandbox_group_transient_response()
+    except SessionActivationConflictError:
+        return _sandbox_invalid_state_response()
     if (
         status.error is not None
         and status.error.code == SESSION_TOMBSTONED_ERROR_CODE
@@ -307,6 +314,8 @@ async def cancel_run(
         return _sandbox_group_authorization_response()
     except SessionActivationTransientError:
         return _sandbox_group_transient_response()
+    except SessionActivationConflictError:
+        return _sandbox_invalid_state_response()
 
 
 def status_payload(status: RunStatus) -> dict[str, object]:
@@ -445,6 +454,19 @@ def _sandbox_group_transient_response() -> ControllerResponse:
             "reason": _SANDBOX_GROUP_TRANSIENT_ERROR_CODE,
         },
         headers={"Retry-After": str(_SANDBOX_GROUP_TRANSIENT_RETRY_AFTER_SECONDS)},
+    )
+
+
+_SANDBOX_INVALID_STATE_ERROR_CODE = "sandbox_invalid_state"
+
+
+def _sandbox_invalid_state_response() -> ControllerResponse:
+    return ControllerResponse(
+        status_code=409,
+        body={
+            "error": _SANDBOX_INVALID_STATE_ERROR_CODE,
+            "reason": _SANDBOX_INVALID_STATE_ERROR_CODE,
+        },
     )
 
 
