@@ -352,6 +352,11 @@ a.card:hover { text-decoration: none; }
 /* Standalone subscription picker (works outside a .toolbar too). */
 .sub-picker { display: inline-flex; align-items: center; gap: 8px; }
 .sub-picker-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); }
+.sub-picker-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: 6px; }
+.sub-picker-retry { width: 34px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
+  color: var(--brand-dark); font: 700 17px/1 inherit; cursor: pointer; }
+.sub-picker-retry:hover { border-color: var(--brand); background: var(--brand-soft); }
+.sub-picker-retry:disabled { color: var(--text-faint); cursor: wait; }
 .sub-picker select { background: var(--surface); color: var(--text); font-size: 13px;
   border: 1px solid var(--border-strong); border-radius: 6px; padding: 7px 10px; max-width: 320px;
   cursor: pointer; font-family: inherit; }
@@ -557,6 +562,7 @@ textarea.instructions-editor:focus { outline: none; }
   border-radius: 8px; background: var(--surface); }
 .skill-aside-card h3 { margin: 0; color: var(--text-faint); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
 .skill-aside-card > strong { font-size: 14px; }
+.skill-aside-card > .badge { align-self: flex-start; margin-top: 2px; }
 .skill-aside-card > .mono { font-size: 12px; overflow-wrap: anywhere; }
 .skill-aside-card dl { margin: 0; }
 .skill-aside-card dl > div { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; font-size: 13px; }
@@ -573,6 +579,67 @@ textarea.instructions-editor:focus { outline: none; }
 .trigger-summary-card h3 { margin: 0 0 4px; font-size: 14px; }
 .trigger-summary-card p { margin: 0; color: var(--text-muted); font-size: 12.5px; }
 .trigger-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; background: var(--surface); color: var(--brand-dark); font-weight: 700; }
+.trigger-editor { max-width: 900px; padding: 18px; }
+.trigger-editor-head { display: flex; align-items: start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.trigger-editor-head h3 { margin: 0 0 4px; font-size: 16px; }
+.trigger-editor-head p { margin: 0; color: var(--text-muted); font-size: 12.5px; }
+.trigger-mode-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 18px; }
+.trigger-mode-picker button { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 10px;
+  min-height: 76px; padding: 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface);
+  color: var(--text-muted); font: inherit; text-align: left; cursor: pointer; }
+.trigger-mode-picker button.active { border-color: var(--brand); background: var(--brand-soft); color: var(--brand-dark); box-shadow: inset 0 0 0 1px var(--brand); }
+.trigger-mode-picker button:disabled { cursor: wait; opacity: .65; }
+.trigger-mode-picker strong, .trigger-mode-picker small { display: block; }
+.trigger-mode-picker strong { margin-bottom: 4px; color: var(--text); font-size: 13.5px; }
+.trigger-mode-picker small { font-size: 12px; line-height: 1.35; }
+.trigger-form-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(150px, 1fr) minmax(150px, 1fr); gap: 12px; }
+.timer-trigger-form { display: grid; gap: 2px; }
+.schedule-option { min-height: 38px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--text); font: 600 12px/1.3 inherit; cursor: pointer; }
+.schedule-option:hover { border-color: var(--brand); }
+.schedule-option.active { border-color: var(--brand); background: var(--brand-soft); color: var(--brand-dark); }
+.schedule-option:disabled { cursor: wait; opacity: .65; }
+.trigger-editor .gh-err, .trigger-editor .note.ok { margin-top: 14px; }
+.trigger-editor-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+.otel-panel { max-width: 1100px; }
+.otel-panel-head { align-items: center; }
+.otel-controls { display: flex; align-items: center; gap: 10px; }
+.otel-summary { display: flex; flex-wrap: wrap; gap: 18px; margin-bottom: 14px; padding: 10px 12px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--text-muted); font-size: 12.5px; }
+.otel-summary strong { color: var(--text); }
+.otel-span-list { border: 1px solid var(--border); border-radius: 7px; overflow: hidden; background: var(--surface); }
+.otel-span + .otel-span { border-top: 1px solid var(--border); }
+.otel-span summary { display: grid; grid-template-columns: auto minmax(220px, 1fr) minmax(110px, auto) 80px;
+  align-items: center; gap: 12px; min-height: 52px; padding: 8px 12px; cursor: pointer; list-style: none; }
+.otel-span summary::-webkit-details-marker { display: none; }
+.otel-span summary:hover { background: var(--surface-2); }
+.otel-span summary > span:nth-child(2) { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.otel-span summary strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.otel-span summary small { color: var(--text-muted); font-size: 11.5px; }
+.otel-span summary code { color: var(--text-muted); font-size: 11.5px; }
+.otel-span summary > span:last-child { color: var(--text-muted); text-align: right; font-size: 12px; }
+.otel-status { width: 8px; height: 8px; border-radius: 50%; }
+.otel-status.ok { background: var(--green); }
+.otel-status.error { background: var(--red); }
+.otel-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.otel-empty > span { color: var(--text-muted); font-size: 12.5px; }
+.otel-span-body { display: grid; grid-template-columns: minmax(240px, .65fr) minmax(0, 1.35fr); gap: 14px;
+  padding: 14px; border-top: 1px solid var(--border); background: var(--surface-2); }
+.otel-span-body dl { display: grid; grid-template-columns: auto minmax(0, 1fr); align-content: start; gap: 7px 12px; margin: 0; font-size: 12px; }
+.otel-span-body dt { color: var(--text-muted); }
+.otel-span-body dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.otel-span-body pre { max-height: 420px; margin: 0; padding: 12px; overflow: auto; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--surface); font: 11.5px/1.5 "Aptos Mono", "Cascadia Code", monospace; }
+@media (max-width: 720px) {
+  .trigger-mode-picker, .trigger-form-grid { grid-template-columns: 1fr; }
+  .trigger-editor-head, .trigger-editor-actions { align-items: stretch; flex-direction: column; }
+  .trigger-editor-actions button { width: 100%; }
+  .otel-panel-head, .otel-controls { align-items: stretch; flex-direction: column; }
+  .otel-span summary { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .otel-span summary code { display: none; }
+  .otel-span-body { grid-template-columns: 1fr; }
+}
 .skill-two-column { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 18px; align-items: start; }
 .skill-endpoint { display: flex; flex-direction: column; gap: 3px; padding: 8px 0; }
 .skill-endpoint + .skill-endpoint { border-top: 1px solid var(--border); }

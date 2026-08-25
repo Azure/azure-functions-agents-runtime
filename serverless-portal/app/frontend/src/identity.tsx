@@ -28,6 +28,10 @@ interface IdentityState {
   setSelected: (id: string) => void
   loading: boolean
   error: string | null
+  subscriptionsLoading: boolean
+  subscriptionsRefreshing: boolean
+  subscriptionError: string | null
+  refreshSubscriptions: () => Promise<void>
 }
 
 const IdentityContext = createContext<IdentityState | null>(null)
@@ -42,6 +46,9 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     queryKey: queryKeys.subscriptions,
     queryFn: () => api.listSubscriptions(),
     staleTime: staleTimes.subscriptions,
+    refetchOnMount: 'always',
+    refetchOnReconnect: true,
+    refetchOnWindowFocus: true,
   })
 
   const identity = identityQuery.data ?? null
@@ -76,14 +83,42 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
   }, [identity, subscriptions, selected, setSelected])
 
   const loading = identityQuery.isLoading || subsQuery.isLoading
+  const subscriptionsLoading = subsQuery.isLoading && subscriptions.length === 0
+  const subscriptionsRefreshing = subsQuery.isFetching
+  const subscriptionError = (subsQuery.error as Error | null)?.message ?? null
+  const refreshSubscriptions = useCallback(async () => {
+    await subsQuery.refetch()
+  }, [subsQuery.refetch])
   const error =
     (identityQuery.error as Error | null)?.message ??
     (subsQuery.error as Error | null)?.message ??
     null
 
   const value = useMemo<IdentityState>(
-    () => ({ identity, subscriptions, selected, setSelected, loading, error }),
-    [identity, subscriptions, selected, setSelected, loading, error],
+    () => ({
+      identity,
+      subscriptions,
+      selected,
+      setSelected,
+      loading,
+      error,
+      subscriptionsLoading,
+      subscriptionsRefreshing,
+      subscriptionError,
+      refreshSubscriptions,
+    }),
+    [
+      identity,
+      subscriptions,
+      selected,
+      setSelected,
+      loading,
+      error,
+      subscriptionsLoading,
+      subscriptionsRefreshing,
+      subscriptionError,
+      refreshSubscriptions,
+    ],
   )
 
   return <IdentityContext.Provider value={value}>{children}</IdentityContext.Provider>

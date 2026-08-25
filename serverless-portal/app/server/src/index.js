@@ -574,6 +574,27 @@ requests
 | order by timestamp desc
 | take 25
 `,
+  // One row per runtime invocation, projected onto OpenTelemetry span fields.
+  // Runtime spans are dependencies in Application Insights; customDimensions
+  // carries the runtime's af.* and MAF's gen_ai.* span attributes.
+  invocations: (timeRange) => `
+dependencies
+| where timestamp >= ago(${timeRange})
+| where cloud_RoleName == "@APP@"
+| where name startswith "agent.run "
+| extend agent_name = tostring(customDimensions["af.agent.name"])
+| where agent_name == "@AGENT@"
+| project start_time = timestamp,
+    trace_id = operation_Id,
+    span_id = id,
+    parent_span_id = operation_ParentId,
+    span_name = name,
+    span_kind = "SPAN_KIND_INTERNAL",
+    duration_ms = duration,
+    status_code = iff(success == false, "STATUS_CODE_ERROR", "STATUS_CODE_OK"),
+    attributes = customDimensions
+| order by start_time desc
+`,
 }
 
 // Sanitise a KQL string identifier — used to inline the app name into a
@@ -592,6 +613,7 @@ app.post(
     const appName = String(req.body?.app ?? '').trim()
     const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
     const preset = String(req.body?.preset ?? '').trim()
+    const agentName = String(req.body?.agent ?? '').trim()
     const timeRange = String(req.body?.timeRange ?? '24h').trim()
     if (!appName || !resourceGroup) throw new HttpError(400, 'app and resourceGroup are required.')
     if (!/^(?:\d+)(?:m|h|d)$/.test(timeRange)) throw new HttpError(400, 'timeRange must look like 15m/24h/7d.')
@@ -602,7 +624,9 @@ app.post(
       if (!builder) throw new HttpError(400, `Unknown preset "${preset}".`)
       const safeApp = safeKqlString(appName)
       if (!safeApp) throw new HttpError(400, 'App name contains disallowed characters.')
-      query = builder(timeRange).replace(/@APP@/g, safeApp)
+      const safeAgent = safeKqlString(agentName)
+      if (preset === 'invocations' && !safeAgent) throw new HttpError(400, 'agent is required for the invocations preset.')
+      query = builder(timeRange).replace(/@APP@/g, safeApp).replace(/@AGENT@/g, safeAgent)
     } else if (typeof req.body?.query === 'string' && req.body.query.trim()) {
       query = String(req.body.query)
     } else {

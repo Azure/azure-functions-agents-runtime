@@ -5,11 +5,13 @@ import { Button } from '@coreai/fluentui-react'
 import { api, type LiveAgent, type LiveAgentApp } from '../api'
 import { AddCapability } from '../components/AddCapability'
 import { DraftEditor } from '../components/SourceEditor'
+import { TriggerEditor } from '../components/TriggerEditor'
+import { ObservabilityPanel } from '../components/ObservabilityPanel'
 import { DeploymentStatus, GitHubConnect, useDeployJob } from '../deploy'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
 
-type DetailTab = 'instructions' | 'runs' | 'capabilities' | 'source'
+type DetailTab = 'instructions' | 'runs' | 'capabilities' | 'observability' | 'source'
 
 interface McpServerSummary {
   name: string
@@ -35,6 +37,11 @@ function buildAgentMarkdown(agent: LiveAgent): string {
 function agentFrontMatter(content: string): string {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)
   return match?.[1].trim() ?? ''
+}
+
+function configuredAgentName(content: string, fallback: string): string {
+  const match = agentFrontMatter(content).match(/^name:\s*(.+?)\s*$/m)
+  return match?.[1].trim().replace(/^(['"])(.*)\1$/, '$2') || fallback
 }
 
 function parseMcpServers(content?: string | null): McpServerSummary[] | null {
@@ -63,15 +70,6 @@ function triggerLabel(trigger: string): string {
   }
   const normalized = value.replace(/_trigger$/, '').replace(/_/g, ' ')
   return normalized.replace(/\b\w/g, (letter) => letter.toUpperCase())
-}
-
-function triggerDescription(trigger: string): string {
-  if (trigger.includes('timer')) return 'Runs automatically on its configured schedule.'
-  if (trigger.includes('connector') || trigger.includes('generic')) return 'Starts when a connected service emits an event.'
-  if (trigger.includes('queue') || trigger.includes('blob') || trigger.includes('event') || trigger.includes('service_bus')) {
-    return 'Starts when the configured Azure data event arrives.'
-  }
-  return 'A person or system sends input and receives a response.'
 }
 
 function endpointUrls(agent: LiveAgent): { label: string; value: string }[] {
@@ -133,14 +131,14 @@ export default function SkillDetailPage() {
   const error = queryError ? (queryError as Error).message : null
   const scanning = !!subForQuery && !data && !error
   const requestedTab = searchParams.get('tab') as DetailTab | null
-  const tab: DetailTab = ['instructions', 'runs', 'source'].includes(requestedTab ?? '')
+  const tab: DetailTab = ['instructions', 'runs', 'observability', 'source'].includes(requestedTab ?? '')
     ? requestedTab!
     : 'instructions'
   const setTab = (next: DetailTab) => setSearchParams(next === 'instructions' ? {} : { tab: next })
 
   const definitionKey = ['agentDefinition', subForQuery, agent?.app ?? '', agent?.name ?? '']
   const fallback = agent ? buildAgentMarkdown(agent) : ''
-  const { data: definition } = useQuery({
+  const { data: definition, isLoading: definitionLoading, error: definitionError } = useQuery({
     queryKey: definitionKey,
     queryFn: () => api.getAgentDefinition({
       subscription: subForQuery,
@@ -272,6 +270,7 @@ export default function SkillDetailPage() {
             <button aria-current={tab === 'instructions' ? 'page' : undefined} className={'skill-subtab' + (tab === 'instructions' ? ' active' : '')} onClick={() => setTab('instructions')}>Instructions</button>
             <button aria-current={tab === 'runs' ? 'page' : undefined} className={'skill-subtab' + (tab === 'runs' ? ' active' : '')} onClick={() => setTab('runs')}>How it runs</button>
             <button className="skill-subtab" disabled>What it can use <span className="badge gray">Coming soon</span></button>
+            <button aria-current={tab === 'observability' ? 'page' : undefined} className={'skill-subtab' + (tab === 'observability' ? ' active' : '')} onClick={() => setTab('observability')}>Observability</button>
             <button aria-current={tab === 'source' ? 'page' : undefined} className={'skill-subtab' + (tab === 'source' ? ' active' : '')} onClick={() => setTab('source')}>Source &amp; GitHub</button>
             {agent.builtinEndpoints && <Link className="skill-subtab" to={`/playground/${subForQuery}/${encodeURIComponent(agent.app)}/${encodeURIComponent(agent.name)}`}>Test</Link>}
           </nav>
@@ -313,7 +312,7 @@ export default function SkillDetailPage() {
               <aside className="skill-aside-stack">
                 <div className="skill-aside-card"><h3>How it runs</h3><strong>{triggerLabel(agent.trigger)}</strong>{urls[0] && <span className="mono">{urls[0].value.replace(/^https?:\/\/[^/]+/, '')}</span>}<button className="link-button" onClick={() => setTab('runs')}>Change</button></div>
                 <div className="skill-aside-card"><h3>Inherited configuration</h3><dl><div><dt>Provider</dt><dd>{agent.provider || 'App default'}</dd></div><div><dt>Region</dt><dd>{agent.region || hostApp?.location || '—'}</dd></div><div><dt>Endpoints</dt><dd>{agent.builtinEndpoints ? 'Enabled' : 'Disabled'}</dd></div></dl></div>
-                <div className="skill-aside-card"><h3>What it can use <span className="badge gray">Coming soon</span></h3><strong>{capabilityCount} discovered</strong><span className="muted">MCP servers, tools, knowledge, and app functions</span></div>
+                <div className="skill-aside-card"><h3>What it can use</h3><strong>{capabilityCount} discovered</strong><span className="muted">MCP servers, tools, knowledge, and app functions</span><span className="badge gray">Coming soon</span></div>
                 <div className="skill-aside-card"><h3>Full source</h3><span className="muted">View or edit the complete file, including YAML front matter.</span><button className="link-button" onClick={() => setTab('source')}>Open agent code</button></div>
               </aside>
             </div>
@@ -321,15 +320,32 @@ export default function SkillDetailPage() {
 
           {tab === 'runs' && (
             <section>
-              <div className="skill-section-head"><div><h2>How it runs</h2><p>A Hosted Skill has one primary trigger. Changing it updates the YAML front matter in <span className="mono">{agent.name}.agent.md</span>.</p></div><AddCapability variant="button" scope="triggers" subscription={subForQuery} resourceGroup={agent.resourceGroup} app={agent.app} agentName={agent.name} /></div>
-              <div className="trigger-summary-grid">
-                <div className="trigger-summary-card active"><span className="trigger-icon">→</span><div><h3>{triggerLabel(agent.trigger)}</h3><p>{triggerDescription(agent.trigger)}</p></div><span className="badge green">Active</span></div>
-              </div>
-              <div className="skill-two-column">
-                <div className="card"><div className="card-head"><h3>Trigger definition</h3><span className="badge blue">{agent.trigger || 'http'}</span></div><dl className="meta-grid"><dt>Function App</dt><dd className="mono">{agent.app}</dd><dt>Supporting functions</dt><dd>{agent.supportingFunctions?.length ?? 0}</dd><dt>Built-in endpoints</dt><dd>{agent.builtinEndpoints ? 'Enabled' : 'Disabled'}</dd></dl></div>
-                <aside className="skill-aside-card"><h3>Endpoints</h3>{urls.length ? urls.map((url) => <div className="skill-endpoint" key={url.value}><span>{url.label}</span><code>{url.value}</code></div>) : <p className="muted">This trigger does not expose an HTTP endpoint.</p>}</aside>
-              </div>
+              <div className="skill-section-head"><div><h2>How it runs</h2><p>A Hosted Skill has one primary trigger. Save changes as a draft, then deploy the Function App to make them live.</p></div></div>
+              {definitionLoading && <p className="muted">Loading trigger definition…</p>}
+              {definitionError && <div className="gh-err">Couldn’t load the complete agent definition: {(definitionError as Error).message}</div>}
+              {!definitionLoading && !definitionError && definition?.content && (
+                <TriggerEditor
+                  subscription={subForQuery}
+                  app={agent.app}
+                  agentName={agent.name}
+                  content={definition.content}
+                  source={definition.source}
+                  queryKey={definitionKey}
+                />
+              )}
+              {!definitionLoading && !definitionError && !definition?.content && (
+                <div className="note warn">The complete <span className="mono">.agent.md</span> source is unavailable. Open Source &amp; GitHub or grant storage access before changing its trigger.</div>
+              )}
             </section>
+          )}
+
+          {tab === 'observability' && (
+            <ObservabilityPanel
+              subscription={subForQuery}
+              resourceGroup={agent.resourceGroup}
+              app={agent.app}
+              agentName={configuredAgentName(definition?.content || fallback, agent.name)}
+            />
           )}
 
           {tab === 'capabilities' && (

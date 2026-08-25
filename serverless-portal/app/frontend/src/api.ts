@@ -430,13 +430,14 @@ export const api = {
   },
 
   // Run a curated Application Insights KQL preset for an app (summary /
-  // timeline / agents / recentFailures). `timeRange` is a Kusto-shortform
+  // timeline / agents / recentFailures / invocations). `timeRange` is a Kusto-shortform
   // window like "24h" / "7d" / "15m".
   appInsightsQuery: (p: {
     subscription: string
     resourceGroup: string
     app: string
-    preset?: 'summary' | 'timeline' | 'agents' | 'recentFailures'
+    agent?: string
+    preset?: 'summary' | 'timeline' | 'agents' | 'recentFailures' | 'invocations'
     query?: string
     timeRange?: string
   }) => req<AppInsightsResult>('POST', '/api/app-insights/query', p),

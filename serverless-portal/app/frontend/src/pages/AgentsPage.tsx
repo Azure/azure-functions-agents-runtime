@@ -28,8 +28,10 @@ export default function AgentsPage() {
     subscriptions,
     selected,
     setSelected,
-    loading: identityLoading,
-    error: identityError,
+    subscriptionsLoading,
+    subscriptionsRefreshing,
+    subscriptionError,
+    refreshSubscriptions,
   } = useIdentity()
 
   const { subscriptionId } = useParams<{ subscriptionId: string }>()
@@ -108,8 +110,10 @@ export default function AgentsPage() {
           subscriptions={subscriptions}
           value={selected}
           onChange={onPickSubscription}
-          loading={identityLoading}
-          error={!!identityError}
+          loading={subscriptionsLoading}
+          refreshing={subscriptionsRefreshing}
+          error={!!subscriptionError}
+          onRetry={() => void refreshSubscriptions()}
         />
         {data && (
           <span className="cache-stamp" title="When this subscription's Hosted Skills were last fetched">

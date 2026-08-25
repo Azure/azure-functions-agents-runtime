@@ -115,13 +115,18 @@ function yamlScalar(v: string): string {
 
 // Build the `trigger:` YAML block for a trigger id + field values. The special
 // `connector` id emits the runtime's connector trigger shape.
-export function buildTriggerYaml(specKey: string, values: Record<string, string>): string {
+export function buildTriggerYaml(
+  specKey: string,
+  values: Record<string, string>,
+  preservedArgs: Record<string, string> = {},
+): string {
   if (specKey === 'connector') {
     return ['trigger:', '  type: generic_trigger', '  args:', '    type: connectorTrigger'].join('\n')
   }
   const spec = TRIGGER_SPECS[specKey]
   if (!spec) throw new Error(`Unknown trigger type: ${specKey}`)
   const argLines: string[] = []
+  const declaredFields = new Set(spec.fields.map((field) => field.name))
   for (const f of spec.fields) {
     const raw = (values[f.name] ?? f.default ?? '').trim()
     if (!raw) continue
@@ -134,6 +139,11 @@ export function buildTriggerYaml(specKey: string, values: Record<string, string>
     } else {
       argLines.push(`    ${f.name}: ${yamlScalar(raw)}`)
     }
+  }
+  for (const [name, raw] of Object.entries(preservedArgs)) {
+    if (declaredFields.has(name) || !raw.trim()) continue
+    const value = /^(?:true|false|null|-?\d+(?:\.\d+)?)$/i.test(raw.trim()) ? raw.trim() : yamlScalar(raw.trim())
+    argLines.push(`    ${name}: ${value}`)
   }
   const lines = ['trigger:', `  type: ${spec.type}`]
   if (argLines.length) {
@@ -185,6 +195,52 @@ export function applyTriggerToMarkdown(md: string, triggerBlock: string): string
   const newFm = [...collapsed, ...triggerBlock.split(/\r?\n/)]
   const body = lines.slice(end + 1).join(nl)
   return `---${nl}${newFm.join(nl)}${nl}---${nl}${body}`
+}
+
+export interface AgentTriggerSettings {
+  type: string
+  args: Record<string, string>
+  instructions: string
+}
+
+function unquoteYamlScalar(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+    return trimmed
+      .slice(1, -1)
+      .split(',')
+      .map((item) => item.trim().replace(/^['"]|['"]$/g, ''))
+      .filter(Boolean)
+      .join(', ')
+  }
+  return trimmed.replace(/^(['"])(.*)\1$/, '$2').replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+}
+
+export function readAgentTriggerSettings(md: string): AgentTriggerSettings {
+  const match = md.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)([\s\S]*)$/)
+  if (!match) return { type: '', args: {}, instructions: md.trim() }
+
+  const lines = match[1].split(/\r?\n/)
+  const triggerStart = lines.findIndex((line) => /^trigger:\s*$/.test(line))
+  if (triggerStart < 0) return { type: '', args: {}, instructions: match[2].replace(/^\r?\n/, '').trimEnd() }
+
+  const args: Record<string, string> = {}
+  let type = ''
+  for (let index = triggerStart + 1; index < lines.length; index++) {
+    const line = lines[index]
+    if (line.trim() && !/^[ \t]/.test(line)) break
+    const typeMatch = line.match(/^\s{2}type:\s*(.+?)\s*$/)
+    if (typeMatch) type = unquoteYamlScalar(typeMatch[1])
+    const argMatch = line.match(/^\s{4}([A-Za-z_][\w-]*):\s*(.*?)\s*$/)
+    if (argMatch) args[argMatch[1]] = unquoteYamlScalar(argMatch[2])
+  }
+  return { type, args, instructions: match[2].replace(/^\r?\n/, '').trimEnd() }
+}
+
+export function applyInstructionsToMarkdown(md: string, instructions: string): string {
+  const match = md.match(/^(---\r?\n[\s\S]*?\r?\n---)(?:\r?\n[\s\S]*)?$/)
+  if (!match) return instructions.trimEnd()
+  return `${match[1]}\n\n${instructions.trim()}\n`
 }
 
 export interface McpServer {

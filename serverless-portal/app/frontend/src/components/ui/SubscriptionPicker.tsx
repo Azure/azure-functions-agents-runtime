@@ -14,6 +14,8 @@ interface SubscriptionPickerProps {
   onChange: (id: string) => void
   loading?: boolean
   error?: boolean
+  refreshing?: boolean
+  onRetry?: () => void
   label?: string
   disabled?: boolean
 }
@@ -24,19 +26,28 @@ export const SubscriptionPicker = ({
   onChange,
   loading = false,
   error = false,
+  refreshing = false,
+  onRetry,
   label = 'Subscription',
   disabled = false,
 }: SubscriptionPickerProps) => (
-  <label className="sub-picker" title="Azure subscription">
+  <label className="sub-picker" title={error ? 'Subscription list could not be refreshed' : 'Azure subscription'}>
     <span className="sub-picker-label">{label}</span>
-    <SearchableSelect
-      value={value}
-      onChange={onChange}
-      options={subscriptions.map((s) => ({ value: s.id, label: s.name }))}
-      placeholder={error ? 'Unavailable' : 'Select a subscription…'}
-      loading={loading}
-      disabled={disabled || error || subscriptions.length === 0}
-      ariaLabel="Azure subscription"
-    />
+    <span className="sub-picker-control">
+      <SearchableSelect
+        value={value}
+        onChange={onChange}
+        options={subscriptions.map((s) => ({ value: s.id, label: s.name }))}
+        placeholder={error ? 'Subscriptions unavailable' : 'Select a subscription…'}
+        loading={loading}
+        disabled={disabled || subscriptions.length === 0}
+        ariaLabel="Azure subscription"
+      />
+      {error && onRetry && (
+        <button type="button" className="sub-picker-retry" disabled={refreshing} onClick={onRetry} title="Retry loading subscriptions" aria-label="Retry loading subscriptions">
+          {refreshing ? '…' : '↻'}
+        </button>
+      )}
+    </span>
   </label>
 )
