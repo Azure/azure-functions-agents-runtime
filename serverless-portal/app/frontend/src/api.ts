@@ -437,7 +437,12 @@ export const api = {
     resourceGroup: string
     app: string
     agent?: string
-    preset?: 'summary' | 'timeline' | 'agents' | 'recentFailures' | 'invocations'
+    traceId?: string
+    startTime?: string
+    endTime?: string
+    page?: number
+    pageSize?: number
+    preset?: 'summary' | 'timeline' | 'agents' | 'recentFailures' | 'invocations' | 'trace'
     query?: string
     timeRange?: string
   }) => req<AppInsightsResult>('POST', '/api/app-insights/query', p),

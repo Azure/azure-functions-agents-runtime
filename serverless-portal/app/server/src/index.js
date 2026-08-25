@@ -575,25 +575,78 @@ requests
 | take 25
 `,
   // One row per runtime invocation, projected onto OpenTelemetry span fields.
-  // Runtime spans are dependencies in Application Insights; customDimensions
-  // carries the runtime's af.* and MAF's gen_ai.* span attributes.
+    // Prefer runtime dependency spans because they carry af.* and gen_ai.*
+    // attributes. Fall back to Azure Functions request spans so timer and HTTP
+    // runs remain visible when runtime OTLP export is not enabled.
   invocations: (timeRange) => `
-dependencies
-| where timestamp >= ago(${timeRange})
-| where cloud_RoleName == "@APP@"
-| where name startswith "agent.run "
-| extend agent_name = tostring(customDimensions["af.agent.name"])
-| where agent_name == "@AGENT@"
-| project start_time = timestamp,
-    trace_id = operation_Id,
-    span_id = id,
-    parent_span_id = operation_ParentId,
-    span_name = name,
-    span_kind = "SPAN_KIND_INTERNAL",
-    duration_ms = duration,
-    status_code = iff(success == false, "STATUS_CODE_ERROR", "STATUS_CODE_OK"),
-    attributes = customDimensions
-| order by start_time desc
+  let runtime_spans = dependencies
+    | where timestamp >= ago(${timeRange})
+    | where name startswith "agent.run "
+    | extend agent_name = tostring(customDimensions["af.agent.name"])
+    | where agent_name == "@AGENT@"
+    | project start_time = timestamp,
+      trace_id = operation_Id,
+      span_id = id,
+      parent_span_id = operation_ParentId,
+      span_name = name,
+      span_kind = "SPAN_KIND_INTERNAL",
+      duration_ms = toreal(duration),
+      status_code = iff(success == false, "STATUS_CODE_ERROR", "STATUS_CODE_OK"),
+      attributes = customDimensions,
+      source_priority = 0;
+  let runtime_span_count = toscalar(runtime_spans | count);
+  let host_invocations = requests
+    | where timestamp >= ago(${timeRange})
+    | where cloud_RoleName == "@APP@"
+    | where operation_Name == "@AGENT@" or operation_Name startswith "agent_@AGENT@_builtin_"
+    | where runtime_span_count == 0
+    | extend attributes = bag_merge(customDimensions, bag_pack(
+      "faas.invoked_name", operation_Name,
+      "telemetry.source", "azure.functions.requests"))
+    | project start_time = timestamp,
+      trace_id = operation_Id,
+      span_id = id,
+      parent_span_id = operation_ParentId,
+      span_name = strcat("function.invoke ", operation_Name),
+      span_kind = "SPAN_KIND_SERVER",
+      duration_ms = toreal(duration),
+      status_code = iff(success == false, "STATUS_CODE_ERROR", "STATUS_CODE_OK"),
+      attributes,
+      source_priority = 1;
+  let all_invocations = materialize(
+    union runtime_spans, host_invocations
+    | summarize arg_min(source_priority, *) by trace_id
+    | project start_time, trace_id, span_id, parent_span_id, span_name, span_kind,
+      duration_ms, status_code, attributes);
+  let total_count = toscalar(all_invocations | count);
+  let total_error_count = toscalar(all_invocations | where status_code == "STATUS_CODE_ERROR" | count);
+  all_invocations
+  | order by start_time desc
+  | serialize row_number = row_number()
+  | where row_number > @OFFSET@ and row_number <= @OFFSET@ + @PAGE_SIZE@
+  | extend total_count, total_error_count
+  | project start_time, trace_id, span_id, parent_span_id, span_name, span_kind,
+    duration_ms, status_code, attributes, total_count, total_error_count
+`,
+  trace: (timeRange) => `
+union
+  (requests
+    | where timestamp >= ago(${timeRange})
+    | where operation_Id == "@TRACE@"
+    | project start_time = timestamp, item_type = "request", span_name = name,
+        span_id = id, parent_span_id = operation_ParentId,
+        duration_ms = toreal(duration),
+        status_code = iff(success == false, "STATUS_CODE_ERROR", "STATUS_CODE_OK"),
+        attributes = customDimensions),
+  (dependencies
+    | where timestamp >= ago(${timeRange})
+    | where operation_Id == "@TRACE@"
+    | project start_time = timestamp, item_type = "dependency", span_name = name,
+        span_id = id, parent_span_id = operation_ParentId,
+        duration_ms = toreal(duration),
+        status_code = iff(success == false, "STATUS_CODE_ERROR", "STATUS_CODE_OK"),
+        attributes = customDimensions)
+| order by start_time asc
 `,
 }
 
@@ -614,9 +667,14 @@ app.post(
     const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
     const preset = String(req.body?.preset ?? '').trim()
     const agentName = String(req.body?.agent ?? '').trim()
+    const traceId = String(req.body?.traceId ?? '').trim()
     const timeRange = String(req.body?.timeRange ?? '24h').trim()
+    const page = Number(req.body?.page ?? 1)
+    const pageSize = Number(req.body?.pageSize ?? 25)
     if (!appName || !resourceGroup) throw new HttpError(400, 'app and resourceGroup are required.')
     if (!/^(?:\d+)(?:m|h|d)$/.test(timeRange)) throw new HttpError(400, 'timeRange must look like 15m/24h/7d.')
+    if (!Number.isSafeInteger(page) || page < 1) throw new HttpError(400, 'page must be a positive integer.')
+    if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new HttpError(400, 'pageSize must be an integer from 1 to 100.')
 
     let query = ''
     if (preset) {
@@ -626,7 +684,13 @@ app.post(
       if (!safeApp) throw new HttpError(400, 'App name contains disallowed characters.')
       const safeAgent = safeKqlString(agentName)
       if (preset === 'invocations' && !safeAgent) throw new HttpError(400, 'agent is required for the invocations preset.')
-      query = builder(timeRange).replace(/@APP@/g, safeApp).replace(/@AGENT@/g, safeAgent)
+      if (preset === 'trace' && !/^[a-f\d]{32}$/i.test(traceId)) throw new HttpError(400, 'traceId must be a 32-character hexadecimal trace ID.')
+      query = builder(timeRange)
+        .replace(/@APP@/g, safeApp)
+        .replace(/@AGENT@/g, safeAgent)
+        .replace(/@TRACE@/g, traceId)
+        .replace(/@OFFSET@/g, String((page - 1) * pageSize))
+        .replace(/@PAGE_SIZE@/g, String(pageSize))
     } else if (typeof req.body?.query === 'string' && req.body.query.trim()) {
       query = String(req.body.query)
     } else {

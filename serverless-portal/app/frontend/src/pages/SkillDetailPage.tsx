@@ -131,7 +131,7 @@ export default function SkillDetailPage() {
   const error = queryError ? (queryError as Error).message : null
   const scanning = !!subForQuery && !data && !error
   const requestedTab = searchParams.get('tab') as DetailTab | null
-  const tab: DetailTab = ['instructions', 'runs', 'observability', 'source'].includes(requestedTab ?? '')
+  const tab: DetailTab = ['instructions', 'runs', 'capabilities', 'observability', 'source'].includes(requestedTab ?? '')
     ? requestedTab!
     : 'instructions'
   const setTab = (next: DetailTab) => setSearchParams(next === 'instructions' ? {} : { tab: next })
@@ -168,13 +168,14 @@ export default function SkillDetailPage() {
   const parsedMcpServers = parseMcpServers(mcpSource?.content)
   const mcpServers = parsedMcpServers ?? []
   const mcpSourceInvalid = parsedMcpServers === null
-  const sourcePaths = sourceList?.files.map((file) => file.path) ?? []
+  const sourceFiles = Array.isArray(sourceList?.files) ? sourceList.files : []
+  const sourcePaths = sourceFiles.map((file) => file.path)
   const pythonTools = sourcePaths.filter((path) => /^tools\/.+\.py$/i.test(path) && !path.endsWith('__init__.py'))
   const knowledge = sourcePaths.filter((path) => /^skills\/[^/]+\/SKILL\.md$/i.test(path))
   const appFunctions = hostApp?.supportingFunctions ?? []
   const urls = agent ? endpointUrls(agent) : []
   const hasDraft = definition?.source === 'draft'
-  const hasDeployableEdits = hasDraft || !!sourceList?.files.some((file) => file.source === 'draft' || file.source === 'both')
+  const hasDeployableEdits = hasDraft || sourceFiles.some((file) => file.source === 'draft' || file.source === 'both')
   const capabilityCount = mcpServers.length + pythonTools.length + knowledge.length + appFunctions.length
   const definitionMetadata = agentFrontMatter(definition?.content || fallback)
 
@@ -269,7 +270,7 @@ export default function SkillDetailPage() {
           <nav className="skill-subtabs" aria-label="Hosted Skill sections">
             <button aria-current={tab === 'instructions' ? 'page' : undefined} className={'skill-subtab' + (tab === 'instructions' ? ' active' : '')} onClick={() => setTab('instructions')}>Instructions</button>
             <button aria-current={tab === 'runs' ? 'page' : undefined} className={'skill-subtab' + (tab === 'runs' ? ' active' : '')} onClick={() => setTab('runs')}>How it runs</button>
-            <button className="skill-subtab" disabled>What it can use <span className="badge gray">Coming soon</span></button>
+            <button aria-current={tab === 'capabilities' ? 'page' : undefined} className={'skill-subtab' + (tab === 'capabilities' ? ' active' : '')} onClick={() => setTab('capabilities')}>What it can use</button>
             <button aria-current={tab === 'observability' ? 'page' : undefined} className={'skill-subtab' + (tab === 'observability' ? ' active' : '')} onClick={() => setTab('observability')}>Observability</button>
             <button aria-current={tab === 'source' ? 'page' : undefined} className={'skill-subtab' + (tab === 'source' ? ' active' : '')} onClick={() => setTab('source')}>Source &amp; GitHub</button>
             {agent.builtinEndpoints && <Link className="skill-subtab" to={`/playground/${subForQuery}/${encodeURIComponent(agent.app)}/${encodeURIComponent(agent.name)}`}>Test</Link>}
@@ -312,7 +313,7 @@ export default function SkillDetailPage() {
               <aside className="skill-aside-stack">
                 <div className="skill-aside-card"><h3>How it runs</h3><strong>{triggerLabel(agent.trigger)}</strong>{urls[0] && <span className="mono">{urls[0].value.replace(/^https?:\/\/[^/]+/, '')}</span>}<button className="link-button" onClick={() => setTab('runs')}>Change</button></div>
                 <div className="skill-aside-card"><h3>Inherited configuration</h3><dl><div><dt>Provider</dt><dd>{agent.provider || 'App default'}</dd></div><div><dt>Region</dt><dd>{agent.region || hostApp?.location || '—'}</dd></div><div><dt>Endpoints</dt><dd>{agent.builtinEndpoints ? 'Enabled' : 'Disabled'}</dd></div></dl></div>
-                <div className="skill-aside-card"><h3>What it can use</h3><strong>{capabilityCount} discovered</strong><span className="muted">MCP servers, tools, knowledge, and app functions</span><span className="badge gray">Coming soon</span></div>
+                <div className="skill-aside-card"><h3>What it can use</h3><strong>{capabilityCount} discovered</strong><span className="muted">MCP servers, tools, knowledge, and app functions</span><button className="link-button" onClick={() => setTab('capabilities')}>Manage capabilities</button></div>
                 <div className="skill-aside-card"><h3>Full source</h3><span className="muted">View or edit the complete file, including YAML front matter.</span><button className="link-button" onClick={() => setTab('source')}>Open agent code</button></div>
               </aside>
             </div>

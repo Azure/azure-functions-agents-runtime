@@ -620,6 +620,30 @@ textarea.instructions-editor:focus { outline: none; }
 .otel-summary { display: flex; flex-wrap: wrap; gap: 18px; margin-bottom: 14px; padding: 10px 12px;
   border: 1px solid var(--border); background: var(--surface-2); color: var(--text-muted); font-size: 12.5px; }
 .otel-summary strong { color: var(--text); }
+.otel-custom-range { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-bottom: 14px; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
+.otel-custom-range label { display: grid; gap: 4px; color: var(--text-muted); font-size: 11.5px; }
+.otel-custom-range input { min-height: 30px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--surface); color: var(--text); font: inherit; color-scheme: light; }
+.otel-custom-error { align-self: center; color: var(--red); font-size: 12px; }
+.otel-metrics { margin-bottom: 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
+.otel-metrics > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; cursor: pointer; }
+.otel-metrics > summary > span:first-child { display: flex; flex-direction: column; gap: 2px; }
+.otel-metrics > summary small, .otel-metrics > summary > span:last-child { color: var(--text-muted); font-size: 11.5px; }
+.otel-metrics-body { display: grid; grid-template-columns: minmax(300px, .8fr) minmax(360px, 1.2fr); gap: 16px; padding: 0 12px 12px; }
+.otel-metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.otel-metric-grid > div { display: flex; flex-direction: column; gap: 3px; padding: 10px; border: 1px solid var(--border); border-radius: 5px; }
+.otel-metric-grid span { color: var(--text-muted); font-size: 11px; }
+.otel-metric-grid strong { font-size: 17px; }
+.otel-latency-chart { display: grid; grid-template-rows: auto 86px; gap: 8px; min-width: 0; padding: 9px 10px 10px;
+  border: 1px solid var(--border); border-radius: 5px; }
+.otel-chart-head { display: flex; justify-content: space-between; gap: 10px; font-size: 11.5px; }
+.otel-chart-head span { color: var(--text-muted); }
+.otel-chart-bars { display: flex; align-items: end; gap: 3px; min-width: 0; border-bottom: 1px solid var(--border); }
+.otel-chart-bars > span { flex: 1 1 0; min-width: 2px; max-width: 18px; background: var(--brand); }
+.otel-chart-bars > span.error { background: var(--red); }
+.otel-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+.otel-pagination > span { color: var(--text-muted); font-size: 12px; }
 .otel-span-list { border: 1px solid var(--border); border-radius: 7px; overflow: hidden; background: var(--surface); }
 .otel-span + .otel-span { border-top: 1px solid var(--border); }
 .otel-span summary { display: grid; grid-template-columns: auto minmax(220px, 1fr) minmax(110px, auto) 80px;
@@ -636,21 +660,50 @@ textarea.instructions-editor:focus { outline: none; }
 .otel-status.error { background: var(--red); }
 .otel-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
 .otel-empty > span { color: var(--text-muted); font-size: 12.5px; }
-.otel-span-body { display: grid; grid-template-columns: minmax(240px, .65fr) minmax(0, 1.35fr); gap: 14px;
+.otel-span-body { display: grid; grid-template-columns: minmax(220px, .42fr) minmax(0, 1.58fr); gap: 14px;
   padding: 14px; border-top: 1px solid var(--border); background: var(--surface-2); }
 .otel-span-body dl { display: grid; grid-template-columns: auto minmax(0, 1fr); align-content: start; gap: 7px 12px; margin: 0; font-size: 12px; }
 .otel-span-body dt { color: var(--text-muted); }
 .otel-span-body dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .otel-span-body pre { max-height: 420px; margin: 0; padding: 12px; overflow: auto; border: 1px solid var(--border);
   border-radius: 6px; background: var(--surface); font: 11.5px/1.5 "Aptos Mono", "Cascadia Code", monospace; }
+.otel-trace-loading { display: grid; gap: 8px; align-content: start; color: var(--text-muted); font-size: 12px; }
+.otel-transaction { min-width: 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--surface); }
+.otel-transaction-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px;
+  border-bottom: 1px solid var(--border); font-size: 12px; }
+.otel-transaction-head > div { display: flex; flex-direction: column; gap: 2px; }
+.otel-transaction-head span { color: var(--text-muted); }
+.otel-waterfall-row + .otel-waterfall-row { border-top: 1px solid var(--border); }
+.otel-waterfall-row > summary { display: grid; grid-template-columns: 8px minmax(160px, .8fr) minmax(180px, 1.2fr) 72px;
+  align-items: center; gap: 9px; min-height: 40px; padding: 5px 10px; cursor: pointer; list-style: none; }
+.otel-waterfall-row > summary::-webkit-details-marker { display: none; }
+.otel-waterfall-row > summary:hover { background: var(--surface-2); }
+.otel-waterfall-name { display: flex; min-width: 0; flex-direction: column; }
+.otel-waterfall-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
+.otel-waterfall-name small { color: var(--text-muted); font-size: 10.5px; }
+.otel-waterfall-track { position: relative; height: 8px; overflow: hidden; border-radius: 2px; background: var(--surface-2); }
+.otel-waterfall-track > span { position: absolute; top: 0; bottom: 0; min-width: 2px; border-radius: 2px; background: var(--brand); }
+.otel-waterfall-duration { color: var(--text-muted); text-align: right; font-size: 11px; }
+.otel-waterfall-attributes { display: grid; gap: 5px; padding: 9px 12px 11px 27px; border-top: 1px solid var(--border);
+  background: var(--surface-2); color: var(--text-muted); font-size: 11px; }
+.otel-waterfall-attributes code { overflow-wrap: anywhere; }
+.otel-waterfall-attributes pre { max-height: 240px; margin-top: 4px; }
+.otel-raw-envelope { border-top: 1px solid var(--border); }
+.otel-raw-envelope summary { padding: 9px 12px; color: var(--text-muted); cursor: pointer; font-size: 11.5px; }
+.otel-raw-envelope pre { margin: 0 12px 12px; }
 @media (max-width: 720px) {
   .trigger-mode-picker, .trigger-form-grid { grid-template-columns: 1fr; }
   .trigger-editor-head, .trigger-editor-actions { align-items: stretch; flex-direction: column; }
   .trigger-editor-actions button { width: 100%; }
   .otel-panel-head, .otel-controls { align-items: stretch; flex-direction: column; }
+  .otel-custom-range { align-items: stretch; }
+  .otel-custom-range label, .otel-custom-range input { width: 100%; }
+  .otel-metrics-body { grid-template-columns: 1fr; }
   .otel-span summary { grid-template-columns: auto minmax(0, 1fr) auto; }
   .otel-span summary code { display: none; }
   .otel-span-body { grid-template-columns: 1fr; }
+  .otel-waterfall-row > summary { grid-template-columns: 8px minmax(0, 1fr) 64px; }
+  .otel-waterfall-track { display: none; }
 }
 .skill-two-column { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 18px; align-items: start; }
 .skill-endpoint { display: flex; flex-direction: column; gap: 3px; padding: 8px 0; }
