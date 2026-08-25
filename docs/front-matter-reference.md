@@ -14,6 +14,7 @@ Optional file in the root directory. All properties are optional.
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
+| `agent_configuration` | object | No | `null` | Portable and SDK-specific defaults inherited by every agent. [Details](./front-matter-spec.md#agent_configuration) |
 | `system_tools` | object | No | `{}` | System-level tools configuration. [Details](#global-system_tools) |
 | `model` | string | No | Resolved from env/provider | Default LLM model identifier for all agents |
 | `timeout` | number | No | `900` | Default execution timeout in seconds |
@@ -70,8 +71,7 @@ YAML front matter at the top of each agent markdown file.
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
-| `sdk` | `maf` | No | `maf` | Agent SDK. Only `maf` is supported. [Details](./front-matter-spec.md#sdk-and-mode) |
-| `mode` | `default` \| object | No | `default` | Execution mode: plain MAF (`default`) or nested harness settings. [Details](./front-matter-spec.md#sdk-and-mode) |
+| `agent_configuration` | object | No | `null` | Portable and SDK-specific execution settings. Recursively inherits global values. [Details](./front-matter-spec.md#agent_configuration) |
 | `builtin_endpoints` | boolean \| object | No | `false` | Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints) |
 | `model` | string | No | Inherited from global | Override LLM model for this agent |
 | `timeout` | number | No | Inherited from global | Override execution timeout (seconds) for this agent |
@@ -127,34 +127,38 @@ Enable built-in endpoints for interactive testing, programmatic access, and agen
 
 **See:** [Front Matter Spec - builtin_endpoints](./front-matter-spec.md#builtin_endpoints)
 
-### Agent: `mode`
+### Global and agent: `agent_configuration`
 
-Use `default` for plain MAF agent execution, or provide a harness object:
+Configure portable output limits and MAF-specific conversation compaction:
 
 ```yaml
-sdk: maf
-mode:
-  harness:
-    max_context_window_tokens: 8192
-    max_output_tokens: 4096
+agent_configuration:
+  max_output_tokens: 4096
+  maf:
+    compaction:
+      max_context_window_tokens: 8192
 ```
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
-| `harness` | object | **Yes** | N/A | Harness execution settings. An empty object enables harness mode without compaction. |
+| `max_output_tokens` | integer | No | `null` | Positive model output-token limit. May be configured without compaction. |
+| `maf` | object | No | `{}` | Microsoft Agent Framework-specific settings. |
 
-#### Agent: `mode.harness`
-
-Omit both token fields for harness execution without compaction, or provide both fields.
+#### `agent_configuration.maf`
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
-| `max_context_window_tokens` | integer | No | `null` | Positive total context budget used by conversation compaction. Must be provided with `max_output_tokens`. |
-| `max_output_tokens` | integer | No | `null` | Positive reserved output budget and model output-token limit. Must be less than `max_context_window_tokens`. |
+| `compaction` | object | No | `{}` | MAF conversation-compaction settings. |
 
-`max_output_tokens` must be less than `max_context_window_tokens`.
+#### `agent_configuration.maf.compaction`
 
-**See:** [Front Matter Spec - sdk and mode](./front-matter-spec.md#sdk-and-mode)
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `max_context_window_tokens` | integer | No | `null` | Positive total context budget used by conversation compaction. Requires an effective `max_output_tokens` smaller than this value. |
+
+Agent values recursively inherit global values. Explicit `null` clears an inherited leaf or subtree. When context compaction is configured, the effective `max_output_tokens` must be present and less than `max_context_window_tokens`.
+
+**See:** [Front Matter Spec - agent_configuration](./front-matter-spec.md#agent_configuration)
 
 ### Agent: `system_tools`
 

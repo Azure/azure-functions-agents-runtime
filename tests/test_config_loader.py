@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
+from azure_functions_agents.config.merge import compose
 from azure_functions_agents.registration._naming import allocate_unique_function_name
 
 
@@ -62,6 +63,7 @@ def test_load_global_config_leaves_unset_placeholders_literal(tmp_path: Path) ->
 def test_load_global_config_missing_returns_empty(tmp_path: Path) -> None:
     assert load_global_config(tmp_path) == load_global_config(tmp_path)
     assert load_global_config(tmp_path).model_dump() == {
+        "agent_configuration": None,
         "system_tools": None,
         "model": None,
         "timeout": None,
@@ -179,50 +181,68 @@ def test_load_agent_specs_resolves_frontmatter_strings(
     assert spec.response_example == '{"status":"ok"}'
 
 
-def test_load_agent_specs_resolves_sdk_mode_and_harness_limits(
+def test_load_global_and_agent_configuration_with_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("CONTEXT_LIMIT", "8192")
+    monkeypatch.setenv("OUTPUT_LIMIT", "4096")
+    (tmp_path / "agents.config.yaml").write_text(
+        "agent_configuration:\n"
+        "  max_output_tokens: $OUTPUT_LIMIT\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.agent.md").write_text(
+        "---\n"
+        "name: Main\n"
+        "description: Main agent\n"
+        "agent_configuration:\n"
+        "  maf:\n"
+        "    compaction:\n"
+        "      max_context_window_tokens: $CONTEXT_LIMIT\n"
+        "---\n"
+        "Hello\n",
+        encoding="utf-8",
+    )
+
+    config = load_global_config(tmp_path)
+    [spec] = load_agent_specs(tmp_path, strict=True)
+    assert config.agent_configuration is not None
+    assert config.agent_configuration.max_output_tokens == 4096
+    assert spec.agent_configuration is not None
+    assert spec.agent_configuration.max_output_tokens is None
+    assert spec.agent_configuration.maf is not None
+    assert spec.agent_configuration.maf.compaction is not None
+    assert spec.agent_configuration.maf.compaction.max_context_window_tokens == 8192
+    resolved = compose(spec, config)
+    assert resolved.agent_configuration.max_output_tokens == 4096
+    assert resolved.agent_configuration.maf is not None
+    assert resolved.agent_configuration.maf.compaction is not None
+    assert resolved.agent_configuration.maf.compaction.max_context_window_tokens == 8192
+
+
+def test_load_global_config_rejects_removed_substituted_sdk(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("AGENT_SDK", "maf")
-    monkeypatch.setenv("CONTEXT_LIMIT", "8192")
-    monkeypatch.setenv("OUTPUT_LIMIT", "4096")
-    (tmp_path / "main.agent.md").write_text(
-        textwrap.dedent(
-            """
-            ---
-            name: Main
-            description: Main agent
-            sdk: $AGENT_SDK
-            mode:
-              harness:
-                max_context_window_tokens: $CONTEXT_LIMIT
-                max_output_tokens: $OUTPUT_LIMIT
-            ---
-            Hello
-            """
-        ).lstrip(),
+    (tmp_path / "agents.config.yaml").write_text(
+        "sdk: $AGENT_SDK\n",
         encoding="utf-8",
     )
 
-    [spec] = load_agent_specs(tmp_path, strict=True)
-    assert spec.sdk == "maf"
-    assert spec.mode != "default"
-    assert spec.mode.harness.max_context_window_tokens == 8192
-    assert spec.mode.harness.max_output_tokens == 4096
+    with pytest.raises(ValueError, match="sdk"):
+        load_global_config(tmp_path)
 
 
-def test_load_agent_specs_rejects_unsupported_substituted_sdk(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setenv("AGENT_SDK", "unsupported")
+def test_load_agent_specs_rejects_global_sdk_override(tmp_path: Path) -> None:
     (tmp_path / "main.agent.md").write_text(
         textwrap.dedent(
             """
             ---
             name: Main
             description: Main agent
-            sdk: $AGENT_SDK
+            sdk: maf
             ---
             Hello
             """
@@ -234,26 +254,24 @@ def test_load_agent_specs_rejects_unsupported_substituted_sdk(
         load_agent_specs(tmp_path, strict=True)
 
 
-def test_load_agent_specs_rejects_invalid_nested_harness_limits(tmp_path: Path) -> None:
+def test_compose_rejects_invalid_effective_agent_configuration(tmp_path: Path) -> None:
     (tmp_path / "main.agent.md").write_text(
-        textwrap.dedent(
-            """
-            ---
-            name: Main
-            description: Main agent
-            mode:
-              harness:
-                max_context_window_tokens: 4096
-                max_output_tokens: 4096
-            ---
-            Hello
-            """
-        ).lstrip(),
+        "---\n"
+        "name: Main\n"
+        "description: Main agent\n"
+        "agent_configuration:\n"
+        "  max_output_tokens: 4096\n"
+        "  maf:\n"
+        "    compaction:\n"
+        "      max_context_window_tokens: 4096\n"
+        "---\n"
+        "Hello\n",
         encoding="utf-8",
     )
 
+    [spec] = load_agent_specs(tmp_path, strict=True)
     with pytest.raises(ValueError, match="must be less than"):
-        load_agent_specs(tmp_path, strict=True)
+        compose(spec, load_global_config(tmp_path))
 
 
 def test_load_agent_specs_substitute_variables_false_skips_frontmatter_and_body(

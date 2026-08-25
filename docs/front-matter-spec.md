@@ -18,7 +18,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
   - Code execution sandbox configuration
   - Outbound web request tool (`web_request`) — enabled by default, SSRF-guarded
 - Default runtime settings (model, timeout)
-- Explicit MAF execution modes with optional token-budget conversation-history compaction
+- Harness-first MAF execution with optional token-budget conversation-history compaction
 
 **MCP server discovery:**
 - MCP servers (defined in `mcp.json`), including connector-backed MCP servers
@@ -47,8 +47,8 @@ For capabilities (MCP, skills, tools):
 
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
-| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools`, `http_auth` |
-| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `sdk`, `mode`, `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `workflows`, `subagents`, `input_schema`, `response_schema`, `response_example`, `metadata` |
+| **Global** (`agents.config.yaml`) | None (entire file is optional) | `agent_configuration`, `system_tools`, `model`, `timeout`, `tools`, `http_auth` |
+| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `agent_configuration`, `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `workflows`, `subagents`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
 ---
@@ -61,6 +61,7 @@ Optional file in the root directory that defines shared infrastructure and runti
 **Required properties:** None (entire file is optional)
 
 **Supported properties:**
+- `agent_configuration` — Portable and MAF-specific execution defaults inherited by agents
 - `system_tools` — Object containing system-level tools configuration
   - `dynamic_sessions_code_interpreter` — Object with ACA Dynamic Sessions code interpreter configuration
   - `web_request` — Object or boolean configuring the built-in outbound HTTP request tool (enabled by default; `false` disables app-wide)
@@ -83,8 +84,7 @@ YAML front matter at the top of each agent file.
 
 **Optional properties:**
 - `builtin_endpoints` — Object or boolean for enabling built-in chat UI, chat API, and MCP tool endpoints
-- `sdk` — Agent SDK selector; only `maf` is supported and it is the default
-- `mode` — `default` for plain MAF execution or an object containing nested harness settings
+- `agent_configuration` — Portable and MAF-specific execution settings; recursively inherits global values
 - `model` — String to override global default model
 - `timeout` — Number to override global default timeout
 - `logger` — Boolean to enable/disable response logging for triggered agents
@@ -156,10 +156,10 @@ Fields are organized into categories based on how they can be used:
 **Runtime Settings (Global defaults, overridable in agents):**
 - `model` — LLM selection
 - `timeout` — Execution time limit
+- `agent_configuration` — Output-token limit and MAF conversation-compaction settings
 
 **Agent-Specific (Agent front matter only):**
 - `name`, `description` — Agent identity (required)
-- `sdk`, `mode` — SDK selection and plain or harness execution mode
 - `trigger` — Invocation method (required unless at least one built-in endpoint is enabled, or the agent is referenced as an internal specialist via another agent's `subagents` or `workflows.subagents`)
 - `builtin_endpoints` — Built-in chat UI, chat API, and MCP tool endpoints
 - `subagents` — Chat-time delegation to specialist agents (`delegate_<slug>` tools; see [`subagents`](#subagents))
@@ -192,32 +192,40 @@ unless another agent references it through `subagents` or
 
 ### Optional Fields
 
-#### `sdk` and `mode`
-- **Types:** `sdk: maf`; `mode: default | object`
-- **Typical location:** Agent only
-- **Defaults:** `sdk: maf`, `mode: default`
-- **Description:** Selects the agent SDK and execution mode. Microsoft Agent Framework (`maf`) is
-  currently the only supported SDK. `default` uses the plain MAF `Agent`; a nested `harness` object
-  uses MAF's harness agent and may compact accumulated conversation history before model calls.
+#### `agent_configuration`
+- **Type:** `object | null`
+- **Typical location:** Global defaults in `agents.config.yaml`; optional recursive overrides in agent front matter
+- **Default:** Empty configuration; Microsoft Agent Framework (`maf`) is the runtime invariant
+- **Description:** Configures a portable model output limit and SDK-specific execution settings. All
+  agents execute through MAF's harness-agent mechanism, whether or not this object is present.
 
 ```yaml
-# .agent.md front matter
-sdk: maf
-mode:
-  harness:
-    max_context_window_tokens: 8192  # Total budget used by compaction
-    max_output_tokens: 4096          # Reserved response and output-token budget
+# agents.config.yaml
+agent_configuration:
+  max_output_tokens: 4096
+  maf:
+    compaction:
+      max_context_window_tokens: 8192
+
+# .agent.md front matter: override one inherited leaf
+agent_configuration:
+  maf:
+    compaction:
+      max_context_window_tokens: 16384
 ```
 
-Omitting either top-level field is valid. Omitted `sdk` means `maf`; omitted `mode` means `default`.
-An empty `mode: { harness: {} }` selects harness execution without enabling compaction. Otherwise,
-both token limits are required positive integers and `max_output_tokens` must be less than
-`max_context_window_tokens`. `sdk`, scalar `mode`, and nested token values participate in normal
-front-matter environment substitution before validation; string substitution cannot create the
-nested mapping itself.
+Agent configuration inherits recursively by authored field. An omitted field or empty object keeps
+the global value; an explicit `null` clears the inherited leaf or subtree. Setting the whole per-agent
+`agent_configuration: null` clears all global agent configuration for that agent. Specialists inherit
+only their own resolved global-plus-agent configuration, never a coordinator's overrides.
 
-Harness mode applies whenever that agent runs directly, as a chat-time delegated specialist, or as
-a Workflow Sub Agent. Direct runs retain authoritative full Blob/File history while compaction
+`max_output_tokens` is a positive integer and may be configured without compaction. When
+`max_context_window_tokens` is configured, the effective output limit must also be present and must
+be smaller than the context limit. Environment substitution runs before schema parsing and effective
+validation.
+
+Harness execution applies whenever an agent runs directly, as a chat-time delegated specialist, or
+as a Workflow Sub Agent. Direct runs retain authoritative full Blob/File history while compaction
 bounds only the message context sent to the model. Specialist runs remain fresh, single-task leaf
 executions with no nested delegation or persistent history. Harness instructions are empty, and the
 runtime disables todo, plan/execute mode, file memory, web search, and automatic tool approval;
@@ -227,10 +235,10 @@ these controls are intentionally not author-configurable.
 physical context window. The default strategy begins truncating older non-system message groups at
 80% of the input budget, where input budget is `max_context_window_tokens - max_output_tokens`.
 
-The earlier unmerged top-level `harness` syntax is rejected. Migrate `harness: false` to
-`mode: default`, `harness: true` to `mode: { harness: {} }`, and move a harness object beneath
-`mode.harness`. Global harness configuration is not supported; place the mode object in each agent
-that should use harness execution.
+The earlier `mode`, top-level `harness`, and `sdk` properties are rejected. Remove any authored
+`sdk: maf`; MAF is implicit. Omitted `mode` and `mode: default` migrate to omitted
+`agent_configuration`; both now use harness execution. Move token fields to the canonical shape
+shown above. Existing top-level `model` and `timeout` fields remain unchanged.
 
 #### `trigger`
 - **Type:** `object`

@@ -11,10 +11,12 @@ from types import SimpleNamespace
 from typing import Any
 
 from azure_functions_agents.config.schema import (
+    AgentConfiguration,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     EndpointAuthConfig,
-    HarnessAgentConfig,
+    MafAgentConfiguration,
+    MafCompactionConfig,
     ResolvedAgent,
     ToolsFilter,
 )
@@ -988,12 +990,12 @@ def test_workflow_http_handler_rejects_invalid_schema_response(
 
 
 # ---------------------------------------------------------------------------
-# harness_config forwarding
+# agent_configuration forwarding
 # ---------------------------------------------------------------------------
 
 
-def _resolved_agent_with_harness(
-    harness_config: HarnessAgentConfig | None,
+def _resolved_agent_with_configuration(
+    agent_configuration: AgentConfiguration,
 ) -> ResolvedAgent:
     source = Path(__file__).resolve()
     return ResolvedAgent(
@@ -1015,16 +1017,17 @@ def _resolved_agent_with_harness(
         response_example=None,
         metadata={},
         source_file=str(source),
-        harness_config=harness_config,
+        agent_configuration=agent_configuration,
     )
 
 
-def test_http_handler_forwards_harness_config(monkeypatch: Any) -> None:
-    """make_http_agent_handler passes resolved.harness_config to _run_agent."""
+def test_http_handler_forwards_agent_configuration(monkeypatch: Any) -> None:
     captured: dict[str, Any] = {}
-    cfg = HarnessAgentConfig(
-        max_context_window_tokens=64_000,
+    config = AgentConfiguration(
         max_output_tokens=4_096,
+        maf=MafAgentConfiguration(
+            compaction=MafCompactionConfig(max_context_window_tokens=64_000)
+        ),
     )
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
@@ -1037,16 +1040,16 @@ def test_http_handler_forwards_harness_config(monkeypatch: Any) -> None:
     )
 
     handler = make_http_agent_handler(
-        _resolved_agent_with_harness(cfg), AgentCapabilities()
+        _resolved_agent_with_configuration(config), AgentCapabilities()
     )
     asyncio.run(handler(DummyRequest({"prompt": "hi"})))
 
-    assert captured.get("harness_config") is cfg
+    assert captured.get("agent_configuration") is config
 
 
-def test_http_handler_forwards_none_harness_config(monkeypatch: Any) -> None:
-    """make_http_agent_handler passes harness_config=None when not configured."""
+def test_http_handler_forwards_empty_agent_configuration(monkeypatch: Any) -> None:
     captured: dict[str, Any] = {}
+    config = AgentConfiguration()
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         captured.update(kwargs)
@@ -1058,17 +1061,16 @@ def test_http_handler_forwards_none_harness_config(monkeypatch: Any) -> None:
     )
 
     handler = make_http_agent_handler(
-        _resolved_agent_with_harness(None), AgentCapabilities()
+        _resolved_agent_with_configuration(config), AgentCapabilities()
     )
     asyncio.run(handler(DummyRequest({"prompt": "hi"})))
 
-    assert captured.get("harness_config") is None
+    assert captured.get("agent_configuration") is config
 
 
-def test_non_http_handler_forwards_harness_config(monkeypatch: Any) -> None:
-    """make_agent_handler passes resolved.harness_config to _run_agent."""
+def test_non_http_handler_forwards_agent_configuration(monkeypatch: Any) -> None:
     captured: dict[str, Any] = {}
-    cfg = HarnessAgentConfig()
+    config = AgentConfiguration()
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
         captured.update(kwargs)
@@ -1084,9 +1086,9 @@ def test_non_http_handler_forwards_harness_config(monkeypatch: Any) -> None:
     )
 
     handler = make_agent_handler(
-        _resolved_agent_with_harness(cfg), "timer_trigger", AgentCapabilities()
+        _resolved_agent_with_configuration(config), "timer_trigger", AgentCapabilities()
     )
     asyncio.run(handler({}))
 
-    assert captured.get("harness_config") is cfg
+    assert captured.get("agent_configuration") is config
 

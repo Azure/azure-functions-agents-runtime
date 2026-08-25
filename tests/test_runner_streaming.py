@@ -226,12 +226,12 @@ def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> No
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
 
-    async def fake_build_agent_session_history(
+    async def fake_build_agent_session(
         **_kwargs: Any,
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
@@ -271,12 +271,12 @@ def test_run_agent_stream_bounds_stalled_generator_by_coordinator_deadline(
     """
     spans = _install_start_span_capture(monkeypatch)
 
-    async def fake_build_agent_session_history(
+    async def fake_build_agent_session(
         **_kwargs: Any,
     ) -> tuple[_StallingAgent, object, str, None, InferenceTarget]:
         return _StallingAgent(), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
         return [
@@ -331,12 +331,12 @@ def test_run_agent_stream_finalizes_when_deadline_exhausted_between_updates(
         ]
     )
 
-    async def fake_build_agent_session_history(
+    async def fake_build_agent_session(
         **_kwargs: Any,
     ) -> tuple[_CleanupTrackingAgent, object, str, None, InferenceTarget]:
         return _CleanupTrackingAgent(fake_stream), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def drive() -> list[str]:
         gen = runner.run_agent_stream("prompt", timeout=0.05)
@@ -393,12 +393,12 @@ def test_run_agent_stream_finalizes_when_cancelled_while_suspended_at_a_yield(
         ]
     )
 
-    async def fake_build_agent_session_history(
+    async def fake_build_agent_session(
         **_kwargs: Any,
     ) -> tuple[_CleanupTrackingAgent, object, str, None, InferenceTarget]:
         return _CleanupTrackingAgent(fake_stream), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def drive() -> None:
         gen = runner.run_agent_stream("prompt", timeout=30.0)
@@ -522,12 +522,12 @@ def test_run_agent_bounds_lock_wait_by_coordinator_deadline(monkeypatch: Any) ->
     """
     resolved_id = "test-m1-lock-contention-non-streaming"
 
-    async def fake_build_agent_session_history(
+    async def fake_build_agent_session(
         **_kwargs: Any,
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), resolved_id, None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def scenario() -> BaseException | None:
         lock = await runner._get_session_lock(resolved_id)
@@ -561,12 +561,12 @@ def test_run_agent_stream_bounds_lock_wait_by_coordinator_deadline(monkeypatch: 
     spans = _install_start_span_capture(monkeypatch)
     resolved_id = "test-m1-lock-contention-streaming"
 
-    async def fake_build_agent_session_history(
+    async def fake_build_agent_session(
         **_kwargs: Any,
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), resolved_id, None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def scenario() -> list[str]:
         lock = await runner._get_session_lock(resolved_id)
@@ -674,12 +674,12 @@ def test_run_agent_stream_reports_delegate_error_count_on_span(monkeypatch: Any)
     tracker.record_error()
     tracker.record_error()
 
-    async def fake_build_agent_session_history(
+    async def fake_build_agent_session(
         **_kwargs: Any,
     ) -> tuple[_Agent, object, str, runner._DelegateErrorTracker, InferenceTarget]:
         return _Agent(), object(), "test-session", tracker, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
@@ -704,12 +704,12 @@ def test_run_agent_stream_reports_zero_tool_errors_without_delegation(monkeypatc
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
     spans = _install_start_span_capture(monkeypatch)
 
-    async def fake_build_agent_session_history(
+    async def fake_build_agent_session(
         **_kwargs: Any,
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
@@ -738,12 +738,12 @@ def test_run_agent_stream_counts_ordinary_tool_errors_without_delegation(
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
     spans = _install_start_span_capture(monkeypatch)
 
-    async def fake_build_agent_session_history(
+    async def fake_build_agent_session(
         **_kwargs: Any,
     ) -> tuple[_ToolErrorAgent, object, str, None, InferenceTarget]:
         return _ToolErrorAgent(), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
@@ -770,12 +770,12 @@ def test_run_agent_stream_sums_ordinary_and_delegate_tool_errors(monkeypatch: An
     tracker = runner._DelegateErrorTracker()
     tracker.record_error()  # one delegate failure, independent of the tool error below
 
-    async def fake_build_agent_session_history(
+    async def fake_build_agent_session(
         **_kwargs: Any,
     ) -> tuple[_ToolErrorAgent, object, str, runner._DelegateErrorTracker, InferenceTarget]:
         return _ToolErrorAgent(), object(), "test-session", tracker, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
@@ -800,12 +800,12 @@ def test_run_agent_stream_reports_display_name_on_span(monkeypatch: Any) -> None
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
     spans = _install_start_span_capture(monkeypatch)
 
-    async def fake_build_agent_session_history(
+    async def fake_build_agent_session(
         **_kwargs: Any,
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
         return [

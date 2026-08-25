@@ -225,34 +225,43 @@ class SystemToolsAgentOverride(BaseModel):
     web_request: bool | None = None
 
 
-class HarnessAgentConfig(BaseModel):
-    """Optional conversation-compaction limits for MAF harness mode."""
+class MafCompactionConfig(BaseModel):
+    """MAF-specific conversation-compaction settings."""
 
     model_config = ConfigDict(extra="forbid")
 
     max_context_window_tokens: int | None = Field(default=None, gt=0)
-    max_output_tokens: int | None = Field(default=None, gt=0)
 
-    @model_validator(mode="after")
-    def validate_token_limits(self) -> HarnessAgentConfig:
-        limits = (self.max_context_window_tokens, self.max_output_tokens)
-        if (limits[0] is None) != (limits[1] is None):
-            raise ValueError(
-                "max_context_window_tokens and max_output_tokens must be provided together"
-            )
-        if limits[0] is not None and limits[1] is not None and limits[1] >= limits[0]:
-            raise ValueError(
-                "max_output_tokens must be less than max_context_window_tokens"
-            )
-        return self
+    @field_validator("max_context_window_tokens", mode="before")
+    @classmethod
+    def reject_boolean_context_limit(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("max_context_window_tokens must be an integer")
+        return value
 
 
-class HarnessModeConfig(BaseModel):
-    """Agent execution-mode wrapper for MAF harness configuration."""
+class MafAgentConfiguration(BaseModel):
+    """MAF-specific agent configuration."""
 
     model_config = ConfigDict(extra="forbid")
 
-    harness: HarnessAgentConfig
+    compaction: MafCompactionConfig | None = None
+
+
+class AgentConfiguration(BaseModel):
+    """Portable and SDK-specific agent configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_output_tokens: int | None = Field(default=None, gt=0)
+    maf: MafAgentConfiguration | None = None
+
+    @field_validator("max_output_tokens", mode="before")
+    @classmethod
+    def reject_boolean_output_limit(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("max_output_tokens must be an integer")
+        return value
 
 
 class GlobalConfig(BaseModel):
@@ -260,6 +269,7 @@ class GlobalConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    agent_configuration: AgentConfiguration | None = None
     system_tools: SystemToolsConfig | None = None
     model: str | None = None
     timeout: float | None = None
@@ -282,17 +292,7 @@ class AgentSpec(BaseModel):
 
     name: str
     description: str
-    sdk: Literal["maf"] = Field(
-        default="maf",
-        description="Agent SDK. Only Microsoft Agent Framework (`maf`) is supported.",
-    )
-    mode: Literal["default"] | HarnessModeConfig = Field(
-        default="default",
-        description=(
-            "Agent execution mode. Use `default` for plain MAF execution or provide "
-            "a `harness` object with optional conversation-compaction token limits."
-        ),
-    )
+    agent_configuration: AgentConfiguration | None = None
     trigger: TriggerSpec | None = None
     builtin_endpoints: bool | BuiltinEndpointsConfig | None = None
     model: str | None = None
@@ -351,7 +351,7 @@ class ResolvedAgent(BaseModel):
     substitute_variables: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
     source_file: str | None = None
-    harness_config: HarnessAgentConfig | None = None
+    agent_configuration: AgentConfiguration = Field(default_factory=AgentConfiguration)
 
 
 GlobalConfig.model_rebuild()
@@ -418,6 +418,7 @@ TRIGGER_TYPES: dict[str, dict[str, Any]] = {
 # markdown formatting and internal document links.
 
 GLOBAL_CONFIG_DESCRIPTIONS: dict[str, str] = {
+    "agent_configuration": "Portable and SDK-specific defaults inherited by every agent. [Details](./front-matter-spec.md#agent_configuration)",
     "system_tools": "System-level tools configuration. [Details](#global-system_tools)",
     "model": "Default LLM model identifier for all agents",
     "timeout": "Default execution timeout in seconds",
@@ -425,6 +426,7 @@ GLOBAL_CONFIG_DESCRIPTIONS: dict[str, str] = {
 }
 
 GLOBAL_CONFIG_DEFAULTS: dict[str, str] = {
+    "agent_configuration": "`null`",
     "system_tools": "`{}`",
     "model": "Resolved from env/provider",
     "timeout": "`900`",
@@ -452,6 +454,7 @@ AGENT_SPEC_REQUIRED_DESCRIPTIONS: dict[str, str] = {
 }
 
 AGENT_SPEC_OPTIONAL_DESCRIPTIONS: dict[str, str] = {
+    "agent_configuration": "Portable and SDK-specific execution settings. Recursively inherits global values. [Details](./front-matter-spec.md#agent_configuration)",
     "builtin_endpoints": "Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints)",
     "model": "Override LLM model for this agent",
     "timeout": "Override execution timeout (seconds) for this agent",

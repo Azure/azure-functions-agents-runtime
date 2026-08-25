@@ -5,12 +5,13 @@ from __future__ import annotations
 from azure_functions_agents._slug import _function_name_from_source
 from azure_functions_agents.config.env import runtime_env_value
 from azure_functions_agents.config.schema import (
+    AgentConfiguration,
     AgentSpec,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     GlobalConfig,
-    HarnessAgentConfig,
-    HarnessModeConfig,
+    MafAgentConfiguration,
+    MafCompactionConfig,
     McpFilter,
     ResolvedAgent,
     SkillsFilter,
@@ -133,11 +134,110 @@ def apply_tools_filter(
     return ToolsFilter(exclude=sorted(merged_excludes)), False
 
 
-def _resolve_mode(spec: AgentSpec) -> HarnessAgentConfig | None:
-    """Translate the public execution mode into the internal harness contract."""
-    if isinstance(spec.mode, HarnessModeConfig):
-        return spec.mode.harness
-    return None
+def _merge_compaction(
+    agent_config: MafCompactionConfig,
+    global_config: MafCompactionConfig | None,
+) -> MafCompactionConfig | None:
+    max_context_window_tokens = (
+        agent_config.max_context_window_tokens
+        if "max_context_window_tokens" in agent_config.model_fields_set
+        else global_config.max_context_window_tokens
+        if global_config is not None
+        else None
+    )
+    if max_context_window_tokens is None:
+        return None
+    return MafCompactionConfig(max_context_window_tokens=max_context_window_tokens)
+
+
+def _merge_maf_configuration(
+    agent_config: MafAgentConfiguration,
+    global_config: MafAgentConfiguration | None,
+) -> MafAgentConfiguration | None:
+    if "compaction" not in agent_config.model_fields_set:
+        compaction = (
+            global_config.compaction.model_copy(deep=True)
+            if global_config is not None and global_config.compaction is not None
+            else None
+        )
+    elif agent_config.compaction is None:
+        compaction = None
+    else:
+        compaction = _merge_compaction(
+            agent_config.compaction,
+            global_config.compaction if global_config else None,
+        )
+
+    if compaction is None:
+        return None
+    return MafAgentConfiguration(compaction=compaction)
+
+
+def _merge_agent_configuration(
+    agent_config: AgentConfiguration,
+    global_config: AgentConfiguration | None,
+) -> AgentConfiguration:
+    max_output_tokens = (
+        agent_config.max_output_tokens
+        if "max_output_tokens" in agent_config.model_fields_set
+        else global_config.max_output_tokens
+        if global_config is not None
+        else None
+    )
+
+    if "maf" not in agent_config.model_fields_set:
+        maf = global_config.maf.model_copy(deep=True) if global_config and global_config.maf else None
+    elif agent_config.maf is None:
+        maf = None
+    else:
+        maf = _merge_maf_configuration(
+            agent_config.maf,
+            global_config.maf if global_config else None,
+        )
+
+    return AgentConfiguration(max_output_tokens=max_output_tokens, maf=maf)
+
+
+def _validate_agent_configuration(config: AgentConfiguration) -> None:
+    max_context_window_tokens = (
+        config.maf.compaction.max_context_window_tokens
+        if config.maf is not None and config.maf.compaction is not None
+        else None
+    )
+    if max_context_window_tokens is None:
+        return
+    if config.max_output_tokens is None:
+        raise ValueError(
+            "agent_configuration.max_output_tokens is required when "
+            "agent_configuration.maf.compaction.max_context_window_tokens is configured"
+        )
+    if config.max_output_tokens >= max_context_window_tokens:
+        raise ValueError(
+            "agent_configuration.max_output_tokens must be less than "
+            "agent_configuration.maf.compaction.max_context_window_tokens"
+        )
+
+
+def _resolve_agent_configuration(
+    spec: AgentSpec, global_config: GlobalConfig
+) -> AgentConfiguration:
+    """Recursively merge agent overrides over global agent configuration."""
+    if "agent_configuration" not in spec.model_fields_set:
+        resolved = (
+            global_config.agent_configuration.model_copy(deep=True)
+            if global_config.agent_configuration is not None
+            else AgentConfiguration()
+        )
+    elif spec.agent_configuration is None:
+        resolved = AgentConfiguration()
+    else:
+        resolved = _merge_agent_configuration(
+            spec.agent_configuration,
+            global_config.agent_configuration,
+        )
+
+    _validate_agent_configuration(resolved)
+    return resolved
 
 
 def _resolve_slug(spec: AgentSpec) -> str:
@@ -220,7 +320,7 @@ def compose(
         substitute_variables=spec.substitute_variables,
         metadata=metadata,
         source_file=spec.source_file,
-        harness_config=_resolve_mode(spec),
+        agent_configuration=_resolve_agent_configuration(spec, global_config),
     )
 
     return resolved

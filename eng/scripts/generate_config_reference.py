@@ -31,11 +31,12 @@ from pydantic.fields import FieldInfo
 
 # Extract models from the dynamically loaded schema module
 AgentSpec = schema.AgentSpec
+AgentConfiguration = schema.AgentConfiguration
 BuiltinEndpointsConfig = schema.BuiltinEndpointsConfig
 DynamicSessionsCodeInterpreterConfig = schema.DynamicSessionsCodeInterpreterConfig
 GlobalConfig = schema.GlobalConfig
-HarnessAgentConfig = schema.HarnessAgentConfig
-HarnessModeConfig = schema.HarnessModeConfig
+MafAgentConfiguration = schema.MafAgentConfiguration
+MafCompactionConfig = schema.MafCompactionConfig
 McpFilter = schema.McpFilter
 SkillsFilter = schema.SkillsFilter
 SystemToolsAgentOverride = schema.SystemToolsAgentOverride
@@ -66,11 +67,6 @@ WEB_REQUEST_DESCRIPTIONS = schema.WEB_REQUEST_DESCRIPTIONS
 
 def format_type(field_info: FieldInfo, field_name: str) -> str:
     """Format field type annotation as a readable string."""
-    if field_name == "sdk":
-        return "`maf`"
-    if field_name == "mode":
-        return "`default` \\| object"
-
     annotation = field_info.annotation
     annotation_args = get_args(annotation)
 
@@ -106,8 +102,9 @@ def format_type(field_info: FieldInfo, field_name: str) -> str:
         "DynamicSessionsCodeInterpreterConfig",
         "EndpointAuthConfig",
         "EntraAuthConfig",
-        "HarnessAgentConfig",
-        "HarnessModeConfig",
+        "AgentConfiguration",
+        "MafAgentConfiguration",
+        "MafCompactionConfig",
         "McpFilter",
         "SkillsFilter",
         "ToolsFilter",
@@ -264,6 +261,7 @@ def generate_model_table(
 
 # Custom descriptions for fields (enhances docstrings)
 GLOBAL_CONFIG_DESCRIPTIONS = {
+    "agent_configuration": "Portable and SDK-specific defaults inherited by every agent. [Details](./front-matter-spec.md#agent_configuration)",
     "system_tools": "System-level tools configuration. [Details](#global-system_tools)",
     "model": "Default LLM model identifier for all agents",
     "timeout": "Default execution timeout in seconds",
@@ -272,6 +270,7 @@ GLOBAL_CONFIG_DESCRIPTIONS = {
 }
 
 GLOBAL_CONFIG_DEFAULTS = {
+    "agent_configuration": "`null`",
     "system_tools": "`{}`",
     "model": "Resolved from env/provider",
     "timeout": "`900`",
@@ -308,8 +307,7 @@ AGENT_SPEC_REQUIRED_DESCRIPTIONS = {
 }
 
 AGENT_SPEC_OPTIONAL_DESCRIPTIONS = {
-    "sdk": "Agent SDK. Only `maf` is supported. [Details](./front-matter-spec.md#sdk-and-mode)",
-    "mode": "Execution mode: plain MAF (`default`) or nested harness settings. [Details](./front-matter-spec.md#sdk-and-mode)",
+    "agent_configuration": "Portable and SDK-specific execution settings. Recursively inherits global values. [Details](./front-matter-spec.md#agent_configuration)",
     "builtin_endpoints": "Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints)",
     "model": "Override LLM model for this agent",
     "timeout": "Override execution timeout (seconds) for this agent",
@@ -327,13 +325,17 @@ AGENT_SPEC_OPTIONAL_DESCRIPTIONS = {
     "metadata": "Additional metadata for organization. Free-form.",
 }
 
-HARNESS_MODE_DESCRIPTIONS = {
-    "harness": "Harness execution settings. An empty object enables harness mode without compaction.",
+AGENT_CONFIGURATION_DESCRIPTIONS = {
+    "max_output_tokens": "Positive model output-token limit. May be configured without compaction.",
+    "maf": "Microsoft Agent Framework-specific settings.",
 }
 
-HARNESS_CONFIG_DESCRIPTIONS = {
-    "max_context_window_tokens": "Positive total context budget used by conversation compaction. Must be provided with `max_output_tokens`.",
-    "max_output_tokens": "Positive reserved output budget and model output-token limit. Must be less than `max_context_window_tokens`.",
+MAF_AGENT_CONFIGURATION_DESCRIPTIONS = {
+    "compaction": "MAF conversation-compaction settings.",
+}
+
+MAF_COMPACTION_DESCRIPTIONS = {
+    "max_context_window_tokens": "Positive total context budget used by conversation compaction. Requires an effective `max_output_tokens` smaller than this value.",
 }
 
 TRIGGER_SPEC_DESCRIPTIONS = {
@@ -453,8 +455,6 @@ def generate_markdown() -> str:
             default = "`{}`"
         elif field_name == "builtin_endpoints":
             default = "`false`"
-        elif field_name == "sdk":
-            default = "`maf`"
         elif field_name == "mode":
             default = "`default`"
         elif field_name == "system_tools":
@@ -511,42 +511,29 @@ def generate_markdown() -> str:
     ])
 
     lines.extend([
-        "### Agent: `mode`",
+        "### Global and agent: `agent_configuration`",
         "",
-        "Use `default` for plain MAF agent execution, or provide a harness object:",
+        "Configure portable output limits and MAF-specific conversation compaction:",
         "",
         "```yaml",
-        "sdk: maf",
-        "mode:",
-        "  harness:",
-        "    max_context_window_tokens: 8192",
-        "    max_output_tokens: 4096",
+        "agent_configuration:",
+        "  max_output_tokens: 4096",
+        "  maf:",
+        "    compaction:",
+        "      max_context_window_tokens: 8192",
         "```",
         "",
     ])
-    lines.extend(generate_model_table(HarnessModeConfig, descriptions=HARNESS_MODE_DESCRIPTIONS))
+    lines.extend(generate_model_table(AgentConfiguration, descriptions=AGENT_CONFIGURATION_DESCRIPTIONS))
+    lines.extend(["", "#### `agent_configuration.maf`", ""])
+    lines.extend(generate_model_table(MafAgentConfiguration, descriptions=MAF_AGENT_CONFIGURATION_DESCRIPTIONS))
+    lines.extend(["", "#### `agent_configuration.maf.compaction`", ""])
+    lines.extend(generate_model_table(MafCompactionConfig, descriptions=MAF_COMPACTION_DESCRIPTIONS))
     lines.extend([
         "",
-        "#### Agent: `mode.harness`",
+        "Agent values recursively inherit global values. Explicit `null` clears an inherited leaf or subtree. When context compaction is configured, the effective `max_output_tokens` must be present and less than `max_context_window_tokens`.",
         "",
-        "Omit both token fields for harness execution without compaction, or provide both fields.",
-        "",
-    ])
-    lines.extend(
-        generate_model_table(
-            HarnessAgentConfig,
-            descriptions=HARNESS_CONFIG_DESCRIPTIONS,
-            custom_defaults={
-                "max_context_window_tokens": "`null`",
-                "max_output_tokens": "`null`",
-            },
-        )
-    )
-    lines.extend([
-        "",
-        "`max_output_tokens` must be less than `max_context_window_tokens`.",
-        "",
-        "**See:** [Front Matter Spec - sdk and mode](./front-matter-spec.md#sdk-and-mode)",
+        "**See:** [Front Matter Spec - agent_configuration](./front-matter-spec.md#agent_configuration)",
         "",
     ])
 

@@ -176,7 +176,7 @@ async def _run_builtin_agent(
         workflow_agent_slug=resolved.slug,
         workflow_policy=workflow_policy,
         agent_name=resolved.slug,
-        harness_config=resolved.harness_config,
+        agent_configuration=resolved.agent_configuration,
         subagents=resolved.subagents,
         catalog=catalog,
     )
@@ -219,7 +219,7 @@ def _run_builtin_agent_stream(
         # `agent.run {name}` span is the only place `af.agent.display_name`
         # can be recorded for the streaming surface — thread it through.
         display_name=resolved.name,
-        harness_config=resolved.harness_config,
+        agent_configuration=resolved.agent_configuration,
         subagents=resolved.subagents,
         catalog=catalog,
     )

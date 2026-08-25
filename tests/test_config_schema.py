@@ -6,12 +6,13 @@ import pytest
 from pydantic import ValidationError
 
 from azure_functions_agents.config.schema import (
+    AgentConfiguration,
     AgentSpec,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     GlobalConfig,
-    HarnessAgentConfig,
-    HarnessModeConfig,
+    MafAgentConfiguration,
+    MafCompactionConfig,
     McpFilter,
     ResolvedAgent,
     SubagentRef,
@@ -132,96 +133,127 @@ def test_global_config_extra_forbidden() -> None:
 
 
 # ---------------------------------------------------------------------------
-# HarnessAgentConfig
+# AgentConfiguration
 # ---------------------------------------------------------------------------
 
 
-def test_harness_agent_config_defaults() -> None:
-    config = HarnessAgentConfig()
-    assert config.max_context_window_tokens is None
+def test_agent_configuration_defaults() -> None:
+    config = AgentConfiguration()
     assert config.max_output_tokens is None
+    assert config.maf is None
 
 
-def test_harness_agent_config_with_fields() -> None:
-    config = HarnessAgentConfig(max_context_window_tokens=128_000, max_output_tokens=4_096)
-    assert config.max_context_window_tokens == 128_000
+def test_agent_configuration_with_fields() -> None:
+    config = AgentConfiguration(
+        max_output_tokens=4_096,
+        maf=MafAgentConfiguration(
+            compaction=MafCompactionConfig(max_context_window_tokens=128_000)
+        ),
+    )
     assert config.max_output_tokens == 4_096
-
-
-def test_harness_agent_config_extra_forbidden() -> None:
-    with pytest.raises(ValidationError):
-        HarnessAgentConfig.model_validate({"unknown_field": True})
-
-
-@pytest.mark.parametrize("field", ["disable_file_memory", "disable_mode"])
-def test_harness_agent_config_runtime_owned_fields_forbidden(field: str) -> None:
-    with pytest.raises(ValidationError):
-        HarnessAgentConfig.model_validate({field: True})
+    assert config.maf is not None
+    assert config.maf.compaction is not None
+    assert config.maf.compaction.max_context_window_tokens == 128_000
 
 
 @pytest.mark.parametrize(
-    ("data", "message"),
+    ("model", "data"),
     [
-        ({"max_context_window_tokens": 8192}, "must be provided together"),
-        ({"max_output_tokens": 4096}, "must be provided together"),
-        (
-            {"max_context_window_tokens": 4096, "max_output_tokens": 4096},
-            "must be less than",
-        ),
-        ({"max_context_window_tokens": 0, "max_output_tokens": 1}, "greater than 0"),
+        (AgentConfiguration, {"unknown_field": True}),
+        (MafAgentConfiguration, {"unknown_field": True}),
+        (MafCompactionConfig, {"unknown_field": True}),
     ],
 )
-def test_harness_agent_config_rejects_invalid_token_limits(
-    data: dict[str, int], message: str
+def test_agent_configuration_extra_forbidden(
+    model: type[AgentConfiguration | MafAgentConfiguration | MafCompactionConfig],
+    data: dict[str, Any],
 ) -> None:
-    with pytest.raises(ValidationError, match=message):
-        HarnessAgentConfig.model_validate(data)
+    with pytest.raises(ValidationError):
+        model.model_validate(data)
 
 
-def test_agent_spec_sdk_and_mode_defaults() -> None:
+@pytest.mark.parametrize("field", ["disable_file_memory", "disable_mode"])
+def test_agent_configuration_runtime_owned_fields_forbidden(field: str) -> None:
+    with pytest.raises(ValidationError):
+        AgentConfiguration.model_validate({"maf": {field: True}})
+
+
+@pytest.mark.parametrize(
+    ("model", "data"),
+    [
+        (AgentConfiguration, {"max_output_tokens": 0}),
+        (AgentConfiguration, {"max_output_tokens": True}),
+        (MafCompactionConfig, {"max_context_window_tokens": 0}),
+        (MafCompactionConfig, {"max_context_window_tokens": True}),
+    ],
+)
+def test_agent_configuration_rejects_invalid_token_limits(
+    model: type[AgentConfiguration | MafCompactionConfig], data: dict[str, Any]
+) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate(data)
+
+
+def test_global_and_agent_configuration_defaults() -> None:
+    config = GlobalConfig()
     spec = AgentSpec(name="X", description="Y")
-    assert spec.sdk == "maf"
-    assert spec.mode == "default"
+    assert config.agent_configuration is None
+    assert spec.agent_configuration is None
 
 
-def test_agent_spec_accepts_explicit_maf_default_mode() -> None:
-    spec = AgentSpec(name="X", description="Y", sdk="maf", mode="default")
-    assert spec.sdk == "maf"
-    assert spec.mode == "default"
+def test_global_and_agent_config_accept_agent_configuration() -> None:
+    data = {
+        "max_output_tokens": 4096,
+        "maf": {"compaction": {"max_context_window_tokens": 8192}},
+    }
+    global_config = GlobalConfig.model_validate({"agent_configuration": data})
+    spec = AgentSpec.model_validate(
+        {"name": "X", "description": "Y", "agent_configuration": data}
+    )
+    assert global_config.agent_configuration == spec.agent_configuration
 
 
-def test_agent_spec_accepts_harness_mode() -> None:
-    config = HarnessAgentConfig(max_context_window_tokens=8192, max_output_tokens=4096)
-    spec = AgentSpec(name="X", description="Y", mode=HarnessModeConfig(harness=config))
-    assert isinstance(spec.mode, HarnessModeConfig)
-    assert spec.mode.harness == config
+def test_agent_configuration_accepts_partial_and_null_shapes() -> None:
+    assert AgentConfiguration(max_output_tokens=4096).max_output_tokens == 4096
+    assert AgentConfiguration.model_validate({"maf": {"compaction": {}}}).maf is not None
+    assert AgentConfiguration.model_validate({"max_output_tokens": None}).max_output_tokens is None
+    assert AgentConfiguration.model_validate({"maf": None}).maf is None
+
+
+@pytest.mark.parametrize(
+    "sdk",
+    ["maf", "other", True],
+)
+def test_global_config_rejects_removed_sdk(sdk: Any) -> None:
+    with pytest.raises(ValidationError):
+        GlobalConfig.model_validate({"sdk": sdk})
 
 
 @pytest.mark.parametrize(
     "data",
     [
-        {"sdk": "other"},
-        {"sdk": True},
-        {"mode": "harness"},
-        {"mode": True},
-        {"mode": {}},
-        {"mode": {"harness": True}},
-        {"mode": {"harness": {}, "other": {}}},
+        {"mode": "default"},
+        {"mode": {"harness": {}}},
         {"harness": True},
     ],
 )
-def test_agent_spec_rejects_invalid_sdk_and_mode_shapes(data: dict[str, Any]) -> None:
+def test_agent_spec_rejects_removed_execution_fields(data: dict[str, Any]) -> None:
     with pytest.raises(ValidationError):
         AgentSpec.model_validate({"name": "X", "description": "Y", **data})
 
 
-def test_global_config_rejects_sdk_mode_and_harness() -> None:
-    for field in ("sdk", "mode", "harness"):
+def test_agent_spec_rejects_global_sdk() -> None:
+    with pytest.raises(ValidationError):
+        AgentSpec.model_validate({"name": "X", "description": "Y", "sdk": "maf"})
+
+
+def test_global_config_rejects_mode_and_harness() -> None:
+    for field in ("mode", "harness"):
         with pytest.raises(ValidationError):
             GlobalConfig.model_validate({field: "default"})
 
 
-def test_resolved_agent_harness_config_defaults_none() -> None:
+def test_resolved_agent_configuration_defaults_empty() -> None:
     resolved = ResolvedAgent(
         name="X",
         description="desc",
@@ -239,7 +271,7 @@ def test_resolved_agent_harness_config_defaults_none() -> None:
         response_schema=None,
         response_example=None,
     )
-    assert resolved.harness_config is None
+    assert resolved.agent_configuration == AgentConfiguration()
 
 
 def test_global_config_auth_defaults_to_none() -> None:

@@ -15,7 +15,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
-- **Explicit MAF execution modes** — keep default agent behavior or opt an agent into harness execution with token-budget conversation compaction
+- **Harness-first execution controls** — set portable output limits and optional MAF token-budget conversation compaction
 
 ## Installation
 
@@ -157,22 +157,25 @@ Any `.agent.md` file can opt into built-in endpoints with `builtin_endpoints`. T
 
 If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint-only agents as well as triggered agents that also expose a chat UI or API. `builtin_endpoints.debug_chat_ui: true` automatically enables the backing chat APIs. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints, including the MCP tool. See [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
 
-### SDK and execution mode
+### Agent configuration
 
-Agent front matter may explicitly select the MAF SDK and harness execution. Both fields are optional;
-omitting them uses plain MAF agent execution.
+All agents execute through MAF's harness-agent mechanism. Optional global defaults and recursive
+per-agent overrides configure model output and conversation compaction limits.
 
 ```yaml
-sdk: maf
-mode:
-  harness:
-    max_context_window_tokens: 8192
-    max_output_tokens: 4096
+# agents.config.yaml
+agent_configuration:
+  max_output_tokens: 4096
+  maf:
+    compaction:
+      max_context_window_tokens: 8192
 ```
 
-Use an empty `harness: {}` object for harness execution without compaction. When token limits are
-present, both positive values are required and output must be less than context. See
-[`docs/front-matter-spec.md#sdk-and-mode`](docs/front-matter-spec.md#sdk-and-mode).
+Agents recursively inherit global `agent_configuration` values. Per-agent values override individual
+leaves, while explicit `null` clears inherited values. `max_output_tokens` may stand alone; MAF
+compaction requires an effective output limit smaller than `max_context_window_tokens`. Agent front
+matter and global configuration do not accept an SDK selector. See
+[`docs/front-matter-spec.md#agent_configuration`](docs/front-matter-spec.md#agent_configuration).
 
 #### Securing endpoints
 

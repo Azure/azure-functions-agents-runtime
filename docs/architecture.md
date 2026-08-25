@@ -138,7 +138,7 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
    - **Implemented by:** `src/azure_functions_agents/config/loader.py:load_global_config()`
    - **Input:** `app_root: Path`
    - **Output:** `GlobalConfig`
-   - **Notes:** missing config is valid and becomes `GlobalConfig()`. String values in `agents.config.yaml` are normalized through `config/env.py` via `resolve_env_vars_in_data()`, so env-var references are resolved before the Pydantic model is materialized.
+  - **Notes:** missing config is valid and becomes `GlobalConfig()`. MAF is the runtime invariant, so no SDK selector is accepted. String values in `agents.config.yaml` are normalized through `config/env.py` via `resolve_env_vars_in_data()`, so env-var references are resolved before the Pydantic model is materialized.
 
 3. **Load all agent markdown files**
    - **Implemented by:** `src/azure_functions_agents/config/loader.py:_load_agent_spec()`, `src/azure_functions_agents/config/loader.py:load_agent_specs()`
@@ -198,27 +198,30 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
 
 Registration does not run the agent itself. Instead, `registration/_handlers.py` builds closures that call `runner.run_agent()` or `runner.run_agent_stream()`, passing the `ResolvedAgent` instructions plus the already-filtered `AgentCapabilities` — and, when the agent declares `subagents`, its `ResolvedAgent.subagents` list plus the frozen `AgentCatalog`. For non-HTTP triggers, the closure delegates payload construction to `registration/_trigger_serialization.py`: native `to_dict()`/`model_dump()` contracts are used first, then public Azure Functions binding adapters, batch recursion, and byte encoding produce JSON-safe prompt data. HTTP handlers build their request-body JSON separately and do not use this serializer. The runner then asks the active `ClientManager` to build a chat client, builds any `delegate_<slug>` tools fresh for this request, and executes through the Microsoft Agent Framework (`src/azure_functions_agents/runner.py`, `src/azure_functions_agents/client_manager.py`).
 
-Agent front matter's optional `sdk` and `mode` fields are translated by `config/merge.py` into
-`ResolvedAgent.harness_config`: nested harness configuration selects MAF's `create_harness_agent`,
-while `None` selects the plain `Agent`. For direct execution, both modes reuse the same runtime
-history provider, keyed by the public session ID returned to the caller and supplied on later turns.
+MAF is implicit and the strict schemas reject an authored SDK selector at either scope.
+`config/merge.py` recursively combines global and per-agent `agent_configuration` fields, using
+authored `null` values to clear inherited leaves or subtrees,
+then validates the effective token limits. `ResolvedAgent.agent_configuration` is always a concrete
+configuration object. The runner unconditionally constructs every role with MAF's
+`create_harness_agent`. Direct execution uses the runtime history provider, keyed by the public
+session ID returned to the caller and supplied on later turns.
 In Azure, `BlobHistoryProvider` stores that history in the
 Function App's configured storage account, so a request handled by another worker can reload the
 same conversation. The `FileHistoryProvider` fallback is for local development and does not provide
-cross-worker sharing. Harness runs force provider-managed history (`store=false`) because the runtime
+cross-worker sharing. Runs force provider-managed history (`store=false`) because the runtime
 creates a new in-memory `AgentSession` object for every request, including later requests that supply
 the same session ID. Those objects represent the same logical conversation: each is initialized with
 the supplied ID, and the Blob/File provider reloads the history stored under that ID. Blob/File
 history, rather than a provider-side conversation ID retained on an earlier object, therefore remains
 authoritative. Cross-worker turn ordering is not coordinated, so callers must still avoid concurrent
-turns for the same session ID. With both harness token limits configured, MAF compacts the externally
+turns for the same session ID. With effective context and output limits configured, MAF compacts the externally
 loaded conversation history immediately before each model call. Agent instructions remain part of
 every call; compaction controls accumulated message-history growth.
 
-The mode belongs to the agent rather than the invocation surface, so delegated and Workflow Sub
-Agent roles use the specialist's resolved mode too. Leaf roles remain fresh and single-task: harness
-specialists receive no persistent history provider, sandbox, workflow-management tools, or nested
-delegation. Their own filtered user/MCP/web-request tools and skills remain available.
+Delegated and Workflow Sub Agent roles use the specialist's own resolved configuration, never the
+coordinator's overrides. Leaf roles remain fresh and single-task: specialists receive no persistent
+history provider, sandbox, workflow-management tools, or nested delegation. Their own filtered
+user/MCP/web-request tools and skills remain available.
 
 For each workflow-enabled agent, `workflows/integration.py` uses the cataloged immutable
 `WorkflowPlanPolicy` to generate model guidance and agent-scoped management
@@ -310,14 +313,10 @@ By the time a handler calls `runner.run_agent()` or `runner.run_agent_stream()`,
 
 - `ResolvedAgent.instructions` becomes the per-agent instruction block.
 - `ResolvedAgent.timeout` and `ResolvedAgent.model` become execution settings.
-- `ResolvedAgent.harness_config` selects plain or harness construction and carries optional
-  context-compaction limits. Harness mode remains explicit because the runtime cannot infer safe
-  context/output limits for every model; without both limits it provides no default compaction.
-  It also installs harness-specific persistence and middleware, so making it unconditional would
-  change existing agents even when no token reduction is possible. Plain mode preserves the direct
-  MAF `Agent` behavior for short-lived/stateless workloads, custom clients, and applications that
-  require complete uncompressed history. `sdk` and `mode` are agent-only: omitted `mode` selects
-  plain execution, and nested `mode.harness` selects harness execution for that agent in every role.
+- `ResolvedAgent.agent_configuration` carries the recursively merged portable output limit and
+  MAF-specific context-compaction limit. Registration forwards this typed object without interpreting
+  SDK-specific fields. The runner maps the values to `create_harness_agent`; all roles use harness
+  construction even when both limits are absent. MAF is implicit; no SDK selector is exposed.
 - `AgentCapabilities.filtered_user_tools` becomes the concrete user-tool list.
 - `AgentCapabilities.filtered_workflow_tools` contributes to that agent's
   `WorkflowPlanPolicy`; it does not shrink the complete Activity handler catalog.

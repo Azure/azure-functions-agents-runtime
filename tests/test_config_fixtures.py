@@ -17,7 +17,6 @@ from azure_functions_agents.config.loader import load_agent_specs, load_global_c
 from azure_functions_agents.config.merge import compose
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
-    HarnessModeConfig,
     McpFilter,
     SkillsFilter,
     SubagentRef,
@@ -796,40 +795,37 @@ def test_multi_owner_workflows_fixture() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 19 — agent SDK and execution modes
+# 19 — inheritable agent configuration
 # ---------------------------------------------------------------------------
 
 
-def test_sdk_modes_fixture() -> None:
-    fixture = FIXTURES_ROOT / "19_sdk_modes"
+def test_agent_configuration_fixture() -> None:
+    fixture = FIXTURES_ROOT / "19_agent_configuration"
     global_config = load_global_config(fixture)
     specs = load_agent_specs(fixture, strict=True)
     by_slug = {compose(spec, global_config).slug: (spec, compose(spec, global_config)) for spec in specs}
 
     assert set(by_slug) == {
-        "compacted_harness",
-        "empty_harness",
-        "explicit_default",
-        "implicit",
+        "context_override",
+        "empty_override",
+        "explicit_null",
+        "inherited",
     }
+    _, inherited = by_slug["inherited"]
+    _, empty_override = by_slug["empty_override"]
+    for resolved in (inherited, empty_override):
+        assert resolved.agent_configuration.max_output_tokens == 4096
+        assert resolved.agent_configuration.maf is not None
+        assert resolved.agent_configuration.maf.compaction is not None
+        assert resolved.agent_configuration.maf.compaction.max_context_window_tokens == 8192
 
-    implicit_spec, implicit = by_slug["implicit"]
-    explicit_spec, explicit = by_slug["explicit_default"]
-    assert implicit_spec.sdk == "maf"
-    assert implicit_spec.mode == "default"
-    assert explicit_spec.sdk == "maf"
-    assert explicit_spec.mode == "default"
-    assert implicit.harness_config is None
-    assert explicit.harness_config is None
+    _, context_override = by_slug["context_override"]
+    assert context_override.agent_configuration.max_output_tokens == 4096
+    assert context_override.agent_configuration.maf is not None
+    assert context_override.agent_configuration.maf.compaction is not None
+    assert context_override.agent_configuration.maf.compaction.max_context_window_tokens == 16384
 
-    empty_spec, empty = by_slug["empty_harness"]
-    assert isinstance(empty_spec.mode, HarnessModeConfig)
-    assert empty.harness_config is not None
-    assert empty.harness_config.max_context_window_tokens is None
-    assert empty.harness_config.max_output_tokens is None
-
-    compacted_spec, compacted = by_slug["compacted_harness"]
-    assert isinstance(compacted_spec.mode, HarnessModeConfig)
-    assert compacted.harness_config is not None
-    assert compacted.harness_config.max_context_window_tokens == 8192
-    assert compacted.harness_config.max_output_tokens == 4096
+    explicit_null_spec, explicit_null = by_slug["explicit_null"]
+    assert explicit_null_spec.agent_configuration is None
+    assert explicit_null.agent_configuration.max_output_tokens is None
+    assert explicit_null.agent_configuration.maf is None
