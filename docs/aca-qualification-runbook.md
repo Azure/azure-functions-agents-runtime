@@ -230,6 +230,30 @@ The check runs twice — once after deploying, once at the start of the
 qualification suite. The second is not redundant: phase 2 can begin much later,
 and a redeploy in between would otherwise silently move the target.
 
+## How runtime telemetry is proven
+
+The fixture locks include the runtime's `[monitor]` extra. With the protected
+`APPLICATIONINSIGHTS_CONNECTION_STRING` app setting, this enables export of the
+runtime's OpenTelemetry spans; host-level Function telemetry alone does not.
+
+After deployment, prove installation by finding
+`azure_monitor_opentelemetry-1.8.8.dist-info` in the built
+`released-package.zip`. Prove initialization and export with a normal runtime
+span:
+
+```kusto
+AppDependencies
+| where TimeGenerated > ago(30m)
+| where AppRoleName == "<fixture-app-role-name>"
+| where Name == "dynamic_session.execute" or Name startswith "agent.run "
+| project TimeGenerated, AppRoleName, Name, Success, DurationMs, Properties
+| order by TimeGenerated desc
+```
+
+The `af.setup.*` attributes are emitted only when a setup timeout occurs. Their
+absence in a green run is therefore not evidence that instrumentation failed;
+ordinary runtime spans are the initialization proof.
+
 ## Triage
 
 | Symptom | Meaning | Action |

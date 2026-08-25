@@ -725,3 +725,46 @@ class TestDeployPreflightHelpers:
         )
         assert "functionapp_deploy_preflight_failed:publishing_config_read" in rendered
         assert "grant Website Contributor on aca-app" in rendered
+
+
+class TestMonitorDependencyContract:
+    """Prevent silent removal of the monitor extra from the ACA fixture."""
+
+    def _repo_root(self) -> Path:
+        return Path(__file__).resolve().parents[1]
+
+    def test_fixture_requirements_input_requests_monitor_extra(self) -> None:
+        source = (
+            self._repo_root() / "eng" / "constraints" / "aca-fixture-requirements.in"
+        ).read_text(encoding="utf-8")
+        requirements = {
+            line.strip()
+            for line in source.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        assert requirements == {".[aca_sandbox,monitor]"}
+
+    def test_compiled_constraints_contain_azure_monitor_opentelemetry(self) -> None:
+        constraints_dir = self._repo_root() / "eng" / "constraints"
+        for lock_name in ("aca-fixture-py313.txt", "aca-fixture-py314.txt"):
+            content = (constraints_dir / lock_name).read_text(encoding="utf-8")
+            assert "azure-monitor-opentelemetry==" in content, (
+                f"{lock_name} must pin azure-monitor-opentelemetry"
+            )
+
+    @pytest.mark.parametrize("python_minor", ["313", "314"])
+    def test_assembled_requirements_include_the_monitor_distribution(
+        self, python_minor: str
+    ) -> None:
+        root = self._repo_root()
+        rendered = render_requirements(
+            wheel_filename="azurefunctions_agents_runtime-test.whl",
+            constraints_path=(
+                root / "eng" / "constraints" / f"aca-fixture-py{python_minor}.txt"
+            ),
+            template_path=(
+                root / "tests" / "live" / "apps" / "aca-qualification" / "requirements.txt"
+            ),
+        )
+        assert "./azurefunctions_agents_runtime-test.whl" in rendered
+        assert "azure-monitor-opentelemetry==1.8.8" in rendered
