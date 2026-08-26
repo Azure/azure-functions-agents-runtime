@@ -1,0 +1,19 @@
+@baseUrl = http://localhost:7071
+@contentType = application/json
+
+### Chat API
+POST {{baseUrl}}/agents/main/chat
+Content-Type: {{contentType}}
+
+{
+  "prompt": "Explain Azure Functions in two sentences."
+}
+
+### Streaming Chat API
+POST {{baseUrl}}/agents/main/chatstream
+Content-Type: {{contentType}}
+Accept: text/event-stream
+
+{
+  "prompt": "List three practical uses for serverless agents."
+}

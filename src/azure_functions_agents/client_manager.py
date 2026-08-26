@@ -1,7 +1,8 @@
 """Pluggable chat-client providers.
 
 The runtime uses an abstract :class:`ClientManager` so that different
-backends (today: Microsoft Agent Framework via Azure OpenAI / OpenAI / Foundry;
+backends (today: Microsoft Agent Framework via Azure OpenAI / OpenAI / Foundry /
+GitHub Models;
 in the future: other agent frameworks) can be plugged in without touching the
 agent registration or HTTP/streaming layers.
 
@@ -88,17 +89,20 @@ class ClientManager(ABC):
 
 _DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 _DEFAULT_FOUNDRY_MODEL = "gpt-4o-mini"
+_DEFAULT_GITHUB_MODEL = "openai/gpt-4.1-mini"
+_DEFAULT_GITHUB_MODELS_ENDPOINT = "https://models.github.ai/inference"
 
 
 class MAFClientManager(ClientManager):
     """Build Microsoft Agent Framework chat clients.
 
     Selects a provider from environment variables — explicit
-    ``AZURE_FUNCTIONS_AGENTS_PROVIDER=openai|azure_openai|foundry`` wins. Otherwise:
+    ``AZURE_FUNCTIONS_AGENTS_PROVIDER=openai|azure_openai|foundry|github`` wins. Otherwise:
 
     1. ``AZURE_OPENAI_ENDPOINT``      → Azure OpenAI
     2. ``FOUNDRY_PROJECT_ENDPOINT``   → Microsoft Foundry
     3. ``OPENAI_API_KEY``             → vanilla OpenAI
+    4. ``GITHUB_MODELS_TOKEN``        → GitHub Models
     """
 
     name = "maf"
@@ -118,6 +122,12 @@ class MAFClientManager(ClientManager):
             )
         if provider == "foundry":
             return os.environ.get("FOUNDRY_MODEL") or runtime_model or _DEFAULT_FOUNDRY_MODEL
+        if provider == "github":
+            return (
+                cls._env("GITHUB_MODELS_MODEL")
+                or runtime_model
+                or _DEFAULT_GITHUB_MODEL
+            )
         return runtime_model or _DEFAULT_OPENAI_MODEL
 
     def build_chat_client(self, model: str | None) -> Any:
@@ -147,10 +157,12 @@ class MAFClientManager(ClientManager):
             client = self._build_azure_openai(resolved)
         elif provider == "foundry":
             client = self._build_foundry(resolved)
+        elif provider == "github":
+            client = self._build_github(resolved)
         else:
             raise RuntimeError(
                 f"Unknown AZURE_FUNCTIONS_AGENTS_PROVIDER '{provider}'. "
-                "Use one of: openai, azure_openai, foundry."
+                "Use one of: openai, azure_openai, foundry, github."
             )
         return client, InferenceTarget(
             provider=provider,
@@ -182,12 +194,15 @@ class MAFClientManager(ClientManager):
             return "foundry"
         if cls._env("OPENAI_API_KEY"):
             return "openai"
+        if cls._env("GITHUB_MODELS_TOKEN"):
+            return "github"
         raise RuntimeError(
             "No MAF provider configured. Set one of: "
             "OPENAI_API_KEY (OpenAI), "
             "AZURE_OPENAI_ENDPOINT (+ AZURE_OPENAI_API_KEY or managed identity) for Azure OpenAI, "
-            "or FOUNDRY_PROJECT_ENDPOINT for Microsoft Foundry. "
-            "You can also set AZURE_FUNCTIONS_AGENTS_PROVIDER=openai|azure_openai|foundry "
+            "FOUNDRY_PROJECT_ENDPOINT for Microsoft Foundry, "
+            "or GITHUB_MODELS_TOKEN for GitHub Models. "
+            "You can also set AZURE_FUNCTIONS_AGENTS_PROVIDER=openai|azure_openai|foundry|github "
             "to override."
         )
 
@@ -242,6 +257,19 @@ class MAFClientManager(ClientManager):
             model=model,
             credential=build_async_credential(),
         )
+
+    @classmethod
+    def _build_github(cls, model: str) -> Any:
+        from agent_framework.openai import OpenAIChatClient
+
+        token = cls._env("GITHUB_MODELS_TOKEN") or cls._env("GITHUB_TOKEN")
+        if not token:
+            raise RuntimeError(
+                "AZURE_FUNCTIONS_AGENTS_PROVIDER=github requires "
+                "GITHUB_MODELS_TOKEN or GITHUB_TOKEN to be set."
+            )
+        endpoint = cls._env("GITHUB_MODELS_ENDPOINT") or _DEFAULT_GITHUB_MODELS_ENDPOINT
+        return OpenAIChatClient(model=model, api_key=token, base_url=endpoint)
 
 
 # ---------------------------------------------------------------------------

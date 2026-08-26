@@ -1,11 +1,14 @@
 # Samples
 
 Each subdirectory in the runnable samples table is a standalone Azure Functions
-app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd).
+app. Samples that include `azure.yaml` are deployable with
+[`azd up`](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd);
+the others are focused local examples.
 
 | Sample | Trigger | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
 |---|---|---|---|---|---|---|---|
 | [basic-chat](basic-chat/) | HTTP | | | | | ✅ | ✅ |
+| [github-models-chat](github-models-chat/) | HTTP | | | | | | ✅ |
 | [multi-agent-delegation](multi-agent-delegation/) | HTTP | | | | | | ✅ |
 | [outlook-reply-agent](outlook-reply-agent/) | Office 365 Outlook | | ✅ Office 365 Outlook | ✅ Office 365 Outlook | | ✅ | |
 | [daily-tech-news-email](daily-tech-news-email/) | Timer | | ✅ Office 365 Outlook | ✅ Office 365 Outlook | | ✅ | |
@@ -76,17 +79,18 @@ Edit `local.settings.json` and set the required values. See each sample's README
 
 **Model provider (required for all samples):**
 
-The Microsoft Agent Framework supports Microsoft Foundry, Azure OpenAI, and OpenAI. The samples default to Microsoft Foundry and their templates pin `AZURE_FUNCTIONS_AGENTS_PROVIDER` to `foundry`.
+The runtime supports Microsoft Foundry, Azure OpenAI, OpenAI, and GitHub Models through Microsoft Agent Framework. The samples default to Microsoft Foundry and their templates pin `AZURE_FUNCTIONS_AGENTS_PROVIDER` to `foundry`.
 
 | Provider | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Required env vars |
 | --- | --- | --- |
 | Microsoft Foundry | `foundry` | `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL` (uses `DefaultAzureCredential`) |
 | Azure OpenAI | `azure_openai` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` (uses `DefaultAzureCredential` unless an API key is set) |
 | OpenAI | `openai` | `OPENAI_API_KEY`, optional `AZURE_FUNCTIONS_AGENTS_MODEL` |
+| GitHub Models | `github` | `GITHUB_MODELS_TOKEN` (preferred) or `GITHUB_TOKEN`, optional `GITHUB_MODELS_MODEL` |
 
 For Foundry, set `FOUNDRY_PROJECT_ENDPOINT` to your project endpoint and `FOUNDRY_MODEL` to your model deployment name (for example, `gpt-5.4`). Authentication uses `DefaultAzureCredential` — run `az login` locally.
 
-OpenAI and Azure OpenAI remain supported alternatives. If you switch providers, update `AZURE_FUNCTIONS_AGENTS_PROVIDER` and the provider-specific settings in `local.settings.json`; if `AZURE_FUNCTIONS_AGENTS_PROVIDER` is unset, the runtime auto-detects in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`.
+Azure OpenAI, OpenAI, and GitHub Models remain supported alternatives. If you switch providers, update `AZURE_FUNCTIONS_AGENTS_PROVIDER` and the provider-specific settings in `local.settings.json`; if `AZURE_FUNCTIONS_AGENTS_PROVIDER` is unset, the runtime auto-detects in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY` → `GITHUB_MODELS_TOKEN`. Generic `GITHUB_TOKEN` requires explicit `AZURE_FUNCTIONS_AGENTS_PROVIDER=github`. GitHub Models defaults to `openai/gpt-4.1-mini` and `https://models.github.ai/inference`; use `GITHUB_MODELS_ENDPOINT` only when a different compatible endpoint is required.
 
 **Sample-specific variables:**
 

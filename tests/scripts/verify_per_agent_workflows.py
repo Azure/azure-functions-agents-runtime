@@ -46,6 +46,10 @@ PROVIDER_KEYS = (
     "AZURE_OPENAI_API_KEY",
     "AZURE_OPENAI_DEPLOYMENT",
     "AZURE_OPENAI_API_VERSION",
+    "GITHUB_MODELS_TOKEN",
+    "GITHUB_TOKEN",
+    "GITHUB_MODELS_MODEL",
+    "GITHUB_MODELS_ENDPOINT",
     "AZURE_CLIENT_ID",
 )
 READY_MARKERS = (
@@ -413,20 +417,25 @@ def _provider_values() -> dict[str, str]:
         if env_value:
             values[key] = env_value
 
-    configured = {
-        "foundry": bool(values.get("FOUNDRY_PROJECT_ENDPOINT", "").strip()),
-        "azure_openai": bool(values.get("AZURE_OPENAI_ENDPOINT", "").strip()),
-        "openai": bool(values.get("OPENAI_API_KEY", "").strip()),
-    }
     requested_from_environment = (
         os.environ.get("AZURE_FUNCTIONS_AGENTS_PROVIDER") or ""
     ).strip()
     requested = requested_from_environment or values.get(
         "AZURE_FUNCTIONS_AGENTS_PROVIDER", ""
     ).strip()
+    configured = {
+        "foundry": bool(values.get("FOUNDRY_PROJECT_ENDPOINT", "").strip()),
+        "azure_openai": bool(values.get("AZURE_OPENAI_ENDPOINT", "").strip()),
+        "openai": bool(values.get("OPENAI_API_KEY", "").strip()),
+        "github": bool(values.get("GITHUB_MODELS_TOKEN", "").strip())
+        or (
+            requested == "github"
+            and bool(values.get("GITHUB_TOKEN", "").strip())
+        ),
+    }
     if requested and requested not in configured:
         raise RuntimeError(
-            "AZURE_FUNCTIONS_AGENTS_PROVIDER must be foundry, azure_openai, or openai"
+            "AZURE_FUNCTIONS_AGENTS_PROVIDER must be foundry, azure_openai, openai, or github"
         )
     if requested_from_environment or (requested and configured[requested]):
         selected = [requested]
@@ -436,13 +445,14 @@ def _provider_values() -> dict[str, str]:
         ]
     if not selected:
         raise RuntimeError(
-            "no model provider is configured; set Foundry, Azure OpenAI, or OpenAI "
+            "no model provider is configured; set Foundry, Azure OpenAI, OpenAI, or "
+            "GitHub Models "
             "values in src/local.settings.json or the current environment"
         )
     if len(selected) > 1:
         raise RuntimeError(
             "multiple model providers are configured; populate settings for exactly "
-            "one of Foundry, Azure OpenAI, or OpenAI"
+            "one of Foundry, Azure OpenAI, OpenAI, or GitHub Models"
         )
 
     provider = selected[0]
@@ -454,8 +464,14 @@ def _provider_values() -> dict[str, str]:
             "AZURE_OPENAI_API_VERSION",
         ),
         "openai": ("OPENAI_API_KEY", "OPENAI_CHAT_MODEL_ID"),
+        "github": (),
     }
     missing = [key for key in required[provider] if not values.get(key, "").strip()]
+    if provider == "github" and not (
+        values.get("GITHUB_MODELS_TOKEN", "").strip()
+        or values.get("GITHUB_TOKEN", "").strip()
+    ):
+        missing.append("GITHUB_MODELS_TOKEN or GITHUB_TOKEN")
     if missing:
         raise RuntimeError(
             f"{', '.join(missing)} must be configured for provider {provider}"

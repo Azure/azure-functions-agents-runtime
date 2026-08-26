@@ -132,6 +132,10 @@ PROVIDER_ENV_KEYS: tuple[str, ...] = (
     "AZURE_OPENAI_API_KEY",
     "AZURE_OPENAI_DEPLOYMENT",
     "AZURE_OPENAI_API_VERSION",
+    "GITHUB_MODELS_TOKEN",
+    "GITHUB_TOKEN",
+    "GITHUB_MODELS_MODEL",
+    "GITHUB_MODELS_ENDPOINT",
     "AZURE_CLIENT_ID",
 )
 
@@ -198,6 +202,10 @@ def configured_provider(app_dir: Path) -> str | None:
         return explicit or "foundry"
     if str(values.get("OPENAI_API_KEY") or "").strip():
         return explicit or "openai"
+    if str(values.get("GITHUB_MODELS_TOKEN") or "").strip():
+        return explicit or "github"
+    if explicit == "github" and str(values.get("GITHUB_TOKEN") or "").strip():
+        return "github"
     return None
 
 

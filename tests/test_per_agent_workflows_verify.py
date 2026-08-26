@@ -136,6 +136,48 @@ def test_provider_values_honors_explicit_provider_when_multiple_are_configured(
     assert resolved["AZURE_FUNCTIONS_AGENTS_PROVIDER"] == "foundry"
 
 
+def test_provider_values_auto_detects_github_models_dedicated_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    verify = _load_verify_module()
+    _clear_provider_environment(monkeypatch, verify)
+    _use_template_settings(monkeypatch, verify, tmp_path)
+    monkeypatch.setenv("GITHUB_MODELS_TOKEN", "dedicated-token")
+
+    resolved = verify._provider_values()
+
+    assert resolved["AZURE_FUNCTIONS_AGENTS_PROVIDER"] == "github"
+
+
+def test_provider_values_explicit_github_accepts_generic_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    verify = _load_verify_module()
+    _clear_provider_environment(monkeypatch, verify)
+    _use_template_settings(monkeypatch, verify, tmp_path)
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "github")
+    monkeypatch.setenv("GITHUB_TOKEN", "generic-token")
+
+    resolved = verify._provider_values()
+
+    assert resolved["AZURE_FUNCTIONS_AGENTS_PROVIDER"] == "github"
+
+
+def test_provider_values_does_not_auto_detect_generic_github_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    verify = _load_verify_module()
+    _clear_provider_environment(monkeypatch, verify)
+    _use_template_settings(monkeypatch, verify, tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "generic-token")
+
+    with pytest.raises(RuntimeError, match="no model provider is configured"):
+        verify._provider_values()
+
+
 @pytest.mark.parametrize(
     ("missing", "message"),
     [

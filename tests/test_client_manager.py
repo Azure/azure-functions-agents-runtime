@@ -8,6 +8,8 @@ import pytest
 from azure_functions_agents._credential import build_async_credential
 from azure_functions_agents.client_manager import (
     _DEFAULT_FOUNDRY_MODEL,
+    _DEFAULT_GITHUB_MODEL,
+    _DEFAULT_GITHUB_MODELS_ENDPOINT,
     _DEFAULT_OPENAI_MODEL,
     ClientManager,
     InferenceTarget,
@@ -20,6 +22,7 @@ from azure_functions_agents.client_manager import (
     [
         ("azure_openai", "AZURE_OPENAI_DEPLOYMENT", "azure-provider-model"),
         ("foundry", "FOUNDRY_MODEL", "foundry-provider-model"),
+        ("github", "GITHUB_MODELS_MODEL", "github-provider-model"),
     ],
 )
 def test_resolve_model_requested_wins(
@@ -40,6 +43,7 @@ def test_resolve_model_requested_wins(
     [
         ("azure_openai", "AZURE_OPENAI_DEPLOYMENT", "azure-provider-model"),
         ("foundry", "FOUNDRY_MODEL", "foundry-provider-model"),
+        ("github", "GITHUB_MODELS_MODEL", "github-provider-model"),
     ],
 )
 def test_resolve_model_prefers_provider_specific_env(
@@ -60,6 +64,7 @@ def test_resolve_model_prefers_provider_specific_env(
     [
         ("azure_openai", "AZURE_OPENAI_DEPLOYMENT"),
         ("foundry", "FOUNDRY_MODEL"),
+        ("github", "GITHUB_MODELS_MODEL"),
         ("openai", None),
     ],
 )
@@ -82,6 +87,7 @@ def test_resolve_model_uses_runtime_model_as_fallback(
         ("openai", _DEFAULT_OPENAI_MODEL),
         ("azure_openai", _DEFAULT_OPENAI_MODEL),
         ("foundry", _DEFAULT_FOUNDRY_MODEL),
+        ("github", _DEFAULT_GITHUB_MODEL),
     ],
 )
 def test_resolve_model_uses_default_when_no_override_exists(
@@ -93,6 +99,7 @@ def test_resolve_model_uses_default_when_no_override_exists(
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_MODEL", raising=False)
     monkeypatch.delenv("AZURE_OPENAI_DEPLOYMENT", raising=False)
     monkeypatch.delenv("FOUNDRY_MODEL", raising=False)
+    monkeypatch.delenv("GITHUB_MODELS_MODEL", raising=False)
 
     assert MAFClientManager().resolve_model(None) == default_model
 
@@ -112,6 +119,12 @@ def test_resolve_model_uses_default_when_no_override_exists(
             "_build_foundry",
             "FOUNDRY_PROJECT_ENDPOINT",
             "https://user:password@project.services.ai.azure.com:443/api/projects/private",
+        ),
+        (
+            "github",
+            "_build_github",
+            "GITHUB_MODELS_ENDPOINT",
+            "https://models.example.test/inference",
         ),
     ],
 )
@@ -209,9 +222,170 @@ def test_anthropic_api_key_does_not_select_direct_transport(
     monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
     monkeypatch.delenv("FOUNDRY_PROJECT_ENDPOINT", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GITHUB_MODELS_TOKEN", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "not-used")
 
     with pytest.raises(RuntimeError, match="No MAF provider configured"):
+        MAFClientManager().build_chat_client_with_target(None)
+
+
+def test_github_models_auto_detection_uses_only_dedicated_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+    monkeypatch.delenv("FOUNDRY_PROJECT_ENDPOINT", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GITHUB_MODELS_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "generic-token")
+
+    with pytest.raises(RuntimeError, match="No MAF provider configured"):
+        MAFClientManager().build_chat_client_with_target(None)
+
+    monkeypatch.setenv("GITHUB_MODELS_TOKEN", "dedicated-token")
+    with patch.object(MAFClientManager, "_build_github", return_value=object()) as build:
+        _, target = MAFClientManager().build_chat_client_with_target(None)
+
+    build.assert_called_once_with(_DEFAULT_GITHUB_MODEL)
+    assert target == InferenceTarget("github", _DEFAULT_GITHUB_MODEL)
+
+
+@pytest.mark.parametrize(
+    ("provider_env", "provider", "builder", "default_model"),
+    [
+        (
+            "AZURE_OPENAI_ENDPOINT",
+            "azure_openai",
+            "_build_azure_openai",
+            _DEFAULT_OPENAI_MODEL,
+        ),
+        (
+            "FOUNDRY_PROJECT_ENDPOINT",
+            "foundry",
+            "_build_foundry",
+            _DEFAULT_FOUNDRY_MODEL,
+        ),
+        ("OPENAI_API_KEY", "openai", "_build_openai", _DEFAULT_OPENAI_MODEL),
+    ],
+)
+def test_existing_provider_precedence_wins_over_github_models(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_env: str,
+    provider: str,
+    builder: str,
+    default_model: str,
+) -> None:
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+    monkeypatch.delenv("FOUNDRY_PROJECT_ENDPOINT", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(provider_env, "configured")
+    monkeypatch.setenv("GITHUB_MODELS_TOKEN", "github-token")
+
+    with patch.object(MAFClientManager, builder, return_value=object()) as build:
+        _, target = MAFClientManager().build_chat_client_with_target(None)
+
+    build.assert_called_once_with(default_model)
+    assert target == InferenceTarget(provider, default_model)
+
+
+def test_blank_github_models_token_does_not_enable_auto_detection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+    monkeypatch.delenv("FOUNDRY_PROJECT_ENDPOINT", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("GITHUB_MODELS_TOKEN", "   ")
+
+    with pytest.raises(RuntimeError, match="No MAF provider configured"):
+        MAFClientManager().build_chat_client_with_target(None)
+
+
+def test_build_github_prefers_dedicated_token_and_default_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_MODELS_TOKEN", "dedicated-token")
+    monkeypatch.setenv("GITHUB_TOKEN", "generic-token")
+    monkeypatch.delenv("GITHUB_MODELS_ENDPOINT", raising=False)
+
+    with patch("agent_framework.openai.OpenAIChatClient") as client_ctor:
+        MAFClientManager._build_github("openai/gpt-4.1-mini")
+
+    client_ctor.assert_called_once_with(
+        model="openai/gpt-4.1-mini",
+        api_key="dedicated-token",
+        base_url=_DEFAULT_GITHUB_MODELS_ENDPOINT,
+    )
+
+
+def test_build_github_uses_generic_token_and_endpoint_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GITHUB_MODELS_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "generic-token")
+    monkeypatch.setenv("GITHUB_MODELS_ENDPOINT", "https://models.example.test/inference")
+
+    with patch("agent_framework.openai.OpenAIChatClient") as client_ctor:
+        MAFClientManager._build_github("publisher/model")
+
+    client_ctor.assert_called_once_with(
+        model="publisher/model",
+        api_key="generic-token",
+        base_url="https://models.example.test/inference",
+    )
+
+
+def test_build_github_requires_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITHUB_MODELS_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    with pytest.raises(
+        RuntimeError,
+        match="requires GITHUB_MODELS_TOKEN or GITHUB_TOKEN",
+    ):
+        MAFClientManager._build_github("publisher/model")
+
+
+def test_github_blank_model_uses_runtime_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "github")
+    monkeypatch.setenv("GITHUB_MODELS_MODEL", "   ")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_MODEL", "runtime-model")
+
+    assert MAFClientManager().resolve_model(None) == "runtime-model"
+
+
+def test_build_github_blank_endpoint_uses_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_MODELS_TOKEN", "dedicated-token")
+    monkeypatch.setenv("GITHUB_MODELS_ENDPOINT", "   ")
+
+    with patch("agent_framework.openai.OpenAIChatClient") as client_ctor:
+        MAFClientManager._build_github("publisher/model")
+
+    client_ctor.assert_called_once_with(
+        model="publisher/model",
+        api_key="dedicated-token",
+        base_url=_DEFAULT_GITHUB_MODELS_ENDPOINT,
+    )
+
+
+def test_provider_errors_include_github_models_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "unsupported")
+    with pytest.raises(RuntimeError, match=r"openai, azure_openai, foundry, github"):
+        MAFClientManager().build_chat_client_with_target(None)
+
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_PROVIDER")
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+    monkeypatch.delenv("FOUNDRY_PROJECT_ENDPOINT", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GITHUB_MODELS_TOKEN", raising=False)
+    with pytest.raises(RuntimeError, match=r"GITHUB_MODELS_TOKEN for GitHub Models"):
         MAFClientManager().build_chat_client_with_target(None)
 
 

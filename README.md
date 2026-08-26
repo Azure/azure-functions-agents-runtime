@@ -14,7 +14,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Run agents on durable workflows** *(experimental, see [`docs/workflows.md`](docs/workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
-- **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
+- **Pluggable model providers** — bring Microsoft Foundry, Azure OpenAI, OpenAI, or GitHub Models credentials and the runtime auto-detects the right client
 
 ## Installation
 
@@ -32,17 +32,30 @@ azurefunctions-agents-runtime
 
 ## Model Provider Configuration
 
-The runtime uses Microsoft Agent Framework, which supports Microsoft Foundry, Azure OpenAI, and OpenAI as inference back-ends. The public preview quickstart and samples use **Microsoft Foundry** as the primary path, pinned with `AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`.
+The runtime uses Microsoft Agent Framework with Microsoft Foundry, Azure OpenAI, OpenAI, and GitHub Models inference back-ends. The public preview quickstart and samples use **Microsoft Foundry** as the primary path, pinned with `AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`.
 
 | Provider | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Required env vars | Notes |
 | --- | --- | --- | --- |
 | Microsoft Foundry | `foundry` | `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL` | Recommended quickstart/sample path. Uses `DefaultAzureCredential`; run `az login` locally and set `AZURE_CLIENT_ID` in multi-identity Function Apps. |
 | Azure OpenAI | `azure_openai` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, optional `AZURE_OPENAI_API_VERSION` | Alternative Azure-hosted provider. `AZURE_OPENAI_DEPLOYMENT` takes precedence over `AZURE_FUNCTIONS_AGENTS_MODEL`. If `AZURE_OPENAI_API_KEY` is omitted the SDK uses `DefaultAzureCredential` (AAD). |
 | OpenAI | `openai` | `OPENAI_API_KEY`, optional `AZURE_FUNCTIONS_AGENTS_MODEL` (default `gpt-4o-mini`) | Alternative non-Azure provider. `AZURE_FUNCTIONS_AGENTS_MODEL` applies directly for OpenAI. |
+| GitHub Models | `github` | `GITHUB_MODELS_TOKEN` (preferred) or `GITHUB_TOKEN`, optional `GITHUB_MODELS_MODEL` (default `openai/gpt-4.1-mini`) | Uses GitHub Models' OpenAI-compatible endpoint. `GITHUB_TOKEN` works only with explicit `provider=github`; it never enables auto-detection. Override the endpoint with `GITHUB_MODELS_ENDPOINT`. |
 
-If `AZURE_FUNCTIONS_AGENTS_PROVIDER` is unset, auto-detection picks the first provider whose env vars are set, in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`. Set `AZURE_FUNCTIONS_AGENTS_PROVIDER` to make the provider choice intentional.
+If `AZURE_FUNCTIONS_AGENTS_PROVIDER` is unset, auto-detection picks the first provider whose env vars are set, in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY` → `GITHUB_MODELS_TOKEN`. Set `AZURE_FUNCTIONS_AGENTS_PROVIDER` to make the provider choice intentional.
 
-Model resolution precedence is: explicit requested model > provider-specific env (`FOUNDRY_MODEL` for Foundry, `AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI) > `AZURE_FUNCTIONS_AGENTS_MODEL` > provider default.
+Model resolution precedence is: explicit requested model > provider-specific env (`FOUNDRY_MODEL` for Foundry, `AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `GITHUB_MODELS_MODEL` for GitHub Models) > `AZURE_FUNCTIONS_AGENTS_MODEL` > provider default.
+
+For example, a local GitHub Models configuration can use:
+
+```json
+{
+  "Values": {
+    "AZURE_FUNCTIONS_AGENTS_PROVIDER": "github",
+    "GITHUB_MODELS_TOKEN": "<github-token>",
+    "GITHUB_MODELS_MODEL": "openai/gpt-4.1-mini"
+  }
+}
+```
 
 ## Quick Start
 
@@ -550,6 +563,7 @@ Session ids must match `^[A-Za-z0-9._-]{1,128}$` — anything else is rejected a
 See the [`samples/`](samples/) directory for complete, deployable example apps:
 
 - [`basic-chat`](samples/basic-chat) — minimal chat agent with sandbox
+- [`github-models-chat`](samples/github-models-chat) — minimal local chat app using GitHub Models
 - [`daily-azure-report`](samples/daily-azure-report) — timer-triggered agent that emails a daily Azure status report
 - [`daily-tech-news-email`](samples/daily-tech-news-email) — timer-triggered agent that scrapes news and emails a digest
 - [`outlook-reply-agent`](samples/outlook-reply-agent) — connector-triggered agent that drafts replies to incoming Office 365 Outlook email
@@ -563,7 +577,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 
 ### Required Azure App Settings
 
-Set the model provider env vars described above. The preview samples use Microsoft Foundry (`AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`, `FOUNDRY_PROJECT_ENDPOINT`, and `FOUNDRY_MODEL`). Azure OpenAI (`AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`) and OpenAI (`OPENAI_API_KEY` and optionally `AZURE_FUNCTIONS_AGENTS_MODEL`) are supported alternatives. For Microsoft Foundry and Azure OpenAI, the provider-specific model/deployment setting takes precedence over `AZURE_FUNCTIONS_AGENTS_MODEL`.
+Set the model provider env vars described above. The preview samples use Microsoft Foundry (`AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`, `FOUNDRY_PROJECT_ENDPOINT`, and `FOUNDRY_MODEL`). Azure OpenAI, OpenAI, and GitHub Models are supported alternatives. Provider-specific model/deployment settings take precedence over `AZURE_FUNCTIONS_AGENTS_MODEL`.
 
 When the agent uses connector-backed MCP servers, connector triggers, or `dynamic_sessions_code_interpreter`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the target resource — otherwise `DefaultAzureCredential` will fail to obtain a token. In multi-identity Function Apps, set `AZURE_CLIENT_ID` so the runtime uses the intended managed identity for Azure OpenAI, Foundry, blob-backed session storage, ACA Dynamic Sessions, and ARM/data-plane connector calls. For an individual MCP server, set `auth.client_id` in `mcp.json` to choose a different managed identity just for that server. For an individual code interpreter pool, set `system_tools.dynamic_sessions_code_interpreter.client_id`.
 
@@ -586,7 +600,7 @@ correlation, `host.json` `telemetryMode: OpenTelemetry` is optional and additive
 | `AZURE_FUNCTIONS_AGENTS_APP_ROOT` | Override the app root used to discover `*.agent.md`, `agents/`, `tools/`, `skills/`, and `mcp.json` |
 | `AZURE_FUNCTIONS_AGENTS_SESSION_DIR` | Override the directory used for local session storage |
 | `AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS` | Per-call timeout in seconds (default `900`) |
-| `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Pin the model provider (`openai`/`azure_openai`/`foundry`) and skip auto-detection |
+| `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Pin the model provider (`openai`/`azure_openai`/`foundry`/`github`) and skip auto-detection |
 | `AZURE_FUNCTIONS_AGENTS_MODEL` | Runtime-owned model fallback when no provider-specific model/deployment is set |
 | `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` | Optional reasoning effort for supported reasoning models (valid values include `none`, `low`, `medium`, `high`, `xhigh`) |
 | `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Optional reasoning summary mode for supported reasoning models (valid values are `auto`, `concise`, `detailed`) |
