@@ -241,3 +241,21 @@ def test_build_managed_identity_credential_without_client_id(
         assert build_async_credential() is credential
 
     credential_ctor.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_foundry_stateless_request_does_not_include_encrypted_content() -> None:
+    """Foundry models may reject OpenAI's encrypted reasoning replay option."""
+    from agent_framework.foundry import FoundryChatClient
+
+    client = object.__new__(FoundryChatClient)
+    client._prepare_tools_for_openai = lambda _tools: None
+    client._prepare_messages_for_openai = lambda _messages, **_kwargs: [
+        {"role": "user", "content": "ping"}
+    ]
+    client._prepare_response_and_text_format = lambda **_kwargs: (None, None)
+    client._check_model_presence = lambda options: options.setdefault("model", "test-model")
+
+    request_options = await client._prepare_options([], {})
+
+    assert "reasoning.encrypted_content" not in request_options.get("include", [])

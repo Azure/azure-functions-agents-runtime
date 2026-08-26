@@ -43,6 +43,9 @@ from azure_functions_agents.client_manager import (
     set_client_manager,
 )
 from azure_functions_agents.config.schema import (
+    AgentConfiguration,
+    AgentFrameworkCompactionConfig,
+    AgentFrameworkConfiguration,
     BuiltinEndpointsConfig,
     ResolvedAgent,
     SubagentRef,
@@ -300,49 +303,45 @@ def test_sanitize_delegate_failure_message_identical_across_exception_classes() 
 
 
 # ---------------------------------------------------------------------------
-# _build_role_agent: direct vs. delegated tool/context-provider composition
+# _assemble_agent_inputs: direct vs. delegated tool composition
 # ---------------------------------------------------------------------------
 
 
-def test_build_role_agent_delegated_role_has_only_its_own_tools() -> None:
-    chat_client = SimpleNamespace(model="fake-model")
+def test_assemble_agent_inputs_for_delegated_role_has_only_its_own_tools() -> None:
     user_tool = SimpleNamespace(name="own_user_tool")
     mcp_tool = SimpleNamespace(name="own_mcp_tool")
 
-    agent = runner._build_role_agent(
-        chat_client,
+    resolved_tools, instructions = runner._assemble_agent_inputs(
         instructions="be a specialist",
         tools=[user_tool],
         mcp_tools=[mcp_tool],
-        skill_paths=None,
         sandbox_tools=None,
         web_request_tools=None,
         system_addendum=None,
         workflow_enabled=False,
         workflow_durable_client=None,
+        workflow_agent_slug=None,
         agent_name="billing",
         resolved_id=None,
-        history_provider=None,
         delegate_tools=None,
+        workflow_policy=None,
     )
 
     # Own static tools are present; per-request sandbox and main-only
     # Dynamic-Workflow tools are naturally absent (never passed), and there
     # are no delegate_* tools (delegate_tools=None) — Decisions #13/#15/#6.
-    assert _tool_names(agent) == {"own_user_tool", "own_mcp_tool"}
-    assert agent.context_providers == []
+    assert {item.name for item in resolved_tools} == {"own_user_tool", "own_mcp_tool"}
+    assert instructions == "be a specialist"
 
 
-def test_build_role_agent_direct_role_has_full_tool_superset(
+def test_assemble_agent_inputs_for_direct_role_has_full_tool_superset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    chat_client = SimpleNamespace(model="fake-model")
     user_tool = SimpleNamespace(name="own_user_tool")
     mcp_tool = SimpleNamespace(name="own_mcp_tool")
     sandbox_tool = SimpleNamespace(name="run_code")
     web_request_tool = SimpleNamespace(name="web_request")
     delegate_tool = SimpleNamespace(name="delegate_billing")
-    history_provider = SimpleNamespace()
     policy = WorkflowPlanPolicy(
         allowed_tools=frozenset({"own_user_tool"}),
         allowed_subagents=frozenset({"billing"}),
@@ -362,25 +361,23 @@ def test_build_role_agent_direct_role_has_full_tool_superset(
         _build_workflow_tools,
     )
 
-    agent = runner._build_role_agent(
-        chat_client,
+    resolved_tools, _ = runner._assemble_agent_inputs(
         instructions="be a coordinator",
         tools=[user_tool],
         mcp_tools=[mcp_tool],
-        skill_paths=None,
         sandbox_tools=[sandbox_tool],
         web_request_tools=[web_request_tool],
         system_addendum=None,
         workflow_enabled=True,
         workflow_durable_client=None,
+        workflow_agent_slug=None,
         agent_name="coordinator",
         resolved_id="session-1",
-        history_provider=history_provider,
         delegate_tools=[delegate_tool],
         workflow_policy=policy,
     )
 
-    tool_names = _tool_names(agent)
+    tool_names = {item.name for item in resolved_tools}
     assert {
         "own_user_tool",
         "own_mcp_tool",
@@ -391,7 +388,6 @@ def test_build_role_agent_direct_role_has_full_tool_superset(
         "get_workflow_status",
         "list_workflows",
     } <= tool_names
-    assert history_provider in agent.context_providers
     assert captured["policy"] is policy
 
 
@@ -418,41 +414,71 @@ def test_build_delegated_agent_never_wires_its_own_declared_subagents() -> None:
     assert not any(name.startswith("delegate_") for name in _tool_names(agent))
 
 
+@pytest.mark.parametrize("execution_role", ["delegate", "workflow_subagent"])
+@pytest.mark.asyncio
+async def test_agent_configuration_applies_to_each_stateless_leaf_role(
+    monkeypatch: pytest.MonkeyPatch,
+    execution_role: Any,
+) -> None:
+    set_client_manager(_FakeClientManager())
+    captured: list[dict[str, Any]] = []
+
+    async def respond(task: str) -> str:
+        return f"handled: {task}"
+
+    def build_harness(_client: Any, **kwargs: Any) -> _FakeSpecialistAgent:
+        captured.append(kwargs)
+        return _FakeSpecialistAgent("billing", respond)
+
+    monkeypatch.setattr(runner, "_build_role_agent", build_harness)
+
+    config = AgentConfiguration(
+        max_output_tokens=4096,
+        agent_framework=AgentFrameworkConfiguration(
+            compaction=AgentFrameworkCompactionConfig(max_context_window_tokens=8192)
+        ),
+    )
+    local_tool = tool(lambda: "ok", name="billing_lookup")
+    resolved = _make_resolved(
+        slug="billing",
+        instructions="handle billing",
+        subagents=[SubagentRef(agent="shipping")],
+        agent_configuration=config,
+    )
+    capabilities = AgentCapabilities(filtered_user_tools=[local_tool])
+
+    result = await runner.run_leaf_agent_task(
+        resolved,
+        capabilities,
+        "invoice 42",
+        timeout=1.0,
+        execution_role=execution_role,
+    )
+
+    assert result == "handled: invoice 42"
+    assert len(captured) == 1
+    assert captured[0]["agent_name"] == "billing"
+    assert captured[0]["agent_instructions"] == "handle billing"
+    assert captured[0]["agent_configuration"] is config
+    assert captured[0]["history_provider"] is None
+    assert {item.name for item in captured[0]["tools"]} == {"billing_lookup"}
+    assert not any(item.name.startswith("delegate_") for item in captured[0]["tools"])
+
+
 def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and_skills_not_coordinators(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """"Runs as itself" (FRD 0007 §5 Decisions #13/#15) — a deeper, end-to-end check.
-
-    ``test_build_delegated_agent_never_wires_its_own_declared_subagents``
-    above proves the *no-subagents-leak* half of "runs as itself". It does
-    not, however, prove the other half the FRD's §6 test plan explicitly
-    calls for: that a delegated specialist's *own* model/instructions/tools/
-    skills are what actually land on the built ``Agent`` — as opposed to,
-    say, a coordinator's values leaking in via a wiring mistake in
-    ``build_subagent_tools``/``_build_delegate_tool``. Every ``model=``
-    passed to ``_make_resolved()`` elsewhere in this file is the default
-    ``None``, so no prior test could have caught that kind of regression.
-
-    This builds two roles with deliberately *different* model/instructions/
-    tool/skill values — a specialist via the real ``_build_delegated_agent``
-    and a contrasting "coordinator" via the same ``_build_role_agent`` tail
-    that ``_build_agent_session_history`` uses for the direct role — and
-    asserts the specialist's build reflects only its own values.
-    """
+    """A delegated specialist builds from its own model, prompt, tools, and skills."""
     set_client_manager(_FakeClientManager())
+    captured: list[tuple[Any, dict[str, Any]]] = []
 
-    # `_build_skills_provider` requires real `SKILL.md`-bearing directories
-    # on disk (it is MAF's `SkillsProvider.from_paths`, an I/O-touching,
-    # experimental API) — irrelevant to what we're proving here, which is
-    # only that `enabled_skill_paths` is threaded through unchanged and
-    # per-role. Monkeypatched to a pure, side-effect-free recorder.
-    captured_skill_paths: list[list[Path] | None] = []
+    def fake_create_harness_agent(client: Any, **kwargs: Any) -> Any:
+        captured.append((client, kwargs))
+        return SimpleNamespace(client=client, options=kwargs)
 
-    def _fake_build_skills_provider(skill_paths: list[Path] | None) -> Any:
-        captured_skill_paths.append(skill_paths)
-        return f"skills-provider:{skill_paths}" if skill_paths else None
+    import agent_framework
 
-    monkeypatch.setattr(runner, "_build_skills_provider", _fake_build_skills_provider)
+    monkeypatch.setattr(agent_framework, "create_harness_agent", fake_create_harness_agent)
 
     coordinator_only_tool = tool(lambda: "ignored", name="coordinator_only_tool")
     billing_only_tool = tool(lambda: "ignored", name="billing_only_tool")
@@ -469,52 +495,29 @@ def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and
         enabled_skill_paths=[billing_skill_path],
     )
 
-    # A contrasting "coordinator" build via the exact same shared tail
-    # (`_build_role_agent`) that `_build_agent_session_history` uses for the
-    # `direct` role — not a hardcoded second value, but a second concrete,
-    # independently-built artifact to compare against.
     coordinator_chat_client = get_client_manager().build_chat_client("coordinator-model")
-    coordinator_agent = runner._build_role_agent(
+    runner._build_role_agent(
         coordinator_chat_client,
-        instructions="be a coordinator",
+        agent_instructions="be a coordinator",
         tools=[coordinator_only_tool],
-        mcp_tools=[],
         skill_paths=[coordinator_skill_path],
-        sandbox_tools=None,
-        web_request_tools=None,
-        system_addendum=None,
-        workflow_enabled=False,
-        workflow_durable_client=None,
         agent_name="coordinator",
-        resolved_id=None,
         history_provider=None,
-        delegate_tools=None,
+        agent_configuration=AgentConfiguration(),
     )
 
-    billing_agent, _ = runner._build_delegated_agent(billing_resolved, billing_capabilities)
+    runner._build_delegated_agent(billing_resolved, billing_capabilities)
 
-    # Model: the specialist's chat client resolves to *its own* model.
-    # (MAF's `Agent` stores the client passed to its constructor as
-    # `.client` — the `chat_client` name above is only this test's/
-    # `_build_role_agent`'s local variable name for it.)
-    assert billing_agent.client.model == "billing-model"
-    assert billing_agent.client.model != coordinator_agent.client.model
-
-    # Instructions: its own text only.
-    assert billing_agent.default_options["instructions"] == "handle billing precisely"
-    assert billing_agent.default_options["instructions"] != coordinator_agent.default_options["instructions"]
-
-    # Tools: only the specialist's own filtered_user_tools — never the
-    # coordinator's, and vice versa.
-    assert _tool_names(billing_agent) == {"billing_only_tool"}
-    assert _tool_names(coordinator_agent) == {"coordinator_only_tool"}
-
-    # Skills: `_build_skills_provider` was called once per role, each with
-    # that role's own `enabled_skill_paths` — never swapped.
-    assert [billing_skill_path] in captured_skill_paths
-    assert [coordinator_skill_path] in captured_skill_paths
-    assert captured_skill_paths.count([billing_skill_path]) == 1
-    assert captured_skill_paths.count([coordinator_skill_path]) == 1
+    coordinator_client, coordinator_options = captured[0]
+    billing_client, billing_options = captured[1]
+    assert coordinator_client.model == "coordinator-model"
+    assert billing_client.model == "billing-model"
+    assert coordinator_options["agent_instructions"] == "be a coordinator"
+    assert billing_options["agent_instructions"] == "handle billing precisely"
+    assert {item.name for item in coordinator_options["tools"]} == {"coordinator_only_tool"}
+    assert {item.name for item in billing_options["tools"]} == {"billing_only_tool"}
+    assert coordinator_options["skills_paths"] == [coordinator_skill_path]
+    assert billing_options["skills_paths"] == [billing_skill_path]
 
 
 @pytest.mark.asyncio
@@ -1298,21 +1301,29 @@ async def test_real_maf_agent_run_raises_on_expanded_mcp_function_collision() ->
     mcp_server = _FakeMCPServerWithExpandedFunctions("delegate_billing")
     delegate_tool = tool(lambda: "ignored", name="delegate_billing")
 
-    agent = runner._build_role_agent(
-        _RunnableFakeChatClient(),
+    resolved_tools, effective_instructions = runner._assemble_agent_inputs(
         instructions="be a coordinator",
         tools=[],
         mcp_tools=[mcp_server],
-        skill_paths=None,
         sandbox_tools=None,
         web_request_tools=None,
         system_addendum=None,
         workflow_enabled=False,
         workflow_durable_client=None,
+        workflow_agent_slug=None,
         agent_name="coordinator",
         resolved_id=None,
-        history_provider=None,
         delegate_tools=[delegate_tool],
+        workflow_policy=None,
+    )
+    agent = runner._build_role_agent(
+        _RunnableFakeChatClient(),
+        agent_instructions=effective_instructions,
+        tools=resolved_tools,
+        skill_paths=None,
+        agent_name="coordinator",
+        history_provider=None,
+        agent_configuration=AgentConfiguration(),
     )
 
     stream = agent.run("hello", stream=True)

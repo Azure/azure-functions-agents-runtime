@@ -13,6 +13,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
+- **Harness-only execution controls** — set portable output limits and optional Microsoft Agent Framework token-budget conversation compaction
 
 ## Installation
 
