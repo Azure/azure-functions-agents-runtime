@@ -418,18 +418,10 @@ class FunctionHost:
         self._lines: list[str] = []
         self._condition = threading.Condition()
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-        environment = dict(os.environ)
-        existing_pythonpath = environment.get("PYTHONPATH")
-        environment["PYTHONPATH"] = os.pathsep.join(
-            [
-                str(RUNTIME_SRC),
-                *([existing_pythonpath] if existing_pythonpath else []),
-            ]
-        )
         self._process = subprocess.Popen(
             [func, "start", "--port", str(_free_port())],
             cwd=app_dir,
-            env=environment,
+            env=_host_environment(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -524,6 +516,18 @@ class FunctionHost:
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     self._process.wait(timeout=5)
         self._reader.join(timeout=5)
+
+
+def _host_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    existing_pythonpath = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [
+            str(RUNTIME_SRC),
+            *([existing_pythonpath] if existing_pythonpath else []),
+        ]
+    )
+    return environment
 
 
 def _free_port() -> int:

@@ -264,3 +264,11 @@ log #20); the runtime version bump is a follow-up.
 - **Detailed-token follow-up scope sign-off:** @tsuyoshiushio — 2026-08-25. The follow-up must remain
   opt-in, preserve default behavior, retain the initial benchmark data in the PR, and land as a
   separately revertible commit.
+- **Detailed-token architecture review:** independent `rubber-duck` review completed 2026-08-25.
+  Canonical-first failure isolation, a distinct detail prefix, explicit schema versioning, flag
+  lifetime, field vocabulary, and provider variability were resolved before implementation; the
+  re-review found no blockers.
+- **Detailed-token testing review:** independent `rubber-duck` review completed 2026-08-25 with no
+  correctness blockers. Follow-up coverage now directly exercises compact/detail correlation and
+  parser guard branches, enabled streaming emission, exact compact serialization, and worker
+  `PYTHONPATH` isolation.

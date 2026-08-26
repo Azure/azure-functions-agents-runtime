@@ -242,6 +242,48 @@ def test_usage_parser_requires_exact_expected_primary() -> None:
             "other agent",
         ),
         ([expected], "detailed usage record"),
+        ([expected, detail, detail], "detailed usage record"),
+        (
+            [
+                expected,
+                detail.replace(
+                    '"agent_name":"baseline"', '"agent_name":"workflow"'
+                ),
+            ],
+            "other primary agent",
+        ),
+        (
+            [expected, detail.replace('"schema_version":1', '"schema_version":2')],
+            "unsupported schema",
+        ),
+        (
+            [
+                expected,
+                detail.replace(
+                    '"openai.cached_input_tokens":25',
+                    '"openai.cached_input_tokens":"25"',
+                ),
+            ],
+            "dimensions are invalid",
+        ),
+        (
+            [
+                expected,
+                detail.replace(
+                    '"input_token_count":100', '"input_token_count":101'
+                ),
+            ],
+            "input token count does not match",
+        ),
+        (
+            [
+                expected,
+                detail.replace(
+                    '"output_token_count":20', '"output_token_count":21'
+                ),
+            ],
+            "output token count does not match",
+        ),
     ):
         try:
             benchmark.select_trial_usage(
@@ -259,6 +301,20 @@ def test_benchmark_uses_runtime_from_current_checkout() -> None:
     benchmark = _load_benchmark()
 
     assert Path(__file__).resolve().parents[1] / "src" == benchmark.RUNTIME_SRC
+
+
+def test_host_environment_prepends_runtime_from_current_checkout(
+    monkeypatch: Any,
+) -> None:
+    benchmark = _load_benchmark()
+    monkeypatch.setenv("PYTHONPATH", "existing-runtime")
+
+    environment = benchmark._host_environment()
+
+    assert environment["PYTHONPATH"].split(benchmark.os.pathsep) == [
+        str(benchmark.RUNTIME_SRC),
+        "existing-runtime",
+    ]
 
 
 def test_usage_parser_rejects_workflow_subagent_record() -> None:

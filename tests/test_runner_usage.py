@@ -328,6 +328,16 @@ def test_usage_recorder_emits_versioned_detailed_event_when_enabled(
     canonical = _usage_payloads(caplog)
     assert len(canonical) == 1
     _assert_exact_usage_fields(canonical[0])
+    canonical_records = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("Agent token usage: ")
+    ]
+    assert canonical_records[0].getMessage() == (
+        'Agent token usage: {"agent_name":"billing","event_name":"agent_token_usage",'
+        '"execution_role":"workflow_subagent","input_tokens":10,"model":"gpt-test",'
+        '"model_publisher":null,"output_tokens":3,"provider":"foundry"}'
+    )
     details = _usage_detail_payloads(caplog)
     assert details == [
         {
@@ -547,6 +557,7 @@ async def test_run_agent_stream_logs_usage_from_real_maf_final_response(
             return ResponseStream(updates(), finalizer=lambda _: response)
 
     target = InferenceTarget("openai", "gpt-4o-mini")
+    monkeypatch.setattr(runner, "_DETAILED_TOKEN_USAGE_ENABLED", True)
     _install_primary_agent(monkeypatch, Agent(), "session-2", target)
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         events = [chunk async for chunk in runner.run_agent_stream("prompt", agent_name="main")]
@@ -567,6 +578,13 @@ async def test_run_agent_stream_logs_usage_from_real_maf_final_response(
     assert payload["provider"] == "openai"
     assert "inference_host" not in payload
     assert payload["model"] == "gpt-4o-mini"
+    details = _usage_detail_payloads(caplog)
+    assert len(details) == 1
+    assert details[0]["usage_details"] == {
+        "input_token_count": 5,
+        "output_token_count": 3,
+        "total_token_count": 8,
+    }
 
 
 @pytest.mark.asyncio
