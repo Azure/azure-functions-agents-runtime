@@ -11,11 +11,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import random
 import re
 import stat as stat_module
 import tempfile
 import threading
+import time
 import zipfile
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, TYPE_CHECKING
@@ -36,7 +39,7 @@ from ..transport.manifest import (
     render_sandbox_manifest_binding,
     verify_sandbox_manifest,
 )
-from ..transport.ports import SandboxFileTransport
+from ..transport.ports import SandboxFileTransport, SandboxSessionHandle
 from ..transport.transport_models import (
     ProvisionedSandboxIdentity,
     SandboxFileNotFoundError,
@@ -44,7 +47,7 @@ from ..transport.transport_models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
 
 CONTENT_DIR_PATH = CONTENT_PATH
 
@@ -77,6 +80,42 @@ _MAX_ARCHIVE_OPERATIONAL_SIZE = 256 * 1024 * 1024
 # Streaming chunk size used to copy one validated file's bytes into the
 # archive without holding the whole file in memory at once.
 _READ_CHUNK_SIZE = 1024 * 1024
+_FILE_RETRY_MAX_ATTEMPTS = 4
+_FILE_RETRY_BUDGET_SECONDS = 12.0
+_FILE_RETRY_BASE_DELAY_SECONDS = 0.25
+_FILE_RETRY_MAX_DELAY_SECONDS = 4.0
+
+
+async def retry_file_operation(
+    operation: Callable[[], Awaitable[None]],
+    transport: SandboxFileTransport,
+    *,
+    budget_seconds: float = _FILE_RETRY_BUDGET_SECONDS,
+) -> None:
+    """Retry lifecycle-transition 409s within a bounded, jittered budget."""
+    deadline = time.monotonic() + budget_seconds
+    for attempt in range(_FILE_RETRY_MAX_ATTEMPTS):
+        try:
+            await operation()
+            return
+        except SandboxFileOperationError as exc:
+            if exc.status_code != 409 or attempt + 1 == _FILE_RETRY_MAX_ATTEMPTS:
+                raise
+            if isinstance(transport, SandboxSessionHandle):
+                await transport.resume()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            retry_after = exc.retry_after_seconds
+            delay = (
+                retry_after
+                if retry_after is not None
+                else _FILE_RETRY_BASE_DELAY_SECONDS * (2**attempt)
+            )
+            delay = min(_FILE_RETRY_MAX_DELAY_SECONDS, max(0.0, delay))
+            delay = min(remaining, delay + random.uniform(0.0, delay * 0.25))
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable")
 
 # Bound on manual symlink-chain resolution, matching typical POSIX MAXSYMLINKS.
 _MAX_SYMLINK_HOPS = 40
@@ -430,7 +469,12 @@ async def _deliver_content_archive(
 ) -> None:
     # No except here: an ambiguous write outcome must never be reclassified as
     # success by a same-sized (possibly stale) file already at this path.
-    await transport.write_file(CONTENT_ARCHIVE_PATH, package.archive_bytes, create_dirs=True)
+    await retry_file_operation(
+        lambda: transport.write_file(
+            CONTENT_ARCHIVE_PATH, package.archive_bytes, create_dirs=True
+        ),
+        transport,
+    )
     if not await _content_archive_landed(transport, package.size):
         raise ContentDeliveryVerificationError(
             "Delivered content archive size does not match the captured package."
@@ -457,7 +501,12 @@ async def _deliver_digest_sidecar(
 ) -> None:
     sidecar_bytes = _render_digest_sidecar(package.digest)
     try:
-        await transport.write_file(CONTENT_DIGEST_SIDECAR_PATH, sidecar_bytes, create_dirs=True)
+        await retry_file_operation(
+            lambda: transport.write_file(
+                CONTENT_DIGEST_SIDECAR_PATH, sidecar_bytes, create_dirs=True
+            ),
+            transport,
+        )
     except (SandboxFileNotFoundError, SandboxFileOperationError):
         await _reraise_unless_sidecar_landed(transport, sidecar_bytes)
         return
@@ -508,7 +557,12 @@ async def _deliver_manifest_seed(
 ) -> None:
     seed_bytes = render_sandbox_manifest_binding(expected)
     try:
-        await transport.write_file(CONTENT_MANIFEST_SEED_PATH, seed_bytes, create_dirs=True)
+        await retry_file_operation(
+            lambda: transport.write_file(
+                CONTENT_MANIFEST_SEED_PATH, seed_bytes, create_dirs=True
+            ),
+            transport,
+        )
     except (SandboxFileNotFoundError, SandboxFileOperationError):
         await _reraise_unless_seed_landed(transport, expected, live_identity)
         return

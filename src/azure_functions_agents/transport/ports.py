@@ -120,13 +120,15 @@ class SandboxSessionProvider(Protocol):
     ) -> SandboxSessionHandle:
         """Resume a persisted sandbox and prove its manifest binding."""
 
-    async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[SandboxSummary, ...]:
+    async def list_sandboxes(
+        self, *, labels: dict[str, str], max_items: int | None = None
+    ) -> tuple[SandboxSummary, ...]:
         """List app-owned sandboxes using an exact label selector."""
 
     async def delete_sandbox(self, sandbox_id: str) -> None:
         """Delete one group-owned sandbox by its provider identifier."""
 
-    async def list_snapshots(self) -> tuple[SandboxSnapshot, ...]:
+    async def list_snapshots(self, *, max_items: int | None = None) -> tuple[SandboxSnapshot, ...]:
         """List snapshots visible to the bound Sandbox Group."""
 
     async def delete_snapshot(self, snapshot_id: str) -> None:

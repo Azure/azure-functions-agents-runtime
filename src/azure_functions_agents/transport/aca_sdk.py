@@ -13,8 +13,9 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from importlib import import_module
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
 
 import aiohttp
 from azure.core.credentials_async import AsyncTokenCredential
@@ -55,6 +56,9 @@ from .transport_models import (
     SandboxFileNotFoundError,
     SandboxFileOperationError,
     SandboxFileStat,
+    SandboxGroupArmAuthorizationError,
+    SandboxGroupArmNotFoundError,
+    SandboxGroupArmUnavailableError,
     SandboxGroupAuthorizationError,
     SandboxGroupBinding,
     SandboxGroupBindingError,
@@ -92,6 +96,9 @@ _ARM_HOST = "https://management.azure.com"
 _ARM_SCOPE = f"{_ARM_HOST}/.default"
 _ARM_API_VERSION = "2026-02-01-preview"
 _ARM_REQUEST_TIMEOUT_SECONDS = 30
+_ARM_LOOKUP_MAX_ATTEMPTS = 3
+_ARM_LOOKUP_BACKOFF_SECONDS = 0.5
+_ARM_LOOKUP_MAX_DELAY_SECONDS = 5.0
 _PROVISIONING_ATTEMPT_LABEL = "provisioning_attempt_id"
 _OPERATION_LABEL = "operation_label"
 _CONTROL_OPERATION_TIMEOUT_SECONDS = 30
@@ -105,6 +112,11 @@ _RECONCILIATION_ERRORS = (AzureError, TimeoutError, RuntimeError, ValueError)
 # A module-level indirection so tests can patch just this adapter's retry
 # delays instead of monkeypatching the process-wide ``asyncio`` module.
 _sleep = asyncio.sleep
+
+
+def is_retryable_arm_status(status_code: int) -> bool:
+    """Return whether an ARM binding lookup may safely be retried."""
+    return status_code == 429 or 500 <= status_code < 600
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,8 +178,54 @@ def validate_aca_sandbox_dependency() -> None:
     _SDK_FACTORIES()
 
 
+class _ArmErrorMetadata(TypedDict):
+    error_code: str | None
+    correlation_id: str | None
+    retry_after_seconds: float | None
+
+
 _SDK_FACTORIES: Callable[[], SdkFactories] = _load_sdk_factories
 _CREDENTIAL_FACTORY: Callable[[], AsyncTokenCredential] = build_async_credential
+
+
+async def _arm_error_metadata(
+    response: aiohttp.ClientResponse,
+) -> _ArmErrorMetadata:
+    """Extract bounded, non-sensitive ARM error metadata."""
+    error_code: str | None = None
+    try:
+        body = await response.json(content_type=None)
+    except (aiohttp.ClientError, TypeError, ValueError):
+        body = None
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict) and isinstance(error.get("code"), str):
+            error_code = error["code"][:128]
+    correlation_id = next(
+        (
+            response.headers.get(name, "")[:128]
+            for name in ("x-ms-correlation-request-id", "x-ms-request-id")
+            if response.headers.get(name)
+        ),
+        None,
+    )
+    return {
+        "error_code": error_code,
+        "correlation_id": correlation_id,
+        "retry_after_seconds": _parse_retry_after(response.headers.get("Retry-After")),
+    }
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            return max(0.0, parsedate_to_datetime(value).timestamp() - time.time())
+        except (TypeError, ValueError, OverflowError):
+            return None
 
 
 async def _read_arm_group(
@@ -180,25 +238,51 @@ async def _read_arm_group(
         raise SandboxGroupBindingError("Controller credential returned no ARM access token.")
 
     timeout = aiohttp.ClientTimeout(total=_ARM_REQUEST_TIMEOUT_SECONDS)
-    try:
-        async with (
-            aiohttp.ClientSession(timeout=timeout) as session,
-            session.get(
-                f"{_ARM_HOST}{resource_id}",
-                params={"api-version": _ARM_API_VERSION},
-                headers={"Authorization": f"Bearer {token.token}"},
-            ) as response,
-        ):
-            if response.status != 200:
-                raise SandboxGroupBindingError(
-                    "Configured Sandbox Group could not be resolved under the "
-                    "controller credential."
-                )
-            payload = await response.json(content_type=None)
-    except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
-        raise SandboxGroupBindingError(
-            "Configured Sandbox Group ARM lookup failed due to a transport or decode error."
-        ) from exc
+    payload: object = None
+    for attempt in range(_ARM_LOOKUP_MAX_ATTEMPTS):
+        try:
+            async with (
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.get(
+                    f"{_ARM_HOST}{resource_id}",
+                    params={"api-version": _ARM_API_VERSION},
+                    headers={"Authorization": "******"},
+                ) as response,
+            ):
+                if response.status != 200:
+                    metadata = await _arm_error_metadata(response)
+                    if response.status in _AUTHORIZATION_STATUS_CODES:
+                        raise SandboxGroupArmAuthorizationError(
+                            status_code=response.status, **metadata
+                        )
+                    if response.status == 404:
+                        raise SandboxGroupArmNotFoundError(
+                            status_code=response.status, **metadata
+                        )
+                    if is_retryable_arm_status(response.status):
+                        if attempt + 1 < _ARM_LOOKUP_MAX_ATTEMPTS:
+                            delay = metadata["retry_after_seconds"]
+                            await _sleep(
+                                min(
+                                    delay
+                                    if delay is not None
+                                    else _ARM_LOOKUP_BACKOFF_SECONDS * 2**attempt,
+                                    _ARM_LOOKUP_MAX_DELAY_SECONDS,
+                                )
+                            )
+                            continue
+                        raise SandboxGroupArmUnavailableError(
+                            status_code=response.status, **metadata
+                        )
+                    raise SandboxGroupBindingError(
+                        "Configured Sandbox Group ARM binding was rejected."
+                    )
+                payload = await response.json(content_type=None)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+            raise SandboxGroupBindingError(
+                "Configured Sandbox Group ARM lookup failed due to a transport or decode error."
+            ) from exc
+        break
 
     if not isinstance(payload, dict):
         raise SandboxGroupBindingError("Configured Sandbox Group returned an invalid ARM response.")
@@ -556,12 +640,20 @@ class AcaSandboxAdapter:
         finally:
             await _close_resource(self._credential)
 
-    async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[SandboxSummary, ...]:
+    async def list_sandboxes(
+        self, *, labels: dict[str, str], max_items: int | None = None
+    ) -> tuple[SandboxSummary, ...]:
         """Project label-filtered platform inventory without leaking SDK summaries."""
         self._ensure_open()
+        _validate_inventory_limit(max_items)
         summaries: list[SandboxSummary] = []
+        iterator = self._group_client.list_sandboxes(labels=labels).__aiter__()
         try:
-            async for sandbox in self._group_client.list_sandboxes(labels=labels):
+            while max_items is None or len(summaries) < max_items:
+                try:
+                    sandbox = await anext(iterator)
+                except StopAsyncIteration:
+                    break
                 summaries.append(
                     SandboxSummary.create(
                         sandbox_id=sandbox.id,
@@ -598,9 +690,12 @@ class AcaSandboxAdapter:
         except AzureError as exc:
             raise SandboxProvisioningError("Sandbox delete failed.") from exc
 
-    async def list_snapshots(self) -> tuple[SandboxSnapshot, ...]:
+    async def list_snapshots(
+        self, *, max_items: int | None = None
+    ) -> tuple[SandboxSnapshot, ...]:
         """Project snapshots so the reconciler can prune provider-retained storage."""
         self._ensure_open()
+        _validate_inventory_limit(max_items)
         snapshots: list[SandboxSnapshot] = []
         async for snapshot in self._group_client.list_snapshots():
             snapshots.append(
@@ -610,6 +705,8 @@ class AcaSandboxAdapter:
                     created_at=_sdk_timestamp(snapshot.created_at_utc),
                 )
             )
+            if max_items is not None and len(snapshots) >= max_items:
+                break
         return tuple(snapshots)
 
     async def delete_snapshot(self, snapshot_id: str) -> None:
@@ -803,7 +900,9 @@ async def _translate_file_errors[T](operation: Awaitable[T]) -> T:
         ) from None
     except HttpResponseError as exc:
         raise SandboxFileOperationError(
-            "Sandbox file operation failed.", status_code=exc.status_code
+            "Sandbox file operation failed.",
+            status_code=exc.status_code,
+            retry_after_seconds=_retry_after_seconds(exc),
         ) from None
     except (ServiceRequestError, AzureError):
         raise SandboxFileOperationError("Sandbox file operation failed.") from None
@@ -1108,6 +1207,7 @@ def _is_definitive_client_rejection(exc: HttpResponseError) -> bool:
 
 
 _AUTHORIZATION_STATUS_CODES = frozenset({401, 403})
+_RETRYABLE_ARM_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
 
 def _is_authorization_rejection(exc: HttpResponseError) -> bool:
@@ -1116,6 +1216,24 @@ def _is_authorization_rejection(exc: HttpResponseError) -> bool:
 
 def _is_capacity_rejection(exc: HttpResponseError) -> bool:
     return exc.status_code in {409, 429, 503}
+
+
+def _retry_after_seconds(exc: HttpResponseError) -> float | None:
+    """Read a bounded Retry-After value without trusting provider payloads."""
+    response = exc.response
+    if response is None:
+        return None
+    value = cast(Any, response).headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            date = parsedate_to_datetime(value)
+            return max(0.0, date.timestamp() - time.time())
+        except (TypeError, ValueError, OverflowError):
+            return None
 
 
 async def _read_manifest_when_ready(
@@ -1157,6 +1275,11 @@ async def _try_read_manifest(handle: AcaSandboxHandle, timeout_seconds: float) -
 def _validate_positive_finite_seconds(value: float, field_name: str) -> None:
     if not math.isfinite(value) or value <= 0:
         raise SandboxProvisioningError(f"Sandbox {field_name} must be positive and finite.")
+
+
+def _validate_inventory_limit(value: int | None) -> None:
+    if value is not None and value <= 0:
+        raise ValueError("max_items must be greater than zero.")
 
 
 class _AsyncCloseable(Protocol):

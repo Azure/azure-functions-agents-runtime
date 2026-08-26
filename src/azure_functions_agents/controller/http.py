@@ -125,6 +125,7 @@ async def submit_run(
     agent_slug: str,
     respond_async: bool,
     budget: RequestBudget,
+    defer_response: bool = False,
 ) -> ControllerResponse:
     """Start a run, return an LRO ticket, or preserve the synchronous contract."""
     started = await _start_run_or_response(
@@ -136,13 +137,15 @@ async def submit_run(
     if isinstance(started, ControllerResponse):
         return started
     context = RunContext(run_id=started.run_id, session_id=started.session_id)
-    if respond_async:
+    if respond_async or defer_response:
         return _accepted_response(agent_slug, started, context)
     try:
         status, _events = await budget.wait_for(collect_terminal_run(backend, context))
     except RunDeadlineExceededError:
-        return await _synchronous_timeout_response(backend, context, budget)
-    return _synchronous_status_response(status)
+        return await _synchronous_timeout_response(
+            backend, context, budget, agent_slug=agent_slug
+        )
+    return _synchronous_status_response(agent_slug, status)
 
 
 async def _start_run_or_response(
@@ -194,11 +197,13 @@ async def _synchronous_timeout_response(
     backend: AgentExecutionBackend,
     context: RunContext,
     budget: RequestBudget,
+    *,
+    agent_slug: str,
 ) -> ControllerResponse:
     try:
         status = await budget.wait_for_cleanup(backend.get_run(context))
         if status.state in TERMINAL_RUN_STATUSES:
-            return _synchronous_status_response(status)
+            return _synchronous_status_response(agent_slug, status)
         await budget.wait_for_cleanup(backend.cancel_run(context))
     except Exception as exc:
         logger.warning(
@@ -337,23 +342,30 @@ def _accepted_response(
     )
 
 
-def _synchronous_status_response(status: RunStatus) -> ControllerResponse:
+def _synchronous_status_response(agent_slug: str, status: RunStatus) -> ControllerResponse:
+    context = RunContext(session_id=status.session_id, run_id=status.run_id)
+    urls = management_urls(agent_slug=agent_slug, context=context)
+    headers = {
+        "x-ms-session-id": status.session_id,
+        "x-ms-run-id": status.run_id,
+        "Location": urls["status_url"],
+    }
     if status.state == "succeeded" and status.result is not None:
         return ControllerResponse(
             status_code=200,
             body=_result_payload(status.result),
-            headers={"x-ms-session-id": status.session_id},
+            headers=headers,
         )
     if status.state in TERMINAL_RUN_STATUSES and status.state != "succeeded":
         return ControllerResponse(
             status_code=500,
             body=status_payload(status),
-            headers={"x-ms-session-id": status.session_id},
+            headers=headers,
         )
     return ControllerResponse(
         status_code=500,
         body={"error": "run_did_not_reach_terminal_state", **status_payload(status)},
-        headers={"x-ms-session-id": status.session_id},
+        headers=headers,
     )
 
 

@@ -39,6 +39,7 @@ The full lifecycle that produces an FRD lives in [`../../AGENTS.md`](../../AGENT
 | [0006](0006-endpoint-authentication.md) | Endpoint & HTTP trigger authentication (API key / Entra ID) | Finalized |
 | [0007](0007-multi-agent-delegation.md) | Multi-agent delegation (agent-as-tool) | In review |
 | [0008](0008-aca-sandbox-session-runtime.md) | ACA Sandbox session runtime | Finalized |
+| [0009](0009-aca-qualification-reliability-fixes.md) | ACA qualification reliability fixes | Finalized |
 
 > `_template.md` is the template, not an FRD — the leading underscore keeps it
 > sorted first and excludes it from numbering.

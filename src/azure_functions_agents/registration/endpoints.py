@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -405,6 +406,50 @@ def _register_chat_page(
     app.function_name(name=function_name)(decorated)
 
 
+def register_sandbox_preflight_endpoint(
+    app: func.FunctionApp,
+    *,
+    slug: str,
+    auth: EndpointAuthConfig,
+    session_runtime: SessionRuntimeBinding,
+) -> None:
+    """Register an authenticated, read-only provider identity preflight."""
+
+    from ..transport.aca_sdk import AcaSandboxAdapter
+
+    async def preflight_handler(req: Request) -> Response:
+        auth_error = authorize_entra_request(req.headers.get, auth)
+        if auth_error is not None:
+            return _json_error(auth_error.message, status_code=auth_error.status_code)
+        adapter = None
+        try:
+            adapter = await AcaSandboxAdapter.open(session_runtime.sandbox_group_resource_id)
+            await adapter.list_sandboxes(labels={"qualification": "preflight"})
+        except Exception:
+            logger.exception("sandbox identity preflight failed")
+            return _json_error("sandbox identity preflight failed", status_code=503)
+        finally:
+            if adapter is not None:
+                await adapter.close()
+        return Response(
+            json.dumps(
+                {
+                    "arm_get": True,
+                    "data_plane_list": True,
+                    "instance_id": os.environ.get("WEBSITE_INSTANCE_ID", "unknown"),
+                }
+            ),
+            media_type="application/json",
+        )
+
+    decorated = app.route(
+        route=f"agents/{slug}/sandbox-preflight",
+        methods=["GET"],
+        auth_level=resolve_endpoint_auth_level(auth),
+    )(preflight_handler)
+    app.function_name(name=_safe_function_name(f"agent_{slug}_sandbox_preflight"))(decorated)
+
+
 def _register_http_chat(
     app: func.FunctionApp,
     resolved: ResolvedAgent,
@@ -598,8 +643,9 @@ async def _start_aca_stream(
             timeout=resolved.timeout,
         ),
         agent_slug=resolved.slug,
-        respond_async=True,
+        respond_async=respond_async,
         budget=budget,
+        defer_response=True,
     )
     if accepted.status_code != 202 or respond_async:
         return _controller_response_to_fastapi(accepted)
@@ -610,14 +656,27 @@ async def _start_aca_stream(
     run_id = body.get("run_id")
     if not isinstance(accepted_session_id, str) or not isinstance(run_id, str):
         return _json_error("sandbox run acceptance response was invalid")
+    location = accepted.headers.get("Location")
+    if not isinstance(location, str) or not location:
+        status_url = body.get("status_url")
+        location = (
+            status_url
+            if isinstance(status_url, str)
+            else f"/agents/{resolved.slug}/sessions/{accepted_session_id}/runs/{run_id}"
+        )
     return StreamingResponse(
         render_events(
             backend,
             RunContext(session_id=accepted_session_id, run_id=run_id),
             after_sequence=after_sequence,
+            deadline=budget.wall_deadline,
         ),
         media_type="text/event-stream",
-        headers={"x-ms-session-id": accepted_session_id},
+        headers={
+            "Location": location,
+            "x-ms-session-id": accepted_session_id,
+            "x-ms-run-id": run_id,
+        },
     )
 
 

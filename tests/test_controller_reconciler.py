@@ -58,25 +58,31 @@ class InventoryProvider:
         self.deleted_sandboxes: list[str] = []
         self.deleted_snapshots: list[str] = []
         self.list_calls = 0
+        self.label_queries: list[dict[str, str]] = []
 
-    async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[SandboxSummary, ...]:
+    async def list_sandboxes(
+        self, *, labels: dict[str, str], max_items: int | None = None
+    ) -> tuple[SandboxSummary, ...]:
         self.list_calls += 1
+        self.label_queries.append(labels)
         sandboxes = (
             self.sandboxes
             if self.list_calls == 1 or self.refreshed_sandboxes is None
             else self.refreshed_sandboxes
         )
-        return tuple(
+        result = tuple(
             sandbox
             for sandbox in sandboxes
             if all(sandbox.labels.get(key) == value for key, value in labels.items())
         )
+        return result if max_items is None else result[:max_items]
 
     async def delete_sandbox(self, sandbox_id: str) -> None:
         self.deleted_sandboxes.append(sandbox_id)
 
-    async def list_snapshots(self) -> tuple[SandboxSnapshot, ...]:
-        return tuple(self.snapshots.values())
+    async def list_snapshots(self, *, max_items: int | None = None) -> tuple[SandboxSnapshot, ...]:
+        result = tuple(self.snapshots.values())
+        return result if max_items is None else result[:max_items]
 
     async def delete_snapshot(self, snapshot_id: str) -> None:
         self.deleted_snapshots.append(snapshot_id)
@@ -361,6 +367,36 @@ def _run(session: DurableSessionRecord, now: datetime, *, status: str = "running
         created_at=now,
         updated_at=now,
     )
+
+
+@pytest.mark.asyncio
+async def test_targeted_request_reconciliation_does_not_probe_unrelated_same_app_sandboxes() -> None:
+    now = datetime.now(UTC)
+    session = _session(now)
+    provider = InventoryProvider(
+        sandboxes=(
+            SandboxSummary.create(
+                sandbox_id="sandbox-1",
+                labels={"app_hash": session.owner_partition.app_hash, "session_id": session.session_id},
+            ),
+            SandboxSummary.create(
+                sandbox_id="stale-other",
+                labels={"app_hash": session.owner_partition.app_hash, "session_id": "other-session"},
+            ),
+        )
+    )
+    reconciler = SessionReconciler(
+        store=FakeSessionStateStore(session),
+        provider=provider,
+        app_hash=session.owner_partition.app_hash,
+        now=lambda: now,
+    )
+
+    await reconciler.reconcile_session_targeted(session.owner_partition, session.session_id)
+
+    assert provider.label_queries == [
+        {"app_hash": session.owner_partition.app_hash, "session_id": session.session_id}
+    ]
 
 
 def _submit_operation(
@@ -1537,6 +1573,27 @@ async def test_reconciler_rotates_the_durable_cursor_across_bounded_pages() -> N
     cursor = await store.get_reconciler_cursor(_app_hash())
     assert cursor is not None
     assert cursor.continuation_token == "1"
+
+
+@pytest.mark.asyncio
+async def test_reconciler_reports_partial_progress_when_page_budget_is_exhausted() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    entities = tuple(
+        _tombstoned_session(now, f"session-{index}").to_table_entity()
+        for index in range(2)
+    )
+    store = RotatingPageStore(entities)
+    report = await SessionReconciler(
+        store=store,
+        provider=InventoryProvider(sandboxes=()),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(page_size=1, max_pages=1),
+        now=lambda: now,
+    ).run_once()
+
+    assert report.scanned_pages == 1
+    assert report.scanned_records == 1
+    assert report.partial is True
 
 
 @pytest.mark.asyncio

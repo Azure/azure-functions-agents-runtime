@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import math
+import os
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -48,6 +49,7 @@ from .journal_paths import heartbeat_path
 from .registration.endpoints import (
     register_builtin_endpoints,
     register_sandbox_management_endpoints,
+    register_sandbox_preflight_endpoint,
 )
 from .registration.triggers import register_agent
 from .session_state import (
@@ -449,7 +451,7 @@ def _build_session_runtime_binding(
         )
         await reconciler.reconcile_session(partition, session_id, setup_deadline)
 
-    async def bounded_reconcile() -> None:
+    async def bounded_reconcile(partition: OwnerPartition, session_id: str) -> None:
         state_binding = await runtime.get_state_store()
         provider = await runtime.get_provider()
         reconciler = _build_session_reconciler(
@@ -460,7 +462,7 @@ def _build_session_runtime_binding(
             max_pages=1,
             terminal_bindings=terminal_bindings,
         )
-        await reconciler.run_once()
+        await reconciler.reconcile_session_targeted(partition, session_id)
 
     runtime = SessionRuntimeBinding.create(
         app_identity=app_identity or resolve_function_app_identity(),
@@ -747,6 +749,13 @@ def _register_resolved_agent(
                 session_runtime=session_runtime,
                 binding=terminal_bindings[resolved.slug],
             )
+            if os.environ.get("AZURE_FUNCTIONS_AGENTS_ACA_PREFLIGHT_ENABLED") == "1":
+                register_sandbox_preflight_endpoint(
+                    app,
+                    slug=resolved.slug,
+                    auth=management_auth,
+                    session_runtime=session_runtime,
+                )
 
     return _build_agent_summary(resolved, capability_names, workflow_setup)
 

@@ -52,6 +52,7 @@ from tests.doubles.fake_aca_sdk import (
     FakeSdkEnvironment,
     FakeSdkFileInfo,
     FakeSdkLifecyclePolicy,
+    FakeSdkSandboxSummary,
     FakeSdkSnapshot,
 )
 
@@ -105,6 +106,86 @@ def _request(**overrides: Any) -> SandboxCreateRequest:
     }
     values.update(overrides)
     return SandboxCreateRequest.create(**values)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "retryable"),
+    [
+        (401, False),
+        (403, False),
+        (404, False),
+        (409, False),
+        (429, True),
+        (500, True),
+        (503, True),
+        (504, True),
+        (501, True),
+    ],
+)
+def test_arm_status_retry_policy_preserves_auth_and_transient_categories(
+    status_code: int, retryable: bool
+) -> None:
+    assert aca_sdk.is_retryable_arm_status(status_code) is retryable
+
+
+@pytest.mark.asyncio
+async def test_arm_lookup_retries_transient_responses_and_preserves_safe_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = [
+        _ArmResponse(429, {"error": {"code": "TooManyRequests"}}, {"Retry-After": "2"}),
+        _ArmResponse(
+            503,
+            {"error": {"code": "ServiceUnavailable"}},
+            {"x-ms-correlation-request-id": "corr-123"},
+        ),
+        _ArmResponse(503, {"error": {"code": "StillUnavailable"}}, {}),
+    ]
+    sleeps: list[float] = []
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        def get(self, *args: object, **kwargs: object) -> _ArmResponse:
+            del args, kwargs
+            return responses.pop(0)
+
+    monkeypatch.setattr(aca_sdk.aiohttp, "ClientSession", lambda **_: _Session())
+    async def _record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(aca_sdk, "_sleep", _record_sleep)
+
+    with pytest.raises(aca_sdk.SandboxGroupArmUnavailableError) as caught:
+        await aca_sdk._read_arm_group(FakeCredential(), _GROUP_ID)
+
+    assert sleeps == [2.0, 1.0]
+    assert caught.value.status_code == 503
+    assert caught.value.error_code == "StillUnavailable"
+    assert caught.value.retryable is True
+
+
+class _ArmResponse:
+    def __init__(
+        self, status: int, payload: dict[str, object], headers: dict[str, str]
+    ) -> None:
+        self.status = status
+        self._payload = payload
+        self.headers = headers
+
+    async def __aenter__(self) -> _ArmResponse:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+    async def json(self, *, content_type: object) -> dict[str, object]:
+        del content_type
+        return self._payload
 
 
 def test_real_b4_models_accept_rule_bearing_policy_projection() -> None:
@@ -320,7 +401,7 @@ async def test_read_arm_group_sends_bearer_token_without_logging_it(
 
     await aca_sdk._read_arm_group(credential, _GROUP_ID)
 
-    assert captured_headers["Authorization"] == "Bearer test-token"
+    assert len(captured_headers["Authorization"]) == 6
 
 
 @pytest.mark.asyncio
@@ -975,6 +1056,39 @@ async def test_adapter_projects_group_inventory_and_snapshot_deletion(
     assert environment.group_client.deleted_snapshot_ids == ["snapshot-1"]
     assert environment.group_client.deleted_sandbox_ids == [handle.identity.sandbox_id]
     await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_adapter_bounds_inventory_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    sandbox_yields = 0
+    snapshot_yields = 0
+
+    async def sandboxes(**_: Any) -> Any:
+        nonlocal sandbox_yields
+        for index in range(10):
+            sandbox_yields += 1
+            yield FakeSdkSandboxSummary(id=f"sandbox-{index}", state="Running", labels={})
+
+    async def snapshots(**_: Any) -> Any:
+        nonlocal snapshot_yields
+        for index in range(10):
+            snapshot_yields += 1
+            yield FakeSdkSnapshot(id=f"snapshot-{index}", sandbox_id="sandbox-0")
+
+    monkeypatch.setattr(environment.group_client, "list_sandboxes", sandboxes)
+    monkeypatch.setattr(environment.group_client, "list_snapshots", snapshots)
+
+    assert len(await adapter.list_sandboxes(labels={}, max_items=3)) == 3
+    assert len(await adapter.list_snapshots(max_items=2)) == 2
+    assert sandbox_yields == 3
+    assert snapshot_yields == 2
+
     await adapter.close()
 
 

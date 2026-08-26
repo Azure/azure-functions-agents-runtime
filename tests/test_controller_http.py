@@ -227,6 +227,23 @@ async def test_async_submission_derives_phase_when_the_handle_has_none() -> None
 
 
 @pytest.mark.asyncio
+async def test_deferred_stream_submission_returns_ticket_without_async_preference() -> None:
+    backend = FakeBackend(_status(phase="executing"))
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=False,
+        defer_response=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 202
+    assert response.body["run_id"] == "run-1"
+
+
+@pytest.mark.asyncio
 async def test_status_payload_includes_provider_neutral_phase_when_available() -> None:
     backend = FakeBackend(_status(phase="settling"))
 
@@ -273,6 +290,8 @@ async def test_sync_success_keeps_session_identity_in_the_response_header() -> N
         "delegate_error_count": 0,
     }
     assert response.headers["x-ms-session-id"] == "session-1"
+    assert response.headers["x-ms-run-id"] == "run-1"
+    assert response.headers["Location"] == "/agents/main/sessions/session-1/runs/run-1"
 
 
 @pytest.mark.asyncio
@@ -316,6 +335,8 @@ async def test_prefer_only_changes_submission_projection() -> None:
     assert async_response.status_code == 202
     assert sync_response.status_code == 200
     assert async_response.headers["x-ms-session-id"] == sync_response.headers["x-ms-session-id"]
+    assert sync_response.headers["x-ms-run-id"] == "run-1"
+    assert sync_response.headers["Location"] == "/agents/main/sessions/session-1/runs/run-1"
 
 
 @pytest.mark.asyncio

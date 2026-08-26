@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
@@ -1622,6 +1622,33 @@ class AzureTableSessionStateStore:
 
     # -- admission (EGT) ------------------------------------------------
 
+    async def _clear_completed_operation_pointer(
+        self,
+        *,
+        partition: OwnerPartition,
+        session: SessionRead,
+    ) -> SessionRead:
+        from azure.data.tables import TableTransactionError
+
+        operation_id = session.record.active_operation_id
+        if operation_id is None:
+            return session
+        operation = await self.get_operation(partition, session.record.session_id, operation_id)
+        if operation.record.state == "active":
+            raise SessionNotAdmissibleError(
+                "session has an active durable controller operation"
+            )
+        healed = replace(session.record, active_operation_id=None)
+        try:
+            await self._table_client.submit_transaction(
+                [_update_op(healed, etag=session.etag)]
+            )
+        except TableTransactionError as exc:
+            raise ConcurrencyConflictError(
+                "session changed concurrently while clearing completed operation"
+            ) from exc
+        return await self.get_session(partition, session.record.session_id)
+
     async def admit_run(
         self,
         records: AdmissionRecords,
@@ -1645,10 +1672,9 @@ class AzureTableSessionStateStore:
             and current_session.etag != expected_session_etag
         ):
             raise ConcurrencyConflictError("session changed concurrently before admission")
-        if current_session.record.active_operation_id is not None:
-            raise SessionNotAdmissibleError(
-                "session has an active durable controller operation"
-            )
+        current_session = await self._clear_completed_operation_pointer(
+            partition=partition, session=current_session
+        )
         if current_session.record.active_run_id is not None:
             raise ActiveRunConflictError(
                 f"session {session_id!r} already has an active run",
@@ -1907,10 +1933,9 @@ class AzureTableSessionStateStore:
             and current_session.etag != expected_session_etag
         ):
             raise ConcurrencyConflictError("session changed concurrently before admission")
-        if current_session.record.active_operation_id is not None:
-            raise SessionNotAdmissibleError(
-                "session has an active durable controller operation"
-            )
+        current_session = await self._clear_completed_operation_pointer(
+            partition=partition, session=current_session
+        )
         if current_session.record.active_run_id is not None:
             raise ActiveRunConflictError(
                 f"session {records.session.session_id!r} already has an active run",

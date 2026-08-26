@@ -44,18 +44,19 @@ async def render_events(
     heartbeat_seconds: float = DEFAULT_HEARTBEAT_SECONDS,
     lease_seconds: float = DEFAULT_LEASE_SECONDS,
     clock: Callable[[], float] = time.monotonic,
+    deadline: float | None = None,
 ) -> AsyncIterator[str]:
     """Render a bounded, heartbeat-bearing SSE lease without cancelling the run."""
     if heartbeat_seconds <= 0 or lease_seconds <= 0:
         raise ValueError("heartbeat_seconds and lease_seconds must be positive")
     if after_sequence < 0:
         raise ValueError("after_sequence must be non-negative")
-    deadline = clock() + lease_seconds
+    lease_deadline = clock() + lease_seconds if deadline is None else deadline
     iterator = backend.read_events(context, after_sequence).__aiter__()
     pending_event: asyncio.Future[RunEvent] | None = None
     try:
         while True:
-            remaining = deadline - clock()
+            remaining = lease_deadline - clock()
             if remaining <= 0:
                 return
             if pending_event is None:

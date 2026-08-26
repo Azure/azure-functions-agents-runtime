@@ -43,6 +43,63 @@ class SandboxGroupBindingError(SandboxTransportError):
     """Raised when a configured, persisted, ARM, or live group binding disagrees."""
 
 
+class SandboxGroupArmAuthorizationError(SandboxGroupBindingError):
+    """Raised when ARM denies resolving the configured Sandbox Group."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int | None = None,
+        error_code: str | None = None,
+        correlation_id: str | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.error_code = error_code
+        self.correlation_id = correlation_id
+        self.retry_after_seconds = retry_after_seconds
+        self.retryable = False
+        super().__init__("Configured Sandbox Group ARM authorization failed.")
+
+
+class SandboxGroupArmNotFoundError(SandboxGroupBindingError):
+    """Raised when ARM cannot find the configured Sandbox Group."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int | None = None,
+        error_code: str | None = None,
+        correlation_id: str | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.error_code = error_code
+        self.correlation_id = correlation_id
+        self.retry_after_seconds = retry_after_seconds
+        self.retryable = False
+        super().__init__("Configured Sandbox Group was not found.")
+
+
+class SandboxGroupArmUnavailableError(SandboxGroupBindingError):
+    """Raised when ARM cannot currently resolve the configured Sandbox Group."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int | None = None,
+        error_code: str | None = None,
+        correlation_id: str | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.error_code = error_code
+        self.correlation_id = correlation_id
+        self.retry_after_seconds = retry_after_seconds
+        self.retryable = True
+        super().__init__("Configured Sandbox Group ARM lookup is temporarily unavailable.")
+
+
 class AcaSandboxDependencyError(SandboxTransportError):
     """Raised when the optional ACA Sandbox SDK extra is unavailable."""
 
@@ -59,9 +116,16 @@ class SandboxFileOperationError(SandboxTransportError):
     narrow, typed retry decision without catching a provider SDK exception.
     """
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
 
 
 @dataclass(frozen=True, slots=True)

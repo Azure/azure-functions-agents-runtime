@@ -554,9 +554,11 @@ async def test_builtin_stream_honors_respond_async(
     async def fake_submit_run(*args: Any, **kwargs: Any) -> ControllerResponse:
         del args
         captured["respond_async"] = kwargs["respond_async"]
+        captured["defer_response"] = kwargs["defer_response"]
         return ControllerResponse(
             status_code=202,
             body={"session_id": "session-1", "run_id": "run-1", "status": "accepted"},
+            headers={"Location": "/agents/test-agent/sessions/session-1/runs/run-1"},
         )
 
     monkeypatch.setattr(
@@ -586,6 +588,7 @@ async def test_builtin_stream_honors_respond_async(
 
     assert response.status_code == 202
     assert captured["respond_async"] is True
+    assert captured["defer_response"] is True
     assert callable(captured["binding"].output_validator)
 
 

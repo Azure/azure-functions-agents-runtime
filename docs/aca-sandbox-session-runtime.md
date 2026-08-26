@@ -20,8 +20,8 @@ python -m pip install "azurefunctions-agents-runtime[aca_sandbox]"
 Configure `session_runtime.aca_sandbox` only for HTTP-triggered MAF agents on a
 supported Linux x86_64 Functions worker. Unsupported hosts, invalid retention,
 missing ACA prerequisites, and incompatible Dynamic Workflows fail startup;
-they never silently select another backend. Ordinary chat remains synchronous
-and `Prefer: respond-async` opts into the durable run-management URLs.
+they never silently select another backend. ordinary chat remains synchronous and `Prefer: respond-async` opts into the
+durable run-management URLs.
 
 The sandbox has no public inbound port. The Functions app remains the
 authenticated entry point and controller.
@@ -118,6 +118,15 @@ operation uses a sliding 120-second lease. A pre-reservation setup `504` retains
 `retry_with=respond-async` with `Retry-After: 120`; once a response includes a
 durable management ticket, `Retry-After: 2` is the polling cadence for that
 ticket.
+
+The synchronous `/chatstream` response is an SSE lease, not an implicit async
+conversion. It preserves the caller's `Prefer` choice: a committed setup
+timeout without `respond-async` is a linked `504`, while an explicit async
+request is `202`. Every successful synchronous stream response includes
+`x-ms-session-id`, `x-ms-run-id`, and `Location` pointing to the run status URL.
+The `done` event means output is complete; the session can remain `settling`
+until the status URL reports `phase=terminal`, which clients must observe before
+submitting another run with the same session key.
 
 ## Egress and credentials
 
@@ -216,8 +225,21 @@ during an active run and restores the idle policy after terminal adoption.
 Normal v1 durability is same-sandbox disk auto-suspend/resume; the platform
 does not expose an explicit snapshot resource for that normal path. The
 controller timer is the reclamation authority after idle expiry and deletes any
-owned snapshot resources if present before tombstoning; group auto-delete is
-only a backstop.
+owned snapshot resources if present before tombstoning; group auto-delete is only a backstop.
+
+Request-path reconciliation is deliberately targeted to the requested
+session/operation (and is bounded to a small quota). It never lists or probes
+unrelated app-owned sessions; global orphan, expiry, inventory, and backlog
+cleanup belongs to the timer. Timer passes page inventory with bounded
+concurrency and a cursor that advances only after a page completes, reporting
+deferred and partial progress when its deadline is reached.
+
+File-plane `409` readiness is lifecycle-aware: the controller resumes only
+when it owns that mutation, honors provider `Retry-After`, and uses capped
+jittered backoff with per-candidate and whole-flow budgets. Absent backing is
+never probed. ARM binding failures retain safe `401/403/404/429/5xx`
+classification and retryability; authorization failures surface as
+`sandbox_group_authorization_failed` rather than an opaque setup timeout.
 
 Useful failure signals include:
 

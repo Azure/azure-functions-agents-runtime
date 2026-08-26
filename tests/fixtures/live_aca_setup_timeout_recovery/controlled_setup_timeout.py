@@ -76,14 +76,16 @@ class _DelayedCreateSandboxProvider:
             readiness_timeout_seconds=readiness_timeout_seconds,
         )
 
-    async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[SandboxSummary, ...]:
-        return await self._inner.list_sandboxes(labels=labels)
+    async def list_sandboxes(
+        self, *, labels: dict[str, str], max_items: int | None = None
+    ) -> tuple[SandboxSummary, ...]:
+        return await self._inner.list_sandboxes(labels=labels, max_items=max_items)
 
     async def delete_sandbox(self, sandbox_id: str) -> None:
         await self._inner.delete_sandbox(sandbox_id)
 
-    async def list_snapshots(self) -> tuple[SandboxSnapshot, ...]:
-        return await self._inner.list_snapshots()
+    async def list_snapshots(self, *, max_items: int | None = None) -> tuple[SandboxSnapshot, ...]:
+        return await self._inner.list_snapshots(max_items=max_items)
 
     async def delete_snapshot(self, snapshot_id: str) -> None:
         await self._inner.delete_snapshot(snapshot_id)

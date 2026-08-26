@@ -1152,6 +1152,13 @@ async def test_retryable_provision_content_failure_leaves_a_resumable_operation(
     )
     request = StartRunRequest(prompt="hello", idempotency_key="content-retry")
 
+    if status_code == 409:
+        recovered = await backend.start_run(request)
+        assert recovered.state == "accepted"
+        assert len(provider.sandboxes) == 1
+        assert len(provider.create_calls) == 1
+        return
+
     with pytest.raises(DurableAdmissionSetupTimeoutError):
         await backend.start_run(request)
 

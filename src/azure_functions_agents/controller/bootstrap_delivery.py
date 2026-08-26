@@ -21,6 +21,7 @@ from .package import (
     ContentDeliveryVerificationError,
     DeliveredContentPackage,
     deliver_content_package,
+    retry_file_operation,
 )
 
 _BOOT_READY_CONTENT = b"ready\n"
@@ -90,7 +91,7 @@ async def deliver_content_and_bootstrap(
     """Deliver verified content followed by the supervisor-unblocking bootstrap files."""
 
     with suppress(SandboxFileNotFoundError):
-        await transport.delete_file(BOOT_READY_PATH)
+        await retry_file_operation(lambda: transport.delete_file(BOOT_READY_PATH), transport)
     content = await deliver_content_package(transport, package, expected, live_identity)
     delivered_bootstrap = await deliver_sandbox_bootstrap(transport, artifact)
     return DeliveredSandboxBootstrap(content=content, bootstrap=delivered_bootstrap)
@@ -102,7 +103,9 @@ async def _write_verified(
     content: bytes,
 ) -> None:
     try:
-        await transport.write_file(path, content, create_dirs=True)
+        await retry_file_operation(
+            lambda: transport.write_file(path, content, create_dirs=True), transport
+        )
     except (SandboxFileNotFoundError, SandboxFileOperationError):
         if await _matches_written_content(transport, path, content):
             return

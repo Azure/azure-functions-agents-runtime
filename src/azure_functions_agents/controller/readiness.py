@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
@@ -127,6 +129,7 @@ QUARANTINE_REASONS: frozenset[str] = frozenset(
 )
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.25
 _RESUMABLE_FILE_OPERATION_STATUS_CODES = frozenset({409, 423, 425, 429, 500, 502, 503, 504})
+_FILE_RETRY_MAX_DELAY_SECONDS = 4.0
 _ADMISSION_CONFIRMATION_TIMEOUT_SECONDS = 1.0
 _BOUNDED_TASK_DRAIN_TIMEOUT_SECONDS = 0.05
 _INDETERMINATE_PROVISION_RECOVERY_TIMEOUT_SECONDS = 1.0
@@ -153,7 +156,7 @@ _ADMISSION_POSSIBLY_COMMITTED: AdmissionDisposition = "possibly_committed"
 
 type _SessionLockKey = tuple[str, str]
 type TargetedReconciler = Callable[[OwnerPartition, str, "SetupDeadline"], Awaitable[None]]
-type BoundedReconciler = Callable[[], Awaitable[None]]
+type BoundedReconciler = Callable[..., Awaitable[None]]
 
 
 class SetupDeadline(Protocol):
@@ -427,15 +430,33 @@ class SessionRuntimeBinding:
                     SANDBOX_GROUP_AUTHORIZATION_MESSAGE
                 ) from None
 
-    async def reconcile_after_create(self) -> None:
-        """Run the awaited bounded post-create cleanup when configured."""
+    async def reconcile_after_create(
+        self,
+        partition: OwnerPartition | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        """Run targeted post-create reconciliation when configured."""
         if self._post_create_reconciler is not None:
-            await self._post_create_reconciler()
+            if (
+                partition is None
+                or session_id is None
+                or len(inspect.signature(self._post_create_reconciler).parameters) == 0
+            ):
+                await self._post_create_reconciler()
+            else:
+                await self._post_create_reconciler(partition, session_id)
 
-    async def reap_for_capacity(self) -> None:
-        """Run the awaited bounded capacity cleanup when configured."""
+    async def reap_for_capacity(
+        self,
+        partition: OwnerPartition | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        """Run targeted capacity reconciliation when configured."""
         if self._capacity_reaper is not None:
-            await self._capacity_reaper()
+            if partition is None or session_id is None:
+                await self._capacity_reaper()
+            else:
+                await self._capacity_reaper(partition, session_id)
 
     @asynccontextmanager
     async def hold_session(
@@ -1472,7 +1493,7 @@ async def _complete_provision_submit(
             setup_deadline,
         )
         await _within_setup_budget(
-            runtime.reconcile_after_create(),
+            runtime.reconcile_after_create(preparation.partition, preparation.records.session.session_id),
             setup_deadline,
             phase=SetupPhase.POST_CREATE_RECONCILE,
         )
@@ -2233,6 +2254,7 @@ async def _create_and_activate_session(
             provider,
             create_request,
             group,
+            partition,
             setup_deadline,
         )
         await _within_setup_budget(
@@ -2289,7 +2311,7 @@ async def _create_and_activate_session(
             phase=SetupPhase.STATE_STORE,
         )
         await _within_setup_budget(
-            runtime.reconcile_after_create(),
+            runtime.reconcile_after_create(partition, persisted_session.session_id),
             setup_deadline,
             phase=SetupPhase.POST_CREATE_RECONCILE,
         )
@@ -2340,6 +2362,7 @@ async def _create_sandbox_with_capacity_recovery(
     provider: SandboxSessionProvider,
     create_request: SandboxCreateRequest,
     group: SandboxGroupBinding,
+    partition: OwnerPartition,
     setup_deadline: SetupDeadline,
 ) -> SandboxSessionHandle:
     try:
@@ -2350,7 +2373,7 @@ async def _create_sandbox_with_capacity_recovery(
         )
     except SandboxCapacityError:
         await _within_setup_budget(
-            runtime.reap_for_capacity(),
+            runtime.reap_for_capacity(partition, create_request.labels.session_id),
             setup_deadline,
             phase=SetupPhase.CAPACITY_REAP,
         )
@@ -2385,10 +2408,21 @@ async def _wait_for_created_manifest(
             report = await _read_bootstrap_error_report(handle, setup_deadline)
             if report is not None and report.permanent:
                 raise SessionReadinessArtifactError("bootstrap_failure") from None
-            delay = min(
+            manifest_delay = min(
                 _MANIFEST_RETRY_INTERVAL_SECONDS,
                 setup_deadline.remaining_setup_seconds(phase=SetupPhase.MANIFEST),
             )
+            await _within_setup_budget(
+                asyncio.sleep(manifest_delay), setup_deadline, phase=SetupPhase.MANIFEST
+            )
+        except SandboxFileOperationError as exc:
+            if exc.status_code not in _RESUMABLE_FILE_OPERATION_STATUS_CODES:
+                raise
+            delay: float | None = exc.retry_after_seconds
+            if delay is None:
+                delay = _MANIFEST_RETRY_INTERVAL_SECONDS
+            delay = min(_FILE_RETRY_MAX_DELAY_SECONDS, max(0.0, delay))
+            delay = min(delay * 1.25, delay + random.uniform(0.0, delay * 0.25))
             await _within_setup_budget(
                 asyncio.sleep(delay), setup_deadline, phase=SetupPhase.MANIFEST
             )

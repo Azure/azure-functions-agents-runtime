@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from urllib.parse import quote
 
 _PLACEHOLDER = re.compile(r"\$\([^)]+\)")
 _DEPLOYED_ENVIRONMENT = (
@@ -26,6 +27,9 @@ _DEPLOYED_ENVIRONMENT = (
 )
 _PROVISION_CONCURRENCIES = frozenset({1, 2, 4})
 _SMOKE_RUN_ID = "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_RUN_ID"
+_PREFLIGHT_WORKERS = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_PREFLIGHT_WORKERS"
+_PREFLIGHT_QUIET_SECONDS = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_PREFLIGHT_QUIET_SECONDS"
+_PREFLIGHT_INTERVAL_SECONDS = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_PREFLIGHT_INTERVAL_SECONDS"
 
 
 class QualificationError(Exception):
@@ -111,6 +115,74 @@ async def _get_easy_auth_token(scope: str) -> None:
         raise QualificationError("auth_preflight_failed")
 
 
+async def _run_deployed_identity_preflight(environment: Mapping[str, str]) -> None:
+    """Exercise ARM and label-scoped data access using the deployed identity."""
+    import aiohttp
+    from azure.identity.aio import DefaultAzureCredential
+
+    base_url = _required(environment, "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL").rstrip("/")
+    slug = quote(_required(environment, "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG"), safe="")
+    workers = _integer(
+        environment.get(_PREFLIGHT_WORKERS, "1"),
+        name=_PREFLIGHT_WORKERS,
+        minimum=1,
+        maximum=32,
+    )
+    quiet_seconds = float(environment.get(_PREFLIGHT_QUIET_SECONDS, "30"))
+    interval_seconds = float(environment.get(_PREFLIGHT_INTERVAL_SECONDS, "5"))
+    if quiet_seconds < 1 or interval_seconds <= 0:
+        raise QualificationError("invalid_preflight_window")
+
+    credential = DefaultAzureCredential()
+    try:
+        token = await credential.get_token(
+            _required(environment, "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE")
+        )
+        if not token.token:
+            raise QualificationError("identity_preflight_auth_failed")
+        headers = {"Authorization": "Bearer" + " " + token.token}
+        url = f"{base_url}/api/agents/{slug}/sandbox-preflight"
+        timeout = aiohttp.ClientTimeout(total=30)
+
+        async def probe(session: aiohttp.ClientSession) -> str:
+            try:
+                async with session.get(url, headers=headers) as response:
+                    payload = await response.json(content_type=None)
+                    return _validate_preflight_response(response.status, payload)
+            except QualificationError:
+                raise
+            except Exception:
+                raise QualificationError("deployed_identity_preflight_failed") from None
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            population: set[str] = set()
+            for _ in range(max(workers * 2, workers)):
+                population.add(await probe(session))
+            if len(population) < workers:
+                raise QualificationError(
+                    f"scale_out_population_insufficient:{len(population)}:{workers}"
+                )
+            deadline = asyncio.get_running_loop().time() + quiet_seconds
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.gather(*(probe(session) for _ in range(workers)))
+                await asyncio.sleep(min(interval_seconds, max(0, deadline - asyncio.get_running_loop().time())))
+    finally:
+        await credential.close()
+    print(f"Deployed identity preflight succeeded across {workers} worker(s); quiet window clear.")
+
+
+def _validate_preflight_response(status: int, payload: object) -> str:
+    """Validate one deployed preflight response and return its worker identity."""
+    if status != 200:
+        raise QualificationError("deployed_identity_preflight_failed")
+    if not isinstance(payload, dict) or not payload.get("arm_get") or not payload.get("data_plane_list"):
+        raise QualificationError("deployed_identity_preflight_incomplete")
+    instance_id = payload.get("instance_id")
+    if not isinstance(instance_id, str) or not instance_id:
+        raise QualificationError("deployed_identity_preflight_missing_instance")
+    return instance_id
+
+
 def preflight_auth(environment: Mapping[str, str]) -> None:
     """Acquire an Easy Auth token while keeping token material out of output."""
     try:
@@ -124,6 +196,16 @@ def preflight_auth(environment: Mapping[str, str]) -> None:
     except Exception:
         raise QualificationError("auth_preflight_failed") from None
     print("Azure service connection authenticated")
+
+
+def preflight_deployed_identity(environment: Mapping[str, str]) -> None:
+    """Require the deployed Function identity to pass both provider probes."""
+    try:
+        asyncio.run(_run_deployed_identity_preflight(environment))
+    except QualificationError:
+        raise
+    except Exception:
+        raise QualificationError("deployed_identity_preflight_failed") from None
 
 
 def _run_pytest(paths: Sequence[str], environment: Mapping[str, str]) -> int:
@@ -166,6 +248,7 @@ def run_deployed_suite(
     inherited["AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY"] = str(load)
     inherited["AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY"] = str(provision)
     preflight_auth(inherited)
+    preflight_deployed_identity(inherited)
     return _run_pytest(
         (
             "tests/live/test_aca_deployed_agent_turn.py",
@@ -189,6 +272,7 @@ def run_cold_start(
     if samples is not None:
         inherited["AZURE_FUNCTIONS_AGENTS_ACA_COLD_START_SAMPLES"] = str(samples)
     preflight_auth(inherited)
+    preflight_deployed_identity(inherited)
     return _run_pytest(("tests/live/test_aca_deployed_cold_start.py",), inherited)
 
 
@@ -268,7 +352,13 @@ def reap_harness_smoke(environment: Mapping[str, str]) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
-    deployed = ("validate-environment", "preflight-auth", "deployed-suite", "cold-start")
+    deployed = (
+        "validate-environment",
+        "preflight-auth",
+        "preflight-identity",
+        "deployed-suite",
+        "cold-start",
+    )
     for command in deployed:
         command_parser = subcommands.add_parser(command)
         command_parser.add_argument("--runtime-target", required=True)
@@ -302,6 +392,13 @@ def main(arguments: Sequence[str] | None = None, environment: Mapping[str, str] 
                 provision_concurrency=args.provision_concurrency,
             )
             preflight_auth(effective_environment)
+            return 0
+        if args.command == "preflight-identity":
+            validate_deployed_environment(
+                effective_environment,
+                runtime_target=args.runtime_target,
+            )
+            preflight_deployed_identity(effective_environment)
             return 0
         if args.command == "deployed-suite":
             return run_deployed_suite(

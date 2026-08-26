@@ -66,3 +66,22 @@ role-assignment attestation.
 
 The retained `aca_deployed_qualification.py` and deployed suite helpers are
 manual/local assets only pending the separate post-main qualification work.
+
+### `aca_deployed_qualification.py` identity preflight
+
+`preflight-identity` calls the deployed agent's authenticated
+`/api/agents/<slug>/sandbox-preflight` route. The route performs the ARM Sandbox
+Group GET and a label-scoped data-plane list with the Function's managed
+identity, then reports its worker instance. The command sends a burst sized for
+`AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_PREFLIGHT_WORKERS` and requires a quiet
+window (`..._QUIET_SECONDS`, default 30) with no bind failures before the
+qualification suite starts. A missing worker, non-200 response, or incomplete
+probe fails closed; no external call is simulated.
+
+Set `AZURE_FUNCTIONS_AGENTS_ACA_PREFLIGHT_ENABLED=1` in the deployed app and
+run:
+
+```bash
+python eng/scripts/aca_deployed_qualification.py preflight-identity \
+  --runtime-target python313
+```

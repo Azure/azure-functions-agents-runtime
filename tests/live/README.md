@@ -24,6 +24,13 @@ Deployed cold-start, lifecycle, loss, load, and one-shot recovery suites remain
 direct/manual test assets pending issue #166. They have no pipeline wiring,
 target metadata, or queue-time parameters in this repository.
 
+Before scored deployed qualification, enable the read-only
+`AZURE_FUNCTIONS_AGENTS_ACA_PREFLIGHT_ENABLED=1` route in the deployed app and
+run `aca_deployed_qualification.py preflight-identity`. It exercises the
+Function identity's Sandbox Group ARM GET and label-scoped data-plane list,
+requires the configured worker population, and keeps probing until the quiet
+window completes with zero provider-bind failures.
+
 ## Controlled deployed one-shot recovery
 
 `test_aca_one_shot_recovery.py` targets the fixed

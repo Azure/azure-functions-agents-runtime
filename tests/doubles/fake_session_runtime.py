@@ -190,8 +190,10 @@ class FakeSandboxSessionProvider:
             raise self.attach_error
         return self.handle
 
-    async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[SandboxSummary, ...]:
-        return tuple(
+    async def list_sandboxes(
+        self, *, labels: dict[str, str], max_items: int | None = None
+    ) -> tuple[SandboxSummary, ...]:
+        result = tuple(
             SandboxSummary.create(
                 sandbox_id=sandbox_id,
                 labels=handle.labels,
@@ -199,6 +201,7 @@ class FakeSandboxSessionProvider:
             for sandbox_id, handle in self.sandboxes.items()
             if all(handle.labels.get(key) == value for key, value in labels.items())
         )
+        return result if max_items is None else result[:max_items]
 
     async def delete_sandbox(self, sandbox_id: str) -> None:
         handle = self.sandboxes.pop(sandbox_id, None)
@@ -206,8 +209,9 @@ class FakeSandboxSessionProvider:
             await handle.delete()
         self.deleted_sandbox_ids.append(sandbox_id)
 
-    async def list_snapshots(self) -> tuple[SandboxSnapshot, ...]:
-        return tuple(self.snapshots.values())
+    async def list_snapshots(self, *, max_items: int | None = None) -> tuple[SandboxSnapshot, ...]:
+        result = tuple(self.snapshots.values())
+        return result if max_items is None else result[:max_items]
 
     async def delete_snapshot(self, snapshot_id: str) -> None:
         self.snapshots.pop(snapshot_id, None)

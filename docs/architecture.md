@@ -244,10 +244,11 @@ anchors one request budget, then constructs the four-method backend. The
 controller maps the same backend lifecycle to synchronous HTTP, explicit
 `Prefer: respond-async` LRO responses, or bounded replayable SSE. Four
 session-scoped management routes recompute the authenticated owner on every
-read/cancel; URL identifiers are not authorization. A plain timer is the
-backstop for app-scoped Table/platform reconciliation. Submit conflicts,
-nonterminal polls with unavailable backing, post-create cleanup, and one
-capacity retry use the same bounded reconciliation service. It retains readable
+read/cancel; URL identifiers are not authorization. A plain timer owns app-scoped Table/platform reconciliation, including global
+stale, orphan, and expiry cleanup. Submit conflicts, nonterminal polls with
+unavailable backing, post-create cleanup, and one capacity retry use targeted
+reconciliation for only the current session/operation, avoiding probes of
+unrelated app-owned identities. It retains readable
 terminal status after result eviction and re-drives deleting candidates. The
 controller creates from `SandboxCreateProfile`, delivers the bootstrap/application
 archive and dependency closure over the file plane, and resumes the same

@@ -298,6 +298,17 @@ class AcaSandboxExecutionBackend:
             setup_budget,
         )
         if active_run_id is not None:
+            durable = await self._read_durable_management_state(
+                RunContext(run_id=active_run_id, session_id=session_id)
+            )
+            if durable.run.status in TERMINAL_RUN_STATUSES:
+                raise LinkedActiveRunConflictError(
+                    "session already has a settling run",
+                    session_id=durable.session.session_id,
+                    run_id=durable.run.run_id,
+                    status=durable.run.status,
+                    phase=_public_phase(durable),
+                )
             raise ActiveRunConflictError(
                 "session already has an active run",
                 active_run_id=active_run_id,
