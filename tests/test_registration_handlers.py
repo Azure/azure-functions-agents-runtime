@@ -12,11 +12,11 @@ from typing import Any
 
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
+    AgentFrameworkCompactionConfig,
+    AgentFrameworkConfiguration,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     EndpointAuthConfig,
-    MafAgentConfiguration,
-    MafCompactionConfig,
     ResolvedAgent,
     ToolsFilter,
 )
@@ -1025,8 +1025,8 @@ def test_http_handler_forwards_agent_configuration(monkeypatch: Any) -> None:
     captured: dict[str, Any] = {}
     config = AgentConfiguration(
         max_output_tokens=4_096,
-        maf=MafAgentConfiguration(
-            compaction=MafCompactionConfig(max_context_window_tokens=64_000)
+        agent_framework=AgentFrameworkConfiguration(
+            compaction=AgentFrameworkCompactionConfig(max_context_window_tokens=64_000)
         ),
     )
 

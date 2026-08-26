@@ -44,9 +44,9 @@ from azure_functions_agents.client_manager import (
 )
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
+    AgentFrameworkCompactionConfig,
+    AgentFrameworkConfiguration,
     BuiltinEndpointsConfig,
-    MafAgentConfiguration,
-    MafCompactionConfig,
     ResolvedAgent,
     SubagentRef,
     ToolsFilter,
@@ -434,8 +434,8 @@ async def test_agent_configuration_applies_to_each_stateless_leaf_role(
 
     config = AgentConfiguration(
         max_output_tokens=4096,
-        maf=MafAgentConfiguration(
-            compaction=MafCompactionConfig(max_context_window_tokens=8192)
+        agent_framework=AgentFrameworkConfiguration(
+            compaction=AgentFrameworkCompactionConfig(max_context_window_tokens=8192)
         ),
     )
     local_tool = tool(lambda: "ok", name="billing_lookup")

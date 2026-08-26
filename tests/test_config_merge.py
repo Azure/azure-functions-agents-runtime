@@ -20,13 +20,13 @@ from azure_functions_agents.config.merge import (
 )
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
+    AgentFrameworkCompactionConfig,
+    AgentFrameworkConfiguration,
     AgentSpec,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     EndpointAuthConfig,
     GlobalConfig,
-    MafAgentConfiguration,
-    MafCompactionConfig,
     McpFilter,
     SkillsFilter,
     SubagentRef,
@@ -512,16 +512,19 @@ def _agent_configuration(
     max_output_tokens: int | None = None,
     max_context_window_tokens: int | None = None,
 ) -> AgentConfiguration:
-    maf = (
-        MafAgentConfiguration(
-            compaction=MafCompactionConfig(
+    agent_framework = (
+        AgentFrameworkConfiguration(
+            compaction=AgentFrameworkCompactionConfig(
                 max_context_window_tokens=max_context_window_tokens
             )
         )
         if max_context_window_tokens is not None
         else None
     )
-    return AgentConfiguration(max_output_tokens=max_output_tokens, maf=maf)
+    return AgentConfiguration(
+        max_output_tokens=max_output_tokens,
+        agent_framework=agent_framework,
+    )
 
 
 def test_resolve_agent_configuration_defaults_empty() -> None:
@@ -553,14 +556,17 @@ def test_resolve_agent_configuration_deep_merges_agent_leaves() -> None:
         {
             "name": "A",
             "description": "B",
-            "agent_configuration": {"max_output_tokens": 2048, "maf": {}},
+            "agent_configuration": {
+                "max_output_tokens": 2048,
+                "agent_framework": {},
+            },
         }
     )
     resolved = _resolve_agent_configuration(
         spec, GlobalConfig(agent_configuration=global_value)
     )
     assert resolved.max_output_tokens == 2048
-    assert resolved.maf == global_value.maf
+    assert resolved.agent_framework == global_value.agent_framework
 
 
 def test_resolve_agent_configuration_empty_object_inherits() -> None:
@@ -600,7 +606,7 @@ def test_resolve_agent_configuration_null_leaf_clears_output() -> None:
     ) == AgentConfiguration()
 
 
-def test_resolve_agent_configuration_null_maf_clears_subtree_only() -> None:
+def test_resolve_agent_configuration_null_agent_framework_clears_subtree_only() -> None:
     global_value = _agent_configuration(
         max_output_tokens=4096,
         max_context_window_tokens=8192,
@@ -609,7 +615,7 @@ def test_resolve_agent_configuration_null_maf_clears_subtree_only() -> None:
         {
             "name": "A",
             "description": "B",
-            "agent_configuration": {"maf": None},
+            "agent_configuration": {"agent_framework": None},
         }
     )
     resolved = _resolve_agent_configuration(
@@ -619,7 +625,7 @@ def test_resolve_agent_configuration_null_maf_clears_subtree_only() -> None:
 
 
 @pytest.mark.parametrize(
-    "maf_override",
+    "agent_framework_override",
     [
         {"compaction": None},
         {"compaction": {"max_context_window_tokens": None}},
@@ -627,7 +633,7 @@ def test_resolve_agent_configuration_null_maf_clears_subtree_only() -> None:
     ids=["compaction-subtree", "context-leaf"],
 )
 def test_resolve_agent_configuration_nested_null_clears_compaction_only(
-    maf_override: dict[str, object],
+    agent_framework_override: dict[str, object],
 ) -> None:
     global_value = _agent_configuration(
         max_output_tokens=4096,
@@ -637,7 +643,9 @@ def test_resolve_agent_configuration_nested_null_clears_compaction_only(
         {
             "name": "A",
             "description": "B",
-            "agent_configuration": {"maf": maf_override},
+            "agent_configuration": {
+                "agent_framework": agent_framework_override,
+            },
         }
     )
     resolved = _resolve_agent_configuration(
@@ -666,7 +674,9 @@ def test_resolve_agent_configuration_context_inherits_output() -> None:
             "name": "A",
             "description": "B",
             "agent_configuration": {
-                "maf": {"compaction": {"max_context_window_tokens": 8192}}
+                "agent_framework": {
+                    "compaction": {"max_context_window_tokens": 8192}
+                }
             },
         }
     )

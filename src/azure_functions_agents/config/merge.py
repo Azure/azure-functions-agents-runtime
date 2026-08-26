@@ -6,12 +6,12 @@ from azure_functions_agents._slug import _function_name_from_source
 from azure_functions_agents.config.env import runtime_env_value
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
+    AgentFrameworkCompactionConfig,
+    AgentFrameworkConfiguration,
     AgentSpec,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     GlobalConfig,
-    MafAgentConfiguration,
-    MafCompactionConfig,
     McpFilter,
     ResolvedAgent,
     SkillsFilter,
@@ -21,6 +21,16 @@ from azure_functions_agents.config.schema import (
 )
 
 DEFAULT_TIMEOUT = 900.0
+
+_AGENT_CONFIGURATION_FIELD = "agent_configuration"
+_AGENT_FRAMEWORK_FIELD = "agent_framework"
+_COMPACTION_FIELD = "compaction"
+_MAX_CONTEXT_WINDOW_TOKENS_FIELD = "max_context_window_tokens"
+_MAX_OUTPUT_TOKENS_FIELD = "max_output_tokens"
+_MAX_CONTEXT_WINDOW_TOKENS_PATH = (
+    f"{_AGENT_CONFIGURATION_FIELD}.{_AGENT_FRAMEWORK_FIELD}."
+    f"{_COMPACTION_FIELD}.{_MAX_CONTEXT_WINDOW_TOKENS_FIELD}"
+)
 
 
 def _resolve_builtin_endpoints(
@@ -135,26 +145,26 @@ def apply_tools_filter(
 
 
 def _merge_compaction(
-    agent_config: MafCompactionConfig,
-    global_config: MafCompactionConfig | None,
-) -> MafCompactionConfig | None:
+    agent_config: AgentFrameworkCompactionConfig,
+    global_config: AgentFrameworkCompactionConfig | None,
+) -> AgentFrameworkCompactionConfig | None:
     max_context_window_tokens = (
         agent_config.max_context_window_tokens
-        if "max_context_window_tokens" in agent_config.model_fields_set
+        if _MAX_CONTEXT_WINDOW_TOKENS_FIELD in agent_config.model_fields_set
         else global_config.max_context_window_tokens
         if global_config is not None
         else None
     )
     if max_context_window_tokens is None:
         return None
-    return MafCompactionConfig(max_context_window_tokens=max_context_window_tokens)
+    return AgentFrameworkCompactionConfig(max_context_window_tokens=max_context_window_tokens)
 
 
-def _merge_maf_configuration(
-    agent_config: MafAgentConfiguration,
-    global_config: MafAgentConfiguration | None,
-) -> MafAgentConfiguration | None:
-    if "compaction" not in agent_config.model_fields_set:
+def _merge_agent_framework_configuration(
+    agent_config: AgentFrameworkConfiguration,
+    global_config: AgentFrameworkConfiguration | None,
+) -> AgentFrameworkConfiguration | None:
+    if _COMPACTION_FIELD not in agent_config.model_fields_set:
         compaction = (
             global_config.compaction.model_copy(deep=True)
             if global_config is not None and global_config.compaction is not None
@@ -170,7 +180,7 @@ def _merge_maf_configuration(
 
     if compaction is None:
         return None
-    return MafAgentConfiguration(compaction=compaction)
+    return AgentFrameworkConfiguration(compaction=compaction)
 
 
 def _merge_agent_configuration(
@@ -179,42 +189,49 @@ def _merge_agent_configuration(
 ) -> AgentConfiguration:
     max_output_tokens = (
         agent_config.max_output_tokens
-        if "max_output_tokens" in agent_config.model_fields_set
+        if _MAX_OUTPUT_TOKENS_FIELD in agent_config.model_fields_set
         else global_config.max_output_tokens
         if global_config is not None
         else None
     )
 
-    if "maf" not in agent_config.model_fields_set:
-        maf = global_config.maf.model_copy(deep=True) if global_config and global_config.maf else None
-    elif agent_config.maf is None:
-        maf = None
+    if _AGENT_FRAMEWORK_FIELD not in agent_config.model_fields_set:
+        agent_framework = (
+            global_config.agent_framework.model_copy(deep=True)
+            if global_config and global_config.agent_framework
+            else None
+        )
+    elif agent_config.agent_framework is None:
+        agent_framework = None
     else:
-        maf = _merge_maf_configuration(
-            agent_config.maf,
-            global_config.maf if global_config else None,
+        agent_framework = _merge_agent_framework_configuration(
+            agent_config.agent_framework,
+            global_config.agent_framework if global_config else None,
         )
 
-    return AgentConfiguration(max_output_tokens=max_output_tokens, maf=maf)
+    return AgentConfiguration(
+        max_output_tokens=max_output_tokens,
+        agent_framework=agent_framework,
+    )
 
 
 def _validate_agent_configuration(config: AgentConfiguration) -> None:
     max_context_window_tokens = (
-        config.maf.compaction.max_context_window_tokens
-        if config.maf is not None and config.maf.compaction is not None
+        config.agent_framework.compaction.max_context_window_tokens
+        if config.agent_framework is not None and config.agent_framework.compaction is not None
         else None
     )
     if max_context_window_tokens is None:
         return
     if config.max_output_tokens is None:
         raise ValueError(
-            "agent_configuration.max_output_tokens is required when "
-            "agent_configuration.maf.compaction.max_context_window_tokens is configured"
+            f"{_AGENT_CONFIGURATION_FIELD}.{_MAX_OUTPUT_TOKENS_FIELD} is required when "
+            f"{_MAX_CONTEXT_WINDOW_TOKENS_PATH} is configured"
         )
     if config.max_output_tokens >= max_context_window_tokens:
         raise ValueError(
-            "agent_configuration.max_output_tokens must be less than "
-            "agent_configuration.maf.compaction.max_context_window_tokens"
+            f"{_AGENT_CONFIGURATION_FIELD}.{_MAX_OUTPUT_TOKENS_FIELD} must be less than "
+            f"{_MAX_CONTEXT_WINDOW_TOKENS_PATH}"
         )
 
 
@@ -222,7 +239,7 @@ def _resolve_agent_configuration(
     spec: AgentSpec, global_config: GlobalConfig
 ) -> AgentConfiguration:
     """Recursively merge agent overrides over global agent configuration."""
-    if "agent_configuration" not in spec.model_fields_set:
+    if _AGENT_CONFIGURATION_FIELD not in spec.model_fields_set:
         resolved = (
             global_config.agent_configuration.model_copy(deep=True)
             if global_config.agent_configuration is not None

@@ -1,6 +1,6 @@
 ---
 frd: 0008
-title: Harness-first agent configuration
+title: Harness-only agent configuration
 status: Finalized
 author: victoriahall
 created: 2026-08-20
@@ -10,7 +10,7 @@ pull_requests: []
 branch: hallvictoria/harness-agent
 ---
 
-# FRD 0008 — Harness-first agent configuration
+# FRD 0008 — Harness-only agent configuration
 
 ## 1. Summary
 
@@ -18,15 +18,16 @@ Every agent will execute through Microsoft Agent Framework's harness-agent mecha
 `agent_configuration` object will be accepted globally and per agent, with per-agent values
 recursively overriding inherited global values. Portable output limits live at
 `agent_configuration.max_output_tokens`, while MAF-specific compaction settings live at
-`agent_configuration.maf.compaction.max_context_window_tokens`.
+`agent_configuration.agent_framework.compaction.max_context_window_tokens`.
 
 ## 2. Motivation / problem
 
 Applications need an extensible configuration namespace that carries shared defaults and narrow
 per-agent overrides. Portable controls should remain at the configuration root, while controls
-whose semantics are specific to MAF should be namespaced under `maf`. The runtime should resolve
-that authoring structure once during translation, pass a normalized contract through registration,
-and execute every agent consistently through the harness-agent mechanism.
+whose semantics are specific to Microsoft Agent Framework should be namespaced under
+`agent_framework`. The runtime should resolve that authoring structure once during translation,
+pass a normalized contract through registration, and execute every agent consistently through the
+harness-agent mechanism.
 
 ## 3. Goals / Non-goals
 
@@ -35,7 +36,7 @@ and execute every agent consistently through the harness-agent mechanism.
 - Always construct direct, delegated, and Workflow Sub Agent roles with `create_harness_agent`.
 - Add nullable `agent_configuration` fields to global configuration and agent front matter.
 - Put `max_output_tokens` at the root of `agent_configuration`.
-- Put `max_context_window_tokens` under `agent_configuration.maf.compaction`.
+- Put `max_context_window_tokens` under `agent_configuration.agent_framework.compaction`.
 - Recursively merge per-agent authored fields over global fields.
 - Distinguish omission from explicit `null`: omission and empty objects inherit; `null` clears.
 - Validate token relationships after global and per-agent configuration are merged.
@@ -66,7 +67,7 @@ Global defaults are authored in `agents.config.yaml`:
 ```yaml
 agent_configuration:
   max_output_tokens: 4096
-  maf:
+  agent_framework:
     compaction:
       max_context_window_tokens: 8192
 ```
@@ -85,23 +86,23 @@ agent_configuration:
 The typed public schema is equivalent to:
 
 ```python
-class MafCompactionConfig(BaseModel):
+class AgentFrameworkCompactionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_context_window_tokens: int | None = Field(default=None, gt=0)
 
 
-class MafAgentConfiguration(BaseModel):
+class AgentFrameworkConfiguration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    compaction: MafCompactionConfig | None = None
+    compaction: AgentFrameworkCompactionConfig | None = None
 
 
 class AgentConfiguration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_output_tokens: int | None = Field(default=None, gt=0)
-    maf: MafAgentConfiguration | None = None
+    agent_framework: AgentFrameworkConfiguration | None = None
 
 
 class GlobalConfig(BaseModel):
@@ -129,8 +130,8 @@ rather than truthiness or an untyped dictionary merge:
 | `agent_configuration` omitted | Inherit the complete global configuration. |
 | `agent_configuration: {}` | Inherit the complete global configuration because no fields were authored. |
 | `agent_configuration: null` | Clear all inherited agent configuration. |
-| Nested `maf` or `compaction` omitted / `{}` | Inherit that global subtree. |
-| Nested `maf: null` or `compaction: null` | Clear that inherited subtree. |
+| Nested `agent_framework` or `compaction` omitted / `{}` | Inherit that global subtree. |
+| Nested `agent_framework: null` or `compaction: null` | Clear that inherited subtree. |
 | Leaf omitted | Inherit the corresponding global leaf. |
 | Leaf `null` | Clear the corresponding global leaf. |
 | Concrete leaf | Override the corresponding global leaf. |
@@ -169,11 +170,11 @@ def _merge_optional_model(agent_value, global_value, field_name, merge_nested):
   return merge_nested(authored, global_value)
 ```
 
-`_merge_agent_configuration`, `_merge_maf_configuration`, and `_merge_compaction` apply the same
-rule recursively. Scalar leaves use the agent value, including `None`, only when their field name is
-in the agent model's `model_fields_set`; otherwise they inherit the global leaf. An empty object has
-an empty `model_fields_set`, so it inherits all leaves in its subtree. Copies are deep enough that
-composition cannot mutate either parsed source model.
+`_merge_agent_configuration`, `_merge_agent_framework_configuration`, and `_merge_compaction` apply
+the same rule recursively. Scalar leaves use the agent value, including `None`, only when their
+field name is in the agent model's `model_fields_set`; otherwise they inherit the global leaf. An
+empty object has an empty `model_fields_set`, so it inherits all leaves in its subtree. Copies are
+deep enough that composition cannot mutate either parsed source model.
 
 ### Effective validation
 
@@ -184,7 +185,8 @@ execution. The authored schema models intentionally do not enforce a pair becaus
 may become valid through inheritance. Effective validation enforces:
 
 - `max_output_tokens` may be configured alone and limits model generation.
-- `maf.compaction.max_context_window_tokens` requires an effective `max_output_tokens`.
+- `agent_framework.compaction.max_context_window_tokens` requires an effective
+  `max_output_tokens`.
 - When both are effective, `max_output_tokens` must be less than
   `max_context_window_tokens`.
 
@@ -203,10 +205,10 @@ String substitution cannot synthesize a YAML mapping, so object structure remain
 
 `ResolvedAgent.agent_configuration` is non-nullable and always contains a normalized
 `AgentConfiguration`; an empty effective configuration is represented as
-`AgentConfiguration(max_output_tokens=None, maf=None)`. Nested `maf` and `compaction` fields remain
-optional because explicit clearing is meaningful. A single runner helper safely extracts the
-context leaf through those optional subtrees, avoiding duplicated null checks. Registration
-handlers and built-in endpoints forward the resolved object to `run_agent()` /
+`AgentConfiguration(max_output_tokens=None, agent_framework=None)`. Nested `agent_framework` and
+`compaction` fields remain optional because explicit clearing is meaningful. A single runner helper
+safely extracts the context leaf through those optional subtrees, avoiding duplicated null checks.
+Registration handlers and built-in endpoints forward the resolved object to `run_agent()` /
 `run_agent_stream()` and do not inspect MAF-specific subtrees.
 
 ### Execution behavior
@@ -244,7 +246,7 @@ use MAF defaults. Existing top-level `model` and `timeout` fields remain valid a
 | 1 | Execution implementation | Configurable construction / consistent harness construction | Always use MAF harness construction for every role | Human | 2026-08-25 |
 | 2 | Configuration scope | Global only / agent only / global plus agent override | Accept `agent_configuration` globally and per agent | Human | 2026-08-25 |
 | 3 | Portable output limit | MAF subtree / configuration root | `agent_configuration.max_output_tokens` | Human | 2026-08-25 |
-| 4 | Context-limit namespace | Configuration root / MAF compaction subtree | `agent_configuration.maf.compaction.max_context_window_tokens` | Human | 2026-08-25 |
+| 4 | Context-limit namespace | Configuration root / Microsoft Agent Framework compaction subtree | `agent_configuration.agent_framework.compaction.max_context_window_tokens` | Human | 2026-08-25 |
 | 5 | Override behavior | Whole-object replacement / recursive authored-field merge | Recursively merge; omitted fields inherit | Human | 2026-08-25 |
 | 6 | Explicit null | Reject / treat as omission / clear inheritance | `null` clears the selected inherited leaf or subtree | Human | 2026-08-25 |
 | 7 | Effective token validation | Permit context alone / require output-context pair | Context requires effective output; output must be less than context | Human | 2026-08-25 |
@@ -261,8 +263,9 @@ use MAF defaults. Existing top-level `model` and `timeout` fields remain valid a
 - [x] Unit: merge covers global inheritance, per-leaf overrides, mixed-scope effective pairs, empty
   object inheritance, null clearing at every level, output-only configuration, missing effective
   output, and invalid output/context ordering.
-- [x] Unit: nested `maf: null` clears the full inherited MAF subtree while preserving the portable
-  output leaf; omitted `maf` inherits the complete nested global subtree.
+- [x] Unit: nested `agent_framework: null` clears the full inherited framework subtree while
+  preserving the portable output leaf; omitted `agent_framework` inherits the complete nested
+  global subtree.
 - [x] Unit: invalid environment substitutions fail authored schema validation before merge.
 - [x] Fixture scenario: cover global defaults and per-agent inheritance, override, and opt-out
   cases.

@@ -197,7 +197,7 @@ def test_load_global_and_agent_configuration_with_limits(
         "name: Main\n"
         "description: Main agent\n"
         "agent_configuration:\n"
-        "  maf:\n"
+        "  agent_framework:\n"
         "    compaction:\n"
         "      max_context_window_tokens: $CONTEXT_LIMIT\n"
         "---\n"
@@ -211,47 +211,14 @@ def test_load_global_and_agent_configuration_with_limits(
     assert config.agent_configuration.max_output_tokens == 4096
     assert spec.agent_configuration is not None
     assert spec.agent_configuration.max_output_tokens is None
-    assert spec.agent_configuration.maf is not None
-    assert spec.agent_configuration.maf.compaction is not None
-    assert spec.agent_configuration.maf.compaction.max_context_window_tokens == 8192
+    assert spec.agent_configuration.agent_framework is not None
+    assert spec.agent_configuration.agent_framework.compaction is not None
+    assert spec.agent_configuration.agent_framework.compaction.max_context_window_tokens == 8192
     resolved = compose(spec, config)
     assert resolved.agent_configuration.max_output_tokens == 4096
-    assert resolved.agent_configuration.maf is not None
-    assert resolved.agent_configuration.maf.compaction is not None
-    assert resolved.agent_configuration.maf.compaction.max_context_window_tokens == 8192
-
-
-def test_load_global_config_rejects_removed_substituted_sdk(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setenv("AGENT_SDK", "maf")
-    (tmp_path / "agents.config.yaml").write_text(
-        "sdk: $AGENT_SDK\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="sdk"):
-        load_global_config(tmp_path)
-
-
-def test_load_agent_specs_rejects_global_sdk_override(tmp_path: Path) -> None:
-    (tmp_path / "main.agent.md").write_text(
-        textwrap.dedent(
-            """
-            ---
-            name: Main
-            description: Main agent
-            sdk: maf
-            ---
-            Hello
-            """
-        ).lstrip(),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="sdk"):
-        load_agent_specs(tmp_path, strict=True)
+    assert resolved.agent_configuration.agent_framework is not None
+    assert resolved.agent_configuration.agent_framework.compaction is not None
+    assert resolved.agent_configuration.agent_framework.compaction.max_context_window_tokens == 8192
 
 
 def test_compose_rejects_invalid_effective_agent_configuration(tmp_path: Path) -> None:
@@ -261,7 +228,7 @@ def test_compose_rejects_invalid_effective_agent_configuration(tmp_path: Path) -
         "description: Main agent\n"
         "agent_configuration:\n"
         "  max_output_tokens: 4096\n"
-        "  maf:\n"
+        "  agent_framework:\n"
         "    compaction:\n"
         "      max_context_window_tokens: 4096\n"
         "---\n"

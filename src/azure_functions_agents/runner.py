@@ -476,9 +476,9 @@ def _build_role_agent(
 
 
 def _max_context_window_tokens(config: AgentConfiguration) -> int | None:
-    if config.maf is None or config.maf.compaction is None:
+    if config.agent_framework is None or config.agent_framework.compaction is None:
         return None
-    return config.maf.compaction.max_context_window_tokens
+    return config.agent_framework.compaction.max_context_window_tokens
 
 
 def _build_delegated_agent(

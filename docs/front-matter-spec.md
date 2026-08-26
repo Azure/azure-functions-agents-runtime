@@ -18,7 +18,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
   - Code execution sandbox configuration
   - Outbound web request tool (`web_request`) — enabled by default, SSRF-guarded
 - Default runtime settings (model, timeout)
-- Harness-first MAF execution with optional token-budget conversation-history compaction
+- Harness-only Microsoft Agent Framework execution with optional token-budget conversation-history compaction
 
 **MCP server discovery:**
 - MCP servers (defined in `mcp.json`), including connector-backed MCP servers
@@ -61,7 +61,7 @@ Optional file in the root directory that defines shared infrastructure and runti
 **Required properties:** None (entire file is optional)
 
 **Supported properties:**
-- `agent_configuration` — Portable and MAF-specific execution defaults inherited by agents
+- `agent_configuration` — Portable and Microsoft Agent Framework-specific execution defaults inherited by agents
 - `system_tools` — Object containing system-level tools configuration
   - `dynamic_sessions_code_interpreter` — Object with ACA Dynamic Sessions code interpreter configuration
   - `web_request` — Object or boolean configuring the built-in outbound HTTP request tool (enabled by default; `false` disables app-wide)
@@ -84,7 +84,7 @@ YAML front matter at the top of each agent file.
 
 **Optional properties:**
 - `builtin_endpoints` — Object or boolean for enabling built-in chat UI, chat API, and MCP tool endpoints
-- `agent_configuration` — Portable and MAF-specific execution settings; recursively inherits global values
+- `agent_configuration` — Portable and Microsoft Agent Framework-specific execution settings; recursively inherits global values
 - `model` — String to override global default model
 - `timeout` — Number to override global default timeout
 - `logger` — Boolean to enable/disable response logging for triggered agents
@@ -156,7 +156,7 @@ Fields are organized into categories based on how they can be used:
 **Runtime Settings (Global defaults, overridable in agents):**
 - `model` — LLM selection
 - `timeout` — Execution time limit
-- `agent_configuration` — Output-token limit and MAF conversation-compaction settings
+- `agent_configuration` — Output-token limit and Microsoft Agent Framework conversation-compaction settings
 
 **Agent-Specific (Agent front matter only):**
 - `name`, `description` — Agent identity (required)
@@ -195,21 +195,22 @@ unless another agent references it through `subagents` or
 #### `agent_configuration`
 - **Type:** `object | null`
 - **Typical location:** Global defaults in `agents.config.yaml`; optional recursive overrides in agent front matter
-- **Default:** Empty configuration; Microsoft Agent Framework (`maf`) is the runtime invariant
-- **Description:** Configures a portable model output limit and SDK-specific execution settings. All
-  agents execute through MAF's harness-agent mechanism, whether or not this object is present.
+- **Default:** Empty configuration; Microsoft Agent Framework is the runtime invariant
+- **Description:** Configures a portable model output limit and framework-specific execution
+  settings. All agents execute through the harness-agent mechanism, whether or not this object is
+  present.
 
 ```yaml
 # agents.config.yaml
 agent_configuration:
   max_output_tokens: 4096
-  maf:
+  agent_framework:
     compaction:
       max_context_window_tokens: 8192
 
 # .agent.md front matter: override one inherited leaf
 agent_configuration:
-  maf:
+  agent_framework:
     compaction:
       max_context_window_tokens: 16384
 ```
@@ -235,10 +236,7 @@ these controls are intentionally not author-configurable.
 physical context window. The default strategy begins truncating older non-system message groups at
 80% of the input budget, where input budget is `max_context_window_tokens - max_output_tokens`.
 
-The earlier `mode`, top-level `harness`, and `sdk` properties are rejected. Remove any authored
-`sdk: maf`; MAF is implicit. Omitted `mode` and `mode: default` migrate to omitted
-`agent_configuration`; both now use harness execution. Move token fields to the canonical shape
-shown above. Existing top-level `model` and `timeout` fields remain unchanged.
+Existing top-level `model` and `timeout` fields remain unchanged.
 
 #### `trigger`
 - **Type:** `object`

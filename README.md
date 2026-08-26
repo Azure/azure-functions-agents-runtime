@@ -15,7 +15,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
-- **Harness-first execution controls** — set portable output limits and optional MAF token-budget conversation compaction
+- **Harness-only execution controls** — set portable output limits and optional Microsoft Agent Framework token-budget conversation compaction
 
 ## Installation
 
@@ -159,22 +159,23 @@ If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint
 
 ### Agent configuration
 
-All agents execute through MAF's harness-agent mechanism. Optional global defaults and recursive
-per-agent overrides configure model output and conversation compaction limits.
+All agents execute through Microsoft Agent Framework's harness-agent mechanism. Optional global
+defaults and recursive per-agent overrides configure model output and conversation compaction
+limits.
 
 ```yaml
 # agents.config.yaml
 agent_configuration:
   max_output_tokens: 4096
-  maf:
+  agent_framework:
     compaction:
       max_context_window_tokens: 8192
 ```
 
 Agents recursively inherit global `agent_configuration` values. Per-agent values override individual
-leaves, while explicit `null` clears inherited values. `max_output_tokens` may stand alone; MAF
-compaction requires an effective output limit smaller than `max_context_window_tokens`. Agent front
-matter and global configuration do not accept an SDK selector. See
+leaves, while explicit `null` clears inherited values. `max_output_tokens` may stand alone;
+Microsoft Agent Framework compaction requires an effective output limit smaller than
+`max_context_window_tokens`. See
 [`docs/front-matter-spec.md#agent_configuration`](docs/front-matter-spec.md#agent_configuration).
 
 #### Securing endpoints

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     StrictBool,
@@ -14,6 +15,19 @@ from pydantic import (
 )
 
 type EndpointAuthMode = Literal["function", "admin", "anonymous", "entra"]
+
+
+def _reject_boolean_token_limit(value: object) -> object:
+    if isinstance(value, bool):
+        raise ValueError("token limits must be integers")
+    return value
+
+
+type PositiveTokenLimit = Annotated[
+    int,
+    BeforeValidator(_reject_boolean_token_limit),
+    Field(gt=0),
+]
 
 
 class McpFilter(BaseModel):
@@ -225,43 +239,29 @@ class SystemToolsAgentOverride(BaseModel):
     web_request: bool | None = None
 
 
-class MafCompactionConfig(BaseModel):
-    """MAF-specific conversation-compaction settings."""
+class AgentFrameworkCompactionConfig(BaseModel):
+    """Microsoft Agent Framework conversation-compaction settings."""
 
     model_config = ConfigDict(extra="forbid")
 
-    max_context_window_tokens: int | None = Field(default=None, gt=0)
-
-    @field_validator("max_context_window_tokens", mode="before")
-    @classmethod
-    def reject_boolean_context_limit(cls, value: Any) -> Any:
-        if isinstance(value, bool):
-            raise ValueError("max_context_window_tokens must be an integer")
-        return value
+    max_context_window_tokens: PositiveTokenLimit | None = None
 
 
-class MafAgentConfiguration(BaseModel):
-    """MAF-specific agent configuration."""
+class AgentFrameworkConfiguration(BaseModel):
+    """Microsoft Agent Framework-specific agent configuration."""
 
     model_config = ConfigDict(extra="forbid")
 
-    compaction: MafCompactionConfig | None = None
+    compaction: AgentFrameworkCompactionConfig | None = None
 
 
 class AgentConfiguration(BaseModel):
-    """Portable and SDK-specific agent configuration."""
+    """Portable and framework-specific agent configuration."""
 
     model_config = ConfigDict(extra="forbid")
 
-    max_output_tokens: int | None = Field(default=None, gt=0)
-    maf: MafAgentConfiguration | None = None
-
-    @field_validator("max_output_tokens", mode="before")
-    @classmethod
-    def reject_boolean_output_limit(cls, value: Any) -> Any:
-        if isinstance(value, bool):
-            raise ValueError("max_output_tokens must be an integer")
-        return value
+    max_output_tokens: PositiveTokenLimit | None = None
+    agent_framework: AgentFrameworkConfiguration | None = None
 
 
 class GlobalConfig(BaseModel):

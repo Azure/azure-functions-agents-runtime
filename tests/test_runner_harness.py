@@ -19,8 +19,8 @@ from azure_functions_agents import runner
 from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
-    MafAgentConfiguration,
-    MafCompactionConfig,
+    AgentFrameworkCompactionConfig,
+    AgentFrameworkConfiguration,
 )
 
 # ---------------------------------------------------------------------------
@@ -349,8 +349,8 @@ def test_harness_compacts_model_context_without_rewriting_stored_history(
             "web_request_tools": None,
             "agent_configuration": AgentConfiguration(
                 max_output_tokens=100,
-                maf=MafAgentConfiguration(
-                    compaction=MafCompactionConfig(max_context_window_tokens=500)
+                agent_framework=AgentFrameworkConfiguration(
+                    compaction=AgentFrameworkCompactionConfig(max_context_window_tokens=500)
                 ),
             ),
         }
@@ -476,8 +476,8 @@ def test_run_agent_passes_agent_configuration_to_builder(monkeypatch: Any) -> No
     captured: list[dict[str, Any]] = []
     config = AgentConfiguration(
         max_output_tokens=16_000,
-        maf=MafAgentConfiguration(
-            compaction=MafCompactionConfig(max_context_window_tokens=200_000)
+        agent_framework=AgentFrameworkConfiguration(
+            compaction=AgentFrameworkCompactionConfig(max_context_window_tokens=200_000)
         ),
     )
 

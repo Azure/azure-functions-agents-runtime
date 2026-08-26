@@ -1,5 +1,5 @@
 agent_configuration:
   max_output_tokens: 4096
-  maf:
+  agent_framework:
     compaction:
       max_context_window_tokens: 8192

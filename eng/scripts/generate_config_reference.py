@@ -13,7 +13,7 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
-from typing import Any, get_args, get_origin
+from typing import get_args, get_origin
 
 # Add src to path for imports - import schema module directly to avoid package side effects
 repo_root = Path(__file__).parent.parent.parent
@@ -32,11 +32,11 @@ from pydantic.fields import FieldInfo
 # Extract models from the dynamically loaded schema module
 AgentSpec = schema.AgentSpec
 AgentConfiguration = schema.AgentConfiguration
+AgentFrameworkCompactionConfig = schema.AgentFrameworkCompactionConfig
+AgentFrameworkConfiguration = schema.AgentFrameworkConfiguration
 BuiltinEndpointsConfig = schema.BuiltinEndpointsConfig
 DynamicSessionsCodeInterpreterConfig = schema.DynamicSessionsCodeInterpreterConfig
 GlobalConfig = schema.GlobalConfig
-MafAgentConfiguration = schema.MafAgentConfiguration
-MafCompactionConfig = schema.MafCompactionConfig
 McpFilter = schema.McpFilter
 SkillsFilter = schema.SkillsFilter
 SystemToolsAgentOverride = schema.SystemToolsAgentOverride
@@ -103,8 +103,8 @@ def format_type(field_info: FieldInfo, field_name: str) -> str:
         "EndpointAuthConfig",
         "EntraAuthConfig",
         "AgentConfiguration",
-        "MafAgentConfiguration",
-        "MafCompactionConfig",
+        "AgentFrameworkConfiguration",
+        "AgentFrameworkCompactionConfig",
         "McpFilter",
         "SkillsFilter",
         "ToolsFilter",
@@ -261,7 +261,7 @@ def generate_model_table(
 
 # Custom descriptions for fields (enhances docstrings)
 GLOBAL_CONFIG_DESCRIPTIONS = {
-    "agent_configuration": "Portable and SDK-specific defaults inherited by every agent. [Details](./front-matter-spec.md#agent_configuration)",
+    "agent_configuration": "Portable and framework-specific defaults inherited by every agent. [Details](./front-matter-spec.md#agent_configuration)",
     "system_tools": "System-level tools configuration. [Details](#global-system_tools)",
     "model": "Default LLM model identifier for all agents",
     "timeout": "Default execution timeout in seconds",
@@ -307,7 +307,7 @@ AGENT_SPEC_REQUIRED_DESCRIPTIONS = {
 }
 
 AGENT_SPEC_OPTIONAL_DESCRIPTIONS = {
-    "agent_configuration": "Portable and SDK-specific execution settings. Recursively inherits global values. [Details](./front-matter-spec.md#agent_configuration)",
+    "agent_configuration": "Portable and framework-specific execution settings. Recursively inherits global values. [Details](./front-matter-spec.md#agent_configuration)",
     "builtin_endpoints": "Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints)",
     "model": "Override LLM model for this agent",
     "timeout": "Override execution timeout (seconds) for this agent",
@@ -327,14 +327,14 @@ AGENT_SPEC_OPTIONAL_DESCRIPTIONS = {
 
 AGENT_CONFIGURATION_DESCRIPTIONS = {
     "max_output_tokens": "Positive model output-token limit. May be configured without compaction.",
-    "maf": "Microsoft Agent Framework-specific settings.",
+    "agent_framework": "Microsoft Agent Framework-specific settings.",
 }
 
-MAF_AGENT_CONFIGURATION_DESCRIPTIONS = {
-    "compaction": "MAF conversation-compaction settings.",
+AGENT_FRAMEWORK_CONFIGURATION_DESCRIPTIONS = {
+    "compaction": "Microsoft Agent Framework conversation-compaction settings.",
 }
 
-MAF_COMPACTION_DESCRIPTIONS = {
+AGENT_FRAMEWORK_COMPACTION_DESCRIPTIONS = {
     "max_context_window_tokens": "Positive total context budget used by conversation compaction. Requires an effective `max_output_tokens` smaller than this value.",
 }
 
@@ -455,8 +455,6 @@ def generate_markdown() -> str:
             default = "`{}`"
         elif field_name == "builtin_endpoints":
             default = "`false`"
-        elif field_name == "mode":
-            default = "`default`"
         elif field_name == "system_tools":
             default = "Inherited"
         elif field_name == "mcp":
@@ -513,22 +511,22 @@ def generate_markdown() -> str:
     lines.extend([
         "### Global and agent: `agent_configuration`",
         "",
-        "Configure portable output limits and MAF-specific conversation compaction:",
+        "Configure portable output limits and Microsoft Agent Framework-specific conversation compaction:",
         "",
         "```yaml",
         "agent_configuration:",
         "  max_output_tokens: 4096",
-        "  maf:",
+        "  agent_framework:",
         "    compaction:",
         "      max_context_window_tokens: 8192",
         "```",
         "",
     ])
     lines.extend(generate_model_table(AgentConfiguration, descriptions=AGENT_CONFIGURATION_DESCRIPTIONS))
-    lines.extend(["", "#### `agent_configuration.maf`", ""])
-    lines.extend(generate_model_table(MafAgentConfiguration, descriptions=MAF_AGENT_CONFIGURATION_DESCRIPTIONS))
-    lines.extend(["", "#### `agent_configuration.maf.compaction`", ""])
-    lines.extend(generate_model_table(MafCompactionConfig, descriptions=MAF_COMPACTION_DESCRIPTIONS))
+    lines.extend(["", "#### `agent_configuration.agent_framework`", ""])
+    lines.extend(generate_model_table(AgentFrameworkConfiguration, descriptions=AGENT_FRAMEWORK_CONFIGURATION_DESCRIPTIONS))
+    lines.extend(["", "#### `agent_configuration.agent_framework.compaction`", ""])
+    lines.extend(generate_model_table(AgentFrameworkCompactionConfig, descriptions=AGENT_FRAMEWORK_COMPACTION_DESCRIPTIONS))
     lines.extend([
         "",
         "Agent values recursively inherit global values. Explicit `null` clears an inherited leaf or subtree. When context compaction is configured, the effective `max_output_tokens` must be present and less than `max_context_window_tokens`.",

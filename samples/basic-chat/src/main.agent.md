@@ -2,7 +2,7 @@
 name: Chat Assistant
 description: A helpful assistant with Python code execution capabilities.
 agent_configuration:
-  maf:
+  agent_framework:
     compaction:
       max_context_window_tokens: 8192
 

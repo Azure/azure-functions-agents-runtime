@@ -815,17 +815,17 @@ def test_agent_configuration_fixture() -> None:
     _, empty_override = by_slug["empty_override"]
     for resolved in (inherited, empty_override):
         assert resolved.agent_configuration.max_output_tokens == 4096
-        assert resolved.agent_configuration.maf is not None
-        assert resolved.agent_configuration.maf.compaction is not None
-        assert resolved.agent_configuration.maf.compaction.max_context_window_tokens == 8192
+        assert resolved.agent_configuration.agent_framework is not None
+        assert resolved.agent_configuration.agent_framework.compaction is not None
+        assert resolved.agent_configuration.agent_framework.compaction.max_context_window_tokens == 8192
 
     _, context_override = by_slug["context_override"]
     assert context_override.agent_configuration.max_output_tokens == 4096
-    assert context_override.agent_configuration.maf is not None
-    assert context_override.agent_configuration.maf.compaction is not None
-    assert context_override.agent_configuration.maf.compaction.max_context_window_tokens == 16384
+    assert context_override.agent_configuration.agent_framework is not None
+    assert context_override.agent_configuration.agent_framework.compaction is not None
+    assert context_override.agent_configuration.agent_framework.compaction.max_context_window_tokens == 16384
 
     explicit_null_spec, explicit_null = by_slug["explicit_null"]
     assert explicit_null_spec.agent_configuration is None
     assert explicit_null.agent_configuration.max_output_tokens is None
-    assert explicit_null.agent_configuration.maf is None
+    assert explicit_null.agent_configuration.agent_framework is None
