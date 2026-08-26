@@ -265,7 +265,7 @@ export function useDeployJob(): DeployJobValue {
   )
   if (!context) throw new Error('useDeployJob must be used within DeployProvider.')
   const ownsJob = context.owner === owner.current
-  const phase = context.phase === 'running' ? 'running' : ownsJob ? context.phase : 'idle'
+  const phase = ownsJob ? context.phase : 'idle'
   return {
     phase,
     result: ownsJob ? context.result : null,
