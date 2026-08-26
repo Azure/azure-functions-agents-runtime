@@ -158,6 +158,10 @@ migration is required.
 - [x] Unknown-provider and no-provider messages list GitHub Models configuration.
 - [x] `tests/test_github_models_sample.py`: sample composes its built-in chat endpoints and
   declares the dedicated GitHub Models settings.
+- [x] `tests/endtoend/test_github_models_agentic.py`: when `GITHUB_MODELS_TOKEN` is supplied,
+  boot the GitHub Models sample and verify one live instruction-following response.
+- [x] `eng/templates/official/jobs/e2e-tests.yml`: run the live smoke test in a separate
+  conditional step when the secure pipeline variable `GITHUB_MODELS_TOKEN` is configured.
 - [x] Full Ruff, mypy, and pytest gate.
 
 No config fixture is needed because the authoring schema is unchanged.

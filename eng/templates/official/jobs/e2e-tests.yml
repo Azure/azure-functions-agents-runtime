@@ -78,3 +78,12 @@ jobs:
           AZURE_TOKEN_CREDENTIALS: 'dev'
           FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
           FOUNDRY_MODEL: $(FOUNDRY_MODEL)
+
+      - bash: |
+          python -m pytest -m e2e tests/endtoend/test_github_models_agentic.py -v
+        displayName: 'Run GitHub Models live E2E test'
+        condition: and(succeeded(), ne(variables['GITHUB_MODELS_TOKEN'], ''))
+        env:
+          AzureWebJobsStorage: 'UseDevelopmentStorage=true'
+          FUNCTIONS_WORKER_RUNTIME: 'python'
+          GITHUB_MODELS_TOKEN: $(GITHUB_MODELS_TOKEN)
