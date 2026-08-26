@@ -53,6 +53,12 @@ def _provider_configured() -> bool:
         os.environ.get("OPENAI_API_KEY")
         or os.environ.get("AZURE_OPENAI_ENDPOINT")
         or os.environ.get("FOUNDRY_PROJECT_ENDPOINT")
+        or os.environ.get("GITHUB_MODELS_TOKEN")
+        or (
+            os.environ.get("AZURE_FUNCTIONS_AGENTS_PROVIDER", "").strip().lower()
+            == "github"
+            and os.environ.get("GITHUB_TOKEN")
+        )
         or configured_provider(APPS_DIR / "storage-triggers") is not None
         or configured_provider(APPS_DIR / "builtin-endpoints") is not None
     )
