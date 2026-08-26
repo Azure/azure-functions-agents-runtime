@@ -213,6 +213,8 @@ def test_sample_runtime_files_and_isolation_settings() -> None:
         "token-benchmark-reports"
     )
     assert settings["Values"]["AZURE_FUNCTIONS_AGENTS_DETAILED_TOKEN_USAGE"] == "true"
+    requirements = (SAMPLE_SRC / "requirements.txt").read_text(encoding="utf-8")
+    assert "azure-storage-queue==12.13.*,<13" in requirements
 
 
 def test_usage_parser_requires_exact_expected_primary() -> None:
