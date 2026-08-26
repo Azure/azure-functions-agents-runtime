@@ -46,6 +46,7 @@ from azure_functions_agents.execution.aca_sandbox import (
 from azure_functions_agents.execution.backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
     AgentExecutionBackend,
+    DurableAdmissionIndeterminateError,
     DurableAdmissionSetupTimeoutError,
     EventCursorExpiredError,
     LinkedActiveRunConflictError,
@@ -800,8 +801,21 @@ async def test_duplicate_submit_reuses_run_after_launch_response_loss(
         session_id=session.session_id,
         idempotency_key="same-run",
     )
-    with pytest.raises(RunSubmissionIndeterminateError):
+    with pytest.raises(DurableAdmissionIndeterminateError) as exc_info:
         await backend.start_run(request)
+
+    assert exc_info.value.handle.run_id is not None
+    assert exc_info.value.handle.session_id == session.session_id
+    assert exc_info.value.handle.phase == "executing"
+
+    # Durable state: run remains accepted, operation stays active for reconciliation
+    durable_run = store.runs.get(exc_info.value.handle.run_id)
+    assert durable_run is not None
+    assert durable_run.status == "accepted"
+    active_ops = [
+        op for op in store.durable_operations.values() if op.state == "active"
+    ]
+    assert len(active_ops) == 1
 
     replay = await backend.start_run(request)
 

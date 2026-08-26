@@ -9,6 +9,7 @@ from .._logger import logger
 from ..execution.backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
     AgentExecutionBackend,
+    DurableAdmissionIndeterminateError,
     DurableAdmissionOutcome,
     DurableAdmissionSetupTimeoutError,
     LinkedActiveRunConflictError,
@@ -156,6 +157,14 @@ async def _start_run_or_response(
 ) -> RunHandle | ControllerResponse:
     try:
         return await backend.start_run(request)
+    except DurableAdmissionIndeterminateError as exc:
+        return _accepted_response(
+            agent_slug,
+            exc.handle,
+            RunContext(run_id=exc.handle.run_id, session_id=exc.handle.session_id),
+            admission="committed",
+            phase="executing",
+        )
     except DurableAdmissionSetupTimeoutError as exc:
         return _durable_admission_timeout_response(
             agent_slug,

@@ -78,6 +78,18 @@ class DurableAdmissionSetupTimeoutError(SetupBudgetExpiredError):
         self.handle = handle
 
 
+class DurableAdmissionIndeterminateError(Exception):
+    """Launch completed but journal acceptance was not confirmed; the run may be executing."""
+
+    def __init__(
+        self,
+        *,
+        handle: RunHandle,
+    ) -> None:
+        super().__init__("Run launch indeterminate after committed admission.")
+        self.handle = handle
+
+
 class LinkedActiveRunConflictError(Exception):
     """An active-run conflict with durable management context."""
 

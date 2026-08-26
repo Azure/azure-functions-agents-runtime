@@ -2,6 +2,7 @@
 
 from .backend import (
     AgentExecutionBackend,
+    DurableAdmissionIndeterminateError,
     EventCursorExpiredError,
     RunContext,
     RunError,
@@ -40,6 +41,7 @@ __all__ = [
     "AgentExecutionBackend",
     "AgentResult",
     "BackendUnavailableError",
+    "DurableAdmissionIndeterminateError",
     "EventCursorExpiredError",
     "LanguageWorkerExecutionBackend",
     "RunContext",

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, TypeIs
 
+from .._logger import logger
 from ..config import DEFAULT_TIMEOUT
 from ..controller.idempotency import (
     IdempotencyAttempt,
@@ -71,6 +72,7 @@ from ..transport.transport_models import SandboxFileNotFoundError, SandboxFileOp
 from .backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
     AgentExecutionBackend,
+    DurableAdmissionIndeterminateError,
     DurableAdmissionOutcome,
     DurableAdmissionSetupTimeoutError,
     LinkedActiveRunConflictError,
@@ -89,6 +91,7 @@ from .run_control import (
     RunEnvelope,
     RunJournalProtocolError,
     RunSubmissionDefinitiveFailureError,
+    RunSubmissionIndeterminateError,
     SandboxRunControl,
 )
 from .setup_budget import (
@@ -523,6 +526,15 @@ class AcaSandboxExecutionBackend:
         except RunSubmissionDefinitiveFailureError:
             await _adopt_failed_submission(self._runtime, activated, run)
             raise
+        except RunSubmissionIndeterminateError as exc:
+            logger.warning(
+                "Indeterminate journal acceptance after committed admission; "
+                "deferring to reconciliation (stage=submit_admission, "
+                "reason=launch_indeterminate)",
+            )
+            raise DurableAdmissionIndeterminateError(
+                handle=_run_handle(run, phase="executing"),
+            ) from exc
         await _adopt_if_terminal(
             self._runtime,
             activated,

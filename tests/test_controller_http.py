@@ -27,6 +27,7 @@ from azure_functions_agents.controller.readiness import (
 )
 from azure_functions_agents.execution.backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
+    DurableAdmissionIndeterminateError,
     DurableAdmissionOutcome,
     DurableAdmissionSetupTimeoutError,
     LinkedActiveRunConflictError,
@@ -576,6 +577,56 @@ async def test_ambiguous_setup_timeout_returns_a_linked_confirmation_ticket() ->
         "x-ms-session-id": "session-1",
         "x-ms-retry-with": "respond-async",
     }
+
+
+@pytest.mark.asyncio
+async def test_launch_indeterminate_returns_committed_202_with_executing_phase() -> None:
+    handle = RunHandle(
+        run_id="run-1",
+        session_id="session-1",
+        state="accepted",
+        created_at=datetime(2026, 8, 14, tzinfo=UTC),
+        phase="executing",
+    )
+    urls = _management_urls(session_id=handle.session_id, run_id=handle.run_id)
+    err = DurableAdmissionIndeterminateError(handle=handle)
+
+    async_backend = FakeBackend(_status())
+    async_backend.raise_on_start = err
+    async_response = await submit_run(
+        async_backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello", idempotency_key="k"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    sync_backend = FakeBackend(_status())
+    sync_backend.raise_on_start = err
+    sync_response = await submit_run(
+        sync_backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello", idempotency_key="k"),
+        agent_slug="main",
+        respond_async=False,
+        budget=_expired_budget(),
+    )
+
+    assert async_response.status_code == 202
+    assert async_response.body["admission"] == "committed"
+    assert async_response.body["phase"] == "executing"
+    assert async_response.body["session_id"] == "session-1"
+    assert async_response.body["run_id"] == "run-1"
+    assert all(k in async_response.body for k in urls)
+
+    # Sync caller also gets 202 (not 504); run is committed and may be executing
+    assert sync_response.status_code == 202
+    assert sync_response.body["admission"] == "committed"
+    assert sync_response.body["phase"] == "executing"
+    assert sync_response.body["session_id"] == "session-1"
+    assert sync_response.body["run_id"] == "run-1"
+    assert all(k in sync_response.body for k in urls)
+    assert "error" not in sync_response.body
+    assert sync_response.timeout_metadata is None
 
 
 @pytest.mark.asyncio
