@@ -1207,7 +1207,7 @@ async def test_file_plane_authorization_failure_is_redacted_and_resumable(
         budget=RequestBudget.start(authored_timeout=None),
     )
 
-    assert response.status_code == 503
+    assert response.status_code == status_code
     assert response.body == {
         "error": "sandbox_group_authorization_failed",
         "reason": "sandbox_group_authorization_failed",
@@ -3490,9 +3490,9 @@ async def test_new_session_authorization_failure_replays_same_terminal_response(
             "Sandbox Group."
         ),
     }
-    assert first.status_code == 503
+    assert first.status_code == 403
     assert first.body == expected_body
-    assert replay.status_code == 503
+    assert replay.status_code == 403
     assert replay.body == expected_body
     assert len(provider.create_calls) == 1
     assert store.session is not None

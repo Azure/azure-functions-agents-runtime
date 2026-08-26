@@ -6,7 +6,6 @@ import asyncio
 import inspect
 import json
 import math
-import os
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -49,7 +48,6 @@ from .journal_paths import heartbeat_path
 from .registration.endpoints import (
     register_builtin_endpoints,
     register_sandbox_management_endpoints,
-    register_sandbox_preflight_endpoint,
 )
 from .registration.triggers import register_agent
 from .session_state import (
@@ -749,13 +747,6 @@ def _register_resolved_agent(
                 session_runtime=session_runtime,
                 binding=terminal_bindings[resolved.slug],
             )
-            if os.environ.get("AZURE_FUNCTIONS_AGENTS_ACA_PREFLIGHT_ENABLED") == "1":
-                register_sandbox_preflight_endpoint(
-                    app,
-                    slug=resolved.slug,
-                    auth=management_auth,
-                    session_runtime=session_runtime,
-                )
 
     return _build_agent_summary(resolved, capability_names, workflow_setup)
 

@@ -89,6 +89,7 @@ from ..transport.transport_models import (
     SandboxCreateSource,
     SandboxFileNotFoundError,
     SandboxFileOperationError,
+    SandboxGroupArmAuthorizationError,
     SandboxGroupAuthorizationError,
     SandboxGroupBinding,
     SandboxLifecyclePolicy,
@@ -197,6 +198,10 @@ class SessionActivationSetupTimeoutError(SessionActivationError):
 
 class SessionActivationAuthorizationError(SessionActivationError):
     """The controller lacks required Sandbox Group data-plane authorization."""
+
+    def __init__(self, message: str, *, status_code: int = 403) -> None:
+        self.status_code = status_code if status_code in {401, 403} else 403
+        super().__init__(message)
 
 
 class SessionCreationUnavailableError(SessionActivationError):
@@ -404,7 +409,13 @@ class SessionRuntimeBinding:
 
     async def get_provider(self) -> SandboxSessionProvider:
         """Return the one lazily opened provider for this app's Sandbox Group."""
-        return await self._provider.get()
+        try:
+            return await self._provider.get()
+        except SandboxGroupArmAuthorizationError as exc:
+            raise SessionActivationAuthorizationError(
+                "Configured Sandbox Group ARM authorization failed.",
+                status_code=exc.status_code or 403,
+            ) from None
 
     async def get_state_store(self) -> StateStoreBinding:
         """Return the one lazily resolved state-store binding for this app."""
@@ -425,9 +436,10 @@ class SessionRuntimeBinding:
                     )
                 else:
                     await self._targeted_reconciler(partition, session_id, setup_deadline)
-            except SandboxGroupAuthorizationError:
+            except SandboxGroupAuthorizationError as exc:
                 raise SessionActivationAuthorizationError(
-                    SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+                    SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+                    status_code=exc.status_code,
                 ) from None
 
     async def reconcile_after_create(
@@ -643,9 +655,12 @@ async def _activate_existing_session(
             setup_deadline,
             phase=SetupPhase.MANIFEST,
         )
-    except SandboxGroupAuthorizationError:
+    except SandboxGroupAuthorizationError as exc:
         await _close_handle_if_open(handle)
-        raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
+        raise SessionActivationAuthorizationError(
+            SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+            status_code=exc.status_code,
+        ) from None
     except SandboxManifestMismatchError:
         await _quarantine_detected_binding(
             store,
@@ -1660,7 +1675,7 @@ async def _provision_reserved_session(
             SetupPhase.PROVISION_RECONCILE,
             reason=SetupTimeoutReason.PROVISION_INDETERMINATE,
         ) from None
-    except SandboxGroupAuthorizationError:
+    except SandboxGroupAuthorizationError as exc:
         if await _is_indeterminate_provision(state_binding.store, fence):
             raise _setup_timeout_error(
                 setup_deadline,
@@ -1674,12 +1689,18 @@ async def _provision_reserved_session(
             )
         except (SessionStateContractError, SessionStateStoreError) as cleanup_error:
             raise cleanup_error from None
-        raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
+        raise SessionActivationAuthorizationError(
+            SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+            status_code=exc.status_code,
+        ) from None
     except SandboxFileNotFoundError:
         raise _setup_timeout_error(setup_deadline, SetupPhase.CONTENT) from None
     except SandboxFileOperationError as exc:
         if exc.status_code in {401, 403}:
-            raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
+            raise SessionActivationAuthorizationError(
+                SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+                status_code=exc.status_code,
+            ) from None
         if exc.status_code is None or exc.status_code in _RESUMABLE_FILE_OPERATION_STATUS_CODES:
             raise _setup_timeout_error(setup_deadline, SetupPhase.CONTENT) from None
         raise

@@ -698,7 +698,7 @@ async def test_sandbox_group_authorization_failure_returns_actionable_nonretryab
         budget=_expired_budget(),
     )
 
-    assert response.status_code == 503
+    assert response.status_code == 403
     assert response.body == {
         "error": "sandbox_group_authorization_failed",
         "reason": "sandbox_group_authorization_failed",
@@ -725,7 +725,7 @@ async def test_cancel_sandbox_group_authorization_failure_returns_actionable_non
         RunContext(run_id="run-1", session_id="session-1"),
     )
 
-    assert response.status_code == 503
+    assert response.status_code == 403
     assert response.body == {
         "error": "sandbox_group_authorization_failed",
         "reason": "sandbox_group_authorization_failed",
@@ -736,6 +736,25 @@ async def test_cancel_sandbox_group_authorization_failure_returns_actionable_non
         ),
     }
     assert response.headers == {}
+
+
+@pytest.mark.asyncio
+async def test_sandbox_group_authentication_failure_preserves_401() -> None:
+    backend = FakeBackend(_status())
+    backend.raise_on_start = SessionActivationAuthorizationError(
+        "Sandbox Group authentication failed.",
+        status_code=401,
+    )
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio
@@ -751,7 +770,7 @@ async def test_status_and_result_authorization_failures_are_redacted(
         RunContext(run_id="run-1", session_id="session-1"),
     )
 
-    assert response.status_code == 503
+    assert response.status_code == 403
     assert response.body == {
         "error": "sandbox_group_authorization_failed",
         "reason": "sandbox_group_authorization_failed",

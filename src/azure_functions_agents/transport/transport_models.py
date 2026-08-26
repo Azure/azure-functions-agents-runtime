@@ -31,7 +31,8 @@ class SandboxCapacityError(SandboxProvisioningError):
 class SandboxGroupAuthorizationError(SandboxProvisioningError):
     """Raised when the controller lacks Sandbox Group data-plane authorization."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, status_code: int = 403) -> None:
+        self.status_code = status_code if status_code in {401, 403} else 403
         super().__init__(SANDBOX_GROUP_AUTHORIZATION_MESSAGE)
 
 

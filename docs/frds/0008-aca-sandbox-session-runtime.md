@@ -1765,7 +1765,6 @@ BuildId-derived labels isolate concurrent runs. Fixture cleanup plus an
 `always()` reaper delete current-run snapshots and sandboxes and fail if either
 remains. The smoke deploys no Function and performs no artifact attestation.
 
-ADO 298692 passed the identity preflight, low-level entrypoint, journal
-acceptance, real model turn, and cleanup. Post-main deployment, external
-attestation, py313/py314 lifecycle/loss/N=5 qualification, and rollback remain
-owned by issue #166.
+ADO 298692 passed the low-level entrypoint, journal acceptance, real model turn,
+and cleanup. Post-main deployment, external attestation, py313/py314
+lifecycle/loss/N=5 qualification, and rollback remain owned by issue #166.

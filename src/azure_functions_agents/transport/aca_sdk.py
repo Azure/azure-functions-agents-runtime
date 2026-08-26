@@ -497,7 +497,7 @@ class AcaSandboxAdapter:
             )
         except HttpResponseError as exc:
             if _is_authorization_rejection(exc):
-                raise SandboxGroupAuthorizationError() from None
+                raise SandboxGroupAuthorizationError(status_code=exc.status_code or 403) from None
             if _is_capacity_rejection(exc):
                 if cleanup_on_failure:
                     await self._cleanup_failed_create(provisioning_attempt_id)
@@ -536,7 +536,7 @@ class AcaSandboxAdapter:
             raise
         except HttpResponseError as exc:
             if _is_authorization_rejection(exc):
-                raise SandboxGroupAuthorizationError() from None
+                raise SandboxGroupAuthorizationError(status_code=exc.status_code or 403) from None
             if cleanup_on_failure:
                 await self._cleanup_failed_create(provisioning_attempt_id)
             if _is_capacity_rejection(exc):
@@ -588,7 +588,7 @@ class AcaSandboxAdapter:
             )
         except SandboxFileOperationError as exc:
             if exc.status_code in _AUTHORIZATION_STATUS_CODES:
-                raise SandboxGroupAuthorizationError() from None
+                raise SandboxGroupAuthorizationError(status_code=exc.status_code) from None
             raise
         return handle
 
@@ -612,7 +612,7 @@ class AcaSandboxAdapter:
             resumed = True
         except HttpResponseError as exc:
             if _is_authorization_rejection(exc):
-                raise SandboxGroupAuthorizationError() from None
+                raise SandboxGroupAuthorizationError(status_code=exc.status_code or 403) from None
             raise
         finally:
             if not resumed:
@@ -625,7 +625,7 @@ class AcaSandboxAdapter:
             )
         except SandboxFileOperationError as exc:
             if exc.status_code in _AUTHORIZATION_STATUS_CODES:
-                raise SandboxGroupAuthorizationError() from None
+                raise SandboxGroupAuthorizationError(status_code=exc.status_code) from None
             raise
         return handle
 
@@ -665,7 +665,7 @@ class AcaSandboxAdapter:
                 )
         except HttpResponseError as exc:
             if _is_authorization_rejection(exc):
-                raise SandboxGroupAuthorizationError() from None
+                raise SandboxGroupAuthorizationError(status_code=exc.status_code or 403) from None
             raise
         return tuple(summaries)
 
@@ -855,7 +855,7 @@ class AcaSandboxAdapter:
                 ]
             except HttpResponseError as exc:
                 if _is_authorization_rejection(exc):
-                    raise SandboxGroupAuthorizationError() from None
+                    raise SandboxGroupAuthorizationError(status_code=exc.status_code or 403) from None
                 raise
             if summaries:
                 if expected_labels is not None and any(

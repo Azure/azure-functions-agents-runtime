@@ -171,8 +171,8 @@ async def _start_run_or_response(
                 session_present=request.session_id is not None,
             )
         )
-    except SessionActivationAuthorizationError:
-        return _sandbox_group_authorization_response()
+    except SessionActivationAuthorizationError as exc:
+        return _sandbox_group_authorization_response(exc)
     except LinkedActiveRunConflictError as exc:
         return _linked_active_run_response(
             agent_slug,
@@ -232,8 +232,8 @@ async def read_status(
         return ControllerResponse(status_code=404, body={"error": "run_not_found"})
     except SessionActivationGoneError:
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
-    except SessionActivationAuthorizationError:
-        return _sandbox_group_authorization_response()
+    except SessionActivationAuthorizationError as exc:
+        return _sandbox_group_authorization_response(exc)
 
 
 async def read_result(
@@ -253,8 +253,8 @@ async def read_result(
         return ControllerResponse(status_code=404, body={"error": "run_not_found"})
     except SessionActivationGoneError:
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
-    except SessionActivationAuthorizationError:
-        return _sandbox_group_authorization_response()
+    except SessionActivationAuthorizationError as exc:
+        return _sandbox_group_authorization_response(exc)
     if (
         status.error is not None
         and status.error.code == SESSION_TOMBSTONED_ERROR_CODE
@@ -301,8 +301,8 @@ async def cancel_run(
         return ControllerResponse(status_code=404, body={"error": "run_not_found"})
     except SessionActivationGoneError:
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
-    except SessionActivationAuthorizationError:
-        return _sandbox_group_authorization_response()
+    except SessionActivationAuthorizationError as exc:
+        return _sandbox_group_authorization_response(exc)
 
 
 def status_payload(status: RunStatus) -> dict[str, object]:
@@ -425,9 +425,11 @@ def _with_request_metadata(
     )
 
 
-def _sandbox_group_authorization_response() -> ControllerResponse:
+def _sandbox_group_authorization_response(
+    error: SessionActivationAuthorizationError | None = None,
+) -> ControllerResponse:
     return ControllerResponse(
-        status_code=503,
+        status_code=error.status_code if error is not None else 403,
         body={
             "error": SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
             "reason": SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,

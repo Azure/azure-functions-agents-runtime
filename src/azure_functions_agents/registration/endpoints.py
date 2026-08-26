@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -404,50 +403,6 @@ def _register_chat_page(
         auth_level=func.AuthLevel.ANONYMOUS,
     )(agent_chat_page)
     app.function_name(name=function_name)(decorated)
-
-
-def register_sandbox_preflight_endpoint(
-    app: func.FunctionApp,
-    *,
-    slug: str,
-    auth: EndpointAuthConfig,
-    session_runtime: SessionRuntimeBinding,
-) -> None:
-    """Register an authenticated, read-only provider identity preflight."""
-
-    from ..transport.aca_sdk import AcaSandboxAdapter
-
-    async def preflight_handler(req: Request) -> Response:
-        auth_error = authorize_entra_request(req.headers.get, auth)
-        if auth_error is not None:
-            return _json_error(auth_error.message, status_code=auth_error.status_code)
-        adapter = None
-        try:
-            adapter = await AcaSandboxAdapter.open(session_runtime.sandbox_group_resource_id)
-            await adapter.list_sandboxes(labels={"qualification": "preflight"})
-        except Exception:
-            logger.exception("sandbox identity preflight failed")
-            return _json_error("sandbox identity preflight failed", status_code=503)
-        finally:
-            if adapter is not None:
-                await adapter.close()
-        return Response(
-            json.dumps(
-                {
-                    "arm_get": True,
-                    "data_plane_list": True,
-                    "instance_id": os.environ.get("WEBSITE_INSTANCE_ID", "unknown"),
-                }
-            ),
-            media_type="application/json",
-        )
-
-    decorated = app.route(
-        route=f"agents/{slug}/sandbox-preflight",
-        methods=["GET"],
-        auth_level=resolve_endpoint_auth_level(auth),
-    )(preflight_handler)
-    app.function_name(name=_safe_function_name(f"agent_{slug}_sandbox_preflight"))(decorated)
 
 
 def _register_http_chat(
