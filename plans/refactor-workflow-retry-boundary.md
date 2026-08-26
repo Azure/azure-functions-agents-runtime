@@ -37,6 +37,14 @@ visible and deterministic.
 - [x] (2026-08-25 22:37Z) Updated the FRD and architecture description.
 - [x] (2026-08-25 22:39Z) Ran targeted tests, mypy, and the full CI-equivalent pytest gate. Ruff found
   one import-order issue; corrected it and re-ran Ruff successfully.
+- [x] (2026-08-26) Moved the complete policy-aware Activity boundary into
+  `workflows/policy.py` in response to PR review, leaving Durable scheduling and
+  replay-sensitive side effects in `workflows/engine.py`.
+- [x] (2026-08-26) Reworked the retry sample to persist a simulated inventory
+  incident in Azure Blob Storage instead of branching on Activity attempt
+  metadata.
+- [x] (2026-08-26) Re-ran focused tests (`118 passed`), Ruff, strict mypy, and
+  the CI-equivalent suite (`1181 passed, 53 deselected`).
 
 ## Surprises & Discoveries
 
@@ -47,7 +55,7 @@ visible and deterministic.
   sub-orchestration adds history, latency, and weaker cancellation.
 - Observation: `retry_delays_ms` is also consumed inside the Activity for
   telemetry, not only by the orchestrator timer loop.
-  Evidence: `_invoke_policy_handler.finish()` selects the current delay for the
+  Evidence: `invoke_policy_handler.finish()` selects the current delay for the
   `selected_delay_ms` telemetry field.
 - Observation: `_policy_activity_context()` runs only in Activity functions, not
   in the replay-sensitive orchestrator.
@@ -57,6 +65,11 @@ visible and deterministic.
   including task arguments, if logged with traceback details.
   Evidence: independent diff review reproduced an identifier mismatch whose
   error text contained a secret placed in `args`.
+- Observation: A customer-facing transient-failure sample should model state in
+  the dependency boundary rather than inspect scheduler metadata.
+  Evidence: the revised order tool reads and decrements Blob-backed
+  `failures_remaining`, while engine tests continue to verify attempt three and
+  decorator precedence independently.
 
 ## Decision Log
 
@@ -94,24 +107,37 @@ visible and deterministic.
   Rationale: malformed Activity inputs are untrusted and may contain sensitive
   handler arguments; validation diagnostics must not echo them.
   Date/Author: 2026-08-25, Copilot and independent diff review.
+- Decision: Put policy-aware Activity execution, boundary validation, sanitized
+  outcomes, telemetry, and retry disposition in `workflows/policy.py`.
+  Rationale: this makes the policy contract reviewable as one unit while keeping
+  every Durable call, timer, cancellation race, and yield in the orchestrator.
+  Date/Author: 2026-08-26, Human (TsuyoshiUshio) and Copilot.
+- Decision: Demonstrate transient dependency recovery with Azure Blob Storage.
+  Rationale: customer tools should react to dependency state, not to
+  `WorkflowTaskContext.attempt`; runtime attempt semantics remain independently
+  covered by engine and E2E status assertions.
+  Date/Author: 2026-08-26, Human (TsuyoshiUshio) and Copilot.
 
 ## Outcomes & Retrospective
 
-The refactor preserves Option A's user-visible behavior while giving policy
-validation, Activity outcomes, and retry disposition one internal module.
+The refactor preserves Option A's user-visible behavior while giving
+policy-aware Activity execution, validation, outcomes, telemetry, and retry
+disposition one internal module.
 Activity telemetry and orchestration now share the same pure decision function.
 Strict Pydantic validation replaces the compound boundary clauses requested in
 PR review without entering replay-sensitive orchestration. Attempt preparation
 and retry/continued-failure transitions have named helpers, while all Durable
 timer coordination remains in the top-level generator.
 
-Focused retry and engine tests passed (`110 passed`). The CI-equivalent suite
-initially passed (`1180 passed, 53 deselected`), strict mypy passed, and full
-Ruff passed after correcting one test import-order issue. Independent diff
+After the PR feedback updates, focused policy, engine, and sample tests passed
+(`118 passed`). The CI-equivalent suite passed (`1181 passed, 53 deselected`);
+strict mypy and full Ruff passed. Independent diff
 review found that Pydantic validation details could expose Activity inputs in
 logs; input values are now hidden, validation logs use a fixed message, and a
 regression test protects the boundary. The current implementation remains
 runtime-managed; no preview dependency or sub-orchestration was introduced.
+The sample now models two transient failures through Blob-backed incident state,
+and no longer uses the workflow attempt number to manufacture failures.
 
 ## Context and Orientation
 
@@ -178,7 +204,7 @@ Do not modify or restore the user's existing uncommitted DTS sample files.
 
 From the repository root:
 
-    python -m pytest tests/test_workflow_retry.py tests/test_workflow_engine.py -q
+    python -m pytest tests/test_workflow_policy.py tests/test_workflow_engine.py -q
     python -m ruff check src tests
     python -m mypy src
     python -m pytest --cache-clear --cov=./src/azure_functions_agents \

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from azure_functions_agents.workflows.context import _workflow_task_idempotency_key
-from azure_functions_agents.workflows.retry import (
+from azure_functions_agents.workflows.policy import (
     ActivityFailure,
     PolicyActivityInputModel,
     RetryDisposition,

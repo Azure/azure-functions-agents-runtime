@@ -1,14 +1,19 @@
 # Workflow Retry Policy
 
-This sample tells one story: an operations engineer recovers delayed order
-`ORD-1001` after its inventory reservation API fails transiently. The workflow
-loads the order, retries inventory reservation, and confirms the order.
+This sample tells one customer-facing story: an operations engineer recovers
+delayed order `ORD-1001` while its inventory reservation service is temporarily
+unavailable. The workflow records a simulated incident in Azure Blob Storage,
+loads the order, retries inventory reservation as the stored incident recovers,
+and confirms the order.
 
 The important behavior is policy precedence. The workflow plan asks for five
 attempts and a 30-second timeout, while the `reserve_inventory` tool author
 declares three attempts and a five-second timeout with `@workflow_tool`.
-Tool-author declarations win, so the reservation fails twice and succeeds on
-attempt three.
+Tool-author declarations win, so the reservation can make at most three
+attempts. The simulated dependency stores `failures_remaining` in Blob Storage;
+the first two calls decrement that state and report a transient failure, and
+the third succeeds. Failure is driven by the persisted counter; the runtime
+attempt number is recorded only to make Activity redelivery idempotent.
 
 | Trigger | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
 |---|---|---|---|---|---|---|
@@ -50,9 +55,18 @@ plan resource, and call `start_workflow`. The workflow should finish
 - `reserve_inventory.max_attempts` is `3`, not the DAG's requested `5`;
 - `confirm_order.state` is `completed`.
 
-## Opt-in model-backed E2E
+The workflow creates container `workflow-retry-policy` in the storage account
+configured by `AzureWebJobsStorage`. A workflow-scoped blob under
+`orders/ORD-1001/incidents/` shows the simulated dependency state. Each failed
+Activity attempt is recorded before the retryable error is raised, so an
+at-least-once redelivery does not decrement the counter twice. The first task
+creates isolated state, so the documented prompt can be run concurrently or
+repeatedly.
 
-The E2E script covers the boundary that unit tests cannot:
+## Maintainer: opt-in model-backed E2E
+
+The script under `scripts/` is maintainer validation for the boundary that unit
+tests cannot cover. It is not required to understand or run the sample:
 
 ```text
 natural-language prompt → model → Skill resource → start_workflow

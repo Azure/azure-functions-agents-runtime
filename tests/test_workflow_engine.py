@@ -20,7 +20,7 @@ from azure_functions_agents.config.schema import (
 from azure_functions_agents.discovery.tools import discover_project_tools
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
-from azure_functions_agents.workflows import engine, integration
+from azure_functions_agents.workflows import engine, integration, policy
 from azure_functions_agents.workflows.context import (
     _workflow_task_idempotency_key,
     current_workflow_task_context,
@@ -1791,6 +1791,17 @@ def test_retry_policy_sample_plan_exercises_decorator_precedence() -> None:
     def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         task_id = payload["id"]
         tool_name = payload["tool"]
+        if tool_name == "open_inventory_incident":
+            return {
+                "id": task_id,
+                "ok": True,
+                "result": {
+                    "order_id": "ORD-1001",
+                    "incident_id": "5d29a9de372abe7a92de8f3c85f7cdf3",
+                    "status": "active",
+                    "failures_remaining": 2,
+                },
+            }
         if tool_name == "reserve_inventory":
             if payload["attempt"] < 3:
                 return _activity_failure(task_id=task_id)
@@ -1801,8 +1812,7 @@ def test_retry_policy_sample_plan_exercises_decorator_precedence() -> None:
                     "order_id": "ORD-1001",
                     "sku": "trail-shoes-blue-42",
                     "reserved": True,
-                    "attempt": payload["attempt"],
-                    "idempotency_key": payload["idempotency_key"],
+                    "transient_failures_observed": 2,
                 },
             }
         handler = tools_by_name[tool_name].handler
@@ -1830,7 +1840,7 @@ def test_retry_policy_sample_plan_exercises_decorator_precedence() -> None:
     assert result["results"]["confirm_order"] == {
         "order_id": "ORD-1001",
         "status": "confirmed",
-        "reservation_attempt": 3,
+        "transient_failures_observed": 2,
     }
     assert context.statuses[-1]["schema_version"] == 3
 
@@ -3139,7 +3149,7 @@ async def test_policy_activity_emits_safe_actual_delivery_telemetry(
         starts.append(attributes)
         return _Recorder()
 
-    monkeypatch.setattr(engine, "workflow_task_activity_telemetry", telemetry)
+    monkeypatch.setattr(policy, "workflow_task_activity_telemetry", telemetry)
 
     def handler(args: dict[str, Any]) -> dict[str, bool]:
         if mode == "retry":
@@ -3170,7 +3180,7 @@ async def test_policy_free_activity_emits_no_workflow_task_telemetry(
 ) -> None:
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
-        engine,
+        policy,
         "workflow_task_activity_telemetry",
         lambda attributes: calls.append(attributes),
     )
@@ -3211,7 +3221,7 @@ async def test_cancelled_activity_records_completion_and_exceptional_span_exit(
             completions.append(kwargs)
 
     monkeypatch.setattr(
-        engine,
+        policy,
         "workflow_task_activity_telemetry",
         lambda _attributes: _Recorder(),
     )

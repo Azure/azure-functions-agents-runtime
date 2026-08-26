@@ -2,11 +2,21 @@
   "version": 1,
   "tasks": [
     {
+      "id": "open_inventory_incident",
+      "type": "tool",
+      "tool": "open_inventory_incident",
+      "args": {"order_id": "ORD-1001"},
+      "depends_on": []
+    },
+    {
       "id": "load_order",
       "type": "tool",
       "tool": "load_order",
-      "args": {"order_id": "ORD-1001"},
-      "depends_on": []
+      "args": {
+        "order_id": "ORD-1001",
+        "incident": "${open_inventory_incident.result}"
+      },
+      "depends_on": ["open_inventory_incident"]
     },
     {
       "id": "reserve_inventory",
