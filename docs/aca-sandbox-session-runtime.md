@@ -128,6 +128,11 @@ The `done` event means output is complete; the session can remain `settling`
 until the status URL reports `phase=terminal`, which clients must observe before
 submitting another run with the same session key.
 
+The built-in chat UI stores those response headers, polls `Location` after
+`done`, and disables the composer until `phase=terminal`. For a linked `504`,
+it keeps the session blocked while polling the returned run status; **New
+session** remains available if the caller chooses not to recover that run.
+
 ## Egress and credentials
 
 Every sandbox is created with `default_action="Deny"` and
