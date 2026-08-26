@@ -201,6 +201,7 @@ def test_sample_runtime_files_and_isolation_settings() -> None:
     assert settings["Values"]["TOKEN_BENCHMARK_CONTAINER"] == (
         "token-benchmark-reports"
     )
+    assert settings["Values"]["AZURE_FUNCTIONS_AGENTS_DETAILED_TOKEN_USAGE"] == "true"
 
 
 def test_usage_parser_requires_exact_expected_primary() -> None:
@@ -210,25 +211,37 @@ def test_usage_parser_requires_exact_expected_primary() -> None:
         '"execution_role":"primary","input_tokens":100,"model":"gpt-test",'
         '"model_publisher":"openai","output_tokens":20,"provider":"foundry"}\n'
     )
+    detail = (
+        'Agent token usage detail: {"agent_name":"baseline",'
+        '"event_name":"agent_token_usage_detail","execution_role":"primary",'
+        '"model":"gpt-test","model_publisher":"openai","provider":"foundry",'
+        '"schema_version":1,"usage_details":{"input_token_count":100,'
+        '"openai.cached_input_tokens":25,"output_token_count":20,'
+        '"total_token_count":120}}\n'
+    )
     usage = benchmark.select_trial_usage(
-        [f"[2026-08-25] {expected.rstrip()}[2026-08-25] next host log\n"],
+        [
+            f"[2026-08-25] {expected.rstrip()}[2026-08-25] next host log\n",
+            f"[2026-08-25] {detail.rstrip()}[2026-08-25] next host log\n",
+        ],
         expected_agent="baseline",
         workflow_mode=False,
     )
     assert usage.total_tokens == 120
     assert usage.model == "gpt-test"
+    assert usage.usage_details["openai.cached_input_tokens"] == 25
 
     for lines, match in (
         ([], "found 0"),
-        ([expected, expected], "found 2"),
+        ([expected, expected, detail], "found 2"),
         (
             [
-                expected.replace(
-                    '"agent_name":"baseline"', '"agent_name":"workflow"'
-                )
+                expected.replace('"agent_name":"baseline"', '"agent_name":"workflow"'),
+                detail,
             ],
             "other agent",
         ),
+        ([expected], "detailed usage record"),
     ):
         try:
             benchmark.select_trial_usage(
@@ -242,6 +255,12 @@ def test_usage_parser_requires_exact_expected_primary() -> None:
             raise AssertionError("invalid usage interval was accepted")
 
 
+def test_benchmark_uses_runtime_from_current_checkout() -> None:
+    benchmark = _load_benchmark()
+
+    assert Path(__file__).resolve().parents[1] / "src" == benchmark.RUNTIME_SRC
+
+
 def test_usage_parser_rejects_workflow_subagent_record() -> None:
     benchmark = _load_benchmark()
     primary = (
@@ -252,10 +271,16 @@ def test_usage_parser_rejects_workflow_subagent_record() -> None:
         'Agent token usage: {"agent_name":"analyst","event_name":"agent_token_usage",'
         '"execution_role":"workflow_subagent","input_tokens":10,"output_tokens":5}\n'
     )
+    detail = (
+        'Agent token usage detail: {"agent_name":"workflow",'
+        '"event_name":"agent_token_usage_detail","execution_role":"primary",'
+        '"schema_version":1,"usage_details":{"input_token_count":100,'
+        '"output_token_count":20}}\n'
+    )
 
     try:
         benchmark.select_trial_usage(
-            [primary, subagent],
+            [primary, subagent, detail],
             expected_agent="workflow",
             workflow_mode=True,
         )

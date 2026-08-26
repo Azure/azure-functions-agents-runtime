@@ -27,10 +27,12 @@ from azure.storage.queue import QueueClient, TextBase64EncodePolicy
 
 SAMPLE_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_SRC = SAMPLE_ROOT / "src"
+RUNTIME_SRC = SAMPLE_ROOT.parents[1] / "src"
 RESULTS_DIR = SAMPLE_ROOT / ".benchmark-results"
 CONTAINER_NAME = "token-benchmark-reports"
 TASK_HUB = "tokenbenchmark"
 USAGE_PREFIX = "Agent token usage: "
+USAGE_DETAIL_PREFIX = "Agent token usage detail: "
 READY_MARKERS = (
     "worker process started and initialized",
     "host started",
@@ -71,6 +73,7 @@ class Usage:
     output_tokens: int
     provider: str | None
     model: str | None
+    usage_details: dict[str, int]
 
     @property
     def total_tokens(self) -> int:
@@ -87,6 +90,7 @@ class ModeResult:
     total_tokens: int | None = None
     provider: str | None = None
     model: str | None = None
+    usage_details: dict[str, int] | None = None
     report_blob: str | None = None
     report_json: dict[str, Any] | None = None
     error: str | None = None
@@ -115,6 +119,20 @@ def parse_usage_line(line: str) -> Mapping[str, Any] | None:
         raise RuntimeError(f"invalid token usage JSON: {raw!r}") from exc
     if not isinstance(payload, dict):
         raise RuntimeError("token usage payload must be a JSON object")
+    return payload
+
+
+def parse_usage_detail_line(line: str) -> Mapping[str, Any] | None:
+    marker = line.find(USAGE_DETAIL_PREFIX)
+    if marker < 0:
+        return None
+    raw = line[marker + len(USAGE_DETAIL_PREFIX) :].strip()
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid detailed token usage JSON: {raw!r}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("detailed token usage payload must be a JSON object")
     return payload
 
 
@@ -157,6 +175,53 @@ def select_trial_usage(
         )
 
     payload = primaries[0]
+    detail_payloads = [
+        detail
+        for line in lines
+        if (detail := parse_usage_detail_line(line)) is not None
+    ]
+    detail_primaries = [
+        detail
+        for detail in detail_payloads
+        if detail.get("execution_role") == "primary"
+        and detail.get("agent_name") == expected_agent
+    ]
+    other_detail_primaries = [
+        detail
+        for detail in detail_payloads
+        if detail.get("execution_role") == "primary"
+        and detail.get("agent_name") != expected_agent
+    ]
+    if other_detail_primaries:
+        names = sorted(
+            {str(detail.get("agent_name")) for detail in other_detail_primaries}
+        )
+        raise RuntimeError(
+            f"trial interval contains detailed usage for other primary agent(s): {names}"
+        )
+    if len(detail_primaries) != 1:
+        raise RuntimeError(
+            f"expected exactly one primary detailed usage record for {expected_agent!r}; "
+            f"found {len(detail_primaries)}"
+        )
+    detail_payload = detail_primaries[0]
+    if (
+        detail_payload.get("event_name") != "agent_token_usage_detail"
+        or detail_payload.get("schema_version") != 1
+    ):
+        raise RuntimeError("detailed token usage record has an unsupported schema")
+    raw_usage_details = detail_payload.get("usage_details")
+    if not isinstance(raw_usage_details, dict) or any(
+        not isinstance(key, str)
+        or not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+        for key, value in raw_usage_details.items()
+    ):
+        raise RuntimeError("detailed token usage dimensions are invalid")
+    usage_details = {
+        str(key): int(value) for key, value in raw_usage_details.items()
+    }
     input_tokens = payload.get("input_tokens")
     output_tokens = payload.get("output_tokens")
     if (
@@ -168,6 +233,10 @@ def select_trial_usage(
         or output_tokens < 0
     ):
         raise RuntimeError("provider did not report valid input and output token counts")
+    if usage_details.get("input_token_count") != input_tokens:
+        raise RuntimeError("detailed input token count does not match the stable event")
+    if usage_details.get("output_token_count") != output_tokens:
+        raise RuntimeError("detailed output token count does not match the stable event")
     return Usage(
         agent_name=expected_agent,
         execution_role="primary",
@@ -177,6 +246,7 @@ def select_trial_usage(
             str(payload["provider"]) if isinstance(payload.get("provider"), str) else None
         ),
         model=str(payload["model"]) if isinstance(payload.get("model"), str) else None,
+        usage_details=usage_details,
     )
 
 
@@ -330,6 +400,7 @@ def _temporary_app(
                 "TASKHUB_NAME": TASK_HUB,
                 "TOKEN_BENCHMARK_CONTAINER": CONTAINER_NAME,
                 "ENABLE_SENSITIVE_DATA": "false",
+                "AZURE_FUNCTIONS_AGENTS_DETAILED_TOKEN_USAGE": "true",
             }
         )
         (app_dir / "local.settings.json").write_text(
@@ -347,9 +418,18 @@ class FunctionHost:
         self._lines: list[str] = []
         self._condition = threading.Condition()
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        environment = dict(os.environ)
+        existing_pythonpath = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = os.pathsep.join(
+            [
+                str(RUNTIME_SRC),
+                *([existing_pythonpath] if existing_pythonpath else []),
+            ]
+        )
         self._process = subprocess.Popen(
             [func, "start", "--port", str(_free_port())],
             cwd=app_dir,
+            env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -409,7 +489,10 @@ class FunctionHost:
         while time.monotonic() < deadline:
             lines = self.lines_since(mark)
             usage_count = sum(parse_usage_line(line) is not None for line in lines)
-            if usage_count:
+            detail_count = sum(
+                parse_usage_detail_line(line) is not None for line in lines
+            )
+            if usage_count and detail_count:
                 time.sleep(0.5)
                 return select_trial_usage(
                     self.lines_since(mark),
@@ -527,6 +610,7 @@ def _run_mode(
         result.total_tokens = usage.total_tokens
         result.provider = usage.provider
         result.model = usage.model
+        result.usage_details = usage.usage_details
         result.report_json = report
     except Exception as exc:
         result.elapsed_ms = round((time.monotonic() - started) * 1000)

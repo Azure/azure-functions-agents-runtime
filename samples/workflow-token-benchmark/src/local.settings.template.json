@@ -8,6 +8,7 @@
     "AZURE_FUNCTIONS_AGENTS_PROVIDER": "foundry",
     "FOUNDRY_PROJECT_ENDPOINT": "",
     "FOUNDRY_MODEL": "gpt-5.4-mini",
+    "AZURE_FUNCTIONS_AGENTS_DETAILED_TOKEN_USAGE": "true",
     "TOKEN_BENCHMARK_CONTAINER": "token-benchmark-reports"
   }
 }

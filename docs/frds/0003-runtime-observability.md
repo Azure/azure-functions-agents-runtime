@@ -229,7 +229,7 @@ values only.
   opt-in states and across non-streaming, streaming, delegate, and Workflow Sub Agent paths.
 - [x] Follow-up failure isolation: malformed detail input or detail serialization failure cannot
   suppress the stable event; detail uses a distinct prefix and `schema_version: 1`.
-- [ ] Follow-up E2E: the Dynamic Workflow token benchmark captures detailed records and reports
+- [x] Follow-up E2E: the Dynamic Workflow token benchmark captures detailed records and reports
   provider dimensions without changing paired canonical-report equality.
 
 ## 7. Docs impact
@@ -244,7 +244,7 @@ values only.
 - [x] Follow-up: document `AZURE_FUNCTIONS_AGENTS_DETAILED_TOKEN_USAGE`, its event schema, volume,
   provider variability, and aggregate-per-MAF-invocation limitation in `docs/observability.md`.
 - [x] Follow-up: update the `runner.py` module-map entry in `docs/architecture.md`.
-- [ ] Follow-up: update the workflow token benchmark methodology and PR results with the detailed E2E
+- [x] Follow-up: update the workflow token benchmark methodology and PR results with the detailed E2E
   analysis.
 
 ## 8. Status & sign-off

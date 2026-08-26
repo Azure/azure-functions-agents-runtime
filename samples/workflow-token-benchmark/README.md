@@ -51,7 +51,7 @@ byte-for-byte equal.
 
 ## Measurement method
 
-PR #147 added one local system log per completed MAF invocation:
+PR #147 added one compact local system log per completed MAF invocation:
 
 ```text
 Agent token usage: {"agent_name":"...","input_tokens":...,"output_tokens":...}
@@ -59,7 +59,16 @@ Agent token usage: {"agent_name":"...","input_tokens":...,"output_tokens":...}
 
 The logger is under `azure.functions.*`, so these records appear in local Azure
 Functions Core Tools output but are not exported to Application Insights
-`AppTraces`. The benchmark therefore captures local host stdout.
+`AppTraces`. This sample also opts in to the runtime's versioned detail record:
+
+```text
+Agent token usage detail: {"schema_version":1,"usage_details":{...}}
+```
+
+The detail object preserves every non-negative integer dimension reported by MAF,
+including provider-specific cache or reasoning fields when available. The
+benchmark captures both records from local host stdout and stores the detail
+mapping with each mode result.
 
 Attribution is deliberately fail-closed:
 
@@ -67,9 +76,11 @@ Attribution is deliberately fail-closed:
 - `maxDequeueCount` is 1, so a failed message is not retried on the input queue;
 - trials run serially and the next message is not submitted until the current
   report and usage record arrive;
-- baseline requires exactly one `primary` usage record from the baseline agent;
-- workflow requires exactly one `primary` record and no `workflow_subagent`
-  record;
+- baseline requires exactly one compact and one detailed `primary` usage record
+  from the baseline agent;
+- workflow requires exactly one compact and one detailed `primary` record and no
+  `workflow_subagent` compact record;
+- detailed input/output counts must match the stable compact event;
 - missing, duplicate, wrong-agent, or forbidden records invalidate the pair
   instead of being guessed or discarded.
 
@@ -108,7 +119,9 @@ python -m pip install -r requirements.txt
 
 The E2E harness starts isolated Azurite and Durable Task Scheduler containers,
 starts the Functions host, runs paired trials, validates reports, and cleans up
-only resources it created.
+only resources it created. It prepends this checkout's `src/` directory to the
+worker `PYTHONPATH`, so another worktree's editable install cannot change the
+runtime under test.
 
 ```powershell
 Set-Location samples\workflow-token-benchmark
@@ -129,5 +142,6 @@ entire series, and retain unfavorable sizes and failures.
 
 Provider-reported input and output totals are authoritative. This initial sample
 does not estimate instruction, history, tool-schema, or tool-result components.
-Detailed opt-in runtime analysis is intentionally deferred until this benchmark
-demonstrates which missing dimensions are needed.
+Detailed dimensions are MAF invocation aggregates, and available keys vary by
+provider, model, and SDK version. Missing cache/reasoning fields are not treated
+as zero or estimated.
