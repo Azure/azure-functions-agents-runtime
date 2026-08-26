@@ -6,7 +6,7 @@ import json
 import math
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
-import azure.durable_functions as df  # type: ignore[import-untyped]
+import azure.durable_functions as df
 from azure.durable_functions.models.Task import TaskBase  # type: ignore[import-untyped]
 
 if TYPE_CHECKING:
