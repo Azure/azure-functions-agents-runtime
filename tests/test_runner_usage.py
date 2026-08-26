@@ -42,6 +42,21 @@ def _usage_payloads(caplog: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _usage_detail_payload(record: logging.LogRecord) -> dict[str, Any]:
+    prefix = "Agent token usage detail: "
+    message = record.getMessage()
+    assert message.startswith(prefix)
+    return json.loads(message.removeprefix(prefix))
+
+
+def _usage_detail_payloads(caplog: Any) -> list[dict[str, Any]]:
+    return [
+        _usage_detail_payload(record)
+        for record in caplog.records
+        if record.getMessage().startswith("Agent token usage detail: ")
+    ]
+
+
 _USAGE_FIELDS = {
     "agent_name",
     "event_name",
@@ -104,6 +119,60 @@ def test_normalize_usage_details_keeps_only_non_negative_integer_counts() -> Non
         }
     ) == {}
     assert runner._normalize_usage_details(None) == {}
+
+
+def test_normalize_detailed_usage_details_preserves_valid_maf_dimensions() -> None:
+    assert runner._normalize_detailed_usage_details(
+        {
+            "input_token_count": 10,
+            "output_token_count": 8,
+            "total_token_count": 18,
+            "openai.cached_input_tokens": 4,
+            "openai.reasoning_tokens": 5,
+            "zero": 0,
+            "boolean": True,
+            "negative": -1,
+            "string": "7",
+            1: 2,
+        }
+    ) == {
+        "input_token_count": 10,
+        "openai.cached_input_tokens": 4,
+        "openai.reasoning_tokens": 5,
+        "output_token_count": 8,
+        "total_token_count": 18,
+        "zero": 0,
+    }
+    assert runner._normalize_detailed_usage_details(None) == {}
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "Y"])
+def test_resolve_detailed_token_usage_accepts_true_values(
+    monkeypatch: Any, value: str
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_DETAILED_TOKEN_USAGE", value)
+
+    assert runner._resolve_detailed_token_usage() is True
+
+
+@pytest.mark.parametrize("value", ["", "false", "FALSE", "0", "no", "N"])
+def test_resolve_detailed_token_usage_defaults_to_false(
+    monkeypatch: Any, value: str
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_DETAILED_TOKEN_USAGE", value)
+
+    assert runner._resolve_detailed_token_usage() is False
+
+
+def test_resolve_detailed_token_usage_warns_and_disables_invalid_value(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_DETAILED_TOKEN_USAGE", "sometimes")
+
+    with caplog.at_level(logging.WARNING, logger="azure.functions.AgentRuntime"):
+        assert runner._resolve_detailed_token_usage() is False
+
+    assert "Ignoring invalid AZURE_FUNCTIONS_AGENTS_DETAILED_TOKEN_USAGE value" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -218,6 +287,101 @@ def test_usage_recorder_logs_available_token_counts_independently(caplog: Any) -
     _assert_exact_usage_fields(payload)
     assert payload["input_tokens"] == 10
     assert payload["output_tokens"] is None
+
+
+def test_usage_recorder_detailed_event_is_disabled_by_default(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    monkeypatch.setattr(runner, "_DETAILED_TOKEN_USAGE_ENABLED", False)
+    recorder = runner._AgentUsageRecorder(agent_name="main", execution_role="primary")
+
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        recorder.emit({"input_token_count": 10, "output_token_count": 3})
+
+    assert len(_usage_payloads(caplog)) == 1
+    assert _usage_detail_payloads(caplog) == []
+
+
+def test_usage_recorder_emits_versioned_detailed_event_when_enabled(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    monkeypatch.setattr(runner, "_DETAILED_TOKEN_USAGE_ENABLED", True)
+    recorder = runner._AgentUsageRecorder(
+        agent_name="billing",
+        execution_role="workflow_subagent",
+        inference_target=InferenceTarget("foundry", "gpt-test"),
+    )
+
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        recorder.emit(
+            {
+                "input_token_count": 10,
+                "output_token_count": 3,
+                "total_token_count": 13,
+                "openai.cached_input_tokens": 4,
+                "openai.reasoning_tokens": 2,
+                "ignored": "5",
+            }
+        )
+        recorder.emit()
+
+    canonical = _usage_payloads(caplog)
+    assert len(canonical) == 1
+    _assert_exact_usage_fields(canonical[0])
+    details = _usage_detail_payloads(caplog)
+    assert details == [
+        {
+            "agent_name": "billing",
+            "event_name": "agent_token_usage_detail",
+            "execution_role": "workflow_subagent",
+            "model": "gpt-test",
+            "model_publisher": None,
+            "provider": "foundry",
+            "schema_version": 1,
+            "usage_details": {
+                "input_token_count": 10,
+                "openai.cached_input_tokens": 4,
+                "openai.reasoning_tokens": 2,
+                "output_token_count": 3,
+                "total_token_count": 13,
+            },
+        }
+    ]
+
+
+def test_usage_recorder_detailed_event_reports_unavailable_usage(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    monkeypatch.setattr(runner, "_DETAILED_TOKEN_USAGE_ENABLED", True)
+    recorder = runner._AgentUsageRecorder(agent_name="main", execution_role="primary")
+
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        recorder.emit()
+
+    assert _usage_detail_payloads(caplog)[0]["usage_details"] == {}
+
+
+def test_usage_recorder_detail_failure_does_not_suppress_canonical_event(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    real_dumps = json.dumps
+
+    def fail_detail(payload: Any, *args: Any, **kwargs: Any) -> str:
+        if payload.get("event_name") == "agent_token_usage_detail":
+            raise TypeError("detail serialization failed")
+        return real_dumps(payload, *args, **kwargs)
+
+    monkeypatch.setattr(runner, "_DETAILED_TOKEN_USAGE_ENABLED", True)
+    monkeypatch.setattr(runner.json, "dumps", fail_detail)
+    recorder = runner._AgentUsageRecorder(agent_name="main", execution_role="primary")
+
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        recorder.emit({"input_token_count": 4, "output_token_count": 2})
+
+    payloads = _usage_payloads(caplog)
+    assert len(payloads) == 1
+    assert payloads[0]["input_tokens"] == 4
+    assert _usage_detail_payloads(caplog) == []
 
 
 def test_usage_recorder_never_changes_agent_behavior_when_logging_fails(monkeypatch: Any) -> None:
