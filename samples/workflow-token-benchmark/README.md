@@ -132,6 +132,73 @@ Use `--service-counts 1 3 5 10 20` and `--evidence-lines 40` to control the
 series. Raw JSON results are written under `.benchmark-results/`, which is
 ignored by Git.
 
+### Manual queue submission
+
+To see the moving parts separately, start the dependencies and Functions host
+yourself, then use `send_trial.py`. The sender only creates/submits queue messages;
+it does not start or stop the host or emulators.
+
+Terminal 1:
+
+```powershell
+docker run --rm --name token-benchmark-azurite `
+  -p 10000:10000 -p 10001:10001 -p 10002:10002 `
+  mcr.microsoft.com/azure-storage/azurite:latest azurite `
+  --silent --skipApiVersionCheck --blobHost 0.0.0.0 `
+  --queueHost 0.0.0.0 --tableHost 0.0.0.0
+```
+
+Terminal 2:
+
+```powershell
+docker run --rm --name token-benchmark-dts `
+  -e DTS_TASK_HUB_NAMES=tokenbenchmark -p 8080:8080 -p 8082:8082 `
+  mcr.microsoft.com/dts/dts-emulator:latest
+```
+
+Terminal 3:
+
+```powershell
+Set-Location samples\workflow-token-benchmark\src
+.\.venv\Scripts\Activate.ps1
+func start 2>&1 | Tee-Object -FilePath .\host.log
+```
+
+Terminal 4:
+
+```powershell
+Set-Location samples\workflow-token-benchmark
+.\src\.venv\Scripts\Activate.ps1
+python scripts\send_trial.py --mode baseline --trial-id manual-comparison `
+  --service-count 3
+# Wait for the baseline report/token log before submitting the next mode.
+python scripts\send_trial.py --mode workflow --trial-id manual-comparison `
+  --service-count 3
+```
+
+For a quick demonstration, `--mode both` submits both queues together:
+
+```powershell
+python scripts\send_trial.py --mode both --trial-id manual-comparison `
+  --service-count 3 --evidence-lines 40
+```
+
+Token counts are not written into a project directory by the runtime. In manual
+mode, watch `func start` or search the captured `src\host.log`:
+
+```powershell
+Select-String -Path src\host.log -Pattern "Agent token usage"
+```
+
+- `Agent token usage: {...}` contains stable input/output totals.
+- `Agent token usage detail: {...}` contains `usage_details`, including cache or
+  reasoning dimensions when the provider reports them.
+- The terminal report is stored in Azurite under
+  `token-benchmark-reports/runs/<trial-id>/<mode>.json`.
+- In automatic `benchmark.py` mode, parsed token counts are saved in
+  `.benchmark-results\benchmark-*.json`, and complete host output is saved in
+  `.benchmark-results\host-*.log`.
+
 ## Interpreting results
 
 A useful result reports the full curve. Dynamic Workflow may lose at one service,

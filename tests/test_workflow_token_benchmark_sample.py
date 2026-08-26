@@ -40,6 +40,17 @@ def _load_benchmark() -> Any:
     return module
 
 
+def _load_sender() -> Any:
+    module_name = "workflow_token_benchmark_sender_test"
+    script = SAMPLE_SRC.parent / "scripts" / "send_trial.py"
+    spec = importlib.util.spec_from_file_location(module_name, script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_sample_declares_paired_queue_agents() -> None:
     specs = {Path(spec.source_file).name: spec for spec in load_agent_specs(SAMPLE_SRC)}
 
@@ -301,6 +312,47 @@ def test_benchmark_uses_runtime_from_current_checkout() -> None:
     benchmark = _load_benchmark()
 
     assert Path(__file__).resolve().parents[1] / "src" == benchmark.RUNTIME_SRC
+
+
+def test_manual_sender_builds_matching_queue_requests() -> None:
+    sender = _load_sender()
+
+    requests = sender.build_requests(
+        trial_id="manual-comparison",
+        service_count=2,
+        evidence_lines=40,
+        modes=("baseline", "workflow"),
+    )
+
+    assert requests == [
+        (
+            "baseline",
+            {
+                "trial_id": "manual-comparison",
+                "services": ["checkout-api-00", "checkout-api-01"],
+                "evidence_lines": 40,
+                "report_blob": "runs/manual-comparison/baseline.json",
+            },
+        ),
+        (
+            "workflow",
+            {
+                "trial_id": "manual-comparison",
+                "services": ["checkout-api-00", "checkout-api-01"],
+                "evidence_lines": 40,
+                "report_blob": "runs/manual-comparison/workflow.json",
+            },
+        ),
+    ]
+
+
+def test_manual_sender_expands_development_storage_connection() -> None:
+    sender = _load_sender()
+
+    connection = sender._development_storage_connection()
+
+    assert "BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1" in connection
+    assert "QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1" in connection
 
 
 def test_host_environment_prepends_runtime_from_current_checkout(
