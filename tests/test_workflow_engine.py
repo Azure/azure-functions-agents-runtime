@@ -1751,18 +1751,18 @@ def test_incident_sample_plan_runs_through_dynamic_scheduler() -> None:
     assert final_status["nodes"]["summarize"] == {"state": "completed"}
 
 
-def test_retry_policy_sample_plan_exercises_decorator_precedence() -> None:
-    sample_root = (
-        Path(__file__).resolve().parents[1]
-        / "samples"
+def test_retry_policy_e2e_plan_exercises_decorator_precedence() -> None:
+    sample_src = (
+        Path(__file__).resolve().parent
+        / "endtoend"
+        / "apps"
         / "workflow-retry-policy"
     )
-    sample_src = sample_root / "src"
     raw_plan = json.loads(
         (
             sample_src
             / "skills"
-            / "resilient-order-recovery"
+            / "retry-policy-e2e"
             / "references"
             / "order-recovery-plan.json"
         ).read_text(encoding="utf-8")
@@ -1791,17 +1791,6 @@ def test_retry_policy_sample_plan_exercises_decorator_precedence() -> None:
     def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         task_id = payload["id"]
         tool_name = payload["tool"]
-        if tool_name == "open_inventory_incident":
-            return {
-                "id": task_id,
-                "ok": True,
-                "result": {
-                    "order_id": "ORD-1001",
-                    "incident_id": "5d29a9de372abe7a92de8f3c85f7cdf3",
-                    "status": "active",
-                    "failures_remaining": 2,
-                },
-            }
         if tool_name == "reserve_inventory":
             if payload["attempt"] < 3:
                 return _activity_failure(task_id=task_id)
@@ -1812,7 +1801,6 @@ def test_retry_policy_sample_plan_exercises_decorator_precedence() -> None:
                     "order_id": "ORD-1001",
                     "sku": "trail-shoes-blue-42",
                     "reserved": True,
-                    "transient_failures_observed": 2,
                 },
             }
         handler = tools_by_name[tool_name].handler
@@ -1840,7 +1828,6 @@ def test_retry_policy_sample_plan_exercises_decorator_precedence() -> None:
     assert result["results"]["confirm_order"] == {
         "order_id": "ORD-1001",
         "status": "confirmed",
-        "transient_failures_observed": 2,
     }
     assert context.statuses[-1]["schema_version"] == 3
 

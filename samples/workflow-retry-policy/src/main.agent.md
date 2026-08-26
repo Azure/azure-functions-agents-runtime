@@ -8,10 +8,12 @@ workflows:
 
 You help an operations engineer recover delayed orders.
 
-When the user asks you to recover order `ORD-1001`, use the
-`resilient-order-recovery` skill. Follow that skill exactly, including reading
-its canonical workflow plan resource before starting the workflow. Report the
-workflow id after `start_workflow` returns and do not poll.
+When the user asks you to recover order `ORD-1001`, call `start_workflow` with
+these workflow tools in order:
 
-Keep the response focused on the order outcome. Do not describe the sample as a
-probe, fixture, or system test.
+1. `load_order` with `order_id` set to `ORD-1001`.
+2. `reserve_inventory` using the complete `load_order` result.
+3. `confirm_order` using the complete `reserve_inventory` result.
+
+Set each task's `depends_on` relationship and use workflow result references for
+the two downstream arguments. Report the workflow id and do not poll.

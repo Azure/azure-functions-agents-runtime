@@ -1,41 +1,62 @@
 # Workflow Retry Policy
 
-This sample tells one customer-facing story: an operations engineer recovers
-delayed order `ORD-1001` while its inventory reservation service is temporarily
-unavailable. The workflow records a simulated incident in Azure Blob Storage,
-loads the order, retries inventory reservation as the stored incident recovers,
-and confirms the order.
-
-The important behavior is policy precedence. The workflow plan asks for five
-attempts and a 30-second timeout, while the `reserve_inventory` tool author
-declares three attempts and a five-second timeout with `@workflow_tool`.
-Tool-author declarations win, so the reservation can make at most three
-attempts. The simulated dependency stores `failures_remaining` in Blob Storage;
-the first two calls decrement that state and report a transient failure, and
-the third succeeds. Failure is driven by the persisted counter; the runtime
-attempt number is recorded only to make Activity redelivery idempotent.
+This sample shows the normal customer setup for retrying a Dynamic Workflow
+task. An operations agent loads delayed order `ORD-1001`, reserves inventory,
+and confirms the order. The inventory tool reports two transient failures
+before succeeding on its third attempt.
 
 | Trigger | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
 |---|---|---|---|---|---|---|
-| HTTP | ✅ (workflow-safe) | | | ✅ | | ✅ |
+| HTTP | ✅ (workflow-safe) | | | | | ✅ |
 
-## Why the plan is a Skill resource
+## Configure retry on a workflow tool
 
-The canonical plan lives at
-[`src/skills/resilient-order-recovery/references/order-recovery-plan.json`](src/skills/resilient-order-recovery/references/order-recovery-plan.json).
-The Skill loads it on demand with `read_skill_resource`.
+The retry policy belongs directly on the operation whose transient failures are
+safe to retry:
 
-Keeping the JSON as a Skill resource matters for two reasons:
+```python
+@workflow_tool(
+    timeout="PT5S",
+    retry=WorkflowRetryPolicy(
+        max_attempts=3,
+        backoff=WorkflowRetryBackoff(
+            initial="PT1S",
+            multiplier=2.0,
+            max="PT4S",
+        ),
+    ),
+)
+def reserve_inventory(args: dict[str, Any]) -> dict[str, Any]:
+    ...
+```
 
-1. `main.agent.md` stays a readable user persona instead of embedding a large
-   system-test fixture.
-2. The precedence demonstration has one source of truth. If a model rewrites
-   the intentionally conflicting DAG policy, the sample no longer proves that
-   decorator policy is authoritative.
+When the dependency is temporarily unavailable, the handler raises the public
+retryable error:
 
-The resource is under `src/`, so it is deployed with the Function App and is
-available to the model at runtime. A repository path mentioned only in agent
-instructions would not make the file readable by the model.
+```python
+raise WorkflowRetryableError(
+    "inventory_temporarily_unavailable",
+    "Inventory reservation is temporarily unavailable.",
+)
+```
+
+No retry fields are required in the model-generated DAG. At workflow start, the
+runtime applies the `reserve_inventory` decorator policy to that task. A DAG may
+instead provide an `execution.retry` policy when the tool author has not
+declared one; see [Workflow task execution policy](../../docs/workflows.md#task-execution-policy).
+
+## Sample-only failure simulation
+
+Real tools fail because their external dependency is unavailable. This sample
+needs a repeatable failure both locally and on Azure, so `reserve_inventory`
+stores a workflow-scoped incident counter in the Storage account configured by
+`AzureWebJobsStorage`. The first two deliveries decrement the counter and raise
+`WorkflowRetryableError`; the third succeeds.
+
+The Blob state and its concurrency handling are only a deterministic substitute
+for a transient inventory service. **Blob Storage and an incident-setup task are
+not required to use retry.** The failure simulation is entirely inside the tool
+and does not appear in the agent-authored workflow.
 
 ## Run locally
 
@@ -47,50 +68,14 @@ Open <http://localhost:7071/agents/main/> and ask:
 
 > Recover delayed order ORD-1001 and complete it safely.
 
-The agent should load the `resilient-order-recovery` Skill, read the canonical
-plan resource, and call `start_workflow`. The workflow should finish
-`Completed`. In status schema v3:
-
-- `reserve_inventory.attempt` is `3`;
-- `reserve_inventory.max_attempts` is `3`, not the DAG's requested `5`;
-- `confirm_order.state` is `completed`.
-
-The workflow creates container `workflow-retry-policy` in the storage account
-configured by `AzureWebJobsStorage`. A workflow-scoped blob under
-`orders/ORD-1001/incidents/` shows the simulated dependency state. Each failed
-Activity attempt is recorded before the retryable error is raised, so an
-at-least-once redelivery does not decrement the counter twice. The first task
-creates isolated state, so the documented prompt can be run concurrently or
-repeatedly.
-
-## Maintainer: opt-in model-backed E2E
-
-The script under `scripts/` is maintainer validation for the boundary that unit
-tests cannot cover. It is not required to understand or run the sample:
+The agent uses its ordinary instructions to generate a three-task DAG:
 
 ```text
-natural-language prompt → model → Skill resource → start_workflow
-→ Durable execution → terminal status
+load_order → reserve_inventory → confirm_order
 ```
 
-It is opt-in because it requires a real Foundry deployment and credentials.
-Set both uniquely named variables:
+The workflow should finish `Completed`. In status schema v3:
 
-```powershell
-$env:AZURE_FUNCTIONS_AGENTS_SAMPLE_E2E_FOUNDRY_PROJECT_ENDPOINT = "https://..."
-$env:AZURE_FUNCTIONS_AGENTS_SAMPLE_E2E_FOUNDRY_MODEL = "<deployment-name>"
-python scripts/run-e2e.py
-```
-
-If both variables are absent, the script reports `SKIPPED` and exits zero. If
-only one is set, it fails with a configuration error. When opted in, the script:
-
-1. refuses to overwrite an existing `src/local.settings.json`;
-2. creates ignored local settings from the two environment variables;
-3. reuses a reachable Azurite or starts its own local Azurite process;
-4. starts the Functions host on a free local port;
-5. submits the documented natural-language prompt and validates the Skill
-   resource calls and terminal workflow status;
-6. stops only processes it started and removes only settings/data it created.
-
-Run `az login` first so `DefaultAzureCredential` can authenticate to Foundry.
+- `reserve_inventory.attempt` is `3`;
+- `reserve_inventory.max_attempts` is `3`;
+- `confirm_order.state` is `completed`.

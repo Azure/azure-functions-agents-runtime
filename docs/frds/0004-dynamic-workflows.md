@@ -1597,7 +1597,8 @@ replay duplicates.
 | 81 | Final implementation-contract clarifications | Leave details to implementation / define replay-safe public contracts before coding | Make authored `execution` presence the policy-aware switch; specify status v3 ownership/counts/nullability, decimal floor backoff precomputation, bounded error codes/messages, orchestrator-side-only cancellation, policy-aware Sub Agent clamping, async dual decorators, and the sync-timeout concurrency caveat | Agent, final architecture review | 2026-08-23 |
 | 82 | Execution-policy sample design and validation | Add a system-test mode to `workflow-incident-triage` / create a focused user-story sample / document only | Extract the policy demonstration into a dedicated retry sample with one order-recovery story. Keep its canonical DAG as a deployed Skill resource instead of duplicating JSON in agent instructions, and require opt-in Foundry E2E across natural language, Skill resource loading, tool-call generation, Durable execution, and terminal status. Re-run the incident-triage sample after extraction. | Human (TsuyoshiUshio) | 2026-08-24 |
 | 83 | Retry implementation boundary after Durable Python 2.x spike | Keep retry logic distributed in the engine / adopt preview 2.x with per-node sub-orchestrations / preserve Option A behavior behind explicit internal contracts | Keep runtime-managed selective retry for the current release because preview 2.x cannot preserve attempt context, retry-wait status, structured exhaustion details, or cooperative cancellation. Extract policy-aware Activity execution, outcomes, and retry decisions into `workflows/policy.py`; use strict Pydantic only at the Activity boundary and retain TypedDict/plain JSON plus visible Durable side effects in the replay-sensitive orchestrator. Do not add per-node sub-orchestrations now. Reassess replacing the scheduler when stable 2.x can satisfy the recorded observable contract or after explicitly approving contract changes. | Human (TsuyoshiUshio) and Agent, informed by preserved 2.x spike | 2026-08-25 |
-| 84 | Retry sample transient-dependency simulation | Branch on workflow attempt metadata / keep an E2E-only fixture / persist simulated dependency state externally | Make the customer sample persist an inventory incident in Azure Blob Storage. A setup task resets `failures_remaining`; reservation calls update that external state and raise the public retryable error while the dependency remains unavailable. Keep attempt-count and precedence assertions in tests/status rather than coupling business-tool behavior to scheduler internals. | Human (TsuyoshiUshio) and Agent | 2026-08-26 |
+| 84 | Retry sample transient-dependency simulation | Branch on workflow attempt metadata / keep an E2E-only fixture / persist simulated dependency state externally | Make the customer sample's reservation tool lazily persist a workflow-scoped inventory incident in Azure Blob Storage and raise the public retryable error while that dependency state remains unavailable. Keep the simulation entirely inside the tool so customer-visible agent authoring contains no setup task or test-only state plumbing. | Human (TsuyoshiUshio) and Agent | 2026-08-26 |
+| 85 | Customer retry sample versus policy E2E | Keep the fixed Skill/DAG in the sample / remove precedence coverage / separate customer authoring from the deterministic fixture | Make `samples/workflow-retry-policy` show ordinary model-generated DAG authoring plus one decorator retry policy. Move the canonical Skill resource, intentionally conflicting DAG policy, attempt-driven deterministic failure, and model/status precedence assertions into a purpose-built app and pytest under `tests/endtoend`. | Human (TsuyoshiUshio) and Agent | 2026-08-26 |
 
 ## 6. Test plan
 
@@ -1633,13 +1634,12 @@ replay duplicates.
 - [x] Sample tests:
   - keep `tests/test_incident_tools.py` focused on the incident-triage story after
     extracting execution-policy probes;
-  - add focused contracts for the dedicated retry sample's tools, canonical
-    Skill resource, and decorator-over-DAG policy demonstration.
-- [x] Model-backed sample E2E:
-  - use uniquely named opt-in Foundry endpoint/model environment variables;
-  - have the dedicated sample script create ignored `local.settings.json` only
-    when opted in, refuse to overwrite user settings, and clean up only files
-    it created;
+  - add focused contracts for the dedicated retry sample's ordinary agent
+    instructions, decorator policy, and internal Blob-backed failure simulation.
+- [x] Model-backed repository E2E:
+  - keep the canonical Skill resource and deliberately conflicting DAG policy
+    under `tests/endtoend/apps/workflow-retry-policy`, not in the customer sample;
+  - use the official E2E provider overlay and Functions host harness;
   - prove natural-language prompt → Skill/resource tools → `start_workflow` →
     Durable terminal status, including three attempts under the authoritative
     decorator retry;

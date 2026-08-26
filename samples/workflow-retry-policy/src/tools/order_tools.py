@@ -22,7 +22,7 @@ _ORDER_ID = "ORD-1001"
 _CONTAINER = "workflow-retry-policy"
 _RETRY_POLICY = WorkflowRetryPolicy(
     max_attempts=3,
-    backoff=WorkflowRetryBackoff(initial="PT0S", multiplier=1.0, max="PT0S"),
+    backoff=WorkflowRetryBackoff(initial="PT1S", multiplier=2.0, max="PT4S"),
 )
 
 
@@ -51,13 +51,18 @@ def _write_incident(
     _incident_blob(incident_id).upload_blob(json.dumps(state), **options)
 
 
-def _create_incident(incident_id: str, state: dict[str, Any]) -> dict[str, Any]:
+def _load_or_create_incident(incident_id: str) -> tuple[dict[str, Any], str]:
+    initial = {
+        "order_id": _ORDER_ID,
+        "failures_remaining": 2,
+        "failed_attempts": [],
+        "status": "active",
+    }
     try:
-        _incident_blob(incident_id).upload_blob(json.dumps(state), overwrite=False)
+        _incident_blob(incident_id).upload_blob(json.dumps(initial), overwrite=False)
     except ResourceExistsError:
-        existing, _ = _read_incident(incident_id)
-        return existing
-    return state
+        pass
+    return _read_incident(incident_id)
 
 
 def _read_incident(incident_id: str) -> tuple[dict[str, Any], str]:
@@ -80,51 +85,16 @@ def _read_incident(incident_id: str) -> tuple[dict[str, Any], str]:
 
 @workflow_tool(
     description=(
-        "Open a simulated inventory-service incident for delayed order ORD-1001. "
-        "The incident state is stored in Azure Blob Storage and causes the next "
-        "two reservation calls to fail transiently. Args: {order_id: str}."
-    ),
-    retry=WorkflowRetryPolicy(max_attempts=1),
-)
-def open_inventory_incident(args: dict[str, Any]) -> dict[str, Any]:
-    order_id = args.get("order_id")
-    if order_id != _ORDER_ID:
-        raise ValueError(f"open_inventory_incident: only {_ORDER_ID!r} is available")
-    context = current_workflow_task_context()
-    if context is None:
-        raise RuntimeError("open_inventory_incident must run as a policy-aware workflow task")
-    incident_id = sha256(context.workflow_id.encode()).hexdigest()[:32]
-    incident = _create_incident(incident_id, {
-        "order_id": _ORDER_ID,
-        "failures_remaining": 2,
-        "failed_attempts": [],
-        "status": "active",
-    })
-    return {
-        "order_id": _ORDER_ID,
-        "incident_id": incident_id,
-        "status": incident["status"],
-        "failures_remaining": incident["failures_remaining"],
-    }
-
-
-@workflow_tool(
-    description=(
-        "Load the delayed sample order. "
-        "Args: {order_id: str, incident: <open_inventory_incident result>}. "
-        "Returns {order_id, incident_id, sku, quantity, status}."
+        "Load the delayed sample order. Args: {order_id: str}. "
+        "Returns {order_id, sku, quantity, status}."
     )
 )
 def load_order(args: dict[str, Any]) -> dict[str, Any]:
     order_id = args.get("order_id")
     if order_id != _ORDER_ID:
         raise ValueError(f"load_order: only sample order {_ORDER_ID!r} is available")
-    incident = args.get("incident")
-    if not isinstance(incident, dict) or not isinstance(incident.get("incident_id"), str):
-        raise ValueError("load_order: 'incident' must be the complete incident result")
     return {
         "order_id": _ORDER_ID,
-        "incident_id": incident["incident_id"],
         "sku": "trail-shoes-blue-42",
         "quantity": 1,
         "status": "awaiting_inventory",
@@ -145,14 +115,12 @@ def reserve_inventory(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(order, dict) or order.get("order_id") != _ORDER_ID:
         raise ValueError("reserve_inventory: 'order' must be the complete load_order result")
 
-    incident_id = order.get("incident_id")
-    if not isinstance(incident_id, str):
-        raise ValueError("reserve_inventory: order is missing its incident id")
     context = current_workflow_task_context()
     if context is None:
         raise RuntimeError("reserve_inventory must run as a policy-aware workflow task")
+    incident_id = sha256(context.workflow_id.encode()).hexdigest()[:32]
     for _ in range(5):
-        incident, etag = _read_incident(incident_id)
+        incident, etag = _load_or_create_incident(incident_id)
         if context.attempt in incident["failed_attempts"]:
             raise WorkflowRetryableError(
                 "inventory_temporarily_unavailable",
@@ -212,6 +180,5 @@ def confirm_order(args: dict[str, Any]) -> dict[str, Any]:
 __all__ = [
     "confirm_order",
     "load_order",
-    "open_inventory_incident",
     "reserve_inventory",
 ]

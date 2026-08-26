@@ -45,6 +45,16 @@ visible and deterministic.
   metadata.
 - [x] (2026-08-26) Re-ran focused tests (`118 passed`), Ruff, strict mypy, and
   the CI-equivalent suite (`1181 passed, 53 deselected`).
+- [x] (2026-08-26) Corrected the retry sample boundary after review feedback:
+  removed the fixed Skill/DAG and setup task from the customer sample, kept
+  transient state simulation inside `reserve_inventory`, and moved the
+  precedence fixture into the official `tests/endtoend` suite.
+- [x] (2026-08-26) Validated the split with focused tests (`111 passed`), Ruff,
+  strict mypy, generated-reference validation, the CI-equivalent suite
+  (`1180 passed, 55 deselected`), and a real Functions-host startup of the new
+  E2E app. The local model-backed E2E reached the configured provider but that
+  machine's inherited Azure OpenAI deployment name did not exist; CI supplies
+  the established Foundry configuration through the official provider overlay.
 
 ## Surprises & Discoveries
 
@@ -117,6 +127,12 @@ visible and deterministic.
   `WorkflowTaskContext.attempt`; runtime attempt semantics remain independently
   covered by engine and E2E status assertions.
   Date/Author: 2026-08-26, Human (TsuyoshiUshio) and Copilot.
+- Decision: Separate customer retry authoring from deterministic policy E2E.
+  Rationale: customers should see only normal agent instructions, the
+  `@workflow_tool` retry declaration, and `WorkflowRetryableError`; a canonical
+  Skill resource and deliberately conflicting DAG are valuable test machinery
+  but misleading as required sample setup.
+  Date/Author: 2026-08-26, Human (TsuyoshiUshio) and Copilot.
 
 ## Outcomes & Retrospective
 
@@ -136,8 +152,10 @@ review found that Pydantic validation details could expose Activity inputs in
 logs; input values are now hidden, validation logs use a fixed message, and a
 regression test protects the boundary. The current implementation remains
 runtime-managed; no preview dependency or sub-orchestration was introduced.
-The sample now models two transient failures through Blob-backed incident state,
-and no longer uses the workflow attempt number to manufacture failures.
+The customer sample now models two transient failures through Blob-backed
+incident state without exposing test setup in its agent-authored DAG. The fixed
+Skill/DAG, attempt-driven failure, and decorator-precedence assertions live only
+in the official E2E fixture.
 
 ## Context and Orientation
 
