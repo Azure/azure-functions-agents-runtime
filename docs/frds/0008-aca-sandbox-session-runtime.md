@@ -4,7 +4,7 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-08-18
+updated: 2026-08-25
 issues: []
 pull_requests: []
 branch: feature/aca-sandboxes
@@ -423,6 +423,9 @@ controlling amendments.
 | 179 | Stale submit fence | Propagate / durable re-read | If cancel, takeover, or another launch claimant wins, re-read the durable run and return its linked projection; never leak the losing fence as a 500 or launch twice. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
 | 180 | Terminal provision replay | Take over / return terminal | Exact replay of a terminal reserved run returns its durable outcome before operation takeover; canceled pre-pointer work never requires a sandbox pointer. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
 | 181 | Complexity and domain vocabulary | Advisory / enforce PLR0912 and PLR0915; repeated strings / owned typed vocabulary | Human approved enforcing PLR0912/PLR0915 and declaring each finite domain once in its owning typed symbols for consumers to reuse. | Human | 2026-08-18 | Review guidance |
+| 182 | Stream recovery metadata | Session-only / stable run recovery headers | Expose `x-ms-run-id` and `Location` on every successful synchronous stream so clients can follow terminal state without relying on a settling conflict. | Human | 2026-08-25 | Bug-fix correction |
+| 183 | Reconciliation ownership | Global request fast path / targeted request repair plus timer sweep | Limit request-path reconciliation to the current session and operation; retain global stale-state, orphan, and expiry convergence in the timer with bounded inventory work. | Human + Agent | 2026-08-25 | Bug-fix correction |
+| 184 | Provider transient handling | Opaque failure / classified bounded recovery | Preserve sanitized ARM status metadata, retry only transient ARM outcomes, and use lifecycle-aware bounded file readiness retries with `Retry-After`. | Human + Agent | 2026-08-25 | Bug-fix correction |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
