@@ -123,6 +123,7 @@ from .client_manager import (  # noqa: E402
     shutdown_client_manager,
 )
 from .config.paths import resolve_config_dir, set_app_root  # noqa: E402
+from .durable import DurableAgentContext  # noqa: E402
 from .runner import (  # noqa: E402
     DEFAULT_MODEL,
     DEFAULT_TIMEOUT,
@@ -139,6 +140,7 @@ __all__ = [
     "AgentResult",
     "AiApp",
     "ClientManager",
+    "DurableAgentContext",
     "DurableAiApp",
     "MAFClientManager",
     "__version__",

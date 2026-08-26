@@ -18,10 +18,17 @@ from ._observability import FaultDomain, LifecycleStage, configure_observability
 from .composition import ProjectSnapshot, compose_binding_target
 from .composition import load_project_snapshot as _load_project_snapshot
 from .config.paths import get_app_root
+from .durable import (
+    _INTERNAL_AGENT_ACTIVITY_NAME,
+    DurableAgentContext,
+    _normalize_agent_prompt,
+    _parse_activity_input,
+)
 from .hydration import (
     AgentBlueprint,
     InvocationMetadata,
     open_agent,
+    run_blueprint,
 )
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -34,11 +41,8 @@ class _BindingRuntime:
         self._blueprints: dict[str, AgentBlueprint] = {}
         self._lock = threading.RLock()
 
-    def resolve(self, agent_name: str) -> AgentBlueprint:
+    def initialize(self) -> ProjectSnapshot:
         with self._lock:
-            blueprint = self._blueprints.get(agent_name)
-            if blueprint is not None:
-                return blueprint
             if self._snapshot is None:
                 self._snapshot = _load_project_snapshot(self.app_root)
                 if self._snapshot.discovery.failed_loads:
@@ -54,7 +58,14 @@ class _BindingRuntime:
                         "prevents binding registration. "
                         "Fix or remove the failing assets."
                     )
-            entry = compose_binding_target(self._snapshot, agent_name)
+            return self._snapshot
+
+    def resolve(self, agent_name: str) -> AgentBlueprint:
+        with self._lock:
+            blueprint = self._blueprints.get(agent_name)
+            if blueprint is not None:
+                return blueprint
+            entry = compose_binding_target(self.initialize(), agent_name)
             existing = self._blueprints.get(entry.definition.slug)
             blueprint = existing if existing is not None else AgentBlueprint(entry)
             self._blueprints[agent_name] = blueprint
@@ -243,7 +254,7 @@ class AiApp(func.FunctionApp):
 
 
 class DurableAiApp(df.DFApp):  # type: ignore[misc]
-    """DFApp with async Function and activity Agent injection."""
+    """DFApp with Agent injection and replay-safe orchestrator Agent calls."""
 
     def __init__(
         self,
@@ -253,6 +264,118 @@ class DurableAiApp(df.DFApp):  # type: ignore[misc]
     ) -> None:
         super().__init__(http_auth_level=http_auth_level)
         self._agent_binding_root = app_root
+        self._markdown_agent_activity_registered = False
+        self._agent_binding_functions_enumerated = False
+
+    def _ensure_markdown_agent_activity(self) -> None:
+        if self._markdown_agent_activity_registered:
+            return
+        runtime = _runtime_for(self, self._agent_binding_root)
+        runtime.initialize()
+        blueprint = df.Blueprint()
+
+        @blueprint.activity_trigger(input_name="payload")  # type: ignore[untyped-decorator]
+        async def azure_functions_agents_run_markdown_agent(
+            payload: object,
+            context: func.Context,
+        ) -> str:
+            parsed = _parse_activity_input(payload)
+            agent_blueprint = runtime.resolve(parsed["agent_name"])
+            response = await run_blueprint(
+                agent_blueprint,
+                _normalize_agent_prompt(parsed["input"]),
+                invocation=InvocationMetadata(
+                    function_name=(
+                        str(context.function_name or "")
+                        or _INTERNAL_AGENT_ACTIVITY_NAME
+                    ),
+                    invocation_id=str(context.invocation_id or "") or None,
+                    durable_instance_id=parsed["durable_instance_id"],
+                ),
+                enable_persistent_history=False,
+            )
+            text = getattr(response, "text", None)
+            if not isinstance(text, str):
+                raise TypeError("Markdown Agent activity response.text must be a string")
+            return text
+
+        self.register_blueprint(blueprint)
+        self._markdown_agent_activity_registered = True
+
+    def orchestration_trigger(
+        self,
+        context_name: str,
+        orchestration: str | None = None,
+        input_type: type | None = None,
+    ) -> Callable[[_F], Any]:
+        """Register an orchestrator whose named context supports ``call_agent``."""
+        sdk_orchestration_trigger = super().orchestration_trigger
+        if input_type is None:
+            sdk_decorator = sdk_orchestration_trigger(
+                context_name=context_name,
+                orchestration=orchestration,
+            )
+        elif "input_type" in inspect.signature(sdk_orchestration_trigger).parameters:
+            sdk_decorator = sdk_orchestration_trigger(
+                context_name=context_name,
+                orchestration=orchestration,
+                input_type=input_type,
+            )
+        else:
+            raise TypeError(
+                "The installed azure-functions-durable version does not support "
+                "orchestration_trigger(input_type=...)"
+            )
+
+        def decorate(handler: _F) -> Any:
+            if not inspect.isgeneratorfunction(handler):
+                raise TypeError(
+                    "DurableAiApp orchestration_trigger requires a synchronous "
+                    "generator function"
+                )
+            signature = inspect.signature(handler)
+            parameter = signature.parameters.get(context_name)
+            if parameter is None:
+                raise TypeError(
+                    f"orchestration context_name {context_name!r} is not present "
+                    f"in handler {handler.__name__!r}"
+                )
+            if parameter.kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD:
+                raise TypeError(
+                    f"orchestration context parameter {context_name!r} must be "
+                    "positional-or-keyword"
+                )
+
+            self._ensure_markdown_agent_activity()
+
+            @functools.wraps(handler)
+            def proxy_orchestrator(*args: Any, **kwargs: Any) -> Any:
+                bound = signature.bind(*args, **kwargs)
+                context = cast(df.DurableOrchestrationContext, bound.arguments[context_name])
+                bound.arguments[context_name] = DurableAgentContext(context)
+                result = handler(*bound.args, **bound.kwargs)
+                return (yield from result)
+
+            proxy_orchestrator.__signature__ = signature  # type: ignore[attr-defined]
+            return sdk_decorator(proxy_orchestrator)
+
+        return decorate
+
+    def get_functions(self) -> list[Any]:
+        if self._agent_binding_functions_enumerated:
+            self.functions_bindings.clear()
+        try:
+            functions = cast(list[Any], super().get_functions())
+        except ValueError as exc:
+            self._agent_binding_functions_enumerated = True
+            if _INTERNAL_AGENT_ACTIVITY_NAME in str(exc):
+                raise ValueError(
+                    f"Function name {_INTERNAL_AGENT_ACTIVITY_NAME!r} is reserved by "
+                    "DurableAiApp.call_agent(); rename the conflicting customer function"
+                ) from exc
+            raise
+        self._agent_binding_functions_enumerated = True
+        return functions
 
     def markdown_agent(
         self,

@@ -5,14 +5,17 @@ import gc
 import inspect
 import weakref
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import azure.durable_functions as df
 import azure.functions as func
 import pytest
 from agent_framework import Agent
 
 from azure_functions_agents import AiApp as ExportedAiApp
+from azure_functions_agents import DurableAgentContext
 from azure_functions_agents import DurableAiApp as ExportedDurableAiApp
 from azure_functions_agents import bindings as bindings_module
 from azure_functions_agents import markdown_agent as exported_markdown_agent
@@ -21,6 +24,7 @@ from azure_functions_agents.bindings import (
     DurableAiApp,
     markdown_agent,
 )
+from azure_functions_agents.durable import _INTERNAL_AGENT_ACTIVITY_NAME
 from azure_functions_agents.hydration import AgentBlueprint
 
 
@@ -257,3 +261,247 @@ def test_runtime_registry_does_not_retain_app_or_cached_runtime(tmp_path: Path) 
     assert app_ref() is None
     assert runtime_ref() is None
     assert not hasattr(bindings_module, "DurableAiAgent")
+
+
+def test_durable_orchestrators_share_one_hidden_agent_activity(tmp_path: Path) -> None:
+    _write_agent(tmp_path)
+    app = DurableAiApp(app_root=tmp_path)
+    received_contexts: list[DurableAgentContext] = []
+
+    @app.orchestration_trigger(context_name="context")
+    def first_orchestrator(context: DurableAgentContext) -> Any:
+        received_contexts.append(context)
+        return (yield context.call_agent("order-fulfillment", {"order": 42}))
+
+    @app.orchestration_trigger(context_name="context")
+    def second_orchestrator(context: DurableAgentContext) -> Any:
+        return (yield context.call_agent("order-fulfillment", "plan"))
+
+    functions = app.get_functions()
+    names = [function.get_function_name() for function in functions]
+    assert names.count(_INTERNAL_AGENT_ACTIVITY_NAME) == 1
+    assert set(names) == {
+        _INTERNAL_AGENT_ACTIVITY_NAME,
+        "first_orchestrator",
+        "second_orchestrator",
+    }
+    hidden = next(
+        function
+        for function in functions
+        if function.get_function_name() == _INTERNAL_AGENT_ACTIVITY_NAME
+    )
+    assert any(
+        binding.get_dict_repr().get("type") == "activityTrigger"
+        for binding in hidden.get_bindings()
+    )
+    assert [
+        function.get_function_name() for function in app.get_functions()
+    ] == names
+
+    first = next(
+        function
+        for function in functions
+        if function.get_function_name() == "first_orchestrator"
+    ).get_user_function()
+    source = first.orchestrator_function
+    context = MagicMock(spec=df.DurableOrchestrationContext)
+    context.instance_id = "instance-42"
+    context.call_activity.return_value = "agent-task"
+
+    generator = source(context)
+    assert next(generator) == "agent-task"
+    with pytest.raises(StopIteration) as completed:
+        generator.send("assessment")
+
+    assert completed.value.value == "assessment"
+    assert len(received_contexts) == 1
+    assert isinstance(received_contexts[0], DurableAgentContext)
+    context.call_activity.assert_called_once_with(
+        _INTERNAL_AGENT_ACTIVITY_NAME,
+        {
+            "schema_version": 1,
+            "agent_name": "order-fulfillment",
+            "input": {"order": 42},
+            "durable_instance_id": "instance-42",
+        },
+    )
+
+
+def test_durable_orchestrator_preserves_supported_input_type(tmp_path: Path) -> None:
+    _write_agent(tmp_path)
+    app = DurableAiApp(app_root=tmp_path)
+
+    @app.orchestration_trigger(context_name="context", input_type=dict)
+    def orchestrator(context: DurableAgentContext) -> Any:
+        return (yield context.call_agent("order-fulfillment", context.get_input()))
+
+    registered = next(
+        function
+        for function in app.get_functions()
+        if function.get_function_name() == "orchestrator"
+    ).get_user_function()
+
+    assert registered._df_input_type is dict
+
+
+@pytest.mark.asyncio
+async def test_hidden_agent_activity_resolves_and_runs_statelessly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_agent(tmp_path)
+    app = DurableAiApp(app_root=tmp_path)
+
+    @app.orchestration_trigger(context_name="context")
+    def orchestrator(context: DurableAgentContext) -> Any:
+        return (yield context.call_agent("order-fulfillment", "prompt"))
+
+    run = AsyncMock(return_value=MagicMock(text="Agent result"))
+    monkeypatch.setattr(bindings_module, "run_blueprint", run)
+    hidden = next(
+        function
+        for function in app.get_functions()
+        if function.get_function_name() == _INTERNAL_AGENT_ACTIVITY_NAME
+    ).get_user_function()
+    function_context = MagicMock(spec=func.Context)
+    function_context.function_name = _INTERNAL_AGENT_ACTIVITY_NAME
+    function_context.invocation_id = "invocation-1"
+
+    result = await hidden(
+        {
+            "schema_version": 1,
+            "agent_name": "order-fulfillment",
+            "input": {"z": 2, "a": 1},
+            "durable_instance_id": "instance-1",
+        },
+        function_context,
+    )
+
+    assert result == "Agent result"
+    blueprint, prompt = run.await_args.args
+    assert isinstance(blueprint, AgentBlueprint)
+    assert blueprint.slug == "order_fulfillment"
+    assert prompt == '{"a":1,"z":2}'
+    assert run.await_args.kwargs["enable_persistent_history"] is False
+    invocation = run.await_args.kwargs["invocation"]
+    assert invocation.function_name == _INTERNAL_AGENT_ACTIVITY_NAME
+    assert invocation.invocation_id == "invocation-1"
+    assert invocation.durable_instance_id == "instance-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [object(), SimpleNamespace(text=None), SimpleNamespace(text=42)],
+)
+async def test_hidden_agent_activity_requires_text_response(
+    response: object,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_agent(tmp_path)
+    app = DurableAiApp(app_root=tmp_path)
+
+    @app.orchestration_trigger(context_name="context")
+    def orchestrator(context: DurableAgentContext) -> Any:
+        return (yield context.call_agent("order-fulfillment", "prompt"))
+
+    monkeypatch.setattr(
+        bindings_module,
+        "run_blueprint",
+        AsyncMock(return_value=response),
+    )
+    hidden = next(
+        function
+        for function in app.get_functions()
+        if function.get_function_name() == _INTERNAL_AGENT_ACTIVITY_NAME
+    ).get_user_function()
+
+    with pytest.raises(TypeError, match=r"response\.text must be a string"):
+        await hidden(
+            {
+                "schema_version": 1,
+                "agent_name": "order-fulfillment",
+                "input": "prompt",
+                "durable_instance_id": "instance-1",
+            },
+            MagicMock(spec=func.Context),
+        )
+
+
+@pytest.mark.asyncio
+async def test_hidden_agent_activity_rejects_unknown_dynamic_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_agent(tmp_path)
+    app = DurableAiApp(app_root=tmp_path)
+
+    @app.orchestration_trigger(context_name="context")
+    def orchestrator(context: DurableAgentContext) -> Any:
+        return (yield context.call_agent("dynamic-name", "prompt"))
+
+    run = AsyncMock()
+    monkeypatch.setattr(bindings_module, "run_blueprint", run)
+    hidden = next(
+        function
+        for function in app.get_functions()
+        if function.get_function_name() == _INTERNAL_AGENT_ACTIVITY_NAME
+    ).get_user_function()
+
+    with pytest.raises(
+        ValueError,
+        match=r"Agent definition 'missing-agent' was not found.*filename stem.*slug",
+    ):
+        await hidden(
+            {
+                "schema_version": 1,
+                "agent_name": "missing-agent",
+                "input": "prompt",
+                "durable_instance_id": "instance-1",
+            },
+            MagicMock(spec=func.Context),
+        )
+
+    run.assert_not_awaited()
+
+
+def test_durable_orchestrator_rejects_non_generator(tmp_path: Path) -> None:
+    _write_agent(tmp_path)
+    app = DurableAiApp(app_root=tmp_path)
+
+    with pytest.raises(TypeError, match="synchronous generator"):
+
+        @app.orchestration_trigger(context_name="context")
+        def invalid_orchestrator(context: DurableAgentContext) -> str:
+            return context.instance_id
+
+
+def test_durable_orchestrator_rejects_keyword_only_context(tmp_path: Path) -> None:
+    _write_agent(tmp_path)
+    app = DurableAiApp(app_root=tmp_path)
+
+    with pytest.raises(TypeError, match="positional-or-keyword"):
+
+        @app.orchestration_trigger(context_name="context")
+        def invalid_orchestrator(*, context: DurableAgentContext) -> Any:
+            return (yield context.call_agent("order-fulfillment", "prompt"))
+
+
+def test_reserved_hidden_activity_name_collision_is_actionable(tmp_path: Path) -> None:
+    _write_agent(tmp_path)
+    app = DurableAiApp(app_root=tmp_path)
+
+    @app.activity_trigger(input_name="payload")
+    def azure_functions_agents_run_markdown_agent(payload: str) -> str:
+        return payload
+
+    @app.orchestration_trigger(context_name="context")
+    def orchestrator(context: DurableAgentContext) -> Any:
+        return (yield context.call_agent("order-fulfillment", "prompt"))
+
+    with pytest.raises(
+        ValueError,
+        match=r"reserved by DurableAiApp\.call_agent.*rename the conflicting",
+    ):
+        app.get_functions()

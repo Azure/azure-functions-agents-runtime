@@ -1,36 +1,38 @@
-# Hybrid Durable activity binding
+# Hybrid Durable Agent calls
 
-This sample uses `DurableAiApp` to keep deterministic Durable Functions orchestration code in Python while invoking a markdown-defined Serverless Agent from explicit customer-owned activities.
+This sample uses `DurableAiApp` to keep deterministic Durable Functions orchestration code in Python while invoking a markdown-defined Serverless Agent through `DurableAgentContext.call_agent()`.
 
 It demonstrates:
 
 - an HTTP starter using the standard Durable client binding;
 - a deterministic activity that validates, normalizes, calculates totals, derives
 	review signals, and removes unnecessary customer PII;
-- async Durable activities receiving a fresh raw `agent_framework.Agent`;
-- a synchronous generator orchestrator that explicitly names and calls its agent
-	activities.
+- a synchronous generator orchestrator that schedules stateless Agent calls;
+- optional Durable retry policy on an Agent call.
 
 The preprocessing activity turns the raw order into a compact decision packet.
 Application code owns facts such as monetary calculations and threshold checks; the
 agent first interprets fulfillment risk, then creates a plan from that assessment.
-Keeping preprocessing and Agent calls in activities preserves orchestrator replay
-determinism and gives production applications a natural place for database or service
-enrichment.
+Keeping preprocessing and Agent execution in activities preserves orchestrator replay
+determinism. The preprocessing activity remains customer-owned because it is the
+natural place for database or service enrichment.
 
-The library does not generate an Agent activity for orchestrators. This sample owns
-the activity names, JSON payload and result shapes, and retry policy. Durable Functions
-therefore records only the customer-selected activity inputs and outputs in history,
-while `markdown_agent` owns Agent hydration and cleanup inside each
-activity invocation. The Agent activities return only final text; they do not return
-`AgentResponse.messages`, because the complete model/tool transcript would increase
-orchestration history and replay payload size and could retain sensitive content. Add
-only required identifiers or aggregate usage fields, and include or summarize transcript
-content only when the workflow explicitly needs it.
+`DurableAiApp` registers one internal Agent activity when the first orchestrator is
+decorated. `call_agent()` schedules that activity with a string or JSON-safe input and
+returns only final response text. Each call hydrates a fresh Agent with persistent
+history disabled, so the orchestrator passes the first assessment explicitly into the
+second call. Complete model/tool transcripts are not recorded in orchestration history.
+
+Use an explicit async `@app.activity_trigger` plus `@app.markdown_agent` when an
+application needs a custom activity name, structured result, session behavior, or
+idempotency contract.
 
 The binding projection reads `name`, `description`, the markdown body, and its `substitute_variables` parsing control from `order-fulfillment.agent.md`. Model, timeout, tools, skills, MCP servers, and system tools come from app-level configuration and discovery.
 
-Activity handlers using `markdown_agent` must be declared with `async def`. Each activity invocation receives its own entered Agent; the runtime closes it when the handler exits, so do not retain it beyond that invocation.
+The internal Agent activity is visible in Azure Functions indexing and Durable history
+as `azure_functions_agents_run_markdown_agent`. Model timeout applies inside each
+activity attempt, the Functions host timeout is the outer bound, and `RetryOptions`
+schedules a complete fresh attempt after a failure.
 
 ## Run locally
 

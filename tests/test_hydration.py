@@ -193,6 +193,33 @@ async def test_run_blueprint_builds_fresh_agents_for_concurrent_invocations(
 
 
 @pytest.mark.asyncio
+async def test_run_blueprint_can_disable_persistent_history(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    history_options: list[bool] = []
+
+    def build(
+        _blueprint: AgentBlueprint,
+        _invocation: Any = None,
+        *,
+        enable_persistent_history: bool = True,
+    ) -> _FakeAgent:
+        history_options.append(enable_persistent_history)
+        return _FakeAgent()
+
+    monkeypatch.setattr(AgentBlueprint, "build", build)
+
+    await run_blueprint(
+        AgentBlueprint(_entry(tmp_path)),
+        "prompt",
+        enable_persistent_history=False,
+    )
+
+    assert history_options == [False]
+
+
+@pytest.mark.asyncio
 async def test_open_agent_exits_context_owner_not_entered_value(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -30,6 +30,8 @@ flowchart LR
     K -.->|"prompt + tools + session"| L["Microsoft Agent Framework"]
     A -->|"binding projection"| M["composition.py<br/>ProjectSnapshot"]
     M -->|"BindingAgentEntry"| N["bindings.py<br/>markdown_agent / AiApp / DurableAiApp"]
+    N -->|"wrapped orchestrator context"| P["durable.py<br/>DurableAgentContext.call_agent"]
+    P -.->|"versioned activity payload"| N
     N -.->|"cached AgentBlueprint"| O["hydration.py<br/>fresh Agent hydration"]
     O -.->|"entered Agent per invocation"| L
 ```
@@ -60,8 +62,9 @@ A few boundaries are worth calling out explicitly:
 | --- | --- | --- |
 | `azure_functions_agents/app.py` | Top-level two-pass composition root. Before app mutation it builds the slug index, `AgentCatalog`, complete workflow-handler catalog, and immutable workflow-agent policy catalog. It chooses `DurableAiApp` when any agent enables workflows (otherwise `AiApp`), registers the workflow runtime once, then registers each agent. | `create_function_app()`, `_fail_on_duplicate_slugs()` |
 | `azure_functions_agents/composition.py` | Builds the immutable binding-only project snapshot and resolves a binding target by exact filename stem, then normalized slug. Requires only `name` and `description`, honors `substitute_variables` for those fields and markdown instructions, and discards all other per-agent front matter. | `load_project_snapshot()`, `compose_binding_target()` |
-| `azure_functions_agents/bindings.py` | Owns the smart callable wrapper, enhanced app classes, per-app blueprint registry, and raw Agent injection into async Functions and customer-owned Durable activities. It uses public SDK decorators and signatures without mutating `FunctionBuilder` internals. | `markdown_agent()`, `AiApp`, `DurableAiApp` |
-| `azure_functions_agents/hydration.py` | Owns immutable binding blueprints and fresh per-invocation MAF Agent construction and context management. | `AgentBlueprint`, `open_agent()`, `run_blueprint()` |
+| `azure_functions_agents/bindings.py` | Owns the smart callable wrapper, enhanced app classes, per-app blueprint registry, raw Agent injection into async Functions/customer-owned Durable activities, and one runtime-owned Agent activity per `DurableAiApp`. It uses public SDK decorators and signatures without mutating `FunctionBuilder` internals. | `markdown_agent()`, `AiApp`, `DurableAiApp` |
+| `azure_functions_agents/durable.py` | Owns the replay-safe `DurableAgentContext` proxy, strict JSON activity payload, and `call_agent()` scheduling contract. It performs no file, model, tool, or network I/O. | `DurableAgentContext`, `DurableAgentContext.call_agent()` |
+| `azure_functions_agents/hydration.py` | Owns immutable binding blueprints and fresh per-invocation MAF Agent construction and context management, including the internal persistent-history opt-out used by `call_agent()`. | `AgentBlueprint`, `open_agent()`, `run_blueprint()` |
 | `azure_functions_agents/config/paths.py` | Resolves the app root and the optional config/history directory. | `set_app_root()`, `get_app_root()`, `resolve_config_dir()` |
 | `azure_functions_agents/config/env.py` | Performs env-var substitution and bool coercion across config string values in YAML, JSON, front matter, and markdown body content. | `substitute_env_vars_in_value()`, `resolve_env_vars_in_data()`, `substitute_env_vars_in_text()`, `_to_bool()` |
 | `azure_functions_agents/config/schema.py` | Defines the Pydantic models for raw, global, and merged config, including independent object-only chat and workflow Sub Agent grants. | `AgentSpec`, `GlobalConfig`, `ResolvedAgent`, `TriggerSpec`, `BuiltinEndpointsConfig`, `SubagentRef`, `WorkflowConfig`, `WorkflowSubagentRef` |
@@ -146,12 +149,18 @@ at import time, even when only one agent definition is selected. Starting with a
 partial capability inventory would silently change the Agent's available behavior, so
 v1 requires the failing asset to be fixed or removed.
 
-Durable orchestrators do not receive an injected Agent or proxy. They call explicit
-customer-owned activities whose async handlers use `DurableAiApp.markdown_agent()`. The application
-therefore owns activity names, payload/result schemas, retry and idempotency behavior,
-and the transcript or response data recorded in Durable history. The binding owns only
-Agent hydration and lifecycle within the activity invocation. Durable Entity injection
-is not supported.
+`DurableAiApp` wraps each registered orchestrator's named context in
+`DurableAgentContext`. Its `call_agent()` method performs strict JSON validation and
+schedules the single indexed `azure_functions_agents_run_markdown_agent` activity; it
+does not resolve definitions or run Agent code during replay. The activity resolves the
+authored filename stem/slug, hydrates a fresh Agent with persistent history disabled,
+and returns only response text. Prior results must be passed explicitly through the
+orchestration. Optional `RetryOptions` repeats the complete stateless activity attempt.
+
+Explicit customer-owned activities remain supported through
+`DurableAiApp.markdown_agent()` when applications need custom names, structured
+results, sessions, transcript selection, or idempotency. Caller-owned `DFApp` instances
+use this explicit pattern. Durable Entity injection is not supported.
 
 ## 4. Pipeline stages
 

@@ -56,7 +56,12 @@ class AgentBlueprint:
                 pass
         return DEFAULT_TIMEOUT
 
-    def build(self, invocation: InvocationMetadata | None = None) -> Agent[Any]:
+    def build(
+        self,
+        invocation: InvocationMetadata | None = None,
+        *,
+        enable_persistent_history: bool = True,
+    ) -> Agent[Any]:
         config = self.entry.config
         chat_client, _ = get_client_manager().build_chat_client_with_target(config.model)
         excluded = set(config.tools.exclude) if config.tools is not None else set()
@@ -102,7 +107,9 @@ class AgentBlueprint:
             workflow_durable_client=None,
             agent_name=self.slug,
             resolved_id=invocation.invocation_id if invocation else None,
-            history_provider=_build_history_provider(),
+            history_provider=(
+                _build_history_provider() if enable_persistent_history else None
+            ),
             delegate_tools=None,
         )
 
@@ -120,9 +127,14 @@ async def _enter_agent(owner: Agent[Any]) -> Agent[Any]:
 async def open_agent(
     blueprint: AgentBlueprint,
     invocation: InvocationMetadata | None = None,
+    *,
+    enable_persistent_history: bool = True,
 ) -> AsyncIterator[Agent[Any]]:
     """Build, enter, yield, and always close one invocation-owned Agent."""
-    owner = blueprint.build(invocation)
+    if enable_persistent_history:
+        owner = blueprint.build(invocation)
+    else:
+        owner = blueprint.build(invocation, enable_persistent_history=False)
     entered = await _enter_agent(owner)
     try:
         yield entered
@@ -198,9 +210,14 @@ async def run_blueprint(
     session_id: str | None = None,
     options: Mapping[str, Any] | None = None,
     invocation: InvocationMetadata | None = None,
+    enable_persistent_history: bool = True,
 ) -> Any:
     """Hydrate one Agent, perform one runtime-managed call, and close it."""
-    async with open_agent(blueprint, invocation) as agent:
+    async with open_agent(
+        blueprint,
+        invocation,
+        enable_persistent_history=enable_persistent_history,
+    ) as agent:
         return await _run_managed(
             agent,
             blueprint,

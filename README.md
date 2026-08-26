@@ -188,11 +188,47 @@ Function and activity handlers using `markdown_agent` must be declared with `asy
 
 Durable apps use `DurableAiApp` or a caller-owned `df.DFApp`. Applying `markdown_agent`
 to an `async def` activity handler injects a raw Agent without a mode selector.
-Orchestrators do not support `markdown_agent`; they call an explicit customer-owned
-activity. The application owns that activity's name,
-payload/result schemas, retry and idempotency policy, and Durable history boundary.
+Orchestrators registered on `DurableAiApp` receive a `DurableAgentContext` and can
+schedule a stateless Agent call without authoring an activity:
 
-See [`samples/hybrid-function-agent/`](samples/hybrid-function-agent/) for an `AiApp` with HTTP and queue handlers, and [`samples/hybrid-durable-agent/`](samples/hybrid-durable-agent/) for a `DurableAiApp` with activity and orchestrator handlers.
+```python
+import azure.durable_functions as df
+
+from azure_functions_agents import DurableAgentContext, DurableAiApp
+
+app = DurableAiApp()
+
+
+@app.orchestration_trigger(context_name="context")
+def order_orchestrator(context: DurableAgentContext):
+  assessment = yield context.call_agent(
+    "order-fulfillment",
+    {"order": context.get_input(), "task": "assess risk"},
+  )
+  return (yield context.call_agent(
+    "order-fulfillment",
+    {"assessment": assessment, "task": "create a plan"},
+    retry_options=df.RetryOptions(
+      first_retry_interval_in_milliseconds=5_000,
+      max_number_of_attempts=3,
+    ),
+  ))
+```
+
+`call_agent()` accepts a string or JSON-safe value and returns response text. It only
+schedules Durable work during orchestration replay; agent lookup, hydration, model
+calls, and tools run in the indexed
+`azure_functions_agents_run_markdown_agent` activity. Every attempt uses a fresh Agent
+with persistent history disabled, so pass prior results explicitly as shown above.
+The model timeout applies inside each activity attempt, the Functions host timeout is
+the outer bound, and optional `RetryOptions` schedules complete fresh attempts.
+
+Use an explicit `@app.activity_trigger` plus `@app.markdown_agent` when the application
+must own the activity name, structured result, transcript selection, session behavior,
+or idempotency contract. Caller-owned `df.DFApp` instances use this explicit pattern;
+transparent context wrapping is provided by `DurableAiApp`.
+
+See [`samples/hybrid-function-agent/`](samples/hybrid-function-agent/) for an `AiApp` with HTTP and queue handlers, and [`samples/hybrid-durable-agent/`](samples/hybrid-durable-agent/) for a `DurableAiApp` using `call_agent()` from an orchestrator.
 Both samples demonstrate a production-oriented handoff: deterministic Python validates
 and normalizes orders, calculates trusted monetary fields, derives review signals, and
 removes unnecessary PII before the agent performs contextual assessment or planning.

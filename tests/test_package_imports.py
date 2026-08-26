@@ -27,6 +27,7 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "AgentResult",
         "AiApp",
         "ClientManager",
+        "DurableAgentContext",
         "DurableAiApp",
         "MAFClientManager",
         "__version__",

@@ -16,14 +16,14 @@ app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure
 | [workflow-subagents-preview](workflow-subagents-preview/) | Queue | ✅ workflow-safe | | | ✅ | | |
 | [secured-endpoints](secured-endpoints/) | HTTP + MCP | | | | | | |
 | [hybrid-function-agent](hybrid-function-agent/) | HTTP + Queue | ✅ order totals | | ✅ MS Learn | ✅ order-review | | |
-| [hybrid-durable-agent](hybrid-durable-agent/) | Durable Activities + Orchestrator | ✅ order totals | | ✅ MS Learn | ✅ order-review | | |
+| [hybrid-durable-agent](hybrid-durable-agent/) | Durable `call_agent` Orchestrator | ✅ order totals | | ✅ MS Learn | ✅ order-review | | |
 
 The [hybrid-function-agent](hybrid-function-agent/) sample demonstrates `AiApp`
 injecting one agent into async HTTP and queue handlers after deterministic order
 validation, enrichment, and PII minimization. The
 [hybrid-durable-agent](hybrid-durable-agent/) sample applies the same preprocessing
-in an activity, then chains explicit customer-owned agent activities for risk
-assessment and replay-safe planning.
+in an activity, then chains stateless `call_agent()` operations for risk assessment
+and replay-safe planning.
 
 [`per-agent-workflows`](per-agent-workflows/) is the Engineering Operations Hub:
 two non-main workflow-enabled agents share one Durable engine while retaining
