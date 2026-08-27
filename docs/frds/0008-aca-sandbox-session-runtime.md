@@ -1866,3 +1866,8 @@ backing sandbox. Resume treats only the provider's already-running 409 as
 idempotent success; other 409 responses become typed invalid-state errors.
 Provider payloads and raw Azure SDK exceptions never cross into chat,
 streaming, status, result, cancel, or events routes.
+
+The authored region is also forwarded as non-secret guest configuration because
+the sandbox harness reconstructs the agent catalog from the delivered
+`agents.config.yaml`. The Sandbox Group resource ID and controller credentials
+remain host-only.

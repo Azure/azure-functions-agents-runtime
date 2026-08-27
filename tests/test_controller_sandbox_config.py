@@ -46,6 +46,14 @@ def test_build_sandbox_environment_forwards_only_documented_sources() -> None:
         forwarded["OTHER"] = "value"  # type: ignore[index]
 
 
+def test_sandbox_environment_forwards_region_for_delivered_config_reconstruction() -> None:
+    forwarded = build_sandbox_environment(
+        {"AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION": "westus2"}
+    )
+
+    assert forwarded["AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION"] == "westus2"
+
+
 def test_sandbox_environment_prefix_is_stripped_once() -> None:
     forwarded = build_sandbox_environment(
         {"AZURE_FUNCTIONS_AGENTS_SANDBOXENV_MY_API_HOST": "https://sandbox.example"}

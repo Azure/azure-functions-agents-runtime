@@ -69,6 +69,7 @@ verifies its digest and ABI. A disk override does not disable integrity checks.
 The runtime forwards only this built-in non-secret profile:
 
 ```text
+AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION
 AZURE_FUNCTIONS_AGENTS_PROVIDER
 AZURE_FUNCTIONS_AGENTS_MODEL
 AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS
@@ -80,6 +81,10 @@ AZURE_OPENAI_API_VERSION
 FOUNDRY_PROJECT_ENDPOINT
 FOUNDRY_MODEL
 ```
+
+The non-secret Sandbox Group region is forwarded so the harness can reconstruct
+the delivered `agents.config.yaml` inside the sandbox. The group resource ID and
+controller credentials are not forwarded.
 
 Forward customer configuration with the runtime-owned prefix:
 
