@@ -492,17 +492,14 @@ async function storageAccountKey(accessToken, subscriptionId, appResourceGroup, 
   const primary = await listKeys(appResourceGroup)
   if (primary) return primary
   try {
-    const url = `https://management.azure.com/subscriptions/${subscriptionId}/providers/Microsoft.Storage/storageAccounts?api-version=2023-01-01`
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-      signal: AbortSignal.timeout(10000),
-    })
-    if (res.ok) {
-      const body = await res.json()
-      const match = (body?.value ?? []).find((s) => s?.name === account)
-      const rg = match ? parseResourceGroup(match.id) : ''
-      if (rg && rg !== appResourceGroup) return await listKeys(rg)
-    }
+    const accounts = await armList(
+      accessToken,
+      `/subscriptions/${subscriptionId}/providers/Microsoft.Storage/storageAccounts?api-version=2023-01-01`,
+      { timeoutMs: 10000 },
+    )
+    const match = accounts.find((s) => s?.name === account)
+    const rg = match ? parseResourceGroup(match.id) : ''
+    if (rg && rg !== appResourceGroup) return await listKeys(rg)
   } catch {
     /* fall through to empty */
   }
@@ -1130,13 +1127,11 @@ async function resolveAppInsightsComponentId(accessToken, subscriptionId, resour
 
   // Fallback: enumerate every AI component in the subscription and match iKey.
   try {
-    const res = await fetch(
-      `https://management.azure.com/subscriptions/${subscriptionId}/providers/Microsoft.Insights/components?api-version=2020-02-02`,
-      { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(15000) },
+    const components = await armList(
+      accessToken,
+      `/subscriptions/${subscriptionId}/providers/Microsoft.Insights/components?api-version=2020-02-02`,
     )
-    if (!res.ok) return ''
-    const body = await res.json()
-    for (const component of body?.value ?? []) {
+    for (const component of components) {
       if (String(component?.properties?.InstrumentationKey ?? '').toLowerCase() === iKey.toLowerCase()) {
         return String(component?.id ?? '')
       }
@@ -1560,18 +1555,38 @@ async function armJson(accessToken, url, { method = 'GET', body, timeoutMs = 150
   }
 }
 
+async function armList(accessToken, initialUrl, { timeoutMs = 15000, maxPages = 50 } = {}) {
+  const values = []
+  let url = initialUrl
+  for (let page = 0; page < maxPages && url; page++) {
+    const res = await armJson(accessToken, url, { timeoutMs })
+    if (!res.ok) {
+      const detail = res.json?.error?.message || res.json?.message || `HTTP ${res.status}`
+      throw Object.assign(new Error(`ARM list request failed: ${detail}`), {
+        status: res.status || 502,
+      })
+    }
+    values.push(...(res.json?.value ?? []))
+    url = res.json?.nextLink ?? ''
+  }
+  if (url) {
+    throw Object.assign(new Error(`ARM list exceeded ${maxPages} pages.`), { status: 502 })
+  }
+  return values
+}
+
 /**
  * Discover Microsoft Foundry (Azure AI Services / OpenAI) accounts in a
  * subscription, with their chat model deployments and projects, so the create
  * flow can offer a picker.
  */
 export async function discoverFoundry(accessToken, subscriptionId) {
-  const listed = await armJson(
+  const listed = await armList(
     accessToken,
     `/subscriptions/${subscriptionId}/providers/Microsoft.CognitiveServices/accounts?api-version=${CS_ACCOUNTS_API}`,
     { timeoutMs: 20000 },
   )
-  const raw = (listed.json?.value ?? []).filter((a) => {
+  const raw = listed.filter((a) => {
     const kind = String(a?.kind ?? '')
     return kind === 'AIServices' || kind === 'OpenAI'
   })
@@ -1585,24 +1600,24 @@ export async function discoverFoundry(accessToken, subscriptionId) {
       endpoints['OpenAI Language Model Instance API'] || acc.properties?.endpoint || ''
 
     const [deps, projs] = await Promise.all([
-      armJson(
+      armList(
         accessToken,
         `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.CognitiveServices/accounts/${name}/deployments?api-version=${CS_DEPLOYMENTS_API}`,
       ),
       foundryEndpoint
-        ? armJson(
+        ? armList(
             accessToken,
             `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.CognitiveServices/accounts/${name}/projects?api-version=${CS_PROJECTS_API}`,
           )
-        : Promise.resolve({ json: { value: [] } }),
+        : Promise.resolve([]),
     ])
 
-    const models = (deps.json?.value ?? [])
+    const models = deps
       .map((d) => ({ deployment: d.name, model: d.properties?.model?.name ?? d.name }))
       .filter((m) => !/embedding|whisper|dall-?e|tts|sora|moderation|transcribe/i.test(m.model))
       .sort((a, b) => a.deployment.localeCompare(b.deployment))
 
-    const projects = (projs.json?.value ?? [])
+    const projects = projs
       .map((p) => {
         const short = String(p.name ?? '').split('/').pop() ?? p.name
         return { name: short, endpoint: `${foundryEndpoint}api/projects/${short}` }
@@ -1810,17 +1825,11 @@ export async function planCapabilities(accessToken, subscriptionId, opts) {
 // List the resource groups in a subscription (name + location), for the create
 // flow's "existing resource group" picker.
 export async function listResourceGroups(accessToken, subscriptionId) {
-  // Follow nextLink so subscriptions with many resource groups aren't truncated
-  // to the first ARM page.
-  const resourceGroups = []
-  let url = `/subscriptions/${subscriptionId}/resourcegroups?api-version=2021-04-01`
-  for (let page = 0; page < 50 && url; page++) {
-    const res = await armJson(accessToken, url, { timeoutMs: 15000 })
-    for (const g of res.json?.value ?? []) {
-      resourceGroups.push({ name: g.name, location: g.location ?? '' })
-    }
-    url = res.json?.nextLink ?? ''
-  }
+  const groups = await armList(
+    accessToken,
+    `/subscriptions/${subscriptionId}/resourcegroups?api-version=2021-04-01`,
+  )
+  const resourceGroups = groups.map((g) => ({ name: g.name, location: g.location ?? '' }))
   resourceGroups.sort((a, b) => a.name.localeCompare(b.name))
   return { subscriptionId, resourceGroups }
 }
@@ -1919,14 +1928,11 @@ export async function healFoundryAccess(accessToken, subscriptionId, resourceGro
   // Locate the AI Services account across the subscription so we know its RG.
   let target = null
   try {
-    const res = await fetch(
-      `https://management.azure.com/subscriptions/${subscriptionId}/providers/Microsoft.CognitiveServices/accounts?api-version=2023-05-01`,
-      { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(15000) },
+    const accounts = await armList(
+      accessToken,
+      `/subscriptions/${subscriptionId}/providers/Microsoft.CognitiveServices/accounts?api-version=2023-05-01`,
     )
-    if (res.ok) {
-      const body = await res.json()
-      target = (body?.value ?? []).find((a) => String(a?.name ?? '') === account)
-    }
+    target = accounts.find((a) => String(a?.name ?? '') === account)
   } catch {
     /* unavailable — fall through */
   }

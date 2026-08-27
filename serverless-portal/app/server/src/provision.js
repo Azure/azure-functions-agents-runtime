@@ -49,6 +49,18 @@ async function arm(token, url, { method = 'GET', body, timeoutMs = 30000 } = {})
   return json
 }
 
+async function armList(token, initialUrl, { timeoutMs = 30000, maxPages = 50 } = {}) {
+  const values = []
+  let url = initialUrl
+  for (let page = 0; page < maxPages && url; page++) {
+    const result = await arm(token, url, { timeoutMs })
+    values.push(...(result.value ?? []))
+    url = result.nextLink ?? ''
+  }
+  if (url) throw new Error(`ARM list exceeded ${maxPages} pages.`)
+  return values
+}
+
 // Create or update the target resource group (idempotent).
 export async function ensureResourceGroup(token, subscriptionId, resourceGroup, location) {
   await arm(
@@ -192,11 +204,11 @@ function flexTemplate({ appName, storageName, planName, containerName, workspace
 // Best-effort extraction of a failed deployment's error messages.
 async function deploymentError(token, subscriptionId, resourceGroup, deploymentName) {
   try {
-    const ops = await arm(
+    const operations = await armList(
       token,
       `${ARM}/subscriptions/${subscriptionId}/resourcegroups/${encodeURIComponent(resourceGroup)}/providers/Microsoft.Resources/deployments/${deploymentName}/operations?api-version=2021-04-01`,
     )
-    const messages = (ops.value || [])
+    const messages = operations
       .map((op) => {
         const sm = op?.properties?.statusMessage
         return sm?.error?.message || sm?.Message || (typeof sm === 'string' ? sm : '')

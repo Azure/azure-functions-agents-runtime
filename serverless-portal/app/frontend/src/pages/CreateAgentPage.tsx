@@ -23,6 +23,7 @@ export default function CreateAgentPage() {
 
   const {
     data: foundryData,
+    error: foundryError,
     isFetching: foundryLoading,
     refetch: refetchFoundry,
   } = useQuery({
@@ -238,13 +239,22 @@ export default function CreateAgentPage() {
                     onChange={selectAccount}
                     options={accountOptions}
                     placeholder={
-                      foundryAccounts.length ? 'Select a Foundry resource…' : 'No Foundry resources found'
+                      foundryError
+                        ? 'Foundry resources unavailable'
+                        : foundryAccounts.length
+                          ? 'Select a Foundry resource…'
+                          : 'No Foundry resources found'
                     }
                     loading={foundryLoading}
                     loadingLabel="Loading Foundry resources…"
                     onRefresh={() => void refetchFoundry()}
                     ariaLabel="Foundry resource"
                   />
+                  {foundryError && (
+                    <div className="note warn" role="alert">
+                      Couldn’t load Foundry resources: {(foundryError as Error).message}
+                    </div>
+                  )}
                 </div>
 
                 {selectedAccount && (
