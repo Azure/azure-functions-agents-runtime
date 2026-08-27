@@ -122,6 +122,11 @@ type PreLaunchCancelDisposition = Literal[
 ]
 type AdmissionDisposition = Literal["not_reserved", "committed", "possibly_committed"]
 
+# An independent cursor lane sharing an app's reconciler partition. ``None``
+# (omitted) addresses the original unscoped Table-scan cursor; a named scope
+# addresses a provider-inventory paging cursor (sandboxes or snapshots).
+type ReconcilerCursorScope = Literal["sandboxes", "snapshots"]
+
 
 # ---------------------------------------------------------------------------
 # Read/outcome DTOs
@@ -277,11 +282,17 @@ class PreLaunchCancelOutcome:
 
 @dataclass(frozen=True, slots=True)
 class ReconcilerCursorRead:
-    """The app-scoped durable continuation for bounded reconciliation scans."""
+    """The app-scoped durable continuation for one bounded reconciliation scan.
+
+    ``scope`` is ``None`` for the original Table-scan cursor, or a
+    :data:`ReconcilerCursorScope` for an independent provider-inventory
+    paging lane sharing this app's reconciler partition.
+    """
 
     app_hash: str
     continuation_token: str | None
     etag: str
+    scope: ReconcilerCursorScope | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -530,8 +541,14 @@ class SessionStateStore(Protocol):
     ) -> AdoptionOutcome:
         """Authoritatively invalidate an untrusted journal, including prior success."""
 
-    async def get_reconciler_cursor(self, app_hash: str) -> ReconcilerCursorRead | None:
-        """Read the app-scoped bounded-scan continuation."""
+    async def get_reconciler_cursor(
+        self, app_hash: str, *, scope: ReconcilerCursorScope | None = None
+    ) -> ReconcilerCursorRead | None:
+        """Read the app-scoped bounded-scan continuation.
+
+        ``scope`` selects an independent cursor lane sharing this app's
+        reconciler partition; omit it for the original Table-scan cursor.
+        """
 
     async def advance_reconciler_cursor(
         self,
@@ -539,6 +556,7 @@ class SessionStateStore(Protocol):
         app_hash: str,
         previous: ReconcilerCursorRead | None,
         continuation_token: str | None,
+        scope: ReconcilerCursorScope | None = None,
     ) -> ReconcilerCursorRead:
         """Conditionally persist a completed bounded-scan continuation."""
 
@@ -2283,23 +2301,27 @@ class AzureTableSessionStateStore:
             f"{_MAX_ADOPTION_ATTEMPTS} attempts"
         )
 
-    async def get_reconciler_cursor(self, app_hash: str) -> ReconcilerCursorRead | None:
+    async def get_reconciler_cursor(
+        self, app_hash: str, *, scope: ReconcilerCursorScope | None = None
+    ) -> ReconcilerCursorRead | None:
         from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 
         partition_key = _reconciler_cursor_partition_key(app_hash)
         try:
             entity = await self._table_client.get_entity(
                 partition_key,
-                _RECONCILER_CURSOR_ROW_KEY,
+                _reconciler_cursor_row_key(scope),
             )
         except ResourceNotFoundError:
             return None
         except HttpResponseError as exc:
             raise _map_http_error(exc, context="get_reconciler_cursor") from exc
         stored_app_hash = entity.get("cursor_app_hash")
+        stored_scope = entity.get("cursor_scope")
         stored_token = entity.get("continuation_token")
         if (
             stored_app_hash != app_hash
+            or not _reconciler_cursor_scope_matches(stored_scope, scope)
             or not isinstance(stored_token, str)
             or len(stored_token.encode("utf-8")) > _MAX_RECONCILER_CURSOR_BYTES
         ):
@@ -2308,6 +2330,7 @@ class AzureTableSessionStateStore:
             app_hash=app_hash,
             continuation_token=stored_token or None,
             etag=_etag_from_entity(entity),
+            scope=scope,
         )
 
     async def advance_reconciler_cursor(
@@ -2316,6 +2339,7 @@ class AzureTableSessionStateStore:
         app_hash: str,
         previous: ReconcilerCursorRead | None,
         continuation_token: str | None,
+        scope: ReconcilerCursorScope | None = None,
     ) -> ReconcilerCursorRead:
         from azure.core.exceptions import (
             HttpResponseError,
@@ -2330,8 +2354,9 @@ class AzureTableSessionStateStore:
             raise SessionStateStoreError("reconciler continuation token is too large")
         entity: TableEntity = {
             "PartitionKey": partition_key,
-            "RowKey": _RECONCILER_CURSOR_ROW_KEY,
+            "RowKey": _reconciler_cursor_row_key(scope),
             "cursor_app_hash": app_hash,
+            "cursor_scope": scope or "",
             "continuation_token": token,
         }
         if previous is None:
@@ -2342,8 +2367,10 @@ class AzureTableSessionStateStore:
             except HttpResponseError as exc:
                 raise _map_http_error(exc, context="advance_reconciler_cursor") from exc
         else:
-            if previous.app_hash != app_hash:
-                raise SessionStateStoreError("reconciler cursor app hash does not match")
+            if previous.app_hash != app_hash or previous.scope != scope:
+                raise SessionStateStoreError(
+                    "reconciler cursor app hash or scope does not match"
+                )
             try:
                 result = await self._table_client.update_entity(
                     entity,
@@ -2361,6 +2388,7 @@ class AzureTableSessionStateStore:
             app_hash=app_hash,
             continuation_token=continuation_token,
             etag=_etag_from_write_result(result),
+            scope=scope,
         )
 
     async def delete_run(self, *, previous: DurableRunRecord, etag: str) -> None:
@@ -3330,6 +3358,30 @@ def _reconciler_cursor_partition_key(app_hash: str) -> str:
     if not app_hash.startswith("a") or ":" in app_hash:
         raise SessionStateStoreError("invalid reconciler app hash")
     return f"{_RECONCILER_CURSOR_PARTITION_PREFIX}{app_hash}"
+
+
+def _reconciler_cursor_row_key(scope: ReconcilerCursorScope | None) -> str:
+    """Derive an independent row key per cursor scope within an app's partition.
+
+    ``scope is None`` keeps the original unscoped row key byte-for-byte, so
+    pre-existing Table-scan cursor rows remain readable and writable.
+    """
+    if scope is None:
+        return _RECONCILER_CURSOR_ROW_KEY
+    return f"{_RECONCILER_CURSOR_ROW_KEY}:{scope}"
+
+
+def _reconciler_cursor_scope_matches(
+    stored_scope: object, requested_scope: ReconcilerCursorScope | None
+) -> bool:
+    """Tolerate rows written before ``cursor_scope`` existed.
+
+    A missing ``cursor_scope`` attribute (``None``) and an empty string are
+    both treated as "no scope", so old unscoped cursor rows stay valid when
+    ``requested_scope`` is also ``None``.
+    """
+    normalized_stored = stored_scope or ""
+    return normalized_stored == (requested_scope or "")
 
 
 def _latest_service_timestamp(entities: tuple[Mapping[str, object], ...]) -> datetime | None:

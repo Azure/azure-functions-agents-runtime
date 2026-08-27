@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from typing import TypedDict
 
 from .._logger import logger
 from ..execution.backend import (
@@ -52,6 +53,15 @@ _ADMISSION_COMMITTED: DurableAdmissionOutcome = "committed"
 _ADMISSION_POSSIBLY_COMMITTED: DurableAdmissionOutcome = "possibly_committed"
 _PROVISIONING_PHASE: RunPhase = "provisioning"
 _DEFAULT_ACCEPTED_RUN_PHASE: RunPhase = "executing"
+
+
+class ManagementUrls(TypedDict):
+    """Session-scoped management URLs for one run."""
+
+    status_url: str
+    result_url: str
+    events_url: str
+    cancel_url: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +117,7 @@ def parse_last_event_id(headers: Mapping[str, str] | None) -> int:
     return parsed
 
 
-def management_urls(*, agent_slug: str, context: RunContext) -> dict[str, str]:
+def management_urls(*, agent_slug: str, context: RunContext) -> ManagementUrls:
     """Build one shared set of session-scoped management URLs."""
     base = f"/agents/{agent_slug}/sessions/{context.session_id}/runs/{context.run_id}"
     return {
@@ -564,7 +574,7 @@ def _linked_active_run_response(
 
 def _run_ticket_payload(
     handle: RunHandle,
-    urls: Mapping[str, str],
+    urls: ManagementUrls,
     *,
     admission: DurableAdmissionOutcome | None = None,
     phase: RunPhase | None = None,
@@ -594,7 +604,7 @@ def _ticket_phase(handle: RunHandle, phase: RunPhase | None) -> RunPhase:
 def _management_headers(
     *,
     context: RunContext,
-    urls: Mapping[str, str],
+    urls: ManagementUrls,
     retry_with: bool = False,
 ) -> dict[str, str]:
     headers = {

@@ -20,8 +20,8 @@ python -m pip install "azurefunctions-agents-runtime[aca_sandbox]"
 Configure `session_runtime.aca_sandbox` only for HTTP-triggered MAF agents on a
 supported Linux x86_64 Functions worker. Unsupported hosts, invalid retention,
 missing ACA prerequisites, and incompatible Dynamic Workflows fail startup;
-they never silently select another backend. ordinary chat remains synchronous and `Prefer: respond-async` opts into the
-durable run-management URLs.
+they never silently select another backend. Ordinary chat remains synchronous,
+and `Prefer: respond-async` opts into the durable run-management URLs.
 
 The sandbox has no public inbound port. The Functions app remains the
 authenticated entry point and controller.
@@ -238,6 +238,8 @@ unrelated app-owned sessions; global orphan, expiry, inventory, and backlog
 cleanup belongs to the timer. Timer passes page inventory with bounded
 concurrency and a cursor that advances only after a page completes, reporting
 deferred and partial progress when its deadline is reached.
+A capacity-triggered targeted retry may therefore remain capacity-exhausted
+until the timer reclaims unrelated stale resources.
 
 File-plane `409` readiness is lifecycle-aware: the controller resumes only
 when it owns that mutation, honors provider `Retry-After`, and uses capped

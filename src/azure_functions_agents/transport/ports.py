@@ -6,6 +6,7 @@ from typing import Protocol, runtime_checkable
 
 from .manifest import ExpectedSandboxManifestBinding
 from .transport_models import (
+    InventoryPage,
     PersistedSandboxBinding,
     ProvisionedSandboxIdentity,
     SandboxCreateRequest,
@@ -125,11 +126,39 @@ class SandboxSessionProvider(Protocol):
     ) -> tuple[SandboxSummary, ...]:
         """List app-owned sandboxes using an exact label selector."""
 
+    async def list_sandboxes_page(
+        self,
+        *,
+        labels: dict[str, str],
+        continuation_token: str | None,
+        target_count: int,
+    ) -> InventoryPage[SandboxSummary]:
+        """Fetch one bounded batch of app-owned sandboxes, resuming from a token.
+
+        Consumes whole provider pages until at least ``target_count`` items
+        have been read or the inventory ends; a page is never truncated
+        mid-page, so a returned batch may exceed ``target_count`` by at most
+        one provider page.
+        """
+
+    async def get_sandbox_summary(self, sandbox_id: str) -> SandboxSummary | None:
+        """Read one sandbox by its exact ID, returning ``None`` only if it is gone."""
+
     async def delete_sandbox(self, sandbox_id: str) -> None:
         """Delete one group-owned sandbox by its provider identifier."""
 
     async def list_snapshots(self, *, max_items: int | None = None) -> tuple[SandboxSnapshot, ...]:
         """List snapshots visible to the bound Sandbox Group."""
+
+    async def list_snapshots_page(
+        self, *, continuation_token: str | None, target_count: int
+    ) -> InventoryPage[SandboxSnapshot]:
+        """Fetch one bounded batch of snapshots, resuming from a token.
+
+        Consumes whole provider pages until at least ``target_count`` items
+        have been read or the inventory ends; a page is never truncated
+        mid-page.
+        """
 
     async def delete_snapshot(self, snapshot_id: str) -> None:
         """Delete one unreferenced snapshot from the bound Sandbox Group."""

@@ -249,6 +249,29 @@ class SandboxSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class InventoryPage[T]:
+    """One bounded batch of provider inventory items plus an opaque resume token.
+
+    ``continuation_token`` is the provider's opaque page marker (e.g. an SDK
+    ``nextLink``): store and replay it verbatim, never parse, hash, or log it.
+    ``None`` means the provider inventory is exhausted; the next scan should
+    start over from the beginning.
+    """
+
+    items: tuple[T, ...]
+    continuation_token: str | None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        items: Iterable[T],
+        continuation_token: str | None,
+    ) -> InventoryPage[T]:
+        return cls(items=tuple(items), continuation_token=continuation_token)
+
+
+@dataclass(frozen=True, slots=True)
 class SandboxGroupResourceId:
     """The normalized, controller-configured ARM identity of a Sandbox Group."""
 

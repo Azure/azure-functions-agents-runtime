@@ -2279,6 +2279,33 @@
 			return `${url}${separator}code=${encodeURIComponent(state.key)}`;
 		}
 
+		function resolveSettlementLocation(location) {
+			if (typeof location !== "string" || !location.trim()) {
+				throw new Error("Run status Location is invalid.");
+			}
+
+			const apiBasePath = getApiBasePath();
+			const agentsPathIndex = apiBasePath.lastIndexOf("/agents/");
+			const deploymentPrefix = agentsPathIndex > 0
+				? apiBasePath.slice(0, agentsPathIndex)
+				: "";
+			const trimmedLocation = location.trim();
+			const target = (
+				trimmedLocation === "/agents" ||
+				trimmedLocation.startsWith("/agents/")
+			)
+				? `${deploymentPrefix}${trimmedLocation}`
+				: trimmedLocation;
+			const resolved = new URL(
+				target,
+				`${state.baseUrl}${apiBasePath}/`
+			);
+			if (resolved.protocol !== "http:" && resolved.protocol !== "https:") {
+				throw new Error("Run status Location must use HTTP or HTTPS.");
+			}
+			return resolved.toString();
+		}
+
 		function runMetadataFromResponse(response, body = null) {
 			const location = response.headers.get("Location") || body?.status_url || null;
 			const sessionId = response.headers.get("x-ms-session-id") || body?.session_id || null;
@@ -2310,10 +2337,7 @@
 			const expectedRunId = state.settlementRunId;
 			state.settlementPollInFlight = true;
 			try {
-				const statusUrl = new URL(
-					state.settlementLocation,
-					`${state.baseUrl}${getApiBasePath()}/`
-				).toString();
+				const statusUrl = resolveSettlementLocation(state.settlementLocation);
 				const response = await fetch(appendAuthQuery(statusUrl), {
 					method: "GET",
 					headers: {

@@ -193,10 +193,12 @@ controlling amendments.
   async.
 - Reconcile terminal checkpoints and expired/abandoned sessions with a **minimal
   periodic reconciler/reaper** (plain timer, configurable ~1h default — not
-  Durable) as a guaranteed backstop, augmented by opportunistic fast-paths
-  (after-create, reap-on-capacity-failure, controller fast-path) and client
-  polling, so crashed/idle sandboxes and snapshots do not leak. Cadence tightens to
-  ~1/min in v2 solely for the checkpoint-mirror SLO (Decisions 22, 58, 59, 63).
+  Durable) as the guaranteed backstop and only global reclamation authority.
+  Request fast-paths and client polling repair only the current session/operation;
+  on capacity failure they repair that target and retry once without scanning
+  unrelated sessions, so capacity may remain exhausted. Cadence tightens to
+  ~1/min in v2 solely for the checkpoint-mirror SLO (Decisions 22, 58, 59, 63,
+  183, 186).
 - Place one Sandbox Group per Function App/environment in the customer subscription;
   customer tooling creates ARM/RBAC, the runtime creates only session sandboxes.
 - Reserve an extensible owner contract for the separate non-HTTP trigger-session
@@ -211,8 +213,10 @@ controlling amendments.
 - Moving non-HTTP trigger execution to persistent sandboxes in v1 (reserved for
   FRD 0009).
 - Per-owner fairness quota in v1 — a single owner may consume the app's full ACA
-  capacity; aggregate capacity is bounded by ACA + reap-on-capacity-failure, and
-  per-owner fairness is a v2 optimization (Decision 61).
+  capacity. Request-time capacity handling repairs only the current
+  session/operation and retries once; it does not reclaim unrelated resources.
+  Global reclamation remains timer-owned, and per-owner fairness is a v2
+  optimization (Decisions 61, 183, 186).
 - Exactly-once execution of external side effects; automatic retry of a failed
   agent loop.
 - Claiming native user OBO; only a credential-broker extension point is reserved.
@@ -427,6 +431,7 @@ controlling amendments.
 | 183 | Reconciliation ownership | Global request fast path / targeted request repair plus timer sweep | Limit request-path reconciliation to the current session and operation; retain global stale-state, orphan, and expiry convergence in the timer with bounded inventory work. | Human + Agent | 2026-08-25 | Bug-fix correction |
 | 184 | Provider transient handling | Opaque failure / classified bounded recovery | Preserve sanitized ARM status metadata, retry only transient ARM outcomes, and use lifecycle-aware bounded file readiness retries with `Retry-After`. | Human + Agent | 2026-08-25 | Bug-fix correction |
 | 185 | Built-in UI session reuse | Reuse after `done` / wait for durable terminal phase | Have the built-in chat UI capture stream run metadata and poll `Location` until `phase=terminal`, keeping same-session submission disabled during settling. | Human + Agent | 2026-08-26 | Bug-fix correction |
+| 186 | Capacity-failure reconciliation ownership (narrows #58/#61) | Bounded app-wide request sweep / session-targeted repair / timer-only | Keep session-targeted repair and one retry; unrelated global reclamation stays timer-owned, so capacity may remain exhausted. | Human | 2026-08-27 | Bug-fix correction |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -1305,13 +1310,13 @@ V1 loss always tombstones. V2-only state-preserving rebind/rebuild from an exter
 ##### Reconciler/reaper
 
 * A plain Functions timer trigger—not Durable Functions—is mandatory as the guaranteed floor. Default cadence is about one hour, configurable/tunable up to several hours; v2 would tighten the same timer to about one minute for the deferred mirror SLO.
-* Fast paths: inline reconcile before active-run check on request/resubmit, client `get_status`/`get_result`, fire-and-forget sweep after create, and synchronous reap-on-capacity-failure then retry once. Periodic pass covers crashed/no-poll/idle-app cases and submit-operation finalization.
+* Fast paths reconcile only the current session/operation before active-run checks on request/resubmit, during client `get_status`/`get_result`, after create, and on capacity failure before one retry. They never scan unrelated sessions. The periodic timer is the only global authority for crashed/no-poll/idle-app cases, orphan/expiry/backlog reclamation, and submit-operation finalization.
 * Heartbeat default: emitted ~30 seconds; stale after ~3 missed emissions (~90 seconds). This merely triggers verification; it never authorizes abandon alone.
 * Direct scan requirements: use the authoritative Tables rows and, per SDK correction, reconcile against `list_sandboxes(labels=...)` platform truth. Scan nonterminal `accepted` and `running` run rows with due `expires_at`; session rows with idle-reclaim `expires_at` only after CAS confirms no `active_run_id`; and terminal session rows where `idle_policy_armed=false`. Due fields are state-dependent: run timeout deadline vs session reclaim deadline; `last_activity_at` feeds idle expiry. Terminal/tombstone pruning keeps scan bounded.
 * Reconciler only deletes runtime per-session resources: sandbox, snapshot, generated packages, and Table records/tombstones. It never deletes customer-owned Sandbox Group, state account, identity, egress policy, base disk/image, or RBAC.
 * Snapshot correction: snapshots are immutable, region-pinned, and not platform-GC’d. Persist `snapshot_ids`; reconciler must list and delete/prune snapshots. Snapshot-sourced sandbox inherits resource tier and cannot change entrypoint/cmd/environment.
 * No automatic run retries. Same-key retries replay. A crash with intact disk permits resubmit on same session; loss requires a new session; live conflict requires cancel-then-submit.
-* No v1 runtime quota counter. ACA group capacity is aggregate limit. On capacity failure reap/reconcile and retry once. Per-owner fairness is deferred to v2.
+* No v1 runtime quota counter. ACA group capacity is the aggregate limit. On capacity failure, repair only the current session/operation and retry once; the retry may remain capacity-exhausted because unrelated reclamation is timer-only. Per-owner fairness is deferred to v2.
 
 ##### Retention and lifecycle policy
 

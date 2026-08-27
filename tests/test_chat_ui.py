@@ -27,6 +27,12 @@ def _history_replay_functions(script: str) -> str:
     return script[start:end]
 
 
+def _settlement_location_function(script: str) -> str:
+    start = script.index("function resolveSettlementLocation(")
+    end = script.index("\n\t\tfunction runMetadataFromResponse(", start)
+    return script[start:end]
+
+
 def _run_node(harness: str) -> None:
     result = subprocess.run(
         [shutil.which("node") or "node", "--input-type=module", "-e", harness],
@@ -120,6 +126,87 @@ def test_delayed_history_response_cannot_replace_newer_chat_activity() -> None:
         }
         """
     ).replace("__HISTORY_FUNCTIONS__", functions)
+
+    _run_node(harness)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_settlement_location_resolves_under_deployment_prefix() -> None:
+    script = _script_text()
+    function = _settlement_location_function(script)
+    poll_start = script.index("async function pollRunSettlement()")
+    poll_end = script.index("\n\t\tfunction beginRunSettlement(", poll_start)
+    assert (
+        "resolveSettlementLocation(state.settlementLocation)"
+        in script[poll_start:poll_end]
+    )
+
+    harness = textwrap.dedent(
+        """
+        const state = { baseUrl: "https://example.test" };
+        let apiBasePath = "/agents/main";
+        function getApiBasePath() { return apiBasePath; }
+
+        __SETTLEMENT_LOCATION_FUNCTION__
+
+        const cases = [
+          {
+            name: "root deployment",
+            apiBasePath: "/agents/main",
+            location: "/agents/main/sessions/s1/runs/r1",
+            expected: "https://example.test/agents/main/sessions/s1/runs/r1",
+          },
+          {
+            name: "default api prefix",
+            apiBasePath: "/api/agents/main",
+            location: "/agents/main/sessions/s1/runs/r1",
+            expected: "https://example.test/api/agents/main/sessions/s1/runs/r1",
+          },
+          {
+            name: "reverse proxy prefix",
+            apiBasePath: "/proxy/functions/agents/main",
+            location: "/agents/main/sessions/s1/runs/r1",
+            expected: "https://example.test/proxy/functions/agents/main/sessions/s1/runs/r1",
+          },
+          {
+            name: "already-prefixed root-relative location",
+            apiBasePath: "/api/agents/main",
+            location: "/api/agents/main/sessions/s1/runs/r1",
+            expected: "https://example.test/api/agents/main/sessions/s1/runs/r1",
+          },
+          {
+            name: "relative location",
+            apiBasePath: "/api/agents/main",
+            location: "sessions/s1/runs/r1",
+            expected: "https://example.test/api/agents/main/sessions/s1/runs/r1",
+          },
+          {
+            name: "absolute location",
+            apiBasePath: "/api/agents/main",
+            location: "https://management.example/agents/main/sessions/s1/runs/r1",
+            expected: "https://management.example/agents/main/sessions/s1/runs/r1",
+          },
+        ];
+
+        for (const testCase of cases) {
+          apiBasePath = testCase.apiBasePath;
+          const actual = resolveSettlementLocation(testCase.location);
+          if (actual !== testCase.expected) {
+            throw new Error(`${testCase.name}: expected ${testCase.expected}, got ${actual}`);
+          }
+        }
+
+        let unsafeSchemeRejected = false;
+        try {
+          resolveSettlementLocation("javascript:alert(1)");
+        } catch {
+          unsafeSchemeRejected = true;
+        }
+        if (!unsafeSchemeRejected) {
+          throw new Error("unsafe settlement Location scheme was accepted");
+        }
+        """
+    ).replace("__SETTLEMENT_LOCATION_FUNCTION__", function)
 
     _run_node(harness)
 

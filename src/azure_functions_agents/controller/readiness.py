@@ -465,7 +465,11 @@ class SessionRuntimeBinding:
     ) -> None:
         """Run targeted capacity reconciliation when configured."""
         if self._capacity_reaper is not None:
-            if partition is None or session_id is None:
+            if (
+                partition is None
+                or session_id is None
+                or len(inspect.signature(self._capacity_reaper).parameters) == 0
+            ):
                 await self._capacity_reaper()
             else:
                 await self._capacity_reaper(partition, session_id)
@@ -1928,7 +1932,9 @@ async def _provision_reserved_session_inner(
         )
     except SandboxCapacityError:
         await _within_setup_budget(
-            runtime.reap_for_capacity(), setup_deadline, phase=SetupPhase.CAPACITY_REAP
+            runtime.reap_for_capacity(session.owner_partition, session.session_id),
+            setup_deadline,
+            phase=SetupPhase.CAPACITY_REAP,
         )
         create_request = replace(
             create_request,

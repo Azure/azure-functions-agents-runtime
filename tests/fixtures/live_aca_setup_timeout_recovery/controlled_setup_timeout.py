@@ -17,6 +17,7 @@ from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
 from azure_functions_agents.transport.manifest import ExpectedSandboxManifestBinding
 from azure_functions_agents.transport.ports import SandboxSessionHandle, SandboxSessionProvider
 from azure_functions_agents.transport.transport_models import (
+    InventoryPage,
     PersistedSandboxBinding,
     SandboxCreateRequest,
     SandboxGroupBinding,
@@ -81,11 +82,34 @@ class _DelayedCreateSandboxProvider:
     ) -> tuple[SandboxSummary, ...]:
         return await self._inner.list_sandboxes(labels=labels, max_items=max_items)
 
+    async def list_sandboxes_page(
+        self,
+        *,
+        labels: dict[str, str],
+        continuation_token: str | None,
+        target_count: int,
+    ) -> InventoryPage[SandboxSummary]:
+        return await self._inner.list_sandboxes_page(
+            labels=labels,
+            continuation_token=continuation_token,
+            target_count=target_count,
+        )
+
     async def delete_sandbox(self, sandbox_id: str) -> None:
         await self._inner.delete_sandbox(sandbox_id)
 
+    async def get_sandbox_summary(self, sandbox_id: str) -> SandboxSummary | None:
+        return await self._inner.get_sandbox_summary(sandbox_id)
+
     async def list_snapshots(self, *, max_items: int | None = None) -> tuple[SandboxSnapshot, ...]:
         return await self._inner.list_snapshots(max_items=max_items)
+
+    async def list_snapshots_page(
+        self, *, continuation_token: str | None, target_count: int
+    ) -> InventoryPage[SandboxSnapshot]:
+        return await self._inner.list_snapshots_page(
+            continuation_token=continuation_token, target_count=target_count
+        )
 
     async def delete_snapshot(self, snapshot_id: str) -> None:
         await self._inner.delete_snapshot(snapshot_id)
