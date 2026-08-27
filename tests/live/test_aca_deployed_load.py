@@ -23,6 +23,7 @@ from tests.live.aca_deployed_agent_support import (
     acquire_default_authorization_evidence,
     deployed_aca_smoke_enabled,
     json_request,
+    optional_retry_after_seconds,
     parse_accepted_run,
     read_sse_events_with_first_event_time,
     read_sse_events_with_observation_times,
@@ -72,6 +73,8 @@ _POLL_SECONDS = 1.0
 _COMMON_ACTIVE_WAIT_SECONDS = 1.0
 _ACTIVE_PROOF_TIMEOUT_SECONDS = 120.0
 _EVENT_STREAM_GRACE_SECONDS = 360.0
+_RESULT_MATERIALIZATION_TIMEOUT_SECONDS = 60.0
+_RESULT_RETRY_AFTER_MAXIMUM_SECONDS = 10.0
 _HOLD_SECONDS = 300.0
 _MINIMUM_HOLD_TERMINAL_SECONDS = _HOLD_SECONDS - 1.0
 _SETUP_DEADLINE_ATTEMPTS = 2
@@ -1660,12 +1663,27 @@ async def _read_terminal_result(
     )
     assert status_code == 200
     assert status.get("state") == "succeeded"
-    result_code, result, _ = await json_request(
-        client,
-        "GET",
-        accepted.management_urls["result_url"],
-        headers={"Authorization": authorization},
-    )
+    deadline = time.monotonic() + _RESULT_MATERIALIZATION_TIMEOUT_SECONDS
+    while True:
+        result_code, result, response_headers = await json_request(
+            client,
+            "GET",
+            accepted.management_urls["result_url"],
+            headers={"Authorization": authorization},
+            retry_throttled=False,
+        )
+        if result_code == 200:
+            break
+        assert result_code == 503
+        assert result.get("error") == "result_temporarily_unavailable"
+        retry_after = optional_retry_after_seconds(
+            response_headers,
+            maximum_seconds=_RESULT_RETRY_AFTER_MAXIMUM_SECONDS,
+        )
+        assert retry_after is not None
+        if time.monotonic() + retry_after > deadline:
+            raise AssertionError("Terminal result did not materialize within the retry window.")
+        await asyncio.sleep(retry_after)
     assert result_code == 200
     assert isinstance(result.get("result"), dict)
     return True

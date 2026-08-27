@@ -161,6 +161,53 @@ def load_module(monkeypatch: pytest.MonkeyPatch) -> object:
 
 
 @pytest.mark.asyncio
+async def test_terminal_result_honors_temporary_unavailability_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    responses = iter(
+        [
+            (200, {"state": "succeeded"}, {}),
+            (
+                503,
+                {"error": "result_temporarily_unavailable"},
+                {"Retry-After": "2"},
+            ),
+            (200, {"result": {"text": "done"}}, {}),
+        ]
+    )
+    calls: list[bool] = []
+    sleeps: list[float] = []
+
+    async def request(*_: object, **kwargs: object) -> tuple[int, dict[str, object], dict[str, str]]:
+        calls.append(bool(kwargs.get("retry_throttled", True)))
+        return next(responses)
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(module, "json_request", request)
+    monkeypatch.setattr(module.asyncio, "sleep", sleep)  # type: ignore[attr-defined]
+    submitted = SimpleNamespace(
+        accepted=SimpleNamespace(
+            management_urls={
+                "status_url": "https://example.test/status",
+                "result_url": "https://example.test/result",
+            }
+        )
+    )
+
+    assert await module._read_terminal_result(  # type: ignore[attr-defined]
+        object(),
+        submitted,
+        "Bearer redacted",
+    )
+    assert calls == [True, False, False]
+    assert sleeps == [2.0]
+
+
+@pytest.mark.asyncio
 async def test_phase_a_batch_preserves_prepared_candidates_before_aggregate_failure(
     monkeypatch: pytest.MonkeyPatch,
     load_module: object,
