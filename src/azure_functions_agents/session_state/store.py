@@ -2307,8 +2307,8 @@ class AzureTableSessionStateStore:
         partition_key = _reconciler_cursor_partition_key(app_hash)
         try:
             entity = await self._table_client.get_entity(
-                partition_key,
-                _reconciler_cursor_row_key(scope),
+                partition_key=partition_key,
+                row_key=_reconciler_cursor_row_key(scope),
             )
         except ResourceNotFoundError:
             return None

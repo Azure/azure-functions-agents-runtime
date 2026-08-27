@@ -11,7 +11,7 @@ import asyncio
 import math
 import time
 import uuid
-from collections.abc import AsyncIterable, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from importlib import import_module
@@ -92,6 +92,8 @@ if TYPE_CHECKING:
         ExecResult,
         FileInfo,
         LifecyclePolicy,
+        Sandbox,
+        Snapshot,
     )
     from azure.containerapps.sandbox.aio import SandboxClient, SandboxGroupClient
 
@@ -660,22 +662,11 @@ class AcaSandboxAdapter:
         self._ensure_open()
         _validate_inventory_limit(max_items)
         summaries: list[SandboxSummary] = []
-        iterator = self._group_client.list_sandboxes(labels=labels).__aiter__()
         try:
-            while max_items is None or len(summaries) < max_items:
-                try:
-                    sandbox = await anext(iterator)
-                except StopAsyncIteration:
+            async for sandbox in self._group_client.list_sandboxes(labels=labels):
+                summaries.append(_project_sandbox_summary(sandbox))
+                if max_items is not None and len(summaries) >= max_items:
                     break
-                summaries.append(
-                    SandboxSummary.create(
-                        sandbox_id=sandbox.id,
-                        labels=dict(sandbox.labels),
-                        state=sandbox.state,
-                        created_at=_sdk_timestamp(sandbox.created_at),
-                        modified_at=None,
-                    )
-                )
         except HttpResponseError as exc:
             if _is_authorization_rejection(exc):
                 raise SandboxGroupAuthorizationError(status_code=exc.status_code or 403) from None
@@ -700,24 +691,15 @@ class AcaSandboxAdapter:
         self._ensure_open()
         _validate_inventory_limit(target_count)
 
-        def _pages(token: str | None) -> AsyncIterable[AsyncIterable[Any]]:
+        def _pages(token: str | None) -> AsyncIterator[AsyncIterator[Sandbox]]:
             return self._group_client.list_sandboxes(labels=labels).by_page(
                 continuation_token=token
-            )
-
-        def _project(sandbox: Any) -> SandboxSummary:
-            return SandboxSummary.create(
-                sandbox_id=sandbox.id,
-                labels=dict(sandbox.labels),
-                state=sandbox.state,
-                created_at=_sdk_timestamp(sandbox.created_at),
-                modified_at=None,
             )
 
         try:
             return await _fetch_inventory_page(
                 _pages,
-                _project,
+                _project_sandbox_summary,
                 continuation_token=continuation_token,
                 target_count=target_count,
             )
@@ -743,13 +725,7 @@ class AcaSandboxAdapter:
             raise SandboxProvisioningError("Sandbox lookup failed.") from exc
         except AzureError as exc:
             raise SandboxProvisioningError("Sandbox lookup failed.") from exc
-        return SandboxSummary.create(
-            sandbox_id=sandbox.id,
-            labels=dict(sandbox.labels),
-            state=sandbox.state,
-            created_at=_sdk_timestamp(sandbox.created_at),
-            modified_at=None,
-        )
+        return _project_sandbox_summary(sandbox)
 
     async def delete_sandbox(self, sandbox_id: str) -> None:
         """Delete one sandbox through the bound customer-owned group."""
@@ -780,13 +756,7 @@ class AcaSandboxAdapter:
         _validate_inventory_limit(max_items)
         snapshots: list[SandboxSnapshot] = []
         async for snapshot in self._group_client.list_snapshots():
-            snapshots.append(
-                SandboxSnapshot.create(
-                    snapshot_id=snapshot.id,
-                    sandbox_id=snapshot.sandbox_id,
-                    created_at=_sdk_timestamp(snapshot.created_at_utc),
-                )
-            )
+            snapshots.append(_project_snapshot(snapshot))
             if max_items is not None and len(snapshots) >= max_items:
                 break
         return tuple(snapshots)
@@ -804,20 +774,13 @@ class AcaSandboxAdapter:
         self._ensure_open()
         _validate_inventory_limit(target_count)
 
-        def _pages(token: str | None) -> AsyncIterable[AsyncIterable[Any]]:
+        def _pages(token: str | None) -> AsyncIterator[AsyncIterator[Snapshot]]:
             return self._group_client.list_snapshots().by_page(continuation_token=token)
-
-        def _project(snapshot: Any) -> SandboxSnapshot:
-            return SandboxSnapshot.create(
-                snapshot_id=snapshot.id,
-                sandbox_id=snapshot.sandbox_id,
-                created_at=_sdk_timestamp(snapshot.created_at_utc),
-            )
 
         try:
             return await _fetch_inventory_page(
                 _pages,
-                _project,
+                _project_snapshot,
                 continuation_token=continuation_token,
                 target_count=target_count,
             )
@@ -1316,6 +1279,24 @@ def _sdk_timestamp(timestamp: str | None) -> str | None:
     return timestamp
 
 
+def _project_sandbox_summary(sandbox: Sandbox) -> SandboxSummary:
+    return SandboxSummary.create(
+        sandbox_id=sandbox.id,
+        labels=dict(sandbox.labels),
+        state=sandbox.state,
+        created_at=_sdk_timestamp(sandbox.created_at),
+        modified_at=None,
+    )
+
+
+def _project_snapshot(snapshot: Snapshot) -> SandboxSnapshot:
+    return SandboxSnapshot.create(
+        snapshot_id=snapshot.id,
+        sandbox_id=snapshot.sandbox_id,
+        created_at=_sdk_timestamp(snapshot.created_at_utc),
+    )
+
+
 def _is_definitive_client_rejection(exc: HttpResponseError) -> bool:
     """A 4xx create rejection is definitive: the request never created a sandbox."""
 
@@ -1339,45 +1320,33 @@ def _is_cursor_rejection(exc: HttpResponseError) -> bool:
     return exc.status_code in _CURSOR_INVALID_STATUS_CODES
 
 
-def _inventory_page_iterator(
-    pages: Callable[[str | None], AsyncIterable[AsyncIterable[Any]]],
+def _inventory_page_iterator[RawItem](
+    pages: Callable[[str | None], AsyncIterator[AsyncIterator[RawItem]]],
     continuation_token: str | None,
-) -> AsyncPageIterator[Any]:
-    return cast(AsyncPageIterator[Any], pages(continuation_token).__aiter__())
+) -> AsyncPageIterator[RawItem]:
+    # azure-core types by_page() as AsyncIterator, but its public runtime result
+    # is AsyncPageIterator and exposes the continuation token needed here.
+    return cast(AsyncPageIterator[RawItem], pages(continuation_token))
 
 
-async def _drain_inventory_pages[T](
-    page_iterator: AsyncPageIterator[Any],
-    project: Callable[[Any], T],
-    target_count: int,
+def _is_initial_cursor_rejection(
+    exc: ValueError | HttpResponseError,
     *,
-    first_page: AsyncIterable[Any] | None = None,
-) -> InventoryPage[T]:
-    items: list[T] = []
-    next_token: str | None = None
-    page = first_page
-    while True:
-        if page is None:
-            try:
-                page = await anext(page_iterator)
-            except StopAsyncIteration:
-                break
-        async for raw_item in page:
-            items.append(project(raw_item))
-        next_token = page_iterator.continuation_token
-        if len(items) >= target_count:
-            break
-        page = None
-    return InventoryPage.create(items=items, continuation_token=next_token)
+    continuation_token: str | None,
+    received_page: bool,
+) -> bool:
+    if continuation_token is None or received_page:
+        return False
+    return isinstance(exc, ValueError) or _is_cursor_rejection(exc)
 
 
-async def _fetch_inventory_page[T](
-    pages: Callable[[str | None], AsyncIterable[AsyncIterable[Any]]],
-    project: Callable[[Any], T],
+async def _fetch_inventory_page[RawItem, ProjectedItem](
+    pages: Callable[[str | None], AsyncIterator[AsyncIterator[RawItem]]],
+    project: Callable[[RawItem], ProjectedItem],
     *,
     continuation_token: str | None,
     target_count: int,
-) -> InventoryPage[T]:
+) -> InventoryPage[ProjectedItem]:
     """Fetch one bounded batch, recovering once from a rejected durable cursor.
 
     A durable ``continuation_token`` can outlive the provider's willingness to
@@ -1385,36 +1354,33 @@ async def _fetch_inventory_page[T](
     an SDK ``ValueError`` or bounded cursor-invalid HTTP status for a non-``None``
     token restarts the scan exactly once; any later rejection propagates.
     """
-    if continuation_token is None:
-        return await _drain_inventory_pages(
-            _inventory_page_iterator(pages, None),
-            project,
-            target_count,
-        )
-
-    try:
-        page_iterator = _inventory_page_iterator(pages, continuation_token)
-        first_page = await anext(page_iterator)
-    except StopAsyncIteration:
-        return InventoryPage.create(items=[], continuation_token=None)
-    except ValueError:
-        pass
-    except HttpResponseError as exc:
-        if not _is_cursor_rejection(exc):
-            raise
-    else:
-        return await _drain_inventory_pages(
-            page_iterator,
-            project,
-            target_count,
-            first_page=first_page,
-        )
-
-    return await _drain_inventory_pages(
-        _inventory_page_iterator(pages, None),
-        project,
-        target_count,
+    tokens_to_try = (
+        (continuation_token, None) if continuation_token is not None else (None,)
     )
+    for token in tokens_to_try:
+        items: list[ProjectedItem] = []
+        received_page = False
+        try:
+            page_iterator = _inventory_page_iterator(pages, token)
+            async for page in page_iterator:
+                received_page = True
+                async for raw_item in page:
+                    items.append(project(raw_item))
+                if len(items) >= target_count:
+                    break
+        except (ValueError, HttpResponseError) as exc:
+            if not _is_initial_cursor_rejection(
+                exc,
+                continuation_token=token,
+                received_page=received_page,
+            ):
+                raise
+            continue
+        return InventoryPage.create(
+            items=items,
+            continuation_token=page_iterator.continuation_token if received_page else None,
+        )
+    raise AssertionError("fresh inventory scan did not complete")
 
 
 def _is_capacity_rejection(exc: HttpResponseError) -> bool:

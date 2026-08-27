@@ -2001,29 +2001,32 @@ class SessionReconciler:
             return False
         limit = asyncio.Semaphore(_EXACT_SANDBOX_READ_CONCURRENCY)
 
-        async def read(sandbox_id: str) -> SandboxSummary | None:
-            async with limit:
-                return await self._provider.get_sandbox_summary(sandbox_id)
+        async def read(sandbox_id: str) -> bool:
+            try:
+                async with limit:
+                    sandbox_cache[sandbox_id] = await self._provider.get_sandbox_summary(
+                        sandbox_id
+                    )
+            except _SESSION_RECONCILIATION_ERRORS as exc:
+                logger.warning(
+                    "Sandbox snapshot backing lookup deferred: sandbox_id=%s error=%s",
+                    sandbox_id,
+                    type(exc).__name__,
+                )
+                return False
+            return True
 
         results = await asyncio.gather(
             *(read(sandbox_id) for sandbox_id in pending),
             return_exceptions=True,
         )
-        deferred = False
-        for sandbox_id, result in zip(pending, results, strict=True):
-            if isinstance(result, BaseException):
-                if not isinstance(result, _SESSION_RECONCILIATION_ERRORS):
-                    raise result
-                logger.warning(
-                    "Sandbox snapshot backing lookup deferred: sandbox_id=%s error=%s",
-                    sandbox_id,
-                    type(result).__name__,
-                )
-                deferred = True
-                continue
-            sandbox_cache[sandbox_id] = result
-        return deferred
-
+        failure = next(
+            (result for result in results if isinstance(result, BaseException)),
+            None,
+        )
+        if failure is not None:
+            raise failure
+        return False in results
 
     async def _is_deletable_labeled_orphan(
         self,
