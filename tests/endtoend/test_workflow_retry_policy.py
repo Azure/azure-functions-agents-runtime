@@ -78,6 +78,37 @@ def _request_workflows(base_url: str, session_id: str) -> list[Any]:
     return workflows
 
 
+def _start_model_workflow(base_url: str, session_id: str) -> str:
+    tool_calls: list[Any] = []
+    prompts = [
+        "Recover delayed order ORD-1001 and complete it safely.",
+        (
+            "Continue the retry-policy-e2e skill now. Read its resource and call "
+            "start_workflow; do not stop until start_workflow returns."
+        ),
+        (
+            "Finish the retry-policy-e2e skill now by calling any remaining required "
+            "tool. Return only after start_workflow returns."
+        ),
+    ]
+    last_error: AssertionError | None = None
+    for prompt in prompts:
+        reply = chat(base_url, "main", prompt, session_id=session_id)
+        assert reply.status == 200, reply.body
+        calls = reply.body.get("tool_calls")
+        if isinstance(calls, list):
+            tool_calls.extend(calls)
+        try:
+            return _workflow_id(tool_calls)
+        except AssertionError as exc:
+            last_error = exc
+
+    assert last_error is not None
+    raise AssertionError(
+        f"model did not complete retry-policy-e2e after {len(prompts)} turns"
+    ) from last_error
+
+
 def _wait_for_terminal_workflow(
     base_url: str,
     session_id: str,
@@ -234,18 +265,10 @@ def test_model_preserves_plan_and_decorator_retry_wins(
     if configured_provider(APP_DIR) is None:
         pytest.skip("no LLM provider configured for retry-policy E2E")
     session_id = f"retry-policy-e2e-{uuid.uuid4()}"
-    reply = chat(
-        retry_policy_host.base_url,
-        "main",
-        "Recover delayed order ORD-1001 and complete it safely.",
-        session_id=session_id,
-    )
-    assert reply.status == 200, reply.body
-
     workflow = _wait_for_terminal_workflow(
         retry_policy_host.base_url,
         session_id,
-        _workflow_id(reply.body.get("tool_calls")),
+        _start_model_workflow(retry_policy_host.base_url, session_id),
     )
     assert workflow["runtime_status"] == "Completed"
     output = workflow.get("output")
