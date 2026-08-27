@@ -267,7 +267,7 @@ class FakeSessionStateStore:
         self.idempotency_etags: dict[str, str] = {}
         self.admission_expected_session_etags: list[str | None] = []
         self.reconciler_cursors: dict[
-            tuple[str, ReconcilerCursorScope | None], ReconcilerCursorRead
+            tuple[str, ReconcilerCursorScope], ReconcilerCursorRead
         ] = {}
 
     async def create_session(self, record: DurableSessionRecord) -> str:
@@ -1092,7 +1092,7 @@ class FakeSessionStateStore:
         )
 
     async def get_reconciler_cursor(
-        self, app_hash: str, *, scope: ReconcilerCursorScope | None = None
+        self, app_hash: str, *, scope: ReconcilerCursorScope
     ) -> ReconcilerCursorRead | None:
         return self.reconciler_cursors.get((app_hash, scope))
 
@@ -1102,7 +1102,7 @@ class FakeSessionStateStore:
         app_hash: str,
         previous: ReconcilerCursorRead | None,
         continuation_token: str | None,
-        scope: ReconcilerCursorScope | None = None,
+        scope: ReconcilerCursorScope,
     ) -> ReconcilerCursorRead:
         current = self.reconciler_cursors.get((app_hash, scope))
         if current != previous:

@@ -27,9 +27,13 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
 - Give every source module a globally unique, intent-revealing basename.
   Source tests mirror the module name as `tests/test_<module>.py`.
 - Use a module constant rather than repeating a named URL, API version, or path.
-- Declare each finite domain vocabulary once in its owning module using the
-  repository's typed idiom (`Literal`/`StrEnum` plus named constants,
-  frozensets, or mappings as appropriate); consumers reuse those symbols rather
+- Declare each finite domain vocabulary once in its owning module. Use a
+  `StrEnum` when the vocabulary is a runtime concept or crosses a persistence,
+  serialization, logging, or API boundary; consumers should use named enum
+  members and `.value` at string boundaries. Use `Literal[...]` when the
+  vocabulary is type-only, local to a signature or model, and does not need
+  runtime identity or member access. Use frozensets or mappings when membership
+  or value lookup is the runtime operation. Consumers reuse these symbols rather
   than redeclaring raw strings.
 
 ## Documentation and logging

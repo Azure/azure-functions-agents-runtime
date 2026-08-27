@@ -39,6 +39,7 @@ from ..session_state import (
     OperationRowNotFoundError,
     OwnerIdempotencyRowKey,
     OwnerPartition,
+    ReconcilerCursorScope,
     RunRowKey,
     RunRowNotFoundError,
     SessionOperationFence,
@@ -294,10 +295,10 @@ class SessionReconciler:
         now = service_time or controller_now
         inventory_limit = self._config.inventory_page_size * self._config.max_inventory_pages
         sandbox_cursor = await self._store.get_reconciler_cursor(
-            self._app_hash, scope="sandboxes"
+            self._app_hash, scope=ReconcilerCursorScope.SANDBOXES
         )
         snapshot_cursor = await self._store.get_reconciler_cursor(
-            self._app_hash, scope="snapshots"
+            self._app_hash, scope=ReconcilerCursorScope.SNAPSHOTS
         )
         sandbox_page = await self._provider.list_sandboxes_page(
             labels={"app_hash": self._app_hash},
@@ -382,7 +383,7 @@ class SessionReconciler:
                 app_hash=self._app_hash,
                 previous=sandbox_cursor,
                 continuation_token=sandbox_page.continuation_token,
-                scope="sandboxes",
+                scope=ReconcilerCursorScope.SANDBOXES,
             )
         except ConcurrencyConflictError:
             inventory_conflict = True
@@ -391,7 +392,7 @@ class SessionReconciler:
                 app_hash=self._app_hash,
                 previous=snapshot_cursor,
                 continuation_token=snapshot_page.continuation_token,
-                scope="snapshots",
+                scope=ReconcilerCursorScope.SNAPSHOTS,
             )
         except ConcurrencyConflictError:
             inventory_conflict = True
@@ -429,7 +430,9 @@ class SessionReconciler:
         scanned_records = 0
         partial = False
         seen_tokens: set[str | None] = set()
-        cursor = await self._store.get_reconciler_cursor(self._app_hash)
+        cursor = await self._store.get_reconciler_cursor(
+            self._app_hash, scope=ReconcilerCursorScope.RECORDS
+        )
         continuation = None if cursor is None else cursor.continuation_token
         for _ in range(self._config.max_pages):
             if continuation in seen_tokens:
@@ -467,6 +470,7 @@ class SessionReconciler:
                     app_hash=self._app_hash,
                     previous=cursor,
                     continuation_token=continuation,
+                    scope=ReconcilerCursorScope.RECORDS,
                 )
             except ConcurrencyConflictError:
                 partial = True

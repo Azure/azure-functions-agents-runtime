@@ -236,8 +236,9 @@ Request-path reconciliation is deliberately targeted to the requested
 session/operation (and is bounded to a small quota). It never lists or probes
 unrelated app-owned sessions; global orphan, expiry, inventory, and backlog
 cleanup belongs to the timer. Timer passes page inventory with bounded
-concurrency and a cursor that advances only after a page completes, reporting
-deferred and partial progress when its deadline is reached.
+concurrency and independent durable cursors for records, sandboxes, and
+snapshots; each advances only after its page completes, reporting deferred and
+partial progress when its deadline is reached.
 A capacity-triggered targeted retry may therefore remain capacity-exhausted
 until the timer reclaims unrelated stale resources.
 

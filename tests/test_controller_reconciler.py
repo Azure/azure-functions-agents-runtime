@@ -29,6 +29,7 @@ from azure_functions_agents.session_state import (
     DurableSessionOperation,
     DurableSessionRecord,
     FunctionAppOwnerContext,
+    ReconcilerCursorScope,
     SessionNotAdmissibleError,
     SessionOperationFence,
     SessionOperationTarget,
@@ -1721,7 +1722,9 @@ async def test_reconciler_rotates_the_durable_cursor_across_bounded_pages() -> N
     await reconciler.run_once()
 
     assert store.page_starts == [None, "1", "2", None]
-    cursor = await store.get_reconciler_cursor(_app_hash())
+    cursor = await store.get_reconciler_cursor(
+        _app_hash(), scope=ReconcilerCursorScope.RECORDS
+    )
     assert cursor is not None
     assert cursor.continuation_token == "1"
 
@@ -1773,7 +1776,9 @@ async def test_reconciler_inventory_cursor_covers_orphans_beyond_the_old_prefix_
     first = await reconciler.run_once()
     assert provider.deleted_sandboxes == ["orphan-0", "orphan-1"]
     assert first.partial is True
-    cursor = await store.get_reconciler_cursor(_app_hash(), scope="sandboxes")
+    cursor = await store.get_reconciler_cursor(
+        _app_hash(), scope=ReconcilerCursorScope.SANDBOXES
+    )
     assert cursor is not None
     assert cursor.continuation_token == "2"
 
@@ -1790,7 +1795,9 @@ async def test_reconciler_inventory_cursor_covers_orphans_beyond_the_old_prefix_
         "orphan-4",
     ]
     assert third.partial is False
-    cursor = await store.get_reconciler_cursor(_app_hash(), scope="sandboxes")
+    cursor = await store.get_reconciler_cursor(
+        _app_hash(), scope=ReconcilerCursorScope.SANDBOXES
+    )
     assert cursor is not None
     assert cursor.continuation_token is None
 
@@ -1827,8 +1834,12 @@ async def test_reconciler_sandbox_and_snapshot_inventory_cursors_advance_indepen
 
     await reconciler.run_once()
 
-    sandbox_cursor = await store.get_reconciler_cursor(_app_hash(), scope="sandboxes")
-    snapshot_cursor = await store.get_reconciler_cursor(_app_hash(), scope="snapshots")
+    sandbox_cursor = await store.get_reconciler_cursor(
+        _app_hash(), scope=ReconcilerCursorScope.SANDBOXES
+    )
+    snapshot_cursor = await store.get_reconciler_cursor(
+        _app_hash(), scope=ReconcilerCursorScope.SNAPSHOTS
+    )
     assert sandbox_cursor is not None
     assert sandbox_cursor.continuation_token == "2"
     assert snapshot_cursor is not None
@@ -1836,8 +1847,12 @@ async def test_reconciler_sandbox_and_snapshot_inventory_cursors_advance_indepen
 
     await reconciler.run_once()
 
-    sandbox_cursor = await store.get_reconciler_cursor(_app_hash(), scope="sandboxes")
-    snapshot_cursor = await store.get_reconciler_cursor(_app_hash(), scope="snapshots")
+    sandbox_cursor = await store.get_reconciler_cursor(
+        _app_hash(), scope=ReconcilerCursorScope.SANDBOXES
+    )
+    snapshot_cursor = await store.get_reconciler_cursor(
+        _app_hash(), scope=ReconcilerCursorScope.SNAPSHOTS
+    )
     assert sandbox_cursor is not None
     assert sandbox_cursor.continuation_token is None
     assert snapshot_cursor is not None
@@ -2498,15 +2513,15 @@ class SandboxCursorConflictStore(FakeSessionStateStore):
         app_hash: str,
         previous: object,
         continuation_token: str | None,
-        scope: str | None = None,
+        scope: ReconcilerCursorScope,
     ) -> object:
-        if scope == "sandboxes":
+        if scope is ReconcilerCursorScope.SANDBOXES:
             raise ConcurrencyConflictError("concurrent sandbox cursor advance")
         return await super().advance_reconciler_cursor(
             app_hash=app_hash,
             previous=previous,  # type: ignore[arg-type]
             continuation_token=continuation_token,
-            scope=scope,  # type: ignore[arg-type]
+            scope=scope,
         )
 
 
