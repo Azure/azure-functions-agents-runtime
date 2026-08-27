@@ -7,7 +7,8 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch-path=src src/index.js"
+    "dev": "node --watch-path=src src/index.js",
+    "test": "node --test"
   },
   "dependencies": {
     "@azure/arm-appservice": "^19.0.0",

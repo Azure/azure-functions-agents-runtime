@@ -83,6 +83,31 @@ export interface SourceListing {
   files: SourceListEntry[]
 }
 
+export interface CustomToolPreview {
+  toolPath: string
+  python: string
+  requirements: string
+  addedDependencies: string[]
+  existingToolSource: SourceFile['source']
+  requiresOverwrite: boolean
+}
+
+export interface RuntimeIdentity {
+  type: 'system' | 'user'
+  name: string
+  clientId: string
+  principalId: string
+  resourceId?: string
+}
+
+export interface AzureRole {
+  id: string
+  name: string
+  description: string
+  assignableScopes: string[]
+  isDefault: boolean
+}
+
 export interface SessionSummary {
   sessionId: string
   size: number
@@ -294,10 +319,12 @@ export type DeployTarget =
 // Error carrying the HTTP status so React Query's retry guard can skip 4xx.
 export class ApiError extends Error {
   readonly status: number
-  constructor(message: string, status: number) {
+  readonly data: Record<string, unknown>
+  constructor(message: string, status: number, data: Record<string, unknown> = {}) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.data = data
   }
 }
 
@@ -332,7 +359,11 @@ async function req<T>(
       data && typeof data === 'object' && 'detail' in data
         ? (data as { detail: unknown }).detail
         : `HTTP ${res.status}`
-    throw new ApiError(typeof detail === 'string' ? detail : JSON.stringify(detail), res.status)
+    throw new ApiError(
+      typeof detail === 'string' ? detail : JSON.stringify(detail),
+      res.status,
+      data && typeof data === 'object' ? (data as Record<string, unknown>) : {},
+    )
   }
   return data as T
 }
@@ -404,6 +435,52 @@ export const api = {
       storageToken ? { 'X-Storage-Token': storageToken } : undefined,
     )
   },
+
+  previewAzureRestTool: (p: { subscription: string; resourceGroup: string; app: string; toolName: string }) =>
+    req<CustomToolPreview>('POST', '/api/custom-tools/azure-rest/preview', p),
+  saveAzureRestTool: (p: {
+    subscription: string
+    resourceGroup: string
+    app: string
+    toolName: string
+    python: string
+    overwrite: boolean
+  }) => req<{ ok: boolean; source: string; toolPath: string; requirementsPath: string; addedDependencies: string[] }>(
+    'POST',
+    '/api/custom-tools/azure-rest/save',
+    p,
+  ),
+  getCustomToolIdentity: (p: { subscription: string; resourceGroup: string; app: string }) =>
+    req<{ identity: RuntimeIdentity }>(
+      'GET',
+      `/api/custom-tools/identity?subscription=${enc(p.subscription)}&resourceGroup=${enc(p.resourceGroup)}&app=${enc(p.app)}`,
+    ),
+  listCustomToolRoles: (p: {
+    subscription: string
+    scopeType: 'subscription' | 'resourceGroup'
+    resourceGroup?: string
+  }) => req<{ scope: string; roles: AzureRole[] }>(
+    'GET',
+    `/api/custom-tools/roles?subscription=${enc(p.subscription)}&scopeType=${enc(p.scopeType)}&resourceGroup=${enc(p.resourceGroup ?? '')}`,
+  ),
+  grantCustomToolAccess: (p: {
+    subscription: string
+    resourceGroup: string
+    app: string
+    scopeType: 'subscription' | 'resourceGroup'
+    scopeResourceGroup?: string
+    identityClientId?: string
+    roleDefinitionId: string
+  }) => req<{ identity: RuntimeIdentity; outcome: 'granted' | 'existing'; role: AzureRole; scope: string }>(
+    'POST',
+    '/api/custom-tools/access',
+    p,
+  ),
+  getConfiguredModel: (p: { subscription: string; resourceGroup: string; app: string }) =>
+    req<{ provider: string; model: string; available: boolean }>(
+      'GET',
+      `/api/custom-tools/configured-model?subscription=${enc(p.subscription)}&resourceGroup=${enc(p.resourceGroup)}&app=${enc(p.app)}`,
+    ),
 
   // Enumerate the runtime's blob-backed sessions for an app so the Playground
   // can offer a history browser. `readable: false` means storage was reached
@@ -546,12 +623,13 @@ export const api = {
   generateCapability: (p: {
     subscription: string
     app?: string
+    resourceGroup?: string
     kind: 'http_trigger' | 'connector_trigger' | 'timer_trigger' | 'custom_tool' | 'skill'
     triggerType?: string
     name: string
     description: string
     groundInSkills?: boolean
-    foundry: { resourceGroup: string; account: string; openaiEndpoint: string; model: string }
+    foundry?: { resourceGroup: string; account: string; openaiEndpoint: string; model: string }
   }) => req<{ content: string; kind: string }>('POST', '/api/generate-capability', p),
 
   // Resource groups in a subscription (for the create flow's RG picker).

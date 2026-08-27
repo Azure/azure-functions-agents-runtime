@@ -39,7 +39,8 @@ import { SubscriptionClient } from '@azure/arm-resources-subscriptions'
 import { WebSiteManagementClient } from '@azure/arm-appservice'
 import { ContainerClient, StorageSharedKeyCredential } from '@azure/storage-blob'
 import yauzl from 'yauzl'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { resolveConfiguredModelSettings } from './custom-tools.js'
 
 const AGENT_PROVIDER_SETTING = 'AZURE_FUNCTIONS_AGENTS_PROVIDER'
 
@@ -976,6 +977,179 @@ async function readAppSettings(accessToken, subscriptionId, resourceGroup, appNa
   }
 }
 
+export async function readAppSettingsStrict(accessToken, subscriptionId, resourceGroup, appName) {
+  try {
+    const client = webClient(accessToken, subscriptionId)
+    const current = await client.webApps.listApplicationSettings(resourceGroup, appName)
+    return { ...(current?.properties || {}) }
+  } catch (error) {
+    throw Object.assign(new Error('The portal could not read this Function App configuration.'), {
+      status: error?.statusCode === 403 ? 403 : (error?.statusCode ?? 502),
+      portalCode: error?.statusCode === 403 ? 'app_settings_forbidden' : 'app_settings_unavailable',
+    })
+  }
+}
+
+async function updateAzureClientId(accessToken, subscriptionId, resourceGroup, appName, clientId) {
+  const settings = await readAppSettingsStrict(accessToken, subscriptionId, resourceGroup, appName)
+  try {
+    const client = webClient(accessToken, subscriptionId)
+    await client.webApps.updateApplicationSettings(resourceGroup, appName, {
+      properties: { ...settings, AZURE_CLIENT_ID: clientId },
+    })
+  } catch (error) {
+    throw Object.assign(new Error('The portal could not configure the selected managed identity.'), {
+      status: error?.statusCode === 403 ? 403 : (error?.statusCode ?? 502),
+      portalCode: error?.statusCode === 403 ? 'identity_configuration_forbidden' : 'identity_configuration_failed',
+    })
+  }
+}
+
+async function userAssignedIdentityCandidates(accessToken, site) {
+  const identities = Object.entries(site?.identity?.userAssignedIdentities ?? {})
+  return Promise.all(
+    identities.map(async ([resourceId, value]) => {
+      let details = value ?? {}
+      if (!details.clientId || !details.principalId) {
+        const response = await armJson(accessToken, `${resourceId}?api-version=2023-01-31`)
+        if (response.ok) details = response.json?.properties ?? details
+      }
+      return {
+        resourceId,
+        name: resourceId.split('/').pop() ?? resourceId,
+        clientId: String(details.clientId ?? ''),
+        principalId: String(details.principalId ?? ''),
+        type: 'user',
+      }
+    }),
+  ).then((values) => values.filter((value) => value.clientId && value.principalId))
+}
+
+export async function resolveRuntimeIdentity(
+  accessToken,
+  subscriptionId,
+  resourceGroup,
+  appName,
+  selectedClientId = '',
+) {
+  const site = await getSite(accessToken, subscriptionId, resourceGroup, appName)
+  if (!site) {
+    throw Object.assign(new Error(`Function App "${appName}" was not found.`), { status: 404, portalCode: 'app_not_found' })
+  }
+  const settings = await readAppSettingsStrict(accessToken, subscriptionId, resourceGroup, appName)
+  const candidates = await userAssignedIdentityCandidates(accessToken, site)
+  const configuredClientId = String(settings.AZURE_CLIENT_ID ?? '').trim()
+  const requestedClientId = String(selectedClientId ?? '').trim()
+  if (requestedClientId) {
+    const selected = candidates.find((candidate) => candidate.clientId.toLowerCase() === requestedClientId.toLowerCase())
+    if (!selected) {
+      throw Object.assign(new Error('The selected user-assigned identity is not attached to this Function App.'), {
+        status: 409,
+        portalCode: 'configured_identity_unattached',
+        candidates,
+      })
+    }
+    if (configuredClientId.toLowerCase() !== selected.clientId.toLowerCase()) {
+      await updateAzureClientId(accessToken, subscriptionId, resourceGroup, appName, selected.clientId)
+    }
+    return selected
+  }
+  if (configuredClientId) {
+    const configured = candidates.find((candidate) => candidate.clientId.toLowerCase() === configuredClientId.toLowerCase())
+    if (configured) return configured
+    throw Object.assign(new Error('AZURE_CLIENT_ID does not match an identity attached to this Function App.'), {
+      status: 409,
+      portalCode: 'configured_identity_unattached',
+      candidates,
+    })
+  }
+  if (site.identity?.principalId) {
+    return { type: 'system', name: `${appName} (system assigned)`, clientId: '', principalId: site.identity.principalId }
+  }
+  if (candidates.length) {
+    throw Object.assign(new Error('Choose the user-assigned identity the runtime should use.'), {
+      status: 409,
+      portalCode: 'identity_ambiguous',
+      candidates,
+    })
+  }
+  throw Object.assign(new Error('This Function App has no managed identity.'), {
+    status: 409,
+    portalCode: 'managed_identity_missing',
+  })
+}
+
+const READER_ROLE_ID = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
+
+function scopeContains(assignableScope, targetScope) {
+  const parent = String(assignableScope ?? '').replace(/\/$/, '').toLowerCase()
+  const target = String(targetScope ?? '').replace(/\/$/, '').toLowerCase()
+  return parent === '/' || target === parent || target.startsWith(`${parent}/`)
+}
+
+export async function listAssignableRoles(accessToken, subscriptionId, scope) {
+  const response = await armJson(
+    accessToken,
+    `${scope}/providers/Microsoft.Authorization/roleDefinitions?api-version=2022-04-01&$filter=type%20eq%20'BuiltInRole'`,
+  )
+  if (!response.ok) {
+    const message = response.json?.error?.message || `HTTP ${response.status}`
+    throw Object.assign(new Error(`Could not list Azure roles: ${message}`), {
+      status: response.status,
+      portalCode: response.status === 403 ? 'role_definitions_forbidden' : 'role_definitions_unavailable',
+    })
+  }
+  const roles = (response.json?.value ?? [])
+    .filter((role) => (role.properties?.assignableScopes ?? []).some((candidate) => scopeContains(candidate, scope)))
+    .map((role) => ({
+      id: role.id,
+      name: role.properties?.roleName ?? role.name,
+      description: role.properties?.description ?? '',
+      assignableScopes: role.properties?.assignableScopes ?? [],
+      isDefault: String(role.name).toLowerCase() === READER_ROLE_ID,
+    }))
+    .sort((left, right) => Number(right.isDefault) - Number(left.isDefault) || left.name.localeCompare(right.name))
+  return roles
+}
+
+function deterministicRoleAssignmentId(scope, principalId, roleDefinitionId) {
+  const bytes = createHash('sha256').update(`${scope}|${principalId}|${roleDefinitionId}`.toLowerCase()).digest().subarray(0, 16)
+  bytes[6] = (bytes[6] & 0x0f) | 0x50
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = bytes.toString('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+export async function assignRole(accessToken, subscriptionId, scope, principalId, roleDefinitionId) {
+  const roles = await listAssignableRoles(accessToken, subscriptionId, scope)
+  const role = roles.find((candidate) => candidate.id.toLowerCase() === String(roleDefinitionId).toLowerCase())
+  if (!role || !String(role.id).toLowerCase().startsWith(`/subscriptions/${subscriptionId}/`.toLowerCase())) {
+    throw Object.assign(new Error('The selected role is not assignable at this scope.'), {
+      status: 422,
+      portalCode: 'role_not_assignable_at_scope',
+    })
+  }
+  const assignmentId = deterministicRoleAssignmentId(scope, principalId, role.id)
+  const response = await armJson(
+    accessToken,
+    `${scope}/providers/Microsoft.Authorization/roleAssignments/${assignmentId}?api-version=2022-04-01`,
+    {
+      method: 'PUT',
+      body: { properties: { principalId, principalType: 'ServicePrincipal', roleDefinitionId: role.id } },
+      timeoutMs: 30000,
+    },
+  )
+  const code = String(response.json?.error?.code ?? '')
+  if (response.ok) return { outcome: 'granted', role, scope, principalId }
+  if (response.status === 409 || /RoleAssignmentExists/i.test(code)) {
+    return { outcome: 'existing', role, scope, principalId }
+  }
+  throw Object.assign(new Error(response.json?.error?.message || `Role assignment failed with HTTP ${response.status}.`), {
+    status: response.status,
+    portalCode: response.status === 403 ? 'role_assignment_forbidden' : 'role_assignment_failed',
+  })
+}
+
 // Parse `AccountName=` out of an Azure Storage connection string.
 function accountFromConnString(connString) {
   const match = /AccountName=([^;]+)/i.exec(String(connString ?? ''))
@@ -1616,6 +1790,39 @@ export async function discoverFoundry(accessToken, subscriptionId) {
   return { subscriptionId, accounts }
 }
 
+function endpointHost(value) {
+  try {
+    return new URL(value).hostname.toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+export async function resolveConfiguredModel(accessToken, subscriptionId, resourceGroup, appName) {
+  const settings = await readAppSettingsStrict(accessToken, subscriptionId, resourceGroup, appName)
+  const configured = resolveConfiguredModelSettings(settings)
+  if (configured.provider === 'openai') return configured
+
+  const discovered = await discoverFoundry(accessToken, subscriptionId)
+  const configuredHost = endpointHost(configured.endpoint)
+  const account = discovered.accounts.find((candidate) => {
+    const hosts = [candidate.foundryEndpoint, candidate.openaiEndpoint].map(endpointHost).filter(Boolean)
+    return hosts.includes(configuredHost) || configuredHost.startsWith(`${candidate.name.toLowerCase()}.`)
+  })
+  if (!account?.openaiEndpoint) {
+    throw Object.assign(new Error('The configured Azure AI account could not be resolved in this subscription.'), {
+      status: 404,
+      portalCode: 'configured_model_not_found',
+    })
+  }
+  return {
+    ...configured,
+    account: account.name,
+    resourceGroup: account.resourceGroup,
+    openaiEndpoint: account.openaiEndpoint,
+  }
+}
+
 // Fetch a Cognitive Services account data-plane key via ARM listKeys.
 async function foundryAccountKey(accessToken, subscriptionId, resourceGroup, account) {
   const res = await armJson(
@@ -1679,6 +1886,43 @@ async function foundryChat(accessToken, subscriptionId, opts) {
   return { content }
 }
 
+async function openAIChat(apiKey, model, system, user, timeoutMs = 90000) {
+  let response
+  try {
+    response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+  } catch (error) {
+    throw Object.assign(new Error(error?.name === 'TimeoutError' ? 'Configured model generation timed out.' : 'Configured model generation failed.'), {
+      status: error?.name === 'TimeoutError' ? 504 : 502,
+      portalCode: error?.name === 'TimeoutError' ? 'generation_timeout' : 'generation_failed',
+    })
+  }
+  const text = await response.text()
+  let body = {}
+  try { body = JSON.parse(text) } catch { /* raw response */ }
+  if (!response.ok) {
+    throw Object.assign(new Error(String(body?.error?.message || response.statusText).slice(0, 300)), {
+      status: response.status === 429 ? 429 : 502,
+      portalCode: response.status === 429 ? 'generation_throttled' : 'generation_failed',
+    })
+  }
+  const content = String(body?.choices?.[0]?.message?.content ?? '')
+    .replace(/^\s*```[a-z]*\n?/i, '')
+    .replace(/\n?```\s*$/i, '')
+    .trim()
+  if (!content) {
+    throw Object.assign(new Error('The configured model returned no generated content.'), {
+      status: 502,
+      portalCode: 'generation_failed',
+    })
+  }
+  return { content }
+}
+
 // Capability code generators, grounded in the azure-functions-agents-runtime
 // `.agent.md` front matter and `tools/` conventions.
 const CAPABILITY_PROMPTS = {
@@ -1714,7 +1958,7 @@ const CAPABILITY_PROMPTS = {
       'You are an expert Python engineer writing a custom tool for the azure-functions-agents-runtime `tools/` directory. Requirements:\n' +
       '- `from azure_functions_agents import tool` and `from pydantic import BaseModel, Field`.\n' +
       '- Define a Pydantic input model (BaseModel) with Field(description=...) on each field.\n' +
-      '- Define ONE function decorated with `@tool` taking a single argument typed as that model and returning a `str` (JSON) or dict. It MAY be `async`.\n' +
+      '- Define ONE function decorated with `@tool(schema=YourInputModel)` taking a single argument typed as that model and returning a `str` (JSON) or dict. It MAY be `async`. This exposes the model fields directly to MAF.\n' +
       '- Give the function a clear docstring (used as the tool description).\n' +
       '- For Azure calls use `from azure.identity.aio import DefaultAzureCredential` (the app managed identity). Prefer aiohttp or httpx. Keep it a single self-contained file.\n' +
       'Output ONLY valid Python for one file. No markdown, no code fences, no commentary.',
@@ -1760,6 +2004,39 @@ export async function generateCapabilityCode(accessToken, subscriptionId, opts) 
     timeoutMs: 90000,
   })
   return { content, kind }
+}
+
+export async function generateCapabilityCodeForApp(accessToken, subscriptionId, opts) {
+  const { resourceGroup, appName, kind, name, description, triggerType, skillsContext, guidance } = opts
+  const prompt = CAPABILITY_PROMPTS[kind]
+  if (!prompt) throw Object.assign(new Error(`Unknown capability kind: ${kind}`), { status: 400 })
+  const configured = await resolveConfiguredModel(accessToken, subscriptionId, resourceGroup, appName)
+  let user = prompt.user({ name, description, triggerType })
+  if (skillsContext) user += `\n\nUse these existing project skills as authoritative reference where relevant:\n\n${skillsContext}`
+  const system = guidance
+    ? `${prompt.system}\n\n--- Authoritative runtime guidance (follow it exactly) ---\n\n${guidance}`
+    : prompt.system
+  try {
+    const generated = configured.provider === 'openai'
+      ? await openAIChat(configured.apiKey, configured.model, system, user)
+      : await foundryChat(accessToken, subscriptionId, {
+          resourceGroup: configured.resourceGroup,
+          account: configured.account,
+          openaiEndpoint: configured.openaiEndpoint,
+          model: configured.model,
+          system,
+          user,
+          timeoutMs: 90000,
+        })
+    if (!generated.content) throw new Error('The configured model returned no generated content.')
+    return { content: generated.content, kind, provider: configured.provider, model: configured.model }
+  } catch (error) {
+    if (error?.portalCode) throw error
+    throw Object.assign(error, {
+      status: error?.status === 429 ? 429 : (error?.name === 'TimeoutError' ? 504 : (error?.status ?? 502)),
+      portalCode: error?.status === 429 ? 'generation_throttled' : (error?.name === 'TimeoutError' ? 'generation_timeout' : 'generation_failed'),
+    })
+  }
 }
 
 // Fallback planner guidance if the portal skill file can't be read.

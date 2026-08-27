@@ -30,6 +30,7 @@ export default function CreateAgentPage() {
     queryFn: () => api.listFoundry(foundrySub),
     enabled: !!foundrySub,
     staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: 'always',
   })
   const foundryAccounts = foundryData?.accounts ?? []
   const selectedAccount = foundryAccounts.find((a) => a.name === draft.foundryAccount)
@@ -268,6 +269,9 @@ export default function CreateAgentPage() {
                         onChange={(v) => set('foundryModel', v)}
                         options={modelOptions}
                         placeholder={selectedAccount.models.length ? 'Select a model…' : 'No chat models deployed'}
+                        loading={foundryLoading}
+                        loadingLabel="Refreshing model deployments…"
+                        onRefresh={() => void refetchFoundry()}
                         ariaLabel="Model deployment"
                       />
                     </div>

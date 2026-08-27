@@ -18,8 +18,16 @@ import cors from 'cors'
 import * as YAML from 'js-yaml'
 
 import * as azure from './azure.js'
+import {
+  azureRoleScope,
+  customToolPath,
+  mergeRequirements,
+  renderAzureRestTool,
+  validateAzureRestSource,
+} from './custom-tools.js'
 import * as github from './github.js'
 import * as provision from './provision.js'
+import { recoverSourceDrafts, writeSourceDrafts } from './source-draft-store.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DIST_DIR = path.resolve(__dirname, '..', '..', 'frontend', 'dist')
@@ -42,10 +50,11 @@ app.use(
 
 // Raised by handlers to return a specific HTTP status + message.
 class HttpError extends Error {
-  constructor(status, detail) {
+  constructor(status, detail, metadata = {}) {
     super(detail)
     this.status = status
     this.detail = detail
+    this.metadata = metadata
   }
 }
 
@@ -318,6 +327,10 @@ app.put(
 
 const SOURCE_DRAFTS_DIR = path.join(__dirname, '..', '.data', 'source-drafts')
 
+function sourceDraftAppDir(subscription, appName) {
+  return path.join(SOURCE_DRAFTS_DIR, safeSegment(subscription), safeSegment(appName))
+}
+
 function sourceDraftPath(subscription, appName, relPath) {
   // Preserve nested structure (e.g. tools/x.py, skills/y/SKILL.md) so the draft
   // round-trips to the right path — safeSegment each segment, keep the slashes.
@@ -329,6 +342,7 @@ function sourceDraftPath(subscription, appName, relPath) {
 }
 
 async function readSourceDraft(subscription, appName, relPath) {
+  await recoverSourceDrafts(sourceDraftAppDir(subscription, appName))
   try {
     return await fs.promises.readFile(sourceDraftPath(subscription, appName, relPath), 'utf-8')
   } catch {
@@ -337,9 +351,23 @@ async function readSourceDraft(subscription, appName, relPath) {
 }
 
 async function writeSourceDraft(subscription, appName, relPath, content) {
-  const filePath = sourceDraftPath(subscription, appName, relPath)
-  await fs.promises.mkdir(path.dirname(filePath), { recursive: true })
-  await fs.promises.writeFile(filePath, content, 'utf-8')
+  await writeSourceDrafts(sourceDraftAppDir(subscription, appName), [{ path: relPath, content }])
+}
+
+async function readCurrentSource(req, subscription, resourceGroup, appName, relPath) {
+  const draft = await readSourceDraft(subscription, appName, relPath)
+  if (draft != null) return { content: draft, source: 'draft' }
+  const token = requireToken(req)
+  const storageToken = storageTokenFrom(req)
+  let deployed = null
+  if (resourceGroup) {
+    const site = await azure.getSite(token, subscription, resourceGroup, appName)
+    if (site) deployed = await azure.readSourceFile(token, subscription, site, relPath, storageToken)
+  }
+  if (deployed == null) {
+    deployed = await readRepoFileForApp(token, subscription, resourceGroup, appName, [relPath, `src/${relPath}`])
+  }
+  return { content: deployed ?? '', source: deployed == null ? 'none' : 'deployed' }
 }
 
 // Read a source file's content: the portal draft if one exists, else the
@@ -397,6 +425,165 @@ app.put(
   }),
 )
 
+app.post(
+  '/api/custom-tools/azure-rest/preview',
+  wrap(async (req, res) => {
+    requireToken(req)
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
+    const appName = String(req.body?.app ?? '').trim()
+    const toolName = String(req.body?.toolName ?? 'azure_rest').trim()
+    if (!appName || !resourceGroup) throw new HttpError(400, 'app and resourceGroup are required.')
+    let toolPath
+    try {
+      toolPath = customToolPath(toolName)
+    } catch (error) {
+      throw new HttpError(400, error.message)
+    }
+    const [tool, requirements] = await Promise.all([
+      readCurrentSource(req, subscription, resourceGroup, appName, toolPath),
+      readCurrentSource(req, subscription, resourceGroup, appName, 'requirements.txt'),
+    ])
+    const merged = mergeRequirements(requirements.content)
+    res.json({
+      toolPath,
+      python: renderAzureRestTool(toolName),
+      requirements: merged.content,
+      addedDependencies: merged.added,
+      existingToolSource: tool.source,
+      requiresOverwrite: tool.source !== 'none',
+    })
+  }),
+)
+
+app.post(
+  '/api/custom-tools/azure-rest/save',
+  wrap(async (req, res) => {
+    requireToken(req)
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
+    const appName = String(req.body?.app ?? '').trim()
+    const toolName = String(req.body?.toolName ?? 'azure_rest').trim()
+    const overwrite = req.body?.overwrite === true
+    if (!appName || !resourceGroup) throw new HttpError(400, 'app and resourceGroup are required.')
+    let toolPath
+    let python
+    try {
+      toolPath = customToolPath(toolName)
+      python = validateAzureRestSource(req.body?.python, toolName)
+    } catch (error) {
+      throw new HttpError(400, error.message)
+    }
+    const [tool, requirements] = await Promise.all([
+      readCurrentSource(req, subscription, resourceGroup, appName, toolPath),
+      readCurrentSource(req, subscription, resourceGroup, appName, 'requirements.txt'),
+    ])
+    if (tool.source !== 'none' && !overwrite) {
+      throw new HttpError(409, `${toolPath} already exists. Confirm overwrite to replace it.`, {
+        error: 'tool_exists',
+      })
+    }
+    const merged = mergeRequirements(requirements.content)
+    await writeSourceDrafts(sourceDraftAppDir(subscription, appName), [
+      { path: toolPath, content: python },
+      { path: 'requirements.txt', content: merged.content },
+    ])
+    res.json({
+      ok: true,
+      source: 'draft',
+      toolPath,
+      requirementsPath: 'requirements.txt',
+      addedDependencies: merged.added,
+    })
+  }),
+)
+
+function customToolHttpError(error) {
+  return new HttpError(error?.status ?? 502, String(error?.message ?? error), {
+    ...(error?.portalCode ? { error: error.portalCode } : {}),
+    ...(error?.candidates ? { candidates: error.candidates } : {}),
+  })
+}
+
+app.get(
+  '/api/custom-tools/roles',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.query.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    let scope
+    try {
+      scope = azureRoleScope(subscription, String(req.query.scopeType ?? ''), String(req.query.resourceGroup ?? ''))
+      res.json({ scope, roles: await azure.listAssignableRoles(token, subscription, scope) })
+    } catch (error) {
+      throw error?.status ? customToolHttpError(error) : new HttpError(400, error.message)
+    }
+  }),
+)
+
+app.get(
+  '/api/custom-tools/identity',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.query.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const resourceGroup = String(req.query.resourceGroup ?? '').trim()
+    const appName = String(req.query.app ?? '').trim()
+    if (!resourceGroup || !appName) throw new HttpError(400, 'resourceGroup and app are required.')
+    try {
+      res.json({ identity: await azure.resolveRuntimeIdentity(token, subscription, resourceGroup, appName) })
+    } catch (error) {
+      throw customToolHttpError(error)
+    }
+  }),
+)
+
+app.get(
+  '/api/custom-tools/configured-model',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.query.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const resourceGroup = String(req.query.resourceGroup ?? '').trim()
+    const appName = String(req.query.app ?? '').trim()
+    if (!resourceGroup || !appName) throw new HttpError(400, 'resourceGroup and app are required.')
+    try {
+      const configured = await azure.resolveConfiguredModel(token, subscription, resourceGroup, appName)
+      res.json({ provider: configured.provider, model: configured.model, available: true })
+    } catch (error) {
+      throw customToolHttpError(error)
+    }
+  }),
+)
+
+app.post(
+  '/api/custom-tools/access',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
+    const appName = String(req.body?.app ?? '').trim()
+    if (!resourceGroup || !appName) throw new HttpError(400, 'resourceGroup and app are required.')
+    try {
+      const scope = azureRoleScope(subscription, String(req.body?.scopeType ?? ''), String(req.body?.scopeResourceGroup ?? ''))
+      const identity = await azure.resolveRuntimeIdentity(
+        token,
+        subscription,
+        resourceGroup,
+        appName,
+        String(req.body?.identityClientId ?? ''),
+      )
+      const assignment = await azure.assignRole(
+        token,
+        subscription,
+        scope,
+        identity.principalId,
+        String(req.body?.roleDefinitionId ?? ''),
+      )
+      res.json({ identity, ...assignment })
+    } catch (error) {
+      throw error?.status ? customToolHttpError(error) : new HttpError(400, error.message)
+    }
+  }),
+)
+
 // Delete a source-file draft (portal-side working copy). Used by the file tree
 // so the user can revert a draft they no longer want to publish. Does NOT touch
 // the deployed source — that only changes on the next "Deploy edits".
@@ -409,6 +596,7 @@ app.delete(
     const relPath = String(req.query.path ?? '').trim()
     if (!appName || !relPath) throw new HttpError(400, 'app and path query parameters are required.')
     if (relPath.includes('..')) throw new HttpError(400, 'Invalid path.')
+    await recoverSourceDrafts(sourceDraftAppDir(subscription, appName))
     const filePath = sourceDraftPath(subscription, appName, relPath)
     let removed = false
     try {
@@ -456,7 +644,8 @@ app.get(
     }
 
     // Local drafts (portal-side working copies).
-    const sourceDir = path.join(SOURCE_DRAFTS_DIR, safeSegment(subscription), safeSegment(appName))
+    const sourceDir = sourceDraftAppDir(subscription, appName)
+    await recoverSourceDrafts(sourceDir)
     for (const f of await readDirRecursive(sourceDir)) {
       upsert(f.name, { size: f.data.length, draft: true })
     }
@@ -1200,6 +1389,7 @@ async function readDirRecursive(dir, base = dir) {
     return out
   }
   for (const e of entries) {
+    if (e.name === '.transactions' || /\.draft$/.test(e.name)) continue
     const full = path.join(dir, e.name)
     if (e.isDirectory()) out.push(...(await readDirRecursive(full, base)))
     else {
@@ -1259,6 +1449,7 @@ async function overlayDrafts(subscription, appName, baseFiles) {
     apply(file, await fs.promises.readFile(path.join(agentDir, file), 'utf-8'))
   }
   const sourceDir = path.join(SOURCE_DRAFTS_DIR, safeSegment(subscription), safeSegment(appName))
+  await recoverSourceDrafts(sourceDir)
   for (const f of await readDirRecursive(sourceDir)) {
     apply(f.name, f.data.toString('utf-8'))
   }
@@ -1776,8 +1967,8 @@ app.post(
   }),
 )
 
-// Generate the code/config for an agent capability (HTTP trigger .agent.md,
-// connector trigger .agent.md, or a custom Python tool) with a Foundry model.
+// Generate the code/config for an agent capability. Custom tools use the
+// selected Function App's model configuration rather than a client target.
 app.post(
   '/api/generate-capability',
   wrap(async (req, res) => {
@@ -1812,6 +2003,24 @@ app.post(
     const guidance = await readPortalSkill(kind)
 
     try {
+      if (kind === 'custom_tool') {
+        const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
+        if (!appName || !resourceGroup) {
+          throw new HttpError(400, 'app and resourceGroup are required for custom-tool generation.')
+        }
+        return res.json(
+          await azure.generateCapabilityCodeForApp(token, subscription, {
+            resourceGroup,
+            appName,
+            kind,
+            name,
+            description,
+            triggerType,
+            skillsContext,
+            guidance,
+          }),
+        )
+      }
       res.json(
         await azure.generateCapabilityCode(token, subscription, {
           resourceGroup: String(foundry.resourceGroup ?? ''),
@@ -1827,7 +2036,8 @@ app.post(
         }),
       )
     } catch (err) {
-      throw new HttpError(err.status ?? 502, String(err?.message ?? err))
+      if (err instanceof HttpError) throw err
+      throw customToolHttpError(err)
     }
   }),
 )
@@ -2369,7 +2579,7 @@ if (fs.existsSync(path.join(DIST_DIR, 'index.html'))) {
 // eslint-disable-next-line no-unused-vars
 app.use((err, _req, res, _next) => {
   if (err instanceof HttpError) {
-    return res.status(err.status).json({ detail: err.detail })
+    return res.status(err.status).json({ detail: err.detail, ...err.metadata })
   }
   console.error(err)
   res.status(500).json({ detail: 'Internal server error' })

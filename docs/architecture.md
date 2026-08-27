@@ -449,6 +449,11 @@ To add project-specific tools, drop a `.py` file into `tools/` and expose either
 
 These tools enter the pipeline during discovery, are filtered in `build_capabilities()`, and are finally passed into `runner.run_agent()` alongside sandbox tools, the `web_request` tool, MCP tools, and (when declared) `delegate_<slug>` tools. In other words, adding a file under `tools/` affects discovery only; the rest of the pipeline remains unchanged.
 
+The optional Serverless Agent Portal authors the same ordinary project files. Its Custom
+Tool recipes preview and save `tools/*.py` plus required package entries, but do not add a
+portal-specific runtime format or discovery path. Azure access granted by a recipe targets
+the Function App managed identity and remains separate from source-draft persistence.
+
 Dynamic Workflow Activity targets use the same folder but require explicit `@workflow_tool` opt-in. A function decorated only with `@workflow_tool` is workflow-only; a plain public function or `@tool` value is normal-tool-only; using both decorators exposes the same callable in both places. This keeps Durable Activity execution explicit while preserving the existing plain-function normal-tool UX.
 
 ### Per-agent capability filtering

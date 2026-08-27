@@ -185,6 +185,10 @@ my-app/
 - **Markdown-first** — agent instructions, trigger config, and tool bindings in `.agent.md` files
 - **Skills** — progressive-disclosure prompt modules under `skills/<name>/SKILL.md` (loaded on demand via MAF's `SkillsProvider`)
 - **Custom tools** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and they become callable
+- **Portal Custom Tool recipes** — under **Add capability**, preview an Azure REST tool,
+  merge its dependencies, save both files as drafts, and optionally grant the Function App
+  managed identity a built-in Azure role. Optional code generation uses the model already
+  configured on that Function App.
 - **Connector-backed MCP tools** — call Office 365, Teams, SQL, Salesforce, SAP, and other connectors through HTTP MCP servers
 - **MCP servers** — connect to external remote HTTP MCP servers for additional tools
 - **Sandbox** — Python code execution via Azure Container Apps dynamic sessions; if no explicit sandbox session id is supplied, each invocation gets a fresh GUID-backed session

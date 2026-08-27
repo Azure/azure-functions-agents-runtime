@@ -218,6 +218,16 @@ least-privilege in Key Vault; never render secrets; audit Publish and Push actio
   against the schema; show unresolved `$ENV` placeholders as warnings.
 - **FR-9 Tools & MCP** — list discovered `tools/`, `mcp.json` servers, and
   `skills/`; toggle per-agent allow/deny filters.
+  - Offer deterministic Custom Tool recipes that create reviewable `tools/*.py`
+    and dependency drafts. The Azure REST recipe accepts a tool name, exposes
+    `path`, `method`, optional JSON `body`, and optional JMESPath `query`, and
+    merges `aiohttp`, `azure-identity`, and `jmespath` without replacing existing
+    constraints.
+  - Resolve the Function App runtime identity, let the author select subscription
+    or resource-group scope and a built-in role (Reader by default), and report
+    source-save and RBAC outcomes separately.
+  - Use the selected Function App's configured provider and model for optional
+    code generation; do not expose provider credentials or a second model picker.
 - **FR-10 Triggers** — configure trigger type and binding fields.
 - **FR-11 Sessions** — browse recent sessions for this agent; open transcript.
 - **FR-12 Monitoring** — per-agent invocations, latency, errors, and traces.

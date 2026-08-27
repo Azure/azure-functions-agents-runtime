@@ -4,7 +4,7 @@
 
 import { useEffect, useState } from 'react'
 import { useQueryClient, useQuery } from '@tanstack/react-query'
-import { api } from '../api'
+import { ApiError, api, type CustomToolPreview, type RuntimeIdentity } from '../api'
 import { Modal } from './Modal'
 import { SearchableSelect, Icon, type IconName } from './ui'
 import { Button, Checkbox, Input, Textarea } from '@coreai/fluentui-react'
@@ -27,6 +27,7 @@ type View =
   | 'outlook'
   | 'trigger-advanced'
   | 'mcp-advanced'
+  | 'azure-rest'
   | 'tool-ai'
   | 'skill'
 
@@ -276,8 +277,17 @@ export function AddCapability({
                 />
                 <RecipeCard
                   icon="terminal"
-                  title="Custom tool (Python)"
-                  desc="Generate code the agent can call."
+                  title="Azure REST tool"
+                  desc="Call Azure management APIs with the app identity."
+                  onClick={() => {
+                    setView('azure-rest')
+                    reset()
+                  }}
+                />
+                <RecipeCard
+                  icon="terminal"
+                  title="Generate Python tool"
+                  desc="Use this app's configured model to write a tool."
                   onClick={() => {
                     setView('tool-ai')
                     reset()
@@ -573,10 +583,20 @@ export function AddCapability({
                 title="Generate a custom tool (Python) with AI"
                 hint="Describe a capability; a Foundry model writes a Python @tool for the tools/ folder that this app's agents can call. Saved as tools/<name>.py."
                 subscription={subscription}
+                resourceGroup={resourceGroup}
                 app={app}
                 agentName={agentName}
               />
             </>
+          )}
+
+          {view === 'azure-rest' && (
+            <AzureRestTool
+              subscription={subscription}
+              resourceGroup={resourceGroup}
+              app={app}
+              onBack={backToGallery}
+            />
           )}
 
           {view === 'skill' && (
@@ -664,6 +684,300 @@ function RecipeCard({
   )
 }
 
+function AzureRestTool({
+  subscription,
+  resourceGroup,
+  app,
+  onBack,
+}: {
+  subscription: string
+  resourceGroup: string
+  app: string
+  onBack: () => void
+}) {
+  const qc = useQueryClient()
+  const [toolName, setToolName] = useState('azure_rest')
+  const [scopeType, setScopeType] = useState<'subscription' | 'resourceGroup'>('subscription')
+  const [scopeResourceGroup, setScopeResourceGroup] = useState(resourceGroup)
+  const [preview, setPreview] = useState<CustomToolPreview | null>(null)
+  const [python, setPython] = useState('')
+  const [roleId, setRoleId] = useState('')
+  const [identityClientId, setIdentityClientId] = useState('')
+  const [overwrite, setOverwrite] = useState(false)
+  const [description, setDescription] = useState(
+    'Call Azure Resource Manager with path, method, optional JSON body, and optional JMESPath query arguments.',
+  )
+  const [busy, setBusy] = useState<'preview' | 'generate' | 'save' | 'access' | ''>('')
+  const [error, setError] = useState('')
+  const [saveResult, setSaveResult] = useState('')
+  const [accessResult, setAccessResult] = useState('')
+
+  const identityQuery = useQuery({
+    queryKey: ['customToolIdentity', subscription, resourceGroup, app],
+    queryFn: () => api.getCustomToolIdentity({ subscription, resourceGroup, app }),
+    retry: false,
+  })
+  const identityError = identityQuery.error instanceof ApiError ? identityQuery.error : null
+  const candidates = (identityError?.data.candidates as RuntimeIdentity[] | undefined) ?? []
+  const identity = identityQuery.data?.identity
+  const rolesQuery = useQuery({
+    queryKey: ['customToolRoles', subscription, scopeType, scopeResourceGroup],
+    queryFn: () => api.listCustomToolRoles({
+      subscription,
+      scopeType,
+      resourceGroup: scopeType === 'resourceGroup' ? scopeResourceGroup : undefined,
+    }),
+    enabled: scopeType === 'subscription' || !!scopeResourceGroup.trim(),
+    retry: false,
+  })
+  const roles = rolesQuery.data?.roles ?? []
+  const effectiveRole = roleId || roles.find((role) => role.isDefault)?.id || roles[0]?.id || ''
+  const modelQuery = useQuery({
+    queryKey: ['customToolConfiguredModel', subscription, resourceGroup, app],
+    queryFn: () => api.getConfiguredModel({ subscription, resourceGroup, app }),
+    retry: false,
+  })
+
+  const createPreview = async () => {
+    setBusy('preview')
+    setError('')
+    setSaveResult('')
+    try {
+      const result = await api.previewAzureRestTool({ subscription, resourceGroup, app, toolName })
+      setPreview(result)
+      setPython(result.python)
+      setOverwrite(false)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const generate = async () => {
+    if (!description.trim()) return
+    setBusy('generate')
+    setError('')
+    try {
+      const base = preview ?? await api.previewAzureRestTool({ subscription, resourceGroup, app, toolName })
+      setPreview(base)
+      const result = await api.generateCapability({
+        subscription,
+        resourceGroup,
+        app,
+        kind: 'custom_tool',
+        name: toolName,
+        description:
+          `${description.trim()} Preserve the class name AzureRestParams, the decorator ` +
+          '`@tool(schema=AzureRestParams)`, and the Azure REST arguments: path, method, optional body, and optional query.',
+        groundInSkills: true,
+      })
+      setPython(result.content)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const save = async () => {
+    if (!preview) return
+    setBusy('save')
+    setError('')
+    setSaveResult('')
+    try {
+      const result = await api.saveAzureRestTool({
+        subscription,
+        resourceGroup,
+        app,
+        toolName,
+        python,
+        overwrite,
+      })
+      setSaveResult(`Saved ${result.toolPath} and merged ${result.requirementsPath} as drafts.`)
+      qc.invalidateQueries({ queryKey: ['sourceList', subscription, resourceGroup, app] })
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const grantAccess = async () => {
+    setBusy('access')
+    setError('')
+    setAccessResult('')
+    try {
+      const result = await api.grantCustomToolAccess({
+        subscription,
+        resourceGroup,
+        app,
+        scopeType,
+        scopeResourceGroup: scopeType === 'resourceGroup' ? scopeResourceGroup : undefined,
+        identityClientId: identityClientId || undefined,
+        roleDefinitionId: effectiveRole,
+      })
+      setAccessResult(
+        result.outcome === 'existing'
+          ? `${result.identity.name} already has ${result.role.name} at this scope.`
+          : `Granted ${result.role.name} to ${result.identity.name}.`,
+      )
+      qc.invalidateQueries({ queryKey: ['customToolIdentity', subscription, resourceGroup, app] })
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return (
+    <>
+      <button className="view-back" onClick={onBack}>
+        <Icon name="arrowLeft" size={14} /> All capabilities
+      </button>
+      <h4 style={{ margin: '0 0 4px', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+        <Icon name="terminal" size={16} /> Azure REST tool
+      </h4>
+      <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+        Creates a managed-identity Azure Resource Manager tool based on the Daily Azure Report sample.
+      </p>
+      {error && <div className="gh-err" style={{ marginBottom: 12 }}>{error}</div>}
+
+      <div className="field">
+        <label>Tool name *</label>
+        <Input value={toolName} onChange={(_, data) => setToolName(data.value)} placeholder="azure_rest" />
+        <div className="hint">Runtime arguments: path, method, optional JSON body, optional JMESPath query.</div>
+      </div>
+      <div className="gh-row">
+        <Button appearance="primary" disabled={!!busy || !toolName.trim()} onClick={() => void createPreview()}>
+          {busy === 'preview' ? 'Preparing…' : 'Create preview'}
+        </Button>
+      </div>
+
+      {preview && (
+        <>
+          <div className="divider" />
+          <div className="field">
+            <label>Python · {preview.toolPath}</label>
+            <Textarea
+              value={python}
+              onChange={(_, data) => setPython(data.value)}
+              textarea={{ spellCheck: false, style: { minHeight: '260px', fontFamily: 'var(--font-mono)' } }}
+            />
+          </div>
+          <div className="field">
+            <label>Dependencies · requirements.txt</label>
+            <pre className="code" style={{ maxHeight: 150 }}>{preview.requirements}</pre>
+            <div className="hint">
+              {preview.addedDependencies.length
+                ? `Will add: ${preview.addedDependencies.join(', ')}.`
+                : 'All required dependencies are already present.'}
+            </div>
+          </div>
+          {preview.requiresOverwrite && (
+            <Checkbox
+              checked={overwrite}
+              onChange={(_, data) => setOverwrite(data.checked === true)}
+              label={`Replace the existing ${preview.toolPath}`}
+            />
+          )}
+          <Button
+            appearance="primary"
+            disabled={!!busy || !python.trim() || (preview.requiresOverwrite && !overwrite)}
+            onClick={() => void save()}
+          >
+            {busy === 'save' ? 'Saving…' : 'Save tool and requirements drafts'}
+          </Button>
+          {saveResult && <div className="note ok" style={{ marginTop: 12 }}>✓ {saveResult}</div>}
+
+          <div className="divider" />
+          <h4 style={{ marginBottom: 4, fontSize: 13 }}>Customize with AI</h4>
+          <div className="hint" style={{ marginBottom: 8 }}>
+            {modelQuery.data
+              ? `Uses this app's configured ${modelQuery.data.provider} model: ${modelQuery.data.model}.`
+              : modelQuery.isLoading
+                ? 'Checking this app’s configured model…'
+                : (modelQuery.error as Error | null)?.message ?? 'Configured model unavailable.'}
+          </div>
+          <div className="field">
+            <Textarea
+              value={description}
+              onChange={(_, data) => setDescription(data.value)}
+              textarea={{ spellCheck: true, style: { minHeight: '76px' } }}
+            />
+          </div>
+          <Button disabled={!!busy || !modelQuery.data || !description.trim()} onClick={() => void generate()}>
+            {busy === 'generate' ? 'Generating…' : 'Generate Python'}
+          </Button>
+
+          <div className="divider" />
+          <h4 style={{ marginBottom: 4, fontSize: 13 }}>Azure access</h4>
+          <div className="hint" style={{ marginBottom: 10 }}>
+            Source drafts are saved independently. Granting access requires role-assignment permission in Azure.
+          </div>
+          <div className="grid cols-2">
+            <div className="field">
+              <label>Scope</label>
+              <SearchableSelect
+                value={scopeType}
+                onChange={(value) => setScopeType(value as 'subscription' | 'resourceGroup')}
+                options={[
+                  { value: 'subscription', label: 'Subscription' },
+                  { value: 'resourceGroup', label: 'Resource group' },
+                ]}
+                ariaLabel="Role scope"
+              />
+            </div>
+            {scopeType === 'resourceGroup' && (
+              <div className="field">
+                <label>Resource group</label>
+                <Input value={scopeResourceGroup} onChange={(_, data) => setScopeResourceGroup(data.value)} />
+              </div>
+            )}
+          </div>
+          <div className="field">
+            <label>Role</label>
+            <SearchableSelect
+              value={effectiveRole}
+              onChange={setRoleId}
+              options={roles.map((role) => ({ value: role.id, label: role.name }))}
+              placeholder={rolesQuery.isLoading ? 'Loading roles…' : 'Select a built-in role'}
+              loading={rolesQuery.isLoading}
+              ariaLabel="Azure role"
+            />
+            {rolesQuery.error && <div className="hint" style={{ color: 'var(--red)' }}>{(rolesQuery.error as Error).message}</div>}
+          </div>
+          <div className="field">
+            <label>Runtime identity</label>
+            {identity ? (
+              <div className="note">{identity.name}</div>
+            ) : candidates.length ? (
+              <SearchableSelect
+                value={identityClientId}
+                onChange={setIdentityClientId}
+                options={candidates.map((candidate) => ({ value: candidate.clientId, label: candidate.name }))}
+                placeholder="Choose an attached identity"
+                ariaLabel="Runtime identity"
+              />
+            ) : (
+              <div className="hint" style={{ color: identityQuery.error ? 'var(--red)' : undefined }}>
+                {identityQuery.isLoading ? 'Resolving managed identity…' : (identityQuery.error as Error | null)?.message}
+              </div>
+            )}
+          </div>
+          <Button
+            disabled={!!busy || !effectiveRole || (!identity && !identityClientId)}
+            onClick={() => void grantAccess()}
+          >
+            {busy === 'access' ? 'Granting…' : 'Grant Azure access'}
+          </Button>
+          {accessResult && <div className="note ok" style={{ marginTop: 12 }}>✓ {accessResult}</div>}
+        </>
+      )}
+    </>
+  )
+}
+
 type GenKind = 'http_trigger' | 'connector_trigger' | 'timer_trigger' | 'custom_tool' | 'skill'
 
 // A Foundry-backed generator: pick a model, describe the capability, generate
@@ -675,6 +989,7 @@ function AiGenerate({
   title,
   hint,
   subscription,
+  resourceGroup,
   app,
   agentName,
 }: {
@@ -683,17 +998,25 @@ function AiGenerate({
   title: string
   hint: string
   subscription: string
+  resourceGroup?: string
   app: string
   agentName: string
 }) {
   const qc = useQueryClient()
-  const { data: foundry, error: loadErrObj, isLoading } = useQuery({
+  const { data: foundry, error: loadErrObj, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['foundry', subscription],
     queryFn: () => api.listFoundry(subscription),
     staleTime: 5 * 60 * 1000,
-    enabled: !!subscription,
+    refetchOnWindowFocus: 'always',
+    enabled: !!subscription && kind !== 'custom_tool',
   })
   const loadErr = loadErrObj ? (loadErrObj as Error).message : ''
+  const configuredModel = useQuery({
+    queryKey: ['customToolConfiguredModel', subscription, resourceGroup, app],
+    queryFn: () => api.getConfiguredModel({ subscription, resourceGroup: resourceGroup!, app }),
+    enabled: kind === 'custom_tool' && !!resourceGroup,
+    retry: false,
+  })
   const [modelKey, setModelKey] = useState('')
   const [desc, setDesc] = useState('')
   const [toolName, setToolName] = useState('')
@@ -719,20 +1042,21 @@ function AiGenerate({
   const selected = options.find((o) => o.key === effectiveKey)
 
   const generate = async () => {
-    if (!selected || !desc.trim()) return
+    if ((!selected && kind !== 'custom_tool') || !desc.trim()) return
     setBusy(true)
     setError('')
     setApplied('')
     try {
       const r = await api.generateCapability({
         subscription,
+        resourceGroup,
         app,
         kind,
         triggerType,
         name: kind === 'custom_tool' || kind === 'skill' ? toolName : agentName,
         description: desc.trim(),
         groundInSkills: ground,
-        foundry: selected.foundry,
+        foundry: selected?.foundry,
       })
       setContent(r.content)
     } catch (e) {
@@ -783,14 +1107,24 @@ function AiGenerate({
       <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
         {hint}
       </p>
-      <div className="field">
+      {kind === 'custom_tool' ? (
+        <div className="note" style={{ marginBottom: 10 }}>
+          {configuredModel.data
+            ? `Using this app's configured ${configuredModel.data.provider} model: ${configuredModel.data.model}.`
+            : configuredModel.isLoading
+              ? 'Checking this app’s configured model…'
+              : (configuredModel.error as Error | null)?.message ?? 'Configured model unavailable.'}
+        </div>
+      ) : <div className="field">
         <label>Foundry model</label>
         <SearchableSelect
           value={effectiveKey}
           onChange={setModelKey}
           options={options.map((o) => ({ value: o.key, label: o.label }))}
           placeholder={isLoading ? 'Loading Foundry models…' : 'No Foundry models in this subscription'}
-          loading={isLoading}
+          loading={isLoading || isFetching}
+          loadingLabel="Refreshing Foundry models…"
+          onRefresh={() => void refetch()}
           ariaLabel="Foundry model"
         />
         {loadErr && (
@@ -798,7 +1132,7 @@ function AiGenerate({
             {loadErr}
           </div>
         )}
-      </div>
+      </div>}
       {(kind === 'custom_tool' || kind === 'skill') && (
         <div className="field">
           <label>{kind === 'skill' ? 'Skill name *' : 'Tool name *'}</label>
@@ -836,7 +1170,7 @@ function AiGenerate({
       />
       <Button
         appearance="primary"
-        disabled={busy || !desc.trim() || !selected || ((kind === 'custom_tool' || kind === 'skill') && !toolName.trim())}
+        disabled={busy || !desc.trim() || (kind === 'custom_tool' ? !configuredModel.data : !selected) || ((kind === 'custom_tool' || kind === 'skill') && !toolName.trim())}
         onClick={() => void generate()}
       >
         {busy && !content ? (

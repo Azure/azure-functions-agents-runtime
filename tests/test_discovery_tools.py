@@ -127,6 +127,39 @@ def test_discover_user_tools_returns_empty_when_tools_dir_missing(tmp_path: Path
     assert result.failed_loads == []
 
 
+def test_portal_azure_rest_tool_contract_is_discoverable(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "azure_rest",
+        """
+        from typing import Literal
+
+        from pydantic import BaseModel, Field
+
+        from azure_functions_agents import tool
+
+        class AzureRestParams(BaseModel):
+            path: str = Field(description="ARM path including api-version")
+            method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "GET"
+            body: str | None = None
+            query: str | None = None
+
+        @tool(schema=AzureRestParams)
+        async def azure_rest(params: AzureRestParams) -> str:
+            \"\"\"Call the Azure Resource Manager REST API.\"\"\"
+            return params.model_dump_json()
+        """,
+    )
+
+    result = discover_user_tools(tmp_path)
+
+    assert result.failed_loads == []
+    assert _tool_names(result.tools) == ["azure_rest"]
+    schema = result.tools[0].input_model.model_json_schema()
+    assert set(schema["properties"]) == {"path", "method", "body", "query"}
+    assert schema["required"] == ["path"]
+
+
 def test_workflow_tool_only_is_not_normal_user_tool(tmp_path: Path) -> None:
     _write_tool_file(
         tmp_path,
