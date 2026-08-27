@@ -58,6 +58,7 @@ _MARKER_SCHEMA = 1
 _DEFAULT_MAX_AGE_HOURS = 6
 
 _GROUP_RESOURCE_ID_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"
+_GROUP_REGION_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION"
 _PROBE_TIMEOUT_SECONDS = 30.0
 _DEPLOY_PREFLIGHT_TIMEOUT_SECONDS = 30.0
 _DEFAULT_FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "tests" / "live" / "apps" / "aca-qualification"
@@ -402,16 +403,21 @@ async def sweep_with_adapter(
         await adapter.close()
 
 
-async def _sweep(group_resource_id: str, *, max_age_hours: int) -> str:
+async def _sweep(group_resource_id: str, region: str, *, max_age_hours: int) -> str:
     from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
 
-    adapter = await AcaSandboxAdapter.open(group_resource_id)
+    adapter = await AcaSandboxAdapter.open(group_resource_id, region=region)
     return await sweep_with_adapter(
         adapter, now=datetime.now(UTC), max_age_hours=max_age_hours
     )
 
 
-def run_sweep(environment: Mapping[str, str], *, max_age_hours: int) -> int:
+def run_sweep(
+    environment: Mapping[str, str],
+    *,
+    region: str,
+    max_age_hours: int,
+) -> int:
     """Report and clear stale sandboxes. Always returns success.
 
     A leak is a signal that ACA idle-delete or the controller's hourly
@@ -422,8 +428,14 @@ def run_sweep(environment: Mapping[str, str], *, max_age_hours: int) -> int:
     if not group_resource_id:
         print(f"##vso[task.logissue type=warning]sweep skipped: {_GROUP_RESOURCE_ID_ENV} unset")
         return 0
+    configured_region = region.strip()
+    if not configured_region:
+        print(f"##vso[task.logissue type=warning]sweep skipped: {_GROUP_REGION_ENV} unset")
+        return 0
     try:
-        report = asyncio.run(_sweep(group_resource_id, max_age_hours=max_age_hours))
+        report = asyncio.run(
+            _sweep(group_resource_id, configured_region, max_age_hours=max_age_hours)
+        )
     except Exception as error:  # noqa: BLE001 - advisory
         # A crash is not the same as a clean group, and must not read like one.
         # The sweep did not observe anything, so nothing can be concluded about
@@ -575,6 +587,7 @@ def _parser() -> argparse.ArgumentParser:
     check.add_argument("--python-version", required=True)
 
     sweep = subcommands.add_parser("sweep", help="report and clear stale sandboxes")
+    sweep.add_argument("--region", required=True)
     sweep.add_argument("--max-age-hours", type=int, default=_DEFAULT_MAX_AGE_HOURS)
     return parser
 
@@ -684,7 +697,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
             return run_preflight_deploy(args)
         if args.command == "check-build":
             return run_check_build(args)
-        return run_sweep(os.environ, max_age_hours=args.max_age_hours)
+        return run_sweep(
+            os.environ,
+            region=args.region,
+            max_age_hours=args.max_age_hours,
+        )
     except QualificationPipelineError as error:
         print(f"ACA qualification pipeline failed: {error}", file=sys.stderr)
         return 1

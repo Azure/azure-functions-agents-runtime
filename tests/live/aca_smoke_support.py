@@ -106,6 +106,7 @@ class AcaSmokeConfig:
     """Environment-specific inputs needed to create one ACA smoke sandbox."""
 
     group_resource_id: str
+    region: str
     disk: str
 
 
@@ -217,9 +218,10 @@ def aca_smoke_config_from_environment() -> AcaSmokeConfig:
     group_resource_id = _required_environment_value(
         "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"
     )
+    region = _required_environment_value("AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION")
     disk = _required_environment_value("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK")
     require_sandbox_compatible_host(disk)
-    return AcaSmokeConfig(group_resource_id=group_resource_id, disk=disk)
+    return AcaSmokeConfig(group_resource_id=group_resource_id, region=region, disk=disk)
 
 
 def aca_smoke_model_config_from_environment() -> AcaSmokeModelConfig:
@@ -423,7 +425,8 @@ def materialize_current_checkout_app(destination: Path) -> Path:
         + "\n"
         + "session_runtime:\n"
         + "  aca_sandbox:\n"
-        + "    sandbox_group_resource_id: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID\n",
+        + "    sandbox_group_resource_id: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID\n"
+        + "    region: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION\n",
         encoding="utf-8",
     )
     return destination
@@ -869,7 +872,7 @@ async def reap_labelled_sandbox_family(
 async def reap_current_production_smoke_sandboxes(config: AcaSmokeConfig) -> int:
     """Observe and reap every current Function App smoke sandbox."""
 
-    adapter = await AcaSandboxAdapter.open(config.group_resource_id)
+    adapter = await AcaSandboxAdapter.open(config.group_resource_id, region=config.region)
     try:
         return await reap_labelled_sandbox_family(adapter, production_smoke_reaper_labels())
     finally:
@@ -1249,7 +1252,7 @@ async def provision_aca_smoke_sandbox(
     try:
         closure = await _build_provisioning_closure(materialized_app_root, setup_deadline)
         adapter = await _within_setup_budget(
-            AcaSandboxAdapter.open(config.group_resource_id),
+            AcaSandboxAdapter.open(config.group_resource_id, region=config.region),
             setup_deadline,
             phase=SetupPhase.PROVIDER_BIND,
         )

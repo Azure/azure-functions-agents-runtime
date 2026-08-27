@@ -43,12 +43,16 @@ class SandboxInvalidStateError(SandboxProvisioningError):
     """Raised when a sandbox lifecycle operation is rejected due to an incompatible state."""
 
 
+class SandboxNotFoundError(SandboxProvisioningError):
+    """Raised when a sandbox-scoped operation finds no backing sandbox."""
+
+
 class SandboxGroupBindingError(SandboxTransportError):
-    """Raised when a configured, persisted, ARM, or live group binding disagrees."""
+    """Raised when a configured, persisted, or live group binding disagrees."""
 
 
 class SandboxGroupTransientError(SandboxTransportError):
-    """Raised when a Sandbox Group ARM lookup fails transiently (retryable)."""
+    """Raised when the Sandbox Group data plane fails transiently (retryable)."""
 
 
 class AcaSandboxDependencyError(SandboxTransportError):
@@ -737,7 +741,12 @@ def source_to_provider_kwargs(source: SandboxCreateSource) -> dict[str, str]:
 
 def _normalize_region(value: str) -> str:
     _require_nonempty_string(value, "region")
-    return value.strip().casefold()
+    normalized = value.strip().casefold()
+    if not normalized.isascii() or not normalized.isalnum():
+        raise SandboxProvisioningError(
+            "Sandbox region must contain only ASCII letters and digits."
+        )
+    return normalized
 
 
 def _require_nonempty_string(value: object, field_name: str) -> str:

@@ -46,7 +46,9 @@ python eng/scripts/reap_aca_smoke_sandboxes.py
 ```
 
 The Sandbox Group is read from the
-`AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID` environment variable.
+`AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID` environment variable,
+and its required data-plane region is read from
+`AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION`.
 
 **When to run:**
 - As an `always()` cleanup step after the ACA smoke job

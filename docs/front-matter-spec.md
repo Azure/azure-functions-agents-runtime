@@ -577,6 +577,7 @@ session_runtime:
   harness: maf                       # Agent harness; "maf" is the only supported value
   aca_sandbox:                       # Presence of this block selects the ACA Sandbox backend
     sandbox_group_resource_id: string  # ARM resource ID of a pre-provisioned Sandbox Group
+    region: string                   # Required Sandbox Group region, for example westus2
     retention:                       # Optional; nested inside aca_sandbox
       auto_suspend_idle: integer     # Seconds; one of 60, 120, 300, 600, 1800, 3600
       reclaim_idle: integer          # Seconds; positive and > auto_suspend_idle
@@ -600,13 +601,20 @@ session_runtime:
 ##### `session_runtime.aca_sandbox`
 - **Type:** `object`
 - **Selects:** the ACA Sandbox execution backend — its presence under `session_runtime` *is* the backend selection. Omit this block entirely to keep the default in-process backend.
-- **Description:** Points at a **pre-provisioned, customer-owned** Azure Container Apps Sandbox Group. The runtime only references this resource by ID — it never creates, deletes, or otherwise manages the Sandbox Group's lifecycle.
+- **Description:** Points at a **pre-provisioned, customer-owned** Azure Container Apps Sandbox Group. Both `sandbox_group_resource_id` and `region` are required. The runtime trusts the authored region and constructs the regional ACA data-plane endpoint directly; it does not discover the region through ARM or provide a compatibility fallback. The Function App and Sandbox Group may be in different regions.
 
 ```yaml
 session_runtime:
   aca_sandbox:
     sandbox_group_resource_id: /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.App/sandboxGroups/<group-name>
+    region: westus2
 ```
+
+`region` is trimmed and normalized to lowercase and must contain only ASCII
+letters and digits. It identifies the Sandbox Group endpoint, not the Function
+App location. See the
+[generated configuration reference](front-matter-reference.md#global-session_runtimeaca_sandbox)
+for the complete field table.
 
 ---
 
@@ -619,6 +627,7 @@ session_runtime:
 session_runtime:
   aca_sandbox:
     sandbox_group_resource_id: /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.App/sandboxGroups/<group-name>
+    region: westus2
     retention:
       auto_suspend_idle: 300   # Suspend after 5 minutes idle
       reclaim_idle: 3600       # Reclaim after 1 hour idle

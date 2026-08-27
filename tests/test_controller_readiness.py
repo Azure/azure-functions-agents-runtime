@@ -24,6 +24,7 @@ from azure_functions_agents.controller.readiness import (
     SessionActivationGoneError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
+    SessionActivationTransientError,
     SessionBindingChangedError,
     SessionRuntimeBinding,
     StateStoreBinding,
@@ -66,6 +67,7 @@ from azure_functions_agents.transport.manifest import SandboxManifestMismatchErr
 from azure_functions_agents.transport.transport_models import (
     SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
     DiskSource,
+    SandboxCapacityError,
     SandboxCreateOutcomeUnknownError,
     SandboxCreateRequest,
     SandboxFileOperationError,
@@ -82,6 +84,14 @@ _GROUP_RESOURCE_ID = DEFAULT_GROUP_RESOURCE_ID
 _FINGERPRINT = "s1-" + ("a" * 52)
 _TEST_SOURCE = DiskSource.create("test-harness")
 pytestmark = pytest.mark.usefixtures("deterministic_content_package")
+
+
+def test_persistent_capacity_failure_remains_retryable() -> None:
+    with pytest.raises(SessionActivationTransientError, match="capacity exhausted"):
+        readiness_module._raise_provision_provider_error(
+            SandboxCapacityError("capacity exhausted"),
+            SetupBudget.start(),
+        )
 
 
 def _owner() -> FunctionAppOwnerContext:

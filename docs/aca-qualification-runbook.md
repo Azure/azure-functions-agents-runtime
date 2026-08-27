@@ -170,6 +170,7 @@ set it already carries. **Already created.**
 | `ACA_DEPLOYED_TABLE_SERVICE_URI` | |
 | `ACA_DEPLOYED_TABLE_NAME` | `AzureFunctionsAgentsSessions` |
 | `ACA_SANDBOX_GROUP_RESOURCE_ID` | marked secret, matching pipeline 1777 |
+| `ACA_SANDBOX_REGION` | Sandbox Group region, for example `westus2`; not the Function App region |
 
 Names match the e2e pipeline's existing convention so both pipelines share one
 vocabulary and values can be copied between them. The per-runtime suffixes are
@@ -178,6 +179,13 @@ the only addition, because this pipeline drives two apps rather than one.
 **Only `ACA_SANDBOX_GROUP_RESOURCE_ID` is secret.** The rest are configuration
 that must not sit in a public repository — site names, URLs, a resource group,
 an app-registration client ID — but are not credentials.
+
+The two standing fixture Function Apps must also carry
+`AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID` and
+`AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION` app settings. The region setting
+names the shared Sandbox Group location; it does not need to match either
+Function App location. Pipeline variables supply the same value to qualification
+and cleanup jobs but do not mutate the fixture apps' settings.
 
 A variable group is deliberately **not** used. A `- group:` reference that does
 not resolve fails pipeline *compilation*, so a missing or renamed group would

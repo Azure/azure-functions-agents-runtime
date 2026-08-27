@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Never, Protocol
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -89,9 +89,12 @@ from ..transport.transport_models import (
     SandboxFileOperationError,
     SandboxGroupAuthorizationError,
     SandboxGroupBinding,
+    SandboxGroupBindingError,
     SandboxGroupTransientError,
     SandboxInvalidStateError,
     SandboxLifecyclePolicy,
+    SandboxNotFoundError,
+    SandboxProvisioningError,
     SandboxProvisioningLabels,
 )
 from .bootstrap_delivery import deliver_content_and_bootstrap
@@ -198,6 +201,10 @@ class SessionActivationSetupTimeoutError(SessionActivationError):
 
 class SessionActivationAuthorizationError(SessionActivationError):
     """The controller lacks required Sandbox Group data-plane authorization."""
+
+
+class SessionActivationBindingError(SessionActivationError):
+    """The configured Sandbox Group binding is permanently invalid."""
 
 
 class SessionActivationTransientError(SessionActivationError):
@@ -419,6 +426,8 @@ class SessionRuntimeBinding:
             raise SessionActivationAuthorizationError(
                 SANDBOX_GROUP_AUTHORIZATION_MESSAGE
             ) from None
+        except SandboxGroupBindingError as exc:
+            raise SessionActivationBindingError(str(exc)) from None
         except SandboxGroupTransientError as exc:
             raise SessionActivationTransientError(str(exc)) from None
 
@@ -639,9 +648,25 @@ async def _activate_existing_session(
     except SandboxGroupAuthorizationError:
         await _close_handle_if_open(handle)
         raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
+    except SandboxGroupBindingError as exc:
+        await _close_handle_if_open(handle)
+        raise SessionActivationBindingError(str(exc)) from None
+    except SandboxGroupTransientError as exc:
+        await _close_handle_if_open(handle)
+        raise SessionActivationTransientError(str(exc)) from None
+    except SandboxNotFoundError:
+        await _close_handle_if_open(handle)
+        raise SessionActivationGoneError(
+            "Session backing sandbox is unavailable."
+        ) from None
     except SandboxInvalidStateError as exc:
         await _close_handle_if_open(handle)
         raise SessionActivationConflictError(str(exc)) from None
+    except SandboxProvisioningError:
+        await _close_handle_if_open(handle)
+        raise SessionActivationConflictError(
+            "Sandbox provider rejected the lifecycle operation."
+        ) from None
     except SandboxManifestMismatchError:
         await _quarantine_detected_binding(
             store,
@@ -1671,6 +1696,12 @@ async def _provision_reserved_session(
         except (SessionStateContractError, SessionStateStoreError) as cleanup_error:
             raise cleanup_error from None
         raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
+    except (
+        SandboxGroupBindingError,
+        SandboxGroupTransientError,
+        SandboxProvisioningError,
+    ) as exc:
+        _raise_provision_provider_error(exc, setup_deadline)
     except SandboxFileNotFoundError:
         raise _setup_timeout_error(setup_deadline, SetupPhase.CONTENT) from None
     except SandboxFileOperationError as exc:
@@ -1679,6 +1710,25 @@ async def _provision_reserved_session(
         if exc.status_code is None or exc.status_code in _RESUMABLE_FILE_OPERATION_STATUS_CODES:
             raise _setup_timeout_error(setup_deadline, SetupPhase.CONTENT) from None
         raise
+
+
+def _raise_provision_provider_error(
+    error: SandboxGroupBindingError | SandboxGroupTransientError | SandboxProvisioningError,
+    setup_deadline: SetupDeadline,
+) -> Never:
+    if isinstance(error, SandboxGroupBindingError):
+        raise SessionActivationBindingError(str(error)) from None
+    if isinstance(error, SandboxGroupTransientError):
+        raise SessionActivationTransientError(str(error)) from None
+    if isinstance(error, SandboxCapacityError):
+        raise SessionActivationTransientError(str(error)) from None
+    if isinstance(error, SandboxInvalidStateError):
+        raise SessionActivationConflictError(str(error)) from None
+    if isinstance(error, SandboxNotFoundError):
+        raise _setup_timeout_error(setup_deadline, SetupPhase.PROVISION_CREATE) from None
+    raise SessionActivationBindingError(
+        "Sandbox provider rejected the provisioning request."
+    ) from None
 
 
 async def _preserve_indeterminate_provision(

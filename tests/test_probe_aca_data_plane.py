@@ -23,6 +23,11 @@ def _load_probe() -> object:
 probe = _load_probe()
 
 
+def _set_group_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(probe._GROUP_RESOURCE_ID_ENV_VAR, _GROUP_ID)
+    monkeypatch.setenv(probe._GROUP_REGION_ENV_VAR, "westus2")
+
+
 def _forbidden() -> HttpResponseError:
     error = HttpResponseError("Operation returned an invalid status 'Forbidden'")
     error.status_code = 403
@@ -32,10 +37,10 @@ def _forbidden() -> HttpResponseError:
 def test_probe_deadline_reports_authorization_failure(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    async def _timeout_probe(_group: str) -> None:
+    async def _timeout_probe(_group: str, _region: str) -> None:
         raise TimeoutError
 
-    monkeypatch.setenv(probe._GROUP_RESOURCE_ID_ENV_VAR, _GROUP_ID)
+    _set_group_environment(monkeypatch)
     monkeypatch.setattr(probe, "_probe", _timeout_probe)
 
     assert probe.main() == 1
@@ -47,10 +52,10 @@ def test_probe_deadline_reports_authorization_failure(
 def test_probe_403_reports_authorization_failure_without_slow_note(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    async def _forbidden_probe(_group: str) -> None:
+    async def _forbidden_probe(_group: str, _region: str) -> None:
         raise _forbidden()
 
-    monkeypatch.setenv(probe._GROUP_RESOURCE_ID_ENV_VAR, _GROUP_ID)
+    _set_group_environment(monkeypatch)
     monkeypatch.setattr(probe, "_probe", _forbidden_probe)
 
     assert probe.main() == 1
@@ -60,10 +65,10 @@ def test_probe_403_reports_authorization_failure_without_slow_note(
 
 
 def test_probe_success_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _ok_probe(_group: str) -> None:
+    async def _ok_probe(_group: str, _region: str) -> None:
         return None
 
-    monkeypatch.setenv(probe._GROUP_RESOURCE_ID_ENV_VAR, _GROUP_ID)
+    _set_group_environment(monkeypatch)
     monkeypatch.setattr(probe, "_probe", _ok_probe)
 
     assert probe.main() == 0

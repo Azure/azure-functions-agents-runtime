@@ -73,6 +73,13 @@ def _required_group_resource_id() -> str:
     return group_resource_id
 
 
+def _required_group_region() -> str:
+    region = os.environ.get("AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION")
+    if not region:
+        pytest.fail("AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION is required.")
+    return region
+
+
 async def _exercise_direct_file_operations(
     handle: SandboxSessionHandle,
     session_id: str,
@@ -105,7 +112,10 @@ async def _exercise_direct_file_operations(
 async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
     group_resource_id = _required_group_resource_id()
     session_id = f"p4a-smoke-{uuid.uuid4().hex}"
-    adapter = await AcaSandboxAdapter.open(group_resource_id)
+    adapter = await AcaSandboxAdapter.open(
+        group_resource_id,
+        region=_required_group_region(),
+    )
     created = None
     resumed = None
     sandbox_id: str | None = None

@@ -26,6 +26,24 @@ and `Prefer: respond-async` opts into the durable run-management URLs.
 The sandbox has no public inbound port. The Functions app remains the
 authenticated entry point and controller.
 
+## Sandbox Group configuration
+
+Author the existing Sandbox Group resource ID and its region together in
+`agents.config.yaml`:
+
+```yaml
+session_runtime:
+  aca_sandbox:
+    sandbox_group_resource_id: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID
+    region: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION
+```
+
+Both fields are required. `region` is normalized to lowercase and must contain
+only ASCII letters and digits (for example, `westus2`). The runtime trusts this
+authored value and constructs the regional ACA data-plane client directly; it
+does not read the Sandbox Group through ARM or fall back to discovery. The
+Function App may run in a different region from the Sandbox Group.
+
 ## Disk selection and content
 
 By default, `SandboxCreateProfile` selects the public disk named for the

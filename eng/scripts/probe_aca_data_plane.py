@@ -5,7 +5,8 @@ A control-plane ARM read can pass while the data-plane role is missing. The
 data-plane SDK retries 403 for minutes, so this read-only probe issues one
 ``list_sandboxes`` call under its own short deadline and treats a 401/403 or that
 deadline as the authorization failure. Group id comes from
-``AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID``.
+``AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID`` and
+``AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION``.
 """
 
 import asyncio
@@ -21,6 +22,7 @@ from tests.live.aca_smoke_support import ci_smoke_reaper_labels
 from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
 
 _GROUP_RESOURCE_ID_ENV_VAR = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"
+_GROUP_REGION_ENV_VAR = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION"
 _IDENTITY_ENV_VAR = "AZURE_FUNCTIONS_AGENTS_ACA_PROBE_IDENTITY"
 _DATA_OWNER_ROLE = "Container Apps SandboxGroup Data Owner"
 _DATA_OWNER_ROLE_ID = "c24cf47c-5077-412d-a19c-45202126392c"
@@ -48,10 +50,10 @@ def _authorization_failure_message(group_resource_id: str, *, slow: bool = False
     )
 
 
-async def _probe(group_resource_id: str) -> None:
+async def _probe(group_resource_id: str, region: str) -> None:
     """Issue one read-only, label-scoped list call under an explicit deadline."""
 
-    adapter = await AcaSandboxAdapter.open(group_resource_id)
+    adapter = await AcaSandboxAdapter.open(group_resource_id, region=region)
     try:
         async with asyncio.timeout(_PROBE_TIMEOUT_SECONDS):
             await adapter.list_sandboxes(labels=ci_smoke_reaper_labels())
@@ -67,8 +69,15 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    region = os.environ.get(_GROUP_REGION_ENV_VAR, "").strip()
+    if not region:
+        print(
+            f"{_GROUP_REGION_ENV_VAR} must be set to the Sandbox Group region.",
+            file=sys.stderr,
+        )
+        return 1
     try:
-        asyncio.run(_probe(group_resource_id))
+        asyncio.run(_probe(group_resource_id, region))
     except TimeoutError:
         print(_authorization_failure_message(group_resource_id, slow=True), file=sys.stderr)
         return 1

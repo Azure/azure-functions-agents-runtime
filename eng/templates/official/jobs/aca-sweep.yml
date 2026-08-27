@@ -62,7 +62,10 @@ jobs:
             # property: six hours is far longer than any qualification run and
             # than the controller's ~1h reconciliation cadence, so a live
             # sandbox can never fall in scope.
-            python eng/scripts/aca_qualification_pipeline.py sweep --max-age-hours 6
+            python eng/scripts/aca_qualification_pipeline.py sweep \
+              --region "$(ACA_SANDBOX_REGION)" \
+              --max-age-hours 6
         env:
           AZURE_TOKEN_CREDENTIALS: 'dev'
           AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
+          AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION: $(ACA_SANDBOX_REGION)

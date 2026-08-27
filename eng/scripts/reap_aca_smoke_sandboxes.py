@@ -33,13 +33,17 @@ from tests.live.aca_smoke_support import (
 from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
 
 _GROUP_RESOURCE_ID_ENV_VAR = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"
+_GROUP_REGION_ENV_VAR = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION"
 
 
 async def main() -> None:
     """Reap this run's CI smoke sandboxes in the configured Sandbox Group."""
 
     run_id = aca_smoke_run_id()
-    adapter = await AcaSandboxAdapter.open(os.environ[_GROUP_RESOURCE_ID_ENV_VAR])
+    adapter = await AcaSandboxAdapter.open(
+        os.environ[_GROUP_RESOURCE_ID_ENV_VAR],
+        region=os.environ[_GROUP_REGION_ENV_VAR],
+    )
     try:
         reaped = 0
         cleanup_errors: list[str] = []

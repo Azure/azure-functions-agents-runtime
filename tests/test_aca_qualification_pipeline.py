@@ -361,6 +361,49 @@ class TestPipelineEnvironmentContract:
                 found[key.strip()] = value.strip().strip("'\"")
         return found
 
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "aca-deploy-cold.yml",
+            "aca-qualify.yml",
+            "aca-sweep.yml",
+            "e2e-tests.yml",
+        ],
+    )
+    def test_every_aca_template_wires_the_authored_group_region(self, template: str) -> None:
+        env = self._template_env(template)
+        assert env.get("AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION") == (
+            "$(ACA_SANDBOX_REGION)"
+        )
+
+    def test_sweep_passes_the_region_argument_exactly_once(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (
+            root / "eng" / "templates" / "official" / "jobs" / "aca-sweep.yml"
+        ).read_text(encoding="utf-8")
+        assert source.count('--region "$(ACA_SANDBOX_REGION)"') == 1
+
+    def test_fixture_authors_the_required_region(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (
+            root
+            / "tests"
+            / "live"
+            / "apps"
+            / "aca-qualification"
+            / "agents.config.yaml"
+        ).read_text(encoding="utf-8")
+        assert "region: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION" in source
+
+    def test_current_checkout_smoke_wires_region_for_run_and_cleanup(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (
+            root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml"
+        ).read_text(encoding="utf-8")
+        assert source.count(
+            "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION: $(ACA_SANDBOX_REGION)"
+        ) == 2
+
     @pytest.mark.parametrize("template", ["aca-deploy-cold.yml", "aca-qualify.yml"])
     def test_timeout_is_within_the_enforced_bound(self, template: str) -> None:
         env = self._template_env(template)
@@ -620,6 +663,14 @@ class TestSweepAdapterContract:
         assert labels.default is inspect.Parameter.empty, (
             "labels is required; the sweep must pass it explicitly."
         )
+
+    def test_real_adapter_requires_an_authored_region(self) -> None:
+        from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
+
+        parameters = inspect.signature(AcaSandboxAdapter.open).parameters
+        region = parameters["region"]
+        assert region.kind is inspect.Parameter.KEYWORD_ONLY
+        assert region.default is inspect.Parameter.empty
 
     def test_sweep_passes_an_empty_selector(self) -> None:
         """An empty selector is 'no filter', which is what age-scoping needs."""

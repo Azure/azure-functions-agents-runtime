@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-import azure_functions_agents.transport.aca_sdk as aca_sdk
 from azure_functions_agents.controller.budget import RequestBudget
 from azure_functions_agents.controller.http import (
     cancel_run,
@@ -55,7 +54,10 @@ from azure_functions_agents.session_state import (
     RunRowNotFoundError,
 )
 from azure_functions_agents.transport.ports import SandboxSessionProvider
-from azure_functions_agents.transport.transport_models import SandboxGroupBindingError
+from azure_functions_agents.transport.transport_models import (
+    SandboxGroupBindingError,
+    SandboxGroupTransientError,
+)
 
 
 class FakeBackend:
@@ -963,38 +965,7 @@ async def test_tombstoned_abandoned_run_keeps_status_but_result_is_gone() -> Non
 # ---------------------------------------------------------------------------
 
 
-def _arm_status_session(status: int) -> object:
-    """Fake an aiohttp session whose ARM GET answers with ``status``."""
-
-    class _Response:
-        def __init__(self) -> None:
-            self.status = status
-
-        async def __aenter__(self) -> _Response:
-            return self
-
-        async def __aexit__(self, *exc_info: object) -> None:
-            return None
-
-        async def json(self, *, content_type: object) -> dict[str, str]:
-            del content_type
-            return {"error": {"code": "TooManyRequests"}}
-
-    class _Session:
-        async def __aenter__(self) -> _Session:
-            return self
-
-        async def __aexit__(self, *exc_info: object) -> None:
-            return None
-
-        def get(self, *args: object, **kwargs: object) -> _Response:
-            del args, kwargs
-            return _Response()
-
-    return _Session()
-
-
-class _ArmBoundBackend:
+class _ProviderBoundBackend:
     """A backend whose start_run resolves the provider, as the real one does."""
 
     def __init__(self, runtime: SessionRuntimeBinding) -> None:
@@ -1006,13 +977,12 @@ class _ArmBoundBackend:
         raise AssertionError("provider resolution should not have succeeded")
 
 
-def _arm_bound_runtime(tmp_path: Path) -> SessionRuntimeBinding:
+def _provider_bound_runtime(
+    tmp_path: Path,
+    provider_error: Exception,
+) -> SessionRuntimeBinding:
     async def provider_factory() -> SandboxSessionProvider:
-        await aca_sdk._read_arm_group(
-            _ArmCredential(),
-            "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/sandboxGroups/g",
-        )
-        raise AssertionError("the ARM read should have raised")
+        raise provider_error
 
     async def state_store_factory() -> StateStoreBinding:
         raise AssertionError("the state store must not be resolved for this path")
@@ -1029,26 +999,19 @@ def _arm_bound_runtime(tmp_path: Path) -> SessionRuntimeBinding:
         provider_factory=provider_factory,
         state_store_factory=state_store_factory,
     )
-
-
-class _ArmCredential:
-    async def get_token(self, *scopes: str) -> object:
-        del scopes
-
-        class _Token:
-            token = "redacted"
-
-        return _Token()
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
-async def test_transient_arm_status_reaches_the_caller_as_retryable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int
+async def test_transient_data_plane_status_reaches_the_caller_as_retryable(
+    tmp_path: Path,
+    status: int,
 ) -> None:
-    """A retryable ARM status must become 503 with Retry-After, not an untyped 500."""
-    monkeypatch.setattr(aca_sdk.aiohttp, "ClientSession", lambda **_: _arm_status_session(status))
-    backend = _ArmBoundBackend(_arm_bound_runtime(tmp_path))
+    """A retryable provider status becomes 503 with Retry-After, not an untyped 500."""
+    backend = _ProviderBoundBackend(
+        _provider_bound_runtime(
+            tmp_path,
+            SandboxGroupTransientError(f"provider status {status}"),
+        )
+    )
 
     response = await submit_run(
         backend,  # type: ignore[arg-type]
@@ -1068,21 +1031,32 @@ async def test_transient_arm_status_reaches_the_caller_as_retryable(
 
 
 @pytest.mark.asyncio
-async def test_permanent_arm_status_is_not_reported_as_retryable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_permanent_data_plane_binding_failure_is_not_reported_as_retryable(
+    tmp_path: Path,
 ) -> None:
-    """A missing group is a permanent fault and must not be advertised as retryable."""
-    monkeypatch.setattr(aca_sdk.aiohttp, "ClientSession", lambda **_: _arm_status_session(404))
-    backend = _ArmBoundBackend(_arm_bound_runtime(tmp_path))
-
-    with pytest.raises(SandboxGroupBindingError):
-        await submit_run(
-            backend,  # type: ignore[arg-type]
-            StartRunRequest(prompt="hello"),
-            agent_slug="main",
-            respond_async=True,
-            budget=_expired_budget(),
+    """A missing group is a permanent binding fault with no retry advertisement."""
+    backend = _ProviderBoundBackend(
+        _provider_bound_runtime(
+            tmp_path,
+            SandboxGroupBindingError("sensitive provider status 404"),
         )
+    )
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 503
+    assert response.headers.get("Retry-After") is None
+    assert response.body == {
+        "error": "sandbox_group_binding_failed",
+        "reason": "sandbox_group_binding_failed",
+    }
+    assert "sensitive provider status" not in str(response.body)
 
 
 @pytest.mark.asyncio
