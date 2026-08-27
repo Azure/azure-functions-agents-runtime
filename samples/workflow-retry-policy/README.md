@@ -74,8 +74,9 @@ The agent uses its ordinary instructions to generate a three-task DAG:
 load_order → reserve_inventory → confirm_order
 ```
 
-The workflow should finish `Completed`. In status schema v3:
+The workflow should finish `Completed`. In status schema v4:
 
-- `reserve_inventory.attempt` is `3`;
+- `retry_driver` is `durable`;
 - `reserve_inventory.max_attempts` is `3`;
+- `reserve_inventory.attempt` is intentionally absent because Durable owns retries;
 - `confirm_order.state` is `completed`.

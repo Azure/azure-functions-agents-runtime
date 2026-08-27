@@ -55,7 +55,7 @@ def _load_or_create_incident(incident_id: str) -> tuple[dict[str, Any], str]:
     initial = {
         "order_id": _ORDER_ID,
         "failures_remaining": 2,
-        "failed_attempts": [],
+        "transient_failures_observed": 0,
         "status": "active",
     }
     try:
@@ -73,8 +73,7 @@ def _read_incident(incident_id: str) -> tuple[dict[str, Any], str]:
         not isinstance(state, dict)
         or state.get("order_id") != _ORDER_ID
         or not isinstance(state.get("failures_remaining"), int)
-        or not isinstance(state.get("failed_attempts"), list)
-        or not all(type(attempt) is int for attempt in state["failed_attempts"])
+        or not isinstance(state.get("transient_failures_observed"), int)
     ):
         raise ValueError("inventory incident state is invalid")
     etag = download.properties.get("etag")
@@ -121,14 +120,9 @@ def reserve_inventory(args: dict[str, Any]) -> dict[str, Any]:
     incident_id = sha256(context.workflow_id.encode()).hexdigest()[:32]
     for _ in range(5):
         incident, etag = _load_or_create_incident(incident_id)
-        if context.attempt in incident["failed_attempts"]:
-            raise WorkflowRetryableError(
-                "inventory_temporarily_unavailable",
-                "Inventory reservation is temporarily unavailable.",
-            )
         if incident["failures_remaining"] > 0:
             incident["failures_remaining"] -= 1
-            incident["failed_attempts"].append(context.attempt)
+            incident["transient_failures_observed"] += 1
             try:
                 _write_incident(incident_id, incident, etag=etag)
             except ResourceModifiedError:
@@ -153,7 +147,7 @@ def reserve_inventory(args: dict[str, Any]) -> dict[str, Any]:
         "order_id": _ORDER_ID,
         "sku": order["sku"],
         "reserved": True,
-        "transient_failures_observed": 2,
+        "transient_failures_observed": incident["transient_failures_observed"],
     }
 
 

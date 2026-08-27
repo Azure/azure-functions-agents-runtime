@@ -27,7 +27,7 @@ import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from decimal import ROUND_FLOOR, Decimal, InvalidOperation
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Any, Literal, NotRequired, TypedDict, cast
 
@@ -279,6 +279,16 @@ class WorkflowTaskExecution(BaseModel):
         return value
 
 
+class DurableRetryPolicyInput(TypedDict):
+    """JSON-safe Durable Python 2.x retry policy persisted for new histories."""
+
+    first_retry_interval_ms: int
+    max_number_of_attempts: int
+    backoff_coefficient: float
+    max_retry_interval_ms: int
+    retry_timeout_ms: int
+
+
 class EffectiveWorkflowTaskExecution(TypedDict):
     """JSON-safe policy frozen before Durable orchestration starts."""
 
@@ -288,6 +298,7 @@ class EffectiveWorkflowTaskExecution(TypedDict):
     continue_on_error: bool
     timeout_source: Literal["decorator", "task", "runtime_default"]
     retry_source: Literal["decorator", "task", "runtime_default"]
+    durable_retry_policy: NotRequired[DurableRetryPolicyInput]
 
 
 def precompute_retry_delays_ms(retry: WorkflowRetryPolicy) -> list[int]:
@@ -303,6 +314,50 @@ def precompute_retry_delays_ms(retry: WorkflowRetryPolicy) -> list[int]:
             int(
                 (Decimal(initial_ms) * multiplier**index).to_integral_value(
                     rounding=ROUND_FLOOR
+                )
+            ),
+        )
+        for index in range(retry.max_attempts - 1)
+    ]
+
+
+def durable_retry_policy_input(retry: WorkflowRetryPolicy) -> DurableRetryPolicyInput:
+    """Preserve the authored exponential shape for Durable native retry."""
+    if retry.backoff is None:
+        initial_ms = maximum_ms = 0
+        coefficient = 1.0
+    else:
+        initial_ms = _policy_duration_ms(
+            retry.backoff.initial,
+            field_name="backoff.initial",
+        )
+        maximum_ms = _policy_duration_ms(
+            retry.backoff.max,
+            field_name="backoff.max",
+        )
+        coefficient = retry.backoff.multiplier
+    return {
+        "first_retry_interval_ms": initial_ms,
+        "max_number_of_attempts": retry.max_attempts,
+        "backoff_coefficient": coefficient,
+        "max_retry_interval_ms": maximum_ms,
+        "retry_timeout_ms": MAX_POLICY_ELAPSED_MS,
+    }
+
+
+def _native_retry_delays_ceiling_ms(retry: WorkflowRetryPolicy) -> list[int]:
+    """Conservatively bound Durable's floating-point exponential delays."""
+    if retry.backoff is None:
+        return []
+    initial_ms = _policy_duration_ms(retry.backoff.initial, field_name="backoff.initial")
+    maximum_ms = _policy_duration_ms(retry.backoff.max, field_name="backoff.max")
+    multiplier = Decimal(str(retry.backoff.multiplier))
+    return [
+        min(
+            maximum_ms,
+            int(
+                (Decimal(initial_ms) * multiplier**index).to_integral_value(
+                    rounding=ROUND_CEILING
                 )
             ),
         )
@@ -484,7 +539,8 @@ def resolve_workflow_task_execution(
         retry = WorkflowRetryPolicy()
         retry_source = "runtime_default"
     retry_delays_ms = precompute_retry_delays_ms(retry)
-    elapsed_ms = retry.max_attempts * timeout_ms + sum(retry_delays_ms)
+    native_retry_delays_ms = _native_retry_delays_ceiling_ms(retry)
+    elapsed_ms = retry.max_attempts * timeout_ms + sum(native_retry_delays_ms)
     if elapsed_ms > MAX_POLICY_ELAPSED_MS:
         raise ValueError("configured attempt deadlines and retry delays must not exceed PT1H")
     return EffectiveWorkflowTaskExecution(
@@ -494,6 +550,7 @@ def resolve_workflow_task_execution(
         continue_on_error=execution.continue_on_error,
         timeout_source=timeout_source,
         retry_source=retry_source,
+        durable_retry_policy=durable_retry_policy_input(retry),
     )
 
 

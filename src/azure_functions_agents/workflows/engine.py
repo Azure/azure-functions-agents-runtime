@@ -37,6 +37,10 @@ from azure_functions_agents.runner import run_leaf_agent_task
 
 from . import registry
 from .context import _workflow_task_idempotency_key
+from .native_retry import (
+    create_durable_retry_policy,
+    decode_durable_retry_failure,
+)
 from .policy import (
     ActivityFailure,
     authorization_outcome,
@@ -394,6 +398,7 @@ class _MaterializedInstance(TypedDict):
     last_failure: NotRequired[ActivityFailure]
     retry_deadline: NotRequired[str]
     retry_ready: NotRequired[bool]
+    reported_attempts: NotRequired[int]
 
 
 @dataclass
@@ -409,6 +414,7 @@ class _DynamicWorkflowState:
     expanded_count: dict[str, int]
     budget_used: int
     policy_aware: bool
+    native_retry: bool
 
 
 def _new_dynamic_workflow_state(
@@ -427,6 +433,11 @@ def _new_dynamic_workflow_state(
         if policy_input is not None
         else frozenset()
     )
+    policy_executions = [
+        cast(EffectiveWorkflowTaskExecution, cast(Mapping[str, Any], task)["execution"])
+        for task in tasks
+        if "execution" in task
+    ]
     return _DynamicWorkflowState(
         by_id=by_id,
         deps={
@@ -441,7 +452,10 @@ def _new_dynamic_workflow_state(
         node_instances={},
         expanded_count={},
         budget_used=sum(1 for task in tasks if task.get("for_each") is None),
-        policy_aware=any("execution" in task for task in tasks),
+        policy_aware=bool(policy_executions),
+        native_retry=any(
+            "durable_retry_policy" in execution for execution in policy_executions
+        ),
     )
 
 
@@ -455,7 +469,8 @@ def _dynamic_status(state: _DynamicWorkflowState) -> dict[str, Any]:
     """Build the versioned structured ``custom_status`` object.
 
     Version 2 preserves the data-driven workflow shape. Version 3 classifies
-    executable units and adds bounded execution fields for policy-aware plans.
+    executable units for legacy runtime-managed retry. Version 4 identifies
+    Durable-owned retry without claiming attempt or backoff observability.
     """
     completed = skipped = running = pending = retry_wait = failed_continued = failed = 0
     for insts in state.node_instances.values():
@@ -481,6 +496,8 @@ def _dynamic_status(state: _DynamicWorkflowState) -> dict[str, Any]:
         if execution is None:
             return {}
         fields: dict[str, Any] = {"max_attempts": execution["max_attempts"]}
+        if "durable_retry_policy" in execution:
+            return fields
         attempt = instance.get("attempt", 0)
         if attempt > 0:
             fields["attempt"] = attempt
@@ -543,17 +560,21 @@ def _dynamic_status(state: _DynamicWorkflowState) -> dict[str, Any]:
             "materialized_total": materialized_total,
             "pending": pending,
             "running": running,
-            "retry_wait": retry_wait,
             "completed": completed,
             "skipped": skipped,
             "failed_continued": failed_continued,
             "failed": failed,
         }
-    return {
-        "schema_version": 3 if state.policy_aware else 2,
+        if not state.native_retry:
+            counts["retry_wait"] = retry_wait
+    status: dict[str, Any] = {
+        "schema_version": 4 if state.native_retry else 3 if state.policy_aware else 2,
         "counts": counts,
         "nodes": nodes,
     }
+    if state.native_retry:
+        status["retry_driver"] = "durable"
+    return status
 
 
 _UNBOUND = object()
@@ -682,7 +703,8 @@ def _new_materialized_instance(
             cast(Mapping[str, Any], task)["execution"],
         )
         instance["execution"] = execution
-        instance["attempt"] = 0
+        if "durable_retry_policy" not in execution:
+            instance["attempt"] = 0
         instance["idempotency_key"] = _workflow_task_idempotency_key(
             context.instance_id,
             instance_id,
@@ -973,6 +995,9 @@ def _collect_runnable_instances(
 
 def _prepare_dynamic_attempt(instance: _MaterializedInstance) -> None:
     """Advance the explicit runtime attempt before Activity dispatch."""
+    execution = instance.get("execution")
+    if execution is not None and "durable_retry_policy" in execution:
+        return
     if instance.get("retry_ready"):
         instance["attempt"] += 1
         instance.pop("retry_ready", None)
@@ -1009,16 +1034,17 @@ def _dispatch_dynamic_wave(
                     "execution": execution,
                     "task_id": logical_id,
                     "node_instance_id": instance["instance_id"],
-                    "attempt": instance["attempt"],
                     "max_attempts": execution["max_attempts"],
                     "idempotency_key": instance["idempotency_key"],
                 })
-            wave_tasks.append(
-                context.call_activity(
-                    _ACTIVITY_NAME,
-                    activity_input,
-                )
-            )
+                if "durable_retry_policy" not in execution:
+                    activity_input["attempt"] = instance["attempt"]
+            wave_tasks.append(_call_dynamic_activity(
+                context,
+                _ACTIVITY_NAME,
+                activity_input,
+                instance.get("execution"),
+            ))
             instance["kind"] = "activity"
         elif task["type"] == SUB_AGENT_TASK_TYPE:
             if task["agent"] not in state.allowed_subagents:
@@ -1039,16 +1065,17 @@ def _dispatch_dynamic_wave(
                     "execution": execution,
                     "task_id": logical_id,
                     "node_instance_id": instance["instance_id"],
-                    "attempt": instance["attempt"],
                     "max_attempts": execution["max_attempts"],
                     "idempotency_key": instance["idempotency_key"],
                 })
-            wave_tasks.append(
-                context.call_activity(
-                    SUB_AGENT_ACTIVITY_NAME,
-                    subagent_input,
-                )
-            )
+                if "durable_retry_policy" not in execution:
+                    subagent_input["attempt"] = instance["attempt"]
+            wave_tasks.append(_call_dynamic_activity(
+                context,
+                SUB_AGENT_ACTIVITY_NAME,
+                subagent_input,
+                instance.get("execution"),
+            ))
             instance["kind"] = "activity"
         elif task["type"] == WAIT_TASK_TYPE:
             deadline = _wait_deadline(context, task)
@@ -1063,6 +1090,22 @@ def _dispatch_dynamic_wave(
         instance["state"] = "running"
         state.logical_state[logical_id] = "running"
     return wave_tasks
+
+
+def _call_dynamic_activity(
+    context: df.DurableOrchestrationContext,
+    name: str,
+    activity_input: dict[str, Any],
+    execution: EffectiveWorkflowTaskExecution | None,
+) -> Any:
+    """Dispatch through the retry driver frozen into the orchestration input."""
+    if execution is None or "durable_retry_policy" not in execution:
+        return context.call_activity(name, activity_input)
+    return context.call_activity_with_retry(
+        name,
+        create_durable_retry_policy(execution["durable_retry_policy"]),
+        activity_input,
+    )
 
 
 def _mark_dynamic_retry_wait(
@@ -1084,6 +1127,8 @@ def _mark_dynamic_retry_wait(
 def _mark_dynamic_continued_failure(
     instance: _MaterializedInstance,
     failure: ActivityFailure,
+    *,
+    attempts: int | None,
 ) -> None:
     """Materialize the existing sanitized continued-failure result."""
     instance["result"] = {
@@ -1091,8 +1136,9 @@ def _mark_dynamic_continued_failure(
         "error_code": failure["error_code"],
         "error": failure["error"],
         "kind": failure["kind"],
-        "attempts": instance["attempt"],
     }
+    if attempts is not None:
+        instance["result"]["attempts"] = attempts
     instance["state"] = "failed_continued"
 
 
@@ -1157,8 +1203,20 @@ def _apply_dynamic_wave_results(
             instance["result"] = raw["result"]
             instance["state"] = "completed"
         else:
+            execution = instance["execution"]
+            native = "durable_retry_policy" in execution
+            exhausted_attempts: int | None = None
             if isinstance(raw, BaseException):
-                failure: ActivityFailure | None = {
+                failure = (
+                    decode_durable_retry_failure(instance["instance_id"], raw)
+                    if native
+                    else None
+                )
+                if failure is not None:
+                    exhausted_attempts = execution["max_attempts"]
+                    instance["reported_attempts"] = exhausted_attempts
+                else:
+                    failure = {
                     "error_code": "workflow_task_activity_infrastructure",
                     "error": "Task Activity failed before returning an outcome.",
                     "kind": "activity_infrastructure",
@@ -1178,13 +1236,19 @@ def _apply_dynamic_wave_results(
                     failure = cast(ActivityFailure, outcome)
             if failure is not None:
                 instance["last_failure"] = failure
-                execution = instance["execution"]
-                attempt = instance["attempt"]
-                disposition = decide_retry(
-                    execution,
-                    attempt=attempt,
-                    failure=failure,
-                )
+                if native:
+                    disposition = decide_retry(
+                        execution,
+                        attempt=execution["max_attempts"],
+                        failure=failure,
+                    )
+                else:
+                    attempt = instance["attempt"]
+                    disposition = decide_retry(
+                        execution,
+                        attempt=attempt,
+                        failure=failure,
+                    )
                 if disposition.action == "retry":
                     delay_ms = disposition.delay_ms
                     if delay_ms is None:
@@ -1197,7 +1261,11 @@ def _apply_dynamic_wave_results(
                     )
                     continue
                 if disposition.action == "continue":
-                    _mark_dynamic_continued_failure(instance, failure)
+                    _mark_dynamic_continued_failure(
+                        instance,
+                        failure,
+                        attempts=exhausted_attempts if native else instance["attempt"],
+                    )
                 else:
                     instance["state"] = "failed"
                     state.logical_state[instance["logical_id"]] = "failed"
@@ -1226,7 +1294,13 @@ def _apply_dynamic_wave_results(
             path=None,
             logical_id=instance["logical_id"],
         )
-        result["attempts"] = instance["attempt"]
+        attempts = (
+            instance.get("reported_attempts")
+            if "durable_retry_policy" in instance["execution"]
+            else instance.get("attempt")
+        )
+        if attempts is not None:
+            result["attempts"] = attempts
         result["kind"] = failure["kind"]
         return result
     return None
@@ -1432,7 +1506,7 @@ def register_workflows(
             )
         return workflow_agent_slug, policy
 
-    @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
+    @bp.activity_trigger(input_name="task")
     async def agents_workflow_run_tool(task: _ToolActivityInput) -> dict[str, Any]:
         policy_aware = "execution" in task
         if policy_aware:
@@ -1524,7 +1598,7 @@ def register_workflows(
         json.dumps(result)
         return {"id": task_id, "result": result}
 
-    @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
+    @bp.activity_trigger(input_name="task")
     async def agents_workflow_run_sub_agent(
         task: _SubAgentActivityInput,
     ) -> dict[str, Any]:
@@ -1659,7 +1733,7 @@ def register_workflows(
         json.dumps(result)
         return result
 
-    @bp.orchestration_trigger(context_name="context")  # type: ignore[untyped-decorator]
+    @bp.orchestration_trigger(context_name="context")  # type: ignore[arg-type]
     def agents_workflow_orchestrator(context: df.DurableOrchestrationContext) -> Any:
         """Execute a workflow plan, selecting the static or dynamic scheduler.
 

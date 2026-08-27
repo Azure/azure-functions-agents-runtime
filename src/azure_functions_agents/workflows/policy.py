@@ -9,6 +9,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import ROUND_CEILING, Decimal
 from typing import Annotated, Any, Literal, TypedDict, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -28,6 +29,7 @@ from .schema import (
     MAX_POLICY_ELAPSED_MS,
     MAX_POLICY_TIMEOUT_MS,
     MIN_POLICY_TIMEOUT_MS,
+    DurableRetryPolicyInput,
     EffectiveWorkflowTaskExecution,
     WorkflowRetryableError,
     WorkflowTerminalError,
@@ -97,6 +99,27 @@ def decide_retry(
 type _RetryDelayMs = Annotated[int, Field(ge=0, le=MAX_BACKOFF_MS)]
 
 
+class DurableRetryPolicyModel(BaseModel):
+    """Strict Activity-side validation of the persisted native retry marker."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        hide_input_in_errors=True,
+    )
+
+    first_retry_interval_ms: int = Field(ge=0, le=MAX_BACKOFF_MS)
+    max_number_of_attempts: int = Field(ge=1, le=MAX_POLICY_ATTEMPTS)
+    backoff_coefficient: float = Field(ge=1.0, le=10.0, allow_inf_nan=False)
+    max_retry_interval_ms: int = Field(ge=0, le=MAX_BACKOFF_MS)
+    retry_timeout_ms: int = Field(ge=1, le=MAX_POLICY_ELAPSED_MS)
+
+    def to_wire(self) -> DurableRetryPolicyInput:
+        """Return the original JSON-safe TypedDict contract."""
+        return cast(DurableRetryPolicyInput, self.model_dump())
+
+
 class EffectiveExecutionModel(BaseModel):
     """Strict Activity-side validation of the persisted execution policy."""
 
@@ -113,6 +136,7 @@ class EffectiveExecutionModel(BaseModel):
     continue_on_error: bool
     timeout_source: PolicySource
     retry_source: PolicySource
+    durable_retry_policy: DurableRetryPolicyModel | None = None
 
     @model_validator(mode="after")
     def validate_schedule(self) -> EffectiveExecutionModel:
@@ -121,11 +145,43 @@ class EffectiveExecutionModel(BaseModel):
         elapsed_ms = self.max_attempts * self.timeout_ms + sum(self.retry_delays_ms)
         if elapsed_ms > MAX_POLICY_ELAPSED_MS:
             raise ValueError("attempt deadlines and retry delays exceed the elapsed limit")
+        durable = self.durable_retry_policy
+        if durable is not None:
+            if durable.max_number_of_attempts != self.max_attempts:
+                raise ValueError("Durable maximum attempts must match execution policy")
+            if durable.retry_timeout_ms != MAX_POLICY_ELAPSED_MS:
+                raise ValueError("Durable retry timeout must match the runtime elapsed limit")
+            if self.max_attempts == 1:
+                if (
+                    durable.first_retry_interval_ms != 0
+                    or durable.max_retry_interval_ms != 0
+                ):
+                    raise ValueError("single-attempt Durable policy must not configure backoff")
+            else:
+                if durable.first_retry_interval_ms < 1:
+                    raise ValueError("multi-attempt Durable policy requires a retry interval")
+                if durable.max_retry_interval_ms < durable.first_retry_interval_ms:
+                    raise ValueError("Durable maximum retry interval is below the first interval")
+                multiplier = Decimal(str(durable.backoff_coefficient))
+                delays = [
+                    min(
+                        durable.max_retry_interval_ms,
+                        int(
+                            (
+                                Decimal(durable.first_retry_interval_ms)
+                                * multiplier**index
+                            ).to_integral_value(rounding=ROUND_CEILING)
+                        ),
+                    )
+                    for index in range(self.max_attempts - 1)
+                ]
+                if self.max_attempts * self.timeout_ms + sum(delays) > MAX_POLICY_ELAPSED_MS:
+                    raise ValueError("Durable retry schedule exceeds the elapsed limit")
         return self
 
     def to_wire(self) -> EffectiveWorkflowTaskExecution:
         """Return the original JSON-safe TypedDict contract."""
-        return cast(EffectiveWorkflowTaskExecution, self.model_dump())
+        return cast(EffectiveWorkflowTaskExecution, self.model_dump(exclude_none=True))
 
 
 class PolicyActivityInputModel(BaseModel):
@@ -143,7 +199,7 @@ class PolicyActivityInputModel(BaseModel):
     execution: EffectiveExecutionModel
     task_id: str = Field(min_length=1)
     node_instance_id: str = Field(min_length=1)
-    attempt: int = Field(ge=1, le=MAX_POLICY_ATTEMPTS)
+    attempt: int | None = Field(default=None, ge=1, le=MAX_POLICY_ATTEMPTS)
     max_attempts: int = Field(ge=1, le=MAX_POLICY_ATTEMPTS)
     idempotency_key: str = Field(min_length=1)
 
@@ -153,7 +209,10 @@ class PolicyActivityInputModel(BaseModel):
             raise ValueError("Activity id must match node instance id")
         if self.max_attempts != self.execution.max_attempts:
             raise ValueError("Activity maximum attempts must match execution policy")
-        if self.attempt > self.execution.max_attempts:
+        native = self.execution.durable_retry_policy is not None
+        if native == (self.attempt is not None):
+            raise ValueError("Activity attempt shape does not match retry driver")
+        if self.attempt is not None and self.attempt > self.execution.max_attempts:
             raise ValueError("Activity attempt exceeds execution policy")
         expected_key = _workflow_task_idempotency_key(
             self.workflow_id,
@@ -315,6 +374,7 @@ async def invoke_policy_handler(
     telemetry_open = True
 
     def finish(outcome: ActivityOutcome) -> ActivityOutcome:
+        native = "durable_retry_policy" in execution
         if outcome["ok"]:
             kind = "success"
             error_code = None
@@ -324,19 +384,27 @@ async def invoke_policy_handler(
             failure = outcome["failure"]
             kind = failure["kind"]
             error_code = failure["error_code"]
-            disposition = decide_retry(
-                execution,
-                attempt=context.attempt,
-                failure=failure,
-            )
-            decision = disposition.action
-            delay = disposition.delay_ms
+            if native and failure["retryable"]:
+                decision = "durable"
+                delay = None
+            else:
+                disposition = decide_retry(
+                    execution,
+                    attempt=context.attempt or execution["max_attempts"],
+                    failure=failure,
+                )
+                decision = disposition.action
+                delay = disposition.delay_ms
         telemetry.complete(
             outcome_kind=kind,
             error_code=error_code,
             retry_decision=decision,
             selected_delay_ms=delay,
         )
+        if native and not outcome["ok"] and outcome["failure"]["retryable"]:
+            from .native_retry import raise_for_durable_retry
+
+            raise_for_durable_retry(outcome)
         return outcome
 
     try:

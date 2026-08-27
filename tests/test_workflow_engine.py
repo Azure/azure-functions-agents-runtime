@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from durabletask.task import TaskFailedError
 
 from azure_functions_agents._function_tool import WorkflowTool
 from azure_functions_agents.config.schema import (
@@ -25,6 +26,7 @@ from azure_functions_agents.workflows.context import (
     _workflow_task_idempotency_key,
     current_workflow_task_context,
 )
+from azure_functions_agents.workflows.native_retry import DurableRetryableActivityError
 from azure_functions_agents.workflows.schema import (
     MAX_NODES,
     MAX_PARALLELISM,
@@ -1028,6 +1030,7 @@ class _DynamicContext(_FakeOrchestrationContext):
         self._now = now or datetime(2024, 1, 1, tzinfo=UTC)
         self.timers: list[_Task] = []
         self.timer_deadlines: list[datetime] = []
+        self.retry_policies: list[Any] = []
 
     @property
     def current_utc_datetime(self) -> datetime:
@@ -1039,6 +1042,15 @@ class _DynamicContext(_FakeOrchestrationContext):
         self.timers.append(timer)
         self.timer_deadlines.append(deadline)
         return timer
+
+    def call_activity_with_retry(
+        self,
+        name: str,
+        retry_policy: Any,
+        payload: dict[str, Any],
+    ) -> _Task:
+        self.retry_policies.append(retry_policy)
+        return self.call_activity(name, payload)
 
     def task_any(self, tasks: list[_Task]) -> _Task:
         candidates = [task for task in tasks if task is not self.cancel_task]
@@ -1792,8 +1804,6 @@ def test_retry_policy_e2e_plan_exercises_decorator_precedence() -> None:
         task_id = payload["id"]
         tool_name = payload["tool"]
         if tool_name == "reserve_inventory":
-            if payload["attempt"] < 3:
-                return _activity_failure(task_id=task_id)
             return {
                 "id": task_id,
                 "ok": True,
@@ -1801,6 +1811,7 @@ def test_retry_policy_e2e_plan_exercises_decorator_precedence() -> None:
                     "order_id": "ORD-1001",
                     "sku": "trail-shoes-blue-42",
                     "reserved": True,
+                    "transient_failures_observed": 2,
                 },
             }
         handler = tools_by_name[tool_name].handler
@@ -1821,15 +1832,20 @@ def test_retry_policy_e2e_plan_exercises_decorator_precedence() -> None:
         for _, payload in context.calls
         if payload["id"] == "reserve_inventory"
     ]
-    assert [payload["attempt"] for payload in retry_calls] == [1, 2, 3]
+    assert len(retry_calls) == 1
+    assert "attempt" not in retry_calls[0]
     assert all(payload["max_attempts"] == 3 for payload in retry_calls)
     assert len({payload["idempotency_key"] for payload in retry_calls}) == 1
+    assert len(context.retry_policies) == 1
+    assert context.retry_policies[0].max_number_of_attempts == 3
     assert result["results"]["reserve_inventory"]["reserved"] is True
     assert result["results"]["confirm_order"] == {
         "order_id": "ORD-1001",
         "status": "confirmed",
+        "transient_failures_observed": 2,
     }
-    assert context.statuses[-1]["schema_version"] == 3
+    assert context.statuses[-1]["schema_version"] == 4
+    assert context.statuses[-1]["retry_driver"] == "durable"
 
 
 def test_multiple_expansions_run_in_sorted_logical_id_order() -> None:
@@ -2319,6 +2335,28 @@ def _policy_task(
     return task
 
 
+def _native_policy_task(
+    task_id: str,
+    *,
+    attempts: int = 3,
+    continue_on_error: bool = False,
+) -> dict[str, Any]:
+    task = _policy_task(
+        task_id,
+        attempts=attempts,
+        continue_on_error=continue_on_error,
+    )
+    execution = task["execution"]
+    execution["durable_retry_policy"] = {
+        "first_retry_interval_ms": 100 if attempts > 1 else 0,
+        "max_number_of_attempts": attempts,
+        "backoff_coefficient": 2.0 if attempts > 1 else 1.0,
+        "max_retry_interval_ms": 1_000 if attempts > 1 else 0,
+        "retry_timeout_ms": 3_600_000,
+    }
+    return task
+
+
 def _activity_failure(
     *,
     task_id: str = "work",
@@ -2342,6 +2380,66 @@ def _activity_failure(
 
 def _activity_success(task_id: str, result: Any) -> dict[str, Any]:
     return {"id": task_id, "ok": True, "result": result}
+
+
+def _native_exhaustion(task_id: str = "work") -> TaskFailedError:
+    outcome = _activity_failure(task_id=task_id)
+    message = json.dumps(
+        {"version": 1, "outcome": outcome},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return TaskFailedError(
+        "Activity failed.",
+        DurableRetryableActivityError(message),
+    )
+
+
+def test_native_retry_exhaustion_restores_sanitized_failure() -> None:
+    result, context = _run_dynamic(
+        [_native_policy_task("work")],
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=lambda _name, _payload: _native_exhaustion(),
+    )
+
+    assert result == {
+        "failed": True,
+        "error": "Safe failure.",
+        "error_code": "service_busy",
+        "node_id": "work",
+        "path": None,
+        "results": {},
+        "attempts": 3,
+        "kind": "handler_transient",
+    }
+    final_status = context.statuses[-1]
+    assert final_status["schema_version"] == 4
+    assert final_status["retry_driver"] == "durable"
+    assert "retry_wait" not in final_status["counts"]
+    assert final_status["nodes"]["work"] == {
+        "state": "failed",
+        "max_attempts": 3,
+    }
+
+
+def test_native_retry_exhaustion_can_continue_without_exposing_attempts_in_status() -> None:
+    result, context = _run_dynamic(
+        [_native_policy_task("work", continue_on_error=True)],
+        policy={"allowed_tools": ["run"], "allowed_subagents": []},
+        result_for=lambda _name, _payload: _native_exhaustion(),
+    )
+
+    assert result["results"]["work"] == {
+        "failed": True,
+        "error_code": "service_busy",
+        "error": "Safe failure.",
+        "kind": "handler_transient",
+        "attempts": 3,
+    }
+    assert context.statuses[-1]["nodes"]["work"] == {
+        "state": "failed_continued",
+        "max_attempts": 3,
+    }
 
 
 def test_policy_task_routes_dynamic_and_dispatches_retry_contract() -> None:

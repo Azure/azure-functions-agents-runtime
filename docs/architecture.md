@@ -77,9 +77,10 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming; builds per-request `delegate_<slug>` tools and fresh stateless workflow leaf agents; attempts one internal token-usage record through the shared runtime logger for each actual MAF invocation attempt. | `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
 | `azure_functions_agents/workflows/integration.py` | Builds the complete immutable handler catalog, immutable slug-keyed workflow-agent policy catalog, per-agent management tools/addenda, validates declared trigger support for workflow-enabled agents, and performs the one app-wide Durable registration. It also resolves the packaged `data-driven-workflows` skill used for progressive authoring guidance. | `build_workflow_handler_catalog()`, `build_workflow_agent_policy_catalog()`, `build_workflow_agent_integration()`, `data_driven_workflows_skill_path()`, `validate_workflow_agent_trigger()`, `register_workflow_runtime()` |
-| `azure_functions_agents/workflows/engine.py` | Registers one Durable blueprint per app and executes the orchestrator, workflow-tool Activity, and Workflow Sub Agent Activity. Capability-bearing Activities reauthorize against the current workflow-agent policy before complete-catalog dispatch. Policy-aware execution owns Activity deadlines, deterministic independent retry timers, continued failures, ordered `for_each` aggregation, and structured status version 3; policy-free plans retain their compatibility scheduler/status path. Durable `yield` boundaries and timer coordination remain visible in the top-level orchestrator generator. | `register_workflows()` |
-| `azure_functions_agents/workflows/policy.py` | Executes policy-aware Activity deliveries and defines their sanitized outcome contract plus the shared retry/continue/fail decision. Strict Pydantic models validate untrusted persisted policy fields only at the Activity boundary; replay-sensitive orchestration continues to use plain JSON/TypedDict values. | `PolicyActivityInputModel`, `invoke_policy_handler()`, `decide_retry()`, `validate_activity_result()` |
-| `azure_functions_agents/workflows/context.py` | Tracks management identity by `(workflow_agent_slug, session_id)`, derives non-revealing 128-bit agent/session prefixes for Durable instance IDs, and exposes the current immutable Activity attempt context with a stable idempotency key. | `session_instance_prefix()`, `new_workflow_instance_id()`, `workflow_matches_agent_session()`, `current_workflow_task_context()` |
+| `azure_functions_agents/workflows/engine.py` | Registers one Durable blueprint per app and executes the orchestrator, workflow-tool Activity, and Workflow Sub Agent Activity. Capability-bearing Activities reauthorize against the current workflow-agent policy before complete-catalog dispatch. New policy-aware histories schedule direct Durable-owned Activity retry and publish status version 4; histories without the native marker retain the explicit Activity/timer driver and status version 3 for replay compatibility. The DAG scheduler continues to own continued failures, ordered `for_each` aggregation, and cancellation observation. | `register_workflows()` |
+| `azure_functions_agents/workflows/policy.py` | Executes policy-aware Activity deliveries and defines their sanitized outcome contract plus the legacy retry/continue/fail decision. Strict Pydantic models validate untrusted persisted policy fields only at the Activity boundary. Native retryable outcomes cross into Durable as a private sanitized exception; terminal outcomes remain return values. | `PolicyActivityInputModel`, `invoke_policy_handler()`, `decide_retry()`, `validate_activity_result()` |
+| `azure_functions_agents/workflows/native_retry.py` | Isolates the Durable Python 2.x integration seam: maps the persisted JSON policy to `RetryPolicy` and round-trips only the runtime's versioned sanitized retry failure through final `TaskFailedError`. | `create_durable_retry_policy()`, `decode_durable_retry_failure()` |
+| `azure_functions_agents/workflows/context.py` | Tracks management identity by `(workflow_agent_slug, session_id)`, derives non-revealing 128-bit agent/session prefixes for Durable instance IDs, and exposes immutable Activity delivery context with a stable idempotency key. `attempt` is available for legacy histories and `None` when Durable owns retry. | `session_instance_prefix()`, `new_workflow_instance_id()`, `workflow_matches_agent_session()`, `current_workflow_task_context()` |
 | `azure_functions_agents/workflows/registry.py` | Defines immutable workflow handler entries/catalogs, including decorator-declared timeout/retry metadata; production app composition passes this complete catalog explicitly rather than using the compatibility singleton allowlist as authorization. | `WorkflowHandlerCatalog`, `build_handler_catalog()` |
 | `azure_functions_agents/workflows/schema.py`, `workflows/tools.py` | Define workflow plans/policies — including data-driven control flow and bounded execution policy — and build agent-scoped management tools. Submission validates the plan, resolves decorator-authoritative policy, precomputes deterministic delays, and persists the effective policy. List/status/cancel/terminate operations use the captured workflow-agent policy and agent/session identity. | `WorkflowPlanPolicy`, `WorkflowTaskExecution`, `WorkflowRetryPolicy`, `validate_plan()`, `evaluate_condition()`, `build_workflow_tools()` |
 | `azure_functions_agents/_function_tool.py` | Thin local shim around MAF `FunctionTool` creation so project tools can use `@tool`, plus `@workflow_tool` Activity-target metadata with optional authoritative timeout/retry declarations. | `tool()`, `workflow_tool()` |
@@ -224,24 +225,28 @@ At submission, task execution policy is resolved and frozen. For workflow
 tools, decorator timeout and retry declarations are authoritative independently
 and DAG values fill only omitted fields; a retry object is selected whole
 rather than nested-merged. Sub Agent policy is bounded by the specialist's
-resolved timeout. Decimal backoff delays are precomputed as integer
-milliseconds, so the orchestrator only indexes persisted values and creates
-replay-safe Durable timers.
+resolved timeout. New submissions persist a JSON-safe Durable retry policy plus
+the legacy integer-delay sequence. The native marker selects direct
+`call_activity_with_retry`; its absence selects the old explicit Activity/timer
+driver so already-started orchestration histories replay the same calls.
 
 Every actual policy-aware Activity delivery creates an immutable
 `WorkflowTaskContext`. Its idempotency key is derived from the Durable workflow
 id and materialized node id and remains stable across retries and duplicate
-delivery; the one-based attempt is separate. Activities reauthorize against
-the deployed catalogs on every attempt, enforce their own deadline, normalize
-success/failure into a strict sanitized outcome, and emit one start/completion
-telemetry pair. The orchestrator decides retry/continuation from that outcome.
+delivery. New native deliveries expose `attempt=None` because Durable Python
+2.x does not provide the delivery number; legacy deliveries retain their
+one-based attempt. Activities reauthorize against the deployed catalogs on
+every delivery, enforce their own deadline, normalize success/failure into a
+strict sanitized outcome, and emit one start/completion telemetry pair.
+Retryable native outcomes become a private versioned exception for Durable;
+terminal outcomes remain values so they are not retried. After native
+exhaustion, the orchestrator strictly decodes that private payload and then
+owns continuation or fail-fast behavior.
 The Activity boundary uses strict Pydantic validation for the persisted
 execution fields and cross-field identity invariants. Pydantic models do not
-enter the orchestrator: the shared retry module returns the same JSON-safe
-TypedDict contract, and the top-level generator retains all Durable calls,
-timer identity, cancellation, and `yield` points. Activity telemetry and the
-orchestrator call one pure retry-decision helper so advisory and authoritative
-decisions cannot drift.
+enter the orchestrator: replay-sensitive state remains plain JSON/TypedDict
+values, and the top-level generator retains all Durable calls, timer identity,
+cancellation, and `yield` points.
 Timed-out sync handlers run in worker threads and may outlive the wrapper;
 Durable cancellation and termination cannot recall already-dispatched work.
 
@@ -257,8 +262,9 @@ The orchestrator serves compatibility and policy-aware plan shapes from one
 Durable blueprint. A static plan with no dynamic fields or execution policy
 keeps wave-based scheduling and legacy string `custom_status`. A dynamic but
 policy-free plan uses the structured scheduler and status version 2. Any plan
-with effective task execution policy uses the structured policy-aware scheduler
-and status version 3. Structured execution layers four deterministic stages
+with effective task execution policy uses the structured policy-aware scheduler.
+Legacy histories publish status version 3; new native-retry histories publish
+version 4. Structured execution layers four deterministic stages
 over the same DAG:
 
 - **materialize** — resolve each `for_each` value to a JSON array and create
@@ -279,9 +285,12 @@ over the same DAG:
 
 Policy-free dynamic progress is published as a structured `schema_version: 2`
 `custom_status` snapshot (logical node states plus per-instance state).
-Policy-aware progress uses version 3, whose executable-unit buckets include
-`retry_wait` and `failed_continued` and whose bounded attempt/failure fields
-never expose inputs, results, messages, session identity, or idempotency keys.
+Legacy policy-aware progress uses version 3, whose executable-unit buckets
+include `retry_wait` and `failed_continued`. Native progress uses version 4 with
+`retry_driver: "durable"`; Durable backoff remains `running`, and unavailable
+attempt, retry-wait, next-retry, and intermediate-failure fields are omitted.
+Neither version exposes inputs, results, messages, session identity, or
+idempotency keys.
 The four controlled
 control-flow failures (`workflow_condition_invalid`,
 `workflow_reference_unresolved`, `workflow_iteration_not_array`,

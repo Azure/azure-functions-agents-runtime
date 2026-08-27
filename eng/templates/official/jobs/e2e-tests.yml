@@ -36,6 +36,19 @@ jobs:
       - bash: |
           python -m pip install --upgrade pip
           python -m pip install -U -e .[dev]
+          shared_packages="$(pwd)/.e2e-python-packages/lib/site-packages"
+          python -m pip install --target="$shared_packages" -e .
+          for app in \
+            tests/endtoend/apps/workflows \
+            tests/endtoend/apps/workflow-retry-policy \
+            samples/per-agent-workflows/src \
+            samples/workflow-incident-triage/src \
+            samples/workflow-queue-p0-report/src \
+            samples/workflow-retry-policy/src \
+            samples/workflow-subagents-preview/src; do
+            mkdir -p "$app/.python_packages/lib"
+            ln -s "$shared_packages" "$app/.python_packages/lib/site-packages"
+          done
         displayName: 'Install dependencies for $(PYTHON_VERSION)'
 
       - template: /eng/templates/install-core-tools.yml@self

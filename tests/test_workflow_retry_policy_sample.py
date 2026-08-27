@@ -153,25 +153,22 @@ def test_order_recovery_story_uses_internal_blob_state(
 
     order = order_tools.load_order({"order_id": "ORD-1001"})
     reservation = None
-    for attempt in (1, 2, 3):
+    for delivery in (1, 2, 3):
         context = WorkflowTaskContext(
             workflow_id="workflow-123",
             task_id="reserve_inventory",
             node_instance_id="reserve_inventory",
-            attempt=attempt,
+            attempt=None,
             max_attempts=3,
             idempotency_key="reservation-key",
             deadline=datetime(2026, 8, 26, tzinfo=UTC),
         )
         token = _set_workflow_task_context(context)
         try:
-            if attempt < 3:
+            if delivery < 3:
                 with pytest.raises(WorkflowRetryableError) as exc_info:
                     order_tools.reserve_inventory({"order": order})
                 assert exc_info.value.error_code == "inventory_temporarily_unavailable"
-                if attempt == 1:
-                    with pytest.raises(WorkflowRetryableError):
-                        order_tools.reserve_inventory({"order": order})
             else:
                 reservation = order_tools.reserve_inventory({"order": order})
         finally:
@@ -189,7 +186,7 @@ def test_order_recovery_story_uses_internal_blob_state(
     assert state == {
         "order_id": "ORD-1001",
         "failures_remaining": 0,
-        "failed_attempts": [1, 2],
+        "transient_failures_observed": 2,
         "status": "recovered",
     }
 

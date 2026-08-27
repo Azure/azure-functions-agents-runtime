@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any, get_type_hints
 
 import azure.functions as func
+from azure.durable_functions import DurableFunctionsClient
 
 from azure_functions_agents._session_id import SESSION_ID_PATTERN
 from azure_functions_agents.config.schema import (
@@ -782,7 +783,7 @@ def test_register_builtin_endpoints_with_workflows_has_client_parameter(
     chat_params = inspect.signature(chat_handler).parameters
     assert "client" in chat_params, "Chat handler should have 'client' parameter when workflows enabled"
     assert chat_params["client"].default is inspect.Parameter.empty
-    assert get_type_hints(chat_handler)["client"] is str
+    assert get_type_hints(chat_handler)["client"] is DurableFunctionsClient
     assert "durable_client_input" in chat_route, "Chat handler should have durable_client_input decorator"
     assert chat_route["durable_client_input"] == "client", "Durable client input should be named 'client'"
 
@@ -792,7 +793,7 @@ def test_register_builtin_endpoints_with_workflows_has_client_parameter(
     stream_params = inspect.signature(stream_handler).parameters
     assert "client" in stream_params, "Stream handler should have 'client' parameter when workflows enabled"
     assert stream_params["client"].default is inspect.Parameter.empty
-    assert get_type_hints(stream_handler)["client"] is str
+    assert get_type_hints(stream_handler)["client"] is DurableFunctionsClient
     assert "durable_client_input" in stream_route, "Stream handler should have durable_client_input decorator"
     assert stream_route["durable_client_input"] == "client", "Durable client input should be named 'client'"
 
@@ -850,7 +851,7 @@ def test_register_builtin_endpoints_mcp_with_workflows_has_client_parameter(
     mcp_params = inspect.signature(mcp_handler).parameters
     assert "client" in mcp_params, "MCP handler should have 'client' parameter when workflows enabled"
     assert mcp_params["client"].default is inspect.Parameter.empty
-    assert get_type_hints(mcp_handler)["client"] is str
+    assert get_type_hints(mcp_handler)["client"] is DurableFunctionsClient
     assert "durable_client_input" in mcp_routes[0], "MCP handler should have durable_client_input decorator"
     assert mcp_routes[0]["durable_client_input"] == "client", "Durable client input should be named 'client'"
 
