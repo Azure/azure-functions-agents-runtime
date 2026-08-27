@@ -32,7 +32,7 @@ from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
-from agent_framework import MCPStreamableHTTPTool, tool
+from agent_framework import MCPStreamableHTTPTool, SkillsProvider, tool
 
 import azure_functions_agents._observability as obs
 import azure_functions_agents.runner as runner
@@ -516,8 +516,12 @@ def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and
     assert billing_options["agent_instructions"] == "handle billing precisely"
     assert {item.name for item in coordinator_options["tools"]} == {"coordinator_only_tool"}
     assert {item.name for item in billing_options["tools"]} == {"billing_only_tool"}
-    assert coordinator_options["skills_paths"] == [coordinator_skill_path]
-    assert billing_options["skills_paths"] == [billing_skill_path]
+    coordinator_skills = coordinator_options["skills_provider"]
+    billing_skills = billing_options["skills_provider"]
+    assert isinstance(coordinator_skills, SkillsProvider)
+    assert isinstance(billing_skills, SkillsProvider)
+    assert coordinator_skills._source._skill_paths == [str(coordinator_skill_path)]
+    assert billing_skills._source._skill_paths == [str(billing_skill_path)]
 
 
 @pytest.mark.asyncio
