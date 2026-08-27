@@ -985,8 +985,8 @@ agent-wide throttle.
 - An Azure Storage connection string in `AzureWebJobsStorage` (already
   required for non-HTTP triggers; Azurite works locally). DTS is an
   optional Durable backend when configured in `host.json`.
-- The preview extension bundle
-  (`Microsoft.Azure.Functions.ExtensionBundle.Preview`, `[4.*, 5.0.0)`) in
+- The stable extension bundle
+  (`Microsoft.Azure.Functions.ExtensionBundle`, `[4.37.1, 5.0.0)`) in
   `host.json`.
 
 ## v1 scope and v2 backlog
