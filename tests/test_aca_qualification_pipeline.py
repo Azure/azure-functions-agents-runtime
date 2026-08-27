@@ -395,6 +395,20 @@ class TestPipelineEnvironmentContract:
         ).read_text(encoding="utf-8")
         assert "region: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION" in source
 
+    def test_deploy_configures_the_region_app_setting(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (
+            root
+            / "eng"
+            / "templates"
+            / "official"
+            / "jobs"
+            / "aca-deploy-cold.yml"
+        ).read_text(encoding="utf-8")
+        assert source.count(
+            'AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION="$(ACA_SANDBOX_REGION)"'
+        ) == 1
+
     def test_current_checkout_smoke_wires_region_for_run_and_cleanup(self) -> None:
         root = Path(__file__).resolve().parents[1]
         source = (

@@ -180,12 +180,13 @@ the only addition, because this pipeline drives two apps rather than one.
 that must not sit in a public repository — site names, URLs, a resource group,
 an app-registration client ID — but are not credentials.
 
-The two standing fixture Function Apps must also carry
-`AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID` and
-`AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION` app settings. The region setting
-names the shared Sandbox Group location; it does not need to match either
-Function App location. Pipeline variables supply the same value to qualification
-and cleanup jobs but do not mutate the fixture apps' settings.
+The two standing fixture Function Apps must carry
+`AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID`. Each deploy leg writes
+`AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION` from `ACA_SANDBOX_REGION` before
+uploading the package, so a newly required schema field cannot leave the worker
+unindexable. That region names the shared Sandbox Group location; it does not
+need to match either Function App location. Qualification and cleanup jobs
+receive the same value.
 
 A variable group is deliberately **not** used. A `- group:` reference that does
 not resolve fails pipeline *compilation*, so a missing or renamed group would

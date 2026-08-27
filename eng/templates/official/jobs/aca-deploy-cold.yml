@@ -78,6 +78,22 @@ jobs:
         env:
           AZURE_TOKEN_CREDENTIALS: 'dev'
 
+      - task: AzureCLI@2
+        displayName: 'Configure Sandbox Group region'
+        inputs:
+          azureSubscription: ${{ parameters.acaServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            az functionapp config appsettings set \
+              --name "${{ parameters.appSiteName }}" \
+              --resource-group "$(ACA_DEPLOYED_RESOURCE_GROUP)" \
+              --settings AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION="$(ACA_SANDBOX_REGION)" \
+              --output none
+        env:
+          AZURE_TOKEN_CREDENTIALS: 'dev'
+
       - bash: |
           set -euo pipefail
           # The version is read from the checkout that produced the wheel, so the
