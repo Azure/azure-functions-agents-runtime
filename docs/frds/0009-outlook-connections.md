@@ -4,7 +4,7 @@ title: Outlook connections in the Capabilities tab
 status: Finalized
 author: swapnil
 created: 2026-08-27
-updated: 2026-08-27
+updated: 2026-08-28
 issues: []
 pull_requests: []
 branch: swapnil/outlook-connections
@@ -70,9 +70,10 @@ This is a portal control-plane feature. It does not change the runtime's discove
 - The only supported surface is the `What it can use` tab at `/agents/:subscriptionId/:app/:name?tab=capabilities`. Connections are app-shared but managed in the context of the selected Hosted Skill.
 - Remove the legacy `/apps/:subscriptionId/:app` and `/apps/:subscriptionId/:app/connections` routes and delete their page modules. Remove the unused legacy agent-detail module and the generic `AddCapability` module once the focused tab component replaces it.
 - The tab shows a Connections table first, followed by the existing MCP, Python tool, knowledge, and app-function tables. It shows connection name, source, resource group/gateway, allowed operation, truthful status, and actions.
-- The table empty state explains that connections let Hosted Skills call external services and offers `Add connection`.
-- `Add connection` opens a focused wizard:
-  1. Source: customer chooses `Create new` or `Use existing` for Office 365 Outlook.
+- The table empty state explains that connections let Hosted Skills call external services and offers `Add MCP server or tool`.
+- `Add MCP server or tool` opens a catalog with `Add Outlook MCP server` and a disabled `Add tool` option marked Coming soon.
+- `Add Outlook MCP server` opens the focused Outlook wizard:
+  1. Source: customer chooses `Create new` or `Use existing` for Office 365 Outlook. The existing path uses a searchable subscription picker.
   2. Details: create mode accepts a display name; existing mode lists eligible connections with gateway, resource group, authentication status, and signed-in account.
   3. Configure: create mode provisions the full resource set; existing mode validates the selected ARM ID and connector type, then adds the two app access policies and an app-specific MCP configuration without updating the selected gateway or connection.
   4. Authorize: portal opens the Connector Namespace gateway at `connectors.azure.com` in a new browser tab. The customer opens the Outlook connection, chooses `Authorize`, and completes Microsoft sign-in. The Hosted Skills portal never renders or proxies credential entry.
@@ -222,6 +223,8 @@ The portal API is new and internal to the Hosted Skills portal. Responses use a 
 | 30 | Existing connector subscription scope | Function App subscription only / independent visible-subscription picker | Let the customer select any subscription visible through the current ARM sign-in; persist the exact selected connection ARM ID for recovery | Human | 2026-08-27 |
 | 31 | Capabilities tab availability | Disable Add after one connection / connector-type-aware catalog | Keep Add connection enabled regardless of existing rows; prevent only duplicate Outlook configuration while other connector types can be added later. Mark Python tools and Skills as Coming soon and remove App Functions from this tab. | Human | 2026-08-27 |
 | 32 | Existing connection wizard navigation | Select path then Continue / open the picker immediately | Selecting Use existing advances directly to the subscription and connection picker without an extra Continue click | Human | 2026-08-27 |
+| 33 | Capability add entry point | Outlook-specific Add connection / MCP server and tool catalog | Label the action Add MCP server or tool; offer Outlook MCP server now and show Add tool as Coming soon; search connector subscriptions in the existing Outlook path | Human | 2026-08-28 |
+| 34 | New Skill connection setup | Configure after deployment / optional live setup before review | Add Tools & connections as optional Step 4 after Deployment target. Existing targets reuse the live Outlook panel immediately; new targets prepare Azure infrastructure and identity first, then reuse the same panel before source deployment. Skip performs no early preparation | Human | 2026-08-28 |
 
 ## 6. Test plan
 
@@ -241,6 +244,8 @@ The portal API is new and internal to the Hosted Skills portal. Responses use a 
 - [x] Server app-setting integration: setup atomically merges and verifies endpoint plus selected connection ID; removal clears/restores both settings.
 - [x] Frontend flow: independent subscription selector defaults to the app subscription, clears stale row selection on change, and permits selecting a candidate from another visible subscription.
 - [x] Frontend flow: selecting Use existing advances directly from Source to the subscription and connection picker without an intermediate Continue action.
+- [x] Frontend flow: Add MCP server or tool opens a responsive catalog, Add tool is disabled as Coming soon, and the existing Outlook path can filter subscriptions by name or ID.
+- [x] Frontend flow: New Skill includes optional Tools & connections before Review; Skip creates no early Azure resources, while Configure reuses the live Outlook create/existing flow on the selected target.
 - [x] Frontend flow: Add connection stays enabled with existing rows; the Outlook flow explains its per-type uniqueness instead of submitting a duplicate. Python tools and Skills show Coming soon; App Functions is absent.
 - [ ] Frontend flow: create/existing choice, loading/empty/error candidate states, candidate selection, configuration disclosure, and successful attachment.
 - [ ] Frontend route audit: no `/apps/` routes or links remain; legacy app detail, standalone Connections, legacy agent detail, and generic AddCapability modules are deleted.

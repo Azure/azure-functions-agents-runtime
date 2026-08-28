@@ -98,13 +98,29 @@ export interface ArmTokenClaims {
   expiresAt: number
 }
 
+function decodeJwtPart(part: string): Record<string, unknown> | null {
+  if (!part || !/^[A-Za-z0-9_-]+$/.test(part)) return null
+  try {
+    const normalized = part.replace(/-/g, '+').replace(/_/g, '/')
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')
+    const value = JSON.parse(atob(padded)) as unknown
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null
+  } catch {
+    return null
+  }
+}
+
 /** Decode (without verifying) the claims of a JWT ARM access token. */
 export function decodeArmToken(token: string): ArmTokenClaims | null {
   const parts = token.trim().split('.')
-  if (parts.length !== 3) return null
+  if (parts.length !== 3 || !parts.every((part) => /^[A-Za-z0-9_-]+$/.test(part))) return null
   try {
-    const json = atob(parts[1].replace(/-/g, '+').replace(/_/g, '/'))
-    const c = JSON.parse(json) as Record<string, unknown>
+    const header = decodeJwtPart(parts[0])
+    const c = decodeJwtPart(parts[1])
+    const algorithm = String(header?.alg ?? '').toLowerCase()
+    if (!header || !c || !algorithm || algorithm === 'none' || parts[2].length < 32) return null
     return {
       name: String(c.name ?? ''),
       username: String(c.upn ?? c.unique_name ?? c.preferred_username ?? ''),
@@ -124,7 +140,7 @@ export function validateArmToken(
 ): { ok: true; claims: ArmTokenClaims } | { ok: false; error: string } {
   const claims = decodeArmToken(token)
   if (!claims) {
-    return { ok: false, error: 'That doesn’t look like a token — paste the full JWT (three dot-separated parts).' }
+    return { ok: false, error: 'That token is incomplete or malformed. Run the command again and paste the full JWT without extra or missing characters.' }
   }
   const aud = claims.audience.toLowerCase()
   if (!aud.includes('management.azure.com') && !aud.includes('management.core.windows.net')) {

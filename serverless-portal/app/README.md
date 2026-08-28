@@ -42,12 +42,23 @@ subscriptions it scans.
 
 ### Outlook connections
 
+The **New Skill** flow is Model → Instructions → Deployment target → **Tools &
+connections (optional)** → Review and deploy. Authors can select **Skip for now**
+without preparing Azure resources. For an existing Function App, the optional
+step opens the same live Outlook flow used by **What it can use**. For a new
+target, **Prepare app & configure** creates the Function App infrastructure and
+managed identity first, then opens that same live flow before skill source is
+deployed. A per-draft preparation identifier prevents final deployment from
+adopting an unrelated existing app.
+
 Open a Hosted Skill and select **What it can use**. Its **Connections** table is
-the only connection-management surface. **Add connection** offers two paths:
+the only connection-management surface. **Add MCP server or tool** opens a
+catalog with **Add Outlook MCP server** and **Add tool** (Coming soon). The
+Outlook MCP server flow offers two paths:
 
 - **Create new** provisions one deterministic Connector Gateway and Office 365
   Outlook connection for the app.
-- **Use existing** has an independent subscription selector populated from the
+- **Use existing** has an independent searchable subscription selector populated from the
   subscriptions visible to the current ARM sign-in. It defaults to the Function
   App subscription, but an eligible Office 365 Outlook connection may be selected
   from another visible subscription. Selecting one leaves its gateway and
@@ -180,6 +191,8 @@ npm run build    # emits dist/, which the Node server serves at http://localhost
 | GET | `/api/connections/:connectionId/auth-link` | Return the validated Connector Namespace authorization link |
 | POST | `/api/connections/:connectionId/test` | Validate authentication, access policies, MCP state, and `SendEmailV2` restriction |
 | DELETE | `/api/connections/:connectionId` | Delete an app-owned connection or detach a shared connection, clear app settings, and stage focused source cleanup |
+| POST | `/api/prepare-app` | Prepare a new Function App and managed identity without deploying skill source |
+| GET | `/api/prepare-app/:jobId` | Poll New Skill app-preparation status before live connection setup |
 | GET | `/api/github/status` | Report GitHub OAuth configuration and the current user's encrypted session status |
 | POST | `/api/github/login-url` | Create a user-bound OAuth URL using the configured production callback or validated localhost callback |
 | POST | `/api/github/local-session` | On localhost only, seal the authenticated GitHub CLI identity into the current ARM user's session |

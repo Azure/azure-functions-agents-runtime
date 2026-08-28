@@ -206,6 +206,15 @@ export interface DeployResult {
   grantOutcome?: 'granted' | 'partial' | 'failed'
 }
 
+export interface PrepareAppResult {
+  status: 'running' | 'prepared' | 'error'
+  message: string
+  url?: string
+  portalUrl?: string
+  principalId?: string
+  grantOutcome?: 'granted' | 'partial' | 'failed'
+}
+
 export interface DeployStarted {
   jobId: string
   status: 'running'
@@ -384,6 +393,15 @@ export type DeployTarget =
       foundryModel: string
       foundryAccount?: { subscription: string; resourceGroup: string; account: string }
     }
+  | {
+      kind: 'prepared'
+      appName: string
+      resourceGroup: string
+      preparationId: string
+      foundryAccount?: { subscription: string; resourceGroup: string; account: string }
+    }
+
+export type PrepareAppTarget = Extract<DeployTarget, { kind: 'new' }> & { preparationId: string }
 
 // Error carrying the HTTP status so React Query's retry guard can skip 4xx.
 export class ApiError extends Error {
@@ -686,6 +704,11 @@ export const api = {
     agent: { fileName: string; content: string }
     target: DeployTarget
   }) => req<DeployStarted>('POST', '/api/deploy', p),
+
+  startPrepareApp: (p: { subscription: string; target: PrepareAppTarget }) =>
+    req<DeployStarted>('POST', '/api/prepare-app', p),
+  getPrepareAppStatus: (jobId: string) =>
+    req<PrepareAppResult>('GET', `/api/prepare-app/${enc(jobId)}`),
 
   // Start redeploying an existing app from its own current source with the
   // portal's saved edits overlaid (safe for multi-agent apps).

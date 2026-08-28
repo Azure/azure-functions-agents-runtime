@@ -156,6 +156,10 @@ tbody tr:hover { background: var(--surface-2); }
   color: var(--text); text-align: left; cursor: pointer; }
 .connection-choice span:nth-child(2), .permission-row span, .connection-ready div { display: flex; flex-direction: column; }
 .connection-choice small, .permission-row small, .connection-ready span { color: var(--text-muted); font-size: 12px; }
+.capability-add-options { display: grid; gap: 10px; }
+.capability-add-options .connection-choice { border-color: var(--border); background: var(--surface); }
+.capability-add-options .connection-choice:hover:not(:disabled) { border-color: var(--brand); background: var(--brand-soft); }
+.capability-add-options .connection-choice:disabled { cursor: not-allowed; opacity: .62; }
 .permission-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 11px; padding: 12px 0;
   margin-bottom: 12px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
@@ -319,6 +323,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--brand-soft)
 .code, .editor { background: var(--code-bg); color: var(--code-fg); border-radius: var(--radius); padding: 16px 18px;
   font-family: "Cascadia Code", "SF Mono", Consolas, monospace; font-size: 12.5px; line-height: 1.65; }
 textarea.editor { width: 100%; border: none; white-space: pre; overflow-wrap: normal; overflow-x: auto; min-height: 340px; }
+textarea.prompt-editor { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
 textarea.editor:focus { outline: 2px solid var(--brand); }
 
 .muted { color: var(--text-muted); }
@@ -559,6 +564,19 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
 .foundry-resource-field { margin: 8px 0; }
 .foundry-dependent-fields { display: grid; gap: 8px; }
 .foundry-dependent-fields .field { margin-bottom: 0; }
+.creation-capability-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.creation-capability-heading h3 { margin: 0 0 4px; }
+.creation-capability-heading p { margin: 0; }
+.prepare-app-panel, .prepared-target-summary { display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: 12px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.prepare-app-panel { grid-template-columns: auto minmax(0, 1fr); margin-bottom: 14px; }
+.prepare-app-panel > div, .prepared-target-summary > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.prepare-app-panel p { margin: 2px 0 0; color: var(--text-muted); font-size: 12.5px; line-height: 1.5; }
+.prepared-target-summary { margin-top: 16px; border-color: color-mix(in srgb, var(--green) 30%, var(--border)); background: var(--green-soft); }
+.prepared-target-summary span, .prepared-target-summary small { color: var(--text-muted); }
+.live-capability-target { margin: 0 0 12px; }
+.live-capability-step .connection-panel { padding-top: 16px; border-top: 1px solid var(--border); }
+.review-capability-selection { margin-bottom: 12px; }
 .generate-skill-card { position: relative; overflow: hidden; }
 .generate-skill-card.is-generating textarea { opacity: .65; }
 .generate-shimmer { height: 4px; margin: -16px -18px 14px; overflow: hidden; position: relative;
@@ -589,6 +607,8 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
   .review-grid > div:nth-child(3) { border-left: 0; }
   .review-grid > div:nth-child(n+3) { border-top: 1px solid var(--border); }
   .steps .step-sep { display: none; }
+  .prepared-target-summary { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+  .prepared-target-summary > .badge { grid-column: 2; justify-self: start; }
 }
 
 /* Hosted Skill detail */

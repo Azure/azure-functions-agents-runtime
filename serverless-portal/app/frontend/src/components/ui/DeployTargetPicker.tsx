@@ -39,6 +39,7 @@ interface DeployTargetPickerProps {
   radioGroup?: string
   modelHint?: string
   lockAppName?: boolean
+  disabled?: boolean
 }
 
 export const DeployTargetPicker = ({
@@ -53,6 +54,7 @@ export const DeployTargetPicker = ({
   radioGroup = 'deploy-target',
   modelHint,
   lockAppName = false,
+  disabled = false,
 }: DeployTargetPickerProps) => {
   const { mode, existingApp, newApp } = value
   return (
@@ -62,6 +64,7 @@ export const DeployTargetPicker = ({
           type="radio"
           name={radioGroup}
           checked={mode === 'existing'}
+          disabled={disabled}
           onChange={() => onChange({ mode: 'existing' })}
         />{' '}
         Add to an existing Hosted Skills app
@@ -74,6 +77,7 @@ export const DeployTargetPicker = ({
             options={apps.map((a) => ({ value: a.name, label: a.name, sublabel: a.resourceGroup }))}
             placeholder={appsLoading ? 'Loading apps…' : apps.length ? 'Select a Function App…' : 'No Hosted Skills apps in this subscription'}
             loading={appsLoading}
+            disabled={disabled}
             ariaLabel="Existing Function App"
           />
           <div className="hint">One Function App can host many agents.</div>
@@ -85,6 +89,7 @@ export const DeployTargetPicker = ({
           type="radio"
           name={radioGroup}
           checked={mode === 'new'}
+          disabled={disabled}
           onChange={() => onChange({ mode: 'new' })}
         />{' '}
         Create a new Hosted Skills app (Function App, Flex Consumption)
@@ -98,7 +103,7 @@ export const DeployTargetPicker = ({
                 type="text"
                 value={newApp.appName}
                 placeholder="func-my-agents"
-                disabled={lockAppName}
+                disabled={disabled || lockAppName}
                 onChange={(e) => onNewApp({ appName: e.target.value })}
               />
               <div className="hint">
@@ -115,6 +120,7 @@ export const DeployTargetPicker = ({
                 options={regions.map((r) => ({ value: r, label: r }))}
                 placeholder="Select a region…"
                 ariaLabel="Region"
+                disabled={disabled}
               />
             </div>
           </div>
@@ -126,6 +132,7 @@ export const DeployTargetPicker = ({
                   type="radio"
                   name={`${radioGroup}-rg`}
                   checked={newApp.rgMode === 'existing'}
+                  disabled={disabled}
                   onChange={() => onNewApp({ rgMode: 'existing' })}
                 />{' '}
                 Use existing
@@ -135,6 +142,7 @@ export const DeployTargetPicker = ({
                   type="radio"
                   name={`${radioGroup}-rg`}
                   checked={newApp.rgMode === 'new'}
+                  disabled={disabled}
                   onChange={() => onNewApp({ rgMode: 'new' })}
                 />{' '}
                 Create new
@@ -148,12 +156,14 @@ export const DeployTargetPicker = ({
                 placeholder={rgLoading ? 'Loading resource groups…' : resourceGroups.length ? 'Select a resource group…' : 'No resource groups found'}
                 loading={rgLoading}
                 ariaLabel="Resource group"
+                disabled={disabled}
               />
             ) : (
               <input
                 type="text"
                 value={newApp.resourceGroup}
                 placeholder="rg-my-agents"
+                disabled={disabled}
                 onChange={(e) => onNewApp({ resourceGroup: e.target.value })}
               />
             )}

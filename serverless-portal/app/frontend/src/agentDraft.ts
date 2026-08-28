@@ -34,6 +34,10 @@ export interface Draft {
   instructions: string
   generatedFor: string
   mdOverride: string | null
+  capabilitiesReviewed: boolean
+  outlookConfigured: boolean
+  preparationId: string
+  preparedTargetKey: string
   targetSubscription: string
   target: 'existing' | 'new'
   existingApp: string
@@ -74,6 +78,10 @@ export const DEFAULT_DRAFT: Draft = {
   instructions: 'You are a helpful assistant. Answer the user clearly and concisely.',
   generatedFor: '',
   mdOverride: null,
+  capabilitiesReviewed: false,
+  outlookConfigured: false,
+  preparationId: '',
+  preparedTargetKey: '',
   targetSubscription: '',
   target: 'new',
   existingApp: '',

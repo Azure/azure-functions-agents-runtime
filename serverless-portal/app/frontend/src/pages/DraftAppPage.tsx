@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button } from '@coreai/fluentui-react'
 import { api, type LiveAgent, type LiveAgentApp, type LiveDiscovery } from '../api'
+import { OutlookConnectionsPanel } from '../components/OutlookConnectionsPanel'
 import { useDeployJob, DeploymentStatus } from '../deploy'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
@@ -20,6 +21,31 @@ import {
   slugify,
 } from '../agentDraft'
 
+type PreparationState = 'idle' | 'running' | 'prepared' | 'error'
+
+function targetPreparationKey(draft: Draft, subscription: string): string {
+  return [
+    subscription,
+    draft.newApp.appName,
+    draft.newApp.resourceGroup,
+    draft.newApp.region,
+    draft.foundrySubscription,
+    draft.foundryAccount,
+    draft.foundryEndpoint,
+    draft.foundryModel,
+  ].join('|')
+}
+
+function hasOutlookServer(content?: string | null): boolean {
+  if (!content) return false
+  try {
+    const source = JSON.parse(content) as { servers?: Record<string, unknown> }
+    return Object.prototype.hasOwnProperty.call(source.servers ?? {}, 'office365-outlook')
+  } catch {
+    return false
+  }
+}
+
 export default function DraftAppPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -28,6 +54,10 @@ export default function DraftAppPage() {
   const [draft, setDraft] = useState<Draft>(loadDraft)
   const [nameStatus, setNameStatus] = useState<'idle' | 'checking' | 'available' | 'taken' | 'error'>('idle')
   const [nameMessage, setNameMessage] = useState('')
+  const [preparationState, setPreparationState] = useState<PreparationState>('idle')
+  const [preparationMessage, setPreparationMessage] = useState('')
+  const [preparationPortalUrl, setPreparationPortalUrl] = useState('')
+  const preparationAttempt = useRef(0)
   const cachedRef = useRef(false)
 
   useEffect(() => saveDraft(draft), [draft])
@@ -45,6 +75,8 @@ export default function DraftAppPage() {
   }, [])
 
   const targetSubscription = draft.targetSubscription || selected
+  const preparationKey = targetPreparationKey(draft, targetSubscription)
+  const appPrepared = draft.target === 'new' && draft.preparedTargetKey === preparationKey && !!draft.preparationId
   const snapshot = useMemo(() => readAgentsSnapshot(targetSubscription), [targetSubscription])
   const { data, isFetching: appsLoading } = useQuery({
     queryKey: queryKeys.liveAgents(targetSubscription),
@@ -65,36 +97,179 @@ export default function DraftAppPage() {
   })
   const resourceGroups = resourceGroupData?.resourceGroups ?? []
 
-  const updateTargetSubscription = (subscription: string) =>
+  const resetPreparation = () => {
+    preparationAttempt.current += 1
+    setPreparationState('idle')
+    setPreparationMessage('')
+    setPreparationPortalUrl('')
+  }
+
+  const updateTargetSubscription = (subscription: string) => {
+    resetPreparation()
     setDraft((current) => ({
       ...current,
       targetSubscription: subscription,
       existingApp: '',
       newApp: { ...current.newApp, resourceGroup: '' },
+      capabilitiesReviewed: false,
+      outlookConfigured: false,
+      preparationId: '',
+      preparedTargetKey: '',
     }))
+  }
+
+  const updateTarget = (patch: Partial<Pick<Draft, 'target' | 'existingApp'>>) => {
+    resetPreparation()
+    setDraft((current) => ({
+      ...current,
+      ...patch,
+      capabilitiesReviewed: false,
+      outlookConfigured: false,
+      preparationId: '',
+      preparedTargetKey: '',
+    }))
+  }
+
+  const updateNewTarget = (patch: Partial<Draft['newApp']>) => {
+    resetPreparation()
+    setDraft((current) => ({
+      ...current,
+      newApp: {
+        ...current.newApp,
+        ...patch,
+        ...(patch.appName !== undefined ? { appName: sanitizeAppName(patch.appName) } : {}),
+      },
+      capabilitiesReviewed: false,
+      outlookConfigured: false,
+      preparationId: '',
+      preparedTargetKey: '',
+    }))
+  }
 
   const skillSlug = slugify(draft.name)
   const fileName = `${skillSlug}.agent.md`
   const content = draft.mdOverride ?? composeAgentMd(draft)
   const selectedExistingApp = apps.find((app) => app.name === draft.existingApp)
   const targetName = draft.target === 'existing' ? draft.existingApp : draft.newApp.appName
+  const targetResourceGroup = draft.target === 'existing'
+    ? selectedExistingApp?.resourceGroup ?? ''
+    : draft.newApp.resourceGroup
 
   const deployJob = useDeployJob()
   const targetValid =
     draft.target === 'existing'
-      ? !!draft.existingApp
+      ? !!draft.existingApp && !!selectedExistingApp?.resourceGroup
       : !!draft.newApp.appName && !!draft.newApp.resourceGroup && !!draft.newApp.region
   const foundryValid = !!draft.foundryModel && (draft.target === 'existing' || !!draft.foundryEndpoint)
-  const canReview = !!draft.name.trim() && targetValid && foundryValid && !!targetSubscription
+  const canReview = !!draft.name.trim() && targetValid && foundryValid && !!targetSubscription && draft.capabilitiesReviewed
   const canDeploy = canReview && deployJob.phase !== 'running'
-  const step: 3 | 4 = searchParams.get('step') === '4' && canReview ? 4 : 3
+  const requestedStep = searchParams.get('step')
+  const step: 3 | 4 | 5 = requestedStep === '5' && canReview
+    ? 5
+    : requestedStep === '4' && targetValid ? 4 : 3
+
+  const capabilityTargetLive = draft.target === 'existing' ? targetValid : appPrepared
+  const { data: mcpSource } = useQuery({
+    queryKey: ['source', targetSubscription, targetName, 'mcp.json'],
+    queryFn: () => api.getSource({
+      subscription: targetSubscription,
+      app: targetName,
+      resourceGroup: targetResourceGroup,
+      path: 'mcp.json',
+    }),
+    enabled: step === 4 && capabilityTargetLive && !!targetName && !!targetResourceGroup,
+    staleTime: Infinity,
+    refetchOnMount: false,
+  })
 
   const navigateToStep = (nextStep: number) => {
     if (nextStep === 1) navigate('/create-agent?step=1')
     else if (nextStep === 2) navigate('/create-agent?step=2')
     else if (nextStep === 3) setSearchParams({})
-    else if (nextStep === 4 && canReview) setSearchParams({ step: '4' })
+    else if (nextStep === 4 && targetValid) setSearchParams({ step: '4' })
+    else if (nextStep === 5 && canReview) setSearchParams({ step: '5' })
   }
+
+  useEffect(() => () => {
+    preparationAttempt.current += 1
+  }, [])
+
+  useEffect(() => {
+    if (!appPrepared) return
+    setPreparationState('prepared')
+    setPreparationMessage(`Function App "${draft.newApp.appName}" is ready for live setup.`)
+  }, [appPrepared, draft.newApp.appName])
+
+  const foundryAccountTarget = draft.foundryAccount
+    ? {
+        subscription: draft.foundrySubscription || selected,
+        resourceGroup: draft.foundryResourceGroup,
+        account: draft.foundryAccount,
+      }
+    : undefined
+
+  const startAppPreparation = async () => {
+    if (draft.target !== 'new' || !targetValid || preparationState === 'running') return
+    const attempt = preparationAttempt.current + 1
+    preparationAttempt.current = attempt
+    const preparationId = draft.preparationId || crypto.randomUUID()
+    setDraft((current) => ({ ...current, preparationId, capabilitiesReviewed: false }))
+    setPreparationState('running')
+    setPreparationMessage('Starting app preparation…')
+    setPreparationPortalUrl('')
+    try {
+      const started = await api.startPrepareApp({
+        subscription: targetSubscription,
+        target: {
+          kind: 'new',
+          appName: sanitizeAppName(draft.newApp.appName).replace(/-+$/g, ''),
+          resourceGroup: draft.newApp.resourceGroup,
+          region: draft.newApp.region,
+          foundryEndpoint: draft.foundryEndpoint,
+          foundryModel: draft.foundryModel,
+          preparationId,
+          ...(foundryAccountTarget ? { foundryAccount: foundryAccountTarget } : {}),
+        },
+      })
+      setPreparationPortalUrl(started.portalUrl ?? '')
+      const deadline = Date.now() + 15 * 60 * 1000
+      while (Date.now() < deadline && preparationAttempt.current === attempt) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2_000))
+        const state = await api.getPrepareAppStatus(started.jobId)
+        setPreparationMessage(state.message)
+        if (state.portalUrl) setPreparationPortalUrl(state.portalUrl)
+        if (state.status === 'prepared') {
+          setDraft((current) => ({
+            ...current,
+            preparationId,
+            preparedTargetKey: preparationKey,
+            capabilitiesReviewed: false,
+          }))
+          setPreparationState('prepared')
+          return
+        }
+        if (state.status === 'error') throw new Error(state.message)
+      }
+      if (preparationAttempt.current === attempt) throw new Error('App preparation timed out. Check the Azure portal.')
+    } catch (error) {
+      if (preparationAttempt.current !== attempt) return
+      setPreparationState('error')
+      setPreparationMessage((error as Error).message)
+    }
+  }
+
+  const completeCapabilities = () => {
+    const updated = { ...draft, capabilitiesReviewed: true }
+    setDraft(updated)
+    saveDraft(updated)
+    setSearchParams({ step: '5' })
+  }
+
+  const handleConnectionStateChange = useCallback((configured: boolean) => {
+    setDraft((current) => current.outlookConfigured === configured
+      ? current
+      : { ...current, outlookConfigured: configured })
+  }, [])
 
   const runDeploy = () => {
     const target =
@@ -104,22 +279,20 @@ export default function DraftAppPage() {
             app: draft.existingApp,
             resourceGroup: selectedExistingApp?.resourceGroup ?? '',
           }
-        : {
+        : appPrepared ? {
+            kind: 'prepared' as const,
+            appName: sanitizeAppName(draft.newApp.appName).replace(/-+$/g, ''),
+            resourceGroup: draft.newApp.resourceGroup,
+            preparationId: draft.preparationId,
+            ...(foundryAccountTarget ? { foundryAccount: foundryAccountTarget } : {}),
+          } : {
             kind: 'new' as const,
             appName: sanitizeAppName(draft.newApp.appName).replace(/-+$/g, ''),
             resourceGroup: draft.newApp.resourceGroup,
             region: draft.newApp.region,
             foundryEndpoint: draft.foundryEndpoint,
             foundryModel: draft.foundryModel,
-            ...(draft.foundryAccount
-              ? {
-                  foundryAccount: {
-                    subscription: draft.foundrySubscription || selected,
-                    resourceGroup: draft.foundryResourceGroup,
-                    account: draft.foundryAccount,
-                  },
-                }
-              : {}),
+            ...(foundryAccountTarget ? { foundryAccount: foundryAccountTarget } : {}),
           }
     deployJob.deploy({ subscription: targetSubscription, agent: { fileName, content }, target })
   }
@@ -213,9 +386,10 @@ export default function DraftAppPage() {
         </div>
         <CreationSteps
           current={step}
-          completed={[true, true, canReview, deployJob.phase === 'deployed']}
-          available={[true, true, true, canReview]}
+          completed={[true, true, targetValid, draft.capabilitiesReviewed, deployJob.phase === 'deployed']}
+          available={[true, true, true, targetValid, canReview]}
           onNavigate={navigateToStep}
+          disabled={preparationState === 'running'}
         />
 
       {step === 3 && (
@@ -224,60 +398,119 @@ export default function DraftAppPage() {
           <p className="muted" style={{ marginTop: 0 }}>
             Add this skill to an existing Function App or create a new Azure Functions Flex Consumption app.
           </p>
-          <div className="field">
-            <label>Subscription</label>
-            <SearchableSelect
-              value={targetSubscription}
-              onChange={updateTargetSubscription}
-              options={subscriptions.map((subscription) => ({ value: subscription.id, label: subscription.name }))}
-              placeholder="Select a subscription…"
-              ariaLabel="Subscription"
-            />
-          </div>
-          <DeployTargetPicker
-            value={{ mode: draft.target, existingApp: draft.existingApp, newApp: draft.newApp }}
-            onChange={(patch) =>
-              setDraft((current) => ({
-                ...current,
-                ...(patch.mode !== undefined ? { target: patch.mode } : {}),
-                ...(patch.existingApp !== undefined ? { existingApp: patch.existingApp } : {}),
-              }))
-            }
-            onNewApp={(patch) =>
-              setDraft((current) => ({
-                ...current,
-                newApp: {
-                  ...current.newApp,
-                  ...patch,
-                  ...(patch.appName !== undefined ? { appName: sanitizeAppName(patch.appName) } : {}),
-                },
-              }))
-            }
-            apps={apps}
-            appsLoading={appsLoading}
-            resourceGroups={resourceGroups}
-            rgLoading={resourceGroupsLoading}
-            regions={FLEX_REGIONS}
-            modelHint={draft.foundryModel}
-          />
-          {draft.target === 'new' && (
-            <div className="toolbar" style={{ marginTop: 12 }}>
-              <Button size="small" onClick={() => void checkName()} disabled={!draft.newApp.appName.trim() || nameStatus === 'checking'}>
-                {nameStatus === 'checking' ? 'Checking…' : 'Check name availability'}
-              </Button>
-              {nameStatus === 'available' && <span className="badge green"><span className="dot" /> Available</span>}
-              {nameStatus === 'taken' && <span className="muted" style={{ color: 'var(--red)', fontSize: 12 }}>{nameMessage}</span>}
-              {nameStatus === 'error' && <span className="muted" style={{ fontSize: 12 }}>{nameMessage || "Couldn't check right now"}</span>}
+          {appPrepared ? (
+            <div className="prepared-target-summary">
+              <span className="connection-service-icon"><Icon name="check" size={20} /></span>
+              <div>
+                <strong>{draft.newApp.appName}</strong>
+                <span>{draft.newApp.resourceGroup} · {draft.newApp.region}</span>
+                <small>Azure resources and managed identity are prepared. This target is locked to protect its live connections.</small>
+              </div>
+              <span className="badge green">Prepared</span>
             </div>
+          ) : (
+            <>
+              <div className="field">
+                <label>Subscription</label>
+                <SearchableSelect
+                  value={targetSubscription}
+                  onChange={updateTargetSubscription}
+                  options={subscriptions.map((subscription) => ({ value: subscription.id, label: subscription.name }))}
+                  placeholder="Select a subscription…"
+                  ariaLabel="Subscription"
+                  disabled={preparationState === 'running'}
+                />
+              </div>
+              <DeployTargetPicker
+                value={{ mode: draft.target, existingApp: draft.existingApp, newApp: draft.newApp }}
+                onChange={(patch) => updateTarget({
+                  ...(patch.mode !== undefined ? { target: patch.mode } : {}),
+                  ...(patch.existingApp !== undefined ? { existingApp: patch.existingApp } : {}),
+                })}
+                onNewApp={updateNewTarget}
+                apps={apps}
+                appsLoading={appsLoading}
+                resourceGroups={resourceGroups}
+                rgLoading={resourceGroupsLoading}
+                regions={FLEX_REGIONS}
+                modelHint={draft.foundryModel}
+                disabled={preparationState === 'running'}
+              />
+              {draft.target === 'new' && (
+                <div className="toolbar" style={{ marginTop: 12 }}>
+                  <Button size="small" onClick={() => void checkName()} disabled={!draft.newApp.appName.trim() || nameStatus === 'checking' || preparationState === 'running'}>
+                    {nameStatus === 'checking' ? 'Checking…' : 'Check name availability'}
+                  </Button>
+                  {nameStatus === 'available' && <span className="badge green"><span className="dot" /> Available</span>}
+                  {nameStatus === 'taken' && <span className="muted" style={{ color: 'var(--red)', fontSize: 12 }}>{nameMessage}</span>}
+                  {nameStatus === 'error' && <span className="muted" style={{ fontSize: 12 }}>{nameMessage || "Couldn't check right now"}</span>}
+                </div>
+              )}
+            </>
           )}
           <div className="create-flow-actions">
             <Button onClick={() => navigateToStep(2)}>← Back</Button>
-            <Button appearance="primary" disabled={!canReview} onClick={() => navigateToStep(4)}>Review and deploy →</Button>
+            <Button appearance="primary" disabled={!targetValid || !foundryValid} onClick={() => navigateToStep(4)}>Continue to tools &amp; connections →</Button>
           </div>
         </div>
       )}
 
       {step === 4 && (
+        <div className="create-flow-card live-capability-step">
+          <div className="creation-capability-heading">
+            <div>
+              <h3>Configure tools and connections</h3>
+              <p className="muted">This step is optional. Configure Outlook now, or skip it and continue to review.</p>
+            </div>
+            <span className="badge gray">Optional</span>
+          </div>
+
+          {draft.target === 'new' && !appPrepared ? (
+            <div className="prepare-app-panel">
+              <span className="connection-service-icon"><Icon name="server" size={20} /></span>
+              <div>
+                <strong>Prepare {draft.newApp.appName}</strong>
+                <p>Live connection setup needs the Function App's managed identity. Preparing creates the Azure infrastructure now; skill source is deployed only after final review.</p>
+              </div>
+            </div>
+          ) : (
+            <>
+              <p className="muted live-capability-target">Changes are applied to <span className="mono">{targetName}</span> immediately.</p>
+              <OutlookConnectionsPanel
+                subscription={targetSubscription}
+                resourceGroup={targetResourceGroup}
+                app={targetName}
+                mcpSourceState={mcpSource?.source ?? 'none'}
+                hasOutlookMcp={hasOutlookServer(mcpSource?.content)}
+                onConnectionStateChange={handleConnectionStateChange}
+              />
+            </>
+          )}
+
+          {preparationMessage && (
+            <div className={`note ${preparationState === 'error' ? 'warn' : preparationState === 'prepared' ? 'ok' : ''}`} role="status">
+              {preparationState === 'running' && <span className="gh-spin" />} {preparationMessage}{' '}
+              {preparationPortalUrl && <a href={preparationPortalUrl} target="_blank" rel="noreferrer">View in Azure ↗</a>}
+            </div>
+          )}
+
+          <div className="create-flow-actions">
+            <Button onClick={() => navigateToStep(3)} disabled={preparationState === 'running'}>← Back</Button>
+            <div className="toolbar">
+              <Button onClick={completeCapabilities} disabled={preparationState === 'running'}>Skip for now</Button>
+              {draft.target === 'new' && !appPrepared ? (
+                <Button appearance="primary" onClick={() => void startAppPreparation()} disabled={preparationState === 'running'}>
+                  {preparationState === 'running' ? 'Preparing app…' : preparationState === 'error' ? 'Retry preparation' : 'Prepare app & configure'}
+                </Button>
+              ) : draft.outlookConfigured ? (
+                <Button appearance="primary" onClick={completeCapabilities}>Continue to review →</Button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {step === 5 && (
         <div className="create-flow-card">
           <div className="review-grid">
             <div><span>Skill</span><strong>{draft.name}</strong></div>
@@ -289,13 +522,19 @@ export default function DraftAppPage() {
             <div className="card-head"><h3 style={{ margin: 0 }}>Skill instructions</h3><span className="badge green"><span className="dot" /> Ready</span></div>
             <pre>{draft.instructions}</pre>
           </div>
+          <div className="note review-capability-selection">
+            <strong>Tools &amp; connections</strong><br />
+            {draft.outlookConfigured
+              ? 'Outlook MCP server is configured on the target Function App.'
+              : 'Skipped. Tools and connections can be configured later.'}
+          </div>
           <div className="note ok review-validation">
             <strong>Ready to deploy</strong><br />The model, skill instructions, and Function App target are configured.
           </div>
           <div className="create-flow-actions">
-            <Button onClick={() => navigateToStep(3)} disabled={deployJob.phase === 'running'}>← Back</Button>
+            <Button onClick={() => navigateToStep(4)} disabled={deployJob.phase === 'running'}>← Back</Button>
             <Button appearance="primary" disabled={!canDeploy} onClick={runDeploy} icon={<Icon name="rocket" size={14} />}>
-              {deployJob.phase === 'running' ? 'Deploying…' : draft.target === 'new' ? 'Create app and deploy' : 'Deploy skill'}
+              {deployJob.phase === 'running' ? 'Deploying…' : draft.target === 'new' && !appPrepared ? 'Create app and deploy' : 'Deploy skill'}
             </Button>
           </div>
           <DeploymentStatus

@@ -1,4 +1,4 @@
-const labels = ['Model', 'Instructions', 'Deployment target', 'Review and deploy']
+const labels = ['Model', 'Instructions', 'Deployment target', 'Tools & connections (optional)', 'Review and deploy']
 
 interface CreationStepsProps {
   current: number

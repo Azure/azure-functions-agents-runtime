@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { discoverFoundry, formatGeneratedAgentInstructions, resolveSubscriptionId } from '../src/azure.js'
 import { resolveConfiguredModelSettings } from '../src/custom-tools.js'
+import { storageAccountName } from '../src/provision.js'
 
 test('configured model follows runtime provider detection precedence', () => {
   assert.deepEqual(
@@ -38,5 +40,48 @@ test('configured model reports missing and incomplete configuration', () => {
   assert.throws(
     () => resolveConfiguredModelSettings({ AZURE_FUNCTIONS_AGENTS_PROVIDER: 'openai' }),
     /configuration is incomplete/,
+  )
+})
+
+test('generated instructions retain Markdown and format one-line prose as paragraphs', () => {
+  assert.equal(
+    formatGeneratedAgentInstructions('You are a reporter. Gather resources. Send a summary.'),
+    'You are a reporter.\n\nGather resources.\n\nSend a summary.',
+  )
+  assert.equal(
+    formatGeneratedAgentInstructions('## Role\r\n\r\n- Gather resources\r\n- Send a summary'),
+    '## Role\n\n- Gather resources\n- Send a summary',
+  )
+})
+
+test('prepared app storage naming is stable and Azure-safe', () => {
+  const first = storageAccountName('11111111-1111-1111-1111-111111111111', 'rg-report', 'func-report')
+  const retry = storageAccountName('11111111-1111-1111-1111-111111111111', 'rg-report', 'func-report')
+  const other = storageAccountName('11111111-1111-1111-1111-111111111111', 'rg-report', 'func-other')
+
+  assert.equal(first, retry)
+  assert.notEqual(first, other)
+  assert.match(first, /^[a-z0-9]{3,24}$/)
+})
+
+test('subscription GUID resolution does not require subscription enumeration', async () => {
+  const subscription = '11111111-1111-4111-8111-111111111111'
+
+  assert.equal(await resolveSubscriptionId('not-a-real-token', subscription), subscription)
+})
+
+test('Foundry discovery surfaces invalid ARM authentication as 401', async (t) => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ error: { code: 'InvalidAuthenticationToken', message: 'Access token validation failure.' } }),
+    { status: 401, headers: { 'Content-Type': 'application/json' } },
+  )
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  await assert.rejects(
+    discoverFoundry('malformed-token', '11111111-1111-4111-8111-111111111111'),
+    (error) => error.status === 401 && error.portalCode === 'invalid_arm_token',
   )
 })

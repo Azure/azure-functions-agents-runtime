@@ -154,6 +154,9 @@ export async function listSubscriptions(accessToken) {
 export async function resolveSubscriptionId(accessToken, ref) {
   const value = String(ref ?? '').trim()
   if (!value) throw new SubscriptionNotFoundError('No subscription specified.')
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    return value
+  }
   const subs = await listSubscriptions(accessToken)
   const byId = subs.find((s) => s.id.toLowerCase() === value.toLowerCase())
   if (byId) return byId.id
@@ -1762,6 +1765,25 @@ export async function discoverFoundry(accessToken, subscriptionId) {
     `/subscriptions/${subscriptionId}/providers/Microsoft.CognitiveServices/accounts?api-version=${CS_ACCOUNTS_API}`,
     { timeoutMs: 20000 },
   )
+  if (!listed.ok) {
+    const providerMessage = String(listed.json?.error?.message ?? '').trim()
+    if (listed.status === 401) {
+      throw Object.assign(
+        new Error('Your Azure session is invalid or expired. Sign in again or paste a fresh ARM token.'),
+        { status: 401, portalCode: 'invalid_arm_token' },
+      )
+    }
+    if (listed.status === 403) {
+      throw Object.assign(
+        new Error(providerMessage || 'You do not have permission to read Foundry resources in this subscription.'),
+        { status: 403, portalCode: 'foundry_forbidden' },
+      )
+    }
+    throw Object.assign(
+      new Error(providerMessage || 'Azure could not list Foundry resources. Try again.'),
+      { status: listed.status || 502, portalCode: 'foundry_discovery_failed' },
+    )
+  }
   const raw = (listed.json?.value ?? []).filter((a) => {
     const kind = String(a?.kind ?? '')
     return kind === 'AIServices' || kind === 'OpenAI'
@@ -1859,10 +1881,20 @@ export async function generateAgentInstructions(accessToken, subscriptionId, opt
   const system =
     'You are an expert at writing system-prompt instructions for AI agents. Given an agent name and a short ' +
     "description of what it should do, write clear, effective instructions used verbatim as the agent's system " +
-    'prompt. Describe the role, expected behavior, inputs and outputs, tone, and any constraints. Output ONLY ' +
-    'the instructions as plain Markdown prose — no YAML front matter, no code fences, no "Instructions" heading.'
+    'prompt. Describe the role, expected behavior, inputs and outputs, tone, and any constraints. Format the result ' +
+    'as readable multiline Markdown: start with a short role paragraph, then use concise headings and bulleted or ' +
+    'numbered steps with blank lines between sections. Never collapse the response into one long line. Output ONLY ' +
+    'the instructions — no YAML front matter, no code fences, and no generic "Instructions" heading.'
   const user = `Agent name: ${name || '(unnamed)'}\nWhat it should do: ${description || '(no description provided)'}`
-  return foundryChat(accessToken, subscriptionId, { resourceGroup, account, openaiEndpoint, model, system, user })
+  const generated = await foundryChat(accessToken, subscriptionId, { resourceGroup, account, openaiEndpoint, model, system, user })
+  return { ...generated, content: formatGeneratedAgentInstructions(generated.content) }
+}
+
+export function formatGeneratedAgentInstructions(value) {
+  const content = String(value ?? '').replace(/\r\n?/g, '\n').trim()
+  if (!content || content.includes('\n')) return content
+  const sentences = content.match(/[^.!?]+[.!?]+(?:["')\]]+)?|[^.!?]+$/g)?.map((sentence) => sentence.trim()).filter(Boolean) ?? []
+  return sentences.length > 1 ? sentences.join('\n\n') : content
 }
 
 // Call a Foundry chat model with a system + user prompt; returns { content }

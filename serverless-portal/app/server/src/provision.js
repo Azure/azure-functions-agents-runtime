@@ -14,6 +14,8 @@
 // The ZIP is written by hand (store method) to avoid a build dependency; the
 // payload is a handful of small text files.
 
+import { createHash } from 'node:crypto'
+
 const ARM = 'https://management.azure.com'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -58,17 +60,21 @@ export async function ensureResourceGroup(token, subscriptionId, resourceGroup, 
   )
 }
 
-// Derive a globally-unique storage account name (3–24 lowercase alphanumerics).
-function storageAccountName(appName) {
+// Derive a stable globally-unique storage account name so app preparation can
+// be retried safely after a lost response or portal restart.
+export function storageAccountName(subscriptionId, resourceGroup, appName) {
   const clean = String(appName).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 11) || 'agents'
-  const rand = Math.random().toString(16).slice(2, 8)
-  return `st${clean}${rand}`.slice(0, 24)
+  const hash = createHash('sha256')
+    .update(`${subscriptionId}/${resourceGroup}/${appName}`.toLowerCase())
+    .digest('hex')
+    .slice(0, 10)
+  return `st${clean}${hash}`.slice(0, 24)
 }
 
 // Build the lean Flex Consumption ARM template. Storage auth uses a connection
 // string (no managed identity / RBAC needed to deploy); the app carries a
 // system-assigned identity so the caller can later grant it access to Foundry.
-function flexTemplate({ appName, storageName, planName, containerName, workspaceName, insightsName, region, pythonVersion, foundryEndpoint, foundryModel }) {
+function flexTemplate({ appName, storageName, planName, containerName, workspaceName, insightsName, region, pythonVersion, foundryEndpoint, foundryModel, preparationId }) {
   // Inner (unbracketed) resourceId expressions for nesting inside other ARM
   // expressions; wrap in `[ ]` only where an expression stands on its own.
   const storageIdE = `resourceId('Microsoft.Storage/storageAccounts', '${storageName}')`
@@ -84,6 +90,7 @@ function flexTemplate({ appName, storageName, planName, containerName, workspace
     { name: 'AzureWebJobsStorage', value: connStr },
     { name: 'DEPLOYMENT_STORAGE_CONNECTION_STRING', value: connStr },
     { name: 'AZURE_FUNCTIONS_AGENTS_PROVIDER', value: 'foundry' },
+    { name: 'AZURE_FUNCTIONS_AGENTS_PORTAL_MANAGED', value: 'true' },
     {
       name: 'APPLICATIONINSIGHTS_CONNECTION_STRING',
       value: `[reference(${insightsIdE}, '2020-02-02').ConnectionString]`,
@@ -91,6 +98,7 @@ function flexTemplate({ appName, storageName, planName, containerName, workspace
   ]
   if (foundryEndpoint) appSettings.push({ name: 'FOUNDRY_PROJECT_ENDPOINT', value: foundryEndpoint })
   if (foundryModel) appSettings.push({ name: 'FOUNDRY_MODEL', value: foundryModel })
+  if (preparationId) appSettings.push({ name: 'AZURE_FUNCTIONS_AGENTS_PREPARATION_ID', value: preparationId })
 
   return {
     $schema: 'https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#',
@@ -220,6 +228,7 @@ export async function provisionFlexApp(token, opts) {
     region,
     foundryEndpoint = '',
     foundryModel = '',
+    preparationId = '',
     pythonVersion = '3.13',
     deploymentName = `portal-deploy-${Date.now()}`,
   } = opts
@@ -236,7 +245,7 @@ export async function provisionFlexApp(token, opts) {
       .replace(/-+/g, '-')
       .replace(/^-+|-+$/g, '') || 'agents'
   const trimTrailingHyphen = (s) => s.replace(/-+$/g, '')
-  const storageName = storageAccountName(appName)
+  const storageName = storageAccountName(subscriptionId, resourceGroup, appName)
   const planName = trimTrailingHyphen(`${nameBase}-plan`.slice(0, 40))
   const containerName = 'app-package'
   const insightsName = trimTrailingHyphen(nameBase.slice(0, 60))
@@ -252,6 +261,7 @@ export async function provisionFlexApp(token, opts) {
     pythonVersion,
     foundryEndpoint,
     foundryModel,
+    preparationId,
   })
 
   const url = `${ARM}/subscriptions/${subscriptionId}/resourcegroups/${encodeURIComponent(resourceGroup)}/providers/Microsoft.Resources/deployments/${deploymentName}?api-version=2021-04-01`

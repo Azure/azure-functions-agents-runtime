@@ -24,6 +24,7 @@ interface SearchableSelectProps {
   loadingLabel?: string
   onRefresh?: () => void
   ariaLabel?: string
+  alwaysShowSearch?: boolean
 }
 
 // Number of options above which the popover renders the search input. Below
@@ -35,7 +36,8 @@ const POPOVER_MIN_WIDTH = 240
 
 interface PopoverRect {
   left: number
-  top: number
+  top: number | null
+  bottom: number | null
   width: number
   maxHeight: number
   above: boolean
@@ -53,17 +55,21 @@ function computeRect(trigger: HTMLElement, preferAbove?: boolean): PopoverRect {
       ? preferAbove
       : spaceBelow < 200 && spaceAbove > spaceBelow
   const maxHeight = Math.min(POPOVER_MAX_HEIGHT, Math.max(160, above ? spaceAbove : spaceBelow))
-  const width = Math.max(POPOVER_MIN_WIDTH, r.width)
+  const width = Math.min(Math.max(POPOVER_MIN_WIDTH, r.width), window.innerWidth - 16)
   const left = Math.min(Math.max(8, r.left), window.innerWidth - width - 8)
-  const top = above ? r.top - gap - maxHeight : r.bottom + gap
-  return { left, top, width, maxHeight, above }
+  const top = above ? null : r.bottom + gap
+  const bottom = above ? window.innerHeight - r.top + gap : null
+  return { left, top, bottom, width, maxHeight, above }
 }
 
 function rectEqual(a: PopoverRect | null, b: PopoverRect | null): boolean {
   if (!a || !b) return false
+  const close = (left: number | null, right: number | null) =>
+    left === null || right === null ? left === right : Math.abs(left - right) < 0.5
   return (
     Math.abs(a.left - b.left) < 0.5 &&
-    Math.abs(a.top - b.top) < 0.5 &&
+    close(a.top, b.top) &&
+    close(a.bottom, b.bottom) &&
     Math.abs(a.width - b.width) < 0.5 &&
     a.maxHeight === b.maxHeight &&
     a.above === b.above
@@ -80,6 +86,7 @@ export const SearchableSelect = ({
   loadingLabel = 'Loading…',
   onRefresh,
   ariaLabel,
+  alwaysShowSearch = false,
 }: SearchableSelectProps) => {
   const selected = options.find((o) => o.value === value)
   const [open, setOpen] = useState(false)
@@ -108,7 +115,7 @@ export const SearchableSelect = ({
         (o.sublabel?.toLowerCase().includes(q) ?? false),
     )
   }, [options, query])
-  const showSearch = options.length >= SEARCH_THRESHOLD
+  const showSearch = alwaysShowSearch || options.length >= SEARCH_THRESHOLD
 
   const commit = useCallback(
     (next: string) => {
@@ -292,7 +299,8 @@ export const SearchableSelect = ({
           style={{
             position: 'fixed',
             left: rect.left,
-            top: rect.top,
+            top: rect.top ?? undefined,
+            bottom: rect.bottom ?? undefined,
             width: rect.width,
             maxHeight: rect.maxHeight,
           }}

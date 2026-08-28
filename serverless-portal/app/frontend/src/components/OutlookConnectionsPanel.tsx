@@ -12,7 +12,7 @@ import {
   type OutlookConnectionCandidate,
 } from '../api'
 import { Modal } from './Modal'
-import { Icon } from './ui'
+import { Icon, SearchableSelect } from './ui'
 import { useIdentity } from '../identity'
 
 type SetupMode = 'create' | 'existing'
@@ -24,6 +24,7 @@ interface OutlookConnectionsPanelProps {
   app: string
   mcpSourceState: 'draft' | 'deployed' | 'none'
   hasOutlookMcp: boolean
+  onConnectionStateChange?: (configured: boolean) => void
 }
 
 function ConnectionStatus({ value }: { value: OutlookConnection['status'] }) {
@@ -48,6 +49,7 @@ export function OutlookConnectionsPanel({
   app,
   mcpSourceState,
   hasOutlookMcp,
+  onConnectionStateChange,
 }: OutlookConnectionsPanelProps) {
   const queryClient = useQueryClient()
   const { subscriptions, subscriptionsLoading, subscriptionError, refreshSubscriptions } = useIdentity()
@@ -55,6 +57,7 @@ export function OutlookConnectionsPanel({
   const connectionKey = ['connections', subscription, resourceGroup, app]
   const [connectorSubscription, setConnectorSubscription] = useState(subscription)
   const candidateKey = ['connectionCandidates', subscription, resourceGroup, app, connectorSubscription]
+  const [catalogOpen, setCatalogOpen] = useState(false)
   const [wizardOpen, setWizardOpen] = useState(false)
   const [step, setStep] = useState(1)
   const [mode, setMode] = useState<SetupMode>('create')
@@ -83,6 +86,20 @@ export function OutlookConnectionsPanel({
   const connections = connectionsQuery.data?.connections ?? []
   const candidates = candidatesQuery.data?.connections ?? []
   const outlookConfigured = connections.some((connection) => connection.service === 'Office 365 Outlook')
+  const connectorSubscriptionOptions = [
+    ...(!subscriptions.some((candidate) => candidate.id === subscription)
+      ? [{ value: subscription, label: 'Function App subscription', sublabel: subscription }]
+      : []),
+    ...subscriptions.map((candidate) => ({
+      value: candidate.id,
+      label: candidate.name,
+      sublabel: `${candidate.id}${candidate.id === subscription ? ' - Function App' : ''}`,
+    })),
+  ]
+
+  useEffect(() => {
+    if (connectionsQuery.data) onConnectionStateChange?.(outlookConfigured)
+  }, [connectionsQuery.data, onConnectionStateChange, outlookConfigured])
 
   useEffect(() => {
     if (!actionMessage) return
@@ -182,7 +199,12 @@ export function OutlookConnectionsPanel({
     onError: (error) => setActionError(removalErrorMessage(error)),
   })
 
-  const openWizard = () => {
+  const openCatalog = () => {
+    setActionError('')
+    setActionMessage('')
+    setCatalogOpen(true)
+  }
+  const openOutlookWizard = () => {
     setStep(1)
     setMode('create')
     setConnectorSubscription(subscription)
@@ -192,7 +214,12 @@ export function OutlookConnectionsPanel({
     setTestResult(null)
     setActionError('')
     setActionMessage('')
+    setCatalogOpen(false)
     setWizardOpen(true)
+  }
+  const backToCatalog = () => {
+    setWizardOpen(false)
+    setCatalogOpen(true)
   }
   const beginAuthorization = (connection: OutlookConnection) => {
     setActionError('')
@@ -224,10 +251,10 @@ export function OutlookConnectionsPanel({
           <Button
             appearance="primary"
             icon={<Icon name="plus" size={16} />}
-            onClick={openWizard}
-            title="Add a service connection"
+            onClick={openCatalog}
+            title="Add an MCP server or tool"
           >
-            Add connection
+            Add MCP server or tool
           </Button>
         </div>
       </div>
@@ -384,8 +411,31 @@ export function OutlookConnectionsPanel({
         </div>
       )}
 
+      {catalogOpen && (
+        <Modal title="Add MCP server or tool" onClose={() => setCatalogOpen(false)} width={620}>
+          <div className="capability-add-options">
+            <button type="button" className="connection-choice" onClick={openOutlookWizard}>
+              <span className="connection-service-icon"><Icon name="mail" size={20} /></span>
+              <span>
+                <strong>Add Outlook MCP server</strong>
+                <small>Send email through an Office 365 Outlook connection.</small>
+              </span>
+              <Icon name="arrowRight" size={18} />
+            </button>
+            <button type="button" className="connection-choice" disabled>
+              <span className="connection-service-icon"><Icon name="wrench" size={20} /></span>
+              <span>
+                <strong>Add tool</strong>
+                <small>Add a Python tool to this Hosted Skills app.</small>
+              </span>
+              <span className="badge gray">Coming soon</span>
+            </button>
+          </div>
+        </Modal>
+      )}
+
       {wizardOpen && (
-        <Modal title="Add Outlook connection" onClose={() => setWizardOpen(false)} width={720}>
+        <Modal title="Add Outlook MCP server" onClose={() => setWizardOpen(false)} width={720}>
           <div className="connection-steps" aria-label={`Step ${step} of 3`}>
             {['Source', 'Configure', 'Finish'].map((label, index) => (
               <span
@@ -427,6 +477,7 @@ export function OutlookConnectionsPanel({
                   : 'Selects an Office 365 Outlook connection from any subscription available to your current sign-in.'}
               </div>
               <div className="modal-actions">
+                <Button onClick={backToCatalog}>Back</Button>
                 <Button appearance="primary" disabled={outlookConfigured} onClick={() => setStep(2)}>Continue</Button>
               </div>
             </>
@@ -460,26 +511,23 @@ export function OutlookConnectionsPanel({
           {step === 2 && mode === 'existing' && (
             <>
               <div className="field">
-                <label htmlFor="connector-subscription">Connector subscription</label>
-                <select
-                  id="connector-subscription"
+                <label>Connector subscription</label>
+                <SearchableSelect
                   value={connectorSubscription}
                   disabled={subscriptionsLoading || attachConnection.isPending}
-                  onChange={(event) => {
-                    setConnectorSubscription(event.target.value)
+                  loading={subscriptionsLoading}
+                  loadingLabel="Loading subscriptions..."
+                  options={connectorSubscriptionOptions}
+                  placeholder="Select a subscription..."
+                  ariaLabel="Connector subscription"
+                  alwaysShowSearch
+                  onRefresh={() => void refreshSubscriptions()}
+                  onChange={(value) => {
+                    setConnectorSubscription(value)
                     setSelectedId('')
                     setActionError('')
                   }}
-                >
-                  {!subscriptions.some((candidate) => candidate.id === subscription) && (
-                    <option value={subscription}>{subscription} (Function App)</option>
-                  )}
-                  {subscriptions.map((candidate) => (
-                    <option key={candidate.id} value={candidate.id}>
-                      {candidate.name} ({candidate.id}){candidate.id === subscription ? ' - Function App' : ''}
-                    </option>
-                  ))}
-                </select>
+                />
                 <div className="hint">This selection does not change the Function App subscription.</div>
               </div>
               {subscriptionError && (

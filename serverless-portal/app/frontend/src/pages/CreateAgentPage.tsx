@@ -23,6 +23,7 @@ export default function CreateAgentPage() {
 
   const {
     data: foundryData,
+    error: foundryError,
     isFetching: foundryLoading,
     refetch: refetchFoundry,
   } = useQuery({
@@ -57,6 +58,51 @@ export default function CreateAgentPage() {
       })) ?? [],
     [selectedAccount],
   )
+
+  // Reconcile a restored session draft with current ARM discovery. Without
+  // this, a renamed/deleted account hides the entire model field, while a
+  // one-model account restored before discovery never receives its default.
+  useEffect(() => {
+    if (!foundryData || foundryLoading) return
+    setDraft((current) => {
+      const currentSubscription = current.foundrySubscription || selected
+      if (currentSubscription !== foundryData.subscriptionId || !current.foundryAccount) return current
+      const account = foundryData.accounts.find((candidate) => candidate.name === current.foundryAccount)
+      if (!account) {
+        return {
+          ...current,
+          foundryAccount: '',
+          foundryResourceGroup: '',
+          foundryOpenaiEndpoint: '',
+          foundryEndpoint: '',
+          foundryModel: '',
+        }
+      }
+      const modelExists = account.models.some((model) => model.deployment === current.foundryModel)
+      const projectExists = account.projects.some((project) => project.endpoint === current.foundryEndpoint)
+      const foundryModel = modelExists
+        ? current.foundryModel
+        : account.models.length === 1 ? account.models[0].deployment : ''
+      const foundryEndpoint = projectExists
+        ? current.foundryEndpoint
+        : account.projects.length === 1 ? account.projects[0].endpoint : ''
+      if (
+        current.foundryResourceGroup === account.resourceGroup &&
+        current.foundryOpenaiEndpoint === account.openaiEndpoint &&
+        current.foundryEndpoint === foundryEndpoint &&
+        current.foundryModel === foundryModel
+      ) {
+        return current
+      }
+      return {
+        ...current,
+        foundryResourceGroup: account.resourceGroup,
+        foundryOpenaiEndpoint: account.openaiEndpoint,
+        foundryEndpoint,
+        foundryModel,
+      }
+    })
+  }, [foundryData, foundryLoading, selected])
 
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }))
 
@@ -118,7 +164,7 @@ export default function CreateAgentPage() {
     }
   }
 
-  const foundryReady = !!draft.foundryModel && !!draft.foundryAccount
+  const foundryReady = !!selectedAccount?.models.some((model) => model.deployment === draft.foundryModel)
   const skillReady =
     !!draft.name.trim() &&
     !!draft.instructions.trim() &&
@@ -134,6 +180,7 @@ export default function CreateAgentPage() {
     else if (nextStep === 2 && foundryReady) setSearchParams({ step: '2' })
     else if (nextStep === 3 && skillReady) navigate('/new-app/draft')
     else if (nextStep === 4 && skillReady && targetReady) navigate('/new-app/draft?step=4')
+    else if (nextStep === 5 && skillReady && targetReady && draft.capabilitiesReviewed) navigate('/new-app/draft?step=5')
   }
 
   const cancel = () => {
@@ -154,8 +201,8 @@ export default function CreateAgentPage() {
 
         <CreationSteps
           current={step}
-          completed={[foundryReady, skillReady, skillReady && targetReady, false]}
-          available={[true, foundryReady, skillReady, skillReady && targetReady]}
+          completed={[foundryReady, skillReady, targetReady, draft.capabilitiesReviewed, false]}
+          available={[true, foundryReady, skillReady, targetReady, targetReady && draft.capabilitiesReviewed]}
           onNavigate={navigateToStep}
           disabled={generating}
         />
@@ -224,6 +271,11 @@ export default function CreateAgentPage() {
               Select the resource, project, and model deployment that will generate and run this skill.
             </p>
             <div className="model-provider-fields">
+                {foundryError && (
+                  <div className="gh-err" style={{ marginBottom: 12 }}>
+                    Could not load Foundry resources: {(foundryError as Error).message}
+                  </div>
+                )}
                 <div className="field" style={{ marginBottom: 8 }}>
                   <label>Subscription</label>
                   <SearchableSelect
@@ -250,9 +302,8 @@ export default function CreateAgentPage() {
                   />
                 </div>
 
-                {selectedAccount && (
-                  <div className="foundry-dependent-fields">
-                    {selectedAccount.projects.length > 0 && (
+                <div className="foundry-dependent-fields">
+                    {(selectedAccount?.projects.length ?? 0) > 0 && (
                       <div className="field">
                         <label>Project</label>
                         <SearchableSelect
@@ -270,15 +321,20 @@ export default function CreateAgentPage() {
                         value={draft.foundryModel}
                         onChange={(v) => set('foundryModel', v)}
                         options={modelOptions}
-                        placeholder={selectedAccount.models.length ? 'Select a model…' : 'No chat models deployed'}
+                        placeholder={!selectedAccount
+                          ? 'Select a Foundry resource first'
+                          : selectedAccount.models.length ? 'Select a model…' : 'No chat models deployed'}
                         loading={foundryLoading}
                         loadingLabel="Refreshing model deployments…"
                         onRefresh={() => void refetchFoundry()}
                         ariaLabel="Model deployment"
+                        disabled={!selectedAccount}
                       />
+                      {selectedAccount && selectedAccount.models.length === 0 && (
+                        <div className="hint">No chat model deployments were found in this resource. Deploy a model, then refresh.</div>
+                      )}
                     </div>
                   </div>
-                )}
                 <div className="hint" style={{ marginTop: 8 }}>
                   No model yet?{' '}
                   <a href="https://ai.azure.com" target="_blank" rel="noreferrer">
@@ -360,7 +416,7 @@ export default function CreateAgentPage() {
                   Describe the outcome. <span className="mono">{draft.foundryModel}</span> will generate the skill instructions for you to review and edit.
                 </p>
                 <textarea
-                  className="editor"
+                  className="editor prompt-editor"
                   style={{ minHeight: 150 }}
                   spellCheck={false}
                   disabled={generating}
@@ -397,7 +453,7 @@ export default function CreateAgentPage() {
                     <div className="field" style={{ marginTop: 18 }}>
                       <label>Generated instructions</label>
                       <textarea
-                        className="editor"
+                        className="editor prompt-editor"
                         style={{ minHeight: 260 }}
                         spellCheck={false}
                         disabled={generating}
@@ -405,7 +461,7 @@ export default function CreateAgentPage() {
                         onChange={(e) => setDraft((current) => ({ ...current, instructions: e.target.value, mdOverride: null }))}
                         aria-label="Generated skill instructions"
                       />
-                      <div className="hint">Review and edit these instructions before choosing where the skill will run.</div>
+                      <div className="hint">Review and edit these instructions before choosing where the skill will run. Markdown formatting and line breaks are preserved.</div>
                     </div>
                     <Button appearance="primary" disabled={generating} onClick={() => navigateToStep(3)}>
                       Continue to deployment target →
@@ -438,7 +494,7 @@ export default function CreateAgentPage() {
                   <label htmlFor="manual-skill-instructions">Instructions</label>
                   <textarea
                     id="manual-skill-instructions"
-                    className="editor"
+                    className="editor prompt-editor"
                     style={{ minHeight: 260 }}
                     spellCheck={false}
                     disabled={generating}
@@ -451,7 +507,7 @@ export default function CreateAgentPage() {
                     }))}
                     aria-label="Skill instructions"
                   />
-                  <div className="hint">These instructions are used as written and remain editable during review.</div>
+                  <div className="hint">These instructions are used as written and remain editable during review. Markdown formatting and line breaks are preserved.</div>
                 </div>
                 <div className="toolbar">
                   <Button appearance="primary" disabled={!skillReady || generating} onClick={() => navigateToStep(3)}>

@@ -1909,6 +1909,73 @@ async function pushFilesToSite(id, token, site, files) {
   await provision.deployZipToApp(token, azure.scmHostName(site), zip)
 }
 
+async function verifyPreparedApp(token, subscription, resourceGroup, appName, preparationId) {
+  const site = await azure.getSite(token, subscription, resourceGroup, appName)
+  if (!site?.id) return null
+  const settings = await azure.readAppSettingsStrict(token, subscription, resourceGroup, appName)
+  const managed = String(settings.AZURE_FUNCTIONS_AGENTS_PORTAL_MANAGED ?? '').toLowerCase() === 'true'
+  const matches = String(settings.AZURE_FUNCTIONS_AGENTS_PREPARATION_ID ?? '') === preparationId
+  if (!managed || !matches) {
+    throw new HttpError(409, `Function App "${appName}" already exists and was not prepared by this New Skill session.`)
+  }
+  return site
+}
+
+async function runPrepareAppJob(id, token, { subscription, target, deploymentName }) {
+  const { appName, resourceGroup } = target
+  try {
+    const existing = await verifyPreparedApp(token, subscription, resourceGroup, appName, target.preparationId)
+    if (!existing) {
+      const availability = await azure.checkFunctionAppNameAvailable(token, subscription, appName)
+      if (!availability.available) {
+        throw new Error(availability.message || `Function App name "${appName}" is not available.`)
+      }
+    }
+
+    setJob(id, { message: 'Preparing the Function App and managed identity…' })
+    const provisioned = await provision.provisionFlexApp(token, {
+      subscriptionId: subscription,
+      resourceGroup,
+      appName,
+      region: target.region,
+      foundryEndpoint: target.foundryEndpoint,
+      foundryModel: target.foundryModel,
+      preparationId: target.preparationId,
+      deploymentName,
+    })
+    const site = await azure.getSite(token, subscription, resourceGroup, appName)
+    if (!site?.id) throw new Error(`Function App "${appName}" was not found after preparation.`)
+    const principalId = site.identity?.principalId || provisioned?.principalId || ''
+
+    let grantOutcome
+    const foundry = target.foundryAccount
+    if (principalId && foundry?.subscription && foundry.resourceGroup && foundry.account) {
+      setJob(id, { message: 'Granting the app access to Foundry…' })
+      try {
+        const result = await azure.grantFoundryAccess(token, {
+          subscriptionId: foundry.subscription,
+          resourceGroup: foundry.resourceGroup,
+          account: foundry.account,
+          principalId,
+        })
+        grantOutcome = result.granted?.length ? (result.failed?.length ? 'partial' : 'granted') : 'failed'
+      } catch {
+        grantOutcome = 'failed'
+      }
+    }
+
+    setJob(id, {
+      status: 'prepared',
+      message: `Function App "${appName}" is ready for tools and connections.`,
+      url: `https://${site.defaultHostName}`,
+      principalId,
+      ...(grantOutcome ? { grantOutcome } : {}),
+    })
+  } catch (error) {
+    setJob(id, { status: 'error', message: String(error?.message ?? error) })
+  }
+}
+
 // Provision (for a new app) then push the source with a remote build, updating
 // the job as each stage completes. Runs detached from the HTTP request.
 async function runDeployJob(id, token, ctx) {
@@ -1936,6 +2003,9 @@ async function runDeployJob(id, token, ctx) {
           ),
         })
       }
+    } else if (target.kind === 'prepared') {
+      setJob(id, { message: 'Verifying the prepared Function App…' })
+      await verifyPreparedApp(token, subscription, resourceGroup, appName, target.preparationId)
     }
 
     setJob(id, { message: 'Resolving Function App…' })
@@ -1983,12 +2053,12 @@ async function runDeployJob(id, token, ctx) {
         ? `Deployed "${fileName}" to ${appName}, but ${unclearedDrafts.length} local draft(s) could not be cleared.`
         : `Deployed "${fileName}" to ${appName}.`,
       url: `https://${site.defaultHostName}`,
-      ...(target.kind === 'new' && principalId ? { principalId } : {}),
+      ...(target.kind !== 'existing' && principalId ? { principalId } : {}),
       ...(grantOutcome ? { grantOutcome } : {}),
     })
     await recordDeployHistory(subscription, appName, {
       jobId: id,
-      kind: target.kind === 'new' ? 'create' : 'deploy',
+      kind: target.kind === 'existing' ? 'deploy' : 'create',
       status: 'deployed',
       finishedAt: new Date().toISOString(),
       files: files.map((f) => f.name).sort(),
@@ -2001,7 +2071,7 @@ async function runDeployJob(id, token, ctx) {
     setJob(id, { status: 'error', message: String(err?.message ?? err) })
     await recordDeployHistory(subscription, appName, {
       jobId: id,
-      kind: target.kind === 'new' ? 'create' : 'deploy',
+      kind: target.kind === 'existing' ? 'deploy' : 'create',
       status: 'error',
       finishedAt: new Date().toISOString(),
       message: String(err?.message ?? err),
@@ -2065,6 +2135,56 @@ async function runRedeployJob(id, token, ctx) {
   }
 }
 
+// Prepare a new Function App and managed identity without deploying source, so
+// the New Skill wizard can configure live tools and connections before review.
+app.post(
+  '/api/prepare-app',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const target = req.body?.target
+    if (!target || target.kind !== 'new') throw new HttpError(400, 'A new app target is required.')
+    const appName = String(target.appName ?? '').trim()
+    const resourceGroup = String(target.resourceGroup ?? '').trim()
+    const preparationId = String(target.preparationId ?? '').trim()
+    if (!appName || !resourceGroup || !target.region) {
+      throw new HttpError(400, 'App name, resource group, and region are required.')
+    }
+    if (!/^[A-Za-z0-9-]{16,80}$/.test(preparationId)) {
+      throw new HttpError(400, 'A valid preparation ID is required.')
+    }
+
+    pruneJobs()
+    const jobId = randomUUID()
+    const deploymentName = `portal-prepare-${Date.now()}`.slice(0, 64)
+    const portalUrl = portalDeploymentUrl(tenantFromToken(token), subscription, resourceGroup, deploymentName)
+    setJob(jobId, { kind: 'prepare', status: 'running', message: 'Starting app preparation…', files: [], portalUrl })
+    runPrepareAppJob(jobId, token, {
+      subscription,
+      target: { ...target, appName, resourceGroup, preparationId },
+      deploymentName,
+    })
+    res.status(202).json({ jobId, status: 'running', files: [], portalUrl })
+  }),
+)
+
+app.get(
+  '/api/prepare-app/:jobId',
+  wrap(async (req, res) => {
+    requireToken(req)
+    const job = deployJobs.get(req.params.jobId)
+    if (!job || job.kind !== 'prepare') throw new HttpError(404, 'Unknown or expired preparation job.')
+    res.json({
+      status: job.status,
+      message: job.message,
+      ...(job.url ? { url: job.url } : {}),
+      ...(job.portalUrl ? { portalUrl: job.portalUrl } : {}),
+      ...(job.principalId ? { principalId: job.principalId } : {}),
+      ...(job.grantOutcome ? { grantOutcome: job.grantOutcome } : {}),
+    })
+  }),
+)
+
 // Start a deploy: refresh the app's source tree, then run provisioning + deploy
 // in the background. Returns a job id the client polls via GET /api/deploy/:id.
 app.post(
@@ -2080,12 +2200,18 @@ app.post(
     if (!target || typeof target.kind !== 'string') {
       throw new HttpError(400, 'Request body must include a target.')
     }
+    if (!['existing', 'new', 'prepared'].includes(target.kind)) {
+      throw new HttpError(400, 'Target kind must be existing, new, or prepared.')
+    }
     const appName = target.kind === 'existing' ? target.app : target.appName
     if (!appName) throw new HttpError(400, 'A target Function App name is required.')
     const resourceGroup = target.resourceGroup
     if (!resourceGroup) throw new HttpError(400, 'A target resource group is required.')
     if (target.kind === 'new' && !target.region) {
       throw new HttpError(400, 'A region is required to create a new app.')
+    }
+    if (target.kind === 'prepared' && !/^[A-Za-z0-9-]{16,80}$/.test(String(target.preparationId ?? ''))) {
+      throw new HttpError(400, 'A valid preparation ID is required for a prepared app.')
     }
     const fileName = safeSegment(agent.fileName)
     if (!/\.agent\.md$/i.test(fileName)) throw new HttpError(400, 'Agent file must end with .agent.md.')
@@ -2273,7 +2399,13 @@ app.get(
         throw err
       }
     }
-    res.json(await azure.discoverFoundry(token, subscriptionId))
+    try {
+      res.json(await azure.discoverFoundry(token, subscriptionId))
+    } catch (error) {
+      throw new HttpError(error?.status ?? 502, String(error?.message ?? error), {
+        ...(error?.portalCode ? { error: error.portalCode } : {}),
+      })
+    }
   }),
 )
 
