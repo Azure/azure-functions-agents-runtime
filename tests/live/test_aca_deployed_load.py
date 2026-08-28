@@ -27,6 +27,7 @@ from tests.live.aca_deployed_agent_support import (
     parse_accepted_run,
     read_sse_events_with_first_event_time,
     read_sse_events_with_observation_times,
+    response_header,
     setup_retry_after_seconds,
     submission_payload,
 )
@@ -73,9 +74,9 @@ _POLL_SECONDS = 1.0
 _COMMON_ACTIVE_WAIT_SECONDS = 1.0
 _ACTIVE_PROOF_TIMEOUT_SECONDS = 120.0
 _EVENT_STREAM_GRACE_SECONDS = 360.0
-_RESULT_MATERIALIZATION_TIMEOUT_SECONDS = 60.0
 _RESULT_RETRY_AFTER_MAXIMUM_SECONDS = 10.0
 _HOLD_SECONDS = 300.0
+_RESULT_MATERIALIZATION_TIMEOUT_SECONDS = _HOLD_SECONDS
 _MINIMUM_HOLD_TERMINAL_SECONDS = _HOLD_SECONDS - 1.0
 _SETUP_DEADLINE_ATTEMPTS = 2
 _MAX_ADMISSION_ATTEMPTS = 5
@@ -1430,7 +1431,12 @@ async def _establish_common_active_interval(
         first = await _active_observations(resources, config, partition_key, submitted)
         if first is not None:
             replay_count, conflict_count = await _exercise_active_races(
-                client, config, headers, submitted[:_RACE_SAMPLE_LIMIT]
+                resources,
+                client,
+                config,
+                partition_key,
+                headers,
+                submitted[:_RACE_SAMPLE_LIMIT],
             )
             await asyncio.sleep(_COMMON_ACTIVE_WAIT_SECONDS)
             second = await _active_observations(resources, config, partition_key, submitted)
@@ -1526,26 +1532,40 @@ def _assert_active_operation_consistency(
 
 
 async def _exercise_active_races(
+    resources: DeployedAcaLifecycleResources,
     client: ClientSession,
     config: DeployedAcaLifecycleConfig,
+    partition_key: str,
     headers: dict[str, str],
     sample: list[_SubmittedRun],
 ) -> tuple[int, int]:
     outcomes = await asyncio.gather(
-        *(_exercise_one_active_race(client, config, headers, item) for item in sample)
+        *(
+            _exercise_one_active_race(
+                resources,
+                client,
+                config,
+                partition_key,
+                headers,
+                item,
+            )
+            for item in sample
+        )
     )
     return sum(replays for replays, _ in outcomes), sum(conflicts for _, conflicts in outcomes)
 
 
 async def _exercise_one_active_race(
+    resources: DeployedAcaLifecycleResources,
     client: ClientSession,
     config: DeployedAcaLifecycleConfig,
+    partition_key: str,
     headers: dict[str, str],
     submitted: _SubmittedRun,
 ) -> tuple[int, int]:
     accepted = submitted.accepted
     assert submitted.session_id_header == accepted.session_id
-    replay_status, replay_payload, _ = await json_request(
+    replay_status, replay_payload, replay_headers = await json_request(
         client,
         "POST",
         config.deployed.chat_url,
@@ -1556,8 +1576,23 @@ async def _exercise_one_active_race(
         },
         payload=submission_payload(_LOAD_PROMPT),
     )
-    assert replay_status == 202
-    replay = parse_accepted_run(replay_payload, config.deployed)
+    if replay_status == 202:
+        replay = parse_accepted_run(replay_payload, config.deployed)
+    else:
+        assert replay_status == 504
+        assert replay_payload.get("error") == "setup_deadline_exceeded"
+        assert replay_payload.get("retry_with") == "respond-async"
+        assert response_header(replay_headers, "x-ms-retry-with") == "respond-async"
+        recovered = await _recover_submitted_run(
+            resources,
+            config,
+            partition_key,
+            submitted.idempotency_key,
+            submitted.submitted_at,
+            session_id_header=submitted.session_id_header,
+        )
+        assert recovered is not None
+        replay = recovered.accepted
     assert replay.session_id == accepted.session_id
     assert replay.run_id == accepted.run_id
     conflict_status, conflict_payload, _ = await json_request(

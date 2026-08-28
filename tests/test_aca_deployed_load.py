@@ -160,6 +160,13 @@ def load_module(monkeypatch: pytest.MonkeyPatch) -> object:
     return importlib.import_module("tests.live.test_aca_deployed_load")
 
 
+def test_result_materialization_window_covers_the_result_hold(
+    load_module: object,
+) -> None:
+    module = load_module
+    assert module._RESULT_MATERIALIZATION_TIMEOUT_SECONDS == module._HOLD_SECONDS  # type: ignore[attr-defined]
+
+
 @pytest.mark.asyncio
 async def test_terminal_result_honors_temporary_unavailability_retry(
     monkeypatch: pytest.MonkeyPatch,
@@ -205,6 +212,53 @@ async def test_terminal_result_honors_temporary_unavailability_retry(
     )
     assert calls == [True, False, False]
     assert sleeps == [2.0]
+
+
+@pytest.mark.asyncio
+async def test_active_replay_recovers_durable_identity_after_setup_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    accepted = SimpleNamespace(session_id="session-a", run_id="run-a")
+    submitted = module._SubmittedRun(  # type: ignore[attr-defined]
+        accepted=accepted,
+        idempotency_key="original-key",
+        submitted_at=1.0,
+        accepted_at=2.0,
+        session_id_header="session-a",
+    )
+    responses = iter(
+        [
+            (
+                504,
+                {
+                    "error": "setup_deadline_exceeded",
+                    "retry_with": "respond-async",
+                },
+                {"x-ms-retry-with": "respond-async"},
+            ),
+            (409, {"error": "active_run_exists"}, {}),
+        ]
+    )
+
+    async def request(*_: object, **__: object) -> tuple[int, dict[str, object], dict[str, str]]:
+        return next(responses)
+
+    async def recover(*_: object, **__: object) -> object:
+        return submitted
+
+    monkeypatch.setattr(module, "json_request", request)
+    monkeypatch.setattr(module, "_recover_submitted_run", recover)
+
+    assert await module._exercise_one_active_race(  # type: ignore[attr-defined]
+        object(),
+        object(),
+        SimpleNamespace(deployed=SimpleNamespace(chat_url="https://example.test/chat")),
+        "partition",
+        {"Authorization": "redacted"},
+        submitted,
+    ) == (1, 1)
 
 
 @pytest.mark.asyncio
@@ -1359,7 +1413,9 @@ async def test_active_race_replay_and_conflict_both_preserve_existing_session_he
 
     assert await module._exercise_one_active_race(  # type: ignore[attr-defined]
         object(),
+        object(),
         SimpleNamespace(deployed=SimpleNamespace(chat_url="https://example.test/chat")),
+        "partition",
         {"Authorization": "redacted"},
         submitted,
     ) == (1, 1)

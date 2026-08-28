@@ -48,6 +48,7 @@ from azure_functions_agents.execution.setup_budget import (
 )
 from azure_functions_agents.harness.sandbox_capabilities import REQUIRED_HARNESS_CAPABILITIES
 from azure_functions_agents.journal_paths import BOOTSTRAP_ERROR_PATH
+from azure_functions_agents.sandbox_runtime_limits import RESULT_HOLD_SECONDS
 from azure_functions_agents.session_state import (
     AdmissionRecords,
     AppIdentity,
@@ -162,6 +163,8 @@ def _runtime(
     source: DiskSource | None = _TEST_SOURCE,
     fingerprint: str = _FINGERPRINT,
     post_create_reconciler: Callable[[], Awaitable[None]] | None = None,
+    auto_suspend_seconds: int = readiness_module.DEFAULT_AUTO_SUSPEND_SECONDS,
+    reclaim_idle_seconds: int = readiness_module.DEFAULT_RECLAIM_IDLE_SECONDS,
 ) -> SessionRuntimeBinding:
     async def provider_factory() -> _FakeProvider:
         return provider
@@ -180,6 +183,8 @@ def _runtime(
         state_store_factory=state_store_factory,
         creation_source=source,
         post_create_reconciler=post_create_reconciler,
+        auto_suspend_seconds=auto_suspend_seconds,
+        reclaim_idle_seconds=reclaim_idle_seconds,
     )
 
 
@@ -1942,7 +1947,13 @@ async def test_terminal_submit_fences_admission_before_lifecycle_write(tmp_path:
             await super().set_lifecycle_policy(policy)
 
     handle = AdmissionProbeHandle()
-    runtime = _runtime(script_root, _FakeProvider(handle), store)
+    runtime = _runtime(
+        script_root,
+        _FakeProvider(handle),
+        store,
+        auto_suspend_seconds=60,
+        reclaim_idle_seconds=120,
+    )
     activated = ActivatedSession.create(
         handle=handle,
         session=session,
@@ -1962,7 +1973,9 @@ async def test_terminal_submit_fences_admission_before_lifecycle_write(tmp_path:
         fence=fence,
         records=AdmissionRecords.create(admitted, run),
     )
-    await store.adopt_terminal_run(replace(run, status="succeeded"))
+    await store.adopt_terminal_run(
+        replace(run, status="succeeded", result_available=True)
+    )
 
     assert await finalize_submit_operation(
         runtime,
@@ -1973,6 +1986,9 @@ async def test_terminal_submit_fences_admission_before_lifecycle_write(tmp_path:
     assert store.session is not None
     assert store.session.active_operation_id is None
     assert store.session.idle_policy_armed
+    assert (
+        store.session.expires_at - store.session.last_activity_at
+    ).total_seconds() == RESULT_HOLD_SECONDS
     operation = next(iter(store.durable_operations.values()))
     assert operation.kind == "submit_run"
     assert operation.state == "completed"

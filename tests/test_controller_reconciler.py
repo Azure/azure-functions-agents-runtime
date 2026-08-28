@@ -652,6 +652,51 @@ async def test_reconciler_adopts_reachable_terminal_before_loss_processing() -> 
 
 
 @pytest.mark.asyncio
+async def test_reconciler_terminal_adoption_extends_session_result_hold() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = replace(
+        _session(now, status="running", active_run_id="run-1"),
+        expires_at=now + timedelta(seconds=120),
+    )
+    run = _run(session, now)
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+
+    async def terminal_reader(
+        _: DurableSessionRecord,
+        __: DurableRunRecord,
+    ) -> RunStatus:
+        return RunStatus(
+            run_id=run.run_id,
+            session_id=session.session_id,
+            state="succeeded",
+            last_sequence=1,
+            result_available=True,
+            result=RunResult(
+                content="done",
+                content_intermediate=[],
+                tool_calls=[],
+                reasoning=None,
+                delegate_error_count=0,
+            ),
+        )
+
+    await SessionReconciler(
+        store=store,
+        provider=InventoryProvider(sandboxes=(_sandbox(now),)),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(result_hold_seconds=300),
+        terminal_reader=terminal_reader,
+        now=lambda: now,
+    ).run_once()
+
+    assert store.session is not None
+    assert store.session.status == "ready"
+    assert store.session.expires_at == now + timedelta(seconds=300)
+    assert store.runs[run.run_id].result_available
+
+
+@pytest.mark.asyncio
 async def test_reconciler_validates_terminal_success_before_adoption() -> None:
     now = datetime(2026, 8, 5, tzinfo=UTC)
     session = _session(now, status="running", active_run_id="run-1")
@@ -821,6 +866,42 @@ async def test_page_size_one_hydrates_terminal_run_for_result_eviction() -> None
 
     assert report.evicted_results == 1
     assert store.runs[run.run_id].result_available is False
+
+
+@pytest.mark.asyncio
+async def test_result_hold_blocks_idle_reclaim_independently_of_safety_grace() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(
+        now - timedelta(minutes=10),
+        status="suspended",
+        expires_at=now - timedelta(minutes=5),
+    )
+    run = replace(
+        _run(session, now - timedelta(minutes=2), status="succeeded"),
+        result_available=True,
+    )
+    store = PairPageStore(
+        session,
+        run,
+        (session.to_table_entity(), run.to_table_entity()),
+    )
+    provider = InventoryProvider(sandboxes=(_sandbox(now, state="Suspended"),))
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(
+            safety_grace_seconds=1,
+            result_hold_seconds=300,
+        ),
+        now=lambda: now,
+    ).run_once()
+
+    assert report.evicted_results == 0
+    assert report.deleted_sandboxes == 0
+    assert provider.deleted_sandboxes == []
+    assert store.runs[run.run_id].result_available
 
 
 @pytest.mark.asyncio

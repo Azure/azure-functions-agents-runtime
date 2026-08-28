@@ -20,6 +20,7 @@ from ..sandbox_runtime_limits import (
     DEFAULT_RECONCILER_CADENCE_SECONDS,
     MAX_RECONCILER_CADENCE_SECONDS,
     RECLAIM_SAFETY_GRACE_SECONDS,
+    RESULT_HOLD_SECONDS,
 )
 from ..session_state import (
     OWNER_CANONICALIZERS,
@@ -118,7 +119,7 @@ class ReconcilerConfig:
     cadence_seconds: int = DEFAULT_RECONCILER_CADENCE_SECONDS
     safety_grace_seconds: int = RECLAIM_SAFETY_GRACE_SECONDS
     heartbeat_stale_seconds: int = 90
-    result_hold_seconds: int = 300
+    result_hold_seconds: int = RESULT_HOLD_SECONDS
     terminal_retention_seconds: int = 86_400
     tombstone_retention_seconds: int = 86_400
     page_size: int = 100
@@ -428,7 +429,14 @@ class SessionReconciler:
                 report,
             )
         if run.status in TERMINAL_RUN_STATUSES:
-            outcome = await self._store.adopt_terminal_run(run)
+            outcome = await self._store.adopt_terminal_run(
+                run,
+                minimum_session_expires_at=(
+                    run.updated_at + timedelta(seconds=self._config.result_hold_seconds)
+                    if run.result_available
+                    else None
+                ),
+            )
             return _replace_report(
                 report,
                 adopted_terminal_runs=report.adopted_terminal_runs + int(outcome.slot_released),
@@ -438,14 +446,21 @@ class SessionReconciler:
 
         terminal = await self._read_terminal(session, run)
         if terminal is not None and terminal.state in TERMINAL_RUN_STATUSES:
+            adopted_run = terminal_run(
+                run,
+                status=terminal.state,
+                result_available=terminal.result_available,
+                reason=_terminal_reason(terminal),
+                updated_at=now,
+            )
             outcome = await self._store.adopt_terminal_run(
-                terminal_run(
-                    run,
-                    status=terminal.state,
-                    result_available=terminal.result_available,
-                    reason=_terminal_reason(terminal),
-                    updated_at=now,
-                )
+                adopted_run,
+                minimum_session_expires_at=(
+                    adopted_run.updated_at
+                    + timedelta(seconds=self._config.result_hold_seconds)
+                    if adopted_run.result_available
+                    else None
+                ),
             )
             return _replace_report(
                 report,
@@ -1279,7 +1294,16 @@ class SessionReconciler:
                 )
                 report = _replace_report(report, evicted_results=report.evicted_results + 1)
 
-        due = session.expires_at <= now - timedelta(seconds=self._config.safety_grace_seconds)
+        reclaim_after = max(
+            (
+                run.updated_at + timedelta(seconds=self._config.result_hold_seconds)
+                for run in runs
+                if run.status in TERMINAL_RUN_STATUSES and run.result_available
+            ),
+            default=session.expires_at,
+        )
+        reclaim_after = max(reclaim_after, session.expires_at)
+        due = reclaim_after <= now - timedelta(seconds=self._config.safety_grace_seconds)
         if session.status in _RECLAIMABLE_SESSION_STATUSES and due:
             return await self._begin_reclaim(session, inventory, snapshots, now, report)
         return report

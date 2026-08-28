@@ -512,7 +512,12 @@ class SessionStateStore(Protocol):
     ) -> AdmissionOutcome:
         """Atomically admit a candidate session and elect one owner-key winner."""
 
-    async def adopt_terminal_run(self, terminal_run: DurableRunRecord) -> AdoptionOutcome:
+    async def adopt_terminal_run(
+        self,
+        terminal_run: DurableRunRecord,
+        *,
+        minimum_session_expires_at: datetime | None = None,
+    ) -> AdoptionOutcome:
         """Atomically move a run to a terminal status and free the session's slot.
 
         Idempotent: re-adopting the same terminal outcome is a safe no-op so
@@ -2060,13 +2065,21 @@ class AzureTableSessionStateStore:
 
     # -- terminal adoption ------------------------------------------------
 
-    async def adopt_terminal_run(self, terminal_run: DurableRunRecord) -> AdoptionOutcome:
+    async def adopt_terminal_run(
+        self,
+        terminal_run: DurableRunRecord,
+        *,
+        minimum_session_expires_at: datetime | None = None,
+    ) -> AdoptionOutcome:
         if terminal_run.status not in _TERMINAL_RUN_STATUSES:
             raise SessionStateStoreError(
                 f"adopt_terminal_run requires a terminal status, got {terminal_run.status!r}"
             )
         for _attempt in range(_MAX_ADOPTION_ATTEMPTS):
-            outcome = await self._adopt_terminal_run_once(terminal_run)
+            outcome = await self._adopt_terminal_run_once(
+                terminal_run,
+                minimum_session_expires_at=minimum_session_expires_at,
+            )
             if outcome is not None:
                 return outcome
 
@@ -2078,6 +2091,8 @@ class AzureTableSessionStateStore:
     async def _adopt_terminal_run_once(
         self,
         terminal_run: DurableRunRecord,
+        *,
+        minimum_session_expires_at: datetime | None,
     ) -> AdoptionOutcome | None:
         current_run = await self.get_run(
             terminal_run.owner_partition,
@@ -2085,13 +2100,23 @@ class AzureTableSessionStateStore:
             terminal_run.run_id,
         )
         if current_run.record.status in _TERMINAL_RUN_STATUSES:
-            return await self._adopt_existing_terminal_run(terminal_run, current_run)
-        return await self._adopt_active_terminal_run(terminal_run, current_run)
+            return await self._adopt_existing_terminal_run(
+                terminal_run,
+                current_run,
+                minimum_session_expires_at=minimum_session_expires_at,
+            )
+        return await self._adopt_active_terminal_run(
+            terminal_run,
+            current_run,
+            minimum_session_expires_at=minimum_session_expires_at,
+        )
 
     async def _adopt_existing_terminal_run(
         self,
         terminal_run: DurableRunRecord,
         current_run: RunRead,
+        *,
+        minimum_session_expires_at: datetime | None,
     ) -> AdoptionOutcome | None:
         if current_run.record.status != terminal_run.status:
             _require_matching_terminal_outcome(
@@ -2108,17 +2133,29 @@ class AzureTableSessionStateStore:
         if not _session_owns_active_run(session, terminal_run.run_id):
             return await self._persist_terminal_without_slot(current_run, adopted_run)
         assert session is not None
-        return await self._persist_terminal_with_slot(current_run, adopted_run, session)
+        return await self._persist_terminal_with_slot(
+            current_run,
+            adopted_run,
+            session,
+            minimum_session_expires_at=minimum_session_expires_at,
+        )
 
     async def _adopt_active_terminal_run(
         self,
         terminal_run: DurableRunRecord,
         current_run: RunRead,
+        *,
+        minimum_session_expires_at: datetime | None,
     ) -> AdoptionOutcome | None:
         session = await self._get_session_or_none(terminal_run)
         if _session_owns_active_run(session, terminal_run.run_id):
             assert session is not None
-            return await self._persist_terminal_with_slot(current_run, terminal_run, session)
+            return await self._persist_terminal_with_slot(
+                current_run,
+                terminal_run,
+                session,
+                minimum_session_expires_at=minimum_session_expires_at,
+            )
         try:
             run_etag = await self._replace_entity(
                 terminal_run.to_table_entity(),
@@ -2165,12 +2202,19 @@ class AzureTableSessionStateStore:
         current_run: RunRead,
         adopted_run: DurableRunRecord,
         session: SessionRead,
+        *,
+        minimum_session_expires_at: datetime | None,
     ) -> AdoptionOutcome | None:
         from azure.core.exceptions import HttpResponseError
         from azure.data.tables import TableTransactionError
 
         released_session = _release_active_run(
             session.record,
+            minimum_expires_at=(
+                minimum_session_expires_at
+                if adopted_run.result_available
+                else None
+            ),
             updated_at=adopted_run.updated_at,
         )
         operations: list[_TransactionOp] = [_update_op(released_session, etag=session.etag)]
@@ -2220,6 +2264,7 @@ class AzureTableSessionStateStore:
             released_session = (
                 _release_active_run(
                     current_session.record,
+                    minimum_expires_at=None,
                     updated_at=max(effective_updated_at, current_session.record.updated_at),
                 )
                 if owns_slot
@@ -2593,7 +2638,10 @@ def _update_op(
 
 
 def _release_active_run(
-    session: DurableSessionRecord, *, updated_at: datetime
+    session: DurableSessionRecord,
+    *,
+    minimum_expires_at: datetime | None,
+    updated_at: datetime,
 ) -> DurableSessionRecord:
     """Build the released-slot session record after a terminal run is adopted.
 
@@ -2612,7 +2660,11 @@ def _release_active_run(
         protocol=session.protocol,
         status="ready",
         last_activity_at=updated_at,
-        expires_at=session.expires_at,
+        expires_at=(
+            session.expires_at
+            if minimum_expires_at is None
+            else max(session.expires_at, minimum_expires_at)
+        ),
         idle_policy_armed=session.idle_policy_armed,
         active_run_id=None,
         snapshot_ids=session.snapshot_ids,

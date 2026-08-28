@@ -35,7 +35,7 @@ from ..journal_paths import (
     HARNESS_PROTOCOL_PATH,
     validate_checkpoint_name,
 )
-from ..sandbox_runtime_limits import lifecycle_auto_delete_seconds
+from ..sandbox_runtime_limits import RESULT_HOLD_SECONDS, lifecycle_auto_delete_seconds
 from ..session_state import (
     TERMINAL_RUN_STATUSES,
     ActiveRunConflictError,
@@ -1155,6 +1155,9 @@ async def finalize_submit_operation(
     armed = _session_after_submit_rearm(
         rearm_session,
         reclaim_idle_seconds=runtime.reclaim_idle_seconds,
+        minimum_retention_seconds=(
+            RESULT_HOLD_SECONDS if run.record.result_available else 0
+        ),
         updated_at=datetime.now(UTC),
     )
     try:
@@ -1262,6 +1265,7 @@ def _session_after_submit_rearm(
     session: DurableSessionRecord,
     *,
     reclaim_idle_seconds: int,
+    minimum_retention_seconds: int = 0,
     updated_at: datetime,
 ) -> DurableSessionRecord:
     return DurableSessionRecord.create(
@@ -1274,7 +1278,8 @@ def _session_after_submit_rearm(
         protocol=session.protocol,
         status=session.status,
         last_activity_at=updated_at,
-        expires_at=updated_at + timedelta(seconds=reclaim_idle_seconds),
+        expires_at=updated_at
+        + timedelta(seconds=max(reclaim_idle_seconds, minimum_retention_seconds)),
         idle_policy_armed=True,
         active_run_id=session.active_run_id,
         snapshot_ids=session.snapshot_ids,

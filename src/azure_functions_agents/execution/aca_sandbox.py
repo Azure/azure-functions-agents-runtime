@@ -44,6 +44,7 @@ from ..controller.readiness import (
     session_with_admitted_run,
     terminal_run,
 )
+from ..sandbox_runtime_limits import RESULT_HOLD_SECONDS
 from ..session_state import (
     TERMINAL_RUN_STATUSES,
     ActiveRunConflictError,
@@ -1494,7 +1495,14 @@ async def _adopt_if_terminal(
     terminal = _terminal_record(run, status)
     if terminal is None:
         return None
-    outcome = await activated.store.adopt_terminal_run(terminal)
+    outcome = await activated.store.adopt_terminal_run(
+        terminal,
+        minimum_session_expires_at=(
+            terminal.updated_at + timedelta(seconds=RESULT_HOLD_SECONDS)
+            if terminal.result_available
+            else None
+        ),
+    )
     await finalize_submit_operation(
         runtime,
         activated,
