@@ -279,7 +279,7 @@ textarea { resize: vertical; }
 @media (prefers-reduced-motion: reduce) { .ss-spinner { animation: none; } }
 
 .ss-popover {
-  z-index: 4000;
+  z-index: 1000001;
   display: flex; flex-direction: column;
   background: var(--surface); border: 1px solid var(--border-strong);
   border-radius: 8px; box-shadow: 0 8px 20px rgba(0, 0, 0, 0.10), 0 2px 6px rgba(0, 0, 0, 0.06);
@@ -574,6 +574,13 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
 .prepare-app-panel p { margin: 2px 0 0; color: var(--text-muted); font-size: 12.5px; line-height: 1.5; }
 .prepared-target-summary { margin-top: 16px; border-color: color-mix(in srgb, var(--green) 30%, var(--border)); background: var(--green-soft); }
 .prepared-target-summary span, .prepared-target-summary small { color: var(--text-muted); }
+.connection-plan-empty { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 76px;
+  padding: 16px; border: 1px dashed var(--border); border-radius: 8px; color: var(--text-muted); background: var(--surface-2); }
+.connection-plan-summary { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center;
+  gap: 12px; padding: 14px; border: 1px solid color-mix(in srgb, var(--brand) 30%, var(--border));
+  border-radius: 8px; background: var(--brand-soft); }
+.connection-plan-summary > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.connection-plan-summary span, .connection-plan-summary small { color: var(--text-muted); overflow-wrap: anywhere; }
 .live-capability-target { margin: 0 0 12px; }
 .live-capability-step .connection-panel { padding-top: 16px; border-top: 1px solid var(--border); }
 .review-capability-selection { margin-bottom: 12px; }
@@ -607,8 +614,8 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
   .review-grid > div:nth-child(3) { border-left: 0; }
   .review-grid > div:nth-child(n+3) { border-top: 1px solid var(--border); }
   .steps .step-sep { display: none; }
-  .prepared-target-summary { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
-  .prepared-target-summary > .badge { grid-column: 2; justify-self: start; }
+  .prepared-target-summary, .connection-plan-summary { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+  .prepared-target-summary > .badge, .connection-plan-summary > .badge { grid-column: 2; justify-self: start; }
 }
 
 /* Hosted Skill detail */

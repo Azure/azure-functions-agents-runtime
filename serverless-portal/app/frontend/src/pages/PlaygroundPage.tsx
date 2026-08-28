@@ -6,6 +6,7 @@ import { Button, Checkbox, Input } from '@coreai/fluentui-react'
 import { SearchableSelect } from '../components/ui'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
+import { slugify } from '../agentDraft'
 
 const enc = encodeURIComponent
 
@@ -449,7 +450,13 @@ export default function PlaygroundPage() {
   // Select the deep-linked agent, else the first chat-capable one.
   useEffect(() => {
     if (!chatAgents.length) return
-    const deep = appParam && nameParam ? `${appParam}::${nameParam}` : ''
+    const appAgents = appParam ? chatAgents.filter((candidate) => candidate.app === appParam) : []
+    const deepAgent = appParam && nameParam
+      ? appAgents.find(
+          (candidate) => candidate.name === nameParam || candidate.name === slugify(nameParam),
+        ) ?? (appAgents.length === 1 ? appAgents[0] : undefined)
+      : undefined
+    const deep = deepAgent ? keyOf(deepAgent) : ''
     if (!chatAgents.some((a) => keyOf(a) === selectedKey)) {
       setSelectedKey(chatAgents.some((a) => keyOf(a) === deep) ? deep : keyOf(chatAgents[0]))
     }

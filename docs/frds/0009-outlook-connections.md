@@ -78,6 +78,13 @@ This is a portal control-plane feature. It does not change the runtime's discove
   3. Configure: create mode provisions the full resource set; existing mode validates the selected ARM ID and connector type, then adds the two app access policies and an app-specific MCP configuration without updating the selected gateway or connection.
   4. Authorize: portal opens the Connector Namespace gateway at `connectors.azure.com` in a new browser tab. The customer opens the Outlook connection, chooses `Authorize`, and completes Microsoft sign-in. The Hosted Skills portal never renders or proxies credential entry.
   5. Verify: portal writes `O365_MCP_SERVER_URL`, refreshes on return or on `Check status`, and reports readiness only when Azure authentication and the complete app configuration pass.
+- New Skill Step 4 supports connection selection before a new Function App
+  exists. Candidate discovery validates and uses the planned Function App ARM
+  resource ID but performs no mutation. The author chooses create-new or an
+  eligible existing connection, then one action prepares the Function App,
+  waits for its managed identity, and runs the existing create/attach
+  coordinator with the saved choice. A post-preparation Outlook failure keeps
+  the prepared app and retries only connection setup.
 - The table exposes `Reconnect`, `Check status`, and a source-aware removal action. `Delete connection` applies to app-owned resources; `Remove from app` applies to a selected shared connection.
 - Removal opens a confirmation that lists the exact Azure and source effects. A successful removal invalidates both connection and source queries so the table and MCP inventory update together.
 
@@ -124,7 +131,7 @@ Removal is source-aware and differs by ownership:
 The browser continues to send its ARM bearer token to the portal server. New server endpoints mediate validation and ARM calls so preview API details are not duplicated in the frontend:
 
 - `GET /api/connections?subscription=&resourceGroup=&app=` lists supported Connector Gateway connections for the app.
-- `GET /api/connections/candidates?subscription=&resourceGroup=&app=&connectorSubscription=` lists eligible Office 365 connections in the explicitly selected connector subscription.
+- `GET /api/connections/candidates?subscription=&resourceGroup=&app=&connectorSubscription=&planned=` lists eligible Office 365 connections in the explicitly selected connector subscription. `planned=true` derives a validated future Function App ARM ID and does not resolve a live site or managed identity.
 - `POST /api/connections` validates the app identity and creates the Outlook resource set.
 - `POST /api/connections/attach` validates an opaque candidate connection ID, converges app access and MCP configuration on its gateway, and wires the generated endpoint into the Function App settings.
 - `GET /api/connections/:connectionId/status` refreshes the provider status.
@@ -225,6 +232,10 @@ The portal API is new and internal to the Hosted Skills portal. Responses use a 
 | 32 | Existing connection wizard navigation | Select path then Continue / open the picker immediately | Selecting Use existing advances directly to the subscription and connection picker without an extra Continue click | Human | 2026-08-27 |
 | 33 | Capability add entry point | Outlook-specific Add connection / MCP server and tool catalog | Label the action Add MCP server or tool; offer Outlook MCP server now and show Add tool as Coming soon; search connector subscriptions in the existing Outlook path | Human | 2026-08-28 |
 | 34 | New Skill connection setup | Configure after deployment / optional live setup before review | Add Tools & connections as optional Step 4 after Deployment target. Existing targets reuse the live Outlook panel immediately; new targets prepare Azure infrastructure and identity first, then reuse the same panel before source deployment. Skip performs no early preparation | Human | 2026-08-28 |
+| 35 | New Skill connection ordering | Prepare identity, then choose / choose first, then prepare and auto-configure | Supersede the new-target ordering in Decision 34: choose create-new or an existing Outlook connection first; then create the identity and automatically configure that saved choice. Keep preparation when Outlook setup fails so only connection setup is retried. | Human | 2026-08-28 |
+| 36 | Preserve built-in endpoints across preparation and connection deployment | Expose provisioning shells immediately / distinguish pending and active apps; trust generated source / validate final deployment bundle | Keep portal-managed app shells out of Hosted Skills until an agent indexes or final deployment sets an activation marker. Always generate required `description` front matter and validate every overlaid `.agent.md` before initial deploy or redeploy so the runtime cannot skip the agent and its built-in endpoints. | Human | 2026-08-28 |
+| 37 | Built-in Test route identity after New Skill deployment | Cache front-matter display name / cache filename-derived runtime slug | Cache the sanitized `.agent.md` filename slug used by runtime functions. Normalize legacy cached display names at both chat proxy paths and when reconciling detail/Playground deep links. | Agent | 2026-08-28 |
+| 38 | New Skill draft lifecycle | Resume the previous draft from every New Skill entry / reset explicit New Skill entry points | Global and Hosted Skills page New Skill actions clear the prior session draft before navigation; only navigation within an active wizard resumes it. AI regeneration derives the skill name from the current description so a resumed draft cannot silently deploy a previous hidden name. | Agent | 2026-08-28 |
 
 ## 6. Test plan
 
@@ -246,6 +257,11 @@ The portal API is new and internal to the Hosted Skills portal. Responses use a 
 - [x] Frontend flow: selecting Use existing advances directly from Source to the subscription and connection picker without an intermediate Continue action.
 - [x] Frontend flow: Add MCP server or tool opens a responsive catalog, Add tool is disabled as Coming soon, and the existing Outlook path can filter subscriptions by name or ID.
 - [x] Frontend flow: New Skill includes optional Tools & connections before Review; Skip creates no early Azure resources, while Configure reuses the live Outlook create/existing flow on the selected target.
+- [x] Frontend flow: a new target chooses create-new or an existing Outlook connection before preparation; the combined action prepares the identity and then applies the saved choice, with Outlook-only retry after preparation.
+- [x] Server unit: planned Function App ARM IDs are validated for read-only pre-provision candidate discovery.
+- [x] Server regression: missing required `description` is rejected before deployment, final overlaid agent bundles are validated before upload, and empty portal-managed app shells are not exposed as Hosted Skills.
+- [x] Portal regression: optimistic post-deploy cache uses the runtime filename slug; streaming and non-streaming chat proxies normalize stale display-name slugs before invoking built-in endpoints.
+- [x] Frontend regression: explicit New Skill entry points clear previous session state, while in-wizard navigation preserves it; AI regeneration does not retain a name derived from an older description.
 - [x] Frontend flow: Add connection stays enabled with existing rows; the Outlook flow explains its per-type uniqueness instead of submitting a duplicate. Python tools and Skills show Coming soon; App Functions is absent.
 - [ ] Frontend flow: create/existing choice, loading/empty/error candidate states, candidate selection, configuration disclosure, and successful attachment.
 - [ ] Frontend route audit: no `/apps/` routes or links remain; legacy app detail, standalone Connections, legacy agent detail, and generic AddCapability modules are deleted.

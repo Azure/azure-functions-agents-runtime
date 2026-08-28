@@ -6,6 +6,7 @@ import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
 import { EmptyState, HostedSkillRow, StatTiles, SubscriptionPicker } from '../components/ui'
 import { Button } from '@coreai/fluentui-react'
+import { clearDraft } from '../agentDraft'
 
 function formatCachedAt(ms: number): string {
   if (!ms) return ''
@@ -127,7 +128,7 @@ export default function AgentsPage() {
         >
           {isFetching ? '⟳ Refreshing…' : '⟳ Hard refresh'}
         </Button>
-        <Link className="btn primary" to="/create-agent">
+        <Link className="btn primary" to="/create-agent" onClick={clearDraft}>
           ＋ New Skill
         </Link>
       </div>
@@ -198,7 +199,7 @@ function FirstRunEmptyState({ subName }: { subName: string }) {
     <div className="empty" style={{ marginTop: 16 }}>
       <h2 style={{ margin: '0 0 6px' }}>No Hosted Skills yet</h2>
       <p className="muted">Create the first skill in {subName || 'this subscription'}.</p>
-      <Link to="/create-agent" className="btn primary">＋ New Skill</Link>
+      <Link to="/create-agent" className="btn primary" onClick={clearDraft}>＋ New Skill</Link>
     </div>
   )
 }

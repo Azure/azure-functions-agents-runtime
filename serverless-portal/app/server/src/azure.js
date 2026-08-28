@@ -7,10 +7,9 @@
 // How agents are identified (see requirements.md §5.2 and verified against the
 // deployed `func-agent-func-*` apps):
 //
-//   1. DEFINITION — a Function App IS a serverless agent app if — and only if —
-//      it carries the app-setting marker `AZURE_FUNCTIONS_AGENTS_PROVIDER` (its
-//      value is the model provider, e.g. `foundry`). This is the sole, reliable
-//      "is this an agent app?" signal available from ARM.
+//   1. DEFINITION — `AZURE_FUNCTIONS_AGENTS_PROVIDER` identifies agent-app
+//      candidates. A portal-managed app remains pending and is omitted until
+//      an agent indexes or final source deployment marks it active.
 //   2. The `*.agent.md` source files are the source of truth for the agent set
 //      (a developer can add their own plain Functions to `function_app.py`, and
 //      those are indistinguishable from agent triggers in ARM metadata). We read
@@ -43,6 +42,13 @@ import { createHash, randomUUID } from 'node:crypto'
 import { resolveConfiguredModelSettings } from './custom-tools.js'
 
 const AGENT_PROVIDER_SETTING = 'AZURE_FUNCTIONS_AGENTS_PROVIDER'
+const PORTAL_MANAGED_SETTING = 'AZURE_FUNCTIONS_AGENTS_PORTAL_MANAGED'
+const PREPARATION_ID_SETTING = 'AZURE_FUNCTIONS_AGENTS_PREPARATION_ID'
+const DEPLOYMENT_COMPLETE_SETTING = 'AZURE_FUNCTIONS_AGENTS_PORTAL_DEPLOYED'
+
+export function shouldExposeDiscoveredApp({ portalManaged, preparationId, deploymentComplete, indexedAgentCount }) {
+  return !portalManaged && !preparationId || deploymentComplete || indexedAgentCount > 0
+}
 
 // v1 scope: a single default subscription. Override with PORTAL_SUBSCRIPTION_ID.
 // The signed-in identity (the forwarded ARM token) authorises every call.
@@ -379,6 +385,12 @@ function safeFunctionName(rawName) {
   if (!name) return 'agent_function'
   if (/^[0-9]/.test(name)) return `fn_${name}`
   return name
+}
+
+export function agentEndpointSlugs(agentName) {
+  const supplied = String(agentName ?? '').trim()
+  const normalized = safeFunctionName(supplied)
+  return [...new Set([normalized, normalized.toLowerCase(), supplied].filter(Boolean))]
 }
 
 // Map an `<name>.agent.md` filename to its agent slug.
@@ -1633,9 +1645,16 @@ export async function functionHostKey(accessToken, subscriptionId, resourceGroup
 // Call a deployed agent's built-in chat endpoint (`POST agents/<slug>/chat`).
 // Tries the default route prefix and the `api` prefix. Returns the normalised
 // chat result `{ sessionId, response, toolCalls }`.
-export async function callAgentChat(host, agentSlug, prompt, { key = '', sessionId = '' } = {}) {
-  const slug = encodeURIComponent(agentSlug)
-  const paths = [`agents/${slug}/chat`, `api/agents/${slug}/chat`]
+export async function callAgentChat(
+  host,
+  agentSlug,
+  prompt,
+  { key = '', sessionId = '', fetchImpl = fetch } = {},
+) {
+  const paths = agentEndpointSlugs(agentSlug).flatMap((candidate) => {
+    const slug = encodeURIComponent(candidate)
+    return [`agents/${slug}/chat`, `api/agents/${slug}/chat`]
+  })
   const headers = { 'Content-Type': 'application/json' }
   if (key) headers['x-functions-key'] = key
   if (sessionId) headers['x-ms-session-id'] = sessionId
@@ -1644,7 +1663,7 @@ export async function callAgentChat(host, agentSlug, prompt, { key = '', session
   for (const p of paths) {
     let res
     try {
-      res = await fetch(`https://${host}/${p}`, {
+      res = await fetchImpl(`https://${host}/${p}`, {
         method: 'POST',
         headers,
         body: JSON.stringify({ prompt }),
@@ -1686,9 +1705,16 @@ export async function callAgentChat(host, agentSlug, prompt, { key = '', session
 // SSE). Tries the default route prefix then `api`. Returns the raw upstream
 // Response so the caller can pipe `response.body` straight through. `signal`
 // lets the caller abort when the browser disconnects.
-export async function openAgentChatStream(host, agentSlug, prompt, { key = '', sessionId = '', signal } = {}) {
-  const slug = encodeURIComponent(agentSlug)
-  const paths = [`agents/${slug}/chatstream`, `api/agents/${slug}/chatstream`]
+export async function openAgentChatStream(
+  host,
+  agentSlug,
+  prompt,
+  { key = '', sessionId = '', signal, fetchImpl = fetch } = {},
+) {
+  const paths = agentEndpointSlugs(agentSlug).flatMap((candidate) => {
+    const slug = encodeURIComponent(candidate)
+    return [`agents/${slug}/chatstream`, `api/agents/${slug}/chatstream`]
+  })
   const headers = { 'Content-Type': 'application/json', Accept: 'text/event-stream' }
   if (key) headers['x-functions-key'] = key
   if (sessionId) headers['x-ms-session-id'] = sessionId
@@ -1697,7 +1723,7 @@ export async function openAgentChatStream(host, agentSlug, prompt, { key = '', s
   for (const p of paths) {
     let res
     try {
-      res = await fetch(`https://${host}/${p}`, {
+      res = await fetchImpl(`https://${host}/${p}`, {
         method: 'POST',
         headers,
         body: JSON.stringify({ prompt }),
@@ -2360,16 +2386,23 @@ export async function discoverAgentApps(accessToken, subscriptionId) {
     if (appName && resourceGroup) sites.push({ site, resourceGroup, appName })
   }
 
-  // Gate (parallel, cheap): an app IS a serverless agent app if — and only if —
-  // it carries the AZURE_FUNCTIONS_AGENTS_PROVIDER app setting. Check them all
-  // concurrently and drop the rest before doing any expensive work.
+  // Gate (parallel, cheap): the provider setting identifies agent-app
+  // candidates. Preparation/activation state is retained for the enrichment
+  // pass so empty infrastructure shells are not presented as Hosted Skills.
   const gated = (
     await mapLimit(sites, GATE_CONCURRENCY, async (entry) => {
       try {
         const settings = await client.webApps.listApplicationSettings(entry.resourceGroup, entry.appName)
         const settingsMap = settingsToMap(settings.properties)
         if (!(AGENT_PROVIDER_SETTING in settingsMap)) return null
-        return { ...entry, provider: settingsMap[AGENT_PROVIDER_SETTING] ?? '' }
+        return {
+          ...entry,
+          provider: settingsMap[AGENT_PROVIDER_SETTING] ?? '',
+          portalManaged: String(settingsMap[PORTAL_MANAGED_SETTING] ?? '').toLowerCase() === 'true',
+          preparationId: String(settingsMap[PREPARATION_ID_SETTING] ?? ''),
+          deploymentComplete:
+            String(settingsMap[DEPLOYMENT_COMPLETE_SETTING] ?? '').toLowerCase() === 'true',
+        }
       } catch {
         return null
       }
@@ -2379,33 +2412,49 @@ export async function discoverAgentApps(accessToken, subscriptionId) {
   // Enrich (parallel, heavier): list functions and read the authoritative
   // `*.agent.md` slugs for each agent app, then classify agents vs supporting
   // functions. The two reads per app run together.
-  const apps = await mapLimit(gated, ENRICH_CONCURRENCY, async ({ site, resourceGroup, appName, provider }) => {
-    const [functions, slugInfo] = await Promise.all([
-      functionsInApp(client, resourceGroup, appName, site.defaultHostName),
-      readAgentSlugs(accessToken, subscriptionId, site),
-    ])
-    const { agents, appSupportingFunctions } = parseAgentsFromFunctions(functions, slugInfo.slugs, slugInfo.ok)
-
-    // Fall back to the app itself as a single agent when nothing was found.
-    if (agents.length === 0) {
-      agents.push({
-        name: appName,
-        trigger: 'http',
-        builtinEndpoints: false,
-        routes: [],
-        supportingFunctions: [],
-      })
-    }
-    return {
-      name: appName,
+  const apps = (
+    await mapLimit(gated, ENRICH_CONCURRENCY, async ({
+      site,
       resourceGroup,
-      location: site.location ?? '',
+      appName,
       provider,
-      defaultHostName: site.defaultHostName ?? '',
-      agents,
-      supportingFunctions: appSupportingFunctions,
-    }
-  })
+      portalManaged,
+      preparationId,
+      deploymentComplete,
+    }) => {
+      const [functions, slugInfo] = await Promise.all([
+        functionsInApp(client, resourceGroup, appName, site.defaultHostName),
+        readAgentSlugs(accessToken, subscriptionId, site),
+      ])
+      const { agents, appSupportingFunctions } = parseAgentsFromFunctions(functions, slugInfo.slugs, slugInfo.ok)
+      if (!shouldExposeDiscoveredApp({
+        portalManaged,
+        preparationId,
+        deploymentComplete,
+        indexedAgentCount: agents.filter((agent) => agent.builtinEndpoints || agent.trigger !== 'none').length,
+      })) return null
+
+      // Fall back to the app itself as a single agent when nothing was found.
+      if (agents.length === 0) {
+        agents.push({
+          name: appName,
+          trigger: 'http',
+          builtinEndpoints: false,
+          routes: [],
+          supportingFunctions: [],
+        })
+      }
+      return {
+        name: appName,
+        resourceGroup,
+        location: site.location ?? '',
+        provider,
+        defaultHostName: site.defaultHostName ?? '',
+        agents,
+        supportingFunctions: appSupportingFunctions,
+      }
+    })
+  ).filter(Boolean)
 
   apps.sort((a, b) => a.name.localeCompare(b.name))
   return { subscriptionId, apps }

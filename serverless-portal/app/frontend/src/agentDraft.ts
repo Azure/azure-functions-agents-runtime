@@ -6,6 +6,17 @@
 
 export type Trigger = 'http' | 'timer' | 'connector'
 export type InstructionMode = 'generate' | 'manual'
+export type OutlookConnectionPlan =
+  | { mode: 'none' }
+  | { mode: 'create'; displayName: string }
+  | {
+      mode: 'existing'
+      connectionId: string
+      connectorSubscription: string
+      displayName: string
+      gatewayName: string
+      resourceGroup: string
+    }
 
 export interface NewApp {
   rgMode: 'existing' | 'new'
@@ -36,6 +47,7 @@ export interface Draft {
   mdOverride: string | null
   capabilitiesReviewed: boolean
   outlookConfigured: boolean
+  outlookPlan: OutlookConnectionPlan
   preparationId: string
   preparedTargetKey: string
   targetSubscription: string
@@ -80,6 +92,7 @@ export const DEFAULT_DRAFT: Draft = {
   mdOverride: null,
   capabilitiesReviewed: false,
   outlookConfigured: false,
+  outlookPlan: { mode: 'none' },
   preparationId: '',
   preparedTargetKey: '',
   targetSubscription: '',
@@ -89,6 +102,7 @@ export const DEFAULT_DRAFT: Draft = {
 }
 
 export const DRAFT_KEY = 'create-agent-draft'
+const DRAFT_RESET_EVENT = 'serverless-portal:draft-reset'
 
 // Ephemeral: the in-progress agent lives in sessionStorage, so it survives
 // reloads/navigation within the tab but is discarded when the browser closes.
@@ -116,6 +130,13 @@ export function clearDraft(): void {
   } catch {
     /* ignore */
   }
+  window.dispatchEvent(new Event(DRAFT_RESET_EVENT))
+}
+
+export function subscribeDraftReset(callback: () => void): () => void {
+  const listener = () => callback()
+  window.addEventListener(DRAFT_RESET_EVENT, listener)
+  return () => window.removeEventListener(DRAFT_RESET_EVENT, listener)
 }
 
 export function slugify(name: string): string {
@@ -178,8 +199,8 @@ export function sanitizeAppName(name: string): string {
 
 export function composeAgentMd(d: Draft): string {
   const slug = slugify(d.name)
-  const lines: string[] = ['---', `name: ${d.name || slug}`]
-  if (d.description) lines.push(`description: ${d.description}`)
+  const description = d.description.trim() || `${d.name.trim() || slug} Hosted Skill.`
+  const lines: string[] = ['---', `name: ${d.name || slug}`, `description: ${JSON.stringify(description)}`]
   if (d.foundryModel) lines.push(`model: ${d.foundryModel}`)
   if (d.trigger === 'http') {
     lines.push('trigger:', '  type: http_trigger', '  args:', `    route: ${slug}`, '    methods: ["POST"]')

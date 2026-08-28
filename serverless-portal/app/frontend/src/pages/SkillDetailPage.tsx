@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Button } from '@coreai/fluentui-react'
@@ -10,6 +10,7 @@ import { ObservabilityPanel } from '../components/ObservabilityPanel'
 import { DeploymentStatus, GitHubConnect, useDeployJob } from '../deploy'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
+import { slugify } from '../agentDraft'
 
 type DetailTab = 'instructions' | 'runs' | 'capabilities' | 'observability' | 'source'
 
@@ -105,7 +106,7 @@ export default function SkillDetailPage() {
 
   const subForQuery = subscriptionId || selected
   const snapshot = useMemo(() => readAgentsSnapshot(subForQuery), [subForQuery])
-  const { data, error: queryError, isFetching, dataUpdatedAt } = useQuery({
+  const { data, error: queryError, isFetching, dataUpdatedAt, refetch } = useQuery({
     queryKey: queryKeys.liveAgents(subForQuery),
     queryFn: () => api.liveAgents(subForQuery),
     enabled: !!subForQuery,
@@ -119,14 +120,29 @@ export default function SkillDetailPage() {
     if (subForQuery && data) writeAgentsSnapshot(subForQuery, data, dataUpdatedAt)
   }, [subForQuery, data, dataUpdatedAt])
 
-  const agent = useMemo(
-    () => data?.agents.find((candidate) => candidate.app === appName && candidate.name === name),
-    [data, appName, name],
-  )
+  const agent = useMemo(() => {
+    const appAgents = data?.agents.filter((candidate) => candidate.app === appName) ?? []
+    return appAgents.find(
+      (candidate) => candidate.name === name || (!!name && candidate.name === slugify(name)),
+    ) ?? (appAgents.length === 1 ? appAgents[0] : undefined)
+  }, [data, appName, name])
   const hostApp: LiveAgentApp | undefined = useMemo(
     () => data?.apps.find((candidate) => candidate.name === appName),
     [data, appName],
   )
+  const fallbackRefreshRef = useRef('')
+  useEffect(() => {
+    const fallbackKey = agent ? `${subForQuery}/${agent.app}/${agent.name}` : ''
+    const looksLikeProvisioningFallback =
+      !!agent &&
+      agent.name === appName &&
+      agent.trigger === 'http' &&
+      !agent.builtinEndpoints &&
+      (agent.routes?.length ?? 0) === 0
+    if (!looksLikeProvisioningFallback || isFetching || fallbackRefreshRef.current === fallbackKey) return
+    fallbackRefreshRef.current = fallbackKey
+    void refetch()
+  }, [agent, appName, isFetching, refetch, subForQuery])
   const backTo = `/agents/${subscriptionId ?? selected}`
   const error = queryError ? (queryError as Error).message : null
   const scanning = !!subForQuery && !data && !error

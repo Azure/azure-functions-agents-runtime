@@ -11,6 +11,7 @@ import {
   type OutlookConnection,
   type OutlookConnectionCandidate,
 } from '../api'
+import type { OutlookConnectionPlan } from '../agentDraft'
 import { Modal } from './Modal'
 import { Icon, SearchableSelect } from './ui'
 import { useIdentity } from '../identity'
@@ -25,6 +26,10 @@ interface OutlookConnectionsPanelProps {
   mcpSourceState: 'draft' | 'deployed' | 'none'
   hasOutlookMcp: boolean
   onConnectionStateChange?: (configured: boolean) => void
+  selectionOnly?: boolean
+  plannedConnection?: OutlookConnectionPlan
+  onPlannedConnectionChange?: (plan: OutlookConnectionPlan) => void
+  disabled?: boolean
 }
 
 function ConnectionStatus({ value }: { value: OutlookConnection['status'] }) {
@@ -50,6 +55,10 @@ export function OutlookConnectionsPanel({
   mcpSourceState,
   hasOutlookMcp,
   onConnectionStateChange,
+  selectionOnly = false,
+  plannedConnection = { mode: 'none' },
+  onPlannedConnectionChange,
+  disabled = false,
 }: OutlookConnectionsPanelProps) {
   const queryClient = useQueryClient()
   const { subscriptions, subscriptionsLoading, subscriptionError, refreshSubscriptions } = useIdentity()
@@ -73,12 +82,17 @@ export function OutlookConnectionsPanel({
   const connectionsQuery = useQuery({
     queryKey: connectionKey,
     queryFn: () => api.listConnections(context),
+    enabled: !selectionOnly,
     staleTime: 15_000,
     retry: false,
   })
   const candidatesQuery = useQuery({
     queryKey: candidateKey,
-    queryFn: () => api.listOutlookConnectionCandidates({ ...context, connectorSubscription }),
+    queryFn: () => api.listOutlookConnectionCandidates({
+      ...context,
+      connectorSubscription,
+      planned: selectionOnly,
+    }),
     enabled: wizardOpen && step === 2 && mode === 'existing' && !!connectorSubscription,
     staleTime: 15_000,
     retry: false,
@@ -117,6 +131,16 @@ export function OutlookConnectionsPanel({
     setConnectorSubscription(subscription)
     setSelectedId('')
   }, [subscription])
+
+  useEffect(() => {
+    if (!selectionOnly) return
+    setMode(plannedConnection.mode === 'existing' ? 'existing' : 'create')
+    setDisplayName(plannedConnection.mode === 'create' ? plannedConnection.displayName : 'Outlook reports')
+    setConnectorSubscription(
+      plannedConnection.mode === 'existing' ? plannedConnection.connectorSubscription : subscription,
+    )
+    setSelectedId(plannedConnection.mode === 'existing' ? plannedConnection.connectionId : '')
+  }, [plannedConnection, selectionOnly, subscription])
 
   const refreshSourceQueries = () => Promise.all([
     queryClient.invalidateQueries({ queryKey: ['source', subscription, app, 'mcp.json'] }),
@@ -206,9 +230,12 @@ export function OutlookConnectionsPanel({
   }
   const openOutlookWizard = () => {
     setStep(1)
-    setMode('create')
-    setConnectorSubscription(subscription)
-    setSelectedId('')
+    setMode(plannedConnection.mode === 'existing' ? 'existing' : 'create')
+    setDisplayName(plannedConnection.mode === 'create' ? plannedConnection.displayName : 'Outlook reports')
+    setConnectorSubscription(
+      plannedConnection.mode === 'existing' ? plannedConnection.connectorSubscription : subscription,
+    )
+    setSelectedId(plannedConnection.mode === 'existing' ? plannedConnection.connectionId : '')
     setConfigured(null)
     setSetupSource(null)
     setTestResult(null)
@@ -216,6 +243,31 @@ export function OutlookConnectionsPanel({
     setActionMessage('')
     setCatalogOpen(false)
     setWizardOpen(true)
+  }
+  const chooseCreatedConnection = () => {
+    if (!selectionOnly) {
+      createConnection.mutate()
+      return
+    }
+    onPlannedConnectionChange?.({ mode: 'create', displayName: displayName.trim() })
+    setWizardOpen(false)
+  }
+  const chooseExistingConnection = () => {
+    if (!selectionOnly) {
+      attachConnection.mutate(selectedId)
+      return
+    }
+    const selected = candidates.find((candidate) => candidate.id === selectedId)
+    if (!selected) return
+    onPlannedConnectionChange?.({
+      mode: 'existing',
+      connectionId: selected.id,
+      connectorSubscription,
+      displayName: selected.displayName,
+      gatewayName: selected.gatewayName,
+      resourceGroup: selected.resourceGroup,
+    })
+    setWizardOpen(false)
   }
   const backToCatalog = () => {
     setWizardOpen(false)
@@ -235,50 +287,95 @@ export function OutlookConnectionsPanel({
 
   return (
     <section className="connection-panel">
-      <div className="skill-section-head connection-panel-head">
-        <div>
-          <h3>Connections</h3>
-          <p>App-shared service connections available to this Hosted Skill.</p>
+      {selectionOnly ? (
+        <>
+          <div className="skill-section-head connection-panel-head">
+            <div>
+              <h3>Outlook connection</h3>
+              <p>Choose the connection now. Azure configuration starts after the app identity is created.</p>
+            </div>
+            <Button
+              appearance={plannedConnection.mode === 'none' ? 'primary' : 'secondary'}
+              icon={<Icon name={plannedConnection.mode === 'none' ? 'plus' : 'refresh'} size={15} />}
+              onClick={openOutlookWizard}
+              disabled={disabled}
+            >
+              {plannedConnection.mode === 'none' ? 'Choose connection' : 'Change'}
+            </Button>
+          </div>
+          {plannedConnection.mode === 'none' ? (
+            <div className="connection-plan-empty">
+              <Icon name="mail" size={20} />
+              <span>No Outlook connection selected.</span>
+            </div>
+          ) : (
+            <div className="connection-plan-summary">
+              <span className="connection-service-icon"><Icon name="mail" size={20} /></span>
+              <div>
+                <strong>{plannedConnection.displayName}</strong>
+                <span>
+                  {plannedConnection.mode === 'create'
+                    ? 'Create a new Office 365 Outlook connection'
+                    : `${plannedConnection.resourceGroup} / ${plannedConnection.gatewayName}`}
+                </span>
+                {plannedConnection.mode === 'existing' && (
+                  <small className="mono">{plannedConnection.connectorSubscription}</small>
+                )}
+              </div>
+              <span className="badge blue">Selected</span>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="skill-section-head connection-panel-head">
+          <div>
+            <h3>Connections</h3>
+            <p>App-shared service connections available to this Hosted Skill.</p>
+          </div>
+          <div className="connection-actions">
+            <Button
+              icon={<Icon name="refresh" size={15} />}
+              onClick={() => void refresh()}
+              disabled={connectionsQuery.isFetching}
+            >
+              {connectionsQuery.isFetching ? 'Refreshing...' : 'Refresh'}
+            </Button>
+            <Button
+              appearance="primary"
+              icon={<Icon name="plus" size={16} />}
+              onClick={openCatalog}
+              title="Add an MCP server or tool"
+            >
+              Add MCP server or tool
+            </Button>
+          </div>
         </div>
-        <div className="connection-actions">
-          <Button
-            icon={<Icon name="refresh" size={15} />}
-            onClick={() => void refresh()}
-            disabled={connectionsQuery.isFetching}
-          >
-            {connectionsQuery.isFetching ? 'Refreshing...' : 'Refresh'}
-          </Button>
-          <Button
-            appearance="primary"
-            icon={<Icon name="plus" size={16} />}
-            onClick={openCatalog}
-            title="Add an MCP server or tool"
-          >
-            Add MCP server or tool
-          </Button>
-        </div>
-      </div>
+      )}
 
-      {connectionsQuery.error && <div className="gh-err">{(connectionsQuery.error as Error).message}</div>}
-      {actionError && <div className="gh-err" style={{ marginBottom: 12 }}>{actionError}</div>}
-      {actionMessage && <div className="note ok connection-transient-notice" style={{ marginBottom: 12 }}>{actionMessage}</div>}
-      {mcpSourceState === 'draft' && (
+      {!selectionOnly && connectionsQuery.error && <div className="gh-err">{(connectionsQuery.error as Error).message}</div>}
+      {!selectionOnly && actionError && <div className="gh-err" style={{ marginBottom: 12 }}>{actionError}</div>}
+      {!selectionOnly && actionMessage && <div className="note ok connection-transient-notice" style={{ marginBottom: 12 }}>{actionMessage}</div>}
+      {!selectionOnly && mcpSourceState === 'draft' && (
         <div className="note warn connection-deploy-required">
           <Icon name="alert" size={17} />
           <span><strong>Deploy required.</strong> <span className="mono">mcp.json</span> has unpublished changes. Select <strong>Deploy</strong> at the top of this page to update Hosted Skills.</span>
         </div>
       )}
-      {connections.length > 0 && !hasOutlookMcp && mcpSourceState !== 'draft' && (
+      {!selectionOnly && connections.length > 0 && !hasOutlookMcp && mcpSourceState !== 'draft' && (
         <div className="note warn connection-deploy-required">
           <Icon name="alert" size={17} />
           <span><strong>Outlook source configuration is missing.</strong> Create the required <span className="mono">mcp.json</span> draft, then deploy it.</span>
-          <Button size="small" onClick={() => repairConnection.mutate(connections[0])} disabled={repairConnection.isPending}>
+          <Button
+            size="small"
+            onClick={() => repairConnection.mutate(connections[0])}
+            disabled={repairConnection.isPending}
+          >
             {repairConnection.isPending ? 'Preparing draft...' : 'Configure source'}
           </Button>
         </div>
       )}
 
-      <div className="table-wrap connections-table">
+      {!selectionOnly && <div className="table-wrap connections-table">
         <table>
           <thead>
             <tr>
@@ -370,9 +467,9 @@ export function OutlookConnectionsPanel({
             ))}
           </tbody>
         </table>
-      </div>
+      </div>}
 
-      {connections.find((connection) => connection.authorizationRequired) && (() => {
+      {!selectionOnly && connections.find((connection) => connection.authorizationRequired) && (() => {
         const connection = connections.find((candidate) => candidate.authorizationRequired)!
         return (
           <div className="note warn connection-auth-remediation">
@@ -397,7 +494,7 @@ export function OutlookConnectionsPanel({
         )
       })()}
 
-      {testResult && (
+      {!selectionOnly && testResult && (
         <div className={`connection-test ${testResult.ok ? 'is-ok connection-transient-notice' : 'is-failed'}`}>
           <strong>{testResult.ok ? 'Configuration checks passed' : 'Connection needs attention'}</strong>
           <div className="connection-checks">
@@ -411,7 +508,7 @@ export function OutlookConnectionsPanel({
         </div>
       )}
 
-      {catalogOpen && (
+      {!selectionOnly && catalogOpen && (
         <Modal title="Add MCP server or tool" onClose={() => setCatalogOpen(false)} width={620}>
           <div className="capability-add-options">
             <button type="button" className="connection-choice" onClick={openOutlookWizard}>
@@ -435,9 +532,9 @@ export function OutlookConnectionsPanel({
       )}
 
       {wizardOpen && (
-        <Modal title="Add Outlook MCP server" onClose={() => setWizardOpen(false)} width={720}>
-          <div className="connection-steps" aria-label={`Step ${step} of 3`}>
-            {['Source', 'Configure', 'Finish'].map((label, index) => (
+        <Modal title={selectionOnly ? 'Choose Outlook connection' : 'Add Outlook MCP server'} onClose={() => setWizardOpen(false)} width={720}>
+          <div className="connection-steps" aria-label={`Step ${step} of ${selectionOnly ? 2 : 3}`}>
+            {(selectionOnly ? ['Source', 'Choose'] : ['Source', 'Configure', 'Finish']).map((label, index) => (
               <span
                 key={label}
                 className={`${step >= index + 1 ? 'active' : ''}${step === index + 1 ? ' current' : ''}`}
@@ -473,11 +570,13 @@ export function OutlookConnectionsPanel({
               </div>
               <div className="note connection-mode-note">
                 {mode === 'create'
-                  ? 'Creates a Connector Gateway and Office 365 Outlook connection for this app.'
+                  ? selectionOnly
+                    ? 'A new Connector Gateway and Office 365 Outlook connection will be created after the app identity is ready.'
+                    : 'Creates a Connector Gateway and Office 365 Outlook connection for this app.'
                   : 'Selects an Office 365 Outlook connection from any subscription available to your current sign-in.'}
               </div>
               <div className="modal-actions">
-                <Button onClick={backToCatalog}>Back</Button>
+                <Button onClick={selectionOnly ? () => setWizardOpen(false) : backToCatalog}>Back</Button>
                 <Button appearance="primary" disabled={outlookConfigured} onClick={() => setStep(2)}>Continue</Button>
               </div>
             </>
@@ -486,8 +585,8 @@ export function OutlookConnectionsPanel({
           {step === 2 && mode === 'create' && (
             <>
               <div className="field">
-                <label>Connection name</label>
-                <Input value={displayName} maxLength={80} onChange={(_, data) => setDisplayName(data.value)} />
+                <label htmlFor="outlook-connection-name">Connection name</label>
+                <Input id="outlook-connection-name" value={displayName} maxLength={80} onChange={(_, data) => setDisplayName(data.value)} />
               </div>
               <div className="permission-row">
                 <Icon name="mail" size={18} />
@@ -499,10 +598,12 @@ export function OutlookConnectionsPanel({
                 <Button onClick={() => setStep(1)}>Back</Button>
                 <Button
                   appearance="primary"
-                  disabled={!displayName.trim() || createConnection.isPending}
-                  onClick={() => createConnection.mutate()}
+                  disabled={disabled || !displayName.trim() || createConnection.isPending}
+                  onClick={chooseCreatedConnection}
                 >
-                  {createConnection.isPending ? 'Creating Azure resources...' : 'Create and configure'}
+                  {selectionOnly
+                    ? 'Choose new connection'
+                    : createConnection.isPending ? 'Creating Azure resources...' : 'Create and configure'}
                 </Button>
               </div>
             </>
@@ -514,7 +615,7 @@ export function OutlookConnectionsPanel({
                 <label>Connector subscription</label>
                 <SearchableSelect
                   value={connectorSubscription}
-                  disabled={subscriptionsLoading || attachConnection.isPending}
+                  disabled={disabled || subscriptionsLoading || attachConnection.isPending}
                   loading={subscriptionsLoading}
                   loadingLabel="Loading subscriptions..."
                   options={connectorSubscriptionOptions}
@@ -567,10 +668,12 @@ export function OutlookConnectionsPanel({
                 <Button onClick={() => void candidatesQuery.refetch()} disabled={candidatesQuery.isFetching}>Refresh list</Button>
                 <Button
                   appearance="primary"
-                  disabled={!selectedId || attachConnection.isPending}
-                  onClick={() => attachConnection.mutate(selectedId)}
+                  disabled={disabled || !selectedId || attachConnection.isPending}
+                  onClick={chooseExistingConnection}
                 >
-                  {attachConnection.isPending ? 'Configuring app...' : 'Use selected connection'}
+                  {selectionOnly
+                    ? 'Choose selected connection'
+                    : attachConnection.isPending ? 'Configuring app...' : 'Use selected connection'}
                 </Button>
               </div>
             </>
@@ -610,7 +713,7 @@ export function OutlookConnectionsPanel({
         </Modal>
       )}
 
-      {removalTarget && (
+      {!selectionOnly && removalTarget && (
         <Modal
           title={removalTarget.source === 'Existing' ? 'Remove Outlook from this app?' : 'Delete Outlook connection?'}
           onClose={() => !removeConnection.isPending && setRemovalTarget(null)}

@@ -31,6 +31,22 @@ function appResourceParts(appResourceId) {
   return { subscriptionId: match[1], resourceGroup: match[2], appName: match[3] }
 }
 
+export function functionAppResourceId(subscriptionId, resourceGroup, appName) {
+  const subscription = String(subscriptionId ?? '').trim()
+  const group = String(resourceGroup ?? '').trim()
+  const app = String(appName ?? '').trim()
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(subscription)) {
+    throw portalError(400, 'subscription must be a valid Azure subscription ID.', 'invalid_app_target')
+  }
+  if (!group || group.length > 90 || !/^[a-z0-9._()-]+$/i.test(group) || group.endsWith('.')) {
+    throw portalError(400, 'resourceGroup must be a valid Azure resource group name.', 'invalid_app_target')
+  }
+  if (!/^[a-z0-9][a-z0-9-]{0,58}[a-z0-9]$/i.test(app)) {
+    throw portalError(400, 'app must be a valid Function App name.', 'invalid_app_target')
+  }
+  return `/subscriptions/${subscription}/resourceGroups/${group}/providers/Microsoft.Web/sites/${app}`
+}
+
 function gatewayResourceParts(gatewayResourceId) {
   const match = /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)\/providers\/Microsoft\.Web\/connectorGateways\/([^/]+)$/i.exec(
     String(gatewayResourceId ?? '').trim().replace(/\/$/, ''),

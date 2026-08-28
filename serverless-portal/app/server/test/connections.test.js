@@ -12,6 +12,7 @@ import {
   decodeConnectionId,
   encodeConnectionId,
   ensureOutlookMcpSource,
+  functionAppResourceId,
   listOutlookConnectionCandidates,
   listOutlookConnections,
   normalizeConnectionStatus,
@@ -26,6 +27,21 @@ import {
 } from '../src/connections.js'
 
 const appId = '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-demo/providers/Microsoft.Web/sites/stock-report'
+
+test('builds a validated Function App resource ID for pre-provision connection discovery', () => {
+  assert.equal(
+    functionAppResourceId('11111111-1111-1111-1111-111111111111', 'rg-demo', 'stock-report'),
+    appId,
+  )
+  assert.throws(
+    () => functionAppResourceId('not-a-subscription', 'rg-demo', 'stock-report'),
+    (error) => error.status === 400 && error.portalCode === 'invalid_app_target',
+  )
+  assert.throws(
+    () => functionAppResourceId('11111111-1111-1111-1111-111111111111', 'rg-demo?api-version=1', 'stock-report'),
+    (error) => error.status === 400 && error.portalCode === 'invalid_app_target',
+  )
+})
 
 test('derives stable app-scoped Outlook resource names', () => {
   const first = outlookResourceNames(appId)

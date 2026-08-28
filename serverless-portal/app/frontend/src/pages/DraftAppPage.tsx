@@ -113,6 +113,7 @@ export default function DraftAppPage() {
       newApp: { ...current.newApp, resourceGroup: '' },
       capabilitiesReviewed: false,
       outlookConfigured: false,
+      outlookPlan: { mode: 'none' },
       preparationId: '',
       preparedTargetKey: '',
     }))
@@ -125,6 +126,7 @@ export default function DraftAppPage() {
       ...patch,
       capabilitiesReviewed: false,
       outlookConfigured: false,
+      outlookPlan: { mode: 'none' },
       preparationId: '',
       preparedTargetKey: '',
     }))
@@ -141,6 +143,7 @@ export default function DraftAppPage() {
       },
       capabilitiesReviewed: false,
       outlookConfigured: false,
+      outlookPlan: { mode: 'none' },
       preparationId: '',
       preparedTargetKey: '',
     }))
@@ -195,10 +198,10 @@ export default function DraftAppPage() {
   }, [])
 
   useEffect(() => {
-    if (!appPrepared) return
+    if (!appPrepared || preparationState !== 'idle') return
     setPreparationState('prepared')
     setPreparationMessage(`Function App "${draft.newApp.appName}" is ready for live setup.`)
-  }, [appPrepared, draft.newApp.appName])
+  }, [appPrepared, draft.newApp.appName, preparationState])
 
   const foundryAccountTarget = draft.foundryAccount
     ? {
@@ -208,9 +211,57 @@ export default function DraftAppPage() {
       }
     : undefined
 
+  const configurePlannedOutlook = async () => {
+    const plan = draft.outlookPlan
+    if (draft.target !== 'new' || plan.mode === 'none') return
+    const app = sanitizeAppName(draft.newApp.appName).replace(/-+$/g, '')
+    const connectionContext = {
+      subscription: targetSubscription,
+      resourceGroup: draft.newApp.resourceGroup,
+      app,
+    }
+    setPreparationState('running')
+    setPreparationMessage('Managed identity is ready. Configuring the selected Outlook connection…')
+    const result = plan.mode === 'create'
+      ? await api.createOutlookConnection({ ...connectionContext, displayName: plan.displayName })
+      : await api.attachOutlookConnection({
+          ...connectionContext,
+          connectionId: plan.connectionId,
+          connectorSubscription: plan.connectorSubscription,
+        })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['connections', targetSubscription, draft.newApp.resourceGroup, app] }),
+      queryClient.invalidateQueries({ queryKey: ['connectionCandidates', targetSubscription, draft.newApp.resourceGroup, app] }),
+      queryClient.invalidateQueries({ queryKey: ['source', targetSubscription, app, 'mcp.json'] }),
+      queryClient.invalidateQueries({ queryKey: ['sourceList', targetSubscription, draft.newApp.resourceGroup, app] }),
+    ])
+    setDraft((current) => ({ ...current, outlookConfigured: true }))
+    setPreparationState('prepared')
+    setPreparationMessage(
+      result.connection.status === 'Connected'
+        ? `Outlook connection "${result.connection.displayName}" is configured.`
+        : `Outlook connection "${result.connection.displayName}" is configured. Complete Microsoft sign-in below.`,
+    )
+  }
+
+  const retryPlannedOutlook = async () => {
+    try {
+      await configurePlannedOutlook()
+    } catch (error) {
+      setPreparationState('error')
+      setPreparationMessage(`The app identity is ready, but Outlook setup failed: ${(error as Error).message}`)
+    }
+  }
+
   const startAppPreparation = async () => {
-    if (draft.target !== 'new' || !targetValid || preparationState === 'running') return
+    if (
+      draft.target !== 'new' ||
+      draft.outlookPlan.mode === 'none' ||
+      !targetValid ||
+      preparationState === 'running'
+    ) return
     const attempt = preparationAttempt.current + 1
+    let identityPrepared = false
     preparationAttempt.current = attempt
     const preparationId = draft.preparationId || crypto.randomUUID()
     setDraft((current) => ({ ...current, preparationId, capabilitiesReviewed: false }))
@@ -245,7 +296,8 @@ export default function DraftAppPage() {
             preparedTargetKey: preparationKey,
             capabilitiesReviewed: false,
           }))
-          setPreparationState('prepared')
+          identityPrepared = true
+          await configurePlannedOutlook()
           return
         }
         if (state.status === 'error') throw new Error(state.message)
@@ -254,7 +306,9 @@ export default function DraftAppPage() {
     } catch (error) {
       if (preparationAttempt.current !== attempt) return
       setPreparationState('error')
-      setPreparationMessage((error as Error).message)
+      setPreparationMessage(identityPrepared
+        ? `The app identity is ready, but Outlook setup failed: ${(error as Error).message}`
+        : (error as Error).message)
     }
   }
 
@@ -269,6 +323,15 @@ export default function DraftAppPage() {
     setDraft((current) => current.outlookConfigured === configured
       ? current
       : { ...current, outlookConfigured: configured })
+  }, [])
+
+  const handlePlannedConnectionChange = useCallback((outlookPlan: Draft['outlookPlan']) => {
+    setDraft((current) => ({
+      ...current,
+      outlookPlan,
+      outlookConfigured: false,
+      capabilitiesReviewed: false,
+    }))
   }, [])
 
   const runDeploy = () => {
@@ -302,7 +365,7 @@ export default function DraftAppPage() {
     cachedRef.current = true
     const host = (deployJob.result?.url ?? '').replace(/^https?:\/\//, '')
     const skillInApp = {
-      name: draft.name,
+      name: skillSlug,
       trigger: draft.trigger,
       builtinEndpoints: draft.builtinEndpoints,
       routes: [] as string[],
@@ -335,12 +398,12 @@ export default function DraftAppPage() {
       apps: [appEntry, ...previous.apps.filter((app) => app.name !== targetName)],
       agents: [
         skillEntry,
-        ...previous.agents.filter((skill) => !(skill.app === targetName && skill.name === draft.name)),
+        ...previous.agents.filter((skill) => skill.app !== targetName),
       ],
     }
     queryClient.setQueryData(key, next)
     writeAgentsSnapshot(targetSubscription, next, Date.now())
-  }, [deployJob.phase, deployJob.result, draft, queryClient, targetName, targetSubscription])
+  }, [deployJob.phase, deployJob.result, draft, queryClient, skillSlug, targetName, targetSubscription])
 
   useEffect(() => {
     setNameStatus('idle')
@@ -371,7 +434,7 @@ export default function DraftAppPage() {
       <>
         <div className="breadcrumb">Home / <Link to={`/agents/${selected}`}>Hosted Skills</Link> / New Skill</div>
         <div className="page-title"><h1>No skill instructions yet</h1></div>
-        <div className="empty">Add skill instructions first. <Link to="/create-agent">Create a new skill →</Link></div>
+        <div className="empty">Add skill instructions first. <Link to="/create-agent" onClick={clearDraft}>Create a new skill →</Link></div>
       </>
     )
   }
@@ -466,13 +529,26 @@ export default function DraftAppPage() {
           </div>
 
           {draft.target === 'new' && !appPrepared ? (
-            <div className="prepare-app-panel">
-              <span className="connection-service-icon"><Icon name="server" size={20} /></span>
-              <div>
-                <strong>Prepare {draft.newApp.appName}</strong>
-                <p>Live connection setup needs the Function App's managed identity. Preparing creates the Azure infrastructure now; skill source is deployed only after final review.</p>
+            <>
+              <div className="prepare-app-panel">
+                <span className="connection-service-icon"><Icon name="server" size={20} /></span>
+                <div>
+                  <strong>Choose first, configure after identity creation</strong>
+                  <p>Select an Outlook connection below. The next action prepares {draft.newApp.appName}, waits for its managed identity, and then configures your selection automatically. Skill source is deployed only after final review.</p>
+                </div>
               </div>
-            </div>
+              <OutlookConnectionsPanel
+                subscription={targetSubscription}
+                resourceGroup={targetResourceGroup}
+                app={targetName}
+                mcpSourceState="none"
+                hasOutlookMcp={false}
+                selectionOnly
+                plannedConnection={draft.outlookPlan}
+                onPlannedConnectionChange={handlePlannedConnectionChange}
+                disabled={preparationState === 'running'}
+              />
+            </>
           ) : (
             <>
               <p className="muted live-capability-target">Changes are applied to <span className="mono">{targetName}</span> immediately.</p>
@@ -499,8 +575,18 @@ export default function DraftAppPage() {
             <div className="toolbar">
               <Button onClick={completeCapabilities} disabled={preparationState === 'running'}>Skip for now</Button>
               {draft.target === 'new' && !appPrepared ? (
-                <Button appearance="primary" onClick={() => void startAppPreparation()} disabled={preparationState === 'running'}>
-                  {preparationState === 'running' ? 'Preparing app…' : preparationState === 'error' ? 'Retry preparation' : 'Prepare app & configure'}
+                <Button
+                  appearance="primary"
+                  onClick={() => void startAppPreparation()}
+                  disabled={preparationState === 'running' || draft.outlookPlan.mode === 'none'}
+                >
+                  {preparationState === 'running'
+                    ? 'Creating identity & configuring…'
+                    : preparationState === 'error' ? 'Retry preparation' : 'Create identity & configure Outlook'}
+                </Button>
+              ) : draft.target === 'new' && !draft.outlookConfigured && draft.outlookPlan.mode !== 'none' && preparationState === 'error' ? (
+                <Button appearance="primary" onClick={() => void retryPlannedOutlook()}>
+                  Retry Outlook setup
                 </Button>
               ) : draft.outlookConfigured ? (
                 <Button appearance="primary" onClick={completeCapabilities}>Continue to review →</Button>

@@ -12,6 +12,7 @@ import { useIdentity } from '../identity'
 import { signOut } from '../auth'
 import { useTheme } from '../theme'
 import { DeploymentNotifications } from '../deploy'
+import { clearDraft } from '../agentDraft'
 import { Icon, type IconName } from './ui'
 
 const useStyles = makeStyles({
@@ -255,7 +256,10 @@ export default function Shell({ children }: { children: ReactNode }) {
           <Button
             appearance="primary"
             icon={<Icon name="plus" size={16} />}
-            onClick={() => navigate('/create-agent')}
+            onClick={() => {
+              clearDraft()
+              navigate('/create-agent')
+            }}
           >
             New Skill
           </Button>

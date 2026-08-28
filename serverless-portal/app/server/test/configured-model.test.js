@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { discoverFoundry, formatGeneratedAgentInstructions, resolveSubscriptionId } from '../src/azure.js'
+import {
+  callAgentChat,
+  discoverFoundry,
+  formatGeneratedAgentInstructions,
+  openAgentChatStream,
+  resolveSubscriptionId,
+} from '../src/azure.js'
 import { resolveConfiguredModelSettings } from '../src/custom-tools.js'
 import { storageAccountName } from '../src/provision.js'
 
@@ -84,4 +90,46 @@ test('Foundry discovery surfaces invalid ARM authentication as 401', async (t) =
     discoverFoundry('malformed-token', '11111111-1111-4111-8111-111111111111'),
     (error) => error.status === 401 && error.portalCode === 'invalid_arm_token',
   )
+})
+
+test('chatstream resolves a cached display name to the runtime agent slug', async () => {
+  const requested = []
+  const response = await openAgentChatStream(
+    'stock-analysis-agent-im2x1.azurewebsites.net',
+    'stock-analysis-agent-13',
+    'Hello',
+    {
+      fetchImpl: async (url) => {
+        requested.push(String(url))
+        return new Response('data: {"type":"done"}\n\n', {
+          status: String(url).includes('/agents/stock_analysis_agent_13/chatstream') ? 200 : 404,
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      },
+    },
+  )
+
+  assert.equal(response.status, 200)
+  assert.match(requested[0], /\/agents\/stock_analysis_agent_13\/chatstream$/)
+})
+
+test('non-streaming chat resolves a cached display name to the runtime agent slug', async () => {
+  const requested = []
+  const result = await callAgentChat(
+    'stock-analysis-agent-im2x1.azurewebsites.net',
+    'stock-analysis-agent-13',
+    'Hello',
+    {
+      fetchImpl: async (url) => {
+        requested.push(String(url))
+        return new Response(JSON.stringify({ response: 'OK', tool_calls: [] }), {
+          status: String(url).includes('/agents/stock_analysis_agent_13/chat') ? 200 : 404,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      },
+    },
+  )
+
+  assert.equal(result.response, 'OK')
+  assert.match(requested[0], /\/agents\/stock_analysis_agent_13\/chat$/)
 })

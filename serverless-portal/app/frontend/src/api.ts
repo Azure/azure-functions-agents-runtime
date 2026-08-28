@@ -489,10 +489,11 @@ export const api = {
     resourceGroup: string
     app: string
     connectorSubscription: string
+    planned?: boolean
   }) =>
     req<{ connections: OutlookConnectionCandidate[]; partial: boolean }>(
       'GET',
-      `/api/connections/candidates?subscription=${enc(p.subscription)}&resourceGroup=${enc(p.resourceGroup)}&app=${enc(p.app)}&connectorSubscription=${enc(p.connectorSubscription)}`,
+      `/api/connections/candidates?subscription=${enc(p.subscription)}&resourceGroup=${enc(p.resourceGroup)}&app=${enc(p.app)}&connectorSubscription=${enc(p.connectorSubscription)}${p.planned ? '&planned=true' : ''}`,
     ),
   attachOutlookConnection: (p: {
     subscription: string

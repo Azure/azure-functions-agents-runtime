@@ -5,7 +5,14 @@ import { api } from '../api'
 import { useIdentity } from '../identity'
 import { CreationSteps, SearchableSelect, Icon } from '../components/ui'
 import { Button, Input } from '@coreai/fluentui-react'
-import { type Draft, loadDraft, saveDraft, clearDraft, deriveName } from '../agentDraft'
+import {
+  type Draft,
+  clearDraft,
+  deriveName,
+  loadDraft,
+  saveDraft,
+  subscribeDraftReset,
+} from '../agentDraft'
 
 export default function CreateAgentPage() {
   const navigate = useNavigate()
@@ -18,6 +25,11 @@ export default function CreateAgentPage() {
   useEffect(() => {
     saveDraft(draft)
   }, [draft])
+
+  useEffect(() => subscribeDraftReset(() => {
+    setDraft(loadDraft())
+    setProviderExpanded(true)
+  }), [])
 
   const foundrySub = draft.foundrySubscription || selected
 
@@ -142,7 +154,7 @@ export default function CreateAgentPage() {
     setGenerating(true)
     setGenError(null)
     try {
-      const name = draft.name.trim() || deriveName(draft.description)
+      const name = deriveName(draft.description)
       const r = await api.generateAgentMd({
         subscription: foundrySub,
         name,

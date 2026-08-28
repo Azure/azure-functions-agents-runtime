@@ -18,6 +18,7 @@ import cors from 'cors'
 import * as YAML from 'js-yaml'
 
 import * as azure from './azure.js'
+import { validateAgentFiles, validateAgentMarkdown } from './agent-validation.js'
 import {
   azureRoleScope,
   customToolPath,
@@ -31,6 +32,7 @@ import {
   coordinateOutlookConnectionRemoval,
   createOutlookConnection,
   deleteOutlookConnection,
+  functionAppResourceId,
   getOutlookConnection,
   listOutlookConnectionCandidates,
   listOutlookConnections,
@@ -384,7 +386,9 @@ app.get(
       route.subscription,
     )
     try {
-      const context = await connectionContext(token, route.subscription, route.resourceGroup, route.appName)
+      const context = req.query.planned === 'true'
+        ? { appResourceId: functionAppResourceId(route.subscription, route.resourceGroup, route.appName) }
+        : await connectionContext(token, route.subscription, route.resourceGroup, route.appName)
       res.json(await listOutlookConnectionCandidates(token, {
         ...context,
         connectorSubscriptionId: selectedConnectorSubscription,
@@ -1461,122 +1465,13 @@ app.get(
 // Mirrors `azure_functions_agents/config/validation.py`'s allow/deny rules.
 // ---------------------------------------------------------------------------
 
-const SUPPORTED_TRIGGER_TYPES = new Set([
-  'http_trigger',
-  'timer_trigger',
-  'queue_trigger',
-  'blob_trigger',
-  'event_grid_trigger',
-  'event_hub_message_trigger',
-  'service_bus_queue_trigger',
-  'service_bus_topic_trigger',
-  'cosmos_db_trigger',
-  'cosmos_db_trigger_v3',
-  'sql_trigger',
-  'mysql_trigger',
-  'kafka_trigger',
-  'dapr_binding_trigger',
-  'dapr_service_invocation_trigger',
-  'dapr_topic_trigger',
-  'generic_trigger',
-  'connector_trigger',
-])
-
-const REJECTED_TRIGGER_TYPES = new Set([
-  'route',
-  'schedule',
-  'activity_trigger',
-  'orchestration_trigger',
-  'entity_trigger',
-  'warm_up_trigger',
-  'assistant_skill_trigger',
-  'mcp_tool_trigger',
-  'mcp_resource_trigger',
-  'mcp_prompt_trigger',
-])
-
-// Required args per trigger type — mirrors docs/triggers.md.
-const TRIGGER_REQUIRED_ARGS = {
-  http_trigger: ['route'],
-  timer_trigger: ['schedule'],
-  queue_trigger: ['queue_name', 'connection'],
-  blob_trigger: ['path'],
-  event_hub_message_trigger: ['event_hub_name', 'connection'],
-  service_bus_queue_trigger: ['queue_name', 'connection'],
-  service_bus_topic_trigger: ['topic_name', 'subscription_name', 'connection'],
-}
-
-function validateFrontmatter(front) {
-  const errors = []
-  const warnings = []
-  if (!front || typeof front !== 'object') {
-    errors.push({ path: '/', message: 'Missing or invalid YAML frontmatter block.' })
-    return { errors, warnings }
-  }
-  if (!front.name || typeof front.name !== 'string' || !front.name.trim()) {
-    errors.push({ path: '/name', message: 'name is required and must be a non-empty string.' })
-  }
-  if (!front.description || typeof front.description !== 'string' || !front.description.trim()) {
-    errors.push({ path: '/description', message: 'description is required and must be a non-empty string.' })
-  }
-  const hasBuiltin =
-    front.builtin_endpoints === true ||
-    (front.builtin_endpoints && typeof front.builtin_endpoints === 'object')
-  const trigger = front.trigger
-  if (!hasBuiltin && !trigger) {
-    errors.push({
-      path: '/trigger',
-      message:
-        'Either a trigger: block or builtin_endpoints: true is required (agents that only expose MCP still need a trigger).',
-    })
-  }
-  if (trigger) {
-    if (typeof trigger !== 'object' || Array.isArray(trigger)) {
-      errors.push({ path: '/trigger', message: 'trigger must be an object with type and args.' })
-    } else {
-      const type = String(trigger.type ?? '').trim()
-      if (!type) {
-        errors.push({ path: '/trigger/type', message: 'trigger.type is required.' })
-      } else if (REJECTED_TRIGGER_TYPES.has(type)) {
-        errors.push({
-          path: '/trigger/type',
-          message: `trigger.type "${type}" is not a runtime-supported trigger — see docs/triggers.md.`,
-        })
-      } else if (type.includes('.')) {
-        errors.push({
-          path: '/trigger/type',
-          message: 'Dotted connector types (e.g. teams.new_channel_message_trigger) are not supported — use generic_trigger with args.type.',
-        })
-      } else if (!SUPPORTED_TRIGGER_TYPES.has(type)) {
-        warnings.push({
-          path: '/trigger/type',
-          message: `Unknown trigger type "${type}". Continuing but expect a runtime error.`,
-        })
-      } else {
-        const required = TRIGGER_REQUIRED_ARGS[type] ?? []
-        const args =
-          trigger.args && typeof trigger.args === 'object' && !Array.isArray(trigger.args) ? trigger.args : {}
-        for (const key of required) {
-          const value = args[key]
-          if (value == null || (typeof value === 'string' && !value.trim())) {
-            errors.push({ path: `/trigger/args/${key}`, message: `${key} is required for ${type}.` })
-          }
-        }
-      }
-    }
-  }
-  return { errors, warnings }
-}
-
 app.post(
   '/api/validate/agent-md',
   wrap(async (req, res) => {
     requireToken(req)
     const content = req.body?.content
     if (typeof content !== 'string') throw new HttpError(400, 'Request body must be { content: string }.')
-    const { front } = splitFrontmatter(content)
-    const result = validateFrontmatter(front)
-    res.json({ ok: result.errors.length === 0, ...result, front })
+    res.json(validateAgentMarkdown(content))
   }),
 )
 
@@ -1904,6 +1799,11 @@ async function gatherAppSkills(subscription, appName) {
 
 // Zip the prepared files and push them to the app with a remote build.
 async function pushFilesToSite(id, token, site, files) {
+  const validation = validateAgentFiles(files)
+  if (!validation.ok) {
+    const failure = validation.failures[0]
+    throw new Error(`Cannot deploy ${failure.file}: ${failure.errors[0].message}`)
+  }
   setJob(id, { message: 'Deploying source with a remote build…' })
   const zip = provision.zipStore(files)
   await provision.deployZipToApp(token, azure.scmHostName(site), zip)
@@ -2042,6 +1942,12 @@ async function runDeployJob(id, token, ctx) {
     const files = await overlayDrafts(subscription, appName, await readDirFiles(dir))
     setJob(id, { files: files.map((f) => f.name).sort() })
     await pushFilesToSite(id, token, site, files)
+    if (target.kind !== 'existing') {
+      setJob(id, { message: 'Activating the Function App…' })
+      await azure.setAppSettings(token, subscription, resourceGroup, appName, {
+        AZURE_FUNCTIONS_AGENTS_PORTAL_DEPLOYED: 'true',
+      })
+    }
     const sourceCached = await cachePublishedSource(subscription, appName, files)
     const unclearedDrafts = sourceCached ? await clearPublishedDrafts(subscription, appName, files) : []
 
@@ -2196,6 +2102,12 @@ app.post(
     const target = req.body?.target
     if (!agent || typeof agent.fileName !== 'string' || typeof agent.content !== 'string') {
       throw new HttpError(400, 'Request body must include agent { fileName, content }.')
+    }
+    const validation = validateAgentMarkdown(agent.content)
+    if (!validation.ok) {
+      throw new HttpError(400, `Agent source is invalid: ${validation.errors[0].message}`, {
+        errors: validation.errors,
+      })
     }
     if (!target || typeof target.kind !== 'string') {
       throw new HttpError(400, 'Request body must include a target.')

@@ -33,9 +33,10 @@ subscriptions it scans.
   `http://localhost:5173`) as a **SPA** redirect URI, and admin consent for the
   Azure Service Management (ARM) delegated permission must be granted.
 
-- **Agent apps** — a Function App IS a serverless agent app if — and only if — it
-  carries the app-setting marker `AZURE_FUNCTIONS_AGENTS_PROVIDER` (its value is
-  the model provider, e.g. `foundry`).
+- **Agent apps** — `AZURE_FUNCTIONS_AGENTS_PROVIDER` identifies Function Apps
+  managed as agent apps. A portal-managed provisioning shell stays hidden from
+  Hosted Skills until an agent indexes or final source deployment sets
+  `AZURE_FUNCTIONS_AGENTS_PORTAL_DEPLOYED`.
 - **Agents** inside an app are recovered from the runtime's function naming
   convention (`agent_<name>_builtin_*`, routes `agents/<name>/…`) — no need to
   invoke the running app. If none can be parsed, the app itself is surfaced.
@@ -46,10 +47,27 @@ The **New Skill** flow is Model → Instructions → Deployment target → **Too
 connections (optional)** → Review and deploy. Authors can select **Skip for now**
 without preparing Azure resources. For an existing Function App, the optional
 step opens the same live Outlook flow used by **What it can use**. For a new
-target, **Prepare app & configure** creates the Function App infrastructure and
-managed identity first, then opens that same live flow before skill source is
-deployed. A per-draft preparation identifier prevents final deployment from
-adopting an unrelated existing app.
+target, the author first chooses **Create new** or selects an eligible existing
+Outlook connection, without changing Azure. **Create identity & configure
+Outlook** then creates the Function App infrastructure, waits for its managed
+identity, and automatically applies that saved choice before skill source is
+deployed. If connection setup fails after preparation, the prepared app is kept
+and only Outlook setup is retried. A per-draft preparation identifier prevents
+final deployment from adopting an unrelated existing app.
+
+Selecting **New Skill** from the global header or Hosted Skills page starts a
+fresh session draft. Back and step navigation within the active wizard retain
+the current draft. Regenerating instructions from a changed description also
+regenerates the hidden filename-safe skill name instead of retaining a name
+from an earlier draft.
+
+Generated New Skill source always includes the runtime-required `description`
+field. Initial deployment and redeployment validate every final `.agent.md`
+file after draft overlays and before upload. Invalid source is reported instead
+of replacing a working app with a package that indexes zero agents and loses
+its built-in Test endpoint. Test routes use the sanitized `.agent.md` filename
+slug registered by the runtime; the post-deploy cache stores that slug and the
+chat proxy normalizes older cached display names for compatibility.
 
 Open a Hosted Skill and select **What it can use**. Its **Connections** table is
 the only connection-management surface. **Add MCP server or tool** opens a
@@ -185,7 +203,7 @@ npm run build    # emits dist/, which the Node server serves at http://localhost
 | GET | `/api/live/agents` | Scan a subscription (`?subscription=<id or name>`, defaults to the configured one) and list every serverless agent |
 | GET | `/api/connections` | List the app-scoped Office 365 Outlook connection |
 | POST | `/api/connections` | Create or converge the Outlook connection, access policies, and send-only MCP configuration |
-| GET | `/api/connections/candidates` | List eligible Office 365 Outlook connections in an explicitly selected visible subscription |
+| GET | `/api/connections/candidates` | List eligible Office 365 Outlook connections in an explicitly selected visible subscription; `planned=true` supports read-only selection before a new app exists |
 | POST | `/api/connections/attach` | Attach a selected existing connection without updating its gateway or connection |
 | GET | `/api/connections/:connectionId/status` | Refresh normalized connection status |
 | GET | `/api/connections/:connectionId/auth-link` | Return the validated Connector Namespace authorization link |
