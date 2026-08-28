@@ -11,11 +11,13 @@ import asyncio
 import math
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from azure.core.async_paging import AsyncPageIterator
 from azure.core.credentials_async import AsyncTokenCredential
 from azure.core.exceptions import (
     AzureError,
@@ -24,6 +26,7 @@ from azure.core.exceptions import (
     ServiceRequestError,
 )
 from azure.core.polling import AsyncLROPoller
+from azure.core.rest import AsyncHttpResponse, HttpResponse
 
 from azure_functions_agents._credential import build_async_credential
 from azure_functions_agents._logger import logger
@@ -37,6 +40,7 @@ from .manifest import (
 from .ports import SandboxFileTransport, SandboxProcessTransport
 from .transport_models import (
     AcaSandboxDependencyError,
+    InventoryPage,
     PersistedSandboxBinding,
     ProvisionedSandboxIdentity,
     SandboxCapacityError,
@@ -88,6 +92,8 @@ if TYPE_CHECKING:
         ExecResult,
         FileInfo,
         LifecyclePolicy,
+        Sandbox,
+        Snapshot,
     )
     from azure.containerapps.sandbox.aio import SandboxClient, SandboxGroupClient
 
@@ -401,7 +407,7 @@ class AcaSandboxAdapter:
             )
         except HttpResponseError as exc:
             if _is_authorization_rejection(exc):
-                raise SandboxGroupAuthorizationError() from None
+                raise SandboxGroupAuthorizationError(status_code=exc.status_code or 403) from None
             if _is_capacity_rejection(exc):
                 if cleanup_on_failure:
                     await self._cleanup_failed_create(provisioning_attempt_id)
@@ -440,7 +446,7 @@ class AcaSandboxAdapter:
             raise
         except HttpResponseError as exc:
             if _is_authorization_rejection(exc):
-                raise SandboxGroupAuthorizationError() from None
+                raise SandboxGroupAuthorizationError(status_code=exc.status_code or 403) from None
             if cleanup_on_failure:
                 await self._cleanup_failed_create(provisioning_attempt_id)
             if _is_capacity_rejection(exc):
@@ -492,7 +498,7 @@ class AcaSandboxAdapter:
             )
         except SandboxFileOperationError as exc:
             if exc.status_code in _AUTHORIZATION_STATUS_CODES:
-                raise SandboxGroupAuthorizationError() from None
+                raise SandboxGroupAuthorizationError(status_code=exc.status_code) from None
             raise
         return handle
 
@@ -514,19 +520,6 @@ class AcaSandboxAdapter:
         try:
             await handle.resume()
             resumed = True
-        except HttpResponseError as exc:
-            if _is_authorization_rejection(exc):
-                raise SandboxGroupAuthorizationError() from None
-            if _is_already_running_on_resume(exc):
-                resumed = True
-            elif exc.status_code == 409:
-                raise SandboxInvalidStateError(
-                    _RESUME_INVALID_STATE_MESSAGE
-                ) from None
-            else:
-                raise _translate_group_boundary_error(exc, sandbox_scoped=True) from None
-        except (AzureError, TimeoutError) as exc:
-            raise _translate_group_boundary_error(exc, sandbox_scoped=True) from None
         finally:
             if not resumed:
                 await handle.close()
@@ -538,7 +531,7 @@ class AcaSandboxAdapter:
             )
         except SandboxFileOperationError as exc:
             if exc.status_code in _AUTHORIZATION_STATUS_CODES:
-                raise SandboxGroupAuthorizationError() from None
+                raise SandboxGroupAuthorizationError(status_code=exc.status_code) from None
             raise
         return handle
 
@@ -553,26 +546,79 @@ class AcaSandboxAdapter:
         finally:
             await _close_resource(self._credential)
 
-    async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[SandboxSummary, ...]:
+    async def list_sandboxes(
+        self, *, labels: dict[str, str], max_items: int | None = None
+    ) -> tuple[SandboxSummary, ...]:
         """Project label-filtered platform inventory without leaking SDK summaries."""
         self._ensure_open()
+        _validate_inventory_limit(max_items)
         summaries: list[SandboxSummary] = []
         try:
             async for sandbox in self._group_client.list_sandboxes(labels=labels):
-                summaries.append(
-                    SandboxSummary.create(
-                        sandbox_id=sandbox.id,
-                        labels=dict(sandbox.labels),
-                        state=sandbox.state,
-                        created_at=_sdk_timestamp(sandbox.created_at),
-                        modified_at=None,
-                    )
-                )
+                summaries.append(_project_sandbox_summary(sandbox))
+                if max_items is not None and len(summaries) >= max_items:
+                    break
         except HttpResponseError as exc:
             raise _translate_group_boundary_error(exc, sandbox_scoped=False) from None
         except (AzureError, TimeoutError) as exc:
             raise _translate_group_boundary_error(exc, sandbox_scoped=False) from None
+        except ValueError:
+            raise SandboxProvisioningError("Sandbox inventory projection failed.") from None
         return tuple(summaries)
+
+    async def list_sandboxes_page(
+        self,
+        *,
+        labels: dict[str, str],
+        continuation_token: str | None,
+        target_count: int,
+    ) -> InventoryPage[SandboxSummary]:
+        """Fetch one bounded batch of sandboxes, resuming from an opaque token.
+
+        Drains whole SDK pages until ``target_count`` items are collected or
+        the provider inventory ends, so a page is never truncated mid-page
+        (the batch may exceed ``target_count`` by at most one page). A
+        rejected non-``None`` token restarts the scan from the beginning
+        once; see ``_fetch_inventory_page``.
+        """
+        self._ensure_open()
+        _validate_inventory_limit(target_count)
+
+        def _pages(token: str | None) -> AsyncIterator[AsyncIterator[Sandbox]]:
+            return self._group_client.list_sandboxes(labels=labels).by_page(
+                continuation_token=token
+            )
+
+        try:
+            return await _fetch_inventory_page(
+                _pages,
+                _project_sandbox_summary,
+                continuation_token=continuation_token,
+                target_count=target_count,
+            )
+        except HttpResponseError as exc:
+            raise _translate_group_boundary_error(exc, sandbox_scoped=False) from None
+        except (AzureError, TimeoutError) as exc:
+            raise _translate_group_boundary_error(exc, sandbox_scoped=False) from None
+        except ValueError:
+            raise SandboxProvisioningError("Sandbox inventory pagination failed.") from None
+
+    async def get_sandbox_summary(self, sandbox_id: str) -> SandboxSummary | None:
+        """Read one sandbox by exact ID, the safety recheck for cross-page orphans."""
+        self._ensure_open()
+        if not sandbox_id:
+            raise SandboxProvisioningError("Sandbox ID must be non-empty.")
+        try:
+            sandbox = await self._group_client.get_sandbox(sandbox_id)
+        except ResourceNotFoundError:
+            return None
+        except HttpResponseError as exc:
+            if exc.status_code == 404:
+                return None
+            raise _translate_group_boundary_error(exc, sandbox_scoped=True) from None
+        except (AzureError, TimeoutError) as exc:
+            raise _translate_group_boundary_error(exc, sandbox_scoped=True) from None
+        return _project_sandbox_summary(sandbox)
 
     async def delete_sandbox(self, sandbox_id: str) -> None:
         """Delete one sandbox through the bound customer-owned group."""
@@ -593,22 +639,53 @@ class AcaSandboxAdapter:
         except (AzureError, TimeoutError) as exc:
             raise _translate_group_boundary_error(exc, sandbox_scoped=True) from None
 
-    async def list_snapshots(self) -> tuple[SandboxSnapshot, ...]:
+    async def list_snapshots(
+        self, *, max_items: int | None = None
+    ) -> tuple[SandboxSnapshot, ...]:
         """Project snapshots so the reconciler can prune provider-retained storage."""
         self._ensure_open()
+        _validate_inventory_limit(max_items)
         snapshots: list[SandboxSnapshot] = []
         try:
             async for snapshot in self._group_client.list_snapshots():
-                snapshots.append(
-                    SandboxSnapshot.create(
-                        snapshot_id=snapshot.id,
-                        sandbox_id=snapshot.sandbox_id,
-                        created_at=_sdk_timestamp(snapshot.created_at_utc),
-                    )
-                )
+                snapshots.append(_project_snapshot(snapshot))
+                if max_items is not None and len(snapshots) >= max_items:
+                    break
         except (AzureError, TimeoutError) as exc:
             raise _translate_group_boundary_error(exc, sandbox_scoped=False) from None
+        except ValueError:
+            raise SandboxProvisioningError("Snapshot inventory projection failed.") from None
         return tuple(snapshots)
+
+    async def list_snapshots_page(
+        self, *, continuation_token: str | None, target_count: int
+    ) -> InventoryPage[SandboxSnapshot]:
+        """Fetch one bounded batch of snapshots, resuming from an opaque token.
+
+        Drains whole SDK pages until ``target_count`` items are collected or
+        the provider inventory ends, so a page is never truncated mid-page.
+        A rejected non-``None`` token restarts the scan from the beginning
+        once; see ``_fetch_inventory_page``.
+        """
+        self._ensure_open()
+        _validate_inventory_limit(target_count)
+
+        def _pages(token: str | None) -> AsyncIterator[AsyncIterator[Snapshot]]:
+            return self._group_client.list_snapshots().by_page(continuation_token=token)
+
+        try:
+            return await _fetch_inventory_page(
+                _pages,
+                _project_snapshot,
+                continuation_token=continuation_token,
+                target_count=target_count,
+            )
+        except HttpResponseError as exc:
+            raise _translate_group_boundary_error(exc, sandbox_scoped=False) from None
+        except (AzureError, TimeoutError) as exc:
+            raise _translate_group_boundary_error(exc, sandbox_scoped=False) from None
+        except ValueError:
+            raise SandboxProvisioningError("Snapshot inventory pagination failed.") from None
 
     async def delete_snapshot(self, snapshot_id: str) -> None:
         """Delete one unreferenced snapshot through the bound Sandbox Group."""
@@ -801,7 +878,9 @@ async def _translate_file_errors[T](operation: Awaitable[T]) -> T:
         ) from None
     except HttpResponseError as exc:
         raise SandboxFileOperationError(
-            "Sandbox file operation failed.", status_code=exc.status_code
+            "Sandbox file operation failed.",
+            status_code=exc.status_code,
+            retry_after_seconds=_retry_after_seconds(exc),
         ) from None
     except (ServiceRequestError, AzureError):
         raise SandboxFileOperationError("Sandbox file operation failed.") from None
@@ -896,7 +975,16 @@ class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
         """Resume this individual sandbox without trusting advisory state reads."""
 
         self._ensure_open()
-        await self._sdk_client.resume()
+        try:
+            await self._sdk_client.resume()
+        except HttpResponseError as exc:
+            if _is_already_running_on_resume(exc):
+                return
+            if exc.status_code == 409:
+                raise SandboxInvalidStateError(_RESUME_INVALID_STATE_MESSAGE) from None
+            raise _translate_group_boundary_error(exc, sandbox_scoped=True) from None
+        except (AzureError, TimeoutError) as exc:
+            raise _translate_group_boundary_error(exc, sandbox_scoped=True) from None
 
     async def delete(self) -> None:
         """Delete only this individual session sandbox."""
@@ -1103,7 +1191,7 @@ def _translate_group_boundary_error(
     if isinstance(error, HttpResponseError):
         status_code = error.status_code
         if status_code in _AUTHORIZATION_STATUS_CODES:
-            return SandboxGroupAuthorizationError()
+            return SandboxGroupAuthorizationError(status_code=status_code or 403)
         if status_code == 404:
             if sandbox_scoped:
                 return SandboxNotFoundError("Session backing sandbox was not found.")
@@ -1122,6 +1210,24 @@ def _translate_group_boundary_error(
     return SandboxProvisioningError("ACA Sandbox data-plane operation failed.")
 
 
+def _project_sandbox_summary(sandbox: Sandbox) -> SandboxSummary:
+    return SandboxSummary.create(
+        sandbox_id=sandbox.id,
+        labels=dict(sandbox.labels),
+        state=sandbox.state,
+        created_at=_sdk_timestamp(sandbox.created_at),
+        modified_at=None,
+    )
+
+
+def _project_snapshot(snapshot: Snapshot) -> SandboxSnapshot:
+    return SandboxSnapshot.create(
+        snapshot_id=snapshot.id,
+        sandbox_id=snapshot.sandbox_id,
+        created_at=_sdk_timestamp(snapshot.created_at_utc),
+    )
+
+
 def _is_definitive_client_rejection(exc: HttpResponseError) -> bool:
     """A 4xx create rejection is definitive: the request never created a sandbox."""
 
@@ -1138,8 +1244,79 @@ def _is_authorization_rejection(exc: HttpResponseError) -> bool:
     return exc.status_code in _AUTHORIZATION_STATUS_CODES
 
 
+_CURSOR_INVALID_STATUS_CODES = frozenset({400, 404, 410})
+
+
+def _is_cursor_rejection(exc: HttpResponseError) -> bool:
+    """A bounded, permanent rejection of the cursor itself (not auth or load-shedding)."""
+    return exc.status_code in _CURSOR_INVALID_STATUS_CODES
+
+
+def _inventory_page_iterator[RawItem](
+    pages: Callable[[str | None], AsyncIterator[AsyncIterator[RawItem]]],
+    continuation_token: str | None,
+) -> AsyncPageIterator[RawItem]:
+    # azure-core types by_page() as AsyncIterator, but its public runtime result
+    # is AsyncPageIterator and exposes the continuation token needed here.
+    return cast(AsyncPageIterator[RawItem], pages(continuation_token))
+
+
+def _is_initial_cursor_rejection(
+    exc: ValueError | HttpResponseError,
+    *,
+    continuation_token: str | None,
+    received_page: bool,
+) -> bool:
+    if continuation_token is None or received_page:
+        return False
+    return isinstance(exc, ValueError) or _is_cursor_rejection(exc)
+
+
+async def _fetch_inventory_page[RawItem, ProjectedItem](
+    pages: Callable[[str | None], AsyncIterator[AsyncIterator[RawItem]]],
+    project: Callable[[RawItem], ProjectedItem],
+    *,
+    continuation_token: str | None,
+    target_count: int,
+) -> InventoryPage[ProjectedItem]:
+    """Fetch one bounded batch, recovering once from a rejected durable cursor.
+
+    A durable ``continuation_token`` can outlive the provider's willingness to
+    honor it (expiry, region failover). When advancing the first provider page,
+    an SDK ``ValueError`` or bounded cursor-invalid HTTP status for a non-``None``
+    token restarts the scan exactly once; any later rejection propagates.
+    """
+    tokens_to_try = (
+        (continuation_token, None) if continuation_token is not None else (None,)
+    )
+    for token in tokens_to_try:
+        items: list[ProjectedItem] = []
+        received_page = False
+        try:
+            page_iterator = _inventory_page_iterator(pages, token)
+            async for page in page_iterator:
+                received_page = True
+                async for raw_item in page:
+                    items.append(project(raw_item))
+                if len(items) >= target_count:
+                    break
+        except (ValueError, HttpResponseError) as exc:
+            if not _is_initial_cursor_rejection(
+                exc,
+                continuation_token=token,
+                received_page=received_page,
+            ):
+                raise
+            continue
+        return InventoryPage.create(
+            items=items,
+            continuation_token=page_iterator.continuation_token if received_page else None,
+        )
+    raise AssertionError("fresh inventory scan did not complete")
+
+
 def _is_capacity_rejection(exc: HttpResponseError) -> bool:
-    return exc.status_code in {409, 429, 503}
+    return exc.status_code in {429, 503}
 
 
 _RUNNING_STATE_INDICATOR = "Current state: Running"
@@ -1151,6 +1328,29 @@ def _is_already_running_on_resume(exc: HttpResponseError) -> bool:
         return False
     message = str(exc.message) if exc.message else ""
     return _RUNNING_STATE_INDICATOR in message
+
+
+def _retry_after_seconds(exc: HttpResponseError) -> float | None:
+    """Read a bounded Retry-After value without trusting provider payloads."""
+    response = exc.response
+    if response is None:
+        return None
+    # HttpResponseError.response is typed as azure-core's internal
+    # _HttpResponseCommonAPI protocol, which omits `headers`; azure-core's own
+    # contract guarantees the concrete object is a public HttpResponse or
+    # AsyncHttpResponse, both of which declare it.
+    typed_response = cast(HttpResponse | AsyncHttpResponse, response)
+    value = typed_response.headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            date = parsedate_to_datetime(value)
+            return max(0.0, date.timestamp() - time.time())
+        except (TypeError, ValueError, OverflowError):
+            return None
 
 
 async def _read_manifest_when_ready(
@@ -1192,6 +1392,11 @@ async def _try_read_manifest(handle: AcaSandboxHandle, timeout_seconds: float) -
 def _validate_positive_finite_seconds(value: float, field_name: str) -> None:
     if not math.isfinite(value) or value <= 0:
         raise SandboxProvisioningError(f"Sandbox {field_name} must be positive and finite.")
+
+
+def _validate_inventory_limit(value: int | None) -> None:
+    if value is not None and value <= 0:
+        raise ValueError("max_items must be greater than zero.")
 
 
 class _AsyncCloseable(Protocol):

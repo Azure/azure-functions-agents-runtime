@@ -47,6 +47,7 @@ from azure_functions_agents.session_state import (
     OperationRowNotFoundError,
     OwnerPartition,
     ProvisionSubmitRecords,
+    ReconcilerCursorScope,
     RowAlreadyExistsError,
     RunRowNotFoundError,
     SessionNotAdmissibleError,
@@ -594,11 +595,13 @@ async def test_durable_operation_lifecycle_and_cursor_use_real_egt_guards() -> N
             app_hash=partition.app_hash,
             previous=None,
             continuation_token='{"next":"one"}',
+            scope=ReconcilerCursorScope.RECORDS,
         )
         second = await store.advance_reconciler_cursor(
             app_hash=partition.app_hash,
             previous=first,
             continuation_token=None,
+            scope=ReconcilerCursorScope.RECORDS,
         )
         assert second.continuation_token is None
         with pytest.raises(ConcurrencyConflictError):
@@ -606,6 +609,7 @@ async def test_durable_operation_lifecycle_and_cursor_use_real_egt_guards() -> N
                 app_hash=partition.app_hash,
                 previous=first,
                 continuation_token="stale",
+                scope=ReconcilerCursorScope.RECORDS,
             )
 
 

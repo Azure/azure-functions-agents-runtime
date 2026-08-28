@@ -5,15 +5,34 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Literal, get_args
 
 _MAX_PROVIDER_LABEL_VALUE_LENGTH = 63
-SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE = "sandbox_group_authorization_failed"
 SANDBOX_GROUP_AUTHORIZATION_MESSAGE = (
     "Sandbox Group data-plane authorization failed. Grant the controller identity "
     "'Container Apps SandboxGroup Data Owner' on the configured Sandbox Group."
 )
+
+
+class SandboxGroupAuthorizationFailureReason(StrEnum):
+    """Durable classifications for Sandbox Group authorization failures."""
+
+    AUTHENTICATION_FAILED = "sandbox_group_authentication_failed"
+    AUTHORIZATION_FAILED = "sandbox_group_authorization_failed"
+
+    @classmethod
+    def from_status_code(cls, status_code: int) -> SandboxGroupAuthorizationFailureReason:
+        if status_code == 401:
+            return cls.AUTHENTICATION_FAILED
+        return cls.AUTHORIZATION_FAILED
+
+    @property
+    def status_code(self) -> int:
+        if self is self.AUTHENTICATION_FAILED:
+            return 401
+        return 403
 
 
 class SandboxTransportError(Exception):
@@ -31,7 +50,8 @@ class SandboxCapacityError(SandboxProvisioningError):
 class SandboxGroupAuthorizationError(SandboxProvisioningError):
     """Raised when the controller lacks Sandbox Group data-plane authorization."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, status_code: int = 403) -> None:
+        self.status_code = status_code if status_code in {401, 403} else 403
         super().__init__(SANDBOX_GROUP_AUTHORIZATION_MESSAGE)
 
 
@@ -71,9 +91,16 @@ class SandboxFileOperationError(SandboxTransportError):
     narrow, typed retry decision without catching a provider SDK exception.
     """
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +220,29 @@ class SandboxSnapshot:
             ),
             created_at=_optional_timestamp(created_at, "created_at"),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class InventoryPage[T]:
+    """One bounded batch of provider inventory items plus an opaque resume token.
+
+    ``continuation_token`` is the provider's opaque page marker (e.g. an SDK
+    ``nextLink``): store and replay it verbatim, never parse, hash, or log it.
+    ``None`` means the provider inventory is exhausted; the next scan should
+    start over from the beginning.
+    """
+
+    items: tuple[T, ...]
+    continuation_token: str | None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        items: Iterable[T],
+        continuation_token: str | None,
+    ) -> InventoryPage[T]:
+        return cls(items=tuple(items), continuation_token=continuation_token)
 
 
 @dataclass(frozen=True, slots=True)

@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Final, TypeIs
+from typing import TYPE_CHECKING, Final, Never, TypeIs
 
 from .._logger import logger
 from ..config import DEFAULT_TIMEOUT
@@ -30,6 +30,7 @@ from ..controller.readiness import (
     SessionActivationGoneError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
+    SessionActivationTransientError,
     SessionRuntimeBinding,
     _await_admission_with_setup_timeout,
     _bounded_admission_confirmation,
@@ -77,6 +78,7 @@ from ..transport.transport_models import (
     SandboxFileOperationError,
     SandboxGroupAuthorizationError,
     SandboxGroupBindingError,
+    SandboxGroupTransientError,
     SandboxInvalidStateError,
     SandboxNotFoundError,
     SandboxTransportError,
@@ -314,6 +316,17 @@ class AcaSandboxExecutionBackend:
             setup_budget,
         )
         if active_run_id is not None:
+            durable = await self._read_durable_management_state(
+                RunContext(run_id=active_run_id, session_id=session_id)
+            )
+            if durable.run.status in TERMINAL_RUN_STATUSES:
+                raise LinkedActiveRunConflictError(
+                    "session already has a settling run",
+                    session_id=durable.session.session_id,
+                    run_id=durable.run.run_id,
+                    status=durable.run.status,
+                    phase=_public_phase(durable),
+                )
             raise ActiveRunConflictError(
                 "session already has an active run",
                 active_run_id=active_run_id,
@@ -656,7 +669,8 @@ class AcaSandboxExecutionBackend:
             except SandboxFileOperationError as exc:
                 if exc.status_code in {401, 403}:
                     raise SessionActivationAuthorizationError(
-                        SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+                        SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+                        status_code=exc.status_code,
                     ) from None
                 raise RunSubmissionIndeterminateError(
                     "Existing run state could not be confirmed after journal claim."
@@ -761,8 +775,12 @@ class AcaSandboxExecutionBackend:
         except RunJournalProtocolError:
             corrupted = await self._handle_runtime_journal_corruption(activated, context)
             return journal_corruption_status(corrupted)
-        except (SandboxFileNotFoundError, SandboxFileOperationError):
+        except SandboxFileNotFoundError:
             return _durable_status(durable.run, phase=phase)
+        except SandboxFileOperationError as exc:
+            if _is_launching_submission(durable):
+                return _durable_status(durable.run, phase=phase)
+            _raise_file_operation_activation_error(exc)
         finally:
             await activated.handle.close()
 
@@ -787,7 +805,12 @@ class AcaSandboxExecutionBackend:
             await self._runtime.reconcile_session(durable.partition, context.session_id)
             refreshed = await self._read_durable_management_state(context)
             return None, _tombstoned_status(refreshed.run, phase=_public_phase(refreshed))
-        except SessionActivationAuthorizationError:
+        except (
+            SessionActivationAuthorizationError,
+            SessionActivationBindingError,
+            SessionActivationConflictError,
+            SessionActivationTransientError,
+        ):
             raise
         except (
             SessionActivationError,
@@ -855,9 +878,14 @@ class AcaSandboxExecutionBackend:
                     SetupBudget.start(),
                     allow_create=False,
                 )
-            except SessionActivationAuthorizationError:
-                # Let event preflight surface the same management 503 rather than
-                # silently ending the stream through the broad fallback below.
+            except (
+                SessionActivationAuthorizationError,
+                SessionActivationBindingError,
+                SessionActivationConflictError,
+                SessionActivationTransientError,
+            ):
+                # Let event preflight surface the same structured management
+                # response rather than silently ending through the fallback below.
                 raise
             except (
                 SessionActivationError,
@@ -877,8 +905,12 @@ class AcaSandboxExecutionBackend:
             except RunJournalProtocolError:
                 await self._handle_runtime_journal_corruption(activated, context)
                 return
-            except (SandboxFileNotFoundError, SandboxFileOperationError):
+            except SandboxFileNotFoundError:
                 return
+            except SandboxFileOperationError as exc:
+                if _is_launching_submission(durable):
+                    return
+                _raise_file_operation_activation_error(exc)
             finally:
                 await activated.handle.close()
 
@@ -964,7 +996,13 @@ class AcaSandboxExecutionBackend:
                 return await self._cancel_live_run_once(context, durable, setup_budget)
             except SessionActivationGoneError:
                 raise
-            except SessionActivationAuthorizationError:
+            except (
+                SessionActivationAuthorizationError,
+                SessionActivationBindingError,
+                SessionActivationConflictError,
+                SessionActivationNotFoundError,
+                SessionActivationTransientError,
+            ):
                 raise
             except (RunControlTimeoutError, SandboxTransportError) as exc:
                 durable, fallback_status = await self._cancel_transport_error_status(
@@ -1070,24 +1108,54 @@ class AcaSandboxExecutionBackend:
     ) -> tuple[_DurableManagementState, RunStatus | None]:
         if isinstance(error, SandboxFileOperationError) and error.status_code in {401, 403}:
             raise SessionActivationAuthorizationError(
-                SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+                SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+                status_code=error.status_code,
             ) from None
         if isinstance(error, SandboxGroupAuthorizationError):
             raise SessionActivationAuthorizationError(
-                SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+                SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+                status_code=error.status_code,
             ) from None
         if isinstance(error, SandboxGroupBindingError):
             raise SessionActivationBindingError(str(error)) from None
+        if isinstance(error, SandboxGroupTransientError):
+            raise SessionActivationTransientError(str(error)) from None
         if isinstance(error, SandboxInvalidStateError):
             raise SessionActivationConflictError(str(error)) from None
         if isinstance(error, SandboxNotFoundError):
             raise SessionActivationGoneError(
                 "Session backing sandbox is unavailable."
             ) from None
-        if isinstance(error, (SandboxFileNotFoundError, SandboxFileOperationError)):
+        if isinstance(error, SandboxFileOperationError):
+            durable = await self._read_durable_management_state(context)
+            if (
+                durable.run.status not in TERMINAL_RUN_STATUSES
+                and not _is_launching_submission(durable)
+            ):
+                _raise_file_operation_activation_error(error)
+            return await self._cancel_file_error_status(context, setup_budget)
+        if isinstance(error, SandboxFileNotFoundError):
             return await self._cancel_file_error_status(context, setup_budget)
         refreshed = await self._read_durable_management_state(context)
         return refreshed, _durable_status(refreshed.run, phase=_public_phase(refreshed))
+
+
+def _raise_file_operation_activation_error(error: SandboxFileOperationError) -> Never:
+    """Project a live journal transport failure into the controller's typed boundary."""
+    if error.status_code in {401, 403}:
+        raise SessionActivationAuthorizationError(
+            SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+            status_code=error.status_code,
+        ) from None
+    if error.status_code == 409:
+        raise SessionActivationConflictError(
+            "Sandbox journal state does not permit this operation."
+        ) from None
+    if error.status_code is None or error.status_code in {408, 429, 500, 502, 503, 504}:
+        raise SessionActivationTransientError(
+            "Sandbox journal transport is temporarily unavailable."
+        ) from None
+    raise SessionActivationBindingError("Sandbox journal transport request was rejected.") from None
 
 
 async def _cancel_prelaunch_submit(

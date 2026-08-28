@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from typing import TypedDict, Unpack
 from uuid import uuid4
 
 from .._logger import logger
@@ -38,6 +40,7 @@ from ..session_state import (
     OperationRowNotFoundError,
     OwnerIdempotencyRowKey,
     OwnerPartition,
+    ReconcilerCursorScope,
     RunRowKey,
     RunRowNotFoundError,
     SessionOperationFence,
@@ -89,6 +92,7 @@ _NON_REUSABLE_SESSION_STATUSES: frozenset[SessionStatus] = (
     )
 )
 _PROVISION_TERMINAL_BEFORE_POINTER_REASON = "provision_terminal_before_pointer"
+_EXACT_SANDBOX_READ_CONCURRENCY = 16
 
 type TerminalReader = Callable[[DurableSessionRecord, DurableRunRecord], Awaitable[RunStatus | None]]
 type DeathVerifier = Callable[[DurableSessionRecord, DurableRunRecord], Awaitable[bool | None]]
@@ -124,6 +128,8 @@ class ReconcilerConfig:
     tombstone_retention_seconds: int = 86_400
     page_size: int = 100
     max_pages: int = 10
+    inventory_page_size: int = 100
+    max_inventory_pages: int = 10
 
     def __post_init__(self) -> None:
         if (
@@ -143,6 +149,8 @@ class ReconcilerConfig:
             or self.tombstone_retention_seconds <= 0
             or self.page_size <= 0
             or self.max_pages <= 0
+            or self.inventory_page_size <= 0
+            or self.max_inventory_pages <= 0
         ):
             raise ValueError("reconciler bounds must be positive")
 
@@ -184,6 +192,20 @@ class ReconcileReport:
     deleted_sandboxes: int = 0
     deleted_snapshots: int = 0
     evicted_results: int = 0
+    scanned_pages: int = 0
+    scanned_records: int = 0
+    partial: bool = False
+
+
+class _ReconcileReportChanges(TypedDict, total=False):
+    adopted_terminal_runs: int
+    abandoned_runs: int
+    tombstoned_sessions: int
+    deleted_sandboxes: int
+    deleted_snapshots: int
+    evicted_results: int
+    scanned_pages: int
+    scanned_records: int
 
 
 class SessionReconciler:
@@ -261,22 +283,60 @@ class SessionReconciler:
     async def run_once(self) -> ReconcileReport:
         """Perform one bounded, idempotent pass over Table records and platform inventory."""
         controller_now = _utc(self._now())
-        sessions, runs, idempotencies, operations, service_time = await self._load_working_set()
+        (
+            sessions,
+            runs,
+            idempotencies,
+            operations,
+            service_time,
+            scanned_pages,
+            scanned_records,
+            partial,
+        ) = await self._load_working_set()
         now = service_time or controller_now
-        inventory = {
-            item.sandbox_id: item
-            for item in await self._provider.list_sandboxes(
-                labels={"app_hash": self._app_hash}
-            )
-        }
-        snapshots = await self._provider.list_snapshots()
+        inventory_limit = self._config.inventory_page_size * self._config.max_inventory_pages
+        sandbox_cursor = await self._store.get_reconciler_cursor(
+            self._app_hash, scope=ReconcilerCursorScope.SANDBOXES
+        )
+        snapshot_cursor = await self._store.get_reconciler_cursor(
+            self._app_hash, scope=ReconcilerCursorScope.SNAPSHOTS
+        )
+        sandbox_page = await self._provider.list_sandboxes_page(
+            labels={"app_hash": self._app_hash},
+            continuation_token=None if sandbox_cursor is None else sandbox_cursor.continuation_token,
+            target_count=inventory_limit,
+        )
+        snapshot_page = await self._provider.list_snapshots_page(
+            continuation_token=None if snapshot_cursor is None else snapshot_cursor.continuation_token,
+            target_count=inventory_limit,
+        )
+        inventory = {item.sandbox_id: item for item in sandbox_page.items}
+        snapshots = snapshot_page.items
         snapshots_by_id = {snapshot.snapshot_id: snapshot for snapshot in snapshots}
         report = ReconcileReport()
 
         sessions, runs = await self._hydrate_page_pairs(sessions, runs)
         runs_by_session = _runs_by_session(runs)
 
-        for session in sessions:
+        # Handle work most likely to be deadline-sensitive first.  The durable
+        # cursor still rotates the source pages, preventing a hot prefix from
+        # starving older records.
+        ordered_sessions = tuple(
+            sorted(
+                sessions,
+                key=lambda item: (
+                    not (
+                        item.active_run_id is not None
+                        and (
+                            item.expires_at <= now
+                            or item.sandbox_id is None
+                        )
+                    ),
+                    item.updated_at,
+                ),
+            )
+        )
+        for session in ordered_sessions:
             try:
                 session_runs = runs_by_session.get(_session_key(session), ())
                 active_run = _active_run(session, session_runs)
@@ -303,6 +363,7 @@ class SessionReconciler:
                     session.session_id,
                     type(exc).__name__,
                 )
+                report = _replace_report(report, partial=True)
 
         report = await self._prune_expired_records(
             sessions,
@@ -318,7 +379,37 @@ class SessionReconciler:
             now,
             report,
         )
-        return report
+        inventory_conflict = False
+        try:
+            await self._store.advance_reconciler_cursor(
+                app_hash=self._app_hash,
+                previous=sandbox_cursor,
+                continuation_token=sandbox_page.continuation_token,
+                scope=ReconcilerCursorScope.SANDBOXES,
+            )
+        except ConcurrencyConflictError:
+            inventory_conflict = True
+        try:
+            await self._store.advance_reconciler_cursor(
+                app_hash=self._app_hash,
+                previous=snapshot_cursor,
+                continuation_token=snapshot_page.continuation_token,
+                scope=ReconcilerCursorScope.SNAPSHOTS,
+            )
+        except ConcurrencyConflictError:
+            inventory_conflict = True
+        return _replace_report(
+            report,
+            scanned_pages=scanned_pages,
+            scanned_records=scanned_records,
+            partial=(
+                partial
+                or report.partial
+                or inventory_conflict
+                or sandbox_page.continuation_token is not None
+                or snapshot_page.continuation_token is not None
+            ),
+        )
 
     async def _load_working_set(
         self,
@@ -328,20 +419,35 @@ class SessionReconciler:
         tuple[DurableIdempotencyRecord | DurableOwnerIdempotencyRecord, ...],
         tuple[DurableSessionOperation, ...],
         datetime | None,
+        int,
+        int,
+        bool,
     ]:
         sessions: list[DurableSessionRecord] = []
         runs: list[DurableRunRecord] = []
         idempotencies: list[DurableIdempotencyRecord | DurableOwnerIdempotencyRecord] = []
         operations: list[DurableSessionOperation] = []
         service_times: list[datetime] = []
-        cursor = await self._store.get_reconciler_cursor(self._app_hash)
+        scanned_pages = 0
+        scanned_records = 0
+        partial = False
+        seen_tokens: set[str | None] = set()
+        cursor = await self._store.get_reconciler_cursor(
+            self._app_hash, scope=ReconcilerCursorScope.RECORDS
+        )
         continuation = None if cursor is None else cursor.continuation_token
         for _ in range(self._config.max_pages):
+            if continuation in seen_tokens:
+                partial = True
+                break
+            seen_tokens.add(continuation)
             page = await self._store.query_entities(
                 filter_expression=_app_scoped_query_filter(self._app_hash),
                 top=self._config.page_size,
                 continuation_token=continuation,
             )
+            scanned_pages += 1
+            scanned_records += len(page.entities)
             for entity in page.entities:
                 record = _working_set_record(entity)
                 if (
@@ -359,20 +465,31 @@ class SessionReconciler:
             if page.service_time is not None:
                 service_times.append(_utc(page.service_time))
             continuation = page.continuation_token
+            # Commit progress after each fully ingested page.  A cancellation
+            # between pages therefore resumes at the next page.
+            try:
+                cursor = await self._store.advance_reconciler_cursor(
+                    app_hash=self._app_hash,
+                    previous=cursor,
+                    continuation_token=continuation,
+                    scope=ReconcilerCursorScope.RECORDS,
+                )
+            except ConcurrencyConflictError:
+                partial = True
+                break
             if continuation is None:
                 break
-        with suppress(ConcurrencyConflictError):
-            await self._store.advance_reconciler_cursor(
-                app_hash=self._app_hash,
-                previous=cursor,
-                continuation_token=continuation,
-            )
+        else:
+            partial = continuation is not None
         return (
             tuple(sessions),
             tuple(runs),
             tuple(idempotencies),
             tuple(operations),
             max(service_times, default=None),
+            scanned_pages,
+            scanned_records,
+            partial,
         )
 
     async def _hydrate_page_pairs(
@@ -594,11 +711,17 @@ class SessionReconciler:
             )
         if fence.kind != "reclaim_backing" or fence.target.run_id != run.run_id:
             return report
+        backing_present = fence.target.sandbox_id in inventory
+        if not backing_present and fence.target.sandbox_id is not None:
+            backing_present = (
+                await self._provider.get_sandbox_summary(fence.target.sandbox_id)
+                is not None
+            )
         return await self._continue_reclaim_operation(
             session,
             run,
             fence,
-            backing_present=fence.target.sandbox_id in inventory,
+            backing_present=backing_present,
             now=now,
             report=report,
         )
@@ -1121,6 +1244,11 @@ class SessionReconciler:
         armed = _armed_operation_session(
             current.record,
             reclaim_idle_seconds=self._reclaim_idle_seconds,
+            minimum_retention_seconds=(
+                self._config.result_hold_seconds
+                if terminal is not None and terminal.result_available
+                else 0
+            ),
             updated_at=now,
         )
         try:
@@ -1584,10 +1712,12 @@ class SessionReconciler:
             if (
                 snapshot is not None
                 and snapshot.sandbox_id == session.sandbox_id
-                and session.sandbox_id in inventory
             ):
                 await self._provider.delete_snapshot(snapshot_id)
-                report = _replace_report(report, deleted_snapshots=report.deleted_snapshots + 1)
+                report = _replace_report(
+                    report,
+                    deleted_snapshots=report.deleted_snapshots + 1,
+                )
                 deleted_snapshot_count += 1
         latest = await self._store.get_session(session.owner_partition, session.session_id)
         if (
@@ -1682,6 +1812,53 @@ class SessionReconciler:
             )
             return ReconcileReport()
 
+    async def reconcile_session_targeted(
+        self,
+        owner_partition: OwnerPartition,
+        session_id: str,
+    ) -> ReconcileReport:
+        """Reconcile only the requested session; global cleanup belongs to the timer."""
+        if owner_partition.app_hash != self._app_hash:
+            return ReconcileReport()
+        try:
+            session_read = await self._store.get_session(owner_partition, session_id)
+        except SessionRowNotFoundError:
+            return ReconcileReport()
+        session = session_read.record
+        inventory = {
+            item.sandbox_id: item
+            for item in await self._provider.list_sandboxes(
+                labels={"app_hash": self._app_hash, "session_id": session_id}
+            )
+        }
+        now = _utc(self._now())
+        try:
+            if session.active_run_id is None:
+                return await self._reconcile_idle(
+                    session, (), inventory, {}, now, ReconcileReport()
+                )
+            try:
+                run_read = await self._store.get_run(
+                    owner_partition, session_id, session.active_run_id
+                )
+            except RunRowNotFoundError:
+                return await self._recover_missing_submit_run(session, now, ReconcileReport())
+            if (
+                session.active_operation_id is None
+                and session.sandbox_id not in inventory
+            ):
+                return ReconcileReport()
+            return await self._reconcile_active(
+                session, run_read.record, inventory, now, ReconcileReport()
+            )
+        except _SESSION_RECONCILIATION_ERRORS as exc:
+            logger.warning(
+                "Targeted sandbox reconciliation deferred: session_id=%s error=%s",
+                session_id,
+                type(exc).__name__,
+            )
+            return ReconcileReport()
+
     async def _recover_missing_submit_run(
         self,
         session: DurableSessionRecord,
@@ -1763,32 +1940,132 @@ class SessionReconciler:
         report: ReconcileReport,
     ) -> ReconcileReport:
         sessions_by_sandbox: dict[str, DurableSessionRecord | None] = {}
-        snapshots_by_sandbox = _snapshots_by_sandbox(snapshots)
         orphan_snapshot_sandboxes: set[str] = set()
+        # Seeded from this run's sandbox page, then filled by one bounded
+        # concurrent prefetch for the batch's off-page backings, so a hot
+        # sandbox page can never starve a cross-page snapshot.
+        sandbox_cache: dict[str, SandboxSummary | None] = dict(inventory)
+        full_snapshots_by_sandbox: dict[str, tuple[SandboxSnapshot, ...]] | None = None
+        full_inventory_unavailable = False
         for sandbox in inventory.values():
-            session, is_verifiable = await self._session_for_labeled_sandbox(sandbox)
-            if not is_verifiable:
-                continue
-            sessions_by_sandbox[sandbox.sandbox_id] = session
-            if not await self._is_deletable_labeled_orphan(session, sandbox, now):
-                continue
-            orphan_snapshot_sandboxes.add(sandbox.sandbox_id)
-            report = await self._delete_labeled_orphan(
-                sandbox,
-                snapshots_by_sandbox.get(sandbox.sandbox_id, ()),
-                report,
-            )
+            try:
+                session, is_verifiable = await self._session_for_labeled_sandbox(sandbox)
+                if not is_verifiable:
+                    continue
+                sessions_by_sandbox[sandbox.sandbox_id] = session
+                if not await self._is_deletable_labeled_orphan(session, sandbox, now):
+                    continue
+                orphan_snapshot_sandboxes.add(sandbox.sandbox_id)
+                if full_inventory_unavailable:
+                    continue
+                if full_snapshots_by_sandbox is None:
+                    full_snapshots_by_sandbox = await self._full_snapshots_by_sandbox()
+                    if full_snapshots_by_sandbox is None:
+                        full_inventory_unavailable = True
+                        report = _replace_report(report, partial=True)
+                        continue
+                report = await self._delete_labeled_orphan(
+                    sandbox,
+                    full_snapshots_by_sandbox.get(sandbox.sandbox_id, ()),
+                    report,
+                )
+            except _SESSION_RECONCILIATION_ERRORS as exc:
+                logger.warning(
+                    "Sandbox orphan reconciliation deferred: sandbox_id=%s error=%s",
+                    sandbox.sandbox_id,
+                    type(exc).__name__,
+                )
+                report = _replace_report(report, partial=True)
 
+        if await self._prefetch_offpage_sandboxes(snapshots, sandbox_cache):
+            report = _replace_report(report, partial=True)
         for snapshot in snapshots:
-            report = await self._delete_unreferenced_labeled_snapshot(
-                snapshot,
-                sessions_by_sandbox,
-                orphan_snapshot_sandboxes,
-                now,
-                report,
-            )
+            try:
+                report = await self._delete_unreferenced_labeled_snapshot(
+                    snapshot,
+                    sessions_by_sandbox,
+                    orphan_snapshot_sandboxes,
+                    sandbox_cache,
+                    now,
+                    report,
+                )
+            except _SESSION_RECONCILIATION_ERRORS as exc:
+                logger.warning(
+                    "Sandbox snapshot reconciliation deferred: snapshot_id=%s error=%s",
+                    snapshot.snapshot_id,
+                    type(exc).__name__,
+                )
+                report = _replace_report(report, partial=True)
         return report
 
+    async def _full_snapshots_by_sandbox(
+        self,
+    ) -> dict[str, tuple[SandboxSnapshot, ...]] | None:
+        """List the complete snapshot inventory once per run, or ``None`` when deferred.
+
+        The provider exposes no sandbox filter, so an irreversible orphan
+        sandbox delete must recheck the untruncated listing; truncating it
+        would leak that sandbox's snapshots forever.
+        """
+        try:
+            return _snapshots_by_sandbox(await self._provider.list_snapshots())
+        except _SESSION_RECONCILIATION_ERRORS as exc:
+            logger.warning(
+                "Sandbox orphan cleanup deferred without full snapshot inventory: error=%s",
+                type(exc).__name__,
+            )
+            return None
+
+    async def _prefetch_offpage_sandboxes(
+        self,
+        snapshots: tuple[SandboxSnapshot, ...],
+        sandbox_cache: dict[str, SandboxSummary | None],
+    ) -> bool:
+        """Read every off-page snapshot backing concurrently; report whether any deferred.
+
+        Every distinct off-page ID in the already-bounded batch is attempted so
+        no deterministic suffix starves, and a bounded limit keeps the serial
+        latency of those exact reads in check.
+        """
+        pending = tuple(
+            sandbox_id
+            for sandbox_id in dict.fromkeys(
+                snapshot.sandbox_id
+                for snapshot in snapshots
+                if snapshot.sandbox_id is not None
+            )
+            if sandbox_id not in sandbox_cache
+        )
+        if not pending:
+            return False
+        limit = asyncio.Semaphore(_EXACT_SANDBOX_READ_CONCURRENCY)
+
+        async def read(sandbox_id: str) -> bool:
+            try:
+                async with limit:
+                    sandbox_cache[sandbox_id] = await self._provider.get_sandbox_summary(
+                        sandbox_id
+                    )
+            except _SESSION_RECONCILIATION_ERRORS as exc:
+                logger.warning(
+                    "Sandbox snapshot backing lookup deferred: sandbox_id=%s error=%s",
+                    sandbox_id,
+                    type(exc).__name__,
+                )
+                return False
+            return True
+
+        results = await asyncio.gather(
+            *(read(sandbox_id) for sandbox_id in pending),
+            return_exceptions=True,
+        )
+        failure = next(
+            (result for result in results if isinstance(result, BaseException)),
+            None,
+        )
+        if failure is not None:
+            raise failure
+        return False in results
 
     async def _is_deletable_labeled_orphan(
         self,
@@ -1827,7 +2104,7 @@ class SessionReconciler:
                 "Sandbox orphan cleanup deferred: sandbox_id=%s",
                 sandbox.sandbox_id,
             )
-            return report
+            return _replace_report(report, partial=True)
         if deleted:
             return _replace_report(
                 report,
@@ -1850,7 +2127,7 @@ class SessionReconciler:
                     "Sandbox orphan snapshot cleanup deferred: sandbox_id=%s",
                     sandbox.sandbox_id,
                 )
-                return report, False
+                return _replace_report(report, partial=True), False
             if deleted:
                 report = _replace_report(
                     report,
@@ -1864,17 +2141,21 @@ class SessionReconciler:
         snapshot: SandboxSnapshot,
         sessions_by_sandbox: dict[str, DurableSessionRecord | None],
         orphan_snapshot_sandboxes: set[str],
+        sandbox_cache: dict[str, SandboxSummary | None],
         now: datetime,
         report: ReconcileReport,
     ) -> ReconcileReport:
         sandbox_id = snapshot.sandbox_id
-        if (
-            sandbox_id is None
-            or sandbox_id in orphan_snapshot_sandboxes
-            or sandbox_id not in sessions_by_sandbox
-        ):
+        if sandbox_id is None or sandbox_id in orphan_snapshot_sandboxes:
             return report
-        session = sessions_by_sandbox[sandbox_id]
+        if sandbox_id in sessions_by_sandbox:
+            session = sessions_by_sandbox[sandbox_id]
+        else:
+            session, is_verifiable = await self._exact_labeled_sandbox_session(
+                sandbox_id, sandbox_cache
+            )
+            if not is_verifiable:
+                return report
         if session is not None and snapshot.snapshot_id in session.snapshot_ids:
             return report
         if not _is_older_than(
@@ -1888,6 +2169,21 @@ class SessionReconciler:
             report,
             deleted_snapshots=report.deleted_snapshots + 1,
         )
+
+    async def _exact_labeled_sandbox_session(
+        self,
+        sandbox_id: str,
+        sandbox_cache: dict[str, SandboxSummary | None],
+    ) -> tuple[DurableSessionRecord | None, bool]:
+        """Resolve a snapshot's backing sandbox once it falls outside the sandbox page.
+
+        The cache holds one prefetched result per distinct ID, so an absent or
+        deferred entry is unverifiable and leaves the snapshot alone.
+        """
+        summary = sandbox_cache.get(sandbox_id)
+        if summary is None:
+            return None, False
+        return await self._session_for_labeled_sandbox(summary)
 
 
     async def _delete_verified_orphan_snapshot(
@@ -2507,6 +2803,7 @@ def _armed_operation_session(
     record: DurableSessionRecord,
     *,
     reclaim_idle_seconds: int,
+    minimum_retention_seconds: int = 0,
     updated_at: datetime,
 ) -> DurableSessionRecord:
     return DurableSessionRecord.create(
@@ -2519,7 +2816,8 @@ def _armed_operation_session(
         protocol=record.protocol,
         status="quarantined" if record.status == "quarantined" else "ready",
         last_activity_at=updated_at,
-        expires_at=updated_at + timedelta(seconds=reclaim_idle_seconds),
+        expires_at=updated_at
+        + timedelta(seconds=max(reclaim_idle_seconds, minimum_retention_seconds)),
         idle_policy_armed=True,
         active_run_id=None,
         snapshot_ids=record.snapshot_ids,
@@ -2586,17 +2884,15 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _replace_report(report: ReconcileReport, **changes: int) -> ReconcileReport:
-    values = {
-        "adopted_terminal_runs": report.adopted_terminal_runs,
-        "abandoned_runs": report.abandoned_runs,
-        "tombstoned_sessions": report.tombstoned_sessions,
-        "deleted_sandboxes": report.deleted_sandboxes,
-        "deleted_snapshots": report.deleted_snapshots,
-        "evicted_results": report.evicted_results,
-    }
-    values.update(changes)
-    return ReconcileReport(**values)
+def _replace_report(
+    report: ReconcileReport,
+    *,
+    partial: bool | None = None,
+    **changes: Unpack[_ReconcileReportChanges],
+) -> ReconcileReport:
+    if partial is not None:
+        return replace(report, partial=partial, **changes)
+    return replace(report, **changes)
 
 
 def _log_session_reclaimed(

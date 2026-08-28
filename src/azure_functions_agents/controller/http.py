@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from typing import TypedDict
 
 from .._logger import logger
 from ..execution.backend import (
@@ -32,8 +33,8 @@ from ..session_state import (
     SessionRowNotFoundError,
 )
 from ..transport.transport_models import (
-    SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
     SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+    SandboxGroupAuthorizationFailureReason,
 )
 from .budget import RequestBudget, RunDeadlineExceededError
 from .idempotency import IdempotencyResultUnavailableError
@@ -56,6 +57,15 @@ _ADMISSION_COMMITTED: DurableAdmissionOutcome = "committed"
 _ADMISSION_POSSIBLY_COMMITTED: DurableAdmissionOutcome = "possibly_committed"
 _PROVISIONING_PHASE: RunPhase = "provisioning"
 _DEFAULT_ACCEPTED_RUN_PHASE: RunPhase = "executing"
+
+
+class ManagementUrls(TypedDict):
+    """Session-scoped management URLs for one run."""
+
+    status_url: str
+    result_url: str
+    events_url: str
+    cancel_url: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +121,7 @@ def parse_last_event_id(headers: Mapping[str, str] | None) -> int:
     return parsed
 
 
-def management_urls(*, agent_slug: str, context: RunContext) -> dict[str, str]:
+def management_urls(*, agent_slug: str, context: RunContext) -> ManagementUrls:
     """Build one shared set of session-scoped management URLs."""
     base = f"/agents/{agent_slug}/sessions/{context.session_id}/runs/{context.run_id}"
     return {
@@ -129,6 +139,7 @@ async def submit_run(
     agent_slug: str,
     respond_async: bool,
     budget: RequestBudget,
+    defer_response: bool = False,
 ) -> ControllerResponse:
     """Start a run, return an LRO ticket, or preserve the synchronous contract."""
     started = await _start_run_or_response(
@@ -140,13 +151,15 @@ async def submit_run(
     if isinstance(started, ControllerResponse):
         return started
     context = RunContext(run_id=started.run_id, session_id=started.session_id)
-    if respond_async:
+    if respond_async or defer_response:
         return _accepted_response(agent_slug, started, context)
     try:
         status, _events = await budget.wait_for(collect_terminal_run(backend, context))
     except RunDeadlineExceededError:
-        return await _synchronous_timeout_response(backend, context, budget)
-    return _synchronous_status_response(status)
+        return await _synchronous_timeout_response(
+            backend, context, budget, agent_slug=agent_slug
+        )
+    return _synchronous_status_response(agent_slug, status)
 
 
 async def _start_run_or_response(
@@ -180,8 +193,8 @@ async def _start_run_or_response(
                 session_present=request.session_id is not None,
             )
         )
-    except SessionActivationAuthorizationError:
-        return _sandbox_group_authorization_response()
+    except SessionActivationAuthorizationError as exc:
+        return _sandbox_group_authorization_response(exc)
     except (SessionActivationBindingError, SessionActivationTransientError) as exc:
         return _sandbox_group_availability_response(exc)
     except SessionActivationConflictError:
@@ -210,11 +223,13 @@ async def _synchronous_timeout_response(
     backend: AgentExecutionBackend,
     context: RunContext,
     budget: RequestBudget,
+    *,
+    agent_slug: str,
 ) -> ControllerResponse:
     try:
         status = await budget.wait_for_cleanup(backend.get_run(context))
         if status.state in TERMINAL_RUN_STATUSES:
-            return _synchronous_status_response(status)
+            return _synchronous_status_response(agent_slug, status)
         await budget.wait_for_cleanup(backend.cancel_run(context))
     except Exception as exc:
         logger.warning(
@@ -243,8 +258,8 @@ async def read_status(
         return ControllerResponse(status_code=404, body={"error": "run_not_found"})
     except SessionActivationGoneError:
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
-    except SessionActivationAuthorizationError:
-        return _sandbox_group_authorization_response()
+    except SessionActivationAuthorizationError as exc:
+        return _sandbox_group_authorization_response(exc)
     except (SessionActivationBindingError, SessionActivationTransientError) as exc:
         return _sandbox_group_availability_response(exc)
     except SessionActivationConflictError:
@@ -268,8 +283,8 @@ async def read_result(
         return ControllerResponse(status_code=404, body={"error": "run_not_found"})
     except SessionActivationGoneError:
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
-    except SessionActivationAuthorizationError:
-        return _sandbox_group_authorization_response()
+    except SessionActivationAuthorizationError as exc:
+        return _sandbox_group_authorization_response(exc)
     except (SessionActivationBindingError, SessionActivationTransientError) as exc:
         return _sandbox_group_availability_response(exc)
     except SessionActivationConflictError:
@@ -320,8 +335,8 @@ async def cancel_run(
         return ControllerResponse(status_code=404, body={"error": "run_not_found"})
     except SessionActivationGoneError:
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
-    except SessionActivationAuthorizationError:
-        return _sandbox_group_authorization_response()
+    except SessionActivationAuthorizationError as exc:
+        return _sandbox_group_authorization_response(exc)
     except (SessionActivationBindingError, SessionActivationTransientError) as exc:
         return _sandbox_group_availability_response(exc)
     except SessionActivationConflictError:
@@ -365,23 +380,30 @@ def _accepted_response(
     )
 
 
-def _synchronous_status_response(status: RunStatus) -> ControllerResponse:
+def _synchronous_status_response(agent_slug: str, status: RunStatus) -> ControllerResponse:
+    context = RunContext(session_id=status.session_id, run_id=status.run_id)
+    urls = management_urls(agent_slug=agent_slug, context=context)
+    headers = {
+        "x-ms-session-id": status.session_id,
+        "x-ms-run-id": status.run_id,
+        "Location": urls["status_url"],
+    }
     if status.state == "succeeded" and status.result is not None:
         return ControllerResponse(
             status_code=200,
             body=_result_payload(status.result),
-            headers={"x-ms-session-id": status.session_id},
+            headers=headers,
         )
     if status.state in TERMINAL_RUN_STATUSES and status.state != "succeeded":
         return ControllerResponse(
             status_code=500,
             body=status_payload(status),
-            headers={"x-ms-session-id": status.session_id},
+            headers=headers,
         )
     return ControllerResponse(
         status_code=500,
         body={"error": "run_did_not_reach_terminal_state", **status_payload(status)},
-        headers={"x-ms-session-id": status.session_id},
+        headers=headers,
     )
 
 
@@ -441,12 +463,15 @@ def _with_request_metadata(
     )
 
 
-def _sandbox_group_authorization_response() -> ControllerResponse:
+def _sandbox_group_authorization_response(
+    error: SessionActivationAuthorizationError | None = None,
+) -> ControllerResponse:
+    public_reason = SandboxGroupAuthorizationFailureReason.AUTHORIZATION_FAILED.value
     return ControllerResponse(
-        status_code=503,
+        status_code=error.status_code if error is not None else 403,
         body={
-            "error": SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
-            "reason": SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
+            "error": public_reason,
+            "reason": public_reason,
             "message": SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
         },
     )
@@ -627,7 +652,7 @@ def _linked_active_run_response(
 
 def _run_ticket_payload(
     handle: RunHandle,
-    urls: Mapping[str, str],
+    urls: ManagementUrls,
     *,
     admission: DurableAdmissionOutcome | None = None,
     phase: RunPhase | None = None,
@@ -657,7 +682,7 @@ def _ticket_phase(handle: RunHandle, phase: RunPhase | None) -> RunPhase:
 def _management_headers(
     *,
     context: RunContext,
-    urls: Mapping[str, str],
+    urls: ManagementUrls,
     retry_with: bool = False,
 ) -> dict[str, str]:
     headers = {

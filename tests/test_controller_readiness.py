@@ -165,6 +165,7 @@ def _runtime(
     post_create_reconciler: Callable[[], Awaitable[None]] | None = None,
     auto_suspend_seconds: int = readiness_module.DEFAULT_AUTO_SUSPEND_SECONDS,
     reclaim_idle_seconds: int = readiness_module.DEFAULT_RECLAIM_IDLE_SECONDS,
+    capacity_reaper: Callable[[OwnerPartition, str], Awaitable[None]] | None = None,
 ) -> SessionRuntimeBinding:
     async def provider_factory() -> _FakeProvider:
         return provider
@@ -185,6 +186,7 @@ def _runtime(
         post_create_reconciler=post_create_reconciler,
         auto_suspend_seconds=auto_suspend_seconds,
         reclaim_idle_seconds=reclaim_idle_seconds,
+        capacity_reaper=capacity_reaper,
     )
 
 
@@ -617,6 +619,41 @@ async def test_reserved_provision_keeps_successful_created_handle_open(tmp_path:
     assert provisioned.activated is not None
     assert provisioned.activated.handle is handle
     assert handle.close_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_reserved_provision_targets_capacity_reap_before_retrying(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    owner = _owner()
+    handle = _CountingHandle()
+    provider = _FakeProvider(handle)
+    provider.create_errors.append(SandboxCapacityError("capacity exhausted"))
+    store = _FakeStore()
+    reap_calls: list[tuple[OwnerPartition, str]] = []
+
+    async def reap_capacity(partition: OwnerPartition, session_id: str) -> None:
+        reap_calls.append((partition, session_id))
+
+    provisioned = await provision_new_session_submit(
+        _runtime(
+            script_root,
+            provider,
+            store,
+            capacity_reaper=reap_capacity,
+        ),
+        owner,
+        session_id="new-session",
+        run_id="run-1",
+        timeout=None,
+        attempt=None,
+        setup_deadline=SetupBudget.start(),
+    )
+
+    assert provisioned.activated is not None
+    assert reap_calls == [(owner_partition(owner), "new-session")]
+    assert len(provider.create_calls) == 2
 
 
 @pytest.mark.asyncio
@@ -1612,6 +1649,47 @@ async def test_missing_or_transient_bootstrap_report_keeps_manifest_polling(
     )
 
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_manifest_retry_caps_the_final_jittered_delay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    sleep_delays: list[float] = []
+
+    async def eventual_manifest(*_args: object, **_kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise SandboxFileOperationError(
+                "sandbox is resuming",
+                status_code=409,
+                retry_after_seconds=10.0,
+            )
+
+    async def capture_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+
+    script_root = _script_root(tmp_path)
+    expected = readiness_module.build_expected_manifest_binding(
+        _session(script_root),
+        sandbox_group_resource_id=_GROUP_RESOURCE_ID,
+        state_store_fingerprint=_FINGERPRINT,
+    )
+    monkeypatch.setattr(readiness_module, "read_live_manifest_binding", eventual_manifest)
+    monkeypatch.setattr(readiness_module.random, "uniform", lambda _start, end: end)
+    monkeypatch.setattr(readiness_module.asyncio, "sleep", capture_sleep)
+
+    await readiness_module._wait_for_created_manifest(
+        _FakeHandle(),
+        expected=expected,
+        setup_deadline=SetupBudget.start(),
+    )
+
+    assert calls == 2
+    assert sleep_delays == [readiness_module._FILE_RETRY_MAX_DELAY_SECONDS]
 
 
 @pytest.mark.asyncio

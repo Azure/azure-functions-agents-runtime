@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from dataclasses import asdict, replace
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
@@ -11,6 +12,7 @@ from inspect import signature
 from typing import Any
 
 import pytest
+from azure.core.async_paging import AsyncItemPaged
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError, ServiceRequestError
 
 from azure_functions_agents.transport import aca_sdk
@@ -23,6 +25,7 @@ from azure_functions_agents.transport.transport_models import (
     AcaSandboxDependencyError,
     DiskIdSource,
     DiskSource,
+    InventoryPage,
     PersistedSandboxBinding,
     PresetSource,
     SandboxCreateOutcomeUnknownError,
@@ -40,6 +43,7 @@ from azure_functions_agents.transport.transport_models import (
     SandboxGroupBinding,
     SandboxGroupBindingError,
     SandboxGroupTransientError,
+    SandboxInvalidStateError,
     SandboxLifecyclePolicy,
     SandboxNotFoundError,
     SandboxProvisioningError,
@@ -53,6 +57,7 @@ from tests.doubles.fake_aca_sdk import (
     FakeSdkEnvironment,
     FakeSdkFileInfo,
     FakeSdkLifecyclePolicy,
+    FakeSdkSandboxSummary,
     FakeSdkSnapshot,
 )
 
@@ -220,6 +225,41 @@ def _install_fake_adapter_boundary(
     monkeypatch.setattr(aca_sdk, "_SDK_FACTORIES", environment.factories)
     monkeypatch.setattr(aca_sdk, "_CREDENTIAL_FACTORY", lambda: credential)
     return credential
+
+
+def _paged_rejecting_token[T](
+    items: list[T],
+    page_size: int,
+    *,
+    reject_token: str,
+    rejection: Exception,
+) -> tuple[AsyncItemPaged[T], list[str | None]]:
+    """Build an ``AsyncItemPaged`` that raises ``rejection`` once for ``reject_token``.
+
+    Otherwise offset-paginates ``items`` like the shared fake SDK double, so
+    tests can exercise cursor-rejection recovery without editing that double.
+    Returns the tokens the SDK layer was asked for, in call order.
+    """
+    calls: list[str | None] = []
+
+    async def _get_next(continuation_token: str | None = None) -> str | None:
+        calls.append(continuation_token)
+        if continuation_token == reject_token:
+            raise rejection
+        return continuation_token
+
+    async def _extract_data(response: str | None) -> tuple[str | None, AsyncIterator[T]]:
+        start = 0 if response is None else int(response)
+        end = min(start + max(page_size, 1), len(items))
+        next_token = None if end >= len(items) else str(end)
+        return next_token, _yield_items(items[start:end])
+
+    return AsyncItemPaged(_get_next, extract_data=_extract_data), calls
+
+
+async def _yield_items[T](items: list[T]) -> AsyncIterator[T]:
+    for item in items:
+        yield item
 
 
 @pytest.mark.asyncio
@@ -442,6 +482,45 @@ async def test_create_rejects_stable_label_collision_with_foreign_binding(
 
 
 @pytest.mark.asyncio
+async def test_accepted_create_recovery_preserves_a_stable_label_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    environment.group_client.create_result_error = RuntimeError("accepted poll failed")
+    original_list = environment.group_client.list_sandboxes
+
+    def list_with_post_acceptance_collision(**kwargs: Any):
+        if environment.group_client.create_calls:
+            environment.sandboxes["created-1"].labels["session_id"] = "other-session"
+        return original_list(**kwargs)
+
+    monkeypatch.setattr(
+        environment.group_client,
+        "list_sandboxes",
+        list_with_post_acceptance_collision,
+    )
+
+    with pytest.raises(SandboxProvisioningError, match="collision"):
+        await adapter.create(_request(labels=labels), persisted_group=_binding())
+
+    assert len(environment.group_client.create_calls) == 1
+    assert "created-1" in environment.sandboxes
+    await adapter.close()
+
+
+@pytest.mark.asyncio
 async def test_create_rejects_multiple_exact_stable_label_matches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -551,8 +630,17 @@ async def test_create_preserves_cancellation_when_cleanup_cannot_find_a_sandbox(
 
 
 @pytest.mark.asyncio
-async def test_create_preserves_definitive_request_rejection_without_cleanup(
+@pytest.mark.parametrize(
+    ("status_code", "expected_error"),
+    [
+        (400, SandboxProvisioningError),
+        (409, SandboxInvalidStateError),
+    ],
+)
+async def test_create_translates_definitive_request_rejection_without_cleanup(
     monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    expected_error: type[Exception],
 ) -> None:
     environment = FakeSdkEnvironment()
     _install_fake_adapter_boundary(monkeypatch, environment)
@@ -560,7 +648,7 @@ async def test_create_preserves_definitive_request_rejection_without_cleanup(
         _GROUP_ID, region="westus2", persisted_group=_binding()
     )
     rejection = HttpResponseError("request rejected")
-    rejection.status_code = 400
+    rejection.status_code = status_code
 
     async def rejected_create(**_: Any) -> None:
         raise rejection
@@ -571,7 +659,7 @@ async def test_create_preserves_definitive_request_rejection_without_cleanup(
     monkeypatch.setattr(environment.group_client, "begin_create_sandbox", rejected_create)
     monkeypatch.setattr(adapter, "_cleanup_failed_create", unexpected_cleanup)
 
-    with pytest.raises(SandboxProvisioningError) as caught:
+    with pytest.raises(expected_error) as caught:
         await adapter.create(_request(), persisted_group=_binding())
 
     assert "request rejected" not in str(caught.value)
@@ -684,9 +772,14 @@ async def test_stable_create_recovers_labeled_sandbox_after_poller_authorization
         RuntimeError("sensitive poll failure"),
     ],
 )
-async def test_stable_create_keeps_post_acceptance_authorization_failure_indeterminate(
+@pytest.mark.parametrize(
+    "reconciliation_failure_kind",
+    ["authorization", "http_503", "timeout"],
+)
+async def test_stable_create_keeps_post_acceptance_reconciliation_failure_indeterminate(
     monkeypatch: pytest.MonkeyPatch,
     poll_failure: Exception,
+    reconciliation_failure_kind: str,
 ) -> None:
     environment = FakeSdkEnvironment()
     _install_fake_adapter_boundary(monkeypatch, environment)
@@ -701,26 +794,32 @@ async def test_stable_create_keeps_post_acceptance_authorization_failure_indeter
         session_id="session-123",
         operation_label="op-session-123-1",
     )
-    rejection = HttpResponseError("sensitive provider response")
-    rejection.status_code = 403
+    reconciliation_failure: Exception
+    if reconciliation_failure_kind == "timeout":
+        reconciliation_failure = TimeoutError("sensitive reconciliation timeout")
+    else:
+        reconciliation_failure = HttpResponseError("sensitive provider response")
+        reconciliation_failure.status_code = (
+            403 if reconciliation_failure_kind == "authorization" else 503
+        )
     environment.group_client.create_result_error = poll_failure
     original_list = environment.group_client.list_sandboxes
 
-    def list_before_create_then_forbid(**kwargs: Any):
+    def list_before_create_then_fail(**kwargs: Any):
         if environment.group_client.create_calls:
-            raise rejection
+            raise reconciliation_failure
         return original_list(**kwargs)
 
     monkeypatch.setattr(
         environment.group_client,
         "list_sandboxes",
-        list_before_create_then_forbid,
+        list_before_create_then_fail,
     )
 
     with pytest.raises(SandboxCreateOutcomeUnknownError) as caught:
         await adapter.create(_request(labels=labels), persisted_group=_binding())
 
-    assert "sensitive provider response" not in str(caught.value)
+    assert "sensitive" not in str(caught.value)
     assert "sensitive poll" not in str(caught.value)
     assert caught.value.__suppress_context__
     assert len(environment.group_client.create_calls) == 1
@@ -1017,6 +1116,400 @@ async def test_group_transport_failure_is_transient_and_redacted(
 
     assert "sensitive network detail" not in str(caught.value)
     assert caught.value.__suppress_context__
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_get_sandbox_summary_projects_the_exact_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    handle = await adapter.create(_request(), persisted_group=_binding())
+
+    summary = await adapter.get_sandbox_summary(handle.identity.sandbox_id)
+
+    assert summary is not None
+    assert summary.sandbox_id == handle.identity.sandbox_id
+    assert summary.state == "Running"
+    assert summary.labels.get("session_id") == "session-123"
+    await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_get_sandbox_summary_returns_none_for_a_missing_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+
+    assert await adapter.get_sandbox_summary("gone-sandbox") is None
+
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_get_sandbox_summary_translates_authorization_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    rejection = HttpResponseError("sensitive provider response")
+    rejection.status_code = 403
+    environment.group_client.get_sandbox_error = rejection
+
+    with pytest.raises(
+        SandboxGroupAuthorizationError,
+        match="Container Apps SandboxGroup Data Owner",
+    ) as caught:
+        await adapter.get_sandbox_summary("sandbox-1")
+
+    assert "sensitive provider response" not in str(caught.value)
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_get_sandbox_summary_wraps_other_transport_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    failure = HttpResponseError("sensitive provider response")
+    failure.status_code = 500
+    environment.group_client.get_sandbox_error = failure
+
+    with pytest.raises(SandboxGroupTransientError) as caught:
+        await adapter.get_sandbox_summary("sandbox-1")
+
+    assert "sensitive provider response" not in str(caught.value)
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_adapter_bounds_inventory_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    sandbox_yields = 0
+    snapshot_yields = 0
+
+    async def sandboxes(**_: Any) -> Any:
+        nonlocal sandbox_yields
+        for index in range(10):
+            sandbox_yields += 1
+            yield FakeSdkSandboxSummary(id=f"sandbox-{index}", state="Running", labels={})
+
+    async def snapshots(**_: Any) -> Any:
+        nonlocal snapshot_yields
+        for index in range(10):
+            snapshot_yields += 1
+            yield FakeSdkSnapshot(id=f"snapshot-{index}", sandbox_id="sandbox-0")
+
+    monkeypatch.setattr(environment.group_client, "list_sandboxes", sandboxes)
+    monkeypatch.setattr(environment.group_client, "list_snapshots", snapshots)
+
+    assert len(await adapter.list_sandboxes(labels={}, max_items=3)) == 3
+    assert len(await adapter.list_snapshots(max_items=2)) == 2
+    assert sandbox_yields == 3
+    assert snapshot_yields == 2
+
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_list_sandboxes_page_resumes_from_opaque_continuation_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    for index in range(5):
+        environment.add_sandbox(f"sandbox-{index}")
+    environment.group_client.sandbox_page_size = 2
+
+    first = await adapter.list_sandboxes_page(labels={}, continuation_token=None, target_count=2)
+    assert isinstance(first, InventoryPage)
+    assert [item.sandbox_id for item in first.items] == ["sandbox-0", "sandbox-1"]
+    assert first.continuation_token is not None
+
+    second = await adapter.list_sandboxes_page(
+        labels={}, continuation_token=first.continuation_token, target_count=2
+    )
+    assert [item.sandbox_id for item in second.items] == ["sandbox-2", "sandbox-3"]
+    assert second.continuation_token is not None
+
+    third = await adapter.list_sandboxes_page(
+        labels={}, continuation_token=second.continuation_token, target_count=2
+    )
+    assert [item.sandbox_id for item in third.items] == ["sandbox-4"]
+    assert third.continuation_token is None
+
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_list_sandboxes_page_keeps_a_full_provider_page_when_target_is_crossed_mid_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A page is drained whole even though ``target_count`` is smaller than it."""
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    for index in range(3):
+        environment.add_sandbox(f"sandbox-{index}")
+    environment.group_client.sandbox_page_size = 3
+
+    page = await adapter.list_sandboxes_page(labels={}, continuation_token=None, target_count=1)
+
+    assert [item.sandbox_id for item in page.items] == [
+        "sandbox-0",
+        "sandbox-1",
+        "sandbox-2",
+    ]
+    assert page.continuation_token is None
+
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_list_snapshots_page_resumes_from_opaque_continuation_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    for index in range(3):
+        environment.group_client.snapshots[f"snapshot-{index}"] = FakeSdkSnapshot(
+            id=f"snapshot-{index}", sandbox_id="sandbox-0"
+        )
+    environment.group_client.snapshot_page_size = 2
+
+    first = await adapter.list_snapshots_page(continuation_token=None, target_count=2)
+    assert isinstance(first, InventoryPage)
+    assert [item.snapshot_id for item in first.items] == ["snapshot-0", "snapshot-1"]
+    assert first.continuation_token is not None
+
+    second = await adapter.list_snapshots_page(
+        continuation_token=first.continuation_token, target_count=2
+    )
+    assert [item.snapshot_id for item in second.items] == ["snapshot-2"]
+    assert second.continuation_token is None
+
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_list_sandboxes_page_restarts_once_from_the_beginning_after_an_invalid_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An SDK ``ValueError`` for a stale token recovers by resuming from the start."""
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    items = [
+        FakeSdkSandboxSummary(id=f"sandbox-{index}", state="Running", labels={})
+        for index in range(5)
+    ]
+    paged, calls = _paged_rejecting_token(
+        items,
+        2,
+        reject_token="stale-token",
+        rejection=ValueError("continuation token is no longer valid"),
+    )
+    monkeypatch.setattr(environment.group_client, "list_sandboxes", lambda **_: paged)
+
+    page = await adapter.list_sandboxes_page(
+        labels={}, continuation_token="stale-token", target_count=2
+    )
+
+    assert [item.sandbox_id for item in page.items] == ["sandbox-0", "sandbox-1"]
+    assert page.continuation_token is not None
+    assert calls == ["stale-token", None]
+
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_list_snapshots_page_restarts_once_from_the_beginning_after_an_expired_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 410 for an expired durable token recovers by resuming from the start."""
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    items = [FakeSdkSnapshot(id=f"snapshot-{index}", sandbox_id="sandbox-0") for index in range(3)]
+    expired = HttpResponseError("cursor is gone")
+    expired.status_code = 410
+    paged, calls = _paged_rejecting_token(
+        items, 2, reject_token="expired-token", rejection=expired
+    )
+    monkeypatch.setattr(environment.group_client, "list_snapshots", lambda **_: paged)
+
+    page = await adapter.list_snapshots_page(continuation_token="expired-token", target_count=2)
+
+    assert [item.snapshot_id for item in page.items] == ["snapshot-0", "snapshot-1"]
+    assert page.continuation_token is not None
+    assert calls == ["expired-token", None]
+
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_fetch_inventory_page_does_not_reset_cursor_for_projection_value_error() -> None:
+    paged, calls = _paged_rejecting_token(
+        [object()],
+        1,
+        reject_token="unused-token",
+        rejection=AssertionError("unused rejection"),
+    )
+
+    def invalid_projection(_: object) -> object:
+        raise ValueError("malformed provider item")
+
+    with pytest.raises(ValueError, match="malformed provider item"):
+        await aca_sdk._fetch_inventory_page(
+            lambda token: paged.by_page(continuation_token=token),
+            invalid_projection,
+            continuation_token="0",
+            target_count=1,
+        )
+
+    assert calls == ["0"]
+
+
+@pytest.mark.asyncio
+async def test_list_sandboxes_page_does_not_loop_when_the_fresh_retry_also_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The restart-from-``None`` attempt happens at most once, even if it too fails."""
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    calls: list[str | None] = []
+
+    async def _get_next(continuation_token: str | None = None) -> str | None:
+        calls.append(continuation_token)
+        raise ValueError("continuation token is no longer valid")
+
+    async def _extract_data(response: str | None) -> tuple[str | None, AsyncIterator[Any]]:
+        raise AssertionError("extract_data should never be reached")
+
+    paged = AsyncItemPaged(_get_next, extract_data=_extract_data)
+    monkeypatch.setattr(environment.group_client, "list_sandboxes", lambda **_: paged)
+
+    with pytest.raises(SandboxProvisioningError, match="inventory pagination failed"):
+        await adapter.list_sandboxes_page(
+            labels={}, continuation_token="stale-token", target_count=2
+        )
+
+    assert calls == ["stale-token", None]
+
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_list_snapshots_page_translates_authorization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    rejection = HttpResponseError("sensitive provider response")
+    rejection.status_code = 403
+
+    def forbidden_list(**_: Any) -> None:
+        raise rejection
+
+    monkeypatch.setattr(environment.group_client, "list_snapshots", forbidden_list)
+
+    with pytest.raises(
+        SandboxGroupAuthorizationError,
+        match="Container Apps SandboxGroup Data Owner",
+    ) as caught:
+        await adapter.list_snapshots_page(continuation_token=None, target_count=10)
+
+    assert "sensitive provider response" not in str(caught.value)
+    assert caught.value.__suppress_context__
+
+    await adapter.close()
+
+
+async def _assert_status_does_not_reset_the_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+    environment: FakeSdkEnvironment,
+    adapter: aca_sdk.AcaSandboxAdapter,
+    status_code: int,
+) -> None:
+    rejection = HttpResponseError("provider is temporarily unavailable")
+    rejection.status_code = status_code
+    paged, calls = _paged_rejecting_token(
+        [], 2, reject_token="active-token", rejection=rejection
+    )
+    monkeypatch.setattr(environment.group_client, "list_sandboxes", lambda **_: paged)
+
+    expected_error: type[Exception]
+    if status_code == 409:
+        expected_error = SandboxInvalidStateError
+    elif status_code in {408, 429, 500, 503}:
+        expected_error = SandboxGroupTransientError
+    else:
+        expected_error = SandboxProvisioningError
+
+    with pytest.raises(expected_error):
+        await adapter.list_sandboxes_page(
+            labels={}, continuation_token="active-token", target_count=2
+        )
+
+    assert calls == ["active-token"]
+
+
+@pytest.mark.asyncio
+async def test_list_sandboxes_page_does_not_reset_the_cursor_for_non_cursor_rejections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-cursor failures are translated without restarting inventory from page one."""
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+
+    for status_code in (408, 409, 425, 429, 500, 503):
+        await _assert_status_does_not_reset_the_cursor(
+            monkeypatch, environment, adapter, status_code
+        )
+
     await adapter.close()
 
 

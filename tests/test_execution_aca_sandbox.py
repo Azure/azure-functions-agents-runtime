@@ -26,8 +26,11 @@ from azure_functions_agents.controller.readiness import (
     ActivatedSession,
     ProvisionedSubmission,
     SessionActivationAuthorizationError,
+    SessionActivationBindingError,
+    SessionActivationConflictError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
+    SessionActivationTransientError,
     SessionRunOwnershipChangedError,
     SessionRuntimeBinding,
     SetupDeadline,
@@ -108,6 +111,7 @@ from azure_functions_agents.transport.transport_models import (
     SandboxFileOperationError,
     SandboxGroupAuthorizationError,
     SandboxGroupBindingError,
+    SandboxGroupTransientError,
     SandboxInvalidStateError,
     SandboxNotFoundError,
     SandboxProvisioningError,
@@ -829,8 +833,31 @@ async def test_duplicate_submit_reuses_run_after_launch_response_loss(
 
 
 @pytest.mark.asyncio
-async def test_get_run_propagates_provider_authorization_without_table_fallback(
+@pytest.mark.parametrize(
+    ("provider_error", "expected_error"),
+    [
+        (
+            SandboxGroupAuthorizationError(status_code=401),
+            SessionActivationAuthorizationError,
+        ),
+        (
+            SandboxGroupBindingError("Configured Sandbox Group was not found."),
+            SessionActivationBindingError,
+        ),
+        (
+            SandboxGroupTransientError("ACA Sandbox data plane is temporarily unavailable."),
+            SessionActivationTransientError,
+        ),
+        (
+            SandboxInvalidStateError("Sandbox state does not permit this operation."),
+            SessionActivationConflictError,
+        ),
+    ],
+)
+async def test_get_run_propagates_structured_provider_failure_without_table_fallback(
     tmp_path: Path,
+    provider_error: Exception,
+    expected_error: type[Exception],
 ) -> None:
     script_root = _script_root(tmp_path)
     session = _session(script_root)
@@ -838,17 +865,19 @@ async def test_get_run_propagates_provider_authorization_without_table_fallback(
     run = _run(session)
     store.runs[run.run_id] = run
     provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
-    provider.attach_error = SandboxGroupAuthorizationError()
+    provider.attach_error = provider_error
     backend = AcaSandboxExecutionBackend(
         _binding(),
         runtime=_runtime(script_root, provider, store),
         owner=_owner(),
     )
 
-    with pytest.raises(SessionActivationAuthorizationError) as caught:
+    with pytest.raises(expected_error) as caught:
         await backend.get_run(RunContext(run_id=run.run_id, session_id=session.session_id))
 
-    assert str(caught.value) == SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+    if isinstance(caught.value, SessionActivationAuthorizationError):
+        assert str(caught.value) == SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+        assert caught.value.status_code == 401
 
 
 @pytest.mark.asyncio
@@ -1177,6 +1206,13 @@ async def test_retryable_provision_content_failure_leaves_a_resumable_operation(
     )
     request = StartRunRequest(prompt="hello", idempotency_key="content-retry")
 
+    if status_code == 409:
+        recovered = await backend.start_run(request)
+        assert recovered.state == "accepted"
+        assert len(provider.sandboxes) == 1
+        assert len(provider.create_calls) == 1
+        return
+
     with pytest.raises(DurableAdmissionSetupTimeoutError):
         await backend.start_run(request)
 
@@ -1225,7 +1261,7 @@ async def test_file_plane_authorization_failure_is_redacted_and_resumable(
         budget=RequestBudget.start(authored_timeout=None),
     )
 
-    assert response.status_code == 503
+    assert response.status_code == status_code
     assert response.body == {
         "error": "sandbox_group_authorization_failed",
         "reason": "sandbox_group_authorization_failed",
@@ -1839,7 +1875,11 @@ async def test_nonterminal_status_poll_uses_targeted_reconciliation(
         _status(state="running"),
     )
 
-    async def targeted_reconcile(_: OwnerPartition, __: str, ___: object) -> None:
+    async def targeted_reconcile(
+        _: OwnerPartition,
+        __: str,
+        ___: SetupDeadline | None,
+    ) -> None:
         nonlocal calls
         calls += 1
 
@@ -2259,6 +2299,84 @@ async def test_launch_boundary_returns_durable_phase_when_journal_status_is_unav
     assert status.state == "accepted"
     assert status.phase == "executing"
     assert provider.attach_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_launched_status_transport_failure_is_structured(
+    tmp_path: Path,
+) -> None:
+    class UnavailableStatusHandle(FakeSandboxSessionHandle):
+        async def read_file(self, path: str) -> bytes:
+            if path == status_path("run-1"):
+                raise SandboxFileOperationError(
+                    "sensitive provider response",
+                    status_code=503,
+                )
+            return await super().read_file(path)
+
+    script_root = _script_root(tmp_path)
+    session = replace(
+        _session(script_root),
+        status="running",
+        active_run_id="run-1",
+    )
+    run = _run(session, state="running")
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(
+            script_root,
+            FakeSandboxSessionProvider(UnavailableStatusHandle()),
+            store,
+        ),
+        owner=_owner(),
+    )
+
+    with pytest.raises(SessionActivationTransientError) as caught:
+        await backend.get_run(RunContext(run_id=run.run_id, session_id=session.session_id))
+
+    assert "sensitive provider response" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_launched_event_transport_failure_is_structured(
+    tmp_path: Path,
+) -> None:
+    class UnavailableEventsHandle(FakeSandboxSessionHandle):
+        async def list_files(self, path: str):  # type: ignore[no-untyped-def]
+            raise SandboxFileOperationError(
+                "sensitive provider response",
+                status_code=503,
+            )
+
+    script_root = _script_root(tmp_path)
+    session = replace(
+        _session(script_root),
+        status="running",
+        active_run_id="run-1",
+    )
+    run = _run(session, state="running")
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(
+            script_root,
+            FakeSandboxSessionProvider(UnavailableEventsHandle()),
+            store,
+        ),
+        owner=_owner(),
+    )
+
+    stream = backend.read_events(
+        RunContext(run_id=run.run_id, session_id=session.session_id),
+        after_sequence=0,
+    )
+    with pytest.raises(SessionActivationTransientError) as caught:
+        await anext(stream)
+
+    assert "sensitive provider response" not in str(caught.value)
 
 
 @pytest.mark.asyncio
@@ -3207,14 +3325,39 @@ async def test_backend_cancels_through_the_live_handle_and_adopts_the_terminal_r
         (RunControlTimeoutError("control deadline elapsed"), 202, None),
         (SandboxProvisioningError("process execution timed out"), 202, None),
         (
+            SandboxFileOperationError("sensitive provider response", status_code=401),
+            401,
+            "sandbox_group_authorization_failed",
+        ),
+        (
             SandboxFileOperationError("sensitive provider response", status_code=403),
+            403,
+            "sandbox_group_authorization_failed",
+        ),
+        (
+            SandboxFileOperationError("sensitive provider response", status_code=409),
+            409,
+            "sandbox_invalid_state",
+        ),
+        (
+            SandboxFileOperationError("sensitive provider response", status_code=503),
             503,
+            "sandbox_group_transient",
+        ),
+        (
+            SandboxGroupAuthorizationError(status_code=401),
+            401,
             "sandbox_group_authorization_failed",
         ),
         (
             SandboxGroupBindingError("sensitive provider response"),
             503,
             "sandbox_group_binding_failed",
+        ),
+        (
+            SandboxGroupTransientError("sensitive provider response"),
+            503,
+            "sandbox_group_transient",
         ),
         (
             SandboxInvalidStateError("sensitive provider response"),
@@ -3533,13 +3676,22 @@ async def test_not_reserved_same_key_resubmission_can_start_a_new_attempt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "durable_reason"),
+    [
+        (401, "sandbox_group_authentication_failed"),
+        (403, "sandbox_group_authorization_failed"),
+    ],
+)
 async def test_new_session_authorization_failure_replays_same_terminal_response(
     tmp_path: Path,
+    status_code: int,
+    durable_reason: str,
 ) -> None:
     script_root = _script_root(tmp_path)
     handle = FakeSandboxSessionHandle()
     provider = FakeSandboxSessionProvider(handle)
-    provider.create_errors.append(SandboxGroupAuthorizationError())
+    provider.create_errors.append(SandboxGroupAuthorizationError(status_code=status_code))
     store = FakeSessionStateStore()
     backend = AcaSandboxExecutionBackend(
         _binding(),
@@ -3548,7 +3700,7 @@ async def test_new_session_authorization_failure_replays_same_terminal_response(
     )
     request = StartRunRequest(
         prompt="hello",
-        idempotency_key="authorization-failure-key",
+        idempotency_key=f"authorization-failure-{status_code}",
     )
 
     first = await submit_run(
@@ -3575,9 +3727,9 @@ async def test_new_session_authorization_failure_replays_same_terminal_response(
             "Sandbox Group."
         ),
     }
-    assert first.status_code == 503
+    assert first.status_code == status_code
     assert first.body == expected_body
-    assert replay.status_code == 503
+    assert replay.status_code == status_code
     assert replay.body == expected_body
     assert len(provider.create_calls) == 1
     assert store.session is not None
@@ -3586,7 +3738,7 @@ async def test_new_session_authorization_failure_replays_same_terminal_response(
     assert store.session.active_operation_id is None
     [run] = store.runs.values()
     assert run.status == "failed"
-    assert run.status_reason == "sandbox_group_authorization_failed"
+    assert run.status_reason == durable_reason
     [operation] = store.durable_operations.values()
     assert operation.state == "completed"
 
@@ -4176,6 +4328,38 @@ async def test_live_journal_owner_file_failure_is_indeterminate_not_raw_transpor
             SetupBudget.start(),
         )
 
+    assert "sensitive provider response" not in str(caught.value)
+    assert [call for call in handle.calls if call.operation == "exec"] == []
+
+
+@pytest.mark.asyncio
+async def test_live_journal_owner_preserves_authentication_status(
+    tmp_path: Path,
+) -> None:
+    backend, activated, run, store, handle = await _admitted_submit_for_journal_test(
+        _script_root(tmp_path)
+    )
+    original_claim = store.claim_operation_journal
+
+    async def live_owner(**kwargs: object):
+        claimed = await original_claim(**kwargs)
+        assert claimed is not None
+        return None
+
+    store.claim_operation_journal = live_owner  # type: ignore[method-assign]
+    handle.read_errors.append(
+        SandboxFileOperationError("sensitive provider response", status_code=401)
+    )
+
+    with pytest.raises(SessionActivationAuthorizationError) as caught:
+        await backend._submit_fenced_journal(
+            activated,
+            run,
+            StartRunRequest(prompt="hello", session_id=run.session_id),
+            SetupBudget.start(),
+        )
+
+    assert caught.value.status_code == 401
     assert "sensitive provider response" not in str(caught.value)
     assert [call for call in handle.calls if call.operation == "exec"] == []
 
