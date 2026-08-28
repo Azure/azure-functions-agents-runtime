@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Mapping
 
 import pytest
 
+from tests.aca_smoke_diagnostics import AcaSmokeEnvironmentError
 from tests.live import aca_deployed_agent_support as support
 
 
@@ -70,6 +72,17 @@ class TestSseThrottleRetryDelay:
             503, {"Retry-After": "3"}, is_final_attempt=False
         )
         assert delay_429 == delay_503 == pytest.approx(3.0)
+
+    @pytest.mark.parametrize("status", [502, 503])
+    def test_frontend_unavailable_without_retry_after_uses_fixed_delay(
+        self,
+        status: int,
+    ) -> None:
+        assert support.sse_throttle_retry_delay(
+            status,
+            {"Content-Type": "text/html; charset=utf-8", "Connection": "close"},
+            is_final_attempt=False,
+        ) == pytest.approx(support._FRONTEND_UNAVAILABLE_RETRY_SECONDS)
 
     def test_max_attempts_constant_is_positive_and_bounded(self) -> None:
         """Guard: the attempt limit is positive and not accidentally huge."""
@@ -192,6 +205,47 @@ class TestSseReaderRetryLoop:
         assert len(session.request_headers) == 1
 
     @pytest.mark.asyncio
+    async def test_frontend_unavailable_without_header_retries_then_succeeds(self) -> None:
+        session = _FakeSseSession(
+            [
+                _FakeSseResponse(503, {"Content-Type": "text/html"}, b"Site Unavailable"),
+                _FakeSseResponse(200, {}, _sse_body(1)),
+            ]
+        )
+
+        status, events, _, _, _ = await support._read_sse_response(
+            session,  # type: ignore[arg-type]
+            "https://example.invalid/events",
+            headers={"Authorization": "******", "Last-Event-ID": "0"},
+        )
+
+        assert status == 200
+        assert [event.sequence for event in events] == [1]
+        assert self.slept == [support._FRONTEND_UNAVAILABLE_RETRY_SECONDS]
+        assert [headers["Last-Event-ID"] for headers in session.request_headers] == ["0", "0"]
+
+    @pytest.mark.asyncio
+    async def test_persistent_frontend_unavailability_still_raises(self) -> None:
+        session = _FakeSseSession(
+            [
+                _FakeSseResponse(503, {"Content-Type": "text/html"}, b"Site Unavailable")
+                for _ in range(support._SSE_THROTTLE_MAX_ATTEMPTS)
+            ]
+        )
+
+        with pytest.raises(support.SseResponseStatusError):
+            await support._read_sse_response(
+                session,  # type: ignore[arg-type]
+                "https://example.invalid/events",
+                headers={"Authorization": "******"},
+            )
+
+        assert len(session.request_headers) == support._SSE_THROTTLE_MAX_ATTEMPTS
+        assert self.slept == [
+            support._FRONTEND_UNAVAILABLE_RETRY_SECONDS
+        ] * (support._SSE_THROTTLE_MAX_ATTEMPTS - 1)
+
+    @pytest.mark.asyncio
     async def test_resume_header_survives_a_throttled_attempt(self) -> None:
         """A retry must not drop the caller's resume position."""
         session = _FakeSseSession(
@@ -234,6 +288,26 @@ class _FakeJsonResponse:
         import json as _json
 
         return _json.dumps(self._body).encode()
+
+
+class _FakeFrontendResponse(_FakeJsonResponse):
+    """An App Service front-end response that never reached the JSON app."""
+
+    def __init__(self, status: int = 503) -> None:
+        super().__init__(
+            status,
+            {"Content-Type": "text/html; charset=utf-8", "Connection": "close"},
+            {},
+        )
+        self.reads = 0
+
+    async def json(self, content_type: object = None) -> dict[str, object]:
+        del content_type
+        raise json.JSONDecodeError("not JSON", "Site Unavailable", 0)
+
+    async def read(self) -> bytes:
+        self.reads += 1
+        return b"Site Unavailable"
 
 
 class _FakeJsonSession:
@@ -390,6 +464,65 @@ class TestJsonRequestThrottleRetry:
         assert status == 503
         assert len(session.requests) == 1
         assert self.slept == []
+
+    @pytest.mark.asyncio
+    async def test_idempotent_post_retries_frontend_unavailable_then_succeeds(self) -> None:
+        unavailable = _FakeFrontendResponse()
+        session = _FakeJsonSession(
+            [
+                unavailable,
+                _FakeJsonResponse(202, {}, {"run_id": "run-1"}),
+            ]
+        )
+
+        status, body, _ = await support.json_request(
+            session,  # type: ignore[arg-type]
+            "POST",
+            "https://example.invalid/chat",
+            headers={"Idempotency-Key": "same-attempt"},
+        )
+
+        assert status == 202
+        assert body == {"run_id": "run-1"}
+        assert unavailable.reads == 1
+        assert len(session.requests) == 2
+        assert self.slept == [support._FRONTEND_UNAVAILABLE_RETRY_SECONDS]
+
+    @pytest.mark.asyncio
+    async def test_unsafe_post_does_not_retry_frontend_unavailable(self) -> None:
+        unavailable = _FakeFrontendResponse()
+        session = _FakeJsonSession([unavailable])
+
+        with pytest.raises(AcaSmokeEnvironmentError, match="HTTP 503"):
+            await support.json_request(
+                session,  # type: ignore[arg-type]
+                "POST",
+                "https://example.invalid/chat",
+            )
+
+        assert unavailable.reads == 1
+        assert len(session.requests) == 1
+        assert self.slept == []
+
+    @pytest.mark.asyncio
+    async def test_persistent_frontend_unavailability_still_fails(self) -> None:
+        responses = [
+            _FakeFrontendResponse()
+            for _ in range(support._JSON_THROTTLE_MAX_ATTEMPTS)
+        ]
+        session = _FakeJsonSession(responses)
+
+        with pytest.raises(AcaSmokeEnvironmentError, match="HTTP 503"):
+            await support.json_request(
+                session,  # type: ignore[arg-type]
+                "GET",
+                "https://example.invalid/status",
+            )
+
+        assert len(session.requests) == support._JSON_THROTTLE_MAX_ATTEMPTS
+        assert self.slept == [
+            support._FRONTEND_UNAVAILABLE_RETRY_SECONDS
+        ] * (support._JSON_THROTTLE_MAX_ATTEMPTS - 1)
 
     @pytest.mark.asyncio
     async def test_malformed_retry_after_on_503_is_not_retried(self) -> None:

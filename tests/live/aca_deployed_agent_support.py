@@ -39,6 +39,8 @@ _SSE_THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS = 10.0
 
 _JSON_THROTTLE_MAX_ATTEMPTS = 4
 _JSON_THROTTLE_STATUSES = frozenset({429, 503})
+_FRONTEND_UNAVAILABLE_STATUSES = frozenset({502, 503})
+_FRONTEND_UNAVAILABLE_RETRY_SECONDS = 2.0
 # Every 503 this service emits asks for two seconds; ten leaves headroom without
 # admitting a wait long enough to exhaust a caller's own budget. The 120-second
 # Retry-After belongs to the 504 setup-timeout path, which is a real outcome
@@ -75,13 +77,17 @@ def sse_throttle_retry_delay(
     is_final_attempt: bool,
 ) -> float | None:
     """Return the delay before retrying a throttled SSE response, or None to give up."""
-    if status not in _SSE_THROTTLE_STATUSES:
-        return None
     if is_final_attempt:
         return None
-    return optional_retry_after_seconds(
-        headers, maximum_seconds=_SSE_THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS
-    )
+    if status in _SSE_THROTTLE_STATUSES:
+        delay = optional_retry_after_seconds(
+            headers, maximum_seconds=_SSE_THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS
+        )
+        if delay is not None:
+            return delay
+    if _is_frontend_unavailable_response(status, headers):
+        return _FRONTEND_UNAVAILABLE_RETRY_SECONDS
+    return None
 
 
 def optional_retry_after_seconds(
@@ -117,6 +123,28 @@ def response_header(headers: Mapping[str, str], name: str) -> str | None:
         ),
         None,
     )
+
+
+def _is_frontend_unavailable_response(
+    status: int,
+    headers: Mapping[str, str],
+) -> bool:
+    if status not in _FRONTEND_UNAVAILABLE_STATUSES:
+        return False
+    content_type = response_header(headers, "content-type")
+    if content_type is None:
+        return False
+    media_type = content_type.partition(";")[0].strip().casefold()
+    return media_type in {"text/html", "text/plain"}
+
+
+def _request_can_retry_frontend_unavailable(
+    method: str,
+    headers: Mapping[str, str] | None,
+) -> bool:
+    if method.upper() in {"GET", "HEAD"}:
+        return True
+    return headers is not None and response_header(headers, "idempotency-key") is not None
 
 
 def timeout_recovery_submission_headers(
@@ -397,8 +425,16 @@ async def json_request(
         try:
             async with session.request(method, url, headers=headers, json=payload) as response:
                 status = response.status
-                body = await _json_body(response)
                 resp_headers: Mapping[str, str] = dict(response.headers)
+                frontend_unavailable = _is_frontend_unavailable_response(
+                    status,
+                    resp_headers,
+                )
+                if frontend_unavailable:
+                    await response.read()
+                    body: dict[str, object] = {}
+                else:
+                    body = await _json_body(response)
         except (TimeoutError, OSError) as exc:
             raise AcaSmokeEnvironmentError(
                 f"Function App was unavailable at {redact_deployed_aca_evidence(url)}: "
@@ -406,10 +442,28 @@ async def json_request(
             ) from exc
 
         if not retry_throttled:
-            return status, body, resp_headers
-        if status not in _JSON_THROTTLE_STATUSES:
+            if frontend_unavailable:
+                raise AcaSmokeEnvironmentError(f"Function App returned HTTP {status}.")
             return status, body, resp_headers
         is_final = attempt == _JSON_THROTTLE_MAX_ATTEMPTS
+        if frontend_unavailable:
+            if (
+                is_final
+                or not _request_can_retry_frontend_unavailable(method, headers)
+            ):
+                raise AcaSmokeEnvironmentError(f"Function App returned HTTP {status}.")
+            delay = optional_retry_after_seconds(
+                resp_headers,
+                maximum_seconds=_JSON_THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS,
+            )
+            await asyncio.sleep(
+                delay
+                if delay is not None
+                else _FRONTEND_UNAVAILABLE_RETRY_SECONDS
+            )
+            continue
+        if status not in _JSON_THROTTLE_STATUSES:
+            return status, body, resp_headers
         if is_final:
             return status, body, resp_headers
         delay = optional_retry_after_seconds(
@@ -739,7 +793,6 @@ async def _json_body(response: ClientResponse) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise AssertionError("Expected a JSON object response.")
     return payload
-
 
 
 
