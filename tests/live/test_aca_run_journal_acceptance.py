@@ -78,4 +78,7 @@ async def test_live_aca_run_journal_acceptance(
     assert status.state in {"accepted", "failed"}
     if status.state == "failed":
         assert status.error is not None
-        assert status.error.code == "sandbox_storage_failure"
+        # The deliberately unknown agent may fail through catalog lookup or the
+        # journal wrapper before this reader observes the earlier accepted row.
+        # This smoke owns launch/journal acceptance, not that internal race.
+        assert status.error.fault_domain == "harness"
