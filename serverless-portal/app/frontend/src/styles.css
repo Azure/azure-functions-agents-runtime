@@ -187,6 +187,12 @@ tbody tr:hover { background: var(--surface-2); }
 .connection-mode-control button.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
 .connection-mode-control button:disabled { cursor: not-allowed; opacity: .55; }
 .connection-mode-note, .connection-picker-intro { margin-top: 14px; }
+.instruction-mode-control { display: grid; grid-template-columns: 1fr 1fr; width: 100%; padding: 3px;
+  margin-bottom: 18px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-2); }
+.instruction-mode-control button { min-height: 38px; border: 0; border-radius: 5px; background: transparent;
+  color: var(--text-muted); font: 600 13px/1 inherit; cursor: pointer; }
+.instruction-mode-control button.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+.instruction-mode-control button:disabled { cursor: not-allowed; opacity: .55; }
 .connection-candidate-table { max-height: 330px; overflow: auto; }
 .connection-candidate-table tbody tr { cursor: pointer; }
 .connection-candidate-table tbody tr.selected { background: var(--brand-soft); }

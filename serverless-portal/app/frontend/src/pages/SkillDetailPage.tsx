@@ -195,6 +195,7 @@ export default function SkillDetailPage() {
         resourceGroup: agent.resourceGroup,
         app: agent.app,
         mode: 'existing',
+        publishMode: 'pr',
         repo: appConnection.repoUrl.replace('https://github.com/', ''),
         branch: appConnection.branch || 'main',
       })
@@ -368,8 +369,8 @@ export default function SkillDetailPage() {
 
           {tab === 'source' && (
             <section className="source-github-stack">
-              <div className="skill-section-head"><div><h2>Source &amp; GitHub</h2><p>Move the current Function App source into a repository, then use pull requests for future Hosted Skill changes.</p></div>{appConnection?.connected && <span className="badge green">Repository connected</span>}</div>
-              <div className="github-migration-steps"><div><span>1</span><strong>Connect a repository</strong><p>Create a new repository or select an existing one.</p></div><div><span>2</span><strong>Open the initial PR</strong><p>The portal exports the app source and saved drafts to a branch.</p></div><div><span>3</span><strong>Deploy from GitHub</strong><p>Enable GitHub Actions after review so merged code becomes the source of truth.</p></div></div>
+              <div className="skill-section-head"><div><h2>Source &amp; GitHub</h2><p>Move the complete deployable Function App source into a repository, then publish changes through review or directly.</p></div>{appConnection?.connected && <span className="badge green">Repository connected</span>}</div>
+              <div className="github-migration-steps"><div><span>1</span><strong>Connect a repository</strong><p>Create a new repository or select an existing one.</p></div><div><span>2</span><strong>Publish the source</strong><p>Open a pull request or push the app source and saved drafts to the default branch.</p></div><div><span>3</span><strong>Deploy from GitHub</strong><p>Enable GitHub Actions so updates to the connected branch deploy the Function App.</p></div></div>
               <GitHubConnect github={{ subscription: subForQuery, resourceGroup: agent.resourceGroup, app: agent.app }} />
               <details className="advanced-source-card" open>
                 <summary>Agent code · {agent.name}.agent.md</summary>

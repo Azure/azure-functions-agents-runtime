@@ -283,15 +283,18 @@ export interface GitHubRepo {
   defaultBranch: string
   htmlUrl: string
 }
+export type GitHubPublishMode = 'pr' | 'direct'
 export interface GitHubConnectResult {
   htmlUrl: string
   repoUrl: string
   owner: string
   name: string
+  publishMode: GitHubPublishMode
   branch: string
   base?: string
   prUrl?: string
   prNumber?: number
+  commitSha?: string
   stored: boolean
   deploymentCenter?: boolean
   pushed: string[]
@@ -806,7 +809,9 @@ export const api = {
       'GET',
       `/api/github/app-connection?subscription=${enc(p.subscription)}&resourceGroup=${enc(p.resourceGroup)}&app=${enc(p.app)}`,
     ),
-  githubLoginUrl: () => req<{ authorizeUrl: string }>('POST', '/api/github/login-url'),
+  githubLoginUrl: (callbackUrl: string) =>
+    req<{ authorizeUrl: string }>('POST', '/api/github/login-url', { callbackUrl }),
+  githubLocalSession: () => req<GitHubStatus>('POST', '/api/github/local-session'),
   githubDisconnect: () => req<GitHubStatus>('POST', '/api/github/disconnect'),
   githubUnlink: (p: { subscription: string; resourceGroup: string; app: string; deploymentCenter?: boolean }) =>
     req<{ ok: boolean; cleared: boolean; deploymentCenter: boolean; deploymentCenterCleared: boolean }>(
@@ -820,6 +825,7 @@ export const api = {
     resourceGroup: string
     app: string
     mode: 'new' | 'existing'
+    publishMode: GitHubPublishMode
     repoName?: string
     private?: boolean
     org?: string

@@ -5,21 +5,21 @@
 // existing one), pushes the app's source, and records the repo link on the
 // Function App. Later phases open pull requests for edits.
 //
-// The OAuth token never reaches the browser. `authorizeUrl()` embeds a signed
-// `state` that binds the flow to the portal user's `oid`; the callback verifies
-// the signature and stores the token server-side keyed by that oid. Every
-// GitHub API route requires the caller's ARM token (so a user can only use
-// their own connection).
+// The raw OAuth token never reaches browser JavaScript. `authorizeUrl()` embeds
+// a signed `state` bound to the portal user's `oid`; the callback encrypts the
+// GitHub identity into an HttpOnly cookie that every API request re-binds to the
+// caller's ARM identity. A shared state secret keeps this stateless across
+// replicas and revisions.
 
 import crypto from 'node:crypto'
-import fs from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 
 const GH_API = 'https://api.github.com'
 const GH_OAUTH = 'https://github.com/login/oauth'
 const SCOPE = 'repo read:user'
 const UA = 'serverless-agent-portal'
+const execFileAsync = promisify(execFile)
 
 // --- config ----------------------------------------------------------------
 
@@ -30,24 +30,42 @@ export function githubConfig() {
     // Empty by default: when unset, the portal omits redirect_uri so GitHub
     // uses the app's own registered Callback URL (simplest for GitHub Apps).
     callback: process.env.GITHUB_OAUTH_CALLBACK || '',
+    stateSecret: process.env.GITHUB_OAUTH_STATE_SECRET || '',
   }
 }
 
 export function isConfigured() {
   const c = githubConfig()
-  return Boolean(c.clientId && c.clientSecret)
+  return Boolean(c.clientId && c.clientSecret && c.stateSecret)
 }
 
 // --- signed state (CSRF + user binding, stateless) -------------------------
 
-// A per-process secret is fine: state is short-lived. Set the env var to keep
-// states valid across restarts / multiple instances.
+// OAuth is reported as unconfigured unless this value is provided. The random
+// fallback exists only so the pure helpers remain usable in isolated tests.
 const STATE_SECRET = process.env.GITHUB_OAUTH_STATE_SECRET || crypto.randomBytes(32).toString('hex')
 const STATE_TTL_MS = 10 * 60 * 1000
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const SESSION_KEY = crypto.createHmac('sha256', STATE_SECRET).update('github-session-v1').digest()
+export const GITHUB_SESSION_COOKIE = 'serverless-portal-github'
+export const GITHUB_SESSION_MAX_AGE_MS = SESSION_TTL_MS
 
-function makeState(oid) {
+function normalizeLocalCallback(value) {
+  if (!value) return ''
+  try {
+    const url = new URL(String(value))
+    const localHost = url.hostname === 'localhost' || url.hostname === '127.0.0.1'
+    if (!localHost || url.protocol !== 'http:' || url.pathname !== '/api/github/callback') return ''
+    if (url.username || url.password || url.search || url.hash) return ''
+    return `${url.origin}${url.pathname}`
+  } catch {
+    return ''
+  }
+}
+
+function makeState(oid, callback = '') {
   const payload = Buffer.from(
-    JSON.stringify({ oid, n: crypto.randomBytes(8).toString('hex'), t: Date.now() }),
+    JSON.stringify({ oid, callback, n: crypto.randomBytes(8).toString('hex'), t: Date.now() }),
   ).toString('base64url')
   const sig = crypto.createHmac('sha256', STATE_SECRET).update(payload).digest('base64url')
   return `${payload}.${sig}`
@@ -70,63 +88,59 @@ export function readState(state) {
   return obj
 }
 
-// --- token store (in-memory; swap for Key Vault in prod) -------------------
+export function sealSession(oid, { token, login, avatarUrl = '' }) {
+  const iv = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv('aes-256-gcm', SESSION_KEY, iv)
+  const plaintext = Buffer.from(JSON.stringify({ oid, token, login, avatarUrl, t: Date.now() }), 'utf-8')
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()])
+  return ['v1', iv.toString('base64url'), encrypted.toString('base64url'), cipher.getAuthTag().toString('base64url')].join('.')
+}
 
-// Dev-only persistence: keep the token map in a gitignored file so backend
-// reloads (node --watch) don't drop the connection. Prod should use Key Vault.
-const TOKENS_FILE = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '..',
-  '.data',
-  'github-tokens.json',
-)
-function loadTokens() {
+export function readSession(value, expectedOid) {
+  const [version, iv, encrypted, tag] = String(value || '').split('.')
+  if (version !== 'v1' || !iv || !encrypted || !tag || !expectedOid) return null
   try {
-    return new Map(Object.entries(JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf-8'))))
+    const decipher = crypto.createDecipheriv('aes-256-gcm', SESSION_KEY, Buffer.from(iv, 'base64url'))
+    decipher.setAuthTag(Buffer.from(tag, 'base64url'))
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(encrypted, 'base64url')),
+      decipher.final(),
+    ]).toString('utf-8')
+    const session = JSON.parse(plaintext)
+    if (
+      session?.oid !== expectedOid ||
+      !session?.token ||
+      !session?.login ||
+      Date.now() - Number(session?.t || 0) > SESSION_TTL_MS
+    ) {
+      return null
+    }
+    return { token: session.token, login: session.login, avatarUrl: session.avatarUrl || '' }
   } catch {
-    return new Map()
+    return null
   }
-}
-function saveTokens(map) {
-  try {
-    fs.mkdirSync(path.dirname(TOKENS_FILE), { recursive: true })
-    fs.writeFileSync(TOKENS_FILE, JSON.stringify(Object.fromEntries(map)), 'utf-8')
-  } catch {
-    /* best-effort */
-  }
-}
-const tokens = loadTokens() // oid -> { token, login, avatarUrl, connectedAt }
-export const tokenStore = {
-  get: (oid) => tokens.get(oid) || null,
-  set: (oid, data) => {
-    tokens.set(oid, { ...data, connectedAt: Date.now() })
-    saveTokens(tokens)
-  },
-  clear: (oid) => {
-    tokens.delete(oid)
-    saveTokens(tokens)
-  },
 }
 
 // --- OAuth flow ------------------------------------------------------------
 
-export function authorizeUrl(oid) {
+export function authorizeUrl(oid, requestedCallback = '') {
   const c = githubConfig()
+  const callback = c.callback || normalizeLocalCallback(requestedCallback)
   const params = new URLSearchParams({
     client_id: c.clientId,
     scope: SCOPE,
-    state: makeState(oid),
+    state: makeState(oid, callback),
     allow_signup: 'false',
   })
   // Only pin redirect_uri when explicitly configured. Omitting it lets GitHub
   // fall back to the app's registered Callback URL, avoiding the strict
   // "redirect_uri is not associated with this application" match (GitHub Apps
   // require an EXACT match to a registered Callback URL).
-  if (c.callback) params.set('redirect_uri', c.callback)
+  if (callback) params.set('redirect_uri', callback)
   return `${GH_OAUTH}/authorize?${params.toString()}`
 }
 
-export async function exchangeCode(code) {
+export async function exchangeCode(code, callback = '') {
   const c = githubConfig()
   const res = await fetch(`${GH_OAUTH}/access_token`, {
     method: 'POST',
@@ -135,7 +149,7 @@ export async function exchangeCode(code) {
       client_id: c.clientId,
       client_secret: c.clientSecret,
       code,
-      ...(c.callback ? { redirect_uri: c.callback } : {}),
+      ...(callback ? { redirect_uri: callback } : {}),
     }),
     signal: AbortSignal.timeout(15000),
   })
@@ -201,6 +215,25 @@ async function gh(token, apiPath, { method = 'GET', body } = {}) {
 export async function getUser(token) {
   const u = await gh(token, '/user')
   return { login: u.login, avatarUrl: u.avatar_url, name: u.name || u.login }
+}
+
+export async function getLocalCliSession() {
+  try {
+    const { stdout } = await execFileAsync('gh', ['auth', 'token', '--hostname', 'github.com'], {
+      timeout: 10_000,
+      windowsHide: true,
+      maxBuffer: 16 * 1024,
+    })
+    const token = stdout.trim()
+    if (!token) throw new Error('GitHub CLI returned an empty token.')
+    const user = await getUser(token)
+    return { token, login: user.login, avatarUrl: user.avatarUrl }
+  } catch (cause) {
+    const error = new Error('GitHub CLI is not authenticated. Run "gh auth login --hostname github.com", then try again.')
+    error.status = 401
+    error.cause = cause
+    throw error
+  }
 }
 
 export async function listRepos(token) {
@@ -275,6 +308,41 @@ export async function readRepoFile(token, owner, repo, filePath, ref) {
   }
 }
 
+export function validateDeployableRepoFiles(files) {
+  const names = new Set(files.map((file) => String(file.name).replace(/\\/g, '/')))
+  const required = [
+    'azure.yaml',
+    'README.md',
+    '.gitignore',
+    'infra/main.bicep',
+    'infra/main.parameters.json',
+    'src/function_app.py',
+    'src/host.json',
+    'src/requirements.txt',
+  ]
+  const missing = required.filter((name) => !names.has(name))
+  if (![...names].some((name) => /^src\/.+\.agent\.md$/i.test(name))) {
+    missing.push('src/*.agent.md')
+  }
+  if (missing.length) {
+    const error = new Error(`The repository export is incomplete: missing ${missing.join(', ')}.`)
+    error.status = 422
+    throw error
+  }
+  return files
+}
+
+export function ensureWorkflowCanBeWritten(existing, desired) {
+  if (existing == null || existing.replace(/\r\n/g, '\n').trim() === desired.replace(/\r\n/g, '\n').trim()) {
+    return existing == null
+  }
+  const error = new Error(
+    'A different .github/workflows/deploy.yml already exists. Rename or remove it before setting up AI Apps deployment.',
+  )
+  error.status = 409
+  throw error
+}
+
 // Rolling-branch resolution (one PR per app until merged): reuse the branch of an
 // OPEN PR under `${prefix}/` so edits accumulate into a single PR; start a fresh
 // timestamped branch when there's no open PR (first connect, or the last PR was
@@ -338,7 +406,7 @@ export async function setRepoVariable(token, owner, repo, name, value) {
 
 // Build a GitHub Actions workflow that deploys the function under `packagePath`
 // to a Flex Consumption Function App using OIDC (azure/login + functions-action).
-export function functionsWorkflowYaml({ appName, branch, packagePath = 'src', pythonVersion = '3.11' }) {
+export function functionsWorkflowYaml({ appName, branch, packagePath = 'src', pythonVersion = '3.13' }) {
   return `name: Deploy to Azure Functions
 
 on:

@@ -1,10 +1,11 @@
-// Shared in-progress Hosted Skills app draft used by the two-step create flow:
-//   CreateAgentPage  — pick a Foundry model, describe the agent, ✨ Generate.
-//   DraftAppPage     — review the generated .agent.md, then Deploy / connect GitHub.
+// Shared in-progress Hosted Skills app draft used by the create flow:
+//   CreateAgentPage  — pick a Foundry model, then generate or write instructions.
+//   DraftAppPage     — review the .agent.md, then Deploy / connect GitHub.
 // The draft lives in sessionStorage so it survives the navigation between the two
 // pages (and reloads) within the tab, and is discarded when the browser closes.
 
 export type Trigger = 'http' | 'timer' | 'connector'
+export type InstructionMode = 'generate' | 'manual'
 
 export interface NewApp {
   rgMode: 'existing' | 'new'
@@ -29,6 +30,7 @@ export interface Draft {
   builtinEndpoints: boolean
   sandbox: boolean
   trigger: Trigger
+  instructionMode: InstructionMode
   instructions: string
   generatedFor: string
   mdOverride: string | null
@@ -68,6 +70,7 @@ export const DEFAULT_DRAFT: Draft = {
   builtinEndpoints: true,
   sandbox: false,
   trigger: 'http',
+  instructionMode: 'generate',
   instructions: 'You are a helpful assistant. Answer the user clearly and concisely.',
   generatedFor: '',
   mdOverride: null,

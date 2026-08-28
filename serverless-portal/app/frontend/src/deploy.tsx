@@ -14,6 +14,7 @@ import {
   type GitHubRepo,
   type GitHubConnectResult,
   type GitHubAppConnection,
+  type GitHubPublishMode,
 } from './api'
 import { Button, Input } from '@coreai/fluentui-react'
 import { AlertFilled, AlertRegular, DismissRegular } from '@fluentui/react-icons'
@@ -356,6 +357,7 @@ export function GitHubConnect({
   const [appConn, setAppConn] = useState<GitHubAppConnection | null>(null)
   const [busy, setBusy] = useState(false)
   const [mode, setMode] = useState<'new' | 'existing'>('new')
+  const [publishMode, setPublishMode] = useState<GitHubPublishMode>('pr')
   const [repoName, setRepoName] = useState(app)
   const [priv, setPriv] = useState(true)
   const [repos, setRepos] = useState<GitHubRepo[] | null>(null)
@@ -407,11 +409,23 @@ export function GitHubConnect({
   const connect = async () => {
     setError('')
     setBusy(true)
+    const localHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    if (localHost) {
+      try {
+        await api.githubLocalSession()
+        await refreshStatus()
+      } catch (e) {
+        setError((e as Error).message)
+      } finally {
+        setBusy(false)
+      }
+      return
+    }
     // Open the popup synchronously (avoids blockers), then point it at GitHub.
     const popup = window.open('', 'github-oauth', 'width=760,height=820')
     let authorizeUrl = ''
     try {
-      const resp = await api.githubLoginUrl()
+      const resp = await api.githubLoginUrl(`${window.location.origin}/api/github/callback`)
       authorizeUrl = resp.authorizeUrl
     } catch (e) {
       try {
@@ -470,7 +484,14 @@ export function GitHubConnect({
     }
   }
 
-  const createAndPush = async () => {
+  const publish = async (request: {
+    mode: 'new' | 'existing'
+    publishMode: GitHubPublishMode
+    repoName?: string
+    private?: boolean
+    repo?: string
+    branch?: string
+  }) => {
     setError('')
     setPushing(true)
     setResult(null)
@@ -479,16 +500,54 @@ export function GitHubConnect({
         subscription,
         resourceGroup,
         app,
-        mode,
-        ...(mode === 'new' ? { repoName, private: priv } : { repo: existingRepo }),
+        ...request,
       })
       setResult(r)
       setChangingRepo(false)
+      await refreshStatus()
     } catch (e) {
       setError((e as Error).message)
     } finally {
       setPushing(false)
     }
+  }
+
+  const createAndPush = async () => {
+    const selected = repos?.find((repo) => repo.fullName === existingRepo)
+    const branch = mode === 'existing' ? selected?.defaultBranch : 'main'
+    if (
+      publishMode === 'direct' &&
+      !window.confirm(
+        `Push the complete deployable source directly to ${branch || 'the default branch'}?\n\n` +
+          'This bypasses pull-request review and may start a configured GitHub Actions deployment.',
+      )
+    ) {
+      return
+    }
+    await publish({
+      mode,
+      publishMode,
+      ...(mode === 'new'
+        ? { repoName, private: priv }
+        : { repo: existingRepo, ...(branch ? { branch } : {}) }),
+    })
+  }
+
+  const publishConnected = async (nextMode: GitHubPublishMode) => {
+    if (!appConn?.repoUrl) return
+    const repo = appConn.repoUrl.replace('https://github.com/', '')
+    const branch = appConn.branch || 'main'
+    if (
+      nextMode === 'direct' &&
+      !window.confirm(
+        `Push the complete deployable source directly to ${repo}:${branch}?\n\n` +
+          'This bypasses pull-request review and may start a configured GitHub Actions deployment.',
+      )
+    ) {
+      return
+    }
+    setPublishMode(nextMode)
+    await publish({ mode: 'existing', publishMode: nextMode, repo, branch })
   }
 
   // Delete the recorded repo link so the agent can be connected to a different
@@ -589,13 +648,15 @@ export function GitHubConnect({
       <div className="note" style={{ marginTop: 12 }}>
         🐙 GitHub isn’t configured on the server yet. Set{' '}
         <span className="mono">GITHUB_OAUTH_CLIENT_ID</span> and{' '}
-        <span className="mono">GITHUB_OAUTH_CLIENT_SECRET</span> to connect this agent to a repo.
+        <span className="mono">GITHUB_OAUTH_CLIENT_SECRET</span>, plus a shared{' '}
+        <span className="mono">GITHUB_OAUTH_STATE_SECRET</span>, to connect this agent to a repo.
       </div>
     )
   }
 
   const disconnect = () => void api.githubDisconnect().then(refreshStatus)
   const repoShort = (appConn?.repoUrl || '').replace('https://github.com/', '')
+  const resultIsDirect = result?.publishMode === 'direct'
 
   return (
     <div className="gh">
@@ -667,10 +728,15 @@ export function GitHubConnect({
               )}
             </div>
             <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
-              Edit an agent and save a draft, then use <strong>Create PR</strong> in the editor toolbar to
-              open a pull request with your changes.
+              Publish the complete deployable app source, including saved drafts, through review or directly to the connected branch.
             </div>
             <div className="gh-row" style={{ marginTop: 10 }}>
+              <Button appearance="primary" size="small" disabled={pushing} onClick={() => void publishConnected('pr')}>
+                {pushing && publishMode === 'pr' ? 'Opening PR…' : 'Create PR'}
+              </Button>
+              <Button size="small" disabled={pushing} onClick={() => void publishConnected('direct')}>
+                {pushing && publishMode === 'direct' ? 'Pushing…' : `Push to ${appConn.branch || 'main'}`}
+              </Button>
               <Button size="small" disabled={provisioning} onClick={() => void provisionDeploy()}>
                 {provisioning ? (
                   <>
@@ -715,9 +781,13 @@ export function GitHubConnect({
           </div>
         ) : result ? (
           <div className="gh-success">
-            <div className="h">✓ Pull request opened{result.prNumber ? ` · #${result.prNumber}` : ''}</div>
+            <div className="h">
+              {resultIsDirect
+                ? `✓ Source pushed to ${result.branch}`
+                : `✓ Pull request opened${result.prNumber ? ` · #${result.prNumber}` : ''}`}
+            </div>
             <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-              Review &amp; merge to update{' '}
+              {resultIsDirect ? 'Updated' : 'Review and merge to update'}{' '}
               <span className="mono">
                 {result.owner}/{result.name}
               </span>
@@ -726,11 +796,13 @@ export function GitHubConnect({
             <div className="gh-row">
               <a
                 className="btn sm primary"
-                href={result.prUrl || result.htmlUrl}
+                href={resultIsDirect && result.commitSha
+                  ? `${result.htmlUrl}/commit/${result.commitSha}`
+                  : result.prUrl || result.htmlUrl}
                 target="_blank"
                 rel="noreferrer"
               >
-                View pull request →
+                {resultIsDirect ? 'View commit →' : 'View pull request →'}
               </a>
               <a
                 className="btn sm"
@@ -742,7 +814,7 @@ export function GitHubConnect({
               </a>
               <span className="badge gray mono">
                 {result.branch}
-                {result.base ? ` → ${result.base}` : ''}
+                {!resultIsDirect && result.base ? ` → ${result.base}` : ''}
               </span>
               <Button appearance="subtle" size="small" onClick={() => setResult(null)} title="Back to the repository">
                 ← Back
@@ -823,7 +895,7 @@ export function GitHubConnect({
                 onClick={() => setMode('new')}
               >
                 <span className="t">✨ New repository</span>
-                <span className="d">Create a repo &amp; open a PR</span>
+                <span className="d">Create a deployable repository</span>
               </button>
               <button
                 type="button"
@@ -834,7 +906,7 @@ export function GitHubConnect({
                 }}
               >
                 <span className="t">📁 Existing repository</span>
-                <span className="d">Open a PR into a repo you pick</span>
+                <span className="d">Publish into a repository you pick</span>
               </button>
             </div>
 
@@ -881,6 +953,30 @@ export function GitHubConnect({
               </div>
             )}
 
+            <div className="gh-field">
+              <label>Publish changes</label>
+              <div className="gh-vis" role="group" aria-label="GitHub publication mode">
+                <button
+                  type="button"
+                  className={`gh-opt${publishMode === 'pr' ? ' active' : ''}`}
+                  aria-pressed={publishMode === 'pr'}
+                  onClick={() => setPublishMode('pr')}
+                >
+                  <span className="t">Create pull request</span>
+                  <span className="d">Review before merging</span>
+                </button>
+                <button
+                  type="button"
+                  className={`gh-opt${publishMode === 'direct' ? ' active' : ''}`}
+                  aria-pressed={publishMode === 'direct'}
+                  onClick={() => setPublishMode('direct')}
+                >
+                  <span className="t">Push to default branch</span>
+                  <span className="d">Publish without review</span>
+                </button>
+              </div>
+            </div>
+
             <button
               className="btn primary"
               style={{ width: '100%', justifyContent: 'center', marginTop: 4 }}
@@ -889,10 +985,14 @@ export function GitHubConnect({
             >
               {pushing ? (
                 <>
-                  <span className="gh-spin" /> Opening pull request…
+                  <span className="gh-spin" /> {publishMode === 'direct' ? 'Pushing source…' : 'Opening pull request…'}
                 </>
-              ) : mode === 'new' ? (
+              ) : mode === 'new' && publishMode === 'pr' ? (
                 'Create repository & open PR'
+              ) : mode === 'new' ? (
+                'Create repository & push'
+              ) : publishMode === 'direct' ? (
+                'Push to default branch'
               ) : (
                 'Open pull request'
               )}
@@ -902,8 +1002,8 @@ export function GitHubConnect({
                 <div className="skeleton shimmer-bar" />
                 <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
                   {mode === 'new'
-                    ? 'Creating the repository and opening a pull request…'
-                    : 'Opening the pull request…'}
+                    ? `Creating the repository and ${publishMode === 'direct' ? 'pushing source…' : 'opening a pull request…'}`
+                    : publishMode === 'direct' ? 'Pushing source…' : 'Opening the pull request…'}
                 </div>
               </>
             )}

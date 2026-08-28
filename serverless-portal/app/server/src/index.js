@@ -83,6 +83,40 @@ function requireToken(req) {
   return match[1].trim()
 }
 
+function requestCookie(req, name) {
+  for (const part of String(req.get('cookie') ?? '').split(';')) {
+    const separator = part.indexOf('=')
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue
+    try {
+      return decodeURIComponent(part.slice(separator + 1).trim())
+    } catch {
+      return ''
+    }
+  }
+  return ''
+}
+
+function githubEntry(req, oid) {
+  const sealed = requestCookie(req, github.GITHUB_SESSION_COOKIE)
+  return github.readSession(sealed, oid)
+}
+
+function githubCookieOptions(req) {
+  const forwardedProtocol = String(req.get('x-forwarded-proto') ?? '').split(',')[0].trim()
+  const configuredCallbackIsSecure = github.githubConfig().callback.startsWith('https://')
+  const localHost = req.hostname === 'localhost' || req.hostname === '127.0.0.1'
+  return {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: configuredCallbackIsSecure || !localHost || req.secure || forwardedProtocol === 'https',
+    path: '/',
+  }
+}
+
+function isLocalDevelopmentRequest(req) {
+  return process.env.NODE_ENV !== 'production' && (req.hostname === 'localhost' || req.hostname === '127.0.0.1')
+}
+
 // ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------
@@ -566,7 +600,7 @@ function parseGitHubOwnerRepo(repoUrl) {
 // repo link + the caller's stored GitHub token, then tries each candidate path
 // until one resolves. Returns content or null (never throws). Independent of
 // storage/Kudu, so it works even when the deployment package can't be read.
-async function readRepoFileForApp(token, subscription, resourceGroup, appName, candidatePaths) {
+async function readRepoFileForApp(req, token, subscription, resourceGroup, appName, candidatePaths) {
   if (!resourceGroup) return null
   let oid = ''
   try {
@@ -574,7 +608,7 @@ async function readRepoFileForApp(token, subscription, resourceGroup, appName, c
   } catch {
     return null
   }
-  const entry = oid ? github.tokenStore.get(oid) : null
+  const entry = oid ? githubEntry(req, oid) : null
   if (!entry?.token) return null
   let link = null
   try {
@@ -616,7 +650,7 @@ app.get(
     }
     // Fallback: read the source straight from the app's connected GitHub repo.
     if (deployedContent == null) {
-      deployedContent = await readRepoFileForApp(token, subscription, resourceGroup, appName, [
+      deployedContent = await readRepoFileForApp(req, token, subscription, resourceGroup, appName, [
         `${name}.agent.md`,
         `src/${name}.agent.md`,
         `agents/${name}.agent.md`,
@@ -707,7 +741,7 @@ async function readCurrentSource(req, subscription, resourceGroup, appName, relP
     if (site) deployed = await azure.readSourceFile(token, subscription, site, relPath, storageToken)
   }
   if (deployed == null) {
-    deployed = await readRepoFileForApp(token, subscription, resourceGroup, appName, [relPath, `src/${relPath}`])
+    deployed = await readRepoFileForApp(req, token, subscription, resourceGroup, appName, [relPath, `src/${relPath}`])
   }
   return { content: deployed ?? '', source: deployed == null ? 'none' : 'deployed' }
 }
@@ -734,7 +768,7 @@ app.get(
     }
     // Fallback: read the file straight from the app's connected GitHub repo.
     if (deployedContent == null) {
-      deployedContent = await readRepoFileForApp(token, subscription, resourceGroup, appName, [
+      deployedContent = await readRepoFileForApp(req, token, subscription, resourceGroup, appName, [
         relPath,
         `src/${relPath}`,
       ])
@@ -1764,7 +1798,7 @@ async function buildRepoFiles(appFiles, appName) {
   }
   for (const f of appFiles) files.set(`src/${f.name}`, f.data)
   files.set('.gitignore', Buffer.from(REPO_GITIGNORE, 'utf-8'))
-  return [...files].map(([name, data]) => ({ name, data }))
+  return github.validateDeployableRepoFiles([...files].map(([name, data]) => ({ name, data })))
 }
 
 // Overlay this app's saved portal drafts (edited `*.agent.md` and source files)
@@ -2475,7 +2509,7 @@ app.get(
   wrap(async (req, res) => {
     const token = requireToken(req)
     const { oid } = azure.getSignedInIdentity(token)
-    const entry = github.tokenStore.get(oid)
+    const entry = githubEntry(req, oid)
     res.json({
       configured: github.isConfigured(),
       connected: Boolean(entry),
@@ -2506,7 +2540,35 @@ app.post(
     const token = requireToken(req)
     if (!github.isConfigured()) throw new HttpError(501, 'GitHub sign-in is not configured on the server.')
     const { oid } = azure.getSignedInIdentity(token)
-    res.json({ authorizeUrl: github.authorizeUrl(oid) })
+    const callbackUrl = String(req.body?.callbackUrl ?? '').trim()
+    res.json({ authorizeUrl: github.authorizeUrl(oid, callbackUrl) })
+  }),
+)
+
+// Local development can reuse an authenticated GitHub CLI session instead of
+// requiring a localhost callback on the GitHub OAuth application. The token is
+// read only by the backend and immediately sealed into the same HttpOnly,
+// ARM-user-bound cookie as the production OAuth flow.
+app.post(
+  '/api/github/local-session',
+  wrap(async (req, res) => {
+    if (!isLocalDevelopmentRequest(req)) throw new HttpError(404, 'Not found.')
+    const token = requireToken(req)
+    const { oid } = azure.getSignedInIdentity(token)
+    if (!github.githubConfig().stateSecret) {
+      throw new HttpError(501, 'GITHUB_OAUTH_STATE_SECRET is required for a local GitHub session.')
+    }
+    try {
+      const session = await github.getLocalCliSession()
+      res.cookie(
+        github.GITHUB_SESSION_COOKIE,
+        github.sealSession(oid, session),
+        { ...githubCookieOptions(req), maxAge: github.GITHUB_SESSION_MAX_AGE_MS },
+      )
+      res.json({ configured: true, connected: true, login: session.login, avatarUrl: session.avatarUrl })
+    } catch (error) {
+      throw new HttpError(error.status ?? 502, String(error?.message ?? error))
+    }
   }),
 )
 
@@ -2527,9 +2589,14 @@ app.get(
       return res.status(400).send(github.closePage('GitHub sign-in failed (invalid or expired state).', false))
     }
     try {
-      const accessToken = await github.exchangeCode(code)
+      const accessToken = await github.exchangeCode(code, state.callback)
       const user = await github.getUser(accessToken)
-      github.tokenStore.set(state.oid, { token: accessToken, login: user.login, avatarUrl: user.avatarUrl })
+      const session = { token: accessToken, login: user.login, avatarUrl: user.avatarUrl }
+      res.cookie(
+        github.GITHUB_SESSION_COOKIE,
+        github.sealSession(state.oid, session),
+        { ...githubCookieOptions(req), maxAge: github.GITHUB_SESSION_MAX_AGE_MS },
+      )
       console.log('[github/callback] connected as', user.login, 'for oid', state.oid)
       res.send(github.closePage(`Connected as ${user.login}. You can close this window.`, true))
     } catch (err) {
@@ -2544,8 +2611,8 @@ app.post(
   '/api/github/disconnect',
   wrap(async (req, res) => {
     const token = requireToken(req)
-    const { oid } = azure.getSignedInIdentity(token)
-    github.tokenStore.clear(oid)
+    azure.getSignedInIdentity(token)
+    res.clearCookie(github.GITHUB_SESSION_COOKIE, githubCookieOptions(req))
     res.json({ configured: github.isConfigured(), connected: false })
   }),
 )
@@ -2601,7 +2668,7 @@ app.get(
   wrap(async (req, res) => {
     const token = requireToken(req)
     const { oid } = azure.getSignedInIdentity(token)
-    const entry = github.tokenStore.get(oid)
+    const entry = githubEntry(req, oid)
     if (!entry) throw new HttpError(401, 'Not connected to GitHub.')
     try {
       res.json({ repos: await github.listRepos(entry.token) })
@@ -2618,14 +2685,18 @@ app.post(
   wrap(async (req, res) => {
     const token = requireToken(req)
     const { oid } = azure.getSignedInIdentity(token)
-    const entry = github.tokenStore.get(oid)
+    const entry = githubEntry(req, oid)
     if (!entry) throw new HttpError(401, 'Not connected to GitHub.')
 
     const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
     const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
     const appName = String(req.body?.app ?? '').trim()
     const mode = String(req.body?.mode ?? 'new')
+    const publishMode = String(req.body?.publishMode ?? 'pr')
     if (!resourceGroup || !appName) throw new HttpError(400, 'resourceGroup and app are required.')
+    if (!['pr', 'direct'].includes(publishMode)) {
+      throw new HttpError(400, 'publishMode must be "pr" or "direct".')
+    }
 
     // Assemble this app's source: the portal-managed working copy if present,
     // else the app's deployed package — then overlay any saved (unpublished)
@@ -2649,12 +2720,9 @@ app.post(
         const fullName = String(req.body?.repo ?? '').trim()
         const [owner, name] = fullName.split('/')
         if (!owner || !name) throw new HttpError(400, 'An existing repo "owner/name" is required.')
-        repo = {
-          owner,
-          name,
-          defaultBranch: String(req.body?.branch ?? '').trim() || 'main',
-          htmlUrl: `https://github.com/${owner}/${name}`,
-        }
+        repo = await github.getRepo(entry.token, owner, name)
+        const requestedBranch = String(req.body?.branch ?? '').trim()
+        if (requestedBranch) repo.defaultBranch = requestedBranch
       } else {
         const name = safeSegment(String(req.body?.repoName ?? appName).trim() || appName)
         const priv = req.body?.private !== false
@@ -2684,25 +2752,38 @@ app.post(
       // README + the function app under src/) to push.
       const files = await buildRepoFiles(appFiles, appName)
 
-      // Option B — one rolling PR per app: reuse the open PR's branch so edits
-      // accumulate into a single PR; a fresh branch starts once it's merged.
       const base = repo.defaultBranch || 'main'
-      const seg = (s) =>
-        String(s)
-          .replace(/[^A-Za-z0-9._-]/g, '-')
-          .replace(/^-+|-+$/g, '') || 'x'
-      const prefix = `agents/${seg(entry.login)}/${seg(appName)}`
-      const head = await github.resolveRollingBranch(entry.token, repo.owner, repo.name, base, prefix)
-      const pr = await github.openPullRequest(entry.token, {
-        owner: repo.owner,
-        repo: repo.name,
-        base,
-        head,
-        files,
-        message: `Update agent "${appName}" (via AI Apps)`,
-        title: `Agent "${appName}" via AI Apps`,
-        body: `Opened by AI Apps on behalf of @${entry.login}.\n\nAdds/updates the source for agent app \`${appName}\` on branch \`${head}\`. Edits roll into this PR until it's merged.`,
-      })
+      let branch = base
+      let pr = null
+      let commitSha
+      if (publishMode === 'direct') {
+        const pushed = await github.pushFiles(entry.token, {
+          owner: repo.owner,
+          repo: repo.name,
+          branch: base,
+          files,
+          message: `Update agent "${appName}" (via AI Apps)`,
+        })
+        commitSha = pushed.commitSha
+      } else {
+        // Reuse one rolling PR per app; start a fresh branch after it is merged.
+        const seg = (s) =>
+          String(s)
+            .replace(/[^A-Za-z0-9._-]/g, '-')
+            .replace(/^-+|-+$/g, '') || 'x'
+        const prefix = `agents/${seg(entry.login)}/${seg(appName)}`
+        branch = await github.resolveRollingBranch(entry.token, repo.owner, repo.name, base, prefix)
+        pr = await github.openPullRequest(entry.token, {
+          owner: repo.owner,
+          repo: repo.name,
+          base,
+          head: branch,
+          files,
+          message: `Update agent "${appName}" (via AI Apps)`,
+          title: `Agent "${appName}" via AI Apps`,
+          body: `Opened by AI Apps on behalf of @${entry.login}.\n\nAdds/updates the source for agent app \`${appName}\` on branch \`${branch}\`. Edits roll into this PR until it's merged.`,
+        })
+      }
 
       // Persist the connection as app-setting metadata (the reliable store that
       // later visits/edits read back). We intentionally do NOT write the Function
@@ -2749,10 +2830,11 @@ app.post(
         repoUrl,
         owner: repo.owner,
         name: repo.name,
+        publishMode,
         base,
-        branch: head,
-        prUrl: pr.prUrl,
-        prNumber: pr.prNumber,
+        branch,
+        ...(commitSha ? { commitSha } : {}),
+        ...(pr ? { prUrl: pr.prUrl, prNumber: pr.prNumber } : {}),
         stored,
         deploymentCenter,
         pushed: files.map((f) => f.name).sort(),
@@ -2774,7 +2856,7 @@ app.post(
   wrap(async (req, res) => {
     const token = requireToken(req)
     const { oid, tenantId } = azure.getSignedInIdentity(token)
-    const entry = github.tokenStore.get(oid)
+    const entry = githubEntry(req, oid)
     if (!entry) throw new HttpError(401, 'Not connected to GitHub.')
 
     const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
@@ -2797,15 +2879,26 @@ app.post(
       //    dedicated "Workflows" write permission (required for .github/workflows).
       const workflow = github.functionsWorkflowYaml({ appName, branch, packagePath: 'src' })
       try {
-        await github.putRepoContent(
+        const existingWorkflow = await github.readRepoFile(
           entry.token,
           owner,
           name,
           '.github/workflows/deploy.yml',
-          Buffer.from(workflow, 'utf-8'),
-          'Add Azure Functions deploy workflow (AI Apps)',
           branch,
         )
+        const needsWorkflow = github.ensureWorkflowCanBeWritten(existingWorkflow, workflow)
+        if (needsWorkflow) {
+          await github.putRepoContent(
+            entry.token,
+            owner,
+            name,
+            '.github/workflows/deploy.yml',
+            Buffer.from(workflow, 'utf-8'),
+            'Add Azure Functions deploy workflow (AI Apps)',
+            branch,
+          )
+        }
+        steps.workflow = needsWorkflow ? 'created' : 'already configured'
       } catch (e) {
         // GitHub returns 404 (or 403) when writing under .github/workflows without
         // the App's "Workflows" permission, even though Contents:write is present.

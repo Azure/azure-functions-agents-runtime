@@ -197,8 +197,8 @@ export default function DraftAppPage() {
     return (
       <>
         <div className="breadcrumb">Home / <Link to={`/agents/${selected}`}>Hosted Skills</Link> / New Skill</div>
-        <div className="page-title"><h1>No generated skill yet</h1></div>
-        <div className="empty">Generate a skill first. <Link to="/create-agent">Create a new skill →</Link></div>
+        <div className="page-title"><h1>No skill instructions yet</h1></div>
+        <div className="empty">Add skill instructions first. <Link to="/create-agent">Create a new skill →</Link></div>
       </>
     )
   }
@@ -286,11 +286,11 @@ export default function DraftAppPage() {
             <div><span>Subscription</span><strong>{subscriptions.find((subscription) => subscription.id === targetSubscription)?.name || targetSubscription}</strong></div>
           </div>
           <div className="card review-prompt">
-            <div className="card-head"><h3 style={{ margin: 0 }}>Generated prompt</h3><span className="badge green"><span className="dot" /> Ready</span></div>
+            <div className="card-head"><h3 style={{ margin: 0 }}>Skill instructions</h3><span className="badge green"><span className="dot" /> Ready</span></div>
             <pre>{draft.instructions}</pre>
           </div>
           <div className="note ok review-validation">
-            <strong>Ready to deploy</strong><br />The model, skill prompt, and Function App target are configured.
+            <strong>Ready to deploy</strong><br />The model, skill instructions, and Function App target are configured.
           </div>
           <div className="create-flow-actions">
             <Button onClick={() => navigateToStep(3)} disabled={deployJob.phase === 'running'}>← Back</Button>

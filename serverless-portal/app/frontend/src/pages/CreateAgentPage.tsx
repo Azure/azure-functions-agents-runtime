@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { useIdentity } from '../identity'
 import { CreationSteps, SearchableSelect, Icon } from '../components/ui'
-import { Button } from '@coreai/fluentui-react'
+import { Button, Input } from '@coreai/fluentui-react'
 import { type Draft, loadDraft, saveDraft, clearDraft, deriveName } from '../agentDraft'
 
 export default function CreateAgentPage() {
@@ -120,7 +120,9 @@ export default function CreateAgentPage() {
 
   const foundryReady = !!draft.foundryModel && !!draft.foundryAccount
   const skillReady =
-    !!draft.name.trim() && !!draft.instructions.trim() && draft.generatedFor === generationKey
+    !!draft.name.trim() &&
+    !!draft.instructions.trim() &&
+    (draft.instructionMode === 'manual' || draft.generatedFor === generationKey)
   const targetReady =
     draft.target === 'existing'
       ? !!draft.existingApp
@@ -282,14 +284,14 @@ export default function CreateAgentPage() {
                   <a href="https://ai.azure.com" target="_blank" rel="noreferrer">
                     Create one in Azure AI Foundry ↗
                   </a>
-                  , then ↻ Refresh. A selected model powers ✨ Generate.
+                  , then ↻ Refresh. The selected model runs the skill and can generate its instructions.
                 </div>
             </div>
           </div>
 
           <div className="toolbar" style={{ marginTop: 16 }}>
             <Button appearance="primary" disabled={!foundryReady} onClick={() => navigateToStep(2)}>
-              Continue to generate →
+              Continue to instructions →
             </Button>
             <Button onClick={cancel}>Cancel</Button>
             {!foundryReady && (
@@ -317,63 +319,147 @@ export default function CreateAgentPage() {
 
           <div className={'card create-flow-card generate-skill-card' + (generating ? ' is-generating' : '')} aria-busy={generating}>
             {generating && <div className="generate-shimmer" aria-hidden="true" />}
-            <h3>
-              <Icon name="sparkles" size={15} style={{ verticalAlign: '-2px' }} /> Generate your skill
-            </h3>
-            <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
-              Describe the outcome. <span className="mono">{draft.foundryModel}</span> will generate the skill prompt for you to review and edit.
-            </p>
-            <textarea
-              className="editor"
-              style={{ minHeight: 150 }}
-              spellCheck={false}
-              disabled={generating}
-              placeholder="e.g. Triage inbound support tickets: classify urgency, summarize the issue, and draft a concise reply."
-              value={draft.description}
-              onChange={(e) => set('description', e.target.value)}
-              aria-label="Describe your skill"
-            />
-            <div className="toolbar" style={{ marginTop: 12 }}>
-              <button className="btn primary" onClick={generateSkill} disabled={!canGenerate}>
-                {generating ? (
-                  'Generating…'
-                ) : (
+            <div className="instruction-mode-control" role="group" aria-label="Instruction authoring mode">
+              <button
+                type="button"
+                className={draft.instructionMode === 'generate' ? 'active' : ''}
+                aria-pressed={draft.instructionMode === 'generate'}
+                disabled={generating}
+                onClick={() => {
+                  set('instructionMode', 'generate')
+                  setGenError(null)
+                }}
+              >
+                Generate with AI
+              </button>
+              <button
+                type="button"
+                className={draft.instructionMode === 'manual' ? 'active' : ''}
+                aria-pressed={draft.instructionMode === 'manual'}
+                disabled={generating}
+                onClick={() => {
+                  setDraft((current) => ({
+                    ...current,
+                    instructionMode: 'manual',
+                    generatedFor: '',
+                    mdOverride: null,
+                  }))
+                  setGenError(null)
+                }}
+              >
+                Write instructions
+              </button>
+            </div>
+
+            {draft.instructionMode === 'generate' ? (
+              <>
+                <h3>
+                  <Icon name="sparkles" size={15} style={{ verticalAlign: '-2px' }} /> Generate your skill
+                </h3>
+                <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
+                  Describe the outcome. <span className="mono">{draft.foundryModel}</span> will generate the skill instructions for you to review and edit.
+                </p>
+                <textarea
+                  className="editor"
+                  style={{ minHeight: 150 }}
+                  spellCheck={false}
+                  disabled={generating}
+                  placeholder="e.g. Triage inbound support tickets: classify urgency, summarize the issue, and draft a concise reply."
+                  value={draft.description}
+                  onChange={(e) => set('description', e.target.value)}
+                  aria-label="Describe your skill"
+                />
+                <div className="toolbar" style={{ marginTop: 12 }}>
+                  <button className="btn primary" onClick={generateSkill} disabled={!canGenerate}>
+                    {generating ? (
+                      'Generating…'
+                    ) : (
+                      <>
+                        <Icon name="sparkles" size={14} /> Generate skill
+                      </>
+                    )}
+                  </button>
+                  <button className="btn" onClick={cancel} disabled={generating}>
+                    Cancel
+                  </button>
+                  {generating && <span className="generate-status" role="status">Generating skill with {draft.foundryModel}…</span>}
+                  {!draft.description.trim() && (
+                    <span className="muted" style={{ fontSize: 12 }}>Describe the agent to generate.</span>
+                  )}
+                </div>
+                {genError && (
+                  <p className="muted" style={{ color: 'var(--red)', fontSize: 12, margin: '10px 0 0' }}>
+                    Generation failed: {genError}
+                  </p>
+                )}
+                {skillReady && (
                   <>
-                    <Icon name="sparkles" size={14} /> Generate skill
+                    <div className="field" style={{ marginTop: 18 }}>
+                      <label>Generated instructions</label>
+                      <textarea
+                        className="editor"
+                        style={{ minHeight: 260 }}
+                        spellCheck={false}
+                        disabled={generating}
+                        value={draft.instructions}
+                        onChange={(e) => setDraft((current) => ({ ...current, instructions: e.target.value, mdOverride: null }))}
+                        aria-label="Generated skill instructions"
+                      />
+                      <div className="hint">Review and edit these instructions before choosing where the skill will run.</div>
+                    </div>
+                    <Button appearance="primary" disabled={generating} onClick={() => navigateToStep(3)}>
+                      Continue to deployment target →
+                    </Button>
                   </>
                 )}
-              </button>
-              <button className="btn" onClick={cancel} disabled={generating}>
-                Cancel
-              </button>
-              {generating && <span className="generate-status" role="status">Generating skill with {draft.foundryModel}…</span>}
-              {!draft.description.trim() && (
-                <span className="muted" style={{ fontSize: 12 }}>Describe the agent to generate.</span>
-              )}
-            </div>
-            {genError && (
-              <p className="muted" style={{ color: 'var(--red)', fontSize: 12, margin: '10px 0 0' }}>
-                Generation failed: {genError}
-              </p>
-            )}
-            {skillReady && (
+              </>
+            ) : (
               <>
-                <div className="field" style={{ marginTop: 18 }}>
-                  <label>Generated prompt</label>
+                <h3>Write skill instructions</h3>
+                <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
+                  Provide the exact instruction text the skill should use. No prompt-generation request will be made.
+                </p>
+                <div className="field">
+                  <label htmlFor="manual-skill-name">Skill name</label>
+                  <Input
+                    id="manual-skill-name"
+                    value={draft.name}
+                    placeholder="e.g. Daily Azure report"
+                    disabled={generating}
+                    onChange={(_, data) => setDraft((current) => ({
+                      ...current,
+                      name: data.value,
+                      generatedFor: '',
+                      mdOverride: null,
+                    }))}
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="manual-skill-instructions">Instructions</label>
                   <textarea
+                    id="manual-skill-instructions"
                     className="editor"
                     style={{ minHeight: 260 }}
                     spellCheck={false}
                     disabled={generating}
                     value={draft.instructions}
-                    onChange={(e) => set('instructions', e.target.value)}
-                    aria-label="Generated skill prompt"
+                    onChange={(e) => setDraft((current) => ({
+                      ...current,
+                      instructions: e.target.value,
+                      generatedFor: '',
+                      mdOverride: null,
+                    }))}
+                    aria-label="Skill instructions"
                   />
-                  <div className="hint">Review and edit this prompt before choosing where the skill will run.</div>
+                  <div className="hint">These instructions are used as written and remain editable during review.</div>
                 </div>
-                <Button appearance="primary" disabled={generating} onClick={() => navigateToStep(3)}>
-                  Continue to deployment target →
-                </Button>
+                <div className="toolbar">
+                  <Button appearance="primary" disabled={!skillReady || generating} onClick={() => navigateToStep(3)}>
+                    Continue to deployment target →
+                  </Button>
+                  <Button onClick={cancel} disabled={generating}>Cancel</Button>
+                  {!draft.name.trim() && <span className="muted" style={{ fontSize: 12 }}>Enter a skill name to continue.</span>}
+                </div>
               </>
             )}
           </div>

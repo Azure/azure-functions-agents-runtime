@@ -100,6 +100,44 @@ and permission to update its application settings. Connector Gateway uses the
 `2026-05-01-preview` API; unknown provider states are shown as
 **Action required**.
 
+### GitHub source
+
+Open a Hosted Skill and select **Source & GitHub**. After connecting a GitHub
+account, the portal can create a repository or use an existing repository. Every
+publication contains a complete azd-deployable project: `azure.yaml`, Bicep under
+`infra/`, project documentation, `.gitignore`, and the current Function App source
+under `src/`, with saved portal drafts overlaid.
+
+Choose one publication mode:
+
+- **Create pull request** writes to a rolling app-specific branch and opens or
+  updates a PR against the repository's default branch.
+- **Push to default branch** commits the same complete source directly. The UI
+  requires confirmation because this bypasses review and can trigger an existing
+  GitHub Actions deployment.
+
+An already linked repository exposes both actions directly in Source & GitHub.
+Repository creation defaults to private and supports either publication mode.
+The generated Azure Functions workflow uses Python 3.13 and refuses to replace a
+different existing `.github/workflows/deploy.yml`.
+
+GitHub OAuth requires these backend settings:
+
+```text
+GITHUB_OAUTH_CLIENT_ID=<GitHub App client ID>
+GITHUB_OAUTH_CLIENT_SECRET=<GitHub App client secret>
+GITHUB_OAUTH_STATE_SECRET=<shared random value for every portal replica>
+```
+
+Set `GITHUB_OAUTH_CALLBACK` to the production callback, for example
+`https://<portal-host>/api/github/callback`. Local development does not require a
+registered localhost callback: install GitHub CLI, run
+`gh auth login --hostname github.com`, and select **Connect**. The localhost-only
+backend route reads that token without returning it to JavaScript. The raw
+GitHub token is encrypted inside an HttpOnly cookie bound to the caller's ARM
+object ID, so the connection survives backend revisions and works across
+replicas without storing tokens on container disk.
+
 ## Run locally
 
 **Backend** (terminal 1):
@@ -142,6 +180,12 @@ npm run build    # emits dist/, which the Node server serves at http://localhost
 | GET | `/api/connections/:connectionId/auth-link` | Return the validated Connector Namespace authorization link |
 | POST | `/api/connections/:connectionId/test` | Validate authentication, access policies, MCP state, and `SendEmailV2` restriction |
 | DELETE | `/api/connections/:connectionId` | Delete an app-owned connection or detach a shared connection, clear app settings, and stage focused source cleanup |
+| GET | `/api/github/status` | Report GitHub OAuth configuration and the current user's encrypted session status |
+| POST | `/api/github/login-url` | Create a user-bound OAuth URL using the configured production callback or validated localhost callback |
+| POST | `/api/github/local-session` | On localhost only, seal the authenticated GitHub CLI identity into the current ARM user's session |
+| GET | `/api/github/repos` | List repositories available to the connected GitHub user |
+| POST | `/api/github/connect` | Create/select a repository and publish the complete deployable source through a PR or direct default-branch push |
+| POST | `/api/github/provision-deployment` | Add a non-conflicting Python 3.13 GitHub Actions workflow and passwordless Azure deployment configuration |
 
 ## Not yet included (next slices)
 
