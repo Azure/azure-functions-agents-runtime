@@ -1,0 +1,2153 @@
+[
+  {
+    "trial_id": "services-1-repeat-1",
+    "service_count": 1,
+    "evidence_lines": 40,
+    "execution_order": [
+      "baseline",
+      "workflow"
+    ],
+    "baseline": {
+      "mode": "baseline",
+      "agent_name": "baseline",
+      "elapsed_ms": 42745,
+      "report_latency_ms": 39160,
+      "input_tokens": 10329,
+      "output_tokens": 2415,
+      "total_tokens": 12744,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 10329,
+        "openai.cached_input_tokens": 5632,
+        "output_token_count": 2415,
+        "total_token_count": 12744
+      },
+      "report_blob": "runs/services-1-repeat-1/baseline.json",
+      "report_json": {
+        "elevated_service_count": 0,
+        "schema_version": 1,
+        "service_count": 1,
+        "services": [
+          {
+            "cpu_p95_percent": 79,
+            "deploy_age_minutes": 11,
+            "deploy_revision": "328d6b79296d",
+            "errors": 4,
+            "evidence_lines": 40,
+            "latency_p95_ms": 485,
+            "service": "checkout-api-00",
+            "status": "healthy",
+            "warnings": 15
+          }
+        ],
+        "total_errors": 4,
+        "trial_id": "services-1-repeat-1"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 14,
+      "quality_compared_fields": 14,
+      "error": null
+    },
+    "workflow": {
+      "mode": "workflow",
+      "agent_name": "workflow",
+      "elapsed_ms": 16537,
+      "report_latency_ms": 11233,
+      "input_tokens": 5432,
+      "output_tokens": 177,
+      "total_tokens": 5609,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 5432,
+        "openai.cached_input_tokens": 2560,
+        "output_token_count": 177,
+        "total_token_count": 5609
+      },
+      "report_blob": "runs/services-1-repeat-1/workflow.json",
+      "report_json": {
+        "elevated_service_count": 0,
+        "schema_version": 1,
+        "service_count": 1,
+        "services": [
+          {
+            "cpu_p95_percent": 79,
+            "deploy_age_minutes": 11,
+            "deploy_revision": "328d6b79296d",
+            "errors": 4,
+            "evidence_lines": 40,
+            "latency_p95_ms": 485,
+            "service": "checkout-api-00",
+            "status": "healthy",
+            "warnings": 15
+          }
+        ],
+        "total_errors": 4,
+        "trial_id": "services-1-repeat-1"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 14,
+      "quality_compared_fields": 14,
+      "error": null
+    },
+    "reports_equal": true,
+    "reduction": 0.5598713119899561
+  },
+  {
+    "trial_id": "services-1-repeat-2",
+    "service_count": 1,
+    "evidence_lines": 40,
+    "execution_order": [
+      "workflow",
+      "baseline"
+    ],
+    "baseline": {
+      "mode": "baseline",
+      "agent_name": "baseline",
+      "elapsed_ms": 41712,
+      "report_latency_ms": 38635,
+      "input_tokens": 10317,
+      "output_tokens": 2419,
+      "total_tokens": 12736,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 10317,
+        "openai.cached_input_tokens": 5632,
+        "output_token_count": 2419,
+        "total_token_count": 12736
+      },
+      "report_blob": "runs/services-1-repeat-2/baseline.json",
+      "report_json": {
+        "elevated_service_count": 0,
+        "schema_version": 1,
+        "service_count": 1,
+        "services": [
+          {
+            "cpu_p95_percent": 48,
+            "deploy_age_minutes": 28,
+            "deploy_revision": "9ed3bf21456f",
+            "errors": 3,
+            "evidence_lines": 40,
+            "latency_p95_ms": 830,
+            "service": "checkout-api-00",
+            "status": "healthy",
+            "warnings": 7
+          }
+        ],
+        "total_errors": 3,
+        "trial_id": "services-1-repeat-2"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 14,
+      "quality_compared_fields": 14,
+      "error": null
+    },
+    "workflow": {
+      "mode": "workflow",
+      "agent_name": "workflow",
+      "elapsed_ms": 10068,
+      "report_latency_ms": 7132,
+      "input_tokens": 5438,
+      "output_tokens": 195,
+      "total_tokens": 5633,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 5438,
+        "openai.cached_input_tokens": 2048,
+        "output_token_count": 195,
+        "total_token_count": 5633
+      },
+      "report_blob": "runs/services-1-repeat-2/workflow.json",
+      "report_json": {
+        "elevated_service_count": 0,
+        "schema_version": 1,
+        "service_count": 1,
+        "services": [
+          {
+            "cpu_p95_percent": 48,
+            "deploy_age_minutes": 28,
+            "deploy_revision": "9ed3bf21456f",
+            "errors": 3,
+            "evidence_lines": 40,
+            "latency_p95_ms": 830,
+            "service": "checkout-api-00",
+            "status": "healthy",
+            "warnings": 7
+          }
+        ],
+        "total_errors": 3,
+        "trial_id": "services-1-repeat-2"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 14,
+      "quality_compared_fields": 14,
+      "error": null
+    },
+    "reports_equal": true,
+    "reduction": 0.5577104271356783
+  },
+  {
+    "trial_id": "services-1-repeat-3",
+    "service_count": 1,
+    "evidence_lines": 40,
+    "execution_order": [
+      "baseline",
+      "workflow"
+    ],
+    "baseline": {
+      "mode": "baseline",
+      "agent_name": "baseline",
+      "elapsed_ms": 31638,
+      "report_latency_ms": 28947,
+      "input_tokens": 10362,
+      "output_tokens": 2430,
+      "total_tokens": 12792,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 10362,
+        "openai.cached_input_tokens": 5632,
+        "output_token_count": 2430,
+        "total_token_count": 12792
+      },
+      "report_blob": "runs/services-1-repeat-3/baseline.json",
+      "report_json": {
+        "elevated_service_count": 1,
+        "schema_version": 1,
+        "service_count": 1,
+        "services": [
+          {
+            "cpu_p95_percent": 45,
+            "deploy_age_minutes": 38,
+            "deploy_revision": "429fb538cc23",
+            "errors": 13,
+            "evidence_lines": 40,
+            "latency_p95_ms": 509,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 19
+          }
+        ],
+        "total_errors": 13,
+        "trial_id": "services-1-repeat-3"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 14,
+      "quality_compared_fields": 14,
+      "error": null
+    },
+    "workflow": {
+      "mode": "workflow",
+      "agent_name": "workflow",
+      "elapsed_ms": 9306,
+      "report_latency_ms": 6611,
+      "input_tokens": 5434,
+      "output_tokens": 172,
+      "total_tokens": 5606,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 5434,
+        "openai.cached_input_tokens": 2560,
+        "output_token_count": 172,
+        "total_token_count": 5606
+      },
+      "report_blob": "runs/services-1-repeat-3/workflow.json",
+      "report_json": {
+        "elevated_service_count": 1,
+        "schema_version": 1,
+        "service_count": 1,
+        "services": [
+          {
+            "cpu_p95_percent": 45,
+            "deploy_age_minutes": 38,
+            "deploy_revision": "429fb538cc23",
+            "errors": 13,
+            "evidence_lines": 40,
+            "latency_p95_ms": 509,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 19
+          }
+        ],
+        "total_errors": 13,
+        "trial_id": "services-1-repeat-3"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 14,
+      "quality_compared_fields": 14,
+      "error": null
+    },
+    "reports_equal": true,
+    "reduction": 0.5617573483427142
+  },
+  {
+    "trial_id": "services-3-repeat-1",
+    "service_count": 3,
+    "evidence_lines": 40,
+    "execution_order": [
+      "workflow",
+      "baseline"
+    ],
+    "baseline": {
+      "mode": "baseline",
+      "agent_name": "baseline",
+      "elapsed_ms": 89719,
+      "report_latency_ms": 86758,
+      "input_tokens": 24833,
+      "output_tokens": 7163,
+      "total_tokens": 31996,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 24833,
+        "openai.cached_input_tokens": 14848,
+        "output_token_count": 7163,
+        "total_token_count": 31996
+      },
+      "report_blob": "runs/services-3-repeat-1/baseline.json",
+      "report_json": {
+        "elevated_service_count": 2,
+        "schema_version": 1,
+        "service_count": 3,
+        "services": [
+          {
+            "cpu_p95_percent": 60,
+            "deploy_age_minutes": 135,
+            "deploy_revision": "7118151816c7",
+            "errors": 8,
+            "evidence_lines": 40,
+            "latency_p95_ms": 996,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 18
+          },
+          {
+            "cpu_p95_percent": 39,
+            "deploy_age_minutes": 209,
+            "deploy_revision": "7525c3857e90",
+            "errors": 4,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1375,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 5
+          },
+          {
+            "cpu_p95_percent": 41,
+            "deploy_age_minutes": 142,
+            "deploy_revision": "27e36c000443",
+            "errors": 3,
+            "evidence_lines": 40,
+            "latency_p95_ms": 298,
+            "service": "checkout-api-02",
+            "status": "healthy",
+            "warnings": 14
+          }
+        ],
+        "total_errors": 15,
+        "trial_id": "services-3-repeat-1"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 32,
+      "quality_compared_fields": 32,
+      "error": null
+    },
+    "workflow": {
+      "mode": "workflow",
+      "agent_name": "workflow",
+      "elapsed_ms": 9776,
+      "report_latency_ms": 7112,
+      "input_tokens": 5579,
+      "output_tokens": 288,
+      "total_tokens": 5867,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 5579,
+        "openai.cached_input_tokens": 4608,
+        "output_token_count": 288,
+        "total_token_count": 5867
+      },
+      "report_blob": "runs/services-3-repeat-1/workflow.json",
+      "report_json": {
+        "elevated_service_count": 2,
+        "schema_version": 1,
+        "service_count": 3,
+        "services": [
+          {
+            "cpu_p95_percent": 60,
+            "deploy_age_minutes": 135,
+            "deploy_revision": "7118151816c7",
+            "errors": 8,
+            "evidence_lines": 40,
+            "latency_p95_ms": 996,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 18
+          },
+          {
+            "cpu_p95_percent": 39,
+            "deploy_age_minutes": 209,
+            "deploy_revision": "7525c3857e90",
+            "errors": 4,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1375,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 5
+          },
+          {
+            "cpu_p95_percent": 41,
+            "deploy_age_minutes": 142,
+            "deploy_revision": "27e36c000443",
+            "errors": 3,
+            "evidence_lines": 40,
+            "latency_p95_ms": 298,
+            "service": "checkout-api-02",
+            "status": "healthy",
+            "warnings": 14
+          }
+        ],
+        "total_errors": 15,
+        "trial_id": "services-3-repeat-1"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 32,
+      "quality_compared_fields": 32,
+      "error": null
+    },
+    "reports_equal": true,
+    "reduction": 0.8166333291661457
+  },
+  {
+    "trial_id": "services-3-repeat-2",
+    "service_count": 3,
+    "evidence_lines": 40,
+    "execution_order": [
+      "baseline",
+      "workflow"
+    ],
+    "baseline": {
+      "mode": "baseline",
+      "agent_name": "baseline",
+      "elapsed_ms": 90499,
+      "report_latency_ms": 84272,
+      "input_tokens": 24824,
+      "output_tokens": 7160,
+      "total_tokens": 31984,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 24824,
+        "openai.cached_input_tokens": 14848,
+        "output_token_count": 7160,
+        "total_token_count": 31984
+      },
+      "report_blob": "runs/services-3-repeat-2/baseline.json",
+      "report_json": {
+        "elevated_service_count": 3,
+        "schema_version": 1,
+        "service_count": 3,
+        "services": [
+          {
+            "cpu_p95_percent": 47,
+            "deploy_age_minutes": 142,
+            "deploy_revision": "6a882786d361",
+            "errors": 13,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1015,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 7
+          },
+          {
+            "cpu_p95_percent": 81,
+            "deploy_age_minutes": 219,
+            "deploy_revision": "8d7601cca255",
+            "errors": 8,
+            "evidence_lines": 40,
+            "latency_p95_ms": 888,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 13
+          },
+          {
+            "cpu_p95_percent": 36,
+            "deploy_age_minutes": 301,
+            "deploy_revision": "fc8ef0d05405",
+            "errors": 5,
+            "evidence_lines": 40,
+            "latency_p95_ms": 767,
+            "service": "checkout-api-02",
+            "status": "attention",
+            "warnings": 11
+          }
+        ],
+        "total_errors": 26,
+        "trial_id": "services-3-repeat-2"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 32,
+      "quality_compared_fields": 32,
+      "error": null
+    },
+    "workflow": {
+      "mode": "workflow",
+      "agent_name": "workflow",
+      "elapsed_ms": 19867,
+      "report_latency_ms": 14735,
+      "input_tokens": 5582,
+      "output_tokens": 276,
+      "total_tokens": 5858,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 5582,
+        "output_token_count": 276,
+        "total_token_count": 5858
+      },
+      "report_blob": "runs/services-3-repeat-2/workflow.json",
+      "report_json": {
+        "elevated_service_count": 3,
+        "schema_version": 1,
+        "service_count": 3,
+        "services": [
+          {
+            "cpu_p95_percent": 47,
+            "deploy_age_minutes": 142,
+            "deploy_revision": "6a882786d361",
+            "errors": 13,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1015,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 7
+          },
+          {
+            "cpu_p95_percent": 81,
+            "deploy_age_minutes": 219,
+            "deploy_revision": "8d7601cca255",
+            "errors": 8,
+            "evidence_lines": 40,
+            "latency_p95_ms": 888,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 13
+          },
+          {
+            "cpu_p95_percent": 36,
+            "deploy_age_minutes": 301,
+            "deploy_revision": "fc8ef0d05405",
+            "errors": 5,
+            "evidence_lines": 40,
+            "latency_p95_ms": 767,
+            "service": "checkout-api-02",
+            "status": "attention",
+            "warnings": 11
+          }
+        ],
+        "total_errors": 26,
+        "trial_id": "services-3-repeat-2"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 32,
+      "quality_compared_fields": 32,
+      "error": null
+    },
+    "reports_equal": true,
+    "reduction": 0.8168459229614807
+  },
+  {
+    "trial_id": "services-3-repeat-3",
+    "service_count": 3,
+    "evidence_lines": 40,
+    "execution_order": [
+      "workflow",
+      "baseline"
+    ],
+    "baseline": {
+      "mode": "baseline",
+      "agent_name": "baseline",
+      "elapsed_ms": 77748,
+      "report_latency_ms": 75118,
+      "input_tokens": 24857,
+      "output_tokens": 7172,
+      "total_tokens": 32029,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 24857,
+        "openai.cached_input_tokens": 15872,
+        "output_token_count": 7172,
+        "total_token_count": 32029
+      },
+      "report_blob": "runs/services-3-repeat-3/baseline.json",
+      "report_json": {
+        "elevated_service_count": 3,
+        "schema_version": 1,
+        "service_count": 3,
+        "services": [
+          {
+            "cpu_p95_percent": 95,
+            "deploy_age_minutes": 78,
+            "deploy_revision": "860654320cba",
+            "errors": 9,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1437,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 11
+          },
+          {
+            "cpu_p95_percent": 68,
+            "deploy_age_minutes": 97,
+            "deploy_revision": "71d34651104f",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 313,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 17
+          },
+          {
+            "cpu_p95_percent": 71,
+            "deploy_age_minutes": 114,
+            "deploy_revision": "8c15a45d4090",
+            "errors": 4,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1658,
+            "service": "checkout-api-02",
+            "status": "attention",
+            "warnings": 13
+          }
+        ],
+        "total_errors": 24,
+        "trial_id": "services-3-repeat-3"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 32,
+      "quality_compared_fields": 32,
+      "error": null
+    },
+    "workflow": {
+      "mode": "workflow",
+      "agent_name": "workflow",
+      "elapsed_ms": 11860,
+      "report_latency_ms": 8629,
+      "input_tokens": 5594,
+      "output_tokens": 294,
+      "total_tokens": 5888,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 5594,
+        "openai.cached_input_tokens": 2560,
+        "output_token_count": 294,
+        "total_token_count": 5888
+      },
+      "report_blob": "runs/services-3-repeat-3/workflow.json",
+      "report_json": {
+        "elevated_service_count": 3,
+        "schema_version": 1,
+        "service_count": 3,
+        "services": [
+          {
+            "cpu_p95_percent": 95,
+            "deploy_age_minutes": 78,
+            "deploy_revision": "860654320cba",
+            "errors": 9,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1437,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 11
+          },
+          {
+            "cpu_p95_percent": 68,
+            "deploy_age_minutes": 97,
+            "deploy_revision": "71d34651104f",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 313,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 17
+          },
+          {
+            "cpu_p95_percent": 71,
+            "deploy_age_minutes": 114,
+            "deploy_revision": "8c15a45d4090",
+            "errors": 4,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1658,
+            "service": "checkout-api-02",
+            "status": "attention",
+            "warnings": 13
+          }
+        ],
+        "total_errors": 24,
+        "trial_id": "services-3-repeat-3"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 32,
+      "quality_compared_fields": 32,
+      "error": null
+    },
+    "reports_equal": true,
+    "reduction": 0.8161665990196385
+  },
+  {
+    "trial_id": "services-5-repeat-1",
+    "service_count": 5,
+    "evidence_lines": 40,
+    "execution_order": [
+      "baseline",
+      "workflow"
+    ],
+    "baseline": {
+      "mode": "baseline",
+      "agent_name": "baseline",
+      "elapsed_ms": 133127,
+      "report_latency_ms": 129888,
+      "input_tokens": 39463,
+      "output_tokens": 11941,
+      "total_tokens": 51404,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 39463,
+        "openai.cached_input_tokens": 25600,
+        "output_token_count": 11941,
+        "total_token_count": 51404
+      },
+      "report_blob": "runs/services-5-repeat-1/baseline.json",
+      "report_json": {
+        "elevated_service_count": 5,
+        "schema_version": 1,
+        "service_count": 5,
+        "services": [
+          {
+            "cpu_p95_percent": 37,
+            "deploy_age_minutes": 232,
+            "deploy_revision": "258f7d9bfad9",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1125,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 11
+          },
+          {
+            "cpu_p95_percent": 64,
+            "deploy_age_minutes": 73,
+            "deploy_revision": "84d162f0fa26",
+            "errors": 10,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1355,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 7
+          },
+          {
+            "cpu_p95_percent": 61,
+            "deploy_age_minutes": 16,
+            "deploy_revision": "52779377531a",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 485,
+            "service": "checkout-api-02",
+            "status": "attention",
+            "warnings": 6
+          },
+          {
+            "cpu_p95_percent": 77,
+            "deploy_age_minutes": 47,
+            "deploy_revision": "6e02c689f490",
+            "errors": 2,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1142,
+            "service": "checkout-api-03",
+            "status": "attention",
+            "warnings": 18
+          },
+          {
+            "cpu_p95_percent": 70,
+            "deploy_age_minutes": 15,
+            "deploy_revision": "6389b54ead3b",
+            "errors": 12,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1602,
+            "service": "checkout-api-04",
+            "status": "attention",
+            "warnings": 3
+          }
+        ],
+        "total_errors": 38,
+        "trial_id": "services-5-repeat-1"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 50,
+      "quality_compared_fields": 50,
+      "error": null
+    },
+    "workflow": {
+      "mode": "workflow",
+      "agent_name": "workflow",
+      "elapsed_ms": 10959,
+      "report_latency_ms": 8112,
+      "input_tokens": 5766,
+      "output_tokens": 416,
+      "total_tokens": 6182,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 5766,
+        "openai.cached_input_tokens": 2560,
+        "output_token_count": 416,
+        "total_token_count": 6182
+      },
+      "report_blob": "runs/services-5-repeat-1/workflow.json",
+      "report_json": {
+        "elevated_service_count": 5,
+        "schema_version": 1,
+        "service_count": 5,
+        "services": [
+          {
+            "cpu_p95_percent": 37,
+            "deploy_age_minutes": 232,
+            "deploy_revision": "258f7d9bfad9",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1125,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 11
+          },
+          {
+            "cpu_p95_percent": 64,
+            "deploy_age_minutes": 73,
+            "deploy_revision": "84d162f0fa26",
+            "errors": 10,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1355,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 7
+          },
+          {
+            "cpu_p95_percent": 61,
+            "deploy_age_minutes": 16,
+            "deploy_revision": "52779377531a",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 485,
+            "service": "checkout-api-02",
+            "status": "attention",
+            "warnings": 6
+          },
+          {
+            "cpu_p95_percent": 77,
+            "deploy_age_minutes": 47,
+            "deploy_revision": "6e02c689f490",
+            "errors": 2,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1142,
+            "service": "checkout-api-03",
+            "status": "attention",
+            "warnings": 18
+          },
+          {
+            "cpu_p95_percent": 70,
+            "deploy_age_minutes": 15,
+            "deploy_revision": "6389b54ead3b",
+            "errors": 12,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1602,
+            "service": "checkout-api-04",
+            "status": "attention",
+            "warnings": 3
+          }
+        ],
+        "total_errors": 38,
+        "trial_id": "services-5-repeat-1"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 50,
+      "quality_compared_fields": 50,
+      "error": null
+    },
+    "reports_equal": true,
+    "reduction": 0.8797369854486032
+  },
+  {
+    "trial_id": "services-5-repeat-2",
+    "service_count": 5,
+    "evidence_lines": 40,
+    "execution_order": [
+      "workflow",
+      "baseline"
+    ],
+    "baseline": {
+      "mode": "baseline",
+      "agent_name": "baseline",
+      "elapsed_ms": 137863,
+      "report_latency_ms": 134446,
+      "input_tokens": 39382,
+      "output_tokens": 11913,
+      "total_tokens": 51295,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 39382,
+        "openai.cached_input_tokens": 25600,
+        "output_token_count": 11913,
+        "total_token_count": 51295
+      },
+      "report_blob": "runs/services-5-repeat-2/baseline.json",
+      "report_json": {
+        "elevated_service_count": 5,
+        "schema_version": 1,
+        "service_count": 5,
+        "services": [
+          {
+            "cpu_p95_percent": 66,
+            "deploy_age_minutes": 32,
+            "deploy_revision": "3bce69ea9cb2",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1340,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 11
+          },
+          {
+            "cpu_p95_percent": 89,
+            "deploy_age_minutes": 121,
+            "deploy_revision": "68f1b6a5ae46",
+            "errors": 4,
+            "evidence_lines": 40,
+            "latency_p95_ms": 195,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 8
+          },
+          {
+            "cpu_p95_percent": 43,
+            "deploy_age_minutes": 235,
+            "deploy_revision": "5e09ec6cdefc",
+            "errors": 6,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1120,
+            "service": "checkout-api-02",
+            "status": "attention",
+            "warnings": 5
+          },
+          {
+            "cpu_p95_percent": 46,
+            "deploy_age_minutes": 149,
+            "deploy_revision": "5e9a24eb9d3a",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 164,
+            "service": "checkout-api-03",
+            "status": "attention",
+            "warnings": 1
+          },
+          {
+            "cpu_p95_percent": 73,
+            "deploy_age_minutes": 231,
+            "deploy_revision": "9b18f6a16f80",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 811,
+            "service": "checkout-api-04",
+            "status": "attention",
+            "warnings": 16
+          }
+        ],
+        "total_errors": 39,
+        "trial_id": "services-5-repeat-2"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 50,
+      "quality_compared_fields": 50,
+      "error": null
+    },
+    "workflow": {
+      "mode": "workflow",
+      "agent_name": "workflow",
+      "elapsed_ms": 11545,
+      "report_latency_ms": 7607,
+      "input_tokens": 5731,
+      "output_tokens": 387,
+      "total_tokens": 6118,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 5731,
+        "openai.cached_input_tokens": 2048,
+        "output_token_count": 387,
+        "total_token_count": 6118
+      },
+      "report_blob": "runs/services-5-repeat-2/workflow.json",
+      "report_json": {
+        "elevated_service_count": 5,
+        "schema_version": 1,
+        "service_count": 5,
+        "services": [
+          {
+            "cpu_p95_percent": 66,
+            "deploy_age_minutes": 32,
+            "deploy_revision": "3bce69ea9cb2",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1340,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 11
+          },
+          {
+            "cpu_p95_percent": 89,
+            "deploy_age_minutes": 121,
+            "deploy_revision": "68f1b6a5ae46",
+            "errors": 4,
+            "evidence_lines": 40,
+            "latency_p95_ms": 195,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 8
+          },
+          {
+            "cpu_p95_percent": 43,
+            "deploy_age_minutes": 235,
+            "deploy_revision": "5e09ec6cdefc",
+            "errors": 6,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1120,
+            "service": "checkout-api-02",
+            "status": "attention",
+            "warnings": 5
+          },
+          {
+            "cpu_p95_percent": 46,
+            "deploy_age_minutes": 149,
+            "deploy_revision": "5e9a24eb9d3a",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 164,
+            "service": "checkout-api-03",
+            "status": "attention",
+            "warnings": 1
+          },
+          {
+            "cpu_p95_percent": 73,
+            "deploy_age_minutes": 231,
+            "deploy_revision": "9b18f6a16f80",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 811,
+            "service": "checkout-api-04",
+            "status": "attention",
+            "warnings": 16
+          }
+        ],
+        "total_errors": 39,
+        "trial_id": "services-5-repeat-2"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 50,
+      "quality_compared_fields": 50,
+      "error": null
+    },
+    "reports_equal": true,
+    "reduction": 0.8807291158982357
+  },
+  {
+    "trial_id": "services-5-repeat-3",
+    "service_count": 5,
+    "evidence_lines": 40,
+    "execution_order": [
+      "baseline",
+      "workflow"
+    ],
+    "baseline": {
+      "mode": "baseline",
+      "agent_name": "baseline",
+      "elapsed_ms": 229605,
+      "report_latency_ms": 225700,
+      "input_tokens": 39382,
+      "output_tokens": 11912,
+      "total_tokens": 51294,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 39382,
+        "output_token_count": 11912,
+        "total_token_count": 51294
+      },
+      "report_blob": "runs/services-5-repeat-3/baseline.json",
+      "report_json": {
+        "elevated_service_count": 4,
+        "schema_version": 1,
+        "service_count": 5,
+        "services": [
+          {
+            "cpu_p95_percent": 81,
+            "deploy_age_minutes": 209,
+            "deploy_revision": "5652815b1471",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1415,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 3
+          },
+          {
+            "cpu_p95_percent": 92,
+            "deploy_age_minutes": 318,
+            "deploy_revision": "04fc746b2174",
+            "errors": 2,
+            "evidence_lines": 40,
+            "latency_p95_ms": 439,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 12
+          },
+          {
+            "cpu_p95_percent": 56,
+            "deploy_age_minutes": 79,
+            "deploy_revision": "c2893c7af9bb",
+            "errors": 4,
+            "evidence_lines": 40,
+            "latency_p95_ms": 189,
+            "service": "checkout-api-02",
+            "status": "healthy",
+            "warnings": 1
+          },
+          {
+            "cpu_p95_percent": 67,
+            "deploy_age_minutes": 180,
+            "deploy_revision": "d70107d33b08",
+            "errors": 10,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1380,
+            "service": "checkout-api-03",
+            "status": "attention",
+            "warnings": 18
+          },
+          {
+            "cpu_p95_percent": 69,
+            "deploy_age_minutes": 33,
+            "deploy_revision": "b622a57608c1",
+            "errors": 3,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1666,
+            "service": "checkout-api-04",
+            "status": "attention",
+            "warnings": 10
+          }
+        ],
+        "total_errors": 26,
+        "trial_id": "services-5-repeat-3"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 50,
+      "quality_compared_fields": 50,
+      "error": null
+    },
+    "workflow": {
+      "mode": "workflow",
+      "agent_name": "workflow",
+      "elapsed_ms": 12370,
+      "report_latency_ms": 9653,
+      "input_tokens": 5759,
+      "output_tokens": 415,
+      "total_tokens": 6174,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 5759,
+        "output_token_count": 415,
+        "total_token_count": 6174
+      },
+      "report_blob": "runs/services-5-repeat-3/workflow.json",
+      "report_json": {
+        "elevated_service_count": 4,
+        "schema_version": 1,
+        "service_count": 5,
+        "services": [
+          {
+            "cpu_p95_percent": 81,
+            "deploy_age_minutes": 209,
+            "deploy_revision": "5652815b1471",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1415,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 3
+          },
+          {
+            "cpu_p95_percent": 92,
+            "deploy_age_minutes": 318,
+            "deploy_revision": "04fc746b2174",
+            "errors": 2,
+            "evidence_lines": 40,
+            "latency_p95_ms": 439,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 12
+          },
+          {
+            "cpu_p95_percent": 56,
+            "deploy_age_minutes": 79,
+            "deploy_revision": "c2893c7af9bb",
+            "errors": 4,
+            "evidence_lines": 40,
+            "latency_p95_ms": 189,
+            "service": "checkout-api-02",
+            "status": "healthy",
+            "warnings": 1
+          },
+          {
+            "cpu_p95_percent": 67,
+            "deploy_age_minutes": 180,
+            "deploy_revision": "d70107d33b08",
+            "errors": 10,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1380,
+            "service": "checkout-api-03",
+            "status": "attention",
+            "warnings": 18
+          },
+          {
+            "cpu_p95_percent": 69,
+            "deploy_age_minutes": 33,
+            "deploy_revision": "b622a57608c1",
+            "errors": 3,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1666,
+            "service": "checkout-api-04",
+            "status": "attention",
+            "warnings": 10
+          }
+        ],
+        "total_errors": 26,
+        "trial_id": "services-5-repeat-3"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 50,
+      "quality_compared_fields": 50,
+      "error": null
+    },
+    "reports_equal": true,
+    "reduction": 0.879635045034507
+  },
+  {
+    "trial_id": "services-10-repeat-1",
+    "service_count": 10,
+    "evidence_lines": 40,
+    "execution_order": [
+      "workflow",
+      "baseline"
+    ],
+    "baseline": {
+      "mode": "baseline",
+      "agent_name": "baseline",
+      "elapsed_ms": 260371,
+      "report_latency_ms": 257474,
+      "input_tokens": 75236,
+      "output_tokens": 23621,
+      "total_tokens": 98857,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 75236,
+        "openai.cached_input_tokens": 48128,
+        "output_token_count": 23621,
+        "total_token_count": 98857
+      },
+      "report_blob": "runs/services-10-repeat-1/baseline.json",
+      "report_json": {
+        "elevated_service_count": 8,
+        "schema_version": 1,
+        "service_count": 10,
+        "services": [
+          {
+            "cpu_p95_percent": 79,
+            "deploy_age_minutes": 214,
+            "deploy_revision": "e83286249b07",
+            "errors": 10,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1099,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 18
+          },
+          {
+            "cpu_p95_percent": 80,
+            "deploy_age_minutes": 94,
+            "deploy_revision": "91512e1e7248",
+            "errors": 3,
+            "evidence_lines": 40,
+            "latency_p95_ms": 830,
+            "service": "checkout-api-01",
+            "status": "healthy",
+            "warnings": 10
+          },
+          {
+            "cpu_p95_percent": 80,
+            "deploy_age_minutes": 164,
+            "deploy_revision": "e899897a6e8b",
+            "errors": 2,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1092,
+            "service": "checkout-api-02",
+            "status": "attention",
+            "warnings": 15
+          },
+          {
+            "cpu_p95_percent": 67,
+            "deploy_age_minutes": 275,
+            "deploy_revision": "9b961739a659",
+            "errors": 8,
+            "evidence_lines": 40,
+            "latency_p95_ms": 724,
+            "service": "checkout-api-03",
+            "status": "attention",
+            "warnings": 10
+          },
+          {
+            "cpu_p95_percent": 42,
+            "deploy_age_minutes": 103,
+            "deploy_revision": "3f574e1e6967",
+            "errors": 10,
+            "evidence_lines": 40,
+            "latency_p95_ms": 677,
+            "service": "checkout-api-04",
+            "status": "attention",
+            "warnings": 4
+          },
+          {
+            "cpu_p95_percent": 57,
+            "deploy_age_minutes": 298,
+            "deploy_revision": "bd082a2044aa",
+            "errors": 2,
+            "evidence_lines": 40,
+            "latency_p95_ms": 627,
+            "service": "checkout-api-05",
+            "status": "healthy",
+            "warnings": 5
+          },
+          {
+            "cpu_p95_percent": 97,
+            "deploy_age_minutes": 351,
+            "deploy_revision": "e030d05e809d",
+            "errors": 5,
+            "evidence_lines": 40,
+            "latency_p95_ms": 661,
+            "service": "checkout-api-06",
+            "status": "attention",
+            "warnings": 2
+          },
+          {
+            "cpu_p95_percent": 76,
+            "deploy_age_minutes": 241,
+            "deploy_revision": "f6b419cfc13e",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 787,
+            "service": "checkout-api-07",
+            "status": "attention",
+            "warnings": 17
+          },
+          {
+            "cpu_p95_percent": 53,
+            "deploy_age_minutes": 88,
+            "deploy_revision": "639746bf1119",
+            "errors": 5,
+            "evidence_lines": 40,
+            "latency_p95_ms": 365,
+            "service": "checkout-api-08",
+            "status": "attention",
+            "warnings": 8
+          },
+          {
+            "cpu_p95_percent": 90,
+            "deploy_age_minutes": 126,
+            "deploy_revision": "af9a35d9045a",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 179,
+            "service": "checkout-api-09",
+            "status": "attention",
+            "warnings": 2
+          }
+        ],
+        "total_errors": 67,
+        "trial_id": "services-10-repeat-1"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 95,
+      "quality_compared_fields": 95,
+      "error": null
+    },
+    "workflow": {
+      "mode": "workflow",
+      "agent_name": "workflow",
+      "elapsed_ms": 15481,
+      "report_latency_ms": 12695,
+      "input_tokens": 6114,
+      "output_tokens": 667,
+      "total_tokens": 6781,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 6114,
+        "openai.cached_input_tokens": 4096,
+        "output_token_count": 667,
+        "total_token_count": 6781
+      },
+      "report_blob": "runs/services-10-repeat-1/workflow.json",
+      "report_json": {
+        "elevated_service_count": 8,
+        "schema_version": 1,
+        "service_count": 10,
+        "services": [
+          {
+            "cpu_p95_percent": 79,
+            "deploy_age_minutes": 214,
+            "deploy_revision": "e83286249b07",
+            "errors": 10,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1099,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 18
+          },
+          {
+            "cpu_p95_percent": 80,
+            "deploy_age_minutes": 94,
+            "deploy_revision": "91512e1e7248",
+            "errors": 3,
+            "evidence_lines": 40,
+            "latency_p95_ms": 830,
+            "service": "checkout-api-01",
+            "status": "healthy",
+            "warnings": 10
+          },
+          {
+            "cpu_p95_percent": 80,
+            "deploy_age_minutes": 164,
+            "deploy_revision": "e899897a6e8b",
+            "errors": 2,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1092,
+            "service": "checkout-api-02",
+            "status": "attention",
+            "warnings": 15
+          },
+          {
+            "cpu_p95_percent": 67,
+            "deploy_age_minutes": 275,
+            "deploy_revision": "9b961739a659",
+            "errors": 8,
+            "evidence_lines": 40,
+            "latency_p95_ms": 724,
+            "service": "checkout-api-03",
+            "status": "attention",
+            "warnings": 10
+          },
+          {
+            "cpu_p95_percent": 42,
+            "deploy_age_minutes": 103,
+            "deploy_revision": "3f574e1e6967",
+            "errors": 10,
+            "evidence_lines": 40,
+            "latency_p95_ms": 677,
+            "service": "checkout-api-04",
+            "status": "attention",
+            "warnings": 4
+          },
+          {
+            "cpu_p95_percent": 57,
+            "deploy_age_minutes": 298,
+            "deploy_revision": "bd082a2044aa",
+            "errors": 2,
+            "evidence_lines": 40,
+            "latency_p95_ms": 627,
+            "service": "checkout-api-05",
+            "status": "healthy",
+            "warnings": 5
+          },
+          {
+            "cpu_p95_percent": 97,
+            "deploy_age_minutes": 351,
+            "deploy_revision": "e030d05e809d",
+            "errors": 5,
+            "evidence_lines": 40,
+            "latency_p95_ms": 661,
+            "service": "checkout-api-06",
+            "status": "attention",
+            "warnings": 2
+          },
+          {
+            "cpu_p95_percent": 76,
+            "deploy_age_minutes": 241,
+            "deploy_revision": "f6b419cfc13e",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 787,
+            "service": "checkout-api-07",
+            "status": "attention",
+            "warnings": 17
+          },
+          {
+            "cpu_p95_percent": 53,
+            "deploy_age_minutes": 88,
+            "deploy_revision": "639746bf1119",
+            "errors": 5,
+            "evidence_lines": 40,
+            "latency_p95_ms": 365,
+            "service": "checkout-api-08",
+            "status": "attention",
+            "warnings": 8
+          },
+          {
+            "cpu_p95_percent": 90,
+            "deploy_age_minutes": 126,
+            "deploy_revision": "af9a35d9045a",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 179,
+            "service": "checkout-api-09",
+            "status": "attention",
+            "warnings": 2
+          }
+        ],
+        "total_errors": 67,
+        "trial_id": "services-10-repeat-1"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 95,
+      "quality_compared_fields": 95,
+      "error": null
+    },
+    "reports_equal": true,
+    "reduction": 0.9314059702398414
+  },
+  {
+    "trial_id": "services-10-repeat-2",
+    "service_count": 10,
+    "evidence_lines": 40,
+    "execution_order": [
+      "baseline",
+      "workflow"
+    ],
+    "baseline": {
+      "mode": "baseline",
+      "agent_name": "baseline",
+      "elapsed_ms": 246682,
+      "report_latency_ms": 243159,
+      "input_tokens": 75416,
+      "output_tokens": 23681,
+      "total_tokens": 99097,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 75416,
+        "openai.cached_input_tokens": 48640,
+        "output_token_count": 23681,
+        "total_token_count": 99097
+      },
+      "report_blob": "runs/services-10-repeat-2/baseline.json",
+      "report_json": {
+        "elevated_service_count": 10,
+        "schema_version": 1,
+        "service_count": 10,
+        "services": [
+          {
+            "cpu_p95_percent": 85,
+            "deploy_age_minutes": 357,
+            "deploy_revision": "e8cbff425707",
+            "errors": 10,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1482,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 3
+          },
+          {
+            "cpu_p95_percent": 70,
+            "deploy_age_minutes": 254,
+            "deploy_revision": "3f2147bd48cd",
+            "errors": 12,
+            "evidence_lines": 40,
+            "latency_p95_ms": 136,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 15
+          },
+          {
+            "cpu_p95_percent": 58,
+            "deploy_age_minutes": 257,
+            "deploy_revision": "b09f17964604",
+            "errors": 9,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1791,
+            "service": "checkout-api-02",
+            "status": "attention",
+            "warnings": 9
+          },
+          {
+            "cpu_p95_percent": 49,
+            "deploy_age_minutes": 212,
+            "deploy_revision": "d5c28ced64d4",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1264,
+            "service": "checkout-api-03",
+            "status": "attention",
+            "warnings": 4
+          },
+          {
+            "cpu_p95_percent": 69,
+            "deploy_age_minutes": 292,
+            "deploy_revision": "93972f2744ca",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1123,
+            "service": "checkout-api-04",
+            "status": "attention",
+            "warnings": 6
+          },
+          {
+            "cpu_p95_percent": 91,
+            "deploy_age_minutes": 212,
+            "deploy_revision": "2b11ff7edaa9",
+            "errors": 4,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1772,
+            "service": "checkout-api-05",
+            "status": "attention",
+            "warnings": 4
+          },
+          {
+            "cpu_p95_percent": 41,
+            "deploy_age_minutes": 297,
+            "deploy_revision": "554142780a85",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 635,
+            "service": "checkout-api-06",
+            "status": "attention",
+            "warnings": 19
+          },
+          {
+            "cpu_p95_percent": 64,
+            "deploy_age_minutes": 89,
+            "deploy_revision": "a33bf7f7d47f",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 482,
+            "service": "checkout-api-07",
+            "status": "attention",
+            "warnings": 7
+          },
+          {
+            "cpu_p95_percent": 83,
+            "deploy_age_minutes": 93,
+            "deploy_revision": "ad85d80ae813",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1018,
+            "service": "checkout-api-08",
+            "status": "attention",
+            "warnings": 4
+          },
+          {
+            "cpu_p95_percent": 62,
+            "deploy_age_minutes": 76,
+            "deploy_revision": "3f6158c4a0d9",
+            "errors": 12,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1409,
+            "service": "checkout-api-09",
+            "status": "attention",
+            "warnings": 17
+          }
+        ],
+        "total_errors": 98,
+        "trial_id": "services-10-repeat-2"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 95,
+      "quality_compared_fields": 95,
+      "error": null
+    },
+    "workflow": {
+      "mode": "workflow",
+      "agent_name": "workflow",
+      "elapsed_ms": 17005,
+      "report_latency_ms": 13681,
+      "input_tokens": 6174,
+      "output_tokens": 728,
+      "total_tokens": 6902,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 6174,
+        "openai.cached_input_tokens": 3072,
+        "output_token_count": 728,
+        "total_token_count": 6902
+      },
+      "report_blob": "runs/services-10-repeat-2/workflow.json",
+      "report_json": {
+        "elevated_service_count": 10,
+        "schema_version": 1,
+        "service_count": 10,
+        "services": [
+          {
+            "cpu_p95_percent": 85,
+            "deploy_age_minutes": 357,
+            "deploy_revision": "e8cbff425707",
+            "errors": 10,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1482,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 3
+          },
+          {
+            "cpu_p95_percent": 70,
+            "deploy_age_minutes": 254,
+            "deploy_revision": "3f2147bd48cd",
+            "errors": 12,
+            "evidence_lines": 40,
+            "latency_p95_ms": 136,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 15
+          },
+          {
+            "cpu_p95_percent": 58,
+            "deploy_age_minutes": 257,
+            "deploy_revision": "b09f17964604",
+            "errors": 9,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1791,
+            "service": "checkout-api-02",
+            "status": "attention",
+            "warnings": 9
+          },
+          {
+            "cpu_p95_percent": 49,
+            "deploy_age_minutes": 212,
+            "deploy_revision": "d5c28ced64d4",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1264,
+            "service": "checkout-api-03",
+            "status": "attention",
+            "warnings": 4
+          },
+          {
+            "cpu_p95_percent": 69,
+            "deploy_age_minutes": 292,
+            "deploy_revision": "93972f2744ca",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1123,
+            "service": "checkout-api-04",
+            "status": "attention",
+            "warnings": 6
+          },
+          {
+            "cpu_p95_percent": 91,
+            "deploy_age_minutes": 212,
+            "deploy_revision": "2b11ff7edaa9",
+            "errors": 4,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1772,
+            "service": "checkout-api-05",
+            "status": "attention",
+            "warnings": 4
+          },
+          {
+            "cpu_p95_percent": 41,
+            "deploy_age_minutes": 297,
+            "deploy_revision": "554142780a85",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 635,
+            "service": "checkout-api-06",
+            "status": "attention",
+            "warnings": 19
+          },
+          {
+            "cpu_p95_percent": 64,
+            "deploy_age_minutes": 89,
+            "deploy_revision": "a33bf7f7d47f",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 482,
+            "service": "checkout-api-07",
+            "status": "attention",
+            "warnings": 7
+          },
+          {
+            "cpu_p95_percent": 83,
+            "deploy_age_minutes": 93,
+            "deploy_revision": "ad85d80ae813",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1018,
+            "service": "checkout-api-08",
+            "status": "attention",
+            "warnings": 4
+          },
+          {
+            "cpu_p95_percent": 62,
+            "deploy_age_minutes": 76,
+            "deploy_revision": "3f6158c4a0d9",
+            "errors": 12,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1409,
+            "service": "checkout-api-09",
+            "status": "attention",
+            "warnings": 17
+          }
+        ],
+        "total_errors": 98,
+        "trial_id": "services-10-repeat-2"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 95,
+      "quality_compared_fields": 95,
+      "error": null
+    },
+    "reports_equal": true,
+    "reduction": 0.9303510701635771
+  },
+  {
+    "trial_id": "services-10-repeat-3",
+    "service_count": 10,
+    "evidence_lines": 40,
+    "execution_order": [
+      "workflow",
+      "baseline"
+    ],
+    "baseline": {
+      "mode": "baseline",
+      "agent_name": "baseline",
+      "elapsed_ms": 250814,
+      "report_latency_ms": 247052,
+      "input_tokens": 75728,
+      "output_tokens": 23786,
+      "total_tokens": 99514,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 75728,
+        "openai.cached_input_tokens": 48640,
+        "output_token_count": 23786,
+        "total_token_count": 99514
+      },
+      "report_blob": "runs/services-10-repeat-3/baseline.json",
+      "report_json": {
+        "elevated_service_count": 9,
+        "schema_version": 1,
+        "service_count": 10,
+        "services": [
+          {
+            "cpu_p95_percent": 84,
+            "deploy_age_minutes": 17,
+            "deploy_revision": "01aa0f652401",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 570,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 5
+          },
+          {
+            "cpu_p95_percent": 61,
+            "deploy_age_minutes": 301,
+            "deploy_revision": "ada90bca1e99",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 911,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 18
+          },
+          {
+            "cpu_p95_percent": 38,
+            "deploy_age_minutes": 144,
+            "deploy_revision": "8f3d9c826a08",
+            "errors": 2,
+            "evidence_lines": 40,
+            "latency_p95_ms": 602,
+            "service": "checkout-api-02",
+            "status": "healthy",
+            "warnings": 20
+          },
+          {
+            "cpu_p95_percent": 41,
+            "deploy_age_minutes": 297,
+            "deploy_revision": "bb1d6cccc010",
+            "errors": 9,
+            "evidence_lines": 40,
+            "latency_p95_ms": 690,
+            "service": "checkout-api-03",
+            "status": "attention",
+            "warnings": 13
+          },
+          {
+            "cpu_p95_percent": 37,
+            "deploy_age_minutes": 79,
+            "deploy_revision": "8500f97922b0",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 327,
+            "service": "checkout-api-04",
+            "status": "attention",
+            "warnings": 17
+          },
+          {
+            "cpu_p95_percent": 83,
+            "deploy_age_minutes": 85,
+            "deploy_revision": "43bff0b3a5d1",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 872,
+            "service": "checkout-api-05",
+            "status": "attention",
+            "warnings": 2
+          },
+          {
+            "cpu_p95_percent": 94,
+            "deploy_age_minutes": 162,
+            "deploy_revision": "6bde98ca52cf",
+            "errors": 10,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1683,
+            "service": "checkout-api-06",
+            "status": "attention",
+            "warnings": 15
+          },
+          {
+            "cpu_p95_percent": 75,
+            "deploy_age_minutes": 234,
+            "deploy_revision": "76ec3a29c8a9",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 167,
+            "service": "checkout-api-07",
+            "status": "attention",
+            "warnings": 16
+          },
+          {
+            "cpu_p95_percent": 90,
+            "deploy_age_minutes": 281,
+            "deploy_revision": "60c1cb1f21bb",
+            "errors": 4,
+            "evidence_lines": 40,
+            "latency_p95_ms": 595,
+            "service": "checkout-api-08",
+            "status": "attention",
+            "warnings": 13
+          },
+          {
+            "cpu_p95_percent": 77,
+            "deploy_age_minutes": 59,
+            "deploy_revision": "c1cf7b846d27",
+            "errors": 13,
+            "evidence_lines": 40,
+            "latency_p95_ms": 94,
+            "service": "checkout-api-09",
+            "status": "attention",
+            "warnings": 11
+          }
+        ],
+        "total_errors": 81,
+        "trial_id": "services-10-repeat-3"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 95,
+      "quality_compared_fields": 95,
+      "error": null
+    },
+    "workflow": {
+      "mode": "workflow",
+      "agent_name": "workflow",
+      "elapsed_ms": 15379,
+      "report_latency_ms": 12197,
+      "input_tokens": 6118,
+      "output_tokens": 660,
+      "total_tokens": 6778,
+      "provider": "foundry",
+      "model": "gpt-5.4-mini",
+      "usage_details": {
+        "input_token_count": 6118,
+        "openai.cached_input_tokens": 3072,
+        "output_token_count": 660,
+        "total_token_count": 6778
+      },
+      "report_blob": "runs/services-10-repeat-3/workflow.json",
+      "report_json": {
+        "elevated_service_count": 9,
+        "schema_version": 1,
+        "service_count": 10,
+        "services": [
+          {
+            "cpu_p95_percent": 84,
+            "deploy_age_minutes": 17,
+            "deploy_revision": "01aa0f652401",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 570,
+            "service": "checkout-api-00",
+            "status": "attention",
+            "warnings": 5
+          },
+          {
+            "cpu_p95_percent": 61,
+            "deploy_age_minutes": 301,
+            "deploy_revision": "ada90bca1e99",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 911,
+            "service": "checkout-api-01",
+            "status": "attention",
+            "warnings": 18
+          },
+          {
+            "cpu_p95_percent": 38,
+            "deploy_age_minutes": 144,
+            "deploy_revision": "8f3d9c826a08",
+            "errors": 2,
+            "evidence_lines": 40,
+            "latency_p95_ms": 602,
+            "service": "checkout-api-02",
+            "status": "healthy",
+            "warnings": 20
+          },
+          {
+            "cpu_p95_percent": 41,
+            "deploy_age_minutes": 297,
+            "deploy_revision": "bb1d6cccc010",
+            "errors": 9,
+            "evidence_lines": 40,
+            "latency_p95_ms": 690,
+            "service": "checkout-api-03",
+            "status": "attention",
+            "warnings": 13
+          },
+          {
+            "cpu_p95_percent": 37,
+            "deploy_age_minutes": 79,
+            "deploy_revision": "8500f97922b0",
+            "errors": 7,
+            "evidence_lines": 40,
+            "latency_p95_ms": 327,
+            "service": "checkout-api-04",
+            "status": "attention",
+            "warnings": 17
+          },
+          {
+            "cpu_p95_percent": 83,
+            "deploy_age_minutes": 85,
+            "deploy_revision": "43bff0b3a5d1",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 872,
+            "service": "checkout-api-05",
+            "status": "attention",
+            "warnings": 2
+          },
+          {
+            "cpu_p95_percent": 94,
+            "deploy_age_minutes": 162,
+            "deploy_revision": "6bde98ca52cf",
+            "errors": 10,
+            "evidence_lines": 40,
+            "latency_p95_ms": 1683,
+            "service": "checkout-api-06",
+            "status": "attention",
+            "warnings": 15
+          },
+          {
+            "cpu_p95_percent": 75,
+            "deploy_age_minutes": 234,
+            "deploy_revision": "76ec3a29c8a9",
+            "errors": 11,
+            "evidence_lines": 40,
+            "latency_p95_ms": 167,
+            "service": "checkout-api-07",
+            "status": "attention",
+            "warnings": 16
+          },
+          {
+            "cpu_p95_percent": 90,
+            "deploy_age_minutes": 281,
+            "deploy_revision": "60c1cb1f21bb",
+            "errors": 4,
+            "evidence_lines": 40,
+            "latency_p95_ms": 595,
+            "service": "checkout-api-08",
+            "status": "attention",
+            "warnings": 13
+          },
+          {
+            "cpu_p95_percent": 77,
+            "deploy_age_minutes": 59,
+            "deploy_revision": "c1cf7b846d27",
+            "errors": 13,
+            "evidence_lines": 40,
+            "latency_p95_ms": 94,
+            "service": "checkout-api-09",
+            "status": "attention",
+            "warnings": 11
+          }
+        ],
+        "total_errors": 81,
+        "trial_id": "services-10-repeat-3"
+      },
+      "quality_score": 1.0,
+      "quality_exact": true,
+      "quality_matching_fields": 95,
+      "quality_compared_fields": 95,
+      "error": null
+    },
+    "reports_equal": true,
+    "reduction": 0.9318889804449625
+  }
+]

@@ -1,0 +1,35 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "services-10-repeat-3-candidate",
+  "agent": {
+    "name": "workflow-token-benchmark",
+    "version": "1",
+    "model_name": "gpt-5.4-mini"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "user",
+      "message": "{\"instruction\": \"Inspect every requested service exactly once, preserve request order, and publish a complete incident report matching the reference facts.\", \"reference_report\": {\"elevated_service_count\": 9, \"schema_version\": 1, \"service_count\": 10, \"services\": [{\"cpu_p95_percent\": 84, \"deploy_age_minutes\": 17, \"deploy_revision\": \"01aa0f652401\", \"errors\": 7, \"evidence_lines\": 40, \"latency_p95_ms\": 570, \"service\": \"checkout-api-00\", \"status\": \"attention\", \"warnings\": 5}, {\"cpu_p95_percent\": 61, \"deploy_age_minutes\": 301, \"deploy_revision\": \"ada90bca1e99\", \"errors\": 7, \"evidence_lines\": 40, \"latency_p95_ms\": 911, \"service\": \"checkout-api-01\", \"status\": \"attention\", \"warnings\": 18}, {\"cpu_p95_percent\": 38, \"deploy_age_minutes\": 144, \"deploy_revision\": \"8f3d9c826a08\", \"errors\": 2, \"evidence_lines\": 40, \"latency_p95_ms\": 602, \"service\": \"checkout-api-02\", \"status\": \"healthy\", \"warnings\": 20}, {\"cpu_p95_percent\": 41, \"deploy_age_minutes\": 297, \"deploy_revision\": \"bb1d6cccc010\", \"errors\": 9, \"evidence_lines\": 40, \"latency_p95_ms\": 690, \"service\": \"checkout-api-03\", \"status\": \"attention\", \"warnings\": 13}, {\"cpu_p95_percent\": 37, \"deploy_age_minutes\": 79, \"deploy_revision\": \"8500f97922b0\", \"errors\": 7, \"evidence_lines\": 40, \"latency_p95_ms\": 327, \"service\": \"checkout-api-04\", \"status\": \"attention\", \"warnings\": 17}, {\"cpu_p95_percent\": 83, \"deploy_age_minutes\": 85, \"deploy_revision\": \"43bff0b3a5d1\", \"errors\": 11, \"evidence_lines\": 40, \"latency_p95_ms\": 872, \"service\": \"checkout-api-05\", \"status\": \"attention\", \"warnings\": 2}, {\"cpu_p95_percent\": 94, \"deploy_age_minutes\": 162, \"deploy_revision\": \"6bde98ca52cf\", \"errors\": 10, \"evidence_lines\": 40, \"latency_p95_ms\": 1683, \"service\": \"checkout-api-06\", \"status\": \"attention\", \"warnings\": 15}, {\"cpu_p95_percent\": 75, \"deploy_age_minutes\": 234, \"deploy_revision\": \"76ec3a29c8a9\", \"errors\": 11, \"evidence_lines\": 40, \"latency_p95_ms\": 167, \"service\": \"checkout-api-07\", \"status\": \"attention\", \"warnings\": 16}, {\"cpu_p95_percent\": 90, \"deploy_age_minutes\": 281, \"deploy_revision\": \"60c1cb1f21bb\", \"errors\": 4, \"evidence_lines\": 40, \"latency_p95_ms\": 595, \"service\": \"checkout-api-08\", \"status\": \"attention\", \"warnings\": 13}, {\"cpu_p95_percent\": 77, \"deploy_age_minutes\": 59, \"deploy_revision\": \"c1cf7b846d27\", \"errors\": 13, \"evidence_lines\": 40, \"latency_p95_ms\": 94, \"service\": \"checkout-api-09\", \"status\": \"attention\", \"warnings\": 11}], \"total_errors\": 81, \"trial_id\": \"services-10-repeat-3\"}, \"request\": {\"evidence_lines\": 40, \"services\": [\"checkout-api-00\", \"checkout-api-01\", \"checkout-api-02\", \"checkout-api-03\", \"checkout-api-04\", \"checkout-api-05\", \"checkout-api-06\", \"checkout-api-07\", \"checkout-api-08\", \"checkout-api-09\"], \"trial_id\": \"services-10-repeat-3\"}}"
+    },
+    {
+      "step_id": 2,
+      "source": "agent",
+      "model_name": "gpt-5.4-mini",
+      "message": "{\"elevated_service_count\": 9, \"schema_version\": 1, \"service_count\": 10, \"services\": [{\"cpu_p95_percent\": 84, \"deploy_age_minutes\": 17, \"deploy_revision\": \"01aa0f652401\", \"errors\": 7, \"evidence_lines\": 40, \"latency_p95_ms\": 570, \"service\": \"checkout-api-00\", \"status\": \"attention\", \"warnings\": 5}, {\"cpu_p95_percent\": 61, \"deploy_age_minutes\": 301, \"deploy_revision\": \"ada90bca1e99\", \"errors\": 7, \"evidence_lines\": 40, \"latency_p95_ms\": 911, \"service\": \"checkout-api-01\", \"status\": \"attention\", \"warnings\": 18}, {\"cpu_p95_percent\": 38, \"deploy_age_minutes\": 144, \"deploy_revision\": \"8f3d9c826a08\", \"errors\": 2, \"evidence_lines\": 40, \"latency_p95_ms\": 602, \"service\": \"checkout-api-02\", \"status\": \"healthy\", \"warnings\": 20}, {\"cpu_p95_percent\": 41, \"deploy_age_minutes\": 297, \"deploy_revision\": \"bb1d6cccc010\", \"errors\": 9, \"evidence_lines\": 40, \"latency_p95_ms\": 690, \"service\": \"checkout-api-03\", \"status\": \"attention\", \"warnings\": 13}, {\"cpu_p95_percent\": 37, \"deploy_age_minutes\": 79, \"deploy_revision\": \"8500f97922b0\", \"errors\": 7, \"evidence_lines\": 40, \"latency_p95_ms\": 327, \"service\": \"checkout-api-04\", \"status\": \"attention\", \"warnings\": 17}, {\"cpu_p95_percent\": 83, \"deploy_age_minutes\": 85, \"deploy_revision\": \"43bff0b3a5d1\", \"errors\": 11, \"evidence_lines\": 40, \"latency_p95_ms\": 872, \"service\": \"checkout-api-05\", \"status\": \"attention\", \"warnings\": 2}, {\"cpu_p95_percent\": 94, \"deploy_age_minutes\": 162, \"deploy_revision\": \"6bde98ca52cf\", \"errors\": 10, \"evidence_lines\": 40, \"latency_p95_ms\": 1683, \"service\": \"checkout-api-06\", \"status\": \"attention\", \"warnings\": 15}, {\"cpu_p95_percent\": 75, \"deploy_age_minutes\": 234, \"deploy_revision\": \"76ec3a29c8a9\", \"errors\": 11, \"evidence_lines\": 40, \"latency_p95_ms\": 167, \"service\": \"checkout-api-07\", \"status\": \"attention\", \"warnings\": 16}, {\"cpu_p95_percent\": 90, \"deploy_age_minutes\": 281, \"deploy_revision\": \"60c1cb1f21bb\", \"errors\": 4, \"evidence_lines\": 40, \"latency_p95_ms\": 595, \"service\": \"checkout-api-08\", \"status\": \"attention\", \"warnings\": 13}, {\"cpu_p95_percent\": 77, \"deploy_age_minutes\": 59, \"deploy_revision\": \"c1cf7b846d27\", \"errors\": 13, \"evidence_lines\": 40, \"latency_p95_ms\": 94, \"service\": \"checkout-api-09\", \"status\": \"attention\", \"warnings\": 11}], \"total_errors\": 81, \"trial_id\": \"services-10-repeat-3\"}"
+    }
+  ],
+  "final_metrics": {
+    "total_steps": 2,
+    "extra": {
+      "report_latency_ms": 12197,
+      "deterministic_quality_score": 1.0,
+      "deterministic_quality_exact": true
+    },
+    "total_prompt_tokens": 6118,
+    "total_completion_tokens": 660
+  },
+  "extra": {
+    "trial_id": "services-10-repeat-3"
+  }
+}

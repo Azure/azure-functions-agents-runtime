@@ -1,0 +1,35 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "services-5-repeat-2-candidate",
+  "agent": {
+    "name": "workflow-token-benchmark",
+    "version": "1",
+    "model_name": "gpt-5.4-mini"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "user",
+      "message": "{\"instruction\": \"Inspect every requested service exactly once, preserve request order, and publish a complete incident report matching the reference facts.\", \"reference_report\": {\"elevated_service_count\": 5, \"schema_version\": 1, \"service_count\": 5, \"services\": [{\"cpu_p95_percent\": 66, \"deploy_age_minutes\": 32, \"deploy_revision\": \"3bce69ea9cb2\", \"errors\": 7, \"evidence_lines\": 40, \"latency_p95_ms\": 1340, \"service\": \"checkout-api-00\", \"status\": \"attention\", \"warnings\": 11}, {\"cpu_p95_percent\": 89, \"deploy_age_minutes\": 121, \"deploy_revision\": \"68f1b6a5ae46\", \"errors\": 4, \"evidence_lines\": 40, \"latency_p95_ms\": 195, \"service\": \"checkout-api-01\", \"status\": \"attention\", \"warnings\": 8}, {\"cpu_p95_percent\": 43, \"deploy_age_minutes\": 235, \"deploy_revision\": \"5e09ec6cdefc\", \"errors\": 6, \"evidence_lines\": 40, \"latency_p95_ms\": 1120, \"service\": \"checkout-api-02\", \"status\": \"attention\", \"warnings\": 5}, {\"cpu_p95_percent\": 46, \"deploy_age_minutes\": 149, \"deploy_revision\": \"5e9a24eb9d3a\", \"errors\": 11, \"evidence_lines\": 40, \"latency_p95_ms\": 164, \"service\": \"checkout-api-03\", \"status\": \"attention\", \"warnings\": 1}, {\"cpu_p95_percent\": 73, \"deploy_age_minutes\": 231, \"deploy_revision\": \"9b18f6a16f80\", \"errors\": 11, \"evidence_lines\": 40, \"latency_p95_ms\": 811, \"service\": \"checkout-api-04\", \"status\": \"attention\", \"warnings\": 16}], \"total_errors\": 39, \"trial_id\": \"services-5-repeat-2\"}, \"request\": {\"evidence_lines\": 40, \"services\": [\"checkout-api-00\", \"checkout-api-01\", \"checkout-api-02\", \"checkout-api-03\", \"checkout-api-04\"], \"trial_id\": \"services-5-repeat-2\"}}"
+    },
+    {
+      "step_id": 2,
+      "source": "agent",
+      "model_name": "gpt-5.4-mini",
+      "message": "{\"elevated_service_count\": 5, \"schema_version\": 1, \"service_count\": 5, \"services\": [{\"cpu_p95_percent\": 66, \"deploy_age_minutes\": 32, \"deploy_revision\": \"3bce69ea9cb2\", \"errors\": 7, \"evidence_lines\": 40, \"latency_p95_ms\": 1340, \"service\": \"checkout-api-00\", \"status\": \"attention\", \"warnings\": 11}, {\"cpu_p95_percent\": 89, \"deploy_age_minutes\": 121, \"deploy_revision\": \"68f1b6a5ae46\", \"errors\": 4, \"evidence_lines\": 40, \"latency_p95_ms\": 195, \"service\": \"checkout-api-01\", \"status\": \"attention\", \"warnings\": 8}, {\"cpu_p95_percent\": 43, \"deploy_age_minutes\": 235, \"deploy_revision\": \"5e09ec6cdefc\", \"errors\": 6, \"evidence_lines\": 40, \"latency_p95_ms\": 1120, \"service\": \"checkout-api-02\", \"status\": \"attention\", \"warnings\": 5}, {\"cpu_p95_percent\": 46, \"deploy_age_minutes\": 149, \"deploy_revision\": \"5e9a24eb9d3a\", \"errors\": 11, \"evidence_lines\": 40, \"latency_p95_ms\": 164, \"service\": \"checkout-api-03\", \"status\": \"attention\", \"warnings\": 1}, {\"cpu_p95_percent\": 73, \"deploy_age_minutes\": 231, \"deploy_revision\": \"9b18f6a16f80\", \"errors\": 11, \"evidence_lines\": 40, \"latency_p95_ms\": 811, \"service\": \"checkout-api-04\", \"status\": \"attention\", \"warnings\": 16}], \"total_errors\": 39, \"trial_id\": \"services-5-repeat-2\"}"
+    }
+  ],
+  "final_metrics": {
+    "total_steps": 2,
+    "extra": {
+      "report_latency_ms": 134446,
+      "deterministic_quality_score": 1.0,
+      "deterministic_quality_exact": true
+    },
+    "total_prompt_tokens": 39382,
+    "total_completion_tokens": 11913
+  },
+  "extra": {
+    "trial_id": "services-5-repeat-2"
+  }
+}
