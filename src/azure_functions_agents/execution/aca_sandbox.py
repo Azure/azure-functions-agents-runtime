@@ -24,6 +24,8 @@ from ..controller.journal_integrity import (
 from ..controller.readiness import (
     ActivatedSession,
     SessionActivationAuthorizationError,
+    SessionActivationBindingError,
+    SessionActivationConflictError,
     SessionActivationError,
     SessionActivationGoneError,
     SessionActivationNotFoundError,
@@ -68,7 +70,16 @@ from ..session_state import (
     owner_idempotency_expiry,
     owner_partition,
 )
-from ..transport.transport_models import SandboxFileNotFoundError, SandboxFileOperationError
+from ..transport.transport_models import (
+    SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+    SandboxFileNotFoundError,
+    SandboxFileOperationError,
+    SandboxGroupAuthorizationError,
+    SandboxGroupBindingError,
+    SandboxInvalidStateError,
+    SandboxNotFoundError,
+    SandboxTransportError,
+)
 from .backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
     AgentExecutionBackend,
@@ -88,6 +99,7 @@ from .backend import (
 from .binding import AgentBinding
 from .run_control import (
     EVENT_POLL_INTERVAL_SECONDS,
+    RunControlTimeoutError,
     RunEnvelope,
     RunJournalProtocolError,
     RunSubmissionDefinitiveFailureError,
@@ -640,6 +652,14 @@ class AcaSandboxExecutionBackend:
                 ) from None
             except SandboxFileNotFoundError:
                 return _durable_status(durable.run, phase=_public_phase(durable))
+            except SandboxFileOperationError as exc:
+                if exc.status_code in {401, 403}:
+                    raise SessionActivationAuthorizationError(
+                        SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+                    ) from None
+                raise RunSubmissionIndeterminateError(
+                    "Existing run state could not be confirmed after journal claim."
+                ) from exc
         try:
             return await _within_setup_budget(
                 self._run_control.submit(
@@ -945,10 +965,11 @@ class AcaSandboxExecutionBackend:
                 raise
             except SessionActivationAuthorizationError:
                 raise
-            except (SandboxFileNotFoundError, SandboxFileOperationError):
-                durable, fallback_status = await self._cancel_file_error_status(
+            except (RunControlTimeoutError, SandboxTransportError) as exc:
+                durable, fallback_status = await self._cancel_transport_error_status(
                     context,
                     setup_budget,
+                    exc,
                 )
                 if fallback_status is not None:
                     return fallback_status
@@ -1039,6 +1060,33 @@ class AcaSandboxExecutionBackend:
         except (SessionActivationError, SetupBudgetExpiredError):
             return durable, _durable_status(durable.run, phase=_public_phase(durable))
         return durable, None
+
+    async def _cancel_transport_error_status(
+        self,
+        context: RunContext,
+        setup_budget: SetupBudget,
+        error: RunControlTimeoutError | SandboxTransportError,
+    ) -> tuple[_DurableManagementState, RunStatus | None]:
+        if isinstance(error, SandboxFileOperationError) and error.status_code in {401, 403}:
+            raise SessionActivationAuthorizationError(
+                SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+            ) from None
+        if isinstance(error, SandboxGroupAuthorizationError):
+            raise SessionActivationAuthorizationError(
+                SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+            ) from None
+        if isinstance(error, SandboxGroupBindingError):
+            raise SessionActivationBindingError(str(error)) from None
+        if isinstance(error, SandboxInvalidStateError):
+            raise SessionActivationConflictError(str(error)) from None
+        if isinstance(error, SandboxNotFoundError):
+            raise SessionActivationGoneError(
+                "Session backing sandbox is unavailable."
+            ) from None
+        if isinstance(error, (SandboxFileNotFoundError, SandboxFileOperationError)):
+            return await self._cancel_file_error_status(context, setup_budget)
+        refreshed = await self._read_durable_management_state(context)
+        return refreshed, _durable_status(refreshed.run, phase=_public_phase(refreshed))
 
 
 async def _cancel_prelaunch_submit(

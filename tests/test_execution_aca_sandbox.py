@@ -56,6 +56,7 @@ from azure_functions_agents.execution.backend import (
 )
 from azure_functions_agents.execution.binding import AgentBinding
 from azure_functions_agents.execution.run_control import (
+    RunControlTimeoutError,
     RunSubmissionDefinitiveFailureError,
     RunSubmissionIndeterminateError,
     SandboxRunControl,
@@ -106,6 +107,10 @@ from azure_functions_agents.transport.transport_models import (
     SandboxFileNotFoundError,
     SandboxFileOperationError,
     SandboxGroupAuthorizationError,
+    SandboxGroupBindingError,
+    SandboxInvalidStateError,
+    SandboxNotFoundError,
+    SandboxProvisioningError,
 )
 from tests.doubles.content_package import content_package
 from tests.doubles.fake_session_runtime import (
@@ -3196,6 +3201,73 @@ async def test_backend_cancels_through_the_live_handle_and_adopts_the_terminal_r
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cancel_error", "expected_status", "expected_error"),
+    [
+        (RunControlTimeoutError("control deadline elapsed"), 202, None),
+        (SandboxProvisioningError("process execution timed out"), 202, None),
+        (
+            SandboxFileOperationError("sensitive provider response", status_code=403),
+            503,
+            "sandbox_group_authorization_failed",
+        ),
+        (
+            SandboxGroupBindingError("sensitive provider response"),
+            503,
+            "sandbox_group_binding_failed",
+        ),
+        (
+            SandboxInvalidStateError("sensitive provider response"),
+            409,
+            "sandbox_invalid_state",
+        ),
+        (
+            SandboxNotFoundError("sensitive provider response"),
+            410,
+            "session_gone",
+        ),
+    ],
+)
+async def test_cancel_runtime_failure_returns_structured_response(
+    tmp_path: Path,
+    cancel_error: Exception,
+    expected_status: int,
+    expected_error: str | None,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    store.runs["run-1"] = _run(session, state="running")
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    handle.seed_file(status_path("run-1"), _status(state="running"))
+    handle.seed_file(process_path("run-1"), b'{"process_group_id":42}')
+
+    async def failed_cancel(_command: str) -> None:
+        raise cancel_error
+
+    handle.exec_hook = failed_cancel
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    response = await cancel_controller_run(
+        backend,
+        RunContext(run_id="run-1", session_id="session-1"),
+    )
+
+    assert response.status_code == expected_status
+    if expected_error is None:
+        assert response.headers == {"Retry-After": "2"}
+        assert response.body["state"] == "running"
+    else:
+        assert response.body["error"] == expected_error
+        assert "sensitive provider response" not in str(response.body)
+
+
+@pytest.mark.asyncio
 async def test_cancel_natural_success_with_invalid_output_returns_failed_projection(
     tmp_path: Path,
 ) -> None:
@@ -4076,6 +4148,35 @@ async def test_cancel_winning_journal_claim_returns_its_durable_status(
 
     assert status.state == "canceled"
     assert status.phase == "settling"
+    assert [call for call in handle.calls if call.operation == "exec"] == []
+
+
+@pytest.mark.asyncio
+async def test_live_journal_owner_file_failure_is_indeterminate_not_raw_transport(
+    tmp_path: Path,
+) -> None:
+    backend, activated, run, store, handle = await _admitted_submit_for_journal_test(
+        _script_root(tmp_path)
+    )
+    original_claim = store.claim_operation_journal
+
+    async def live_owner(**kwargs: object):
+        claimed = await original_claim(**kwargs)
+        assert claimed is not None
+        return None
+
+    store.claim_operation_journal = live_owner  # type: ignore[method-assign]
+    handle.read_errors.append(SandboxFileOperationError("sensitive provider response"))
+
+    with pytest.raises(RunSubmissionIndeterminateError) as caught:
+        await backend._submit_fenced_journal(
+            activated,
+            run,
+            StartRunRequest(prompt="hello", session_id=run.session_id),
+            SetupBudget.start(),
+        )
+
+    assert "sensitive provider response" not in str(caught.value)
     assert [call for call in handle.calls if call.operation == "exec"] == []
 
 
