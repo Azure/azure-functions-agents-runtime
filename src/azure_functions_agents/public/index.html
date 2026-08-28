@@ -841,6 +841,12 @@
 			key: "",
 			sessionId: null,
 			loading: false,
+			settling: false,
+			settlementSessionId: null,
+			settlementRunId: null,
+			settlementLocation: null,
+			settlementTimer: null,
+			settlementPollInFlight: false,
 			loadingTimer: null,
 			loadingSeconds: 0
 		};
@@ -1372,6 +1378,25 @@
 			workflowPollFailureCount = 0;
 		}
 
+		function clearRunSettlement() {
+			if (state.settlementTimer) {
+				clearTimeout(state.settlementTimer);
+				state.settlementTimer = null;
+			}
+			state.settling = false;
+			state.settlementSessionId = null;
+			state.settlementRunId = null;
+			state.settlementLocation = null;
+			state.settlementPollInFlight = false;
+			updateComposerAvailability();
+		}
+
+		function updateComposerAvailability() {
+			const unavailable = state.loading || state.settling;
+			sendBtnEl.disabled = unavailable;
+			promptInputEl.disabled = unavailable;
+		}
+
 		async function pollWorkflowsOnce() {
 			if (workflowPollInFlight) return;
 			if (workflowsCapability !== "supported") return;
@@ -1623,6 +1648,9 @@
 					setStatus(`Connected • Session ${result.sessionId}`);
 				} else {
 					setStatus("Connected");
+				}
+				if (result.runMetadata) {
+					beginRunSettlement(result.runMetadata);
 				}
 			} catch (error) {
 				setBubbleText(streamingBubble.bubble, "copilot", `Auto-notification failed. ${error.message}`);
@@ -2224,8 +2252,7 @@
 		function setLoading(loading, options = {}) {
 			const showWaitingBubble = options.showWaitingBubble !== false;
 			state.loading = loading;
-			sendBtnEl.disabled = loading;
-			promptInputEl.disabled = loading;
+			updateComposerAvailability();
 
 			if (loading) {
 				if (showWaitingBubble) {
@@ -2246,6 +2273,137 @@
 			}
 		}
 
+		function appendAuthQuery(url) {
+			if (!state.key) return url;
+			const separator = url.includes("?") ? "&" : "?";
+			return `${url}${separator}code=${encodeURIComponent(state.key)}`;
+		}
+
+		function resolveSettlementLocation(location) {
+			if (typeof location !== "string" || !location.trim()) {
+				throw new Error("Run status Location is invalid.");
+			}
+
+			const apiBasePath = getApiBasePath();
+			const agentsPathIndex = apiBasePath.lastIndexOf("/agents/");
+			const deploymentPrefix = agentsPathIndex > 0
+				? apiBasePath.slice(0, agentsPathIndex)
+				: "";
+			const trimmedLocation = location.trim();
+			const target = (
+				trimmedLocation === "/agents" ||
+				trimmedLocation.startsWith("/agents/")
+			)
+				? `${deploymentPrefix}${trimmedLocation}`
+				: trimmedLocation;
+			const resolved = new URL(
+				target,
+				`${state.baseUrl}${apiBasePath}/`
+			);
+			if (resolved.protocol !== "http:" && resolved.protocol !== "https:") {
+				throw new Error("Run status Location must use HTTP or HTTPS.");
+			}
+			if (resolved.origin !== new URL(state.baseUrl).origin) {
+				throw new Error("Run status Location must use the configured origin.");
+			}
+			return resolved.toString();
+		}
+
+		function runMetadataFromResponse(response, body = null) {
+			const location = response.headers.get("Location") || body?.status_url || null;
+			const sessionId = response.headers.get("x-ms-session-id") || body?.session_id || null;
+			const runId = response.headers.get("x-ms-run-id") || body?.run_id || null;
+			if (!location || !sessionId || !runId) return null;
+			return { location, sessionId, runId };
+		}
+
+		function scheduleRunSettlement() {
+			if (!state.settling || state.settlementTimer) return;
+			state.settlementTimer = window.setTimeout(() => {
+				state.settlementTimer = null;
+				void pollRunSettlement();
+			}, 2000);
+		}
+
+		async function pollRunSettlement() {
+			if (
+				!state.settling ||
+				state.settlementPollInFlight ||
+				!state.settlementLocation ||
+				!state.settlementSessionId
+			) {
+				return;
+			}
+
+			const expectedBaseUrl = state.baseUrl;
+			const expectedSessionId = state.settlementSessionId;
+			const expectedRunId = state.settlementRunId;
+			state.settlementPollInFlight = true;
+			try {
+				const statusUrl = resolveSettlementLocation(state.settlementLocation);
+				const response = await fetch(appendAuthQuery(statusUrl), {
+					method: "GET",
+					headers: {
+						"x-ms-session-id": expectedSessionId,
+						"Accept": "application/json"
+					}
+				});
+				if (
+					expectedBaseUrl !== state.baseUrl ||
+					expectedSessionId !== state.settlementSessionId ||
+					expectedRunId !== state.settlementRunId
+				) {
+					return;
+				}
+				if (!response.ok) {
+					throw new Error(`Run status returned HTTP ${response.status}.`);
+				}
+
+				const payload = await response.json();
+				if (payload?.phase === "terminal") {
+					clearRunSettlement();
+					setStatus(
+						state.sessionId
+							? `Connected • Session ${state.sessionId}`
+							: "Connected"
+					);
+					return;
+				}
+
+				setStatus("Response complete. Finishing session cleanup...");
+				scheduleRunSettlement();
+			} catch (error) {
+				if (
+					expectedBaseUrl === state.baseUrl &&
+					expectedSessionId === state.settlementSessionId &&
+					expectedRunId === state.settlementRunId
+				) {
+					setStatus(`Waiting for session cleanup. ${error.message}`, true);
+					scheduleRunSettlement();
+				}
+			} finally {
+				state.settlementPollInFlight = false;
+			}
+		}
+
+		function beginRunSettlement(metadata) {
+			clearRunSettlement();
+			if (state.sessionId !== metadata.sessionId) {
+				state.sessionId = metadata.sessionId;
+				sessionWasFromServer = true;
+				sessionIdIsExplicit = false;
+				persistSessionId();
+				updateSessionBar();
+				recordSessionActivity(state.sessionId, lastSentUserMessage);
+			}
+			state.settling = true;
+			state.settlementSessionId = metadata.sessionId;
+			state.settlementRunId = metadata.runId;
+			state.settlementLocation = metadata.location;
+			updateComposerAvailability();
+			setStatus("Response complete. Finishing session cleanup...");
+			void pollRunSettlement();
+		}
 		function clearSessionIdError() {
 			if (!sessionIdErrorEl) return;
 			sessionIdErrorEl.textContent = "";
@@ -2406,6 +2564,7 @@
 			if (baseUrlChanged) {
 				invalidateHistoryReplay();
 				resetWorkflowStateForSessionChange();
+				clearRunSettlement();
 				state.sessionId = null;
 				sessionWasFromServer = false;
 				sessionIdIsExplicit = false;
@@ -2426,6 +2585,7 @@
 			if (sessionIdRaw && !sessionFieldUntouched && sessionIdRaw !== state.sessionId) {
 				invalidateHistoryReplay();
 				resetWorkflowStateForSessionChange();
+				clearRunSettlement();
 				state.sessionId = sessionIdRaw;
 				sessionIdIsExplicit = true;
 				sessionWasFromServer = false;
@@ -2510,7 +2670,10 @@
 					body = raw;
 				}
 				const message = getMessageFromBody(body);
-				throw new Error(`HTTP ${response.status}: ${message}`);
+				const error = new Error(`HTTP ${response.status}: ${message}`);
+				error.status = response.status;
+				error.runMetadata = runMetadataFromResponse(response, body);
+				throw error;
 			}
 
 			if (!response.body) {
@@ -2738,6 +2901,7 @@
 			return {
 				text: finalMessage || streamText || "(No response body)",
 				sessionId: state.sessionId,
+				runMetadata: runMetadataFromResponse(response),
 				details
 			};
 		}
@@ -2752,7 +2916,7 @@
 			}
 
 			const prompt = promptInputEl.value.trim();
-			if (!prompt || state.loading) return;
+			if (!prompt || state.loading || state.settling) return;
 
 			invalidateHistoryReplay();
 			startWorkflowPolling();
@@ -2824,15 +2988,21 @@
 				} else {
 					setStatus("Connected");
 				}
+				if (result.runMetadata) {
+					beginRunSettlement(result.runMetadata);
+				}
 			} catch (error) {
 				setBubbleText(streamingBubble.bubble, "assistant", `Request failed. ${error.message}`);
 				setBubbleIntermediates(streamingBubble.bubble, []);
 				setBubbleMeta(streamingBubble.bubble, "assistant");
 				attachBubbleDetails(streamingBubble.bubble, null);
 				setStatus(error.message, true);
+				if (error.status === 504 && error.runMetadata) {
+					beginRunSettlement(error.runMetadata);
+				}
 			} finally {
 				setLoading(false);
-				promptInputEl.focus();
+				if (!state.settling) promptInputEl.focus();
 				// If a workflow completed while the user's turn was
 				// streaming, drain the queue now that we're idle.
 				drainCompletionQueueIfIdle();
@@ -2849,6 +3019,7 @@
 		newSessionBtnEl.addEventListener("click", () => {
 			invalidateHistoryReplay();
 			resetWorkflowStateForSessionChange();
+			clearRunSettlement();
 			state.sessionId = null;
 			sessionWasFromServer = false;
 			sessionIdIsExplicit = false;

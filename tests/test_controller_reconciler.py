@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import replace
@@ -28,6 +29,7 @@ from azure_functions_agents.session_state import (
     DurableSessionOperation,
     DurableSessionRecord,
     FunctionAppOwnerContext,
+    ReconcilerCursorScope,
     SessionNotAdmissibleError,
     SessionOperationFence,
     SessionOperationTarget,
@@ -37,11 +39,38 @@ from azure_functions_agents.session_state import (
     owner_partition,
 )
 from azure_functions_agents.transport.transport_models import (
+    InventoryPage,
     SandboxProvisioningError,
     SandboxSnapshot,
     SandboxSummary,
 )
 from tests.doubles.fake_session_runtime import FakeSessionStateStore
+
+
+def _paginate_items[T](
+    items: tuple[T, ...],
+    *,
+    continuation_token: str | None,
+    target_count: int,
+    page_size: int | None,
+) -> InventoryPage[T]:
+    """Slice ``items`` the way a real provider drains whole pages toward ``target_count``.
+
+    Mirrors the ACA adapter contract: a page is never truncated mid-page, so a
+    returned batch may exceed ``target_count`` by at most one page.
+    """
+    start = 0 if continuation_token is None else int(continuation_token)
+    size = page_size if page_size and page_size > 0 else max(len(items), 1)
+    index = start
+    collected: list[T] = []
+    while True:
+        end = min(index + size, len(items))
+        collected.extend(items[index:end])
+        index = end
+        if index >= len(items) or len(collected) >= target_count:
+            break
+    next_token = None if index >= len(items) else str(index)
+    return InventoryPage.create(items=tuple(collected), continuation_token=next_token)
 
 
 class InventoryProvider:
@@ -51,6 +80,8 @@ class InventoryProvider:
         sandboxes: tuple[SandboxSummary, ...],
         snapshots: tuple[SandboxSnapshot, ...] = (),
         refreshed_sandboxes: tuple[SandboxSummary, ...] | None = None,
+        sandbox_page_size: int | None = None,
+        snapshot_page_size: int | None = None,
     ) -> None:
         self.sandboxes = sandboxes
         self.refreshed_sandboxes = refreshed_sandboxes
@@ -58,25 +89,73 @@ class InventoryProvider:
         self.deleted_sandboxes: list[str] = []
         self.deleted_snapshots: list[str] = []
         self.list_calls = 0
+        self.label_queries: list[dict[str, str]] = []
+        self.sandbox_page_size = sandbox_page_size
+        self.snapshot_page_size = snapshot_page_size
+        self.sandbox_page_calls = 0
+        self.snapshot_page_calls = 0
+        self.exact_sandbox_reads: list[str] = []
+        self.full_snapshot_list_calls = 0
 
-    async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[SandboxSummary, ...]:
+    async def list_sandboxes(
+        self, *, labels: dict[str, str], max_items: int | None = None
+    ) -> tuple[SandboxSummary, ...]:
         self.list_calls += 1
+        self.label_queries.append(labels)
         sandboxes = (
             self.sandboxes
             if self.list_calls == 1 or self.refreshed_sandboxes is None
             else self.refreshed_sandboxes
         )
-        return tuple(
+        result = tuple(
             sandbox
             for sandbox in sandboxes
             if all(sandbox.labels.get(key) == value for key, value in labels.items())
+        )
+        return result if max_items is None else result[:max_items]
+
+    async def list_sandboxes_page(
+        self,
+        *,
+        labels: dict[str, str],
+        continuation_token: str | None,
+        target_count: int,
+    ) -> InventoryPage[SandboxSummary]:
+        self.sandbox_page_calls += 1
+        matched = await self.list_sandboxes(labels=labels)
+        return _paginate_items(
+            matched,
+            continuation_token=continuation_token,
+            target_count=target_count,
+            page_size=self.sandbox_page_size,
         )
 
     async def delete_sandbox(self, sandbox_id: str) -> None:
         self.deleted_sandboxes.append(sandbox_id)
 
-    async def list_snapshots(self) -> tuple[SandboxSnapshot, ...]:
-        return tuple(self.snapshots.values())
+    async def get_sandbox_summary(self, sandbox_id: str) -> SandboxSummary | None:
+        self.exact_sandbox_reads.append(sandbox_id)
+        for sandbox in self.sandboxes:
+            if sandbox.sandbox_id == sandbox_id:
+                return sandbox
+        return None
+
+    async def list_snapshots(self, *, max_items: int | None = None) -> tuple[SandboxSnapshot, ...]:
+        self.full_snapshot_list_calls += 1
+        result = tuple(self.snapshots.values())
+        return result if max_items is None else result[:max_items]
+
+    async def list_snapshots_page(
+        self, *, continuation_token: str | None, target_count: int
+    ) -> InventoryPage[SandboxSnapshot]:
+        self.snapshot_page_calls += 1
+        result = tuple(self.snapshots.values())
+        return _paginate_items(
+            result,
+            continuation_token=continuation_token,
+            target_count=target_count,
+            page_size=self.snapshot_page_size,
+        )
 
     async def delete_snapshot(self, snapshot_id: str) -> None:
         self.deleted_snapshots.append(snapshot_id)
@@ -122,6 +201,85 @@ class SnapshotAlreadyDeletedProvider(InventoryProvider):
     async def delete_snapshot(self, snapshot_id: str) -> None:
         self.snapshots.pop(snapshot_id, None)
         raise SandboxProvisioningError("Snapshot delete found no target.")
+
+
+class FullSnapshotListFailureProvider(InventoryProvider):
+    """Fails the lazy full-inventory safety read that guards orphan sandbox deletion."""
+
+    async def list_snapshots(
+        self, *, max_items: int | None = None
+    ) -> tuple[SandboxSnapshot, ...]:
+        self.full_snapshot_list_calls += 1
+        raise SandboxProvisioningError("full snapshot listing unavailable")
+
+
+class ExactReadFailureProvider(InventoryProvider):
+    def __init__(
+        self,
+        *,
+        sandboxes: tuple[SandboxSummary, ...],
+        snapshots: tuple[SandboxSnapshot, ...] = (),
+        failing_sandbox_ids: frozenset[str] = frozenset(),
+        error: BaseException | None = None,
+    ) -> None:
+        super().__init__(sandboxes=sandboxes, snapshots=snapshots)
+        self.failing_sandbox_ids = failing_sandbox_ids
+        self.error = error or SandboxProvisioningError("exact sandbox read unavailable")
+
+    async def get_sandbox_summary(self, sandbox_id: str) -> SandboxSummary | None:
+        self.exact_sandbox_reads.append(sandbox_id)
+        if sandbox_id in self.failing_sandbox_ids:
+            raise self.error
+        for sandbox in self.sandboxes:
+            if sandbox.sandbox_id == sandbox_id:
+                return sandbox
+        return None
+
+
+class SnapshotDeleteFailureProvider(InventoryProvider):
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        raise SandboxProvisioningError("snapshot delete unavailable")
+
+
+class SandboxDeleteFailureProvider(InventoryProvider):
+    async def delete_sandbox(self, sandbox_id: str) -> None:
+        raise SandboxProvisioningError("sandbox delete unavailable")
+
+
+class ConcurrencyProbeProvider(InventoryProvider):
+    """Records how many exact sandbox reads the reconciler keeps in flight at once."""
+
+    def __init__(
+        self,
+        *,
+        sandboxes: tuple[SandboxSummary, ...],
+        snapshots: tuple[SandboxSnapshot, ...] = (),
+    ) -> None:
+        super().__init__(sandboxes=sandboxes, snapshots=snapshots)
+        self.in_flight = 0
+        self.peak_in_flight = 0
+
+    async def get_sandbox_summary(self, sandbox_id: str) -> SandboxSummary | None:
+        self.in_flight += 1
+        self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(0)
+            return await super().get_sandbox_summary(sandbox_id)
+        finally:
+            self.in_flight -= 1
+
+
+class FailingSessionLookupStore(FakeSessionStateStore):
+    """Fails the durable session read for one labeled sandbox candidate."""
+
+    def __init__(self, *, failing_session_id: str) -> None:
+        super().__init__()
+        self.failing_session_id = failing_session_id
+
+    async def get_session(self, partition, session_id):  # type: ignore[no-untyped-def]
+        if session_id == self.failing_session_id:
+            raise ConcurrencyConflictError("transient session read failure")
+        return await super().get_session(partition, session_id)
 
 
 class OperationStartedDuringSuspensionProjectionStore(FakeSessionStateStore):
@@ -361,6 +519,36 @@ def _run(session: DurableSessionRecord, now: datetime, *, status: str = "running
         created_at=now,
         updated_at=now,
     )
+
+
+@pytest.mark.asyncio
+async def test_targeted_request_reconciliation_does_not_probe_unrelated_same_app_sandboxes() -> None:
+    now = datetime.now(UTC)
+    session = _session(now)
+    provider = InventoryProvider(
+        sandboxes=(
+            SandboxSummary.create(
+                sandbox_id="sandbox-1",
+                labels={"app_hash": session.owner_partition.app_hash, "session_id": session.session_id},
+            ),
+            SandboxSummary.create(
+                sandbox_id="stale-other",
+                labels={"app_hash": session.owner_partition.app_hash, "session_id": "other-session"},
+            ),
+        )
+    )
+    reconciler = SessionReconciler(
+        store=FakeSessionStateStore(session),
+        provider=provider,
+        app_hash=session.owner_partition.app_hash,
+        now=lambda: now,
+    )
+
+    await reconciler.reconcile_session_targeted(session.owner_partition, session.session_id)
+
+    assert provider.label_queries == [
+        {"app_hash": session.owner_partition.app_hash, "session_id": session.session_id}
+    ]
 
 
 def _submit_operation(
@@ -1534,9 +1722,864 @@ async def test_reconciler_rotates_the_durable_cursor_across_bounded_pages() -> N
     await reconciler.run_once()
 
     assert store.page_starts == [None, "1", "2", None]
-    cursor = await store.get_reconciler_cursor(_app_hash())
+    cursor = await store.get_reconciler_cursor(
+        _app_hash(), scope=ReconcilerCursorScope.RECORDS
+    )
     assert cursor is not None
     assert cursor.continuation_token == "1"
+
+
+@pytest.mark.asyncio
+async def test_reconciler_reports_partial_progress_when_page_budget_is_exhausted() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    entities = tuple(
+        _tombstoned_session(now, f"session-{index}").to_table_entity()
+        for index in range(2)
+    )
+    store = RotatingPageStore(entities)
+    report = await SessionReconciler(
+        store=store,
+        provider=InventoryProvider(sandboxes=()),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(page_size=1, max_pages=1),
+        now=lambda: now,
+    ).run_once()
+
+    assert report.scanned_pages == 1
+    assert report.scanned_records == 1
+    assert report.partial is True
+
+
+@pytest.mark.asyncio
+async def test_reconciler_reports_partial_when_one_session_is_deferred() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    store = FakeSessionStateStore(_session(now))
+
+    class SessionRefreshFailureProvider(InventoryProvider):
+        def __init__(self) -> None:
+            super().__init__(sandboxes=())
+            self.list_calls = 0
+
+        async def list_sandboxes(
+            self,
+            *,
+            labels: dict[str, str],
+            max_items: int | None = None,
+        ) -> tuple[SandboxSummary, ...]:
+            self.list_calls += 1
+            if self.list_calls > 1:
+                raise SandboxProvisioningError("session backing lookup unavailable")
+            return await super().list_sandboxes(labels=labels, max_items=max_items)
+
+    report = await SessionReconciler(
+        store=store,
+        provider=SessionRefreshFailureProvider(),
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).run_once()
+
+    assert report.partial is True
+    assert store.session is not None
+    assert store.session.status == "ready"
+    for scope in ReconcilerCursorScope:
+        assert await store.get_reconciler_cursor(_app_hash(), scope=scope) is not None
+
+
+@pytest.mark.asyncio
+async def test_reconciler_inventory_cursor_covers_orphans_beyond_the_old_prefix_cap() -> None:
+    """Repeated runs must reach every orphan, not just repeat the first page.
+
+    Before durable inventory cursors, a bounded probe re-read the same
+    leading prefix on every pass; a hot prefix could starve later orphans
+    forever. Pagination must resume past what a prior pass already handled.
+    """
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    store = FakeSessionStateStore()
+    orphans = tuple(
+        _sandbox(now, f"orphan-{index}", session_id=f"orphan-session-{index}")
+        for index in range(5)
+    )
+    provider = InventoryProvider(sandboxes=orphans, sandbox_page_size=2)
+    reconciler = SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(inventory_page_size=1, max_inventory_pages=1),
+        now=lambda: now,
+    )
+
+    first = await reconciler.run_once()
+    assert provider.deleted_sandboxes == ["orphan-0", "orphan-1"]
+    assert first.partial is True
+    cursor = await store.get_reconciler_cursor(
+        _app_hash(), scope=ReconcilerCursorScope.SANDBOXES
+    )
+    assert cursor is not None
+    assert cursor.continuation_token == "2"
+
+    second = await reconciler.run_once()
+    assert provider.deleted_sandboxes == ["orphan-0", "orphan-1", "orphan-2", "orphan-3"]
+    assert second.partial is True
+
+    third = await reconciler.run_once()
+    assert provider.deleted_sandboxes == [
+        "orphan-0",
+        "orphan-1",
+        "orphan-2",
+        "orphan-3",
+        "orphan-4",
+    ]
+    assert third.partial is False
+    cursor = await store.get_reconciler_cursor(
+        _app_hash(), scope=ReconcilerCursorScope.SANDBOXES
+    )
+    assert cursor is not None
+    assert cursor.continuation_token is None
+
+
+@pytest.mark.asyncio
+async def test_reconciler_sandbox_and_snapshot_inventory_cursors_advance_independently() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    store = FakeSessionStateStore()
+    orphans = tuple(
+        _sandbox(now, f"orphan-{index}", session_id=f"orphan-session-{index}")
+        for index in range(4)
+    )
+    snapshots = tuple(
+        SandboxSnapshot.create(
+            snapshot_id=f"snapshot-{index}",
+            sandbox_id="unrelated-sandbox",
+            created_at=now.isoformat(),
+        )
+        for index in range(2)
+    )
+    provider = InventoryProvider(
+        sandboxes=orphans,
+        snapshots=snapshots,
+        sandbox_page_size=2,
+        snapshot_page_size=2,
+    )
+    reconciler = SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(inventory_page_size=1, max_inventory_pages=1),
+        now=lambda: now,
+    )
+
+    await reconciler.run_once()
+
+    sandbox_cursor = await store.get_reconciler_cursor(
+        _app_hash(), scope=ReconcilerCursorScope.SANDBOXES
+    )
+    snapshot_cursor = await store.get_reconciler_cursor(
+        _app_hash(), scope=ReconcilerCursorScope.SNAPSHOTS
+    )
+    assert sandbox_cursor is not None
+    assert sandbox_cursor.continuation_token == "2"
+    assert snapshot_cursor is not None
+    assert snapshot_cursor.continuation_token is None
+
+    await reconciler.run_once()
+
+    sandbox_cursor = await store.get_reconciler_cursor(
+        _app_hash(), scope=ReconcilerCursorScope.SANDBOXES
+    )
+    snapshot_cursor = await store.get_reconciler_cursor(
+        _app_hash(), scope=ReconcilerCursorScope.SNAPSHOTS
+    )
+    assert sandbox_cursor is not None
+    assert sandbox_cursor.continuation_token is None
+    assert snapshot_cursor is not None
+    assert snapshot_cursor.continuation_token is None
+    assert provider.sandbox_page_calls == 2
+    assert provider.snapshot_page_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_cross_page_unreferenced_snapshot_is_deleted_via_exact_sandbox_read() -> None:
+    """A snapshot's sandbox on a later page must not starve it forever (bug A)."""
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    provider = InventoryProvider(
+        sandboxes=(
+            SandboxSummary.create(
+                sandbox_id="filler",
+                labels={"app_hash": _app_hash()},
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+            _sandbox(now, "sandbox-2", session_id="session-2"),
+        ),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="cross-page-snapshot",
+                sandbox_id="sandbox-2",
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+        ),
+        sandbox_page_size=1,
+    )
+    reconciler = SessionReconciler(
+        store=FakeSessionStateStore(),
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(inventory_page_size=1, max_inventory_pages=1),
+        now=lambda: now,
+    )
+
+    report = await reconciler.run_once()
+
+    assert report.deleted_snapshots == 1
+    assert report.deleted_sandboxes == 0
+    assert provider.deleted_snapshots == ["cross-page-snapshot"]
+    assert provider.exact_sandbox_reads == ["sandbox-2"]
+    assert provider.full_snapshot_list_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_referenced_cross_page_snapshot_is_retained() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = DurableSessionRecord.create(
+        owner_partition=owner_partition(_owner()),
+        session_id="session-2",
+        sandbox_id="sandbox-2",
+        generation=1,
+        digest_kind="funcs_zip",
+        digest="sha256:content",
+        protocol="1",
+        status="creating",
+        last_activity_at=now,
+        expires_at=now + timedelta(days=1),
+        idle_policy_armed=True,
+        active_run_id=None,
+        snapshot_ids=("cross-page-snapshot",),
+        region="westus2",
+        state_store_fingerprint="s1-" + ("a" * 52),
+        quarantine_reason=None,
+        tombstone_reason=None,
+        created_at=now,
+        updated_at=now,
+        active_operation_id=None,
+        operation_sequence=0,
+    )
+    store = FakeSessionStateStore(session)
+    provider = InventoryProvider(
+        sandboxes=(
+            SandboxSummary.create(
+                sandbox_id="filler",
+                labels={"app_hash": _app_hash()},
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+            _sandbox(now, "sandbox-2", session_id="session-2"),
+        ),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="cross-page-snapshot",
+                sandbox_id="sandbox-2",
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+        ),
+        sandbox_page_size=1,
+    )
+    reconciler = SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(inventory_page_size=1, max_inventory_pages=1),
+        now=lambda: now,
+    )
+
+    report = await reconciler.run_once()
+
+    assert report.deleted_snapshots == 0
+    assert provider.deleted_snapshots == []
+    assert provider.exact_sandbox_reads == ["sandbox-2"]
+
+
+@pytest.mark.asyncio
+async def test_exact_read_404_and_foreign_app_ownership_retain_the_snapshot() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    foreign_partition = owner_partition(_foreign_owner())
+    provider = InventoryProvider(
+        sandboxes=(
+            SandboxSummary.create(
+                sandbox_id="foreign-sandbox",
+                labels={
+                    "app_hash": foreign_partition.app_hash,
+                    "owner_hash_version": foreign_partition.owner_hash_version,
+                    "owner_kind": foreign_partition.owner_kind,
+                    "owner_hash": foreign_partition.owner_hash,
+                    "session_id": "foreign-session",
+                },
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+        ),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="missing-sandbox-snapshot",
+                sandbox_id="gone-sandbox",
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+            SandboxSnapshot.create(
+                snapshot_id="foreign-app-snapshot",
+                sandbox_id="foreign-sandbox",
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+        ),
+    )
+    reconciler = SessionReconciler(
+        store=FakeSessionStateStore(),
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    )
+
+    report = await reconciler.run_once()
+
+    assert report.deleted_snapshots == 0
+    assert provider.deleted_snapshots == []
+    assert provider.exact_sandbox_reads == ["gone-sandbox", "foreign-sandbox"]
+
+
+@pytest.mark.asyncio
+async def test_snapshots_sharing_one_offpage_sandbox_trigger_a_single_exact_read() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    provider = InventoryProvider(
+        sandboxes=(
+            SandboxSummary.create(
+                sandbox_id="filler",
+                labels={"app_hash": _app_hash()},
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+            _sandbox(now, "sandbox-2", session_id="session-2"),
+        ),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="snapshot-a",
+                sandbox_id="sandbox-2",
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+            SandboxSnapshot.create(
+                snapshot_id="snapshot-b",
+                sandbox_id="sandbox-2",
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+        ),
+        sandbox_page_size=1,
+    )
+    reconciler = SessionReconciler(
+        store=FakeSessionStateStore(),
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(inventory_page_size=1, max_inventory_pages=1),
+        now=lambda: now,
+    )
+
+    report = await reconciler.run_once()
+
+    assert report.deleted_snapshots == 2
+    assert sorted(provider.deleted_snapshots) == ["snapshot-a", "snapshot-b"]
+    assert provider.exact_sandbox_reads == ["sandbox-2"]
+
+
+@pytest.mark.asyncio
+async def test_orphan_sandbox_deletes_snapshots_beyond_the_current_snapshot_page() -> None:
+    """Bug B: an orphan sandbox's off-page snapshots must not survive its deletion."""
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    provider = InventoryProvider(
+        sandboxes=(_sandbox(now, "orphan-1", session_id="orphan-session"),),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="snap-1", sandbox_id="orphan-1", created_at=now.isoformat()
+            ),
+            SandboxSnapshot.create(
+                snapshot_id="snap-2", sandbox_id="orphan-1", created_at=now.isoformat()
+            ),
+            SandboxSnapshot.create(
+                snapshot_id="snap-3", sandbox_id="orphan-1", created_at=now.isoformat()
+            ),
+        ),
+        snapshot_page_size=1,
+    )
+    reconciler = SessionReconciler(
+        store=FakeSessionStateStore(),
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(inventory_page_size=1, max_inventory_pages=1),
+        now=lambda: now,
+    )
+
+    report = await reconciler.run_once()
+
+    assert report.deleted_sandboxes == 1
+    assert report.deleted_snapshots == 3
+    assert sorted(provider.deleted_snapshots) == ["snap-1", "snap-2", "snap-3"]
+    assert provider.deleted_sandboxes == ["orphan-1"]
+    assert provider.full_snapshot_list_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_orphan_snapshot_delete_failure_marks_partial_and_still_advances_the_cursor() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    store = FakeSessionStateStore()
+    provider = FailOnceSnapshotProvider(
+        sandboxes=(_sandbox(now, "orphan-1", session_id="orphan-session"),),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="snap-1",
+                sandbox_id="orphan-1",
+                created_at=now.isoformat(),
+            ),
+            SandboxSnapshot.create(
+                snapshot_id="snap-2",
+                sandbox_id="orphan-1",
+                created_at=now.isoformat(),
+            ),
+        ),
+    )
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).run_once()
+
+    assert report.partial is True
+    assert report.deleted_snapshots == 0
+    assert report.deleted_sandboxes == 0
+    assert provider.deleted_snapshots == []
+    assert provider.deleted_sandboxes == []
+    assert provider.full_snapshot_list_calls == 2
+    assert set(provider.snapshots) == {"snap-1", "snap-2"}
+    sandbox_cursor = await store.get_reconciler_cursor(_app_hash(), scope="sandboxes")
+    snapshot_cursor = await store.get_reconciler_cursor(_app_hash(), scope="snapshots")
+    assert sandbox_cursor is not None
+    assert sandbox_cursor.continuation_token is None
+    assert snapshot_cursor is not None
+    assert snapshot_cursor.continuation_token is None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_delete_failure_defers_the_sandbox_delete_across_the_full_list() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    store = FakeSessionStateStore()
+    provider = FailOnceSnapshotProvider(
+        sandboxes=(_sandbox(now, "orphan-1", session_id="orphan-session"),),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="snap-1", sandbox_id="orphan-1", created_at=now.isoformat()
+            ),
+            SandboxSnapshot.create(
+                snapshot_id="snap-2", sandbox_id="orphan-1", created_at=now.isoformat()
+            ),
+        ),
+    )
+    provider.snapshot_page_size = 1
+    reconciler = SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(inventory_page_size=1, max_inventory_pages=1),
+        now=lambda: now,
+    )
+
+    first = await reconciler.run_once()
+
+    assert first.deleted_sandboxes == 0
+    assert first.deleted_snapshots == 0
+    assert first.partial is True
+    assert provider.deleted_sandboxes == []
+    assert set(provider.snapshots) == {"snap-1", "snap-2"}
+    sandbox_cursor = await store.get_reconciler_cursor(_app_hash(), scope="sandboxes")
+    snapshot_cursor = await store.get_reconciler_cursor(_app_hash(), scope="snapshots")
+    assert sandbox_cursor is not None
+    assert sandbox_cursor.continuation_token is None
+    assert snapshot_cursor is not None
+    assert snapshot_cursor.continuation_token == "1"
+
+    second = await reconciler.run_once()
+
+    assert second.deleted_sandboxes == 1
+    assert second.deleted_snapshots == 2
+    assert provider.deleted_sandboxes == ["orphan-1"]
+
+
+@pytest.mark.asyncio
+async def test_sandbox_delete_failure_marks_partial_and_still_advances_the_cursor() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    store = FakeSessionStateStore()
+    provider = SandboxDeleteFailureProvider(
+        sandboxes=(_sandbox(now, "orphan-1", session_id="orphan-session"),),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="snap-1",
+                sandbox_id="orphan-1",
+                created_at=now.isoformat(),
+            ),
+        ),
+    )
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).run_once()
+
+    assert report.partial is True
+    assert report.deleted_snapshots == 1
+    assert report.deleted_sandboxes == 0
+    assert provider.deleted_snapshots == ["snap-1"]
+    assert provider.deleted_sandboxes == []
+    sandbox_cursor = await store.get_reconciler_cursor(_app_hash(), scope="sandboxes")
+    snapshot_cursor = await store.get_reconciler_cursor(_app_hash(), scope="snapshots")
+    assert sandbox_cursor is not None
+    assert sandbox_cursor.continuation_token is None
+    assert snapshot_cursor is not None
+    assert snapshot_cursor.continuation_token is None
+
+
+@pytest.mark.asyncio
+async def test_two_orphan_sandboxes_share_a_single_full_snapshot_list_call() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    provider = InventoryProvider(
+        sandboxes=(
+            _sandbox(now, "orphan-1", session_id="orphan-session-1"),
+            _sandbox(now, "orphan-2", session_id="orphan-session-2"),
+        ),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="snap-1", sandbox_id="orphan-1", created_at=now.isoformat()
+            ),
+            SandboxSnapshot.create(
+                snapshot_id="snap-2", sandbox_id="orphan-2", created_at=now.isoformat()
+            ),
+        ),
+    )
+    reconciler = SessionReconciler(
+        store=FakeSessionStateStore(),
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    )
+
+    report = await reconciler.run_once()
+
+    assert report.deleted_sandboxes == 2
+    assert report.deleted_snapshots == 2
+    assert provider.full_snapshot_list_calls == 1
+    assert sorted(provider.deleted_sandboxes) == ["orphan-1", "orphan-2"]
+
+
+@pytest.mark.asyncio
+async def test_zero_orphan_sandboxes_never_call_the_full_snapshot_list() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(now, snapshot_ids=("kept",))
+    store = FakeSessionStateStore(session)
+    provider = InventoryProvider(
+        sandboxes=(_sandbox(now, "sandbox-1", session_id="session-1"),),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="kept",
+                sandbox_id="sandbox-1",
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+        ),
+    )
+    reconciler = SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    )
+
+    report = await reconciler.run_once()
+
+    assert report.deleted_sandboxes == 0
+    assert report.deleted_snapshots == 0
+    assert provider.full_snapshot_list_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_full_snapshot_list_failure_defers_orphan_deletes_without_stalling_the_page(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The safety listing is untruncated, so its failure must defer — never delete."""
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    store = FakeSessionStateStore()
+    provider = FullSnapshotListFailureProvider(
+        sandboxes=(
+            _sandbox(now, "orphan-1", session_id="orphan-session-1"),
+            _sandbox(now, "orphan-2", session_id="orphan-session-2"),
+            _sandbox(now, "offpage-sandbox", session_id="offpage-session"),
+        ),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="stray-snapshot",
+                sandbox_id="offpage-sandbox",
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+        ),
+        sandbox_page_size=2,
+    )
+    reconciler = SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(inventory_page_size=2, max_inventory_pages=1),
+        now=lambda: now,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        report = await reconciler.run_once()
+
+    assert report.partial is True
+    assert report.deleted_sandboxes == 0
+    assert provider.deleted_sandboxes == []
+    assert provider.full_snapshot_list_calls == 1
+    assert (
+        sum(
+            "without full snapshot inventory" in record.getMessage()
+            for record in caplog.records
+        )
+        == 1
+    )
+    assert provider.deleted_snapshots == ["stray-snapshot"]
+    sandbox_cursor = await store.get_reconciler_cursor(_app_hash(), scope="sandboxes")
+    assert sandbox_cursor is not None
+    assert sandbox_cursor.continuation_token == "2"
+    snapshot_cursor = await store.get_reconciler_cursor(_app_hash(), scope="snapshots")
+    assert snapshot_cursor is not None
+    assert snapshot_cursor.continuation_token is None
+
+
+@pytest.mark.asyncio
+async def test_one_failing_orphan_candidate_does_not_block_later_candidates() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    store = FailingSessionLookupStore(failing_session_id="orphan-session-1")
+    provider = InventoryProvider(
+        sandboxes=(
+            _sandbox(now, "orphan-1", session_id="orphan-session-1"),
+            _sandbox(now, "orphan-2", session_id="orphan-session-2"),
+        ),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="snap-2", sandbox_id="orphan-2", created_at=now.isoformat()
+            ),
+        ),
+    )
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).run_once()
+
+    assert report.partial is True
+    assert provider.deleted_sandboxes == ["orphan-2"]
+    assert provider.deleted_snapshots == ["snap-2"]
+    assert report.deleted_sandboxes == 1
+
+
+@pytest.mark.asyncio
+async def test_exact_read_failure_marks_partial_and_still_advances_the_cursor() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    store = FakeSessionStateStore(_session(now))
+    provider = ExactReadFailureProvider(
+        sandboxes=(_sandbox(now, "sandbox-1", session_id="session-1"),),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="unreadable-snapshot",
+                sandbox_id="unreadable-sandbox",
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+            SandboxSnapshot.create(
+                snapshot_id="readable-snapshot",
+                sandbox_id="sandbox-1",
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+        ),
+        failing_sandbox_ids=frozenset({"unreadable-sandbox"}),
+    )
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).run_once()
+
+    assert report.partial is True
+    assert provider.deleted_snapshots == ["readable-snapshot"]
+    assert provider.exact_sandbox_reads == ["unreadable-sandbox"]
+    assert provider.full_snapshot_list_calls == 0
+    snapshot_cursor = await store.get_reconciler_cursor(_app_hash(), scope="snapshots")
+    assert snapshot_cursor is not None
+    assert snapshot_cursor.continuation_token is None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_delete_failure_marks_partial_and_still_advances_the_cursor() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    store = FakeSessionStateStore(_session(now))
+    provider = SnapshotDeleteFailureProvider(
+        sandboxes=(_sandbox(now, "sandbox-1", session_id="session-1"),),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="undeletable-snapshot",
+                sandbox_id="sandbox-1",
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+        ),
+    )
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).run_once()
+
+    assert report.partial is True
+    assert report.deleted_snapshots == 0
+    assert provider.full_snapshot_list_calls == 0
+    snapshot_cursor = await store.get_reconciler_cursor(_app_hash(), scope="snapshots")
+    assert snapshot_cursor is not None
+    assert snapshot_cursor.continuation_token is None
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("programming error"), asyncio.CancelledError()]
+)
+@pytest.mark.asyncio
+async def test_unexpected_exact_read_failure_leaves_inventory_cursors_unchanged(
+    error: BaseException,
+) -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    store = FakeSessionStateStore()
+    provider = ExactReadFailureProvider(
+        sandboxes=(),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="snapshot-1",
+                sandbox_id="offpage-sandbox",
+                created_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+        ),
+        failing_sandbox_ids=frozenset({"offpage-sandbox"}),
+        error=error,
+    )
+
+    with pytest.raises(type(error)):
+        await SessionReconciler(
+            store=store,
+            provider=provider,  # type: ignore[arg-type]
+            app_hash=_app_hash(),
+            now=lambda: now,
+        ).run_once()
+
+    assert await store.get_reconciler_cursor(_app_hash(), scope="sandboxes") is None
+    assert await store.get_reconciler_cursor(_app_hash(), scope="snapshots") is None
+
+
+class UnexpectedFullSnapshotListProvider(InventoryProvider):
+    async def list_snapshots(
+        self, *, max_items: int | None = None
+    ) -> tuple[SandboxSnapshot, ...]:
+        raise RuntimeError("programming error")
+
+
+@pytest.mark.asyncio
+async def test_unexpected_full_snapshot_list_failure_leaves_inventory_cursors_unchanged() -> (
+    None
+):
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    store = FakeSessionStateStore()
+    provider = UnexpectedFullSnapshotListProvider(
+        sandboxes=(_sandbox(now, "orphan-1", session_id="orphan-session-1"),),
+    )
+
+    with pytest.raises(RuntimeError):
+        await SessionReconciler(
+            store=store,
+            provider=provider,  # type: ignore[arg-type]
+            app_hash=_app_hash(),
+            now=lambda: now,
+        ).run_once()
+
+    assert await store.get_reconciler_cursor(_app_hash(), scope="sandboxes") is None
+    assert await store.get_reconciler_cursor(_app_hash(), scope="snapshots") is None
+
+
+@pytest.mark.asyncio
+async def test_offpage_backing_reads_are_bounded_and_never_starve_a_suffix() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    sandbox_ids = tuple(f"offpage-{index:03d}" for index in range(40))
+    snapshots = tuple(
+        SandboxSnapshot.create(
+            snapshot_id=f"snapshot-{sandbox_id}-{copy}",
+            sandbox_id=sandbox_id,
+            created_at=(now - timedelta(hours=1)).isoformat(),
+        )
+        for sandbox_id in sandbox_ids
+        for copy in range(2)
+    )
+    provider = ConcurrencyProbeProvider(sandboxes=(), snapshots=snapshots)
+
+    report = await SessionReconciler(
+        store=FakeSessionStateStore(),
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).run_once()
+
+    assert report.partial is False
+    assert sorted(provider.exact_sandbox_reads) == sorted(sandbox_ids)
+    assert provider.peak_in_flight == reconciler_module._EXACT_SANDBOX_READ_CONCURRENCY
+
+
+class SandboxCursorConflictStore(FakeSessionStateStore):
+    """Simulates a concurrent writer racing only the sandbox-inventory cursor."""
+
+    async def advance_reconciler_cursor(
+        self,
+        *,
+        app_hash: str,
+        previous: object,
+        continuation_token: str | None,
+        scope: ReconcilerCursorScope,
+    ) -> object:
+        if scope is ReconcilerCursorScope.SANDBOXES:
+            raise ConcurrencyConflictError("concurrent sandbox cursor advance")
+        return await super().advance_reconciler_cursor(
+            app_hash=app_hash,
+            previous=previous,  # type: ignore[arg-type]
+            continuation_token=continuation_token,
+            scope=scope,
+        )
+
+
+@pytest.mark.asyncio
+async def test_reconciler_cursor_cas_conflict_reports_partial_without_overwriting_progress() -> (
+    None
+):
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    store = SandboxCursorConflictStore()
+    provider = InventoryProvider(sandboxes=())
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).run_once()
+
+    assert report.partial is True
+    assert await store.get_reconciler_cursor(_app_hash(), scope="sandboxes") is None
+    snapshot_cursor = await store.get_reconciler_cursor(_app_hash(), scope="snapshots")
+    assert snapshot_cursor is not None
+    assert snapshot_cursor.continuation_token is None
 
 
 @pytest.mark.asyncio
@@ -1748,7 +2791,8 @@ async def test_reclaim_operation_blocks_successor_until_terminal_adoption_is_res
     assert store.session.idle_policy_armed
     assert store.session.last_activity_at == now
     assert store.session.expires_at == now + timedelta(seconds=120)
-    assert store.operations[-2:] == ["advance_operation", "completed_operation"]
+    assert store.operations[-4:-2] == ["advance_operation", "completed_operation"]
+    assert store.operations[-2:] == ["advance_cursor", "advance_cursor"]
 
 
 async def _none() -> None:
@@ -2095,7 +3139,8 @@ async def test_reconciler_expires_a_no_retry_submit_operation_and_rearms_before_
     assert len(lifecycle_fences) == 1
     assert store.session is not None
     assert store.session.idle_policy_armed
-    assert store.operations[-2:] == ["advance_operation", "completed_operation"]
+    assert store.operations[-4:-2] == ["advance_operation", "completed_operation"]
+    assert store.operations[-2:] == ["advance_cursor", "advance_cursor"]
 
 
 @pytest.mark.asyncio
@@ -2170,7 +3215,8 @@ async def test_expired_submit_operation_with_lost_persisted_backing_tombstones_w
     assert store.session.active_run_id is None
     assert store.session.active_operation_id is None
     assert store.durable_operations[operation.operation_id].state == "completed"
-    assert store.operations[-2:] == ["takeover_expired_operation", "completed_operation"]
+    assert store.operations[-4:-2] == ["takeover_expired_operation", "completed_operation"]
+    assert store.operations[-2:] == ["advance_cursor", "advance_cursor"]
 
 
 @pytest.mark.asyncio
@@ -2420,13 +3466,16 @@ async def test_reconciler_rearms_terminal_submit_before_completion() -> None:
     assert len(lifecycle_fences) == 1
     assert store.session is not None
     assert store.session.idle_policy_armed
-    assert store.operations[-2:] == ["advance_operation", "completed_operation"]
+    assert store.operations[-4:-2] == ["advance_operation", "completed_operation"]
+    assert store.operations[-2:] == ["advance_cursor", "advance_cursor"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("created_sandbox", [False, True])
+@pytest.mark.parametrize("targeted", [False, True])
 async def test_reconciler_expires_pre_pointer_provision_without_raw_orphan_delete(
     created_sandbox: bool,
+    targeted: bool,
 ) -> None:
     now = datetime(2026, 8, 5, tzinfo=UTC)
     base = _session(
@@ -2464,12 +3513,20 @@ async def test_reconciler_expires_pre_pointer_provision_without_raw_orphan_delet
         )
     )
 
-    report = await SessionReconciler(
+    reconciler = SessionReconciler(
         store=store,
         provider=provider,  # type: ignore[arg-type]
         app_hash=_app_hash(),
         now=lambda: now,
-    ).run_once()
+    )
+    report = (
+        await reconciler.reconcile_session_targeted(
+            session.owner_partition,
+            session.session_id,
+        )
+        if targeted
+        else await reconciler.run_once()
+    )
 
     assert report.tombstoned_sessions == 1
     assert store.session is not None

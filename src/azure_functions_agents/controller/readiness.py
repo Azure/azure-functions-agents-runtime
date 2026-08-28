@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
@@ -78,7 +80,6 @@ from ..strict_json import DuplicateJsonKeyError, decode_json_object
 from ..transport.manifest import ExpectedSandboxManifestBinding, SandboxManifestMismatchError
 from ..transport.ports import SandboxSessionHandle, SandboxSessionProvider
 from ..transport.transport_models import (
-    SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
     SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
     PersistedSandboxBinding,
     SandboxCapacityError,
@@ -87,7 +88,9 @@ from ..transport.transport_models import (
     SandboxCreateSource,
     SandboxFileNotFoundError,
     SandboxFileOperationError,
+    SandboxGroupArmAuthorizationError,
     SandboxGroupAuthorizationError,
+    SandboxGroupAuthorizationFailureReason,
     SandboxGroupBinding,
     SandboxLifecyclePolicy,
     SandboxProvisioningLabels,
@@ -127,6 +130,7 @@ QUARANTINE_REASONS: frozenset[str] = frozenset(
 )
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.25
 _RESUMABLE_FILE_OPERATION_STATUS_CODES = frozenset({409, 423, 425, 429, 500, 502, 503, 504})
+_FILE_RETRY_MAX_DELAY_SECONDS = 4.0
 _ADMISSION_CONFIRMATION_TIMEOUT_SECONDS = 1.0
 _BOUNDED_TASK_DRAIN_TIMEOUT_SECONDS = 0.05
 _INDETERMINATE_PROVISION_RECOVERY_TIMEOUT_SECONDS = 1.0
@@ -152,8 +156,11 @@ _ADMISSION_NOT_RESERVED: AdmissionDisposition = "not_reserved"
 _ADMISSION_POSSIBLY_COMMITTED: AdmissionDisposition = "possibly_committed"
 
 type _SessionLockKey = tuple[str, str]
-type TargetedReconciler = Callable[[OwnerPartition, str, "SetupDeadline"], Awaitable[None]]
-type BoundedReconciler = Callable[[], Awaitable[None]]
+type TargetedReconciler = Callable[
+    [OwnerPartition, str, "SetupDeadline | None"],
+    Awaitable[None],
+]
+type BoundedReconciler = Callable[..., Awaitable[None]]
 
 
 class SetupDeadline(Protocol):
@@ -194,6 +201,10 @@ class SessionActivationSetupTimeoutError(SessionActivationError):
 
 class SessionActivationAuthorizationError(SessionActivationError):
     """The controller lacks required Sandbox Group data-plane authorization."""
+
+    def __init__(self, message: str, *, status_code: int = 403) -> None:
+        self.status_code = status_code if status_code in {401, 403} else 403
+        super().__init__(message)
 
 
 class SessionCreationUnavailableError(SessionActivationError):
@@ -401,7 +412,13 @@ class SessionRuntimeBinding:
 
     async def get_provider(self) -> SandboxSessionProvider:
         """Return the one lazily opened provider for this app's Sandbox Group."""
-        return await self._provider.get()
+        try:
+            return await self._provider.get()
+        except SandboxGroupArmAuthorizationError as exc:
+            raise SessionActivationAuthorizationError(
+                "Configured Sandbox Group ARM authorization failed.",
+                status_code=exc.status_code or 403,
+            ) from None
 
     async def get_state_store(self) -> StateStoreBinding:
         """Return the one lazily resolved state-store binding for this app."""
@@ -416,26 +433,44 @@ class SessionRuntimeBinding:
         """Run the shared targeted lifecycle reconciliation when configured."""
         if self._targeted_reconciler is not None:
             try:
-                if setup_deadline is None:
-                    await self._targeted_reconciler(  # type: ignore[misc, call-arg]
-                        partition, session_id
-                    )
-                else:
-                    await self._targeted_reconciler(partition, session_id, setup_deadline)
-            except SandboxGroupAuthorizationError:
+                await self._targeted_reconciler(partition, session_id, setup_deadline)
+            except SandboxGroupAuthorizationError as exc:
                 raise SessionActivationAuthorizationError(
-                    SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+                    SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+                    status_code=exc.status_code,
                 ) from None
 
-    async def reconcile_after_create(self) -> None:
-        """Run the awaited bounded post-create cleanup when configured."""
+    async def reconcile_after_create(
+        self,
+        partition: OwnerPartition | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        """Run targeted post-create reconciliation when configured."""
         if self._post_create_reconciler is not None:
-            await self._post_create_reconciler()
+            if (
+                partition is None
+                or session_id is None
+                or len(inspect.signature(self._post_create_reconciler).parameters) == 0
+            ):
+                await self._post_create_reconciler()
+            else:
+                await self._post_create_reconciler(partition, session_id)
 
-    async def reap_for_capacity(self) -> None:
-        """Run the awaited bounded capacity cleanup when configured."""
+    async def reap_for_capacity(
+        self,
+        partition: OwnerPartition | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        """Run targeted capacity reconciliation when configured."""
         if self._capacity_reaper is not None:
-            await self._capacity_reaper()
+            if (
+                partition is None
+                or session_id is None
+                or len(inspect.signature(self._capacity_reaper).parameters) == 0
+            ):
+                await self._capacity_reaper()
+            else:
+                await self._capacity_reaper(partition, session_id)
 
     @asynccontextmanager
     async def hold_session(
@@ -622,9 +657,12 @@ async def _activate_existing_session(
             setup_deadline,
             phase=SetupPhase.MANIFEST,
         )
-    except SandboxGroupAuthorizationError:
+    except SandboxGroupAuthorizationError as exc:
         await _close_handle_if_open(handle)
-        raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
+        raise SessionActivationAuthorizationError(
+            SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+            status_code=exc.status_code,
+        ) from None
     except SandboxManifestMismatchError:
         await _quarantine_detected_binding(
             store,
@@ -1445,12 +1483,16 @@ async def _complete_provision_submit(
         raise _setup_timeout_error(setup_deadline, SetupPhase.PROVISION_CREATE)
     if outcome.admission == _ADMISSION_POSSIBLY_COMMITTED:
         return _indeterminate_provision_submission(outcome, setup_deadline)
+    authorization_status = _authorization_failure_status(outcome.run.status_reason)
     if (
         outcome.replayed
         and outcome.run.status in TERMINAL_RUN_STATUSES
-        and outcome.run.status_reason == SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE
+        and authorization_status is not None
     ):
-        raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE)
+        raise SessionActivationAuthorizationError(
+            SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+            status_code=authorization_status,
+        )
     activated: ActivatedSession | None = None
     try:
         if outcome.replayed:
@@ -1472,7 +1514,7 @@ async def _complete_provision_submit(
             setup_deadline,
         )
         await _within_setup_budget(
-            runtime.reconcile_after_create(),
+            runtime.reconcile_after_create(preparation.partition, preparation.records.session.session_id),
             setup_deadline,
             phase=SetupPhase.POST_CREATE_RECONCILE,
         )
@@ -1639,7 +1681,7 @@ async def _provision_reserved_session(
             SetupPhase.PROVISION_RECONCILE,
             reason=SetupTimeoutReason.PROVISION_INDETERMINATE,
         ) from None
-    except SandboxGroupAuthorizationError:
+    except SandboxGroupAuthorizationError as exc:
         if await _is_indeterminate_provision(state_binding.store, fence):
             raise _setup_timeout_error(
                 setup_deadline,
@@ -1650,15 +1692,22 @@ async def _provision_reserved_session(
             await _fail_reserved_provision_authorization(
                 state_binding.store,
                 fence,
+                status_code=exc.status_code,
             )
         except (SessionStateContractError, SessionStateStoreError) as cleanup_error:
             raise cleanup_error from None
-        raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
+        raise SessionActivationAuthorizationError(
+            SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+            status_code=exc.status_code,
+        ) from None
     except SandboxFileNotFoundError:
         raise _setup_timeout_error(setup_deadline, SetupPhase.CONTENT) from None
     except SandboxFileOperationError as exc:
         if exc.status_code in {401, 403}:
-            raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
+            raise SessionActivationAuthorizationError(
+                SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+                status_code=exc.status_code,
+            ) from None
         if exc.status_code is None or exc.status_code in _RESUMABLE_FILE_OPERATION_STATUS_CODES:
             raise _setup_timeout_error(setup_deadline, SetupPhase.CONTENT) from None
         raise
@@ -1703,9 +1752,20 @@ async def _is_indeterminate_provision(
     )
 
 
+def _authorization_failure_status(reason: str | None) -> int | None:
+    if reason is None:
+        return None
+    try:
+        return SandboxGroupAuthorizationFailureReason(reason).status_code
+    except ValueError:
+        return None
+
+
 async def _fail_reserved_provision_authorization(
     store: SessionStateStore,
     fence: SessionOperationFence,
+    *,
+    status_code: int,
 ) -> None:
     """Atomically terminalize a provision blocked by deterministic group authorization."""
 
@@ -1718,11 +1778,12 @@ async def _fail_reserved_provision_authorization(
         fence.target.run_id,
     )
     updated_at = datetime.now(UTC)
+    reason = SandboxGroupAuthorizationFailureReason.from_status_code(status_code)
     failed_run = terminal_run(
         run.record,
         status="failed",
         result_available=False,
-        reason=SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
+        reason=reason.value,
         updated_at=updated_at,
     )
     deleting = DurableSessionRecord.create(
@@ -1742,7 +1803,7 @@ async def _fail_reserved_provision_authorization(
         region=current.record.region,
         state_store_fingerprint=current.record.state_store_fingerprint,
         quarantine_reason=current.record.quarantine_reason,
-        tombstone_reason=SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
+        tombstone_reason=reason.value,
         created_at=current.record.created_at,
         updated_at=updated_at,
         active_operation_id=None,
@@ -1886,7 +1947,9 @@ async def _provision_reserved_session_inner(
         )
     except SandboxCapacityError:
         await _within_setup_budget(
-            runtime.reap_for_capacity(), setup_deadline, phase=SetupPhase.CAPACITY_REAP
+            runtime.reap_for_capacity(session.owner_partition, session.session_id),
+            setup_deadline,
+            phase=SetupPhase.CAPACITY_REAP,
         )
         create_request = replace(
             create_request,
@@ -2233,6 +2296,7 @@ async def _create_and_activate_session(
             provider,
             create_request,
             group,
+            partition,
             setup_deadline,
         )
         await _within_setup_budget(
@@ -2289,7 +2353,7 @@ async def _create_and_activate_session(
             phase=SetupPhase.STATE_STORE,
         )
         await _within_setup_budget(
-            runtime.reconcile_after_create(),
+            runtime.reconcile_after_create(partition, persisted_session.session_id),
             setup_deadline,
             phase=SetupPhase.POST_CREATE_RECONCILE,
         )
@@ -2340,6 +2404,7 @@ async def _create_sandbox_with_capacity_recovery(
     provider: SandboxSessionProvider,
     create_request: SandboxCreateRequest,
     group: SandboxGroupBinding,
+    partition: OwnerPartition,
     setup_deadline: SetupDeadline,
 ) -> SandboxSessionHandle:
     try:
@@ -2350,7 +2415,7 @@ async def _create_sandbox_with_capacity_recovery(
         )
     except SandboxCapacityError:
         await _within_setup_budget(
-            runtime.reap_for_capacity(),
+            runtime.reap_for_capacity(partition, create_request.labels.session_id),
             setup_deadline,
             phase=SetupPhase.CAPACITY_REAP,
         )
@@ -2385,9 +2450,23 @@ async def _wait_for_created_manifest(
             report = await _read_bootstrap_error_report(handle, setup_deadline)
             if report is not None and report.permanent:
                 raise SessionReadinessArtifactError("bootstrap_failure") from None
-            delay = min(
+            manifest_delay = min(
                 _MANIFEST_RETRY_INTERVAL_SECONDS,
                 setup_deadline.remaining_setup_seconds(phase=SetupPhase.MANIFEST),
+            )
+            await _within_setup_budget(
+                asyncio.sleep(manifest_delay), setup_deadline, phase=SetupPhase.MANIFEST
+            )
+        except SandboxFileOperationError as exc:
+            if exc.status_code not in _RESUMABLE_FILE_OPERATION_STATUS_CODES:
+                raise
+            delay: float | None = exc.retry_after_seconds
+            if delay is None:
+                delay = _MANIFEST_RETRY_INTERVAL_SECONDS
+            delay = min(_FILE_RETRY_MAX_DELAY_SECONDS, max(0.0, delay))
+            delay = min(
+                _FILE_RETRY_MAX_DELAY_SECONDS,
+                delay + random.uniform(0.0, delay * 0.25),
             )
             await _within_setup_budget(
                 asyncio.sleep(delay), setup_deadline, phase=SetupPhase.MANIFEST

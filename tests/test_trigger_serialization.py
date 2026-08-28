@@ -207,9 +207,25 @@ def test_single_document_and_sql_rows_serialize_without_to_json() -> None:
     assert _serialized(func.MySqlRow({"id": "mysql"})) == {"id": "mysql"}
 
 
-def test_native_contracts_are_preferred_before_adapters() -> None:
+def test_unknown_native_contracts_are_preserved() -> None:
     assert _serialized(_NativeContract()) == {"source": "native"}
     assert _serialized(_ModelContract()) == {"source": "model"}
+
+
+def test_registered_adapter_precedes_native_contract_at_top_level_and_in_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        func.QueueMessage,
+        "to_dict",
+        lambda _message: {"source": "native"},
+        raising=False,
+    )
+    message = func.QueueMessage(body=b"adapter payload")
+    expected = {"body": "adapter payload", "body_encoding": "utf-8"}
+
+    assert _serialized(message) == expected
+    assert _serialized([message]) == [expected]
 
 
 def test_fast_paths_remain_byte_identical() -> None:

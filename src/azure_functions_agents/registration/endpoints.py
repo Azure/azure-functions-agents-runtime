@@ -598,8 +598,9 @@ async def _start_aca_stream(
             timeout=resolved.timeout,
         ),
         agent_slug=resolved.slug,
-        respond_async=True,
+        respond_async=respond_async,
         budget=budget,
+        defer_response=True,
     )
     if accepted.status_code != 202 or respond_async:
         return _controller_response_to_fastapi(accepted)
@@ -610,14 +611,27 @@ async def _start_aca_stream(
     run_id = body.get("run_id")
     if not isinstance(accepted_session_id, str) or not isinstance(run_id, str):
         return _json_error("sandbox run acceptance response was invalid")
+    location = accepted.headers.get("Location")
+    if not isinstance(location, str) or not location:
+        status_url = body.get("status_url")
+        location = (
+            status_url
+            if isinstance(status_url, str)
+            else f"/agents/{resolved.slug}/sessions/{accepted_session_id}/runs/{run_id}"
+        )
     return StreamingResponse(
         render_events(
             backend,
             RunContext(session_id=accepted_session_id, run_id=run_id),
             after_sequence=after_sequence,
+            deadline=budget.wall_deadline,
         ),
         media_type="text/event-stream",
-        headers={"x-ms-session-id": accepted_session_id},
+        headers={
+            "Location": location,
+            "x-ms-session-id": accepted_session_id,
+            "x-ms-run-id": run_id,
+        },
     )
 
 

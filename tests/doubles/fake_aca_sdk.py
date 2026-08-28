@@ -21,6 +21,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
+from azure.core.async_paging import AsyncItemPaged
 from azure.core.credentials import AccessToken
 from azure.core.exceptions import ResourceNotFoundError
 
@@ -447,6 +448,38 @@ class FakePoller[T]:
         return self._result
 
 
+def _fake_item_paged[T](
+    matching: Callable[[], list[T]], page_size: Callable[[], int]
+) -> AsyncItemPaged[T]:
+    """Build a real ``AsyncItemPaged`` over an in-memory, opaquely paged list.
+
+    Reusing the real ``azure.core`` paging primitive (rather than a hand-rolled
+    stand-in) pins this double to the SDK's actual ``by_page``/``continuation_token``
+    resumption contract instead of an approximation of it. ``matching`` and
+    ``page_size`` are read at fetch time so tests can mutate group-client state
+    or the configured page size between calls.
+    """
+
+    async def _get_next(continuation_token: str | None = None) -> str | None:
+        return continuation_token
+
+    async def _extract_data(
+        response: str | None,
+    ) -> tuple[str | None, AsyncIterator[T]]:
+        items = matching()
+        start = 0 if response is None else int(response)
+        end = min(start + max(page_size(), 1), len(items))
+        next_token = None if end >= len(items) else str(end)
+        return next_token, _async_iter(items[start:end])
+
+    return AsyncItemPaged(_get_next, extract_data=_extract_data)
+
+
+async def _async_iter[T](items: list[T]) -> AsyncIterator[T]:
+    for item in items:
+        yield item
+
+
 class FakeSdkGroupClient:
     """Test-only group client that can create individual fake sandboxes."""
 
@@ -456,10 +489,16 @@ class FakeSdkGroupClient:
         self.create_calls: list[dict[str, object]] = []
         self.deleted_sandbox_ids: list[str] = []
         self.create_result_error: Exception | None = None
+        self.get_sandbox_error: Exception | None = None
         self.closed = False
         self.add_port_calls = 0
         self.snapshots: dict[str, FakeSdkSnapshot] = {}
         self.deleted_snapshot_ids: list[str] = []
+        # Large enough that every pre-existing (non-pagination) test still
+        # observes one single provider page; pagination tests override this
+        # to a small value to exercise multi-page ``by_page`` resumption.
+        self.sandbox_page_size = 1_000_000
+        self.snapshot_page_size = 1_000_000
 
     async def begin_create_sandbox(
         self,
@@ -529,19 +568,35 @@ class FakeSdkGroupClient:
         *,
         labels: dict[str, str] | None = None,
         **kwargs: object,
-    ) -> AsyncIterator[FakeSdkSandboxSummary]:
+    ) -> AsyncItemPaged[FakeSdkSandboxSummary]:
         del kwargs
-        async def iterate() -> AsyncIterator[FakeSdkSandboxSummary]:
-            for sandbox in tuple(self.sandboxes.values()):
-                if labels and any(sandbox.labels.get(key) != value for key, value in labels.items()):
-                    continue
-                yield FakeSdkSandboxSummary(
+
+        def _matching() -> list[FakeSdkSandboxSummary]:
+            return [
+                FakeSdkSandboxSummary(
                     id=sandbox.sandbox_id,
                     state="Running",
                     labels=sandbox.labels,
                 )
+                for sandbox in self.sandboxes.values()
+                if not labels
+                or all(sandbox.labels.get(key) == value for key, value in labels.items())
+            ]
 
-        return iterate()
+        return _fake_item_paged(_matching, lambda: self.sandbox_page_size)
+
+    async def get_sandbox(self, sandbox_id: str, **kwargs: object) -> FakeSdkSandboxSummary:
+        del kwargs
+        if self.get_sandbox_error is not None:
+            raise self.get_sandbox_error
+        sandbox = self.sandboxes.get(sandbox_id)
+        if sandbox is None:
+            raise ResourceNotFoundError(message="Not Found")
+        return FakeSdkSandboxSummary(
+            id=sandbox.sandbox_id,
+            state="Running",
+            labels=sandbox.labels,
+        )
 
     async def begin_delete_sandbox(
         self,
@@ -561,13 +616,11 @@ class FakeSdkGroupClient:
 
         return FakePoller(None, on_result=delete)
 
-    def list_snapshots(self, **kwargs: object) -> AsyncIterator[FakeSdkSnapshot]:
+    def list_snapshots(self, **kwargs: object) -> AsyncItemPaged[FakeSdkSnapshot]:
         del kwargs
-        async def iterate() -> AsyncIterator[FakeSdkSnapshot]:
-            for snapshot in tuple(self.snapshots.values()):
-                yield snapshot
-
-        return iterate()
+        return _fake_item_paged(
+            lambda: list(self.snapshots.values()), lambda: self.snapshot_page_size
+        )
 
     async def begin_delete_snapshot(
         self,

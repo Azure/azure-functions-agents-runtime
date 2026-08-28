@@ -298,7 +298,7 @@ async def test_sandbox_events_preflight_returns_redacted_authorization_failure(
 
     async def authorization_failure(*_args: Any, **_kwargs: Any) -> ControllerResponse:
         return ControllerResponse(
-            status_code=503,
+            status_code=403,
             body={"error": "sandbox_group_authorization_failed"},
         )
 
@@ -326,7 +326,7 @@ async def test_sandbox_events_preflight_returns_redacted_authorization_failure(
 
     response = await route["handler"](request)
 
-    assert response.status_code == 503
+    assert response.status_code == 403
     assert json.loads(response.body) == {"error": "sandbox_group_authorization_failed"}
 
 
@@ -554,9 +554,11 @@ async def test_builtin_stream_honors_respond_async(
     async def fake_submit_run(*args: Any, **kwargs: Any) -> ControllerResponse:
         del args
         captured["respond_async"] = kwargs["respond_async"]
+        captured["defer_response"] = kwargs["defer_response"]
         return ControllerResponse(
             status_code=202,
             body={"session_id": "session-1", "run_id": "run-1", "status": "accepted"},
+            headers={"Location": "/agents/test-agent/sessions/session-1/runs/run-1"},
         )
 
     monkeypatch.setattr(
@@ -586,6 +588,7 @@ async def test_builtin_stream_honors_respond_async(
 
     assert response.status_code == 202
     assert captured["respond_async"] is True
+    assert captured["defer_response"] is True
     assert callable(captured["binding"].output_validator)
 
 

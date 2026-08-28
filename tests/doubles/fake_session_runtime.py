@@ -32,6 +32,7 @@ from azure_functions_agents.session_state import (
     ProvisionSubmitOutcome,
     ProvisionSubmitRecords,
     ReconcilerCursorRead,
+    ReconcilerCursorScope,
     RunRead,
     SessionNotAdmissibleError,
     SessionOperationFence,
@@ -41,6 +42,7 @@ from azure_functions_agents.session_state import (
 )
 from azure_functions_agents.transport.manifest import SESSION_MANIFEST_PATH
 from azure_functions_agents.transport.transport_models import (
+    InventoryPage,
     ProvisionedSandboxIdentity,
     SandboxCreateRequest,
     SandboxGroupBinding,
@@ -190,8 +192,10 @@ class FakeSandboxSessionProvider:
             raise self.attach_error
         return self.handle
 
-    async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[SandboxSummary, ...]:
-        return tuple(
+    async def list_sandboxes(
+        self, *, labels: dict[str, str], max_items: int | None = None
+    ) -> tuple[SandboxSummary, ...]:
+        result = tuple(
             SandboxSummary.create(
                 sandbox_id=sandbox_id,
                 labels=handle.labels,
@@ -199,6 +203,26 @@ class FakeSandboxSessionProvider:
             for sandbox_id, handle in self.sandboxes.items()
             if all(handle.labels.get(key) == value for key, value in labels.items())
         )
+        return result if max_items is None else result[:max_items]
+
+    async def list_sandboxes_page(
+        self,
+        *,
+        labels: dict[str, str],
+        continuation_token: str | None,
+        target_count: int,
+    ) -> InventoryPage[SandboxSummary]:
+        matched = await self.list_sandboxes(labels=labels)
+        start = 0 if continuation_token is None else int(continuation_token)
+        end = min(start + max(target_count, 1), len(matched))
+        next_token = None if end >= len(matched) else str(end)
+        return InventoryPage.create(items=matched[start:end], continuation_token=next_token)
+
+    async def get_sandbox_summary(self, sandbox_id: str) -> SandboxSummary | None:
+        handle = self.sandboxes.get(sandbox_id)
+        if handle is None:
+            return None
+        return SandboxSummary.create(sandbox_id=sandbox_id, labels=handle.labels)
 
     async def delete_sandbox(self, sandbox_id: str) -> None:
         handle = self.sandboxes.pop(sandbox_id, None)
@@ -206,8 +230,18 @@ class FakeSandboxSessionProvider:
             await handle.delete()
         self.deleted_sandbox_ids.append(sandbox_id)
 
-    async def list_snapshots(self) -> tuple[SandboxSnapshot, ...]:
-        return tuple(self.snapshots.values())
+    async def list_snapshots(self, *, max_items: int | None = None) -> tuple[SandboxSnapshot, ...]:
+        result = tuple(self.snapshots.values())
+        return result if max_items is None else result[:max_items]
+
+    async def list_snapshots_page(
+        self, *, continuation_token: str | None, target_count: int
+    ) -> InventoryPage[SandboxSnapshot]:
+        result = await self.list_snapshots()
+        start = 0 if continuation_token is None else int(continuation_token)
+        end = min(start + max(target_count, 1), len(result))
+        next_token = None if end >= len(result) else str(end)
+        return InventoryPage.create(items=result[start:end], continuation_token=next_token)
 
     async def delete_snapshot(self, snapshot_id: str) -> None:
         self.snapshots.pop(snapshot_id, None)
@@ -232,7 +266,9 @@ class FakeSessionStateStore:
         self.idempotency: dict[str, DurableIdempotencyRecord] = {}
         self.idempotency_etags: dict[str, str] = {}
         self.admission_expected_session_etags: list[str | None] = []
-        self.reconciler_cursors: dict[str, ReconcilerCursorRead] = {}
+        self.reconciler_cursors: dict[
+            tuple[str, ReconcilerCursorScope], ReconcilerCursorRead
+        ] = {}
 
     async def create_session(self, record: DurableSessionRecord) -> str:
         if self.session is not None:
@@ -1055,8 +1091,10 @@ class FakeSessionStateStore:
             slot_released=owns_slot,
         )
 
-    async def get_reconciler_cursor(self, app_hash: str) -> ReconcilerCursorRead | None:
-        return self.reconciler_cursors.get(app_hash)
+    async def get_reconciler_cursor(
+        self, app_hash: str, *, scope: ReconcilerCursorScope
+    ) -> ReconcilerCursorRead | None:
+        return self.reconciler_cursors.get((app_hash, scope))
 
     async def advance_reconciler_cursor(
         self,
@@ -1064,8 +1102,9 @@ class FakeSessionStateStore:
         app_hash: str,
         previous: ReconcilerCursorRead | None,
         continuation_token: str | None,
+        scope: ReconcilerCursorScope,
     ) -> ReconcilerCursorRead:
-        current = self.reconciler_cursors.get(app_hash)
+        current = self.reconciler_cursors.get((app_hash, scope))
         if current != previous:
             from azure_functions_agents.session_state import ConcurrencyConflictError
 
@@ -1074,8 +1113,9 @@ class FakeSessionStateStore:
             app_hash=app_hash,
             continuation_token=continuation_token,
             etag=f"cursor-{len(self.operations) + 1}",
+            scope=scope,
         )
-        self.reconciler_cursors[app_hash] = cursor
+        self.reconciler_cursors[(app_hash, scope)] = cursor
         self.operations.append("advance_cursor")
         return cursor
 

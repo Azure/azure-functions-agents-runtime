@@ -4,7 +4,7 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-08-18
+updated: 2026-08-25
 issues: []
 pull_requests: []
 branch: feature/aca-sandboxes
@@ -193,10 +193,12 @@ controlling amendments.
   async.
 - Reconcile terminal checkpoints and expired/abandoned sessions with a **minimal
   periodic reconciler/reaper** (plain timer, configurable ~1h default — not
-  Durable) as a guaranteed backstop, augmented by opportunistic fast-paths
-  (after-create, reap-on-capacity-failure, controller fast-path) and client
-  polling, so crashed/idle sandboxes and snapshots do not leak. Cadence tightens to
-  ~1/min in v2 solely for the checkpoint-mirror SLO (Decisions 22, 58, 59, 63).
+  Durable) as the guaranteed backstop and only global reclamation authority.
+  Request fast-paths and client polling repair only the current session/operation;
+  on capacity failure they repair that target and retry once without scanning
+  unrelated sessions, so capacity may remain exhausted. Cadence tightens to
+  ~1/min in v2 solely for the checkpoint-mirror SLO (Decisions 22, 58, 59, 63,
+  183, 186).
 - Place one Sandbox Group per Function App/environment in the customer subscription;
   customer tooling creates ARM/RBAC, the runtime creates only session sandboxes.
 - Reserve an extensible owner contract for the separate non-HTTP trigger-session
@@ -211,8 +213,10 @@ controlling amendments.
 - Moving non-HTTP trigger execution to persistent sandboxes in v1 (reserved for
   FRD 0009).
 - Per-owner fairness quota in v1 — a single owner may consume the app's full ACA
-  capacity; aggregate capacity is bounded by ACA + reap-on-capacity-failure, and
-  per-owner fairness is a v2 optimization (Decision 61).
+  capacity. Request-time capacity handling repairs only the current
+  session/operation and retries once; it does not reclaim unrelated resources.
+  Global reclamation remains timer-owned, and per-owner fairness is a v2
+  optimization (Decisions 61, 183, 186).
 - Exactly-once execution of external side effects; automatic retry of a failed
   agent loop.
 - Claiming native user OBO; only a credential-broker extension point is reserved.
@@ -423,6 +427,13 @@ controlling amendments.
 | 179 | Stale submit fence | Propagate / durable re-read | If cancel, takeover, or another launch claimant wins, re-read the durable run and return its linked projection; never leak the losing fence as a 500 or launch twice. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
 | 180 | Terminal provision replay | Take over / return terminal | Exact replay of a terminal reserved run returns its durable outcome before operation takeover; canceled pre-pointer work never requires a sandbox pointer. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
 | 181 | Complexity and domain vocabulary | Advisory / enforce PLR0912 and PLR0915; repeated strings / owned typed vocabulary | Human approved enforcing PLR0912/PLR0915 and declaring each finite domain once in its owning typed symbols for consumers to reuse. | Human | 2026-08-18 | Review guidance |
+| 182 | Stream recovery metadata | Session-only / stable run recovery headers | Expose `x-ms-run-id` and `Location` on every successful synchronous stream so clients can follow terminal state without relying on a settling conflict. | Human | 2026-08-25 | Bug-fix correction |
+| 183 | Reconciliation ownership | Global request fast path / targeted request repair plus timer sweep | Limit request-path reconciliation to the current session and operation; retain global stale-state, orphan, and expiry convergence in the timer with bounded inventory work. | Human + Agent | 2026-08-25 | Bug-fix correction |
+| 184 | Provider transient handling | Opaque failure / classified bounded recovery | Preserve sanitized ARM status metadata, retry only transient ARM outcomes, and use lifecycle-aware bounded file readiness retries with `Retry-After`. | Human + Agent | 2026-08-25 | Bug-fix correction |
+| 185 | Built-in UI session reuse | Reuse after `done` / wait for durable terminal phase | Have the built-in chat UI capture stream run metadata and poll `Location` until `phase=terminal`, keeping same-session submission disabled during settling. | Human + Agent | 2026-08-26 | Bug-fix correction |
+| 186 | Capacity-failure reconciliation ownership (narrows #58/#61) | Bounded app-wide request sweep / session-targeted repair / timer-only | Keep session-targeted repair and one retry; unrelated global reclamation stays timer-owned, so capacity may remain exhausted. | Human | 2026-08-27 | Bug-fix correction |
+| 187 | Authorization replay and settlement origin (revises #159/#185) | Generic replay / status-preserving replay; any HTTPS / same origin | Preserve sanitized `401`/`403` across exact replay, while keeping the public reason generic; reject cross-origin status URLs before attaching Function credentials or session metadata. | Human + Agent | 2026-08-27 | Review correction |
+| 188 | Bounded recovery closure (refines #183/#184) | Broad/implicit / targeted and explicit | Use session-filtered request repair; retain accepted-create lookup failures as indeterminate; report deferred timer work as partial; apply the declared ARM retry set and hard delay caps after jitter. | Human + Agent | 2026-08-27 | Review correction |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -511,7 +522,9 @@ ACA `get_run`, `read_events`, and `cancel_run` are Table-first, not controller
 catches around activation. They validate owner/run/session/operation before
 activation; result returns nonterminal projection as `200`, events heartbeat
 without invented events until launch, and cancellation returns durable IDs on
-any remaining typed timeout rather than a Functions `500`.
+any remaining typed timeout rather than a Functions `500`. The built-in UI
+accepts only same-origin management locations before forwarding Function
+credentials or session identifiers.
 
 #### Pre-launch cancel, operation race, and retained-slot transient
 
@@ -1301,13 +1314,13 @@ V1 loss always tombstones. V2-only state-preserving rebind/rebuild from an exter
 ##### Reconciler/reaper
 
 * A plain Functions timer trigger—not Durable Functions—is mandatory as the guaranteed floor. Default cadence is about one hour, configurable/tunable up to several hours; v2 would tighten the same timer to about one minute for the deferred mirror SLO.
-* Fast paths: inline reconcile before active-run check on request/resubmit, client `get_status`/`get_result`, fire-and-forget sweep after create, and synchronous reap-on-capacity-failure then retry once. Periodic pass covers crashed/no-poll/idle-app cases and submit-operation finalization.
+* Fast paths reconcile only the current session/operation before active-run checks on request/resubmit, during client `get_status`/`get_result`, after create, and on capacity failure before one retry. They never scan unrelated sessions. The periodic timer is the only global authority for crashed/no-poll/idle-app cases, orphan/expiry/backlog reclamation, and submit-operation finalization.
 * Heartbeat default: emitted ~30 seconds; stale after ~3 missed emissions (~90 seconds). This merely triggers verification; it never authorizes abandon alone.
 * Direct scan requirements: use the authoritative Tables rows and, per SDK correction, reconcile against `list_sandboxes(labels=...)` platform truth. Scan nonterminal `accepted` and `running` run rows with due `expires_at`; session rows with idle-reclaim `expires_at` only after CAS confirms no `active_run_id`; and terminal session rows where `idle_policy_armed=false`. Due fields are state-dependent: run timeout deadline vs session reclaim deadline; `last_activity_at` feeds idle expiry. Terminal/tombstone pruning keeps scan bounded.
 * Reconciler only deletes runtime per-session resources: sandbox, snapshot, generated packages, and Table records/tombstones. It never deletes customer-owned Sandbox Group, state account, identity, egress policy, base disk/image, or RBAC.
 * Snapshot correction: snapshots are immutable, region-pinned, and not platform-GC’d. Persist `snapshot_ids`; reconciler must list and delete/prune snapshots. Snapshot-sourced sandbox inherits resource tier and cannot change entrypoint/cmd/environment.
 * No automatic run retries. Same-key retries replay. A crash with intact disk permits resubmit on same session; loss requires a new session; live conflict requires cancel-then-submit.
-* No v1 runtime quota counter. ACA group capacity is aggregate limit. On capacity failure reap/reconcile and retry once. Per-owner fairness is deferred to v2.
+* No v1 runtime quota counter. ACA group capacity is the aggregate limit. On capacity failure, repair only the current session/operation and retry once; the retry may remain capacity-exhausted because unrelated reclamation is timer-only. Per-owner fairness is deferred to v2.
 
 ##### Retention and lifecycle policy
 
@@ -1566,13 +1579,15 @@ or emit this setup-timeout event.
 
 `AcaSandboxExecutionBackend.start_run()` anchors that one setup budget before
 its first targeted `runtime.reconcile_session()` call. `TargetedReconciler`,
-`SessionRuntimeBinding.reconcile_session()`, the `app.py` closure, and
-`SessionReconciler.reconcile_session()` accept that deadline; the backend
-bounds both the initial and conflict-retry calls with
-`phase=provision_reconcile` and reuses the same budget in `_start_run_once()`.
-Neither reconciliation starts a fresh clock. The targeted reconciler retains
-its existing ETag-fenced/idempotent terminal adoption, expired-operation
-takeover, and cleanup behavior; those mutations are themselves recoverable
+`SessionRuntimeBinding.reconcile_session()`, and the `app.py` closure accept the
+optional deadline, while the closure invokes
+`SessionReconciler.reconcile_session_targeted()` so request work lists only the
+requested session. The backend bounds both the initial and conflict-retry calls
+with `phase=provision_reconcile` and reuses the same budget in
+`_start_run_once()`; reconciliation never starts a fresh clock. The targeted
+reconciler retains its existing ETag-fenced/idempotent terminal adoption,
+expired-operation takeover, and cleanup behavior; those mutations are
+themselves recoverable
 setup work and may occur before a later timeout. Cancellation/expiry must leave
 their durable operation resumable. This path never calls provider create or
 admits a new run. An initial or retry reconciliation timeout returns the typed
@@ -1762,7 +1777,6 @@ BuildId-derived labels isolate concurrent runs. Fixture cleanup plus an
 `always()` reaper delete current-run snapshots and sandboxes and fail if either
 remains. The smoke deploys no Function and performs no artifact attestation.
 
-ADO 298692 passed the identity preflight, low-level entrypoint, journal
-acceptance, real model turn, and cleanup. Post-main deployment, external
-attestation, py313/py314 lifecycle/loss/N=5 qualification, and rollback remain
-owned by issue #166.
+ADO 298692 passed the low-level entrypoint, journal acceptance, real model turn,
+and cleanup. Post-main deployment, external attestation, py313/py314
+lifecycle/loss/N=5 qualification, and rollback remain owned by issue #166.

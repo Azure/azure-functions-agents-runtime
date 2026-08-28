@@ -216,6 +216,49 @@ _skip_unless_posix_secure_traversal = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("budget_seconds", "expected_delay"),
+    [
+        (12.0, package._FILE_RETRY_MAX_DELAY_SECONDS),
+        (1.5, 1.5),
+    ],
+)
+async def test_retry_file_operation_caps_the_final_jittered_delay_and_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    budget_seconds: float,
+    expected_delay: float,
+) -> None:
+    attempts = 0
+    sleep_delays: list[float] = []
+
+    async def operation() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise SandboxFileOperationError(
+                "sandbox is resuming",
+                status_code=409,
+                retry_after_seconds=10.0,
+            )
+
+    async def capture_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+
+    monkeypatch.setattr(package.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(package.random, "uniform", lambda _start, end: end)
+    monkeypatch.setattr(package.asyncio, "sleep", capture_sleep)
+
+    await package.retry_file_operation(
+        operation,
+        FakeSandboxTransport(),
+        budget_seconds=budget_seconds,
+    )
+
+    assert attempts == 2
+    assert sleep_delays == [expected_delay]
+
+
 @_skip_unless_posix_secure_traversal
 def test_capture_is_invariant_to_enumeration_order_and_mtime(tmp_path: Path) -> None:
     first_root = tmp_path / "first"

@@ -125,7 +125,6 @@ def preflight_auth(environment: Mapping[str, str]) -> None:
         raise QualificationError("auth_preflight_failed") from None
     print("Azure service connection authenticated")
 
-
 def _run_pytest(paths: Sequence[str], environment: Mapping[str, str]) -> int:
     result = subprocess.run(
         [
@@ -268,7 +267,12 @@ def reap_harness_smoke(environment: Mapping[str, str]) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
-    deployed = ("validate-environment", "preflight-auth", "deployed-suite", "cold-start")
+    deployed = (
+        "validate-environment",
+        "preflight-auth",
+        "deployed-suite",
+        "cold-start",
+    )
     for command in deployed:
         command_parser = subcommands.add_parser(command)
         command_parser.add_argument("--runtime-target", required=True)
