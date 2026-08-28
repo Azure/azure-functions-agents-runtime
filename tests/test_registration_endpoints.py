@@ -298,7 +298,7 @@ async def test_sandbox_events_preflight_returns_redacted_authorization_failure(
 
     async def authorization_failure(*_args: Any, **_kwargs: Any) -> ControllerResponse:
         return ControllerResponse(
-            status_code=503,
+            status_code=403,
             body={"error": "sandbox_group_authorization_failed"},
         )
 
@@ -326,7 +326,7 @@ async def test_sandbox_events_preflight_returns_redacted_authorization_failure(
 
     response = await route["handler"](request)
 
-    assert response.status_code == 503
+    assert response.status_code == 403
     assert json.loads(response.body) == {"error": "sandbox_group_authorization_failed"}
 
 

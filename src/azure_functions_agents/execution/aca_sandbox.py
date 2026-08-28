@@ -834,8 +834,8 @@ class AcaSandboxExecutionBackend:
                     allow_create=False,
                 )
             except SessionActivationAuthorizationError:
-                # Let event preflight surface the same management 503 rather than
-                # silently ending the stream through the broad fallback below.
+                # Let event preflight surface the same management authorization
+                # response rather than silently ending through the fallback below.
                 raise
             except (
                 SessionActivationError,

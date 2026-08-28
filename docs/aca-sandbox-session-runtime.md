@@ -106,10 +106,11 @@ The Function controller identity separately requires `Container Apps
 SandboxGroup Data Owner` on the configured Sandbox Group. `Container Apps
 SandboxGroup Contributor` is control-plane access and is insufficient for
 listing, creating, or attaching data-plane sandboxes. Missing data-plane access
-fails fast with its sanitized HTTP `401` or `403` and
-`sandbox_group_authorization_failed`; exact replay preserves that status. It is
-not a retryable setup timeout. Grant the role at the individual Sandbox Group
-scope.
+surfaces as sanitized HTTP `401` or `403` with
+`sandbox_group_authorization_failed`; exact replay preserves that status.
+`503` remains reserved for transient service unavailability. The preview SDK
+may briefly retry `403` while a fresh role assignment propagates, bounded by the
+setup deadline. Grant the role at the individual Sandbox Group scope.
 
 ## Setup admission deadline
 
