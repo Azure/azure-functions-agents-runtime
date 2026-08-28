@@ -1369,6 +1369,23 @@ export async function setAppSettings(accessToken, subscriptionId, resourceGroup,
   return properties
 }
 
+export async function removeAppSettings(accessToken, subscriptionId, resourceGroup, appName, names) {
+  const client = webClient(accessToken, subscriptionId)
+  const current = await client.webApps.listApplicationSettings(resourceGroup, appName)
+  const properties = { ...(current?.properties || {}) }
+  const wanted = new Set(names.map((name) => String(name).toLowerCase()))
+  const removedValues = {}
+  for (const key of Object.keys(properties)) {
+    if (!wanted.has(key.toLowerCase())) continue
+    removedValues[key] = properties[key]
+    delete properties[key]
+  }
+  if (Object.keys(removedValues).length) {
+    await client.webApps.updateApplicationSettings(resourceGroup, appName, { properties })
+  }
+  return { properties, removedValues }
+}
+
 // Remove the portal-recorded GitHub repo link from a Function App's application
 // settings (read-modify-write; the ARM update replaces the whole dictionary, so
 // we delete the keys and write the rest back). Returns true when a link was

@@ -3,7 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Button } from '@coreai/fluentui-react'
 import { api, type LiveAgent, type LiveAgentApp } from '../api'
-import { AddCapability } from '../components/AddCapability'
+import { OutlookConnectionsPanel } from '../components/OutlookConnectionsPanel'
 import { DraftEditor } from '../components/SourceEditor'
 import { TriggerEditor } from '../components/TriggerEditor'
 import { ObservabilityPanel } from '../components/ObservabilityPanel'
@@ -167,16 +167,13 @@ export default function SkillDetailPage() {
 
   const parsedMcpServers = parseMcpServers(mcpSource?.content)
   const mcpServers = parsedMcpServers ?? []
+  const hasOutlookMcp = mcpServers.some((server) => server.name === 'office365-outlook')
   const mcpSourceInvalid = parsedMcpServers === null
   const sourceFiles = Array.isArray(sourceList?.files) ? sourceList.files : []
-  const sourcePaths = sourceFiles.map((file) => file.path)
-  const pythonTools = sourcePaths.filter((path) => /^tools\/.+\.py$/i.test(path) && !path.endsWith('__init__.py'))
-  const knowledge = sourcePaths.filter((path) => /^skills\/[^/]+\/SKILL\.md$/i.test(path))
-  const appFunctions = hostApp?.supportingFunctions ?? []
   const urls = agent ? endpointUrls(agent) : []
   const hasDraft = definition?.source === 'draft'
   const hasDeployableEdits = hasDraft || sourceFiles.some((file) => file.source === 'draft' || file.source === 'both')
-  const capabilityCount = mcpServers.length + pythonTools.length + knowledge.length + appFunctions.length
+  const capabilityCount = mcpServers.length
   const definitionMetadata = agentFrontMatter(definition?.content || fallback)
 
   const { data: appConnection } = useQuery({
@@ -313,7 +310,7 @@ export default function SkillDetailPage() {
               <aside className="skill-aside-stack">
                 <div className="skill-aside-card"><h3>How it runs</h3><strong>{triggerLabel(agent.trigger)}</strong>{urls[0] && <span className="mono">{urls[0].value.replace(/^https?:\/\/[^/]+/, '')}</span>}<button className="link-button" onClick={() => setTab('runs')}>Change</button></div>
                 <div className="skill-aside-card"><h3>Inherited configuration</h3><dl><div><dt>Provider</dt><dd>{agent.provider || 'App default'}</dd></div><div><dt>Region</dt><dd>{agent.region || hostApp?.location || '—'}</dd></div><div><dt>Endpoints</dt><dd>{agent.builtinEndpoints ? 'Enabled' : 'Disabled'}</dd></div></dl></div>
-                <div className="skill-aside-card"><h3>What it can use</h3><strong>{capabilityCount} discovered</strong><span className="muted">MCP servers, tools, knowledge, and app functions</span><button className="link-button" onClick={() => setTab('capabilities')}>Manage capabilities</button></div>
+                <div className="skill-aside-card"><h3>What it can use</h3><strong>{capabilityCount} configured</strong><span className="muted">Connections and MCP servers</span><button className="link-button" onClick={() => setTab('capabilities')}>Manage capabilities</button></div>
                 <div className="skill-aside-card"><h3>Full source</h3><span className="muted">View or edit the complete file, including YAML front matter.</span><button className="link-button" onClick={() => setTab('source')}>Open agent code</button></div>
               </aside>
             </div>
@@ -351,15 +348,21 @@ export default function SkillDetailPage() {
 
           {tab === 'capabilities' && (
             <section>
-              <div className="skill-section-head"><div><h2>What it can use</h2><p>App-owned resources this Hosted Skill can call. Add an MCP server, tool, knowledge module, or connector trigger.</p></div><AddCapability variant="button" scope="capabilities" buttonLabel="Add MCP, tool, or connector" subscription={subForQuery} resourceGroup={agent.resourceGroup} app={agent.app} agentName={agent.name} /></div>
+              <div className="skill-section-head"><div><h2>What it can use</h2><p>App-shared connections and capabilities available to this Hosted Skill.</p></div></div>
+              <OutlookConnectionsPanel
+                subscription={subForQuery}
+                resourceGroup={agent.resourceGroup}
+                app={agent.app}
+                mcpSourceState={mcpSource?.source ?? 'none'}
+                hasOutlookMcp={hasOutlookMcp}
+              />
               <div className="capability-groups">
                 {mcpSourceInvalid && <div className="note warn"><strong>mcp.json needs attention.</strong><br />The file is not valid JSON. Open Source &amp; GitHub to repair it before deployment.</div>}
                 <CapabilityGroup title="MCP servers" empty="No MCP servers configured." items={mcpServers.map((server) => ({ name: server.name, path: server.url || 'mcp.json', detail: server.tools.length ? server.tools.join(' · ') : 'All advertised tools' }))} />
-                <CapabilityGroup title="Python tools" empty="No Python tools discovered." items={pythonTools.map((path) => ({ name: path.split('/').pop()?.replace(/\.py$/, '') || path, path, detail: 'App-shared tool module' }))} />
-                <CapabilityGroup title="Knowledge modules" empty="No knowledge modules discovered." items={knowledge.map((path) => ({ name: path.split('/')[1] || path, path, detail: 'Reusable Markdown guidance' }))} />
-                <CapabilityGroup title="App functions" empty="No supporting functions discovered." items={appFunctions.map((fn) => ({ name: fn.name, path: 'function_app.py', detail: `${triggerLabel(fn.trigger)} trigger` }))} />
+                <ComingSoonCapabilityGroup title="Python tools" />
+                <ComingSoonCapabilityGroup title="Skills" />
               </div>
-              <div className="note" style={{ marginTop: 16 }}><strong>App-owned, skill-selected.</strong><br />New MCP servers, tools, and connector definitions are saved as drafts. Review their source before deploying the Function App.</div>
+              <div className="note" style={{ marginTop: 16 }}><strong>App-shared, skill-selected.</strong><br />Source capabilities are discovered from the deployed app and its saved drafts.</div>
             </section>
           )}
 
@@ -394,7 +397,15 @@ function CapabilityGroup({ title, empty, items }: { title: string; empty: string
   return (
     <div className="card capability-group">
       <div className="card-head"><div><h3>{title}</h3><span className="muted">{items.length} discovered</span></div></div>
-      {items.length ? items.map((item) => <div className="capability-row" key={`${title}:${item.path}:${item.name}`}><div><strong>{item.name}</strong><span className="mono muted">{item.path}</span></div><span className="muted">{item.detail}</span><span className="badge green">Available</span></div>) : <p className="muted">{empty}</p>}
+      {items.length ? items.map((item) => <div className="capability-row" key={`${title}:${item.path}:${item.name}`}><div><strong>{item.name}</strong><span className="mono muted">{item.path}</span></div><span className="muted">{item.detail}</span><span className="badge gray">Configured</span></div>) : <p className="muted">{empty}</p>}
+    </div>
+  )
+}
+
+function ComingSoonCapabilityGroup({ title }: { title: string }) {
+  return (
+    <div className="card capability-group">
+      <div className="card-head"><h3>{title}</h3><span className="badge gray">Coming soon</span></div>
     </div>
   )
 }

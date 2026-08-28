@@ -25,6 +25,20 @@ import {
   renderAzureRestTool,
   validateAzureRestSource,
 } from './custom-tools.js'
+import {
+  attachOutlookConnection,
+  coordinateOutlookConnectionSetup,
+  coordinateOutlookConnectionRemoval,
+  createOutlookConnection,
+  deleteOutlookConnection,
+  getOutlookConnection,
+  listOutlookConnectionCandidates,
+  listOutlookConnections,
+  OUTLOOK_CONNECTION_ID_SETTING,
+  outlookAppSettings,
+  removeOutlookMcpSource,
+  testOutlookConnection,
+} from './connections.js'
 import * as github from './github.js'
 import * as provision from './provision.js'
 import { recoverSourceDrafts, writeSourceDrafts } from './source-draft-store.js'
@@ -160,6 +174,323 @@ app.get(
       })),
     )
     res.json({ subscriptionId, apps: result.apps, agents })
+  }),
+)
+
+async function connectionContext(token, subscription, resourceGroup, appName) {
+  if (!subscription || !resourceGroup || !appName) {
+    throw new HttpError(400, 'subscription, resourceGroup, and app are required.')
+  }
+  const [site, runtimeIdentity, appSettings] = await Promise.all([
+    azure.getSite(token, subscription, resourceGroup, appName),
+    azure.resolveRuntimeIdentity(token, subscription, resourceGroup, appName),
+    azure.readAppSettingsStrict(token, subscription, resourceGroup, appName),
+  ])
+  if (!site?.id) throw new HttpError(404, `Function App "${appName}" was not found.`)
+  const deployer = azure.getSignedInIdentity(token)
+  if (!deployer.oid || !deployer.tenantId) {
+    throw new HttpError(403, 'The signed-in identity is missing required Entra ID claims.')
+  }
+  return {
+    appResourceId: site.id,
+    location: site.location || 'eastus2',
+    runtimePrincipalId: runtimeIdentity.principalId,
+    deployerPrincipalId: deployer.oid,
+    tenantId: deployer.tenantId,
+    subscriptionId: subscription,
+    resourceGroup,
+    appName,
+    configuredMcpUrl: String(appSettings.O365_MCP_SERVER_URL ?? ''),
+    configuredConnectionId: String(appSettings[OUTLOOK_CONNECTION_ID_SETTING] ?? ''),
+  }
+}
+
+function connectionHttpError(error) {
+  return new HttpError(error?.status ?? 502, String(error?.message ?? error), {
+    ...(error?.portalCode ? { error: error.portalCode } : {}),
+    ...(error?.sourceCleanup ? { sourceCleanup: error.sourceCleanup } : {}),
+  })
+}
+
+async function configureOutlookWithSource(req, route, configureAzure) {
+  const sourceBefore = await readCurrentSource(
+    req,
+    route.subscription,
+    route.resourceGroup,
+    route.appName,
+    'mcp.json',
+  )
+  return coordinateOutlookConnectionSetup({
+    sourceBefore,
+    stageSource: (content) => writeSourceDraft(route.subscription, route.appName, 'mcp.json', content),
+    rollbackSource: async (previous) => {
+      if (previous.source === 'draft') {
+        await writeSourceDraft(route.subscription, route.appName, 'mcp.json', previous.content)
+      } else {
+        await removeSourceDraft(route.subscription, route.appName, 'mcp.json')
+      }
+    },
+    configureAzure,
+  })
+}
+
+async function wireOutlookEndpoint(token, context, connection) {
+  let settings
+  try {
+    settings = outlookAppSettings(connection)
+  } catch {
+    throw new HttpError(502, 'Azure did not return a valid Outlook MCP endpoint.')
+  }
+  const connectionResourceId = settings[OUTLOOK_CONNECTION_ID_SETTING]
+  try {
+    await azure.setAppSettings(token, context.subscriptionId, context.resourceGroup, context.appName, settings)
+  } catch (error) {
+    const forbidden = error?.status === 403 || error?.statusCode === 403
+    throw new HttpError(
+      forbidden ? 403 : 502,
+      forbidden
+        ? 'Outlook resources were configured, but the portal cannot update this Function App setting. Grant application-settings write access and retry setup.'
+        : 'Outlook resources were configured, but the Function App endpoint setting could not be updated. Retry setup.',
+      { error: forbidden ? 'app_settings_forbidden' : 'app_settings_update_failed' },
+    )
+  }
+  const updatedSettings = await azure.readAppSettingsStrict(
+    token,
+    context.subscriptionId,
+    context.resourceGroup,
+    context.appName,
+  )
+  const persistedEndpoint = String(updatedSettings.O365_MCP_SERVER_URL ?? '').trim().replace(/\/$/, '')
+  const expectedEndpoint = settings.O365_MCP_SERVER_URL.trim().replace(/\/$/, '')
+  const persistedConnectionId = String(updatedSettings[OUTLOOK_CONNECTION_ID_SETTING] ?? '').trim()
+  if (persistedEndpoint !== expectedEndpoint || persistedConnectionId.toLowerCase() !== connectionResourceId.toLowerCase()) {
+    throw new HttpError(
+      502,
+      'Outlook resources were configured, but the Function App connection settings were not persisted. Retry setup.',
+      { error: 'app_settings_not_persisted' },
+    )
+  }
+  return getOutlookConnection(
+    token,
+    {
+      ...context,
+      configuredMcpUrl: String(updatedSettings.O365_MCP_SERVER_URL),
+      configuredConnectionId: persistedConnectionId,
+    },
+    connection.id,
+  )
+}
+
+app.get(
+  '/api/connections',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.query.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const resourceGroup = String(req.query.resourceGroup ?? '').trim()
+    const appName = String(req.query.app ?? '').trim()
+    try {
+      const context = await connectionContext(token, subscription, resourceGroup, appName)
+      res.json({ connections: await listOutlookConnections(token, context) })
+    } catch (error) {
+      throw connectionHttpError(error)
+    }
+  }),
+)
+
+app.post(
+  '/api/connections',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const route = connectionMutationContext(req)
+    const displayName = String(req.body?.displayName ?? '').trim()
+    try {
+      const context = await connectionContext(token, route.subscription, route.resourceGroup, route.appName)
+      const result = await configureOutlookWithSource(req, route, async () => {
+        const created = await createOutlookConnection(token, context, displayName)
+        return wireOutlookEndpoint(token, context, created)
+      })
+      res.status(201).json(result)
+    } catch (error) {
+      throw connectionHttpError(error)
+    }
+  }),
+)
+
+function connectionQueryContext(req) {
+  return {
+    subscription: String(req.query.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID,
+    resourceGroup: String(req.query.resourceGroup ?? '').trim(),
+    appName: String(req.query.app ?? '').trim(),
+  }
+}
+
+function connectionMutationContext(req) {
+  return {
+    subscription: String(req.query.subscription ?? req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID,
+    resourceGroup: String(req.query.resourceGroup ?? req.body?.resourceGroup ?? '').trim(),
+    appName: String(req.query.app ?? req.body?.app ?? '').trim(),
+  }
+}
+
+function connectorSubscriptionId(value, fallback) {
+  const subscriptionId = String(value || fallback).trim()
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(subscriptionId)) {
+    throw new HttpError(400, 'connectorSubscription must be a valid Azure subscription ID.')
+  }
+  return subscriptionId
+}
+
+app.get(
+  '/api/connections/candidates',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const route = connectionQueryContext(req)
+    const selectedConnectorSubscription = connectorSubscriptionId(
+      req.query.connectorSubscription,
+      route.subscription,
+    )
+    try {
+      const context = await connectionContext(token, route.subscription, route.resourceGroup, route.appName)
+      res.json(await listOutlookConnectionCandidates(token, {
+        ...context,
+        connectorSubscriptionId: selectedConnectorSubscription,
+      }))
+    } catch (error) {
+      throw connectionHttpError(error)
+    }
+  }),
+)
+
+app.post(
+  '/api/connections/attach',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const route = connectionMutationContext(req)
+    const connectionId = String(req.body?.connectionId ?? '').trim()
+    const selectedConnectorSubscription = connectorSubscriptionId(
+      req.body?.connectorSubscription,
+      route.subscription,
+    )
+    try {
+      const context = await connectionContext(token, route.subscription, route.resourceGroup, route.appName)
+      const result = await configureOutlookWithSource(req, route, async () => {
+        const attached = await attachOutlookConnection(
+          token,
+          { ...context, connectorSubscriptionId: selectedConnectorSubscription },
+          connectionId,
+        )
+        return wireOutlookEndpoint(token, context, attached)
+      })
+      res.json(result)
+    } catch (error) {
+      throw connectionHttpError(error)
+    }
+  }),
+)
+
+app.get(
+  '/api/connections/:connectionId/status',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const route = connectionQueryContext(req)
+    try {
+      const context = await connectionContext(token, route.subscription, route.resourceGroup, route.appName)
+      res.json({ connection: await getOutlookConnection(token, context, req.params.connectionId) })
+    } catch (error) {
+      throw connectionHttpError(error)
+    }
+  }),
+)
+
+app.get(
+  '/api/connections/:connectionId/auth-link',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const route = connectionQueryContext(req)
+    try {
+      const context = await connectionContext(token, route.subscription, route.resourceGroup, route.appName)
+      const connection = await getOutlookConnection(token, context, req.params.connectionId)
+      res.json({ url: connection.portalUrl })
+    } catch (error) {
+      throw connectionHttpError(error)
+    }
+  }),
+)
+
+app.post(
+  '/api/connections/:connectionId/test',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const route = connectionMutationContext(req)
+    try {
+      const context = await connectionContext(token, route.subscription, route.resourceGroup, route.appName)
+      res.json(await testOutlookConnection(token, context, req.params.connectionId))
+    } catch (error) {
+      throw connectionHttpError(error)
+    }
+  }),
+)
+
+app.delete(
+  '/api/connections/:connectionId',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const route = connectionQueryContext(req)
+    let context
+    try {
+      context = await connectionContext(token, route.subscription, route.resourceGroup, route.appName)
+      await getOutlookConnection(token, context, req.params.connectionId)
+
+      const sourceBefore = await readCurrentSource(req, route.subscription, route.resourceGroup, route.appName, 'mcp.json')
+      const result = await coordinateOutlookConnectionRemoval({
+        sourceBefore,
+        settingBefore: context.configuredMcpUrl || context.configuredConnectionId
+          ? {
+              removed: true,
+              values: {
+                O365_MCP_SERVER_URL: context.configuredMcpUrl,
+                ...(context.configuredConnectionId
+                  ? { [OUTLOOK_CONNECTION_ID_SETTING]: context.configuredConnectionId }
+                  : {}),
+              },
+            }
+          : null,
+        stageSource: (content) => writeSourceDraft(route.subscription, route.appName, 'mcp.json', content),
+        rollbackSource: async (previous) => {
+          if (previous.source === 'draft') {
+            await writeSourceDraft(route.subscription, route.appName, 'mcp.json', previous.content)
+          } else {
+            await removeSourceDraft(route.subscription, route.appName, 'mcp.json')
+          }
+        },
+        removeSetting: async () => {
+          const settingResult = await azure.removeAppSettings(
+            token,
+            route.subscription,
+            route.resourceGroup,
+            route.appName,
+            ['O365_MCP_SERVER_URL', OUTLOOK_CONNECTION_ID_SETTING],
+          )
+          return Object.keys(settingResult.removedValues).length
+            ? { removed: true, values: settingResult.removedValues }
+            : { removed: false }
+        },
+        restoreSetting: (setting) => azure.setAppSettings(
+          token,
+          route.subscription,
+          route.resourceGroup,
+          route.appName,
+          setting.values,
+        ),
+        deleteAzure: () => deleteOutlookConnection(token, context, req.params.connectionId),
+      })
+      res.json({ removed: true, ...result })
+    } catch (error) {
+      throw new HttpError(error?.status ?? 502, String(error?.message ?? error), {
+        ...(error?.portalCode ? { error: error.portalCode } : {}),
+        ...(error?.cleanup ? { cleanup: error.cleanup } : {}),
+      })
+    }
   }),
 )
 
@@ -352,6 +683,17 @@ async function readSourceDraft(subscription, appName, relPath) {
 
 async function writeSourceDraft(subscription, appName, relPath, content) {
   await writeSourceDrafts(sourceDraftAppDir(subscription, appName), [{ path: relPath, content }])
+}
+
+async function removeSourceDraft(subscription, appName, relPath) {
+  await recoverSourceDrafts(sourceDraftAppDir(subscription, appName))
+  try {
+    await fs.promises.unlink(sourceDraftPath(subscription, appName, relPath))
+    return true
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false
+    throw error
+  }
 }
 
 async function readCurrentSource(req, subscription, resourceGroup, appName, relPath) {
@@ -596,15 +938,7 @@ app.delete(
     const relPath = String(req.query.path ?? '').trim()
     if (!appName || !relPath) throw new HttpError(400, 'app and path query parameters are required.')
     if (relPath.includes('..')) throw new HttpError(400, 'Invalid path.')
-    await recoverSourceDrafts(sourceDraftAppDir(subscription, appName))
-    const filePath = sourceDraftPath(subscription, appName, relPath)
-    let removed = false
-    try {
-      await fs.promises.unlink(filePath)
-      removed = true
-    } catch {
-      /* already gone or never existed */
-    }
+    const removed = await removeSourceDraft(subscription, appName, relPath)
     res.json({ ok: true, removed })
   }),
 )

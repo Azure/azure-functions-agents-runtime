@@ -171,9 +171,6 @@ export default function AgentsPage() {
                 <HostedSkillRow
                   key={app.name}
                   app={app}
-                  renderAppLink={(children) => (
-                    <Link to={`/apps/${encodeURIComponent(selected)}/${encodeURIComponent(app.name)}`}>{children}</Link>
-                  )}
                 />
               )
             }

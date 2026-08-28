@@ -51,7 +51,7 @@ export const HostedSkillRow = ({ app, status = 'running', renderAppLink, actions
 
   return (
     <div className="hosted-skill-row">
-      {renderAppLink ? renderAppLink(content) : content}
+      {renderAppLink ? renderAppLink(content) : <div className="hosted-skill-row-content">{content}</div>}
       {actions && <div className="pill-row ai-app-actions">{actions}</div>}
     </div>
   )

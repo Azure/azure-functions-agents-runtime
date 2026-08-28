@@ -37,6 +37,7 @@ The full lifecycle that produces an FRD lives in [`AGENTS.md`](https://github.co
 | [0006](0006-endpoint-authentication.md) | Endpoint & HTTP trigger authentication (API key / Entra ID) | Finalized |
 | [0007](0007-multi-agent-delegation.md) | Multi-agent delegation (agent-as-tool) | In review |
 | [0008](0008-portal-custom-tools.md) | Portal Custom Tool recipes | Finalized |
+| [0009](0009-outlook-connections.md) | Outlook connections in the Capabilities tab | Finalized |
 
 > `_template.md` is the template, not an FRD — the leading underscore keeps it
 > sorted first and excludes it from numbering.

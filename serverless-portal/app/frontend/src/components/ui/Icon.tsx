@@ -31,6 +31,7 @@ export type IconName =
   | 'clock'
   | 'globe'
   | 'mail'
+  | 'trash'
   | 'book'
   | 'bulb'
 
@@ -144,6 +145,11 @@ const ICONS: Record<IconName, JSX.Element> = {
     <>
       <rect width="20" height="16" x="2" y="4" rx="2" />
       <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
+    </>
+  ),
+  trash: (
+    <>
+      <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5" />
     </>
   ),
   book: (

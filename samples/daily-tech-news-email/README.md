@@ -42,7 +42,7 @@ A timer-triggered agent that fetches the day's top tech news headlines, summariz
 
 3. **Authenticate the Office 365 Outlook connection:**
 
-    Open the deployed Office 365 Outlook connection in the Azure portal and complete authentication. The deployment output includes `O365_CONNECTION_ID`; after signing in, the connection status should be `Connected`:
+    Open the Connector Namespace at `https://connectors.azure.com/<subscription-id>/<resource-group>/<connector-gateway-name>/overview`, select the deployed Office 365 Outlook connection, choose **Authorize**, and complete Microsoft sign-in. Do not use the generic Azure resource blade. The deployment output includes `O365_CONNECTION_ID`; after signing in, the connection status should be `Connected`:
 
     ```bash
     az resource show --ids "$(azd env get-value O365_CONNECTION_ID)" --query properties.overallStatus -o tsv

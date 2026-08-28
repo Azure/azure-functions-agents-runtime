@@ -304,6 +304,72 @@ export interface GitHubAppConnection {
   source?: 'deploymentCenter' | 'appSettings'
 }
 
+export type ConnectionStatus = 'Connected' | 'Expired' | 'Action required'
+
+export interface OutlookConnection {
+  id: string
+  displayName: string
+  service: 'Office 365 Outlook'
+  allowedOperations: ['SendEmailV2']
+  status: ConnectionStatus
+  providerStatus: string
+  provisioningState: string
+  authenticatedUser: string
+  authorizationRequired: boolean
+  providerErrorCode: string
+  providerErrorMessage: string
+  source: 'Created' | 'Existing'
+  subscriptionId: string
+  gatewayName: string
+  resourceGroup: string
+  infrastructureReady: boolean
+  authenticationReady: boolean
+  detail: string
+  mcpEndpointUrl: string
+  portalUrl: string
+}
+
+export interface OutlookConnectionCandidate {
+  id: string
+  subscriptionId: string
+  displayName: string
+  connectionName: string
+  gatewayName: string
+  resourceGroup: string
+  status: ConnectionStatus
+  providerStatus: string
+  authenticatedUser: string
+}
+
+export interface ConnectionTest {
+  ok: boolean
+  checks: { name: string; ok: boolean; detail?: string }[]
+  connection: OutlookConnection
+}
+
+export interface ConnectionSetupSource {
+  path: 'mcp.json'
+  changed: boolean
+  deploymentRequired: boolean
+  state: 'draft' | 'deployed'
+}
+
+export interface ConnectionSetup {
+  connection: OutlookConnection
+  source: ConnectionSetupSource
+}
+
+export interface ConnectionRemoval {
+  removed: true
+  source: 'Created' | 'Existing'
+  sourceDraftChanged: boolean
+  cleanup: {
+    sourceDraft: string
+    appSetting: string
+    azure: string
+  }
+}
+
 export type DeployTarget =
   | { kind: 'existing'; app: string; resourceGroup: string }
   | {
@@ -381,6 +447,69 @@ export const api = {
       'GET',
       subscription ? `/api/live/agents?subscription=${enc(subscription)}` : '/api/live/agents',
     ),
+
+  listConnections: (p: { subscription: string; resourceGroup: string; app: string }) =>
+    req<{ connections: OutlookConnection[] }>(
+      'GET',
+      `/api/connections?subscription=${enc(p.subscription)}&resourceGroup=${enc(p.resourceGroup)}&app=${enc(p.app)}`,
+    ),
+  createOutlookConnection: (p: {
+    subscription: string
+    resourceGroup: string
+    app: string
+    displayName: string
+  }) => req<ConnectionSetup>(
+    'POST',
+    `/api/connections?subscription=${enc(p.subscription)}&resourceGroup=${enc(p.resourceGroup)}&app=${enc(p.app)}`,
+    p,
+  ),
+  listOutlookConnectionCandidates: (p: {
+    subscription: string
+    resourceGroup: string
+    app: string
+    connectorSubscription: string
+  }) =>
+    req<{ connections: OutlookConnectionCandidate[]; partial: boolean }>(
+      'GET',
+      `/api/connections/candidates?subscription=${enc(p.subscription)}&resourceGroup=${enc(p.resourceGroup)}&app=${enc(p.app)}&connectorSubscription=${enc(p.connectorSubscription)}`,
+    ),
+  attachOutlookConnection: (p: {
+    subscription: string
+    resourceGroup: string
+    app: string
+    connectionId: string
+    connectorSubscription: string
+  }) => req<ConnectionSetup>(
+    'POST',
+    `/api/connections/attach?subscription=${enc(p.subscription)}&resourceGroup=${enc(p.resourceGroup)}&app=${enc(p.app)}`,
+    p,
+  ),
+  getConnectionStatus: (p: { subscription: string; resourceGroup: string; app: string; id: string }) =>
+    req<{ connection: OutlookConnection }>(
+      'GET',
+      `/api/connections/${enc(p.id)}/status?subscription=${enc(p.subscription)}&resourceGroup=${enc(p.resourceGroup)}&app=${enc(p.app)}`,
+    ),
+  getConnectionAuthLink: (p: { subscription: string; resourceGroup: string; app: string; id: string }) =>
+    req<{ url: string }>(
+      'GET',
+      `/api/connections/${enc(p.id)}/auth-link?subscription=${enc(p.subscription)}&resourceGroup=${enc(p.resourceGroup)}&app=${enc(p.app)}`,
+    ),
+  testConnection: (p: { subscription: string; resourceGroup: string; app: string; id: string }) =>
+    req<ConnectionTest>(`POST`, `/api/connections/${enc(p.id)}/test`, p),
+  deleteOutlookConnection: async (p: {
+    subscription: string
+    resourceGroup: string
+    app: string
+    id: string
+  }) => {
+    const storageToken = await acquireStorageToken()
+    return req<ConnectionRemoval>(
+      'DELETE',
+      `/api/connections/${enc(p.id)}?subscription=${enc(p.subscription)}&resourceGroup=${enc(p.resourceGroup)}&app=${enc(p.app)}`,
+      undefined,
+      storageToken ? { 'X-Storage-Token': storageToken } : undefined,
+    )
+  },
 
   // Agent definition (.agent.md) — read deployed source or portal draft, save draft.
   getAgentDefinition: async (p: { subscription: string; app: string; resourceGroup: string; name: string }) => {
