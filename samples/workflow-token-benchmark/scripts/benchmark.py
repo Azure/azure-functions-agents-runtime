@@ -24,6 +24,13 @@ from typing import Any, NamedTuple
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.storage.blob import BlobServiceClient
 from azure.storage.queue import QueueClient, TextBase64EncodePolicy
+from evaluation import (
+    QualityScore,
+    build_atif_trajectory,
+    build_expected_report,
+    score_report,
+    write_atif_trajectory,
+)
 
 SAMPLE_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_SRC = SAMPLE_ROOT / "src"
@@ -85,6 +92,7 @@ class ModeResult:
     mode: str
     agent_name: str
     elapsed_ms: int | None = None
+    report_latency_ms: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
@@ -93,6 +101,10 @@ class ModeResult:
     usage_details: dict[str, int] | None = None
     report_blob: str | None = None
     report_json: dict[str, Any] | None = None
+    quality_score: float | None = None
+    quality_exact: bool = False
+    quality_matching_fields: int | None = None
+    quality_compared_fields: int | None = None
     error: str | None = None
 
 
@@ -602,6 +614,8 @@ def _run_mode(
     try:
         queue_client.send_message(json.dumps(request, separators=(",", ":")))
         report, _ = _wait_for_blob(container, result.report_blob, timeout=timeout)
+        result.report_latency_ms = round((time.monotonic() - started) * 1000)
+        result.report_json = report
         usage = host.wait_for_usage(
             mark,
             expected_agent=agent_name,
@@ -615,7 +629,6 @@ def _run_mode(
         result.provider = usage.provider
         result.model = usage.model
         result.usage_details = usage.usage_details
-        result.report_json = report
     except Exception as exc:
         result.elapsed_ms = round((time.monotonic() - started) * 1000)
         result.error = str(exc)
@@ -673,6 +686,137 @@ def _print_summary(results: Sequence[PairResult]) -> None:
             f"{_percentile(reductions, 0.75):.1%}"
         )
 
+    print()
+    print(
+        "services  valid/pairs  baseline latency  workflow latency  "
+        "median latency reduction  exact quality"
+    )
+    for service_count in sorted({result.service_count for result in results}):
+        group = [result for result in results if result.service_count == service_count]
+        valid = [
+            result
+            for result in group
+            if result.baseline.report_latency_ms is not None
+            and result.workflow.report_latency_ms is not None
+        ]
+        if not valid:
+            print(f"{service_count:>8}  {0:>5}/{len(group):<5}  no valid latency pairs")
+            continue
+        baseline_latency = [
+            float(result.baseline.report_latency_ms)
+            for result in valid
+            if result.baseline.report_latency_ms is not None
+        ]
+        workflow_latency = [
+            float(result.workflow.report_latency_ms)
+            for result in valid
+            if result.workflow.report_latency_ms is not None
+        ]
+        latency_reductions = [
+            1 - workflow / baseline
+            for baseline, workflow in zip(
+                baseline_latency, workflow_latency, strict=True
+            )
+            if baseline > 0
+        ]
+        exact_count = sum(
+            result.baseline.quality_exact and result.workflow.quality_exact
+            for result in valid
+        )
+        print(
+            f"{service_count:>8}  {len(valid):>5}/{len(group):<5}  "
+            f"{statistics.median(baseline_latency):>16,.0f}  "
+            f"{statistics.median(workflow_latency):>16,.0f}  "
+            f"{statistics.median(latency_reductions):>24.1%}  "
+            f"{exact_count}/{len(valid)} pairs"
+        )
+
+
+def _set_quality(result: ModeResult, quality: QualityScore) -> None:
+    result.quality_score = quality.score
+    result.quality_exact = quality.exact
+    result.quality_matching_fields = quality.matching_fields
+    result.quality_compared_fields = quality.compared_fields
+
+
+def _finalize_pair(pair: PairResult, expected_report: Mapping[str, Any]) -> None:
+    for mode_result in (pair.baseline, pair.workflow):
+        if mode_result.report_json is not None:
+            _set_quality(
+                mode_result,
+                score_report(mode_result.report_json, expected_report),
+            )
+    if pair.baseline.report_json is None or pair.workflow.report_json is None:
+        return
+    pair.reports_equal = (
+        json.dumps(
+            pair.baseline.report_json,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        == json.dumps(
+            pair.workflow.report_json,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+    if (
+        pair.reports_equal
+        and pair.baseline.error is None
+        and pair.workflow.error is None
+        and pair.baseline.total_tokens is not None
+        and pair.baseline.total_tokens > 0
+        and pair.workflow.total_tokens is not None
+    ):
+        pair.reduction = (
+            1 - pair.workflow.total_tokens / pair.baseline.total_tokens
+        )
+
+
+def _export_results(
+    *,
+    output_dir: Path,
+    results: Sequence[PairResult],
+    requests: Mapping[str, Mapping[str, Any]],
+    expected_reports: Mapping[str, Mapping[str, Any]],
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    result_path = output_dir / "benchmark.json"
+    result_path.write_text(
+        json.dumps([asdict(result) for result in results], indent=2) + "\n",
+        encoding="utf-8",
+    )
+    for pair in results:
+        request = requests[pair.trial_id]
+        expected_report = expected_reports[pair.trial_id]
+        for mode_result in (pair.baseline, pair.workflow):
+            if mode_result.report_json is None or mode_result.quality_score is None:
+                continue
+            quality = QualityScore(
+                score=mode_result.quality_score,
+                exact=mode_result.quality_exact,
+                matching_fields=mode_result.quality_matching_fields or 0,
+                compared_fields=mode_result.quality_compared_fields or 0,
+            )
+            trajectory = build_atif_trajectory(
+                trial_id=pair.trial_id,
+                request=request,
+                report=mode_result.report_json,
+                expected_report=expected_report,
+                quality=quality,
+                report_latency_ms=mode_result.report_latency_ms,
+                input_tokens=mode_result.input_tokens,
+                output_tokens=mode_result.output_tokens,
+                model=mode_result.model,
+            )
+            write_atif_trajectory(
+                output_dir / "atif" / f"{pair.trial_id}-{mode_result.mode}.json",
+                trajectory,
+            )
+    return result_path
+
 
 def benchmark(
     *,
@@ -681,6 +825,7 @@ def benchmark(
     evidence_lines: int,
     timeout: float,
     keep_services: bool,
+    results_dir: Path | None = None,
 ) -> list[PairResult]:
     if shutil.which("docker") is None:
         raise RuntimeError("required executable 'docker' was not found")
@@ -693,6 +838,8 @@ def benchmark(
     baseline_queue: QueueClient | None = None
     workflow_queue: QueueClient | None = None
     container: Any = None
+    requests: dict[str, Mapping[str, Any]] = {}
+    expected_reports: dict[str, Mapping[str, Any]] = {}
     try:
         for label, command in (("Azurite", commands.azurite), ("DTS", commands.dts)):
             print(f"Starting {label}...")
@@ -729,6 +876,12 @@ def benchmark(
                                 f"checkout-api-{index:02d}"
                                 for index in range(service_count)
                             ]
+                            expected_report = build_expected_report(
+                                trial_id=trial_id,
+                                services=services,
+                                evidence_lines=evidence_lines,
+                            )
+                            expected_reports[trial_id] = expected_report
                             order = (
                                 ["baseline", "workflow"]
                                 if pair_index % 2 == 0
@@ -743,6 +896,11 @@ def benchmark(
                                     "services": services,
                                     "evidence_lines": evidence_lines,
                                     "report_blob": f"runs/{trial_id}/{mode}.json",
+                                }
+                                requests[trial_id] = {
+                                    key: value
+                                    for key, value in request.items()
+                                    if key != "report_blob"
                                 }
                                 mode_results[mode] = _run_mode(
                                     mode=mode,
@@ -766,37 +924,7 @@ def benchmark(
                                 baseline=baseline,
                                 workflow=workflow,
                             )
-                            if (
-                                baseline.error is None
-                                and workflow.error is None
-                                and baseline.report_json is not None
-                                and workflow.report_json is not None
-                            ):
-                                pair.reports_equal = (
-                                    json.dumps(
-                                        baseline.report_json,
-                                        ensure_ascii=True,
-                                        separators=(",", ":"),
-                                        sort_keys=True,
-                                    )
-                                    == json.dumps(
-                                        workflow.report_json,
-                                        ensure_ascii=True,
-                                        separators=(",", ":"),
-                                        sort_keys=True,
-                                    )
-                                )
-                                if (
-                                    pair.reports_equal
-                                    and baseline.total_tokens is not None
-                                    and baseline.total_tokens > 0
-                                    and workflow.total_tokens is not None
-                                ):
-                                    pair.reduction = (
-                                        1
-                                        - workflow.total_tokens
-                                        / baseline.total_tokens
-                                    )
+                            _finalize_pair(pair, expected_report)
                             results.append(pair)
                             status = (
                                 f"reduction={pair.reduction:.1%}"
@@ -838,6 +966,14 @@ def benchmark(
     host_path.write_text(host_output, encoding="utf-8")
     print(f"Raw results: {result_path}")
     print(f"Host log: {host_path}")
+    if results_dir is not None:
+        exported_path = _export_results(
+            output_dir=results_dir,
+            results=results,
+            requests=requests,
+            expected_reports=expected_reports,
+        )
+        print(f"Shareable results: {exported_path}")
     _print_summary(results)
     return results
 
@@ -854,6 +990,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--evidence-lines", type=int, default=40)
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--keep-services", action="store_true")
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        help="Also export benchmark JSON and ATIF trajectories to this directory",
+    )
     return parser.parse_args()
 
 
@@ -875,6 +1016,7 @@ def main() -> int:
             evidence_lines=args.evidence_lines,
             timeout=args.timeout,
             keep_services=args.keep_services,
+            results_dir=args.results_dir,
         )
     except (KeyboardInterrupt, RuntimeError) as exc:
         print(f"FAIL: {exc}")

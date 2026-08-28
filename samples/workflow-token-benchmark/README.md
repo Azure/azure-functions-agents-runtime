@@ -92,9 +92,31 @@ reduction = 1 - workflow_total_tokens / baseline_total_tokens
 ```
 
 The harness alternates execution order and reports raw trials, median input,
-output, and total tokens, paired median reduction, quartiles, failures, and
-report mismatches for every workload size. The initial series is 1, 3, 5, 10,
-and 20 services.
+output, and total tokens, paired median reduction, quartiles, latency, quality,
+failures, and report mismatches for every workload size. The initial series is
+1, 3, 5, 10, and 20 services.
+
+### Latency
+
+`report_latency_ms` is end-to-end completion latency from queue submission until
+the canonical report Blob can be downloaded. It includes queue dispatch, model
+work, tools or Durable Activities, and report publication. It excludes emulator
+and Functions host startup. `elapsed_ms` additionally includes waiting for and
+validating usage telemetry, so it is a harness diagnostic rather than the
+published latency metric.
+
+### Quality
+
+Quality is measured two ways:
+
+1. The deterministic oracle independently builds the expected report from the
+   complete source evidence. `quality_score` is matching leaf fields divided by
+   the union of expected and actual leaf fields, so missing, wrong, reordered,
+   and fabricated fields reduce the `[0, 1]` score. `quality_exact` requires the
+   complete report to equal the oracle.
+2. The optional Vally prompt judge evaluates the same candidate and reference
+   report with a fixed rubric. This is a semantic secondary measure, not a
+   replacement for the exact oracle.
 
 ## Prerequisites
 
@@ -125,12 +147,30 @@ runtime under test.
 
 ```powershell
 Set-Location samples\workflow-token-benchmark
-python scripts\benchmark.py --repeats 3
+python scripts\benchmark.py --repeats 3 `
+  --results-dir results\2026-08-25-foundry
 ```
 
 Use `--service-counts 1 3 5 10 20` and `--evidence-lines 40` to control the
-series. Raw JSON results are written under `.benchmark-results/`, which is
-ignored by Git.
+series. Raw JSON results and the host log are written under
+`.benchmark-results/`, which is ignored by Git. `--results-dir` additionally
+writes shareable `benchmark.json` and per-mode ATIF trajectories. A named
+directory under `results/` can be committed when preserving a benchmark run.
+
+To grade one repeat per service count with Vally 0.14.0:
+
+```powershell
+python scripts\grade_quality.py `
+  --results-dir results\2026-08-25-foundry `
+  --repeat 1 `
+  --judge-model gpt-5.4-mini
+```
+
+This requires Node.js 22 or newer and access to the selected Copilot judge model.
+Each trajectory invokes the judge and incurs its normal cost. Omit `--repeat` to
+grade every exported trajectory. Machine-readable JSONL verdicts are written
+under the run's `vally/` directory. The fixed rubric is in `evals/eval.yaml`;
+the benchmark workload is not rerun by Vally.
 
 ### Manual queue submission
 

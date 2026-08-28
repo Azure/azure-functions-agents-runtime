@@ -32,6 +32,19 @@ def _load_core() -> Any:
 def _load_benchmark() -> Any:
     module_name = "workflow_token_benchmark_script_test"
     script = SAMPLE_SRC.parent / "scripts" / "benchmark.py"
+    sys.path.insert(0, str(script.parent))
+    spec = importlib.util.spec_from_file_location(module_name, script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    sys.path.pop(0)
+    return module
+
+
+def _load_sender() -> Any:
+    module_name = "workflow_token_benchmark_sender_test"
+    script = SAMPLE_SRC.parent / "scripts" / "send_trial.py"
     spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -40,9 +53,20 @@ def _load_benchmark() -> Any:
     return module
 
 
-def _load_sender() -> Any:
-    module_name = "workflow_token_benchmark_sender_test"
-    script = SAMPLE_SRC.parent / "scripts" / "send_trial.py"
+def _load_evaluation() -> Any:
+    module_name = "workflow_token_benchmark_evaluation_test"
+    script = SAMPLE_SRC.parent / "scripts" / "evaluation.py"
+    spec = importlib.util.spec_from_file_location(module_name, script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_grader() -> Any:
+    module_name = "workflow_token_benchmark_grader_test"
+    script = SAMPLE_SRC.parent / "scripts" / "grade_quality.py"
     spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -405,3 +429,233 @@ def test_percentile_interpolates_small_samples() -> None:
 
     assert benchmark._percentile([0.25], 0.5) == 0.25
     assert benchmark._percentile([0.0, 1.0], 0.25) == 0.25
+
+
+def test_quality_oracle_matches_complete_canonical_report() -> None:
+    core = _load_core()
+    evaluation = _load_evaluation()
+    services = ["checkout-api-00", "checkout-api-01"]
+    expected = evaluation.build_expected_report(
+        trial_id="quality-trial",
+        services=services,
+        evidence_lines=10,
+    )
+    actual = core.build_canonical_report(
+        "quality-trial",
+        [
+            core.build_service_evidence("quality-trial", service, 10)
+            for service in services
+        ],
+    )
+
+    quality = evaluation.score_report(actual, expected)
+
+    assert actual == expected
+    assert quality.score == 1.0
+    assert quality.exact is True
+    assert quality.matching_fields == quality.compared_fields
+
+
+def test_quality_score_penalizes_missing_wrong_and_extra_fields() -> None:
+    evaluation = _load_evaluation()
+    expected = {"trial_id": "trial", "services": [{"service": "one", "errors": 2}]}
+    candidate = {
+        "trial_id": "trial",
+        "services": [{"service": "one", "errors": 9}],
+        "fabricated": True,
+    }
+
+    quality = evaluation.score_report(candidate, expected)
+
+    assert quality.matching_fields == 2
+    assert quality.compared_fields == 4
+    assert quality.score == 0.5
+    assert quality.exact is False
+
+
+def test_quality_score_penalizes_reordered_services() -> None:
+    evaluation = _load_evaluation()
+    expected = {
+        "services": [
+            {"service": "one", "errors": 1},
+            {"service": "two", "errors": 2},
+        ]
+    }
+    candidate = {
+        "services": [
+            {"service": "two", "errors": 2},
+            {"service": "one", "errors": 1},
+        ]
+    }
+
+    quality = evaluation.score_report(candidate, expected)
+
+    assert quality.score == 0.0
+    assert quality.exact is False
+
+
+def test_atif_export_contains_reference_candidate_metrics_and_quality() -> None:
+    evaluation = _load_evaluation()
+    quality = evaluation.QualityScore(
+        score=1.0,
+        exact=True,
+        matching_fields=10,
+        compared_fields=10,
+    )
+    trajectory = evaluation.build_atif_trajectory(
+        trial_id="trial",
+        request={"trial_id": "trial", "services": ["one"], "evidence_lines": 5},
+        report={"trial_id": "trial"},
+        expected_report={"trial_id": "trial"},
+        quality=quality,
+        report_latency_ms=1234,
+        input_tokens=100,
+        output_tokens=20,
+        model="gpt-test",
+    )
+
+    assert trajectory["schema_version"] == "ATIF-v1.7"
+    assert trajectory["session_id"] == "trial-candidate"
+    assert trajectory["agent"]["name"] == "workflow-token-benchmark"
+    assert "benchmark_mode" not in trajectory["extra"]
+    assert json.loads(trajectory["steps"][0]["message"])["reference_report"] == {
+        "trial_id": "trial"
+    }
+    assert json.loads(trajectory["steps"][1]["message"]) == {"trial_id": "trial"}
+    assert trajectory["final_metrics"]["total_prompt_tokens"] == 100
+    assert trajectory["final_metrics"]["total_completion_tokens"] == 20
+    assert trajectory["final_metrics"]["extra"] == {
+        "report_latency_ms": 1234,
+        "deterministic_quality_score": 1.0,
+        "deterministic_quality_exact": True,
+    }
+
+
+def test_run_mode_records_report_ready_latency_before_usage_wait(
+    monkeypatch: Any,
+) -> None:
+    benchmark = _load_benchmark()
+
+    class FakeQueue:
+        def clear_messages(self) -> None:
+            return None
+
+        def send_message(self, message: str) -> None:
+            assert json.loads(message)["trial_id"] == "trial"
+
+    class FakeContainer:
+        def delete_blob(self, name: str) -> None:
+            assert name == "runs/trial/baseline.json"
+
+    class FakeHost:
+        def mark(self) -> int:
+            return 7
+
+        def wait_for_usage(self, *args: Any, **kwargs: Any) -> Any:
+            return benchmark.Usage(
+                agent_name="baseline",
+                execution_role="primary",
+                input_tokens=100,
+                output_tokens=20,
+                provider="foundry",
+                model="gpt-test",
+                usage_details={"input_token_count": 100, "output_token_count": 20},
+            )
+
+    times = iter([10.0, 12.0, 14.0])
+    monkeypatch.setattr(benchmark.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(
+        benchmark,
+        "_wait_for_blob",
+        lambda *args, **kwargs: ({"trial_id": "trial"}, b"{}"),
+    )
+
+    result = benchmark._run_mode(
+        mode="baseline",
+        request={
+            "trial_id": "trial",
+            "report_blob": "runs/trial/baseline.json",
+        },
+        queue_client=FakeQueue(),
+        container=FakeContainer(),
+        host=FakeHost(),
+        timeout=30,
+    )
+
+    assert result.report_latency_ms == 2000
+    assert result.elapsed_ms == 4000
+
+
+def test_finalize_pair_preserves_report_quality_when_telemetry_fails() -> None:
+    benchmark = _load_benchmark()
+    expected = {"trial_id": "trial", "services": [{"service": "one"}]}
+    baseline = benchmark.ModeResult(
+        mode="baseline",
+        agent_name="baseline",
+        report_json=expected,
+        report_latency_ms=100,
+        error="token usage record did not arrive",
+    )
+    workflow = benchmark.ModeResult(
+        mode="workflow",
+        agent_name="workflow",
+        report_json=expected,
+        report_latency_ms=80,
+        total_tokens=50,
+    )
+    pair = benchmark.PairResult(
+        trial_id="trial",
+        service_count=1,
+        evidence_lines=5,
+        execution_order=["baseline", "workflow"],
+        baseline=baseline,
+        workflow=workflow,
+    )
+
+    benchmark._finalize_pair(pair, expected)
+
+    assert pair.reports_equal is True
+    assert pair.reduction is None
+    assert baseline.quality_score == 1.0
+    assert baseline.quality_exact is True
+    assert workflow.quality_score == 1.0
+    assert workflow.quality_exact is True
+
+
+def test_vally_grader_uses_resolved_npx_and_writes_jsonl(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    grader = _load_grader()
+    atif_dir = tmp_path / "atif"
+    atif_dir.mkdir()
+    trajectory = atif_dir / "services-1-repeat-1-baseline.json"
+    trajectory.write_text('{"schema_version":"ATIF-v1.7"}\n', encoding="utf-8")
+    calls: list[tuple[list[str], str, int]] = []
+
+    class Completed:
+        returncode = 0
+        stdout = '{"status":"success"}\n'
+        stderr = ""
+
+    def fake_run(
+        command: list[str],
+        **kwargs: Any,
+    ) -> Completed:
+        calls.append((command, kwargs["input"], kwargs["timeout"]))
+        return Completed()
+
+    monkeypatch.setattr(grader.shutil, "which", lambda name: "C:\\tools\\npx.cmd")
+    monkeypatch.setattr(grader.subprocess, "run", fake_run)
+
+    outputs = grader.grade_trajectories(
+        results_dir=tmp_path,
+        judge_model="gpt-test",
+        repeat=1,
+    )
+
+    assert calls[0][0][0] == "C:\\tools\\npx.cmd"
+    assert calls[0][0][-2:] == ["--judge-model", "gpt-test"]
+    assert calls[0][1] == '{"schema_version":"ATIF-v1.7"}\n'
+    assert calls[0][2] == 600
+    assert outputs[0].read_text(encoding="utf-8") == '{"status":"success"}\n'
