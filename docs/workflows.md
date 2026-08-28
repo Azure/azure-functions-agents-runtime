@@ -55,6 +55,16 @@ a *plan that calls tools* rather than calling them one-by-one through chat
 round-trips — and add durability, observability, and cooperative control
 on top.
 
+In a **standard agent loop**, each tool result returns through the model and
+becomes part of the next loop's context:
+
+![A standard agent loop repeatedly sends growing history, definitions, and tool results through the LLM.](images/dynamic-workflows/standard-agent-loop.gif)
+
+With a **Dynamic Workflow**, intermediate results stay in the orchestration;
+the agent plans once and later summarizes the final envelope:
+
+![A Dynamic Workflow uses one LLM-authored DAG that Durable Functions executes without per-task model round-trips.](images/dynamic-workflows/dynamic-workflow.gif)
+
 Three concrete wins versus chaining tool calls in conversation:
 
 - **Lower token cost.** Intermediate task results stay inside the
