@@ -192,6 +192,78 @@ def test_reserved_names_match_management_tools():
     assert actual == set(registry.RESERVED_TOOL_NAMES)
 
 
+@pytest.mark.asyncio
+async def test_built_management_tools_share_only_the_current_request_client():
+    class _RequestClient:
+        def __init__(self, *, closed=False):
+            self.closed = closed
+            self.calls = []
+            self.workflow_id = None
+
+        def _record(self, operation):
+            assert not self.closed
+            self.calls.append(operation)
+
+        async def get_status_all(self, *args, **kwargs):
+            self._record("get_status_all")
+            if self.workflow_id is None:
+                return []
+            return [_FakeStatus(self.workflow_id, "Running")]
+
+        async def start_new(self, *args, **kwargs):
+            self._record("start_new")
+            self.workflow_id = kwargs["instance_id"]
+            return self.workflow_id
+
+        async def get_status(self, workflow_id):
+            self._record("get_status")
+            return _FakeStatus(workflow_id, "Running")
+
+        async def raise_event(self, *args, **kwargs):
+            self._record("raise_event")
+
+        async def terminate(self, *args, **kwargs):
+            self._record("terminate")
+
+    stale_client = _RequestClient(closed=True)
+    tools.build_workflow_tools(
+        session_id="same-session",
+        workflow_agent_slug="test-agent",
+        durable_client=stale_client,
+    )
+    current_client = _RequestClient()
+    current_tools = {
+        tool.name: tool
+        for tool in tools.build_workflow_tools(
+            session_id="same-session",
+            workflow_agent_slug="test-agent",
+            durable_client=current_client,
+        )
+    }
+    registry.set_app_config(frozenset())
+
+    started = json.loads(
+        await current_tools["start_workflow"].func(
+            tasks=[{"id": "pause", "type": "wait", "duration": "PT1S"}]
+        )
+    )
+    workflow_id = started["workflow_id"]
+    await current_tools["get_workflow_status"].func(workflow_id=workflow_id)
+    await current_tools["list_workflows"].func()
+    await current_tools["cancel_workflow"].func(workflow_id=workflow_id)
+    await current_tools["terminate_workflow"].func(workflow_id=workflow_id)
+
+    assert stale_client.calls == []
+    assert current_client.calls == [
+        "get_status_all",
+        "start_new",
+        "get_status",
+        "get_status_all",
+        "raise_event",
+        "terminate",
+    ]
+
+
 def test_register_workflow_tool_accepts_async_handler():
     async def async_handler(args):
         return {}

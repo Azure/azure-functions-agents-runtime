@@ -245,6 +245,17 @@ workflow metadata.
 
 A declared trigger handler is a short-lived Durable **client/starter**. The agent authors a plan, calls `start_workflow`, receives the Durable instance ID, and ends its turn without polling. The starter remains subject to the normal model-call and Function timeout, but the orchestration does not: Durable checkpoints and resumes the DAG independently across Activities and timers.
 
+Durable Python 2.x async clients are single-invocation resources whose gRPC
+channels are closed when the decorated function returns. Non-streaming chat,
+MCP, and declared-trigger handlers therefore use the rich client injected by
+`durable_client_input` only while they are awaited. The SSE chat handler has a
+longer response-stream lifetime: it receives the host-provided `durableClient`
+binding configuration as a raw value, creates one rich client when that
+response begins streaming, passes it to every workflow management tool for that
+turn, and closes it when the stream completes or fails. No rich Durable client
+is retained across turns; each request and concurrent stream owns a distinct
+client.
+
 At submission, task execution policy is resolved and frozen. For workflow
 tools, decorator timeout and retry declarations are authoritative independently
 and DAG values fill only omitted fields; a retry object is selected whole
