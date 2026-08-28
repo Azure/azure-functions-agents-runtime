@@ -1751,6 +1751,41 @@ async def test_reconciler_reports_partial_progress_when_page_budget_is_exhausted
 
 
 @pytest.mark.asyncio
+async def test_reconciler_reports_partial_when_one_session_is_deferred() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    store = FakeSessionStateStore(_session(now))
+
+    class SessionRefreshFailureProvider(InventoryProvider):
+        def __init__(self) -> None:
+            super().__init__(sandboxes=())
+            self.list_calls = 0
+
+        async def list_sandboxes(
+            self,
+            *,
+            labels: dict[str, str],
+            max_items: int | None = None,
+        ) -> tuple[SandboxSummary, ...]:
+            self.list_calls += 1
+            if self.list_calls > 1:
+                raise SandboxProvisioningError("session backing lookup unavailable")
+            return await super().list_sandboxes(labels=labels, max_items=max_items)
+
+    report = await SessionReconciler(
+        store=store,
+        provider=SessionRefreshFailureProvider(),
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).run_once()
+
+    assert report.partial is True
+    assert store.session is not None
+    assert store.session.status == "ready"
+    for scope in ReconcilerCursorScope:
+        assert await store.get_reconciler_cursor(_app_hash(), scope=scope) is not None
+
+
+@pytest.mark.asyncio
 async def test_reconciler_inventory_cursor_covers_orphans_beyond_the_old_prefix_cap() -> None:
     """Repeated runs must reach every orphan, not just repeat the first page.
 
@@ -3437,8 +3472,10 @@ async def test_reconciler_rearms_terminal_submit_before_completion() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("created_sandbox", [False, True])
+@pytest.mark.parametrize("targeted", [False, True])
 async def test_reconciler_expires_pre_pointer_provision_without_raw_orphan_delete(
     created_sandbox: bool,
+    targeted: bool,
 ) -> None:
     now = datetime(2026, 8, 5, tzinfo=UTC)
     base = _session(
@@ -3476,12 +3513,20 @@ async def test_reconciler_expires_pre_pointer_provision_without_raw_orphan_delet
         )
     )
 
-    report = await SessionReconciler(
+    reconciler = SessionReconciler(
         store=store,
         provider=provider,  # type: ignore[arg-type]
         app_hash=_app_hash(),
         now=lambda: now,
-    ).run_once()
+    )
+    report = (
+        await reconciler.reconcile_session_targeted(
+            session.owner_partition,
+            session.session_id,
+        )
+        if targeted
+        else await reconciler.run_once()
+    )
 
     assert report.tombstoned_sessions == 1
     assert store.session is not None

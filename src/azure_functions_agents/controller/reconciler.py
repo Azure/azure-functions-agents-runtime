@@ -362,6 +362,7 @@ class SessionReconciler:
                     session.session_id,
                     type(exc).__name__,
                 )
+                report = _replace_report(report, partial=True)
 
         report = await self._prune_expired_records(
             sessions,
@@ -1807,7 +1808,10 @@ class SessionReconciler:
                 )
             except RunRowNotFoundError:
                 return await self._recover_missing_submit_run(session, now, ReconcileReport())
-            if session.sandbox_id not in inventory:
+            if (
+                session.active_operation_id is None
+                and session.sandbox_id not in inventory
+            ):
                 return ReconcileReport()
             return await self._reconcile_active(
                 session, run_read.record, inventory, now, ReconcileReport()

@@ -112,7 +112,12 @@ _FAILED_CREATE_LOOKUP_ATTEMPTS = 3
 _FAILED_CREATE_LOOKUP_DELAY_SECONDS = 1.0
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.5
 _RETRYABLE_MANIFEST_STATUS_CODES = frozenset({409, 423, 425, 429, 500, 502, 503, 504})
+_RETRYABLE_ARM_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _RECONCILIATION_ERRORS = (AzureError, TimeoutError, RuntimeError, ValueError)
+_ACCEPTED_CREATE_RECONCILIATION_ERRORS = (
+    SandboxGroupAuthorizationError,
+    *_RECONCILIATION_ERRORS,
+)
 
 # A module-level indirection so tests can patch just this adapter's retry
 # delays instead of monkeypatching the process-wide ``asyncio`` module.
@@ -121,7 +126,7 @@ _sleep = asyncio.sleep
 
 def is_retryable_arm_status(status_code: int) -> bool:
     """Return whether an ARM binding lookup may safely be retried."""
-    return status_code == 429 or 500 <= status_code < 600
+    return status_code in _RETRYABLE_ARM_STATUS_CODES
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,7 +464,7 @@ class AcaSandboxAdapter:
                 label_key=_OPERATION_LABEL,
                 expected_labels=expected_labels,
             )
-        except SandboxGroupAuthorizationError:
+        except _ACCEPTED_CREATE_RECONCILIATION_ERRORS:
             raise SandboxCreateOutcomeUnknownError(
                 "Accepted sandbox creation could not be reconciled yet."
             ) from None
@@ -1305,7 +1310,6 @@ def _is_definitive_client_rejection(exc: HttpResponseError) -> bool:
 
 
 _AUTHORIZATION_STATUS_CODES = frozenset({401, 403})
-_RETRYABLE_ARM_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
 
 def _is_authorization_rejection(exc: HttpResponseError) -> bool:

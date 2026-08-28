@@ -498,8 +498,9 @@ submitting another run for the same session.
 The built-in chat UI follows this contract automatically: it captures the
 session/run identifiers and status URL from each successful stream, polls the
 status URL after `done`, and keeps the composer disabled while the session is
-`settling`. A linked `504` is shown as an accepted run that still needs to
-settle; use **New session** if the run cannot be recovered.
+`settling`. It rejects cross-origin status URLs before attaching a Function key
+or session metadata. A linked `504` is shown as an accepted run that still needs
+to settle; use **New session** if the run cannot be recovered.
 
 If sandbox setup exceeds its 90-second budget after admission, an async request
 keeps its linked `202` ticket and a synchronous request may receive linked

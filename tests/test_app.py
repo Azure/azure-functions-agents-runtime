@@ -20,6 +20,7 @@ from azure_functions_agents.config.schema import (
 from azure_functions_agents.controller.readiness import SessionRuntimeBinding, StateStoreBinding
 from azure_functions_agents.controller.reconciler import ReconcileReport
 from azure_functions_agents.discovery.mcp import MCPDiscoveryResult, MCPServerDefinition
+from azure_functions_agents.execution.setup_budget import SetupBudget
 from azure_functions_agents.session_state import AppIdentity, OwnerPartition
 from tests.doubles.fake_session_runtime import DEFAULT_GROUP_RESOURCE_ID
 
@@ -340,7 +341,11 @@ async def test_targeted_reconciliation_does_not_use_timer_pass_deadline(
     async def state_store_factory() -> StateStoreBinding:
         pytest.fail("targeted reconciliation callback should supply its own state store")
 
-    async def targeted_reconciler(target: OwnerPartition, session_id: str) -> None:
+    async def targeted_reconciler(
+        target: OwnerPartition,
+        session_id: str,
+        _setup_deadline: object | None,
+    ) -> None:
         calls.append((target, session_id))
 
     async def deadline_should_not_run(*_: object, **__: object) -> ReconcileReport:
@@ -386,6 +391,87 @@ def test_composition_builds_a_lazy_app_scoped_session_runtime_binding(
     assert runtime is not None
     assert runtime.app_identity == app_identity
     assert runtime.sandbox_group_resource_id.endswith("/sandboxGroups/group")
+
+
+@pytest.mark.asyncio
+async def test_composed_request_reconciler_uses_only_the_targeted_inventory_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_identity = AppIdentity.create(
+        subscription_id="11111111-2222-3333-4444-555555555555",
+        site_name="agent-app",
+    )
+    config = GlobalConfig(
+        session_runtime=SessionRuntimeConfig(
+            aca_sandbox=AcaSandboxConfig(
+                sandbox_group_resource_id=(
+                    "/subscriptions/sub/resourceGroups/rg/providers/"
+                    "Microsoft.App/sandboxGroups/group"
+                )
+            )
+        )
+    )
+    partition = OwnerPartition.create(
+        "o1",
+        "a1-" + ("a" * 52),
+        "function_app",
+        "o1-" + ("b" * 52),
+    )
+    calls: list[tuple[OwnerPartition, str]] = []
+
+    class _Store:
+        async def ensure_table(self) -> None:
+            return None
+
+    class _Reconciler:
+        async def reconcile_session_targeted(
+            self,
+            target: OwnerPartition,
+            session_id: str,
+        ) -> ReconcileReport:
+            calls.append((target, session_id))
+            return ReconcileReport()
+
+        async def reconcile_session(self, *_args: object) -> ReconcileReport:
+            pytest.fail("request reconciliation used the app-wide inventory path")
+
+    async def get_table_service_client() -> tuple[object, str]:
+        return object(), "s1-" + ("c" * 52)
+
+    async def build_store_from_service_client(_client: object) -> _Store:
+        return _Store()
+
+    async def provider_factory() -> object:
+        return object()
+
+    monkeypatch.setattr(app_module, "get_table_service_client", get_table_service_client)
+    monkeypatch.setattr(
+        app_module,
+        "build_store_from_service_client",
+        build_store_from_service_client,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_build_session_reconciler",
+        lambda *_args, **_kwargs: _Reconciler(),
+    )
+
+    runtime = app_module._build_session_runtime_binding(
+        config,
+        tmp_path,
+        app_identity=app_identity,
+        provider_factory=provider_factory,  # type: ignore[arg-type]
+    )
+    assert runtime is not None
+
+    await runtime.reconcile_session(partition, "target-session", SetupBudget.start())
+    await runtime.reconcile_session(partition, "target-session")
+
+    assert calls == [
+        (partition, "target-session"),
+        (partition, "target-session"),
+    ]
 
 
 def test_sandbox_profile_egress_includes_only_reachable_mcp_servers() -> None:

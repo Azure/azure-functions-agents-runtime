@@ -106,8 +106,10 @@ The Function controller identity separately requires `Container Apps
 SandboxGroup Data Owner` on the configured Sandbox Group. `Container Apps
 SandboxGroup Contributor` is control-plane access and is insufficient for
 listing, creating, or attaching data-plane sandboxes. Missing data-plane access
-fails fast with HTTP `503` and `sandbox_group_authorization_failed`; it is not a
-retryable setup timeout. Grant the role at the individual Sandbox Group scope.
+fails fast with its sanitized HTTP `401` or `403` and
+`sandbox_group_authorization_failed`; exact replay preserves that status. It is
+not a retryable setup timeout. Grant the role at the individual Sandbox Group
+scope.
 
 ## Setup admission deadline
 
@@ -117,7 +119,9 @@ full-cap request therefore leaves a 90-second execution floor. Every durable
 operation uses a sliding 120-second lease. A pre-reservation setup `504` retains
 `retry_with=respond-async` with `Retry-After: 120`; once a response includes a
 durable management ticket, `Retry-After: 2` is the polling cadence for that
-ticket.
+ticket. After a create request is accepted, an unavailable stable-label lookup
+keeps the provision outcome indeterminate for later reconciliation rather than
+terminalizing or duplicating the sandbox.
 
 The synchronous `/chatstream` response is an SSE lease, not an implicit async
 conversion. It preserves the caller's `Prefer` choice: a committed setup
@@ -129,9 +133,11 @@ until the status URL reports `phase=terminal`, which clients must observe before
 submitting another run with the same session key.
 
 The built-in chat UI stores those response headers, polls `Location` after
-`done`, and disables the composer until `phase=terminal`. For a linked `504`,
-it keeps the session blocked while polling the returned run status; **New
-session** remains available if the caller chooses not to recover that run.
+`done`, and disables the composer until `phase=terminal`. It accepts only status
+URLs on the configured origin before attaching a Function key or session
+metadata. For a linked `504`, it keeps the session blocked while polling the
+returned run status; **New session** remains available if the caller chooses not
+to recover that run.
 
 ## Egress and credentials
 
@@ -245,8 +251,9 @@ until the timer reclaims unrelated stale resources.
 File-plane `409` readiness is lifecycle-aware: the controller resumes only
 when it owns that mutation, honors provider `Retry-After`, and uses capped
 jittered backoff with per-candidate and whole-flow budgets. Absent backing is
-never probed. ARM binding failures retain safe `401/403/404/429/5xx`
-classification and retryability; authorization failures surface as
+never probed. ARM binding retries are limited to
+`408/409/425/429/500/502/503/504`; authorization and permanent responses retain
+their sanitized classification. Authorization failures surface as
 `sandbox_group_authorization_failed` rather than an opaque setup timeout.
 
 Useful failure signals include:

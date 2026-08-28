@@ -266,7 +266,11 @@ def _runtime(
     provider: FakeSandboxSessionProvider,
     store: FakeSessionStateStore,
     *,
-    targeted_reconciler: Callable[[OwnerPartition, str], Awaitable[None]] | None = None,
+    targeted_reconciler: Callable[
+        [OwnerPartition, str, SetupBudget | None],
+        Awaitable[None],
+    ]
+    | None = None,
     post_create_reconciler: Callable[[], Awaitable[None]] | None = None,
     capacity_reaper: Callable[[], Awaitable[None]] | None = None,
 ) -> SessionRuntimeBinding:
@@ -1821,7 +1825,11 @@ async def test_nonterminal_status_poll_uses_targeted_reconciliation(
         _status(state="running"),
     )
 
-    async def targeted_reconcile(_: OwnerPartition, __: str) -> None:
+    async def targeted_reconcile(
+        _: OwnerPartition,
+        __: str,
+        ___: SetupBudget | None,
+    ) -> None:
         nonlocal calls
         calls += 1
 
@@ -3448,13 +3456,22 @@ async def test_not_reserved_same_key_resubmission_can_start_a_new_attempt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "durable_reason"),
+    [
+        (401, "sandbox_group_authentication_failed"),
+        (403, "sandbox_group_authorization_failed"),
+    ],
+)
 async def test_new_session_authorization_failure_replays_same_terminal_response(
     tmp_path: Path,
+    status_code: int,
+    durable_reason: str,
 ) -> None:
     script_root = _script_root(tmp_path)
     handle = FakeSandboxSessionHandle()
     provider = FakeSandboxSessionProvider(handle)
-    provider.create_errors.append(SandboxGroupAuthorizationError())
+    provider.create_errors.append(SandboxGroupAuthorizationError(status_code=status_code))
     store = FakeSessionStateStore()
     backend = AcaSandboxExecutionBackend(
         _binding(),
@@ -3463,7 +3480,7 @@ async def test_new_session_authorization_failure_replays_same_terminal_response(
     )
     request = StartRunRequest(
         prompt="hello",
-        idempotency_key="authorization-failure-key",
+        idempotency_key=f"authorization-failure-{status_code}",
     )
 
     first = await submit_run(
@@ -3490,9 +3507,9 @@ async def test_new_session_authorization_failure_replays_same_terminal_response(
             "Sandbox Group."
         ),
     }
-    assert first.status_code == 403
+    assert first.status_code == status_code
     assert first.body == expected_body
-    assert replay.status_code == 403
+    assert replay.status_code == status_code
     assert replay.body == expected_body
     assert len(provider.create_calls) == 1
     assert store.session is not None
@@ -3501,7 +3518,7 @@ async def test_new_session_authorization_failure_replays_same_terminal_response(
     assert store.session.active_operation_id is None
     [run] = store.runs.values()
     assert run.status == "failed"
-    assert run.status_reason == "sandbox_group_authorization_failed"
+    assert run.status_reason == durable_reason
     [operation] = store.durable_operations.values()
     assert operation.state == "completed"
 

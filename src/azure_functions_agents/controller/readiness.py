@@ -80,7 +80,6 @@ from ..strict_json import DuplicateJsonKeyError, decode_json_object
 from ..transport.manifest import ExpectedSandboxManifestBinding, SandboxManifestMismatchError
 from ..transport.ports import SandboxSessionHandle, SandboxSessionProvider
 from ..transport.transport_models import (
-    SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
     SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
     PersistedSandboxBinding,
     SandboxCapacityError,
@@ -91,6 +90,7 @@ from ..transport.transport_models import (
     SandboxFileOperationError,
     SandboxGroupArmAuthorizationError,
     SandboxGroupAuthorizationError,
+    SandboxGroupAuthorizationFailureReason,
     SandboxGroupBinding,
     SandboxLifecyclePolicy,
     SandboxProvisioningLabels,
@@ -156,7 +156,10 @@ _ADMISSION_NOT_RESERVED: AdmissionDisposition = "not_reserved"
 _ADMISSION_POSSIBLY_COMMITTED: AdmissionDisposition = "possibly_committed"
 
 type _SessionLockKey = tuple[str, str]
-type TargetedReconciler = Callable[[OwnerPartition, str, "SetupDeadline"], Awaitable[None]]
+type TargetedReconciler = Callable[
+    [OwnerPartition, str, "SetupDeadline | None"],
+    Awaitable[None],
+]
 type BoundedReconciler = Callable[..., Awaitable[None]]
 
 
@@ -430,12 +433,7 @@ class SessionRuntimeBinding:
         """Run the shared targeted lifecycle reconciliation when configured."""
         if self._targeted_reconciler is not None:
             try:
-                if setup_deadline is None:
-                    await self._targeted_reconciler(  # type: ignore[misc, call-arg]
-                        partition, session_id
-                    )
-                else:
-                    await self._targeted_reconciler(partition, session_id, setup_deadline)
+                await self._targeted_reconciler(partition, session_id, setup_deadline)
             except SandboxGroupAuthorizationError as exc:
                 raise SessionActivationAuthorizationError(
                     SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
@@ -1485,12 +1483,16 @@ async def _complete_provision_submit(
         raise _setup_timeout_error(setup_deadline, SetupPhase.PROVISION_CREATE)
     if outcome.admission == _ADMISSION_POSSIBLY_COMMITTED:
         return _indeterminate_provision_submission(outcome, setup_deadline)
+    authorization_status = _authorization_failure_status(outcome.run.status_reason)
     if (
         outcome.replayed
         and outcome.run.status in TERMINAL_RUN_STATUSES
-        and outcome.run.status_reason == SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE
+        and authorization_status is not None
     ):
-        raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE)
+        raise SessionActivationAuthorizationError(
+            SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+            status_code=authorization_status,
+        )
     activated: ActivatedSession | None = None
     try:
         if outcome.replayed:
@@ -1690,6 +1692,7 @@ async def _provision_reserved_session(
             await _fail_reserved_provision_authorization(
                 state_binding.store,
                 fence,
+                status_code=exc.status_code,
             )
         except (SessionStateContractError, SessionStateStoreError) as cleanup_error:
             raise cleanup_error from None
@@ -1749,9 +1752,20 @@ async def _is_indeterminate_provision(
     )
 
 
+def _authorization_failure_status(reason: str | None) -> int | None:
+    if reason is None:
+        return None
+    try:
+        return SandboxGroupAuthorizationFailureReason(reason).status_code
+    except ValueError:
+        return None
+
+
 async def _fail_reserved_provision_authorization(
     store: SessionStateStore,
     fence: SessionOperationFence,
+    *,
+    status_code: int,
 ) -> None:
     """Atomically terminalize a provision blocked by deterministic group authorization."""
 
@@ -1764,11 +1778,12 @@ async def _fail_reserved_provision_authorization(
         fence.target.run_id,
     )
     updated_at = datetime.now(UTC)
+    reason = SandboxGroupAuthorizationFailureReason.from_status_code(status_code)
     failed_run = terminal_run(
         run.record,
         status="failed",
         result_available=False,
-        reason=SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
+        reason=reason.value,
         updated_at=updated_at,
     )
     deleting = DurableSessionRecord.create(
@@ -1788,7 +1803,7 @@ async def _fail_reserved_provision_authorization(
         region=current.record.region,
         state_store_fingerprint=current.record.state_store_fingerprint,
         quarantine_reason=current.record.quarantine_reason,
-        tombstone_reason=SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
+        tombstone_reason=reason.value,
         created_at=current.record.created_at,
         updated_at=updated_at,
         active_operation_id=None,
@@ -2449,7 +2464,10 @@ async def _wait_for_created_manifest(
             if delay is None:
                 delay = _MANIFEST_RETRY_INTERVAL_SECONDS
             delay = min(_FILE_RETRY_MAX_DELAY_SECONDS, max(0.0, delay))
-            delay = min(delay * 1.25, delay + random.uniform(0.0, delay * 0.25))
+            delay = min(
+                _FILE_RETRY_MAX_DELAY_SECONDS,
+                delay + random.uniform(0.0, delay * 0.25),
+            )
             await _within_setup_budget(
                 asyncio.sleep(delay), setup_deadline, phase=SetupPhase.MANIFEST
             )

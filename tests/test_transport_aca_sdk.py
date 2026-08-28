@@ -117,12 +117,16 @@ def _request(**overrides: Any) -> SandboxCreateRequest:
         (401, False),
         (403, False),
         (404, False),
-        (409, False),
+        (408, True),
+        (409, True),
+        (425, True),
         (429, True),
         (500, True),
+        (502, True),
         (503, True),
         (504, True),
-        (501, True),
+        (501, False),
+        (505, False),
     ],
 )
 def test_arm_status_retry_policy_preserves_auth_and_transient_categories(
@@ -741,6 +745,43 @@ async def test_create_rejects_stable_label_collision_with_foreign_binding(
 
 
 @pytest.mark.asyncio
+async def test_accepted_create_recovery_preserves_a_stable_label_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    environment.group_client.create_result_error = RuntimeError("accepted poll failed")
+    original_list = environment.group_client.list_sandboxes
+
+    def list_with_post_acceptance_collision(**kwargs: Any):
+        if environment.group_client.create_calls:
+            environment.sandboxes["created-1"].labels["session_id"] = "other-session"
+        return original_list(**kwargs)
+
+    monkeypatch.setattr(
+        environment.group_client,
+        "list_sandboxes",
+        list_with_post_acceptance_collision,
+    )
+
+    with pytest.raises(SandboxProvisioningError, match="collision"):
+        await adapter.create(_request(labels=labels), persisted_group=_binding())
+
+    assert len(environment.group_client.create_calls) == 1
+    assert "created-1" in environment.sandboxes
+    await adapter.close()
+
+
+@pytest.mark.asyncio
 async def test_create_rejects_multiple_exact_stable_label_matches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -963,9 +1004,14 @@ async def test_stable_create_recovers_labeled_sandbox_after_poller_authorization
         RuntimeError("sensitive poll failure"),
     ],
 )
-async def test_stable_create_keeps_post_acceptance_authorization_failure_indeterminate(
+@pytest.mark.parametrize(
+    "reconciliation_failure_kind",
+    ["authorization", "http_503", "timeout"],
+)
+async def test_stable_create_keeps_post_acceptance_reconciliation_failure_indeterminate(
     monkeypatch: pytest.MonkeyPatch,
     poll_failure: Exception,
+    reconciliation_failure_kind: str,
 ) -> None:
     environment = FakeSdkEnvironment()
     _install_fake_adapter_boundary(monkeypatch, environment)
@@ -978,26 +1024,32 @@ async def test_stable_create_keeps_post_acceptance_authorization_failure_indeter
         session_id="session-123",
         operation_label="op-session-123-1",
     )
-    rejection = HttpResponseError("sensitive provider response")
-    rejection.status_code = 403
+    reconciliation_failure: Exception
+    if reconciliation_failure_kind == "timeout":
+        reconciliation_failure = TimeoutError("sensitive reconciliation timeout")
+    else:
+        reconciliation_failure = HttpResponseError("sensitive provider response")
+        reconciliation_failure.status_code = (
+            403 if reconciliation_failure_kind == "authorization" else 503
+        )
     environment.group_client.create_result_error = poll_failure
     original_list = environment.group_client.list_sandboxes
 
-    def list_before_create_then_forbid(**kwargs: Any):
+    def list_before_create_then_fail(**kwargs: Any):
         if environment.group_client.create_calls:
-            raise rejection
+            raise reconciliation_failure
         return original_list(**kwargs)
 
     monkeypatch.setattr(
         environment.group_client,
         "list_sandboxes",
-        list_before_create_then_forbid,
+        list_before_create_then_fail,
     )
 
     with pytest.raises(SandboxCreateOutcomeUnknownError) as caught:
         await adapter.create(_request(labels=labels), persisted_group=_binding())
 
-    assert "sensitive provider response" not in str(caught.value)
+    assert "sensitive" not in str(caught.value)
     assert "sensitive poll" not in str(caught.value)
     assert caught.value.__suppress_context__
     assert len(environment.group_client.create_calls) == 1

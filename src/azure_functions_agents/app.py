@@ -436,7 +436,7 @@ def _build_session_runtime_binding(
     async def targeted_reconcile(
         partition: OwnerPartition,
         session_id: str,
-        setup_deadline: SetupDeadline,
+        _setup_deadline: SetupDeadline | None,
     ) -> None:
         state_binding = await runtime.get_state_store()
         provider = await runtime.get_provider()
@@ -447,7 +447,7 @@ def _build_session_runtime_binding(
             cadence_seconds=resolve_reconciler_cadence(),
             terminal_bindings=terminal_bindings,
         )
-        await reconciler.reconcile_session(partition, session_id, setup_deadline)
+        await reconciler.reconcile_session_targeted(partition, session_id)
 
     async def bounded_reconcile(partition: OwnerPartition, session_id: str) -> None:
         state_binding = await runtime.get_state_store()

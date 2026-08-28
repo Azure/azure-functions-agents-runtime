@@ -432,6 +432,8 @@ controlling amendments.
 | 184 | Provider transient handling | Opaque failure / classified bounded recovery | Preserve sanitized ARM status metadata, retry only transient ARM outcomes, and use lifecycle-aware bounded file readiness retries with `Retry-After`. | Human + Agent | 2026-08-25 | Bug-fix correction |
 | 185 | Built-in UI session reuse | Reuse after `done` / wait for durable terminal phase | Have the built-in chat UI capture stream run metadata and poll `Location` until `phase=terminal`, keeping same-session submission disabled during settling. | Human + Agent | 2026-08-26 | Bug-fix correction |
 | 186 | Capacity-failure reconciliation ownership (narrows #58/#61) | Bounded app-wide request sweep / session-targeted repair / timer-only | Keep session-targeted repair and one retry; unrelated global reclamation stays timer-owned, so capacity may remain exhausted. | Human | 2026-08-27 | Bug-fix correction |
+| 187 | Authorization replay and settlement origin (revises #159/#185) | Generic replay / status-preserving replay; any HTTPS / same origin | Preserve sanitized `401`/`403` across exact replay, while keeping the public reason generic; reject cross-origin status URLs before attaching Function credentials or session metadata. | Human + Agent | 2026-08-27 | Review correction |
+| 188 | Bounded recovery closure (refines #183/#184) | Broad/implicit / targeted and explicit | Use session-filtered request repair; retain accepted-create lookup failures as indeterminate; report deferred timer work as partial; apply the declared ARM retry set and hard delay caps after jitter. | Human + Agent | 2026-08-27 | Review correction |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -520,7 +522,9 @@ ACA `get_run`, `read_events`, and `cancel_run` are Table-first, not controller
 catches around activation. They validate owner/run/session/operation before
 activation; result returns nonterminal projection as `200`, events heartbeat
 without invented events until launch, and cancellation returns durable IDs on
-any remaining typed timeout rather than a Functions `500`.
+any remaining typed timeout rather than a Functions `500`. The built-in UI
+accepts only same-origin management locations before forwarding Function
+credentials or session identifiers.
 
 #### Pre-launch cancel, operation race, and retained-slot transient
 
@@ -1575,13 +1579,15 @@ or emit this setup-timeout event.
 
 `AcaSandboxExecutionBackend.start_run()` anchors that one setup budget before
 its first targeted `runtime.reconcile_session()` call. `TargetedReconciler`,
-`SessionRuntimeBinding.reconcile_session()`, the `app.py` closure, and
-`SessionReconciler.reconcile_session()` accept that deadline; the backend
-bounds both the initial and conflict-retry calls with
-`phase=provision_reconcile` and reuses the same budget in `_start_run_once()`.
-Neither reconciliation starts a fresh clock. The targeted reconciler retains
-its existing ETag-fenced/idempotent terminal adoption, expired-operation
-takeover, and cleanup behavior; those mutations are themselves recoverable
+`SessionRuntimeBinding.reconcile_session()`, and the `app.py` closure accept the
+optional deadline, while the closure invokes
+`SessionReconciler.reconcile_session_targeted()` so request work lists only the
+requested session. The backend bounds both the initial and conflict-retry calls
+with `phase=provision_reconcile` and reuses the same budget in
+`_start_run_once()`; reconciliation never starts a fresh clock. The targeted
+reconciler retains its existing ETag-fenced/idempotent terminal adoption,
+expired-operation takeover, and cleanup behavior; those mutations are
+themselves recoverable
 setup work and may occur before a later timeout. Cancellation/expiry must leave
 their durable operation resumable. This path never calls provider create or
 admits a new run. An initial or retry reconciliation timeout returns the typed

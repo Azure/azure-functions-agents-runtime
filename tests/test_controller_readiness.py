@@ -1601,6 +1601,47 @@ async def test_missing_or_transient_bootstrap_report_keeps_manifest_polling(
 
 
 @pytest.mark.asyncio
+async def test_manifest_retry_caps_the_final_jittered_delay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    sleep_delays: list[float] = []
+
+    async def eventual_manifest(*_args: object, **_kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise SandboxFileOperationError(
+                "sandbox is resuming",
+                status_code=409,
+                retry_after_seconds=10.0,
+            )
+
+    async def capture_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+
+    script_root = _script_root(tmp_path)
+    expected = readiness_module.build_expected_manifest_binding(
+        _session(script_root),
+        sandbox_group_resource_id=_GROUP_RESOURCE_ID,
+        state_store_fingerprint=_FINGERPRINT,
+    )
+    monkeypatch.setattr(readiness_module, "read_live_manifest_binding", eventual_manifest)
+    monkeypatch.setattr(readiness_module.random, "uniform", lambda _start, end: end)
+    monkeypatch.setattr(readiness_module.asyncio, "sleep", capture_sleep)
+
+    await readiness_module._wait_for_created_manifest(
+        _FakeHandle(),
+        expected=expected,
+        setup_deadline=SetupBudget.start(),
+    )
+
+    assert calls == 2
+    assert sleep_delays == [readiness_module._FILE_RETRY_MAX_DELAY_SECONDS]
+
+
+@pytest.mark.asyncio
 async def test_malformed_bootstrap_error_report_fails_closed(tmp_path: Path) -> None:
     script_root = _script_root(tmp_path)
     session = _session(script_root)

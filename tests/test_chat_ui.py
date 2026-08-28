@@ -33,6 +33,12 @@ def _settlement_location_function(script: str) -> str:
     return script[start:end]
 
 
+def _settlement_poll_functions(script: str) -> str:
+    start = script.index("function appendAuthQuery(")
+    end = script.index("\n\t\tfunction beginRunSettlement(", start)
+    return script[start:end]
+
+
 def _run_node(harness: str) -> None:
     result = subprocess.run(
         [shutil.which("node") or "node", "--input-type=module", "-e", harness],
@@ -181,10 +187,10 @@ def test_settlement_location_resolves_under_deployment_prefix() -> None:
             expected: "https://example.test/api/agents/main/sessions/s1/runs/r1",
           },
           {
-            name: "absolute location",
+            name: "same-origin absolute location",
             apiBasePath: "/api/agents/main",
-            location: "https://management.example/agents/main/sessions/s1/runs/r1",
-            expected: "https://management.example/agents/main/sessions/s1/runs/r1",
+            location: "https://example.test/api/agents/main/sessions/s1/runs/r1",
+            expected: "https://example.test/api/agents/main/sessions/s1/runs/r1",
           },
         ];
 
@@ -205,8 +211,60 @@ def test_settlement_location_resolves_under_deployment_prefix() -> None:
         if (!unsafeSchemeRejected) {
           throw new Error("unsafe settlement Location scheme was accepted");
         }
+
+        let crossOriginRejected = false;
+        try {
+          resolveSettlementLocation("https://management.example/agents/main/sessions/s1/runs/r1");
+        } catch {
+          crossOriginRejected = true;
+        }
+        if (!crossOriginRejected) {
+          throw new Error("cross-origin settlement Location was accepted");
+        }
         """
     ).replace("__SETTLEMENT_LOCATION_FUNCTION__", function)
+
+    _run_node(harness)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_cross_origin_settlement_never_sends_credentials_or_session_metadata() -> None:
+    functions = _settlement_poll_functions(_script_text())
+    harness = textwrap.dedent(
+        """
+        const state = {
+          baseUrl: "https://example.test",
+          key: "secret-function-key",
+          sessionId: "session-1",
+          settling: true,
+          settlementLocation: "https://management.example/runs/run-1",
+          settlementSessionId: "session-1",
+          settlementRunId: "run-1",
+          settlementPollInFlight: false,
+          settlementTimer: null,
+        };
+        const fetchCalls = [];
+        const statuses = [];
+        globalThis.window = { setTimeout: () => 1 };
+        globalThis.fetch = (...args) => {
+          fetchCalls.push(args);
+          throw new Error("cross-origin fetch must not run");
+        };
+        function getApiBasePath() { return "/api/agents/main"; }
+        function clearRunSettlement() {}
+        function setStatus(message) { statuses.push(message); }
+
+        __SETTLEMENT_POLL_FUNCTIONS__
+
+        await pollRunSettlement();
+        if (fetchCalls.length !== 0) {
+          throw new Error("cross-origin settlement sent a request");
+        }
+        if (!statuses.some((value) => value.includes("configured origin"))) {
+          throw new Error("cross-origin settlement rejection was not surfaced");
+        }
+        """
+    ).replace("__SETTLEMENT_POLL_FUNCTIONS__", functions)
 
     _run_node(harness)
 

@@ -5,15 +5,34 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Literal, get_args
 
 _MAX_PROVIDER_LABEL_VALUE_LENGTH = 63
-SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE = "sandbox_group_authorization_failed"
 SANDBOX_GROUP_AUTHORIZATION_MESSAGE = (
     "Sandbox Group data-plane authorization failed. Grant the controller identity "
     "'Container Apps SandboxGroup Data Owner' on the configured Sandbox Group."
 )
+
+
+class SandboxGroupAuthorizationFailureReason(StrEnum):
+    """Durable classifications for Sandbox Group authorization failures."""
+
+    AUTHENTICATION_FAILED = "sandbox_group_authentication_failed"
+    AUTHORIZATION_FAILED = "sandbox_group_authorization_failed"
+
+    @classmethod
+    def from_status_code(cls, status_code: int) -> SandboxGroupAuthorizationFailureReason:
+        if status_code == 401:
+            return cls.AUTHENTICATION_FAILED
+        return cls.AUTHORIZATION_FAILED
+
+    @property
+    def status_code(self) -> int:
+        if self is self.AUTHENTICATION_FAILED:
+            return 401
+        return 403
 
 
 class SandboxTransportError(Exception):

@@ -32,8 +32,8 @@ from ..session_state import (
     SessionRowNotFoundError,
 )
 from ..transport.transport_models import (
-    SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
     SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+    SandboxGroupAuthorizationFailureReason,
 )
 from .budget import RequestBudget, RunDeadlineExceededError
 from .idempotency import IdempotencyResultUnavailableError
@@ -438,11 +438,12 @@ def _with_request_metadata(
 def _sandbox_group_authorization_response(
     error: SessionActivationAuthorizationError | None = None,
 ) -> ControllerResponse:
+    public_reason = SandboxGroupAuthorizationFailureReason.AUTHORIZATION_FAILED.value
     return ControllerResponse(
         status_code=error.status_code if error is not None else 403,
         body={
-            "error": SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
-            "reason": SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
+            "error": public_reason,
+            "reason": public_reason,
             "message": SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
         },
     )

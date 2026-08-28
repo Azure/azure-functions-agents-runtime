@@ -2303,6 +2303,9 @@
 			if (resolved.protocol !== "http:" && resolved.protocol !== "https:") {
 				throw new Error("Run status Location must use HTTP or HTTPS.");
 			}
+			if (resolved.origin !== new URL(state.baseUrl).origin) {
+				throw new Error("Run status Location must use the configured origin.");
+			}
 			return resolved.toString();
 		}
 

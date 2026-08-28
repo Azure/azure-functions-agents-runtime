@@ -113,7 +113,11 @@ async def retry_file_operation(
                 else _FILE_RETRY_BASE_DELAY_SECONDS * (2**attempt)
             )
             delay = min(_FILE_RETRY_MAX_DELAY_SECONDS, max(0.0, delay))
-            delay = min(remaining, delay + random.uniform(0.0, delay * 0.25))
+            delay = min(
+                remaining,
+                _FILE_RETRY_MAX_DELAY_SECONDS,
+                delay + random.uniform(0.0, delay * 0.25),
+            )
             await asyncio.sleep(delay)
     raise AssertionError("unreachable")
 
