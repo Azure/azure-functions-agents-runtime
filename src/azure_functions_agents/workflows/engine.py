@@ -213,13 +213,28 @@ def _call_task_activity(
     )
 
 
+@dataclass(frozen=True)
+class _TaskOutcome:
+    """A committed node result plus, when it was continued, the failure behind it.
+
+    ``continued_failure`` is scheduler metadata only. It never reaches the
+    workflow output — the node's committed ``result`` is the sanitized ``failed``
+    envelope — but it lets the structured status report *which* failure was
+    continued without re-deriving it from the result shape (a successful handler
+    may legitimately return a dict with a ``failed`` key).
+    """
+
+    result: Any
+    continued_failure: ActivityFailure | None
+
+
 def _resolve_task_outcome(
     node_id: str,
     *,
     policy_aware: bool,
     continue_on_error: bool,
     raw: Any,
-) -> Any:
+) -> _TaskOutcome:
     """Return a node result, raising unless a continuable failure may be committed.
 
     ``raw`` is either the value the Activity produced or the exception Durable
@@ -234,11 +249,11 @@ def _resolve_task_outcome(
             # be shown to be a continuable application failure.
             raise raw
     elif not policy_aware:
-        return raw["result"]
+        return _TaskOutcome(raw["result"], None)
     else:
         succeeded, outcome = validate_activity_result(node_id, raw)
         if succeeded:
-            return outcome
+            return _TaskOutcome(outcome, None)
         failure = cast(ActivityFailure, outcome)
     if continue_on_error and failure_is_continuable(failure):
         logger.info(
@@ -246,16 +261,16 @@ def _resolve_task_outcome(
             node_id,
             failure["error_code"],
         )
-        return _continued_failure_result(failure)
+        return _TaskOutcome(_continued_failure_result(failure), failure)
     raise RuntimeError(f"task {node_id!r}: {failure['error']} ({failure['error_code']})")
 
 
 def _decode_wave_failure(node_ids: list[str], error: BaseException) -> BaseException:
     """Replace an exhausted native-retry failure with its sanitized cause.
 
-    Durable reports one failure for the whole wave, so the sanitized payload is
-    matched back to its node by id. Node order is deterministic, and the decode
-    is a pure function of persisted data, so replay is unaffected.
+    The sanitized payload is matched back to its node by id. Node order is
+    deterministic, and the decode is a pure function of persisted data, so
+    replay is unaffected.
     """
     for node_id in node_ids:
         failure = decode_durable_retry_failure(node_id, error)
@@ -509,7 +524,7 @@ def _run_static_workflow(
                     policy_aware=bool(spec.get("policy_aware")),
                     continue_on_error=bool(spec.get("continue_on_error")),
                     raw=raw,
-                )
+                ).result
             else:
                 results[tid] = {"waited_until": spec["deadline"]}
             remaining.discard(tid)
@@ -564,7 +579,7 @@ type _LogicalState = Literal[
     "completed",
     "failed",
 ]
-type _InstanceState = Literal["pending", "running", "skipped", "completed"]
+type _InstanceState = Literal["pending", "running", "skipped", "completed", "failed"]
 type _InstanceKind = Literal["activity", "timer"]
 
 
@@ -577,6 +592,12 @@ class _MaterializedInstance(TypedDict):
     resolved: NotRequired[Any]
     kind: NotRequired[_InstanceKind]
     deadline: NotRequired[str]
+    # Scheduler-only metadata for a node that ``continue_on_error`` committed a
+    # sanitized failure for. Its ``state`` deliberately stays ``completed``: the
+    # aggregate ``{index, status, result}`` contract and every terminal-state
+    # predicate below are unchanged, and the structured status projects the
+    # continuation separately.
+    continued_failure: NotRequired[ActivityFailure]
 
 
 @dataclass
@@ -591,6 +612,7 @@ class _DynamicWorkflowState:
     node_instances: dict[str, list[_MaterializedInstance]]
     expanded_count: dict[str, int]
     budget_used: int
+    policy_aware: bool
 
 
 def _new_dynamic_workflow_state(
@@ -623,6 +645,11 @@ def _new_dynamic_workflow_state(
         node_instances={},
         expanded_count={},
         budget_used=sum(1 for task in tasks if task.get("for_each") is None),
+        # Read from the persisted orchestration input, so it is identical on
+        # every replay and identical for every runtime version that replays
+        # this history. A plan whose tasks froze no policy keeps emitting the
+        # pre-existing schema_version 2 status.
+        policy_aware=any(_persisted_execution(task) is not None for task in tasks),
     )
 
 
@@ -632,47 +659,131 @@ def _materialized_total(
     return sum(len(instances) for instances in node_instances.values())
 
 
-def _dynamic_status(state: _DynamicWorkflowState) -> dict[str, Any]:
-    """Build the versioned (schema_version=2) structured ``custom_status`` object.
+#: How many continued failures may carry their `last_failure_kind` /
+#: `last_error_code` detail in one status object. Durable caps a custom status
+#: at 16 KB, and a fully-expanded plan can materialize ``MAX_NODES`` instances;
+#: the cap is applied in deterministic (logical id, index) order so replay
+#: reproduces exactly the same status.
+_STATUS_FAILURE_DETAIL_LIMIT = 20
 
-    ``counts`` are instance-level for completed/skipped/running and node-level
-    for ``logical_total``; ``materialized_total`` counts every materialized
-    instance (including skipped ones). ``nodes`` renders logical node state,
-    plus per-instance state for expanded ``for_each`` nodes.
+
+def _reported_instance_state(instance: _MaterializedInstance) -> str:
+    """Project the scheduler state a status reader should see.
+
+    A continued failure runs to a committed result, so the scheduler keeps it
+    ``completed``; the status reports it as ``failed_continued`` so an operator
+    is not told a node succeeded when its result is a sanitized failure.
     """
-    completed = skipped = running = 0
+    if instance["state"] == "completed" and "continued_failure" in instance:
+        return "failed_continued"
+    return instance["state"]
+
+
+def _dynamic_status(state: _DynamicWorkflowState) -> dict[str, Any]:
+    """Build the versioned structured ``custom_status`` object.
+
+    Version 2 is the data-driven workflow snapshot and is emitted unchanged for
+    any plan that froze no execution policy. Version 3 adds task-execution
+    reporting for policy-aware plans: the declared attempt budget, which node
+    failed or was continued past, and that Durable — not the orchestrator — owns
+    retry. Attempts in flight are deliberately not reported: Durable owns the
+    budget and a replayed orchestration cannot observe it (FRD 0004 Decision 73).
+
+    ``counts`` are instance-level for completed/skipped/running (and, in v3,
+    pending/failed/failed_continued) and node-level for ``logical_total``;
+    ``materialized_total`` counts every materialized instance (including skipped
+    ones) in both versions. ``nodes`` renders logical node state, plus
+    per-instance state for expanded ``for_each`` nodes.
+    """
+    completed = skipped = running = pending = failed = failed_continued = 0
     for insts in state.node_instances.values():
         for inst in insts:
-            instance_state = inst["state"]
+            instance_state = _reported_instance_state(inst)
             if instance_state == "completed":
                 completed += 1
             elif instance_state == "skipped":
                 skipped += 1
             elif instance_state == "running":
                 running += 1
+            elif instance_state == "pending":
+                pending += 1
+            elif instance_state == "failed":
+                failed += 1
+            elif instance_state == "failed_continued":
+                failed_continued += 1
+
+    detail_budget = _STATUS_FAILURE_DETAIL_LIMIT
+
+    def execution_fields(instance: _MaterializedInstance) -> dict[str, Any]:
+        nonlocal detail_budget
+        if not state.policy_aware:
+            return {}
+        execution = _persisted_execution(state.by_id[instance["logical_id"]])
+        fields: dict[str, Any] = {}
+        if execution is not None:
+            fields["max_attempts"] = execution["max_attempts"]
+        failure = instance.get("continued_failure")
+        if failure is not None and detail_budget > 0:
+            detail_budget -= 1
+            fields["last_failure_kind"] = failure["kind"]
+            fields["last_error_code"] = failure["error_code"]
+        return fields
 
     nodes: dict[str, Any] = {}
     for lid, task in state.by_id.items():
+        instances = state.node_instances.get(lid, [])
         node: dict[str, Any] = {"state": state.logical_state[lid]}
         if task.get("for_each") is not None and lid in state.expanded_count:
             node["expanded_count"] = state.expanded_count[lid]
             node["instances"] = {
-                inst["instance_id"]: {"state": inst["state"]}
-                for inst in state.node_instances.get(lid, [])
+                inst["instance_id"]: {
+                    "state": _reported_instance_state(inst),
+                    **execution_fields(inst),
+                }
+                for inst in instances
             }
+        elif state.policy_aware:
+            if instances:
+                node["state"] = _reported_logical_state(state, lid, instances[0])
+                node.update(execution_fields(instances[0]))
+            else:
+                execution = _persisted_execution(task)
+                if execution is not None:
+                    node["max_attempts"] = execution["max_attempts"]
         nodes[lid] = node
 
-    return {
-        "schema_version": 2,
-        "counts": {
-            "logical_total": len(state.by_id),
-            "materialized_total": _materialized_total(state.node_instances),
-            "completed": completed,
-            "skipped": skipped,
-            "running": running,
-        },
+    counts: dict[str, Any] = {
+        "logical_total": len(state.by_id),
+        "materialized_total": _materialized_total(state.node_instances),
+        "completed": completed,
+        "skipped": skipped,
+        "running": running,
+    }
+    status: dict[str, Any] = {
+        "schema_version": 3 if state.policy_aware else 2,
+        "counts": counts,
         "nodes": nodes,
     }
+    if state.policy_aware:
+        counts["pending"] = pending
+        counts["failed"] = failed
+        counts["failed_continued"] = failed_continued
+        # Durable owns the attempt budget, so a reader must not expect this
+        # runtime to publish attempt numbers or backoff deadlines.
+        status["retry_driver"] = "durable"
+    return status
+
+
+def _reported_logical_state(
+    state: _DynamicWorkflowState,
+    logical_id: str,
+    instance: _MaterializedInstance,
+) -> str:
+    """Project a non-iterated node's state, mirroring its single instance."""
+    logical_state = state.logical_state[logical_id]
+    if logical_state == "completed":
+        return _reported_instance_state(instance)
+    return logical_state
 
 
 _UNBOUND = object()
@@ -1106,6 +1217,25 @@ def _restore_canceled_dynamic_wave(
         )
 
 
+def _mark_dynamic_wave_failure(
+    state: _DynamicWorkflowState,
+    wave: list[_MaterializedInstance],
+    wave_results: list[Any],
+) -> None:
+    """Record the instance whose failure ends the workflow.
+
+    ``_await_wave`` reports each node's own outcome in wave order, so the
+    failing instance is identified positionally — it does not depend on the
+    failure carrying a sanitized, decodable cause, and an opaque Durable failure
+    is attributed just as precisely as a classified one.
+    """
+    for instance, outcome in zip(wave, wave_results, strict=True):
+        if isinstance(outcome, BaseException):
+            instance["state"] = "failed"
+            state.logical_state[instance["logical_id"]] = "failed"
+            return
+
+
 def _apply_dynamic_wave_results(
     state: _DynamicWorkflowState,
     wave: list[_MaterializedInstance],
@@ -1115,13 +1245,25 @@ def _apply_dynamic_wave_results(
         if instance.get("kind") == "timer":
             instance["result"] = {"waited_until": instance["deadline"]}
         else:
-            task = state.by_id[instance["logical_id"]]
-            instance["result"] = _resolve_task_outcome(
-                instance["instance_id"],
-                policy_aware=_persisted_execution(task) is not None,
-                continue_on_error=_continue_on_error(task),
-                raw=raw,
-            )
+            logical_id = instance["logical_id"]
+            task = state.by_id[logical_id]
+            try:
+                outcome = _resolve_task_outcome(
+                    instance["instance_id"],
+                    policy_aware=_persisted_execution(task) is not None,
+                    continue_on_error=_continue_on_error(task),
+                    raw=raw,
+                )
+            except BaseException:
+                # The node that ends the workflow is recorded before the failure
+                # propagates, so the last published status names it instead of
+                # freezing on the pre-failure snapshot.
+                instance["state"] = "failed"
+                state.logical_state[logical_id] = "failed"
+                raise
+            instance["result"] = outcome.result
+            if outcome.continued_failure is not None:
+                instance["continued_failure"] = outcome.continued_failure
         instance["state"] = "completed"
         if instance["index"] is None:
             logical_id = instance["logical_id"]
@@ -1188,7 +1330,7 @@ def _run_dynamic_workflow(
             )
             _cancel_dynamic_wave_timers(wave, wave_tasks)
             if not continuable_wave:
-                raise _decode_wave_failure(
+                error = _decode_wave_failure(
                     [
                         instance["instance_id"]
                         for instance in wave
@@ -1197,10 +1339,14 @@ def _run_dynamic_workflow(
                     ],
                     wave_failure,
                 )
+                _mark_dynamic_wave_failure(state, wave, wave_results)
+                _publish_dynamic_status(context, state)
+                raise error
         try:
             _apply_dynamic_wave_results(state, wave, wave_results)
         except BaseException:
             _cancel_dynamic_wave_timers(wave, wave_tasks)
+            _publish_dynamic_status(context, state)
             raise
         _publish_dynamic_status(context, state)
 
@@ -1486,7 +1632,8 @@ def register_workflows(
         with its exact pre-#1276 wave scheduling and string ``custom_status``
         behavior. Any ``when`` / ``for_each`` selects
         :func:`_run_dynamic_workflow`, which materializes instances, aggregates
-        results, and publishes structured (schema_version=2) status.
+        results, and publishes structured status (``schema_version`` 2, or 3
+        when the plan froze a task execution policy).
 
         Determinism contract (both paths):
         - Ready/runnable sets ordered deterministically before each wave.
