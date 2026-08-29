@@ -126,6 +126,19 @@ def _wait_deadline(context: df.DurableOrchestrationContext, task: Mapping[str, A
     return deadline
 
 
+def _completed_task_outcome(task: Any) -> Any:
+    """Return a completed Durable task's result, or the failure it raised.
+
+    Durable Functions Python 2.x raises from ``Task.result``; 1.x returned the
+    exception object instead. Normalizing both shapes here keeps wave failure
+    handling (timer cancellation, then rethrow) in exactly one place.
+    """
+    try:
+        return task.result
+    except Exception as exc:
+        return exc
+
+
 def _plan_is_dynamic(tasks: list[WorkflowTaskInput]) -> bool:
     """Return whether any task opts into data-driven control flow.
 
@@ -270,7 +283,7 @@ def _run_static_workflow(
                 "total_count": total,
             }
 
-        wave_results = wave_task.result
+        wave_results = _completed_task_outcome(wave_task)
         if isinstance(wave_results, BaseException):
             for spec, t in zip(wave_specs, wave_tasks, strict=True):
                 if spec["type"] == WAIT_TASK_TYPE and not t.is_completed:
@@ -940,7 +953,7 @@ def _run_dynamic_workflow(
                 "total_count": len(state.by_id),
             }
 
-        wave_results = wave_task.result
+        wave_results = _completed_task_outcome(wave_task)
         if isinstance(wave_results, BaseException):
             _cancel_dynamic_wave_timers(wave, wave_tasks)
             raise wave_results
@@ -988,7 +1001,7 @@ def register_workflows(
             )
         return workflow_agent_slug, policy
 
-    @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
+    @bp.activity_trigger(input_name="task")
     def agents_workflow_run_tool(task: _ToolActivityInput) -> dict[str, Any]:
         task_id = task["id"]
         tool_name = task["tool"]
@@ -1046,7 +1059,7 @@ def register_workflows(
         json.dumps(result)
         return {"id": task_id, "result": result}
 
-    @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
+    @bp.activity_trigger(input_name="task")
     async def agents_workflow_run_sub_agent(
         task: _SubAgentActivityInput,
     ) -> dict[str, Any]:
@@ -1130,7 +1143,7 @@ def register_workflows(
         json.dumps(result)
         return result
 
-    @bp.orchestration_trigger(context_name="context")  # type: ignore[untyped-decorator]
+    @bp.orchestration_trigger(context_name="context")  # type: ignore[arg-type]
     def agents_workflow_orchestrator(context: df.DurableOrchestrationContext) -> Any:
         """Execute a workflow plan, selecting the static or dynamic scheduler.
 

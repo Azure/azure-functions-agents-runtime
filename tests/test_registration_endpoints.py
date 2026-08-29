@@ -9,6 +9,8 @@ from types import SimpleNamespace
 from typing import Any, get_type_hints
 
 import azure.functions as func
+import pytest
+from azure.durable_functions import DurableFunctionsClient
 
 from azure_functions_agents._session_id import SESSION_ID_PATTERN
 from azure_functions_agents.config.schema import (
@@ -37,6 +39,7 @@ class FakeFunctionApp:
     def __init__(self) -> None:
         self.routes: list[dict[str, Any]] = []
         self.durable_clients: dict[Any, str] = {}  # handler -> client_name mapping
+        self.generic_inputs: dict[Any, dict[str, Any]] = {}
 
     def route(self, **kwargs: Any) -> Any:
         def decorator(handler: Any) -> Any:
@@ -44,7 +47,20 @@ class FakeFunctionApp:
             # Check if this handler has a durable client input
             if handler in self.durable_clients:
                 route_info["durable_client_input"] = self.durable_clients[handler]
+            if handler in self.generic_inputs:
+                route_info["generic_input_binding"] = self.generic_inputs[handler]
             self.routes.append(route_info)
+            return handler
+
+        return decorator
+
+    def generic_input_binding(self, **kwargs: Any) -> Any:
+        def decorator(handler: Any) -> Any:
+            self.generic_inputs[handler] = kwargs
+            for route in self.routes:
+                if route["handler"] is handler:
+                    route["generic_input_binding"] = kwargs
+                    break
             return handler
 
         return decorator
@@ -782,7 +798,7 @@ def test_register_builtin_endpoints_with_workflows_has_client_parameter(
     chat_params = inspect.signature(chat_handler).parameters
     assert "client" in chat_params, "Chat handler should have 'client' parameter when workflows enabled"
     assert chat_params["client"].default is inspect.Parameter.empty
-    assert get_type_hints(chat_handler)["client"] is str
+    assert get_type_hints(chat_handler)["client"] is DurableFunctionsClient
     assert "durable_client_input" in chat_route, "Chat handler should have durable_client_input decorator"
     assert chat_route["durable_client_input"] == "client", "Durable client input should be named 'client'"
 
@@ -793,8 +809,11 @@ def test_register_builtin_endpoints_with_workflows_has_client_parameter(
     assert "client" in stream_params, "Stream handler should have 'client' parameter when workflows enabled"
     assert stream_params["client"].default is inspect.Parameter.empty
     assert get_type_hints(stream_handler)["client"] is str
-    assert "durable_client_input" in stream_route, "Stream handler should have durable_client_input decorator"
-    assert stream_route["durable_client_input"] == "client", "Durable client input should be named 'client'"
+    assert stream_route["generic_input_binding"] == {
+        "arg_name": "client",
+        "type": "durableClient",
+    }
+    assert "durable_client_input" not in stream_route
 
 
 def test_register_builtin_endpoints_mcp_without_workflows_has_no_client_parameter(
@@ -850,7 +869,7 @@ def test_register_builtin_endpoints_mcp_with_workflows_has_client_parameter(
     mcp_params = inspect.signature(mcp_handler).parameters
     assert "client" in mcp_params, "MCP handler should have 'client' parameter when workflows enabled"
     assert mcp_params["client"].default is inspect.Parameter.empty
-    assert get_type_hints(mcp_handler)["client"] is str
+    assert get_type_hints(mcp_handler)["client"] is DurableFunctionsClient
     assert "durable_client_input" in mcp_routes[0], "MCP handler should have durable_client_input decorator"
     assert mcp_routes[0]["durable_client_input"] == "client", "Durable client input should be named 'client'"
 
@@ -890,6 +909,150 @@ def test_workflows_enabled_passes_client_to_run_builtin_agent(
     assert run_calls["kwargs"]["workflows_enabled"] is True
     assert run_calls["kwargs"]["durable_client"] is mock_client
     assert run_calls["kwargs"]["workflow_policy"] is None
+
+
+def test_workflow_chatstream_owns_fresh_client_through_stream_consumption(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig())
+    clients: list[Any] = []
+
+    class FakeDurableClient:
+        def __init__(self, binding_value: str) -> None:
+            self.binding_value = binding_value
+            self.closed = False
+            clients.append(self)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    async def fake_run_builtin_agent_stream(
+        prompt: str, *, durable_client: FakeDurableClient, **kwargs: Any
+    ) -> Any:
+        assert not durable_client.closed
+        if prompt == "fail":
+            raise RuntimeError("stream failed")
+        yield f"data: {durable_client.binding_value}:{prompt}\n\n"
+        assert not durable_client.closed
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.DurableFunctionsClient",
+        FakeDurableClient,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent_stream",
+        fake_run_builtin_agent_stream,
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=True)
+    stream_route = next(
+        route for route in app.routes if route["route"] == "agents/test_agent/chatstream"
+    )
+
+    async def exercise_repeated_turns() -> None:
+        first = await stream_route["handler"](
+            DummyRequest({"prompt": "first"}, headers={"x-ms-session-id": "same-session"}),
+            client="binding-one",
+        )
+        first_chunks = [chunk async for chunk in first.body_iterator]
+
+        assert first_chunks == ["data: binding-one:first\n\n"]
+        assert len(clients) == 1
+        assert clients[0].closed is True
+
+        second = await stream_route["handler"](
+            DummyRequest({"prompt": "second"}, headers={"x-ms-session-id": "same-session"}),
+            client="binding-two",
+        )
+        second_chunks = [chunk async for chunk in second.body_iterator]
+
+        assert second_chunks == ["data: binding-two:second\n\n"]
+        assert len(clients) == 2
+        assert clients[1] is not clients[0]
+        assert clients[1].closed is True
+
+        failed = await stream_route["handler"](
+            DummyRequest({"prompt": "fail"}, headers={"x-ms-session-id": "same-session"}),
+            client="binding-three",
+        )
+        with pytest.raises(RuntimeError, match="stream failed"):
+            _ = [chunk async for chunk in failed.body_iterator]
+
+        assert len(clients) == 3
+        assert clients[2].closed is True
+
+    asyncio.run(exercise_repeated_turns())
+
+    assert stream_route["generic_input_binding"] == {
+        "arg_name": "client",
+        "type": "durableClient",
+    }
+    assert "durable_client_input" not in stream_route
+
+
+def test_concurrent_workflow_chatstreams_do_not_share_clients(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig())
+    clients: list[Any] = []
+
+    class FakeDurableClient:
+        def __init__(self, binding_value: str) -> None:
+            self.binding_value = binding_value
+            self.closed = False
+            clients.append(self)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    async def fake_run_builtin_agent_stream(
+        prompt: str, *, durable_client: FakeDurableClient, **kwargs: Any
+    ) -> Any:
+        yield f"data: {durable_client.binding_value}:{prompt}\n\n"
+        await asyncio.sleep(0)
+        assert not durable_client.closed
+        yield "data: done\n\n"
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.DurableFunctionsClient",
+        FakeDurableClient,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent_stream",
+        fake_run_builtin_agent_stream,
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=True)
+    stream_route = next(
+        route for route in app.routes if route["route"] == "agents/test_agent/chatstream"
+    )
+
+    async def exercise_concurrent_requests() -> None:
+        responses = await asyncio.gather(
+            stream_route["handler"](DummyRequest({"prompt": "one"}), client="binding-one"),
+            stream_route["handler"](DummyRequest({"prompt": "two"}), client="binding-two"),
+        )
+        chunks = await asyncio.gather(
+            *(
+                asyncio.create_task(_collect_stream(response.body_iterator))
+                for response in responses
+            )
+        )
+
+        assert chunks == [
+            ["data: binding-one:one\n\n", "data: done\n\n"],
+            ["data: binding-two:two\n\n", "data: done\n\n"],
+        ]
+
+    async def _collect_stream(stream: Any) -> list[str]:
+        return [chunk async for chunk in stream]
+
+    asyncio.run(exercise_concurrent_requests())
+
+    assert [client.binding_value for client in clients] == ["binding-one", "binding-two"]
+    assert all(client.closed for client in clients)
 
 
 def test_workflows_disabled_does_not_pass_client_to_run_builtin_agent(
