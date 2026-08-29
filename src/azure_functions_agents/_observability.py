@@ -20,6 +20,7 @@ so importing this module and calling its helpers is always safe.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -41,6 +42,8 @@ from .config.env import _to_bool, runtime_env_value
 #   * ``af.dynamic_session.*``  — attributes on the ``dynamic_session.execute`` (sandbox) span.
 #   * ``af.delegate.*``         — attributes on the ``execute_tool delegate_<slug>`` span added
 #                                 for a chat-time sub-agent delegation (FRD 0007).
+#   * ``af.workflow_task.*``    — attributes on the ``workflow.task.activity`` span opened for one
+#                                 policy-aware workflow Activity delivery (FRD 0004).
 #
 # Three ``af.*`` attributes are cross-cutting and can appear on any runtime span: fault domain,
 # lifecycle stage, and operation id (below). We reuse standard OTel semantic-convention attributes
@@ -107,6 +110,9 @@ _CONNECTION_ENV = "APPLICATIONINSIGHTS_CONNECTION_STRING"
 _AAD_AUTH_STRING_ENV = "APPLICATIONINSIGHTS_AUTHENTICATION_STRING"
 
 _CONTENT_ATTR_MAX_CHARS = 2048
+#: Identifier-like telemetry attributes (ids, names, codes) are capped far below content.
+_TELEMETRY_ATTR_MAX_CHARS = 128
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 _configured = False
 _enabled = False
@@ -327,6 +333,21 @@ def bounded_content(value: str) -> str:
     return value[:_CONTENT_ATTR_MAX_CHARS] + "…[truncated]"
 
 
+def bounded_attribute(value: str) -> str:
+    """Normalize an identifier-like attribute value for telemetry.
+
+    Unlike :func:`bounded_content` (which trims model/tool *content*), this is for
+    the short identifiers, target names, and stable error codes that runtime spans
+    carry unconditionally. Control characters are collapsed so a hostile value
+    cannot inject line breaks into a log or trace viewer, and the result is capped
+    well below the content limit.
+    """
+    collapsed = _CONTROL_CHAR_RE.sub(" ", value).strip()
+    if len(collapsed) <= _TELEMETRY_ATTR_MAX_CHARS:
+        return collapsed
+    return collapsed[:_TELEMETRY_ATTR_MAX_CHARS] + "…"
+
+
 def current_span() -> RuntimeSpan:
     """Wrap whatever OTel span is already active, without starting a new one.
 
@@ -462,6 +483,8 @@ _web_request_counter: Any = None
 _web_request_error_counter: Any = None
 _delegate_call_counter: Any = None
 _delegate_error_counter: Any = None
+_workflow_task_start_counter: Any = None
+_workflow_task_completion_counter: Any = None
 _metrics_ready = False
 
 
@@ -469,6 +492,7 @@ def _ensure_metrics() -> None:
     global _meter, _sandbox_execution_counter, _sandbox_error_counter
     global _web_request_counter, _web_request_error_counter, _metrics_ready
     global _delegate_call_counter, _delegate_error_counter
+    global _workflow_task_start_counter, _workflow_task_completion_counter
     if _metrics_ready:
         return
     _metrics_ready = True
@@ -485,38 +509,164 @@ def _ensure_metrics() -> None:
             _meter = None
     if _meter is None:
         return
-    try:
-        _sandbox_execution_counter = _meter.create_counter(
-            "azure_functions_agents.dynamic_session.executions",
-            description="ACA dynamic-session code executions.",
-        )
-        _sandbox_error_counter = _meter.create_counter(
-            "azure_functions_agents.dynamic_session.errors",
-            description="ACA dynamic-session executions that produced an error or stderr.",
-        )
-        _web_request_counter = _meter.create_counter(
-            "azure_functions_agents.web_request.requests",
-            description="web_request system tool invocations.",
-        )
-        _web_request_error_counter = _meter.create_counter(
-            "azure_functions_agents.web_request.errors",
-            description="web_request invocations blocked or failed (SSRF, timeout, transport error).",
-        )
-        _delegate_call_counter = _meter.create_counter(
-            "azure_functions_agents.delegate.calls",
-            description="delegate_<slug> tool invocations (chat-time sub-agent delegation).",
-        )
-        _delegate_error_counter = _meter.create_counter(
-            "azure_functions_agents.delegate.errors",
-            description="delegate_<slug> invocations that failed or timed out (specialist-side; sanitized before reaching the model).",
-        )
-    except Exception:  # pragma: no cover - defensive
-        _sandbox_execution_counter = None
-        _sandbox_error_counter = None
-        _web_request_counter = None
-        _web_request_error_counter = None
-        _delegate_call_counter = None
-        _delegate_error_counter = None
+
+    def create_counter(name: str, description: str) -> Any:
+        # Per-instrument isolation: a meter that rejects one instrument must not
+        # silently disable every other counter in the runtime.
+        try:
+            return _meter.create_counter(name, description=description)
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+    _sandbox_execution_counter = create_counter(
+        "azure_functions_agents.dynamic_session.executions",
+        "ACA dynamic-session code executions.",
+    )
+    _sandbox_error_counter = create_counter(
+        "azure_functions_agents.dynamic_session.errors",
+        "ACA dynamic-session executions that produced an error or stderr.",
+    )
+    _web_request_counter = create_counter(
+        "azure_functions_agents.web_request.requests",
+        "web_request system tool invocations.",
+    )
+    _web_request_error_counter = create_counter(
+        "azure_functions_agents.web_request.errors",
+        "web_request invocations blocked or failed (SSRF, timeout, transport error).",
+    )
+    _delegate_call_counter = create_counter(
+        "azure_functions_agents.delegate.calls",
+        "delegate_<slug> tool invocations (chat-time sub-agent delegation).",
+    )
+    _delegate_error_counter = create_counter(
+        "azure_functions_agents.delegate.errors",
+        "delegate_<slug> invocations that failed or timed out "
+        "(specialist-side; sanitized before reaching the model).",
+    )
+    _workflow_task_start_counter = create_counter(
+        "azure_functions_agents.workflow_task.attempts",
+        "Policy-aware workflow Activity deliveries started.",
+    )
+    _workflow_task_completion_counter = create_counter(
+        "azure_functions_agents.workflow_task.outcomes",
+        "Policy-aware workflow Activity deliveries that reached an outcome.",
+    )
+
+
+#: Metric dimensions for the workflow-task counters.
+#:
+#: Deliberately a *subset* of the span attributes. Workflow ids, node instance
+#: ids, target names, timeout values, and handler-authored error codes are all
+#: unbounded, and a counter keyed on them would create one time series per task
+#: attempt. The span carries the full set for per-attempt investigation; the
+#: counters stay aggregatable.
+_WORKFLOW_TASK_METRIC_KEYS = (
+    "af.workflow_task.target_type",
+    "af.workflow_task.max_attempts",
+    "af.workflow_task.continue_on_error",
+    "af.workflow_task.retry_driver",
+    "af.workflow_task.outcome_kind",
+    "af.workflow_task.disposition",
+)
+
+
+def _workflow_task_metric_dimensions(attributes: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: attributes[key]
+        for key in _WORKFLOW_TASK_METRIC_KEYS
+        if attributes.get(key) is not None
+    }
+
+
+class WorkflowTaskActivityTelemetry:
+    """Records the terminal outcome of one policy-aware Activity delivery.
+
+    The span is opened by :func:`workflow_task_activity_telemetry` and stays
+    open until the caller leaves that context. Because a retryable failure is
+    *returned* from the handler wrapper and only raised afterwards (so the
+    private Durable retry marker never becomes a recorded span exception),
+    :meth:`complete` is what sets the error status and fault domain — the span
+    would otherwise look successful for every terminal failure.
+    """
+
+    __slots__ = ("_attributes", "_span")
+
+    def __init__(self, span: RuntimeSpan, attributes: dict[str, Any]) -> None:
+        self._span = span
+        self._attributes = attributes
+
+    def complete(
+        self,
+        *,
+        outcome_kind: str,
+        disposition: str,
+        error_code: str | None = None,
+        fault_domain: str | None = None,
+    ) -> None:
+        """Attach the delivery's outcome to the span and count it.
+
+        ``outcome_kind`` is the runtime's own classification (``success`` or an
+        Activity failure ``kind``); ``disposition`` is what this Activity did
+        about it, never a claim about what Durable will decide next.
+        """
+        terminal = {
+            "af.workflow_task.outcome_kind": bounded_attribute(outcome_kind),
+            "af.workflow_task.disposition": bounded_attribute(disposition),
+            "af.workflow_task.error_code": (
+                bounded_attribute(error_code) if error_code is not None else None
+            ),
+        }
+        for key, value in terminal.items():
+            self._span.set_attribute(key, value)
+        if fault_domain is not None:
+            self._span.set_error(
+                f"workflow task delivery failed: {terminal['af.workflow_task.outcome_kind']}",
+                fault_domain=fault_domain,
+            )
+        if not _enabled:
+            return
+        _ensure_metrics()
+        if _workflow_task_completion_counter is not None:
+            with suppress(Exception):  # pragma: no cover - defensive
+                _workflow_task_completion_counter.add(
+                    1,
+                    _workflow_task_metric_dimensions({**self._attributes, **terminal}),
+                )
+
+
+@contextmanager
+def workflow_task_activity_telemetry(
+    attributes: Mapping[str, Any],
+) -> Iterator[WorkflowTaskActivityTelemetry]:
+    """Open the span for one policy-aware workflow Activity delivery.
+
+    Emitted from the Activity only. The orchestrator replays, so telemetry
+    raised there would be duplicated on every replay; the Activity body runs
+    exactly once per delivery.
+
+    ``fault_domain`` is ``platform`` because the only exception that can escape
+    this scope is host-initiated cancellation — handler failures are classified
+    by :meth:`WorkflowTaskActivityTelemetry.complete` instead.
+    """
+    safe = {
+        key: (bounded_attribute(value) if isinstance(value, str) else value)
+        for key, value in attributes.items()
+        if value is not None
+    }
+    with start_span(
+        "workflow.task.activity",
+        fault_domain=FaultDomain.PLATFORM,
+        attributes=safe,
+    ) as span:
+        if _enabled:
+            _ensure_metrics()
+            if _workflow_task_start_counter is not None:
+                with suppress(Exception):  # pragma: no cover - defensive
+                    _workflow_task_start_counter.add(
+                        1,
+                        _workflow_task_metric_dimensions(safe),
+                    )
+        yield WorkflowTaskActivityTelemetry(span, safe)
 
 
 def record_sandbox_execution(*, error: bool) -> None:

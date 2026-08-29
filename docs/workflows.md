@@ -620,7 +620,9 @@ if context is not None:
 ```
 
 The attempt number is deliberately not exposed: Durable owns the attempt
-budget, and a replayed orchestration cannot observe it.
+budget, and a replayed orchestration cannot observe it. Per-attempt visibility
+lives in telemetry instead — each delivery records a `workflow.task.activity`
+span (see [Observability](#task-execution-spans-and-metrics)).
 
 Retry is bounded overall by an internal one-hour ceiling passed to Durable as
 `retry_timeout`.
@@ -679,6 +681,11 @@ application-level failures are continuable:
 
 An opaque Durable failure carries no classification, so it is never continued
 either.
+
+A continued node is reported as `failed_continued` in the structured status,
+with the failure's `kind` and `error_code` (see
+[`custom_status` schema versions](#custom_status-schema-versions)), so a
+continued failure is never mistaken for a success.
 
 ### Determinism contract
 
@@ -760,7 +767,7 @@ and `runtime_status` is `Failed`.
 
 ### `custom_status` schema versions
 
-`custom_status` has two accepted shapes; clients must accept **either**
+`custom_status` has three accepted shapes; clients must accept **any** of them
 during the experimental compatibility window:
 
 - **Schema version 1** — a free-form string, as shown above. Static plans
@@ -768,6 +775,10 @@ during the experimental compatibility window:
 - **Schema version 2** — a structured JSON object emitted by dynamically
   controlled workflows. The status tools and HTTP endpoint pass it through
   unchanged; the built-in UI renders its states rather than parsing text.
+- **Schema version 3** — the same object plus task-execution reporting, emitted
+  by a dynamically controlled workflow whose persisted plan froze at least one
+  [task execution policy](#task-execution-policy). A plan that froze none keeps
+  emitting version 2 unchanged.
 
 ```json
 {
@@ -799,6 +810,59 @@ Logical node states are `pending`, `running`, `skipped`, `expanded`,
 `aggregated`. A `for_each` node is `expanded` after materialization,
 `running` while any instance is in flight, and `aggregated` once its ordered
 result array is committed.
+
+Version 3 keeps every version 2 field with the same meaning and adds:
+
+| Field | Meaning |
+|---|---|
+| `retry_driver` | Always `"durable"` — Durable owns retry, so this runtime never publishes attempt numbers or backoff deadlines. |
+| `counts.pending` | Materialized instances waiting behind `max_parallelism`. |
+| `counts.failed` | Instances whose failure ended the workflow. |
+| `counts.failed_continued` | Instances that failed and were continued past. |
+| `nodes.<id>.max_attempts` | The attempt budget frozen for that task. |
+| `nodes.<id>.last_failure_kind` / `last_error_code` | The sanitized classification and stable code of a continued failure. |
+
+A continued node reports the state `failed_continued`. That is a *reporting*
+state: the node ran to a committed result, so its entry in a `for_each`
+node's ordered `{index, status, result}` aggregate stays `completed` and every
+downstream dependency behaves exactly as documented under
+[continuing past a failed task](#continuing-past-a-failed-task).
+
+```json
+{
+  "schema_version": 3,
+  "retry_driver": "durable",
+  "counts": {
+    "logical_total": 2,
+    "materialized_total": 2,
+    "completed": 1,
+    "skipped": 0,
+    "running": 0,
+    "pending": 0,
+    "failed": 0,
+    "failed_continued": 1
+  },
+  "nodes": {
+    "load": {"state": "completed"},
+    "enrich": {
+      "state": "failed_continued",
+      "max_attempts": 3,
+      "last_failure_kind": "handler_terminal",
+      "last_error_code": "enrichment_rejected"
+    }
+  }
+}
+```
+
+Two bounds keep the object safe to publish: only the stable `error_code` and
+`kind` a failure already carries are included — never handler output, task
+arguments, or exception text — and per-instance failure detail is capped at the
+first 20 continued failures in persisted plan order (then instance index) so a
+fully expanded plan stays inside Durable's custom-status size limit.
+
+A client that only understands version 2 is unaffected: it sees an unknown
+`schema_version` and degrades, exactly as it already must for any future
+version.
 
 ## Completion delivery
 
@@ -981,9 +1045,48 @@ agent-wide throttle.
   history.
 - **`custom_status`** — the orchestration emits a low-cost polling summary.
   Static plans return a concise string (`"3/7 tasks done, current=summarize"`);
-  dynamically controlled plans return the structured `schema_version: 2`
-  snapshot (see [status envelope](#custom_status-schema-versions)) with
-  per-node and per-instance state.
+  dynamically controlled plans return the structured `schema_version: 2` (or
+  `3`, for a plan with a task execution policy) snapshot (see
+  [status envelope](#custom_status-schema-versions)) with per-node and
+  per-instance state.
+- **Task execution spans** — every delivery of a task that froze an execution
+  policy records one `workflow.task.activity` span, including the deliveries a
+  policy denies before the handler runs.
+
+### Task execution spans and metrics
+
+The span is emitted from the **Activity**, never from the orchestrator: an
+orchestrator replays from history, so a span opened there would be re-emitted on
+every replay.
+
+| Attribute | Value |
+|---|---|
+| `af.workflow_task.workflow_id` | The Durable instance id. |
+| `af.workflow_task.task_id` | The logical task id from the plan. |
+| `af.workflow_task.node_instance_id` | The runtime-owned instance id (e.g. `inspect[3]`). |
+| `af.workflow_task.target_type` / `target_name` | `tool` or `sub_agent`, and which one. |
+| `af.workflow_task.max_attempts` / `timeout_ms` / `continue_on_error` | The frozen policy. |
+| `af.workflow_task.retry_driver` | Always `durable`. |
+| `af.workflow_task.outcome_kind` | `success`, `canceled`, or the failure `kind`. |
+| `af.workflow_task.error_code` | The stable code of a failed delivery. |
+| `af.workflow_task.disposition` | `return_result`, `request_durable_retry`, `return_failure`, or `abort`. |
+
+`disposition` reports what the Activity did, not what Durable decided:
+`request_durable_retry` means the delivery asked for another attempt, and
+whether one follows depends on the budget Durable is tracking. A failing
+delivery also sets `af.fault_domain` — `app` for anything a handler produced,
+`runtime` for a policy denial or a violated Activity contract.
+
+No task arguments, handler output, or Sub Agent text are attached, and the
+attempt number is deliberately absent (Durable owns the attempt budget).
+
+Two counters accompany the span:
+`azure_functions_agents.workflow_task.attempts` and
+`azure_functions_agents.workflow_task.outcomes`. Their dimensions are
+deliberately a low-cardinality subset — `target_type`, `max_attempts`,
+`continue_on_error`, `retry_driver`, and (for outcomes) `outcome_kind` and
+`disposition`. Workflow ids, node instance ids, target names, and error codes
+stay on the span, where one series per task attempt is not a problem.
 
 ## Requirements
 
@@ -1009,7 +1112,8 @@ v1 includes:
   `for_each` iteration with ordered `{index, status, result}` aggregation;
 - result templating with `${node_id.result}`, dotted paths, and the
   `${item}` / `${item.path}` / `${index}` iteration locals;
-- structured `schema_version: 2` status snapshots alongside legacy string
+- structured `schema_version: 2` status snapshots (and `schema_version: 3` for
+  plans with a task execution policy) alongside legacy string
   `custom_status`;
 - cooperative cancel and hard terminate;
 - live progress in the built-in chat UI;

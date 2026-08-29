@@ -205,11 +205,12 @@ def test_session_changes_invalidate_history_and_workflow_identity() -> None:
 
 
 def _status_formatter_functions(script: str) -> str:
-    """Extract the two pure `custom_status` formatter helpers.
+    """Extract the pure `custom_status` formatter helpers.
 
-    ``formatWorkflowStatus`` and ``formatDynamicWorkflowStatus`` live
-    contiguously just above ``renderWorkflowCard`` so they can be lifted
-    into a Node harness without their DOM-touching caller.
+    ``formatWorkflowStatus``, ``formatDynamicWorkflowStatus``, and
+    ``formatWorkflowExecutionDetail`` live contiguously just above
+    ``renderWorkflowCard`` so they can be lifted into a Node harness without
+    their DOM-touching caller.
     """
     start = script.index("function formatWorkflowStatus(")
     end = script.index("function renderWorkflowCard(", start)
@@ -369,6 +370,115 @@ def test_format_workflow_status_renders_v2_dynamic_snapshot() -> None:
           if (out.includes("[object Object]")) {
             throw new Error("partial v2 snapshot leaked [object Object]");
           }
+        }
+        """
+    ).replace("__STATUS_FUNCTIONS__", functions)
+
+    _run_node(harness)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_format_workflow_status_renders_v3_task_execution_snapshot() -> None:
+    functions = _status_formatter_functions(_script_text())
+    harness = textwrap.dedent(
+        """
+        __STATUS_FUNCTIONS__
+
+        // Schema version 3 keeps the v2 layout and adds task execution
+        // reporting: the frozen attempt budget, continued failures, and the
+        // node that failed. Retry attempts are owned by Durable and are
+        // deliberately absent, so the UI must not invent an attempt counter.
+        const policyAware = {
+          schema_version: 3,
+          retry_driver: "durable",
+          counts: {
+            logical_total: 3,
+            materialized_total: 4,
+            pending: 0,
+            running: 1,
+            completed: 1,
+            skipped: 0,
+            failed: 1,
+            failed_continued: 1,
+          },
+          nodes: {
+            reserve: {
+              state: "failed_continued",
+              max_attempts: 3,
+              last_failure_kind: "handler_terminal",
+              last_error_code: "inventory_rejected",
+            },
+            charge: { state: "failed", max_attempts: 2 },
+            notify: { state: "running", max_attempts: 1 },
+          },
+        };
+        const line = formatWorkflowStatus(policyAware);
+        if (!line.startsWith("1/4 done \u00b7 1 running \u00b7 1 continued \u00b7 1 failed")) {
+          throw new Error("v3 counts rendered as: " + line);
+        }
+        if (!line.includes("reserve: failed_continued [max 3 attempts, inventory_rejected]")) {
+          throw new Error("v3 continued node rendered as: " + line);
+        }
+        if (!line.includes("charge: failed [max 2 attempts]")) {
+          throw new Error("v3 failed node rendered as: " + line);
+        }
+        // A single-attempt node has no budget worth showing.
+        if (!line.endsWith("notify: running")) {
+          throw new Error("v3 single-attempt node rendered as: " + line);
+        }
+
+        // A continued instance still counts toward its for_each node's
+        // progress: it ran to a committed result.
+        const iterated = {
+          schema_version: 3,
+          retry_driver: "durable",
+          counts: {
+            logical_total: 1,
+            materialized_total: 2,
+            pending: 0,
+            running: 0,
+            completed: 1,
+            skipped: 0,
+            failed: 0,
+            failed_continued: 1,
+          },
+          nodes: {
+            fan: {
+              state: "aggregated",
+              expanded_count: 2,
+              instances: {
+                "fan[0]": { state: "completed", max_attempts: 1 },
+                "fan[1]": {
+                  state: "failed_continued",
+                  max_attempts: 1,
+                  last_error_code: "order_rejected",
+                },
+              },
+            },
+          },
+        };
+        const iteratedLine = formatWorkflowStatus(iterated);
+        if (!iteratedLine.includes("fan: aggregated (2/2) [order_rejected]")) {
+          throw new Error("v3 iterated node rendered as: " + iteratedLine);
+        }
+
+        // Malformed / partial v3 objects must degrade, not throw.
+        for (const partial of [
+          { schema_version: 3 },
+          { schema_version: 3, counts: null, nodes: "oops" },
+          { schema_version: 3, counts: {}, nodes: { a: { state: 1, max_attempts: "x" } } },
+        ]) {
+          const out = formatWorkflowStatus(partial);
+          if (typeof out !== "string") {
+            throw new Error("partial v3 snapshot did not degrade to a string");
+          }
+        }
+
+        // A version this client does not know must still degrade to JSON
+        // rather than being rendered with v3 assumptions.
+        const future = { schema_version: 4, counts: { completed: 1 } };
+        if (formatWorkflowStatus(future) !== JSON.stringify(future)) {
+          throw new Error("future schema_version was not degraded to JSON");
         }
         """
     ).replace("__STATUS_FUNCTIONS__", functions)
