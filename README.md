@@ -476,9 +476,10 @@ session_runtime:
     region: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION
 ```
 
-The region is required and selects the ACA data-plane endpoint directly; the
-runtime does not discover it through ARM. The Function App and Sandbox Group
-may be deployed in different regions.
+The required authored region identifies and selects the Sandbox Group's
+regional ACA data-plane endpoint directly. The Function App and Sandbox Group
+may be in the same or different regions. The runtime does not use ARM discovery
+or fallback.
 
 When enabled, ordinary chat calls remain synchronous. Send
 `Prefer: respond-async` on either built-in chat surface or a custom

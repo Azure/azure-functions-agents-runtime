@@ -40,8 +40,9 @@ A few boundaries are worth calling out explicitly:
   through the app-scoped session-runtime binding at request/lifecycle time, never by discovery,
   config translation, or registration. Startup validates the supported host, configuration, and
   incompatible capabilities fail-closed; it never silently falls back from a selected ACA backend.
-  The required authored Sandbox Group region selects the regional data-plane endpoint directly;
-  runtime ARM discovery is not used, and Function App/Sandbox Group regions need not match.
+  The required authored Sandbox Group region identifies and selects its regional data-plane
+  endpoint directly. The Function App and Sandbox Group may be in the same or different regions;
+  runtime ARM discovery and fallback are not used.
 - **Sandbox identity is workload-scoped.** A Sandbox Group's attached managed identity is directly
   usable by guest code; egress constrains token-use destinations rather than token acquisition.
   It is separate from the controller identity and should be dedicated and least-privileged.

@@ -1040,7 +1040,7 @@ def _provider_bound_runtime(
         state_store_factory=state_store_factory,
     )
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+@pytest.mark.parametrize("status", [429, 500, 501, 502, 503, 504, 505, 599])
 async def test_transient_data_plane_status_reaches_the_caller_as_retryable(
     tmp_path: Path,
     status: int,

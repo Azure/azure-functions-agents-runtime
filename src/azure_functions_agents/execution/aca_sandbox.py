@@ -1151,7 +1151,11 @@ def _raise_file_operation_activation_error(error: SandboxFileOperationError) -> 
         raise SessionActivationConflictError(
             "Sandbox journal state does not permit this operation."
         ) from None
-    if error.status_code is None or error.status_code in {408, 429, 500, 502, 503, 504}:
+    if (
+        error.status_code is None
+        or error.status_code in {408, 429}
+        or 500 <= error.status_code < 600
+    ):
         raise SessionActivationTransientError(
             "Sandbox journal transport is temporarily unavailable."
         ) from None

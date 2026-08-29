@@ -1065,9 +1065,12 @@ async def test_adapter_projects_group_inventory_and_snapshot_deletion(
         (404, SandboxGroupBindingError),
         (429, SandboxGroupTransientError),
         (500, SandboxGroupTransientError),
+        (501, SandboxGroupTransientError),
         (502, SandboxGroupTransientError),
         (503, SandboxGroupTransientError),
         (504, SandboxGroupTransientError),
+        (505, SandboxGroupTransientError),
+        (599, SandboxGroupTransientError),
     ],
 )
 async def test_group_scoped_failures_are_typed_and_redacted(
@@ -1481,7 +1484,7 @@ async def _assert_status_does_not_reset_the_cursor(
     expected_error: type[Exception]
     if status_code == 409:
         expected_error = SandboxInvalidStateError
-    elif status_code in {408, 429, 500, 503}:
+    elif status_code in {408, 429} or 500 <= status_code < 600:
         expected_error = SandboxGroupTransientError
     else:
         expected_error = SandboxProvisioningError
@@ -1505,7 +1508,7 @@ async def test_list_sandboxes_page_does_not_reset_the_cursor_for_non_cursor_reje
         _GROUP_ID, region="westus2", persisted_group=_binding()
     )
 
-    for status_code in (408, 409, 425, 429, 500, 503):
+    for status_code in (408, 409, 425, 429, 500, 501, 503, 599):
         await _assert_status_does_not_reset_the_cursor(
             monkeypatch, environment, adapter, status_code
         )

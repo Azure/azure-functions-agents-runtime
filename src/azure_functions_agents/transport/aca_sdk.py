@@ -104,7 +104,9 @@ _CONTROL_OPERATION_POLL_INTERVAL_SECONDS = 3
 _FAILED_CREATE_LOOKUP_ATTEMPTS = 3
 _FAILED_CREATE_LOOKUP_DELAY_SECONDS = 1.0
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.5
-_RETRYABLE_MANIFEST_STATUS_CODES = frozenset({409, 423, 425, 429, 500, 502, 503, 504})
+_RETRYABLE_MANIFEST_STATUS_CODES = frozenset(
+    {409, 423, 425, 429, *range(500, 600)}
+)
 _RECONCILIATION_ERRORS = (
     AzureError,
     TimeoutError,
@@ -1172,7 +1174,7 @@ def _sdk_timestamp(timestamp: str | None) -> str | None:
     return timestamp
 
 
-_TRANSIENT_DATA_PLANE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+_TRANSIENT_DATA_PLANE_STATUS_CODES = frozenset({408, 429, *range(500, 600)})
 
 
 def _translate_group_boundary_error(

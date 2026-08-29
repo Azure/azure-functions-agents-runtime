@@ -94,4 +94,4 @@ a signal that automatic cleanup has stopped working. It scopes by age rather
 than by build ID because it is hunting other runs' leftovers, and never deletes
 a sandbox whose age cannot be determined.
 
-See [`docs/aca-qualification-runbook.md`](../../docs/aca-qualification-runbook.md).
+See the [ACA qualification CI guide](../ci/docs/aca-qualification.md).

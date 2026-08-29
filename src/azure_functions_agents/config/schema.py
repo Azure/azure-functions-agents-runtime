@@ -516,9 +516,10 @@ ACA_SANDBOX_DESCRIPTIONS: dict[str, str] = {
         "creates one; this must reference an existing, customer-owned Sandbox Group."
     ),
     "region": (
-        "Azure region of the configured Sandbox Group, used to construct its "
-        "regional data-plane endpoint directly. Required even when the Function "
-        "App runs in a different region."
+        "Required authored Azure region that identifies and selects the Sandbox "
+        "Group's regional data-plane endpoint directly. The Function App and "
+        "Sandbox Group may be in the same or different regions; the runtime does "
+        "not use ARM discovery or fallback."
     ),
     "retention": (
         "Idle/reclaim retention policy for ACA Sandbox sessions. "

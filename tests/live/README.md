@@ -22,7 +22,7 @@ backend.
 
 Deployed cold-start, lifecycle, loss, load, and one-shot recovery suites are
 wired into the post-main ACA qualification stages of `eng/ci/e2e-tests.yml`.
-See [`docs/aca-qualification-runbook.md`](../../docs/aca-qualification-runbook.md)
+See the [ACA qualification CI guide](../../eng/ci/docs/aca-qualification.md)
 for targets, triage, and promotion criteria. They remain runnable by hand, and
 still skip unless `AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1` is set
 explicitly.
@@ -67,8 +67,8 @@ minutes: it covers the 120-second operation lease plus a 60-second dedicated
 fixture reconciler cadence and scheduling jitter.
 
 Deployed cold-start, lifecycle, loss, and load suites are wired into the
-post-main ACA qualification stages of `eng/ci/e2e-tests.yml`. See
-[`docs/aca-qualification-runbook.md`](../../docs/aca-qualification-runbook.md)
+post-main ACA qualification stages of `eng/ci/e2e-tests.yml`. See the
+[ACA qualification CI guide](../../eng/ci/docs/aca-qualification.md)
 for targets, triage, and promotion criteria. They remain runnable by hand, and
 still skip unless `AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1` is set
 explicitly.

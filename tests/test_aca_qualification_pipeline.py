@@ -20,7 +20,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from eng.scripts import aca_deployed_qualification
 from eng.scripts.aca_qualification_pipeline import (
+    _NOT_READY_STATUSES,
     QualificationPipelineError,
     _redacted_reason,
     build_marker,
@@ -94,6 +96,16 @@ class TestBuildMarker:
     def test_stamp_rejects_missing_app_root(self, tmp_path: Path) -> None:
         with pytest.raises(QualificationPipelineError, match="app_root_missing"):
             stamp_marker(tmp_path / "absent", {"schema": 1})
+
+
+@pytest.mark.parametrize("status", [500, 501, 505, 599])
+def test_build_attestation_retries_every_server_error(status: int) -> None:
+    assert status in _NOT_READY_STATUSES
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 600])
+def test_build_attestation_does_not_retry_definitive_responses(status: int) -> None:
+    assert status not in _NOT_READY_STATUSES
 
 
 class TestCompareMarker:
@@ -260,13 +272,16 @@ class TestAcaStageGating:
         return blocks
 
     def test_the_expected_aca_stages_are_present(self) -> None:
-        assert set(self._aca_stage_blocks()) == {
-            "AcaSweep",
-            "AcaDeployColdPy313",
-            "AcaDeployColdPy314",
-            "AcaQualifyPy313",
-            "AcaQualifyPy314",
-        }
+        assert set(self._aca_stage_blocks()) == {"AcaSweep", "AcaQualification"}
+
+    def test_qualification_has_two_parallel_runtime_jobs(self) -> None:
+        block = self._aca_stage_blocks()["AcaQualification"]
+        assert block.count(
+            "template: /eng/templates/official/jobs/aca-qualify.yml@self"
+        ) == 2
+        assert block.count("runtimeTarget: 'python313'") == 1
+        assert block.count("runtimeTarget: 'python314'") == 1
+        assert "AcaDeployCold" not in block
 
     def test_every_aca_stage_declares_a_condition(self) -> None:
         for name, block in self._aca_stage_blocks().items():
@@ -364,7 +379,6 @@ class TestPipelineEnvironmentContract:
     @pytest.mark.parametrize(
         "template",
         [
-            "aca-deploy-cold.yml",
             "aca-qualify.yml",
             "aca-sweep.yml",
             "e2e-tests.yml",
@@ -403,7 +417,7 @@ class TestPipelineEnvironmentContract:
             / "templates"
             / "official"
             / "jobs"
-            / "aca-deploy-cold.yml"
+            / "aca-qualify.yml"
         ).read_text(encoding="utf-8")
         assert source.count(
             'AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION="$(ACA_SANDBOX_REGION)"'
@@ -418,20 +432,18 @@ class TestPipelineEnvironmentContract:
             "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION: $(ACA_SANDBOX_REGION)"
         ) == 2
 
-    @pytest.mark.parametrize("template", ["aca-deploy-cold.yml", "aca-qualify.yml"])
-    def test_timeout_is_within_the_enforced_bound(self, template: str) -> None:
-        env = self._template_env(template)
+    def test_timeout_is_within_the_enforced_bound(self) -> None:
+        env = self._template_env("aca-qualify.yml")
         raw = env.get("AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS")
-        assert raw is not None, f"{template} must set the deployed timeout."
+        assert raw is not None, "aca-qualify.yml must set the deployed timeout."
         timeout = float(raw)
         assert 1 <= timeout <= 230, (
-            f"{template} passes {timeout}s, outside the 1-230s bound enforced by "
+            f"aca-qualify.yml passes {timeout}s, outside the 1-230s bound enforced by "
             "tests/live/aca_deployed_agent_support.py; the suites would error "
             "during fixture setup."
         )
 
-    @pytest.mark.parametrize("template", ["aca-deploy-cold.yml", "aca-qualify.yml"])
-    def test_the_bound_still_matches_the_support_module(self, template: str) -> None:
+    def test_the_bound_still_matches_the_support_module(self) -> None:
         """Fail if the support module's bound moves away from the platform limit."""
         source = (
             Path(__file__).resolve().parents[1]
@@ -441,8 +453,65 @@ class TestPipelineEnvironmentContract:
         ).read_text(encoding="utf-8")
         assert "1 <= timeout <= 230" in source, (
             "The enforced timeout bound changed; re-check the value the pipeline "
-            f"passes in {template}."
+            "passes in aca-qualify.yml."
         )
+
+
+class TestCombinedDeployedSuite:
+    def test_cold_start_is_the_first_module_in_the_single_suite(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[str] = []
+        monkeypatch.setattr(
+            aca_deployed_qualification,
+            "validate_deployed_environment",
+            lambda *args, **kwargs: (5, 1),
+        )
+        monkeypatch.setattr(aca_deployed_qualification, "preflight_auth", lambda _: None)
+        monkeypatch.setattr(
+            aca_deployed_qualification,
+            "_run_pytest",
+            lambda paths, _: captured.extend(paths) or 0,
+        )
+
+        result = aca_deployed_qualification.run_deployed_suite(
+            {},
+            runtime_target="python313",
+            load_concurrency="5",
+            provision_concurrency="1",
+        )
+
+        assert result == 0
+        assert captured == [
+            "tests/live/test_aca_deployed_cold_start.py",
+            "tests/live/test_aca_deployed_agent_turn.py",
+            "tests/live/test_aca_deployed_lifecycle.py",
+            "tests/live/test_aca_deployed_loss.py",
+            "tests/live/test_aca_deployed_load.py",
+        ]
+
+    def test_pipeline_has_no_standalone_attestation_or_cold_invocation(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        template = (
+            root / "eng" / "templates" / "official" / "jobs" / "aca-qualify.yml"
+        ).read_text(encoding="utf-8")
+        assert " check-build " not in template
+        assert " cold-start " not in template
+        assert " preflight-auth " not in template
+        assert template.count(" deployed-suite ") == 1
+        assert template.count("- checkout: self") == 1
+        assert template.count("UsePythonVersion@0") == 1
+        assert template.count('python -m pip install -U -e ".[dev,aca_sandbox]"') == 1
+        assert "continueOnError: true" in template
+        for name in (
+            "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_BUILD_ID",
+            "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_COMMIT_SHA",
+            "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_PYTHON_VERSION",
+        ):
+            assert f"{name}:" in template
+        assert not (
+            root / "eng" / "templates" / "official" / "jobs" / "aca-deploy-cold.yml"
+        ).exists()
 
 
 class TestFixtureRouteBinding:

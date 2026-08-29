@@ -596,10 +596,11 @@ _READINESS_DEADLINE_SECONDS = 300.0
 _READINESS_POLL_SECONDS = 10.0
 # The platform returns these while an app restarts after a deployment. They mean
 # "not ready yet", not "wrong build", so they are retried rather than failed.
-_NOT_READY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+_NOT_READY_STATUSES = frozenset({408, 429, *range(500, 600)})
 
 
-async def _fetch_build_info(base_url: str, token_scope: str) -> dict[str, Any]:
+async def fetch_build_info(base_url: str, token_scope: str) -> dict[str, Any]:
+    """Read and parse the embedded build marker without logging its values."""
     import aiohttp
     from azure.identity.aio import DefaultAzureCredential
 
@@ -651,7 +652,7 @@ async def _fetch_build_info(base_url: str, token_scope: str) -> dict[str, Any]:
 def run_check_build(args: argparse.Namespace) -> int:
     """Fail fast when the deployed app is not the build under qualification."""
     try:
-        reported = asyncio.run(_fetch_build_info(args.base_url, args.token_scope))
+        reported = asyncio.run(fetch_build_info(args.base_url, args.token_scope))
     except QualificationPipelineError:
         raise
     except Exception as error:

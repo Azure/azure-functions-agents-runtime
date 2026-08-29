@@ -4,7 +4,7 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-08-27
+updated: 2026-08-28
 issues: [166]
 pull_requests: []
 branch: feature/aca-sandboxes
@@ -198,7 +198,7 @@ controlling amendments.
   on capacity failure they repair that target and retry once without scanning
   unrelated sessions, so capacity may remain exhausted. Cadence tightens to
   ~1/min in v2 solely for the checkpoint-mirror SLO (Decisions 22, 58, 59, 63,
-  183, 186).
+  131, 183, 186, 188).
 - Place one Sandbox Group per Function App/environment in the customer subscription;
   customer tooling creates ARM/RBAC, the runtime creates only session sandboxes.
 - Reserve an extensible owner contract for the separate non-HTTP trigger-session
@@ -265,14 +265,14 @@ controlling amendments.
 | 19 | Synchronous HTTP budget | Authored up to 900s / platform max / controller cap | Cap sandbox-backed HTTP at 180s; longer work requires `respond-async`. | Agent reviewer | 2026-07-20 | 0008.11 |
 | 20 | Control-state storage | Block blobs / Tables / Durable Entity | Use Tables for queryable ETag session/run records and Blob Storage for transcript/checkpoint archives. | Agent | 2026-07-20 | 0008.3 |
 | 21 | Controller coordination (reaffirms #4) | Durable / minimal Tables / no run records | Keep a no-retry Table state machine because ADC owns the live process; revisit Durable before queues, retries, fan-out, or compensation. | Agent | 2026-07-20 | 0008.12 |
-| 22 | Expired-session cleanup | Next request / Durable eternal / timer | Register a timer-triggered ACA reconciler/reaper. | Agent reviewer | 2026-07-20 | 0008.12 |
+| 22 | Expired-session cleanup | Next request / Durable eternal / timer | Register a timer-triggered ACA reconciler/reaper. **Revised by #58/#59, then #131 and #183/#186/#188.** | Agent reviewer | 2026-07-20 | 0008.12 |
 | 23 | File/exec confidence (qualifies #7) | Samples / live spike / public ingress | Samples establish detached exec and 300s SDK limit; require live spike before finalizing file/exec; forbid anonymous ingress. | Agent reviewer | 2026-07-20 | 0008.5 |
 | 24 | Async mirror cadence | On-demand / continuous write / reconciliation | Reconcile each minute to mirror terminal checkpoints within two-minute p95; keep storage credentials outside sandbox. | Agent | 2026-07-20 | 0008.12 |
 | 25 | v1 streaming guarantee | Token parity / replayable chunks / disable | Permit replayable chunks within two-second p95; preserve event semantics and improve token latency later. | Human | 2026-07-20 | 0008.11 |
 | 26 | Live file/exec gate | Documentation / authenticated ingress / preview spike | `0.1.0b3` spike passed create, 4 MiB transfer, detached launch, events, idempotency, cancel, cleanup; retain file/exec. | Human + Agent | 2026-07-20 | 0008.5 |
 | 27 | Active-run lifecycle | Idle timeout / heartbeat / disable suspend | Disable auto-suspend for a run; watchdog bounds it; controller or one-minute reconciler restores terminal policy. | Agent | 2026-07-20 | 0008.8 |
 | 28 | Resume readiness | `get().state` / retry only / operation+manifest | Trust file/exec response and verify protocol/session manifest; state reads may lag data plane. | Agent | 2026-07-20 | 0008.8 |
-| 29 | v1 concurrency target | 25 / 100 / 1,000 runs | Design and validate for 100 concurrent active runs. | Human | 2026-07-20 | 0008.5 |
+| 29 | v1 concurrency target | 25 / 100 / 1,000 runs | Design and validate for 100 concurrent active runs. **Current qualification policy: #192; N=100 remains human-only.** | Human | 2026-07-20 | 0008.5 |
 | 30 | Sandbox residency | Customer / Microsoft multi-tenant / delegated deployment | Use one Sandbox Group per Function App/environment in customer subscription; long-term automation deploys there. | Agent reviewers | 2026-07-20 | 0008.4 |
 | 31 | Production state account (revises #5) | `AzureWebJobsStorage` / dedicated customer / runtime service | Require `AzureFunctionsAgentsStateStorage` in production; reuse `AzureWebJobsStorage` only local/dev/explicit preview. | Agent reviewers | 2026-07-20 | 0008.3 |
 | 32 | Session-pointer tamper evidence | ETag+RBAC / manifest / signed binding+log+manifest | Sign routing bindings with non-exportable customer Key Vault key; require Table/log/manifest agreement. | Agent reviewers | 2026-07-20 | 0008.3 |
@@ -299,17 +299,17 @@ controlling amendments.
 | 53 | Snapshot durability (refines #9) | Mirror-backed / best-effort snapshot / sync mirror | ACA snapshot is v1 best-effort source of truth; #9's never-correctness rule is v2 after mirror. Loss ends session; retain #27/#28 v1 recovery. | Human | 2026-07-22 | 0008.8 |
 | 54 | External mirror (defers #18 to v2) | v1 Blob mirror / v2 mirror | Defer #18 transcript/checkpoint mirror to v2; restoring it also restores #9's never-correctness guarantee. | Human | 2026-07-22 | 0008.8 |
 | 55 | Ownership auth (revises #15) | Entra-only / Functions auth | Reuse keys or Easy Auth; no second layer. Key callers can own app-bound sessions. `entra_user` is per-user, `function_app` not key-bound, `trigger_binding` reserved. Only versioned hashed owner label crosses boundary; no eager migration. | Human | 2026-07-22 | 0008.2 |
-| 56 | Sandbox identity | Proxy MI / separate identity / same MI via HOBOv2 | Historical identity-proxy design; superseded by the direct Sandbox Group managed-identity contract in §11. MI is not user OBO. | Human | 2026-07-23 | 0008.9 |
-| 57 | v1 sandbox identity (refines #56) | UAMI group / HOBOv2 delegation | v1 assigns app UAMI to group; Identity Proxy needs no 1P onboarding. Defer HOBOv2 for own Azure resource; decouple #56 from #13; #10/#11/#16 remain. | Human | 2026-07-23 | 0008.9 |
-| 58 | Cleanup reconciler (refines #22) | Durable / opportunistic / timer+fast paths | Use configurable adaptive plain timer (~1h) as backstop; fast paths/client poll handle common case; #4 no-Durable remains. | Human | 2026-07-24 | 0008.12 |
-| 59 | Reconciler scale | Hot loop / opportunistic / low-frequency | Use low-frequency adaptive due-work query; no v1 hot loop. Refines #24: one-minute cadence is v2 mirror-only. | Agent | 2026-07-24 | 0008.12 |
+| 56 | Sandbox identity | Proxy MI / separate identity / same MI via HOBOv2 | Historical identity-proxy design. **Revised by #57, superseded by #66, then revised by #153; current contract is in §11.** MI is not user OBO. | Human | 2026-07-23 | 0008.9 |
+| 57 | v1 sandbox identity (refines #56) | UAMI group / HOBOv2 delegation | v1 assigns app UAMI to group; Identity Proxy needs no 1P onboarding. Defer HOBOv2 for own Azure resource; decouple #56 from #13; #10/#11/#16 remain. **Superseded by #66, then revised by #153.** | Human | 2026-07-23 | 0008.9 |
+| 58 | Cleanup reconciler (refines #22) | Durable / opportunistic / timer+fast paths | Use configurable adaptive plain timer (~1h) as backstop; fast paths/client poll handle common case; #4 no-Durable remains. **Current policy: #131 and #183/#186/#188.** | Human | 2026-07-24 | 0008.12 |
+| 59 | Reconciler scale | Hot loop / opportunistic / low-frequency | Use low-frequency adaptive due-work query; no v1 hot loop. Refines #24: one-minute cadence is v2 mirror-only. **Current policy: #131 and #183/#186/#188.** | Agent | 2026-07-24 | 0008.12 |
 | 60 | Automatic retry | Framework retry / caller resubmit | No auto-retry: caller resubmits with Idempotency-Key; active run is 409; cancel-then-submit only escape; no v1 queue/supersede. | Agent | 2026-07-24 | 0008.12 |
 | 61 | Active-session quota | Per-owner / aggregate / no counter | v1 has no cap; ACA capacity and reap-on-failure bound aggregate use; per-owner fairness is v2. | Agent | 2026-07-24 | 0008.12 |
 | 62 | Lost sandbox / 410 | v1 rebuild / status durability | Tables preserve status, sandbox content is best effort; lost sandbox returns 410; rebuild needs v2 mirror. | Agent | 2026-07-24 | 0008.12 |
 | 63 | Suspend restore/reclaim | Self-restore / callback / TTL-disable / reconciler | Periodic reconciler is required for crash-before-signal; reject self-restore/callback. Optional self-suspend request; re-arm #27 idle policy (xref 0008.8; cd0f619 resolved). | Agent | 2026-07-24 | 0008.12 |
 | 64 | Session retention | Fixed TTL / group-only / idle hybrid | Use group default < app `session_runtime.aca_sandbox.retention` (v1) < per-agent `.agent.md` (v2); no absolute creation TTL. | Human | 2026-07-24 | 0008.12 (xref 0008.10, 0008.4) |
 | 65 | Residency/provisioning (refines #30) | Microsoft / cross-tenant / customer IaC | Customer Bicep/ARM under customer creds; no Microsoft/cross-tenant ID. One group/app-env/region; customer tears down IaC, runtime deletes sessions. Preview quota; #29 validates 100. Pinned image/sample IaC; quickstart later. | Human | 2026-07-22 | 0008.4 |
-| 66 | Identity-less v1 sandbox (supersedes #56/#57) | App UAMI / sandbox UAMI / none | No MI or AAD token in sandbox. Egress proxy injects credentials; controller delivers content. Supersedes #56/#57 v1 mechanism; MI/HOBO deferred; sandbox cannot write state. | Human | 2026-07-24 | 0008.9 (xref 0008.3, 0008.6) |
+| 66 | Identity-less v1 sandbox (supersedes #56/#57) | App UAMI / sandbox UAMI / none | No MI or AAD token in sandbox. Egress proxy injects credentials; controller delivers content. Supersedes #56/#57 v1 mechanism; MI/HOBO deferred; sandbox cannot write state. **Revised by #153 for the attached Sandbox Group identity.** | Human | 2026-07-24 | 0008.9 (xref 0008.3, 0008.6) |
 | 67 | Loss vs crash (refines #9/#62) | Reuse always / tombstone always / distinguish | Loss/snapshot tombstones (410/new session). Intact-disk crash abandons run but retains sandbox/session at atomic checkpoint. Only future state-preserving rebind changes generation. | Human | 2026-07-24 | 0008.12 (xref 0008.8, 0008.2, 0008.5) |
 | 68 | Content capture (refines #48/#17) | Sandbox storage / plan Blob / local root | Controller captures local root plus `.python_packages`, hashes, and file-transfers; sandbox has no storage. Require Linux Python 3.13/3.14 ABI; #69 supersedes separate runtime environment. | Human | 2026-07-24 | 0008.6 (xref 0008.9) |
 | 69 | Stdlib bootstrap (refines #68/#17; supersedes baked MAF) | Bake runtime/MAF / stdlib bootstrap | Functions Python base plus stdlib bootstrap; captured `.python_packages` is one pip env for runtime/MAF/tools via `site.addsitedir`. No isolation; base ensures ABI. | Human | 2026-07-27 | 0008.6 (xref 0008.7) |
@@ -342,7 +342,7 @@ controlling amendments.
 | 96 | `active_run_id` invariant | Shape-only / status consistency | Require it for running/canceling; require `None` for creating, ready, suspend/resume, failed, quarantined, tombstoned, deleting, deleted. | Agent reviewer | 2026-07-30 | 0008.3 / P3a |
 | 97 | P4a file/process split | File via exec / mixed port / six file verbs+process port | Keep six direct file verbs separate from process `exec`; journal I/O cannot shell out. Implements #72 without changing four-method seam. | Agent | 2026-07-30 | P4a (0008.5) |
 | 98 | P4a live-manifest boundary | Derive values / handle only / opaque compare | Consume P3 owner/app/generation and P4b digest opaquely; strictly parse manifest and redact mismatches; do not mutate Tables/CAS or canonicalize. | Agent | 2026-07-30 | P4a (0008.3 / 0008.6) |
-| 99 | P4a group/resume verification | ARM ID / SDK state / group+manifest | Bind the customer group; cross-check persisted group/region and sandbox. Resume: persisted ID, manifest read, strict binding; SDK state advisory. **Revised by #197:** group identity and region are authored and no ARM resolution occurs. | Agent | 2026-07-30 | P4a (0008.4 / 0008.8) |
+| 99 | P4a group/resume verification | ARM ID / SDK state / group+manifest | Bind the customer group; cross-check persisted group/region and sandbox. Resume: persisted ID, manifest read, strict binding; SDK state advisory. **Revised by #194:** group identity and region are authored and no ARM resolution occurs. | Agent | 2026-07-30 | P4a (0008.4 / 0008.8) |
 | 100 | P4a safe create | Defaults / implicit disk+ingress / explicit safe create | Require explicit source, no ports, proxy enabled, Deny+Full egress, and <=30s polling; only opaque/versioned IDs label sandbox. Narrowed by #102: reject snapshot ID. | Agent | 2026-07-30 | P4a (0008.4 / 0008.9) |
 | 101 | P4a preview gate | Simulate / live-first / doubles+held smoke | Keep 0.1.0b4 optional in one adapter, test via injected factories/import guards, and hold live create→file→exec→stop→resume→delete smoke for human-authorized group/credentials. | Agent | 2026-07-30 | P4a (0008.5) |
 | 102 | Snapshot create boundary (narrows #100) | Forward snapshot / omit metadata / reject snapshot | Reject `snapshot_id`: 0.1.0b4 restore forbids labels/egress, so cannot prove owner binding and deny-inspected egress. Disk, disk ID, preset remain. | Agent review | 2026-07-30 | P4a (0008.4 / 0008.9) |
@@ -375,7 +375,7 @@ controlling amendments.
 | 128 | Per-sandbox lifecycle policy | group readback / inherited default / explicit complete policy | Set suspend+delete immediately after create and before delivery; delete is reclaim + 3600 + 300. This supersedes row 74/group auto-delete validation. | Human | 2026-08-04 | U1 |
 | 129 | ACA HTTP auth parity | separate policies / weaker management auth / exact equality | Built-in chat and custom HTTP both honor `respond-async`; if both exist, compare complete resolved auth policies before route mutation. | Human | 2026-08-04 | U1 |
 | 130 | Lifecycle call ownership | U1 controller / U2 bootstrap / both | U1/P6 disables, restores, and reconciles per-sandbox lifecycle; U2 only makes its harness suspension-tolerant. | Human | 2026-08-04 | U1 |
-| 131 | Reclaimer isolation and fencing | Timer-only scan / app scope with fence | Scope inventory and Table scans to the app, rotate a durable bounded cursor, and fence an active backing before destructive recovery so terminal adoption cannot reopen its slot. | Agent | 2026-08-06 | U1 corrective |
+| 131 | Reclaimer isolation and fencing | Timer-only scan / app scope with fence | Scope inventory and Table scans to the app, rotate a durable bounded cursor, and fence an active backing before destructive recovery so terminal adoption cannot reopen its slot. **Current request/timer ownership and bounds: #183/#186/#188.** | Agent | 2026-08-06 | U1 corrective |
 | 132 | Durable session operations | Per-flow statuses / generic same-partition row / external coordinator | Use sequence-keyed operation rows plus a session pointer/token; EGT fences reclaim and lifecycle rearm, blocks admission, and resumes/prunes durably. | Human + Agent | 2026-08-06 | U1 corrective |
 | 133 | Operation taxonomy (narrows #132) | Per-state flags / broad op set / three controller flows | Limit v1 operations to `provision_submit`, `submit_run`, and `reclaim_backing`; terminal rearm is the final submit phase, while reads, adoption, attach, quarantine, drain, and routine reconcile remain direct paths. | Human + Agent | 2026-08-06 | U1 corrective |
 | 134 | Reservation and recovery (narrows #132) | Create-first compensation / external coordinator / owner-partition EGT | Reserve owner claim, session, accepted run, and provision op before create; bind a stable provider label and phase target. Resume by token/CAS and prune terminal ops. | Human + Agent | 2026-08-06 | U1 corrective |
@@ -398,19 +398,19 @@ controlling amendments.
 | 151 | Egress lifecycle | Legacy inspection or mutable policy / Full create-time policy | Use explicit Deny plus Full inspection, ordered rules, capped policy, and drain/new session for policy or credential rotation. | Human | 2026-08-07 | U2 |
 | 152 | ACA backend availability and create source | Unconditional unavailable gate / supported opt-in runtime | Remove the unconditional `aca_sandbox backend not available in this build` gate. On Linux x86_64 CPython 3.13/3.14, valid `aca_sandbox` configuration activates the real adapter and `SandboxCreateProfile`; the Function interpreter selects public `python-3.13`/`python-3.14` by default, or a customer can pin a private disk ID. Bootstrap, application, and complete dependency closure cross the file plane; no custom bootstrap image exists. Platform/configuration validation remains fail-closed and the in-language worker remains default. | Human + Agent | 2026-08-12 | U3 |
 | 153 | U3 live turn, identity, and lifecycle evidence | Synthetic-only proof / lower-level and deployed proof | Record real adapter create, exact 80 MiB single-write delivery, full dependency closure, harness entrypoint, envelope/journal acceptance, and SDK-aware mypy from PR #152; a lower-level Luna turn and an Easy-Auth-protected deployed public turn passed (ADO 297517). Record lifecycle pass (ADO 297555): auto-suspend, same sandbox/generation resume, second suspend, then controller-only timer reclaim/tombstone with zero sandbox or snapshot leaks. This supersedes Decision #66's absolute identity-less wording: runtime attaches no identity and forwards no controller/token/storage credential, but a customer-attached, dedicated least-privileged Sandbox Group identity is guest-usable for egress-exempt token acquisition and has model inference only, never state-store rights. OBO remains inert. | Human + Agent | 2026-08-12 | U3 |
-| 154 | U3 load acceptance | Declare Decision #29 passed / retain agent diagnostic policy | The committed public Easy-Auth load runner uses N=5 as its sole agent/CI diagnostic validation. N=100 remains human-only formal Decision #29 acceptance; do not mark Decision #29 or N=100 load acceptance passed until human-supplied N=100 evidence is available. | Human | 2026-08-12 | U3 |
+| 154 | U3 load acceptance | Declare Decision #29 passed / retain agent diagnostic policy | The committed public Easy-Auth load runner uses N=5 as its sole agent/CI diagnostic validation. N=100 remains human-only formal Decision #29 acceptance; do not mark Decision #29 or N=100 load acceptance passed until human-supplied N=100 evidence is available. **Current qualification matrix: #192.** | Human | 2026-08-12 | U3 |
 | 155 | U3 local quality evidence | Omit / record current gate | Record current local gate: Ruff clean; strict mypy clean for 97 files; Python 3.13 pytest result 1792 passed, 61 skipped, 82 deselected. | Human + Agent | 2026-08-12 | U3 |
-| 156 | Live ACA smoke promotion | Schedule/Manual nonblocking / PR signal / blocking pipeline / required check | Retain Schedule/Manual execution, `continueOnError`, and no required merge check. Reconsider promotion only after the U3 service connection is wired to the correct subscription, five scheduled low-level smoke runs pass with zero reaper leaks, and five manual N=5 diagnostics pass. N=100 remains human-only and is never an automated promotion prerequisite. | Human | 2026-08-12 | U3 |
-| 157 | Dual Python deployed smoke matrix | One runtime / parallel Python 3.13 and 3.14 diagnostics / blocking promotion | Extend Decision #156 with a two-phase Python 3.13/3.14 matrix: selected cold-start legs complete before selected deployed/load legs, while legs within each phase run in parallel. The default target is `both`; queue-time selection may isolate either runtime. Keep Manual/Scheduled execution nonblocking and PR-excluded. N=100 remains human-only, requires an explicit single runtime target, and is never an automated promotion prerequisite. | Human + Agent | 2026-08-12 | U3 |
-| 158 | Dual-runtime provisioning bound | Serialize matrix / per-leg 2 / per-leg 1 | Keep parallel 3.13/3.14 diagnostics, but default and require `1` provisioning slot per leg when both share one Sandbox Group; single-runtime human N=100 may explicitly use up to 4. | Human + Agent | 2026-08-12 | U3 |
-| 159 | Sandbox Group authorization failure | Retry as setup timeout / fail fast and settle | Map provider `401`/`403` to a redacted `sandbox_group_authorization_failed` 503, atomically fail the reserved run and release its operation, and replay the same terminal outcome. Require controller `Container Apps SandboxGroup Data Owner`; Contributor is insufficient. | Human + Agent | 2026-08-13 | U3 |
+| 156 | Live ACA smoke promotion | Schedule/Manual nonblocking / PR signal / blocking pipeline / required check | Retain Schedule/Manual execution, `continueOnError`, and no required merge check. Reconsider promotion only after the U3 service connection is wired to the correct subscription, five scheduled low-level smoke runs pass with zero reaper leaks, and five manual N=5 diagnostics pass. N=100 remains human-only and is never an automated promotion prerequisite. **PR-smoke eligibility was revised by #163/#164 and superseded by #165; current deployed qualification policy is #190/#192.** | Human | 2026-08-12 | U3 |
+| 157 | Dual Python deployed smoke matrix | One runtime / parallel Python 3.13 and 3.14 diagnostics / blocking promotion | Extend Decision #156 with a two-phase Python 3.13/3.14 matrix: selected cold-start legs complete before selected deployed/load legs, while legs within each phase run in parallel. The default target is `both`; queue-time selection may isolate either runtime. Keep Manual/Scheduled execution nonblocking and PR-excluded. N=100 remains human-only, requires an explicit single runtime target, and is never an automated promotion prerequisite. **Current deployed qualification matrix: #192.** | Human + Agent | 2026-08-12 | U3 |
+| 158 | Dual-runtime provisioning bound | Serialize matrix / per-leg 2 / per-leg 1 | Keep parallel 3.13/3.14 diagnostics, but default and require `1` provisioning slot per leg when both share one Sandbox Group; single-runtime human N=100 may explicitly use up to 4. **Current deployed qualification matrix: #192.** | Human + Agent | 2026-08-12 | U3 |
+| 159 | Sandbox Group authorization failure | Retry as setup timeout / fail fast and settle | Map provider `401`/`403` to a redacted `sandbox_group_authorization_failed` 503, atomically fail the reserved run and release its operation, and replay the same terminal outcome. Require controller `Container Apps SandboxGroup Data Owner`; Contributor is insufficient. **Revised by #187; current provider boundary: #195.** | Human + Agent | 2026-08-13 | U3 |
 | 160 | Accepted-create authorization ambiguity | Fail every 401/403 / recover stable label / leave durable operation indeterminate | Fail fast only before acceptance. After `begin_create` returns, reconcile the stable label; if authorization prevents reconciliation, retain the active provision for safe replay/reaping rather than terminalizing a potentially created backing. | Agent | 2026-08-13 | U3 corrective |
 | 161 | U3 setup deadline | 30s/60s / 90s/120s | Use a 90s setup budget, one renewable 120s lease for every durable operation, and 120s retry; retain the 180s sync cap. Supersedes timing in #79/#100. | Human | 2026-08-13 | U3 |
 | 162 | Runtime recovery correctness | Terminalize ambiguity / reconcile and retain / stale fallback | After create or journal invocation, preserve durable retryability on timeout/cancellation; map targeted provider authorization to redacted 503; retain authorization deletion rationale so cleanup is not idle reclaim. | Human-approved scope + Agent | 2026-08-17 | U3 corrective |
-| 163 | Predeployed PR smoke eligibility | Manual/Schedule only / PR nonblocking / PR attestation | Supersede #156/#157 only for eligibility: protected predeployed Python 3.13/3.14 smoke runs on PR, Manual, and Schedule, remains nonblocking, and attests neither the PR artifact nor formal capacity. | Human | 2026-08-17 | U3 CI |
-| 164 | ACA pipeline placement (supersedes prior placement) | Required E2E stage / optional ACA pipeline | Run predeployed ACA smoke in a separate non-required pipeline with a dedicated protected ACA connection; do not claim artifact attestation or change required E2E. | Human | 2026-08-17 | U3 CI |
-| 165 | PR ACA signal (supersedes #163/#164) | Predeployed app / separate pipeline / current-checkout smoke | Trusted same-repository PRs run one nonblocking current-checkout ACA/model smoke with Azurite and a dedicated protected ACA connection. Pipeline policy excludes forks; the job guard is defense in depth. Normal E2E is unchanged; no Function is deployed. | Human | 2026-08-17 | U3 CI amendment in review |
-| 166 | Post-main qualification deferral | Implement in PR #160 / defer to #166 | Keep official `pr: none`; move deploy, attestation, predeployed cold/lifecycle/loss, and N=5 qualification to issue #166. Retain deployed tests as manual/test assets for that follow-up. | Human | 2026-08-17 | U3 CI amendment in review |
+| 163 | Predeployed PR smoke eligibility | Manual/Schedule only / PR nonblocking / PR attestation | Supersede #156/#157 only for eligibility: protected predeployed Python 3.13/3.14 smoke runs on PR, Manual, and Schedule, remains nonblocking, and attests neither the PR artifact nor formal capacity. **Revised by #164 and superseded by #165 for PR smoke.** | Human | 2026-08-17 | U3 CI |
+| 164 | ACA pipeline placement (supersedes prior placement) | Required E2E stage / optional ACA pipeline | Run predeployed ACA smoke in a separate non-required pipeline with a dedicated protected ACA connection; do not claim artifact attestation or change required E2E. **Superseded by #165 for PR smoke.** | Human | 2026-08-17 | U3 CI |
+| 165 | PR ACA signal (supersedes #163/#164) | Predeployed app / separate pipeline / current-checkout smoke | Trusted same-repository PRs run one nonblocking current-checkout ACA/model smoke with Azurite and a dedicated protected ACA connection. Pipeline policy excludes forks; the job guard is defense in depth. Normal E2E is unchanged; no Function is deployed. **Current PR-smoke policy; deployed main/manual qualification is separate under #189/#190.** | Human | 2026-08-17 | U3 CI amendment in review |
+| 166 | Post-main qualification deferral | Implement in PR #160 / defer to #166 | Keep official `pr: none`; move deploy, attestation, predeployed cold/lifecycle/loss, and N=5 qualification to issue #166. Retain deployed tests as manual/test assets for that follow-up. **Implemented by #189–#193.** | Human | 2026-08-17 | U3 CI amendment in review |
 | 167 | PR smoke identity evidence | All-scope RBAC audit / protected IaC + positive turn | Protected IaC/ops guarantees the sole guest UAMI has model-only, no-state/no-group RBAC. CI verifies only group identity shape, runtime egress, and positive model access because its controller connection cannot enumerate guest model-scope roles. | Human | 2026-08-17 | U3 CI corrective |
 | 168 | Current-checkout smoke eligibility | PR-only / every protected E2E invocation | Run the nonblocking smoke on every trusted non-fork E2E invocation, including PR, main, manual, and scheduled runs. Pipeline authorization remains the security boundary; the fork guard is defense in depth. | Human | 2026-08-18 | U3 CI corrective |
 | Meta | Implementation compaction | 30 event rows / 8 durable rows | Historical pre-merge editing compacted the then-unmerged rows 119-148; later merged and appended rows remain append-only. | Human | 2026-08-03 | 0008.6 |
@@ -427,31 +427,20 @@ controlling amendments.
 | 179 | Stale submit fence | Propagate / durable re-read | If cancel, takeover, or another launch claimant wins, re-read the durable run and return its linked projection; never leak the losing fence as a 500 or launch twice. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
 | 180 | Terminal provision replay | Take over / return terminal | Exact replay of a terminal reserved run returns its durable outcome before operation takeover; canceled pre-pointer work never requires a sandbox pointer. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
 | 181 | Complexity and domain vocabulary | Advisory / enforce PLR0912 and PLR0915; repeated strings / owned typed vocabulary | Human approved enforcing PLR0912/PLR0915 and declaring each finite domain once in its owning typed symbols for consumers to reuse. | Human | 2026-08-18 | Review guidance |
-| 182 | Post-main pipeline placement | New pipeline / extend official build | Add additive `AcaSweep`/`AcaDeploy*`/`AcaCold*`/`AcaQualify*` stages to `eng/ci/official-build.yml`; `pr: none`, the existing stages, and the §13 current-checkout smoke are unchanged. **Revised by #191**, which moves the stages to `eng/ci/e2e-tests.yml`. | Human | 2026-08-19 | #166 |
-| 183 | Deployment package build | In-pipeline immutable package / remote build | Use Flex remote build from pinned requirements plus the wheel the existing Build stage produces, exercising the customer deployment path. Byte-level reproducibility is traded for that coverage; version determinism is kept by pinning. | Human | 2026-08-19 | #166 |
-| 184 | Deployment attestation | External blob/hash chain / build-stamped marker | Stamp `BUILD_INFO.json` into the package and compare `build_id`, `commit_sha`, and live `sys.version_info` against the running build. The marker must be a file inside the package, never an app setting or resource tag. | Human | 2026-08-19 | #166 |
-| 185 | Build-info route ownership | Product `registration/endpoints.py` / deployed fixture | The route lives in the deployed fixture's `function_app.py` and touches no product module, so no endpoint-response merge ordering is required. | Human | 2026-08-19 | #166 |
-| 186 | Post-main matrix and provisioning | Serialize legs / retain #157 two-phase and #158 bound | Keep the two-phase matrix and parallel legs, with provisioning concurrency 1 per leg passed explicitly because the load helper defaults to 4. N=5 is the automated maximum; N=100 stays human-only. | Human | 2026-08-19 | #166 (applies #157/#158) |
-| 187 | Post-main leak handling | Post-run reconciliation / pre-run sweep | Run one non-fatal, age-scoped sweep before the run and none after: idle-delete and the hourly reap already reclaim, and a post-run reaper would mask their failure. Age scoping replaces BuildId narrowing because the sweep targets other runs' leftovers. | Human | 2026-08-19 | #166 |
-| 188 | Post-main rollback | Retained-package rollback / none | No rollback machinery and no retention requirement; the next merge to `main` corrects a bad deployment. | Human | 2026-08-19 | #166 |
-| 189 | Streaming visibility latency | Omit / gate / observe-only | Measure client-side p50/p95/p99 during the N=5 pass and warn above 2 s, never gate. Report observed poll cadence and batch size so poll latency is separable from transport latency, and state that the true sandbox-write-to-client-observe delta is not captured because cross-machine clock skew exceeds the budget under test. | Human | 2026-08-19 | #166 (evidence for #25) |
-| 190 | Deployed fixture source | Out-of-band / committed | Commit the fixture at `tests/live/apps/aca-qualification/`, config-free, so deployed content is a function of the commit SHA. Not under `tests/endtoend/apps/`, whose `func start` suite auto-enrolls every app with a `host.json`. | Agent | 2026-08-19 | #166 |
-| 191 | Qualification pipeline home | Extend `official-build.yml` / new pipeline / extend `e2e-tests.yml` | Move the five ACA stages to `e2e-tests.yml`, revising #182: deploying a build to real Function Apps and qualifying it is end-to-end testing, while official-build builds and releases artifacts. | Human | 2026-08-20 | #166 |
-| 192 | ACA stage gating on a PR-triggered pipeline | Ungated / CI-only / CI-plus-manual | Gate every ACA stage: CI on `main` only, `Manual` allowed on any branch so they stay testable pre-merge, `PullRequest` and `Schedule` excluded. This pipeline carries PR triggers, so ungated stages would bill every PR a full deploy-and-qualify cycle. | Human | 2026-08-20 | #166 |
-| 193 | 1ES DefaultDeny network isolation | Ignore / CloudTest migration / allow-list request | Treat the unenrolled pipeline as a reprieve and pursue an allow-list entry for `management.*.azuredevcompute.io`. The policy is an allow-list keyed by pipeline definition ID, not by pool, and it blocks the data-plane reads lifecycle, loss, and load depend on. | Human | 2026-08-20 | #166 |
-| 194 | Reconciler deadline argument | Pass two arguments when absent / always pass the deadline | Always pass the deadline, widening the reconciler type to accept `None`. The two-argument branch raised `TypeError` against the registered three-parameter reconciler, returning 500 from status, result, and events. | Agent | 2026-08-21 | #166 |
-| 195 | Deployed fixture observability | Host telemetry only / runtime `[monitor]` extra | Include `[monitor]` with `aca_sandbox` in both fixture locks. Host Application Insights data does not export the runtime's `af.*` spans; the monitor distro plus the existing connection string enables that instrumentation. | Human | 2026-08-25 | #166 |
-| 196 | Sandbox Group region authoring | Optional/inferred / required app-wide field | Require `session_runtime.aca_sandbox.region` beside `sandbox_group_resource_id`. Normalize it to lowercase and reject empty or non-alphanumeric values. This is an intentional pre-release breaking change with no compatibility default. | Human | 2026-08-27 | §15 |
-| 197 | Sandbox Group endpoint resolution | ARM discovery / authored region | Remove runtime ARM discovery and its retry/fallback path. Trust the authored region and construct the regional ACA data-plane client directly from the parsed resource ID plus `region`. | Human | 2026-08-27 | §15; revises #99 |
-| 198 | Function App and Sandbox Group placement | Require equal regions / independent regions | Do not compare the Function App region with the Sandbox Group region. Cross-region placement is supported explicitly; the authored value identifies the group endpoint, not the Function App location. | Human | 2026-08-27 | §15 |
-| 199 | ACA provider failure boundary | Raw SDK propagation / typed runtime errors | No Azure SDK exception may cross `aca_sdk.py`. Group-scoped 401/403 is authorization, 404 is permanent binding, and 429/5xx/timeout is transient; sandbox-scoped 404 means missing backing; already-running resume remains idempotent and every other 409 is invalid state. Controller routes return redacted structured responses for those categories. | Human | 2026-08-27 | §15 |
-| 200 | Stream recovery metadata | Session-only / stable run recovery headers | Expose `x-ms-run-id` and `Location` on every successful synchronous stream so clients can follow terminal state without relying on a settling conflict. | Human | 2026-08-25 | Bug-fix correction |
-| 201 | Reconciliation ownership | Global request fast path / targeted request repair plus timer sweep | Limit request-path reconciliation to the current session and operation; retain global stale-state, orphan, and expiry convergence in the timer with bounded inventory work. | Human + Agent | 2026-08-25 | Bug-fix correction |
-| 202 | Provider transient handling | Opaque failure / classified bounded recovery | Classify provider responses into runtime-owned errors, retry only transient outcomes, and use lifecycle-aware bounded file readiness retries with `Retry-After`. | Human + Agent | 2026-08-25 | Bug-fix correction |
-| 203 | Built-in UI session reuse | Reuse after `done` / wait for durable terminal phase | Have the built-in chat UI capture stream run metadata and poll `Location` until `phase=terminal`, keeping same-session submission disabled during settling. | Human + Agent | 2026-08-26 | Bug-fix correction |
-| 204 | Capacity-failure reconciliation ownership (narrows #58/#61) | Bounded app-wide request sweep / session-targeted repair / timer-only | Keep session-targeted repair and one retry; unrelated global reclamation stays timer-owned, so capacity may remain exhausted. | Human | 2026-08-27 | Bug-fix correction |
-| 205 | Authorization replay and settlement origin (revises #159/#203) | Generic replay / status-preserving replay; any HTTPS / same origin | Preserve sanitized `401`/`403` across exact replay, while keeping the public reason generic; reject cross-origin status URLs before attaching Function credentials or session metadata. | Human + Agent | 2026-08-27 | Review correction |
-| 206 | Bounded recovery closure (refines #201/#202) | Broad/implicit / targeted and explicit | Use session-filtered request repair; retain accepted-create lookup failures as indeterminate; report deferred timer work as partial; apply the declared provider retry set and hard delay caps after jitter. | Human + Agent | 2026-08-27 | Review correction |
+| 182 | Stream recovery metadata | Session-only / stable run recovery headers | Expose `x-ms-run-id` and `Location` on every successful synchronous stream so clients can follow terminal state without relying on a settling conflict. | Human | 2026-08-25 | Bug-fix correction |
+| 183 | Reconciliation ownership | Global request fast path / targeted request repair plus timer sweep | Limit request-path reconciliation to the current session and operation; retain global stale-state, orphan, and expiry convergence in the timer with bounded inventory work. | Human + Agent | 2026-08-25 | Bug-fix correction |
+| 184 | Provider transient handling | Opaque failure / classified bounded recovery | Preserve sanitized ARM status metadata, retry only transient ARM outcomes, and use lifecycle-aware bounded file readiness retries with `Retry-After`. **Revised by #194/#195: runtime ARM discovery is removed; the typed data-plane boundary and bounded transient policy remain current.** | Human + Agent | 2026-08-25 | Bug-fix correction |
+| 185 | Built-in UI session reuse | Reuse after `done` / wait for durable terminal phase | Have the built-in chat UI capture stream run metadata and poll `Location` until `phase=terminal`, keeping same-session submission disabled during settling. | Human + Agent | 2026-08-26 | Bug-fix correction |
+| 186 | Capacity-failure reconciliation ownership (narrows #58/#61) | Bounded app-wide request sweep / session-targeted repair / timer-only | Keep session-targeted repair and one retry; unrelated global reclamation stays timer-owned, so capacity may remain exhausted. | Human | 2026-08-27 | Bug-fix correction |
+| 187 | Authorization replay and settlement origin (revises #159/#185) | Generic replay / status-preserving replay; any HTTPS / same origin | Preserve sanitized `401`/`403` across exact replay, while keeping the public reason generic; reject cross-origin status URLs before attaching Function credentials or session metadata. | Human + Agent | 2026-08-27 | Review correction |
+| 188 | Bounded recovery closure (refines #183/#184) | Broad/implicit / targeted and explicit | Use session-filtered request repair; retain accepted-create lookup failures as indeterminate; report deferred timer work as partial; apply the declared ARM retry set and hard delay caps after jitter. **Revised by #194/#195: there is no runtime ARM discovery; equivalent bounds apply to the classified data-plane transient set.** | Human + Agent | 2026-08-27 | Review correction |
+| 189 | Deployed qualification topology | Official build or separate stages / current E2E topology | Keep deployed qualification in `eng/ci/e2e-tests.yml`: `AcaSweep` plus one `AcaQualification` stage containing parallel Python 3.13 and 3.14 jobs. Each job deploys its runtime fixture and then runs one ordered suite. | Human | 2026-08-28 | #166 |
+| 190 | Deployed qualification gating and status | Every E2E run / main plus manual; blocking / nonblocking | Run automatically only for `IndividualCI`/`BatchedCI` builds of `main`, and allow Manual runs from any branch; exclude PR and Schedule reasons. Keep sweep and qualification `continueOnError` and non-required until a separate human promotion decision. | Human | 2026-08-28 | #166 |
+| 191 | Deployment package and provenance | Released package / deployed build artifact with in-test attestation | Assemble the committed qualification fixture with the built wheel and pinned requirements, deploy it through Flex remote build, and embed `BUILD_INFO.json`. The fixture owns the build-info route. Cold/fresh-session timing runs first; afterward the same test attests build ID, commit SHA, and Python version. Mismatch fails qualification and suppresses latency metrics. | Human | 2026-08-28 | #166 |
+| 192 | Deployed qualification coverage and matrix | Split phases / one ordered per-runtime suite | In each parallel Python 3.13/3.14 job, run fresh-session acceptance first, then public turn, lifecycle, backing loss, and N=5 with provisioning concurrency 1. N=100 remains human-only. Latency evidence is observe-only and never gates. | Human | 2026-08-28 | #166; current N=5/N=100 policy |
+| 193 | Qualification cleanup and rollback | Post-run cleanup and rollback / pre-run signal only | Run one nonfatal, age-scoped sweep before qualification and no post-run cleanup, so automatic idle-delete/reaping failures remain visible. Provide no retained-package rollback machinery; a later deployment corrects a bad deployment. | Human | 2026-08-28 | #166 |
+| 194 | Required Sandbox Group region and endpoint | ARM discovery/equality check / authored direct endpoint | Require the normalized Sandbox Group `region` beside its resource ID. Construct the regional data-plane client directly, with no ARM lookup or fallback. Function App and Sandbox Group may be in the same or different regions; compare only configured, persisted, and live Sandbox Group identity and region, and fail closed on those mismatches. | Human | 2026-08-28 | Revises #99/#184/#188 |
+| 195 | ACA provider error boundary | Raw SDK propagation / complete typed and redacted boundary | No Azure SDK exception crosses `aca_sdk.py`: group 401/403 is authorization, group 404 is binding, group 429/5xx/timeout is transient, and sandbox 404 is missing backing. Only an already-running resume 409 is idempotent; every other 409 is invalid state. Routes expose only typed, redacted projections. | Human | 2026-08-28 | Refines #159/#184/#187/#188 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -640,7 +629,9 @@ sandbox, confines preview SDK usage to `transport/aca_sdk.py`, and has passed
 the recorded real adapter, model, deployed Easy Auth, and lifecycle evidence.
 The N=5 public load diagnostic validates orchestration and cleanup only; it does
 not close Decision #29. N=100 remains human-only formal acceptance, pending
-human-supplied evidence. The Decisions log records the sign-off, amendments,
+human-supplied evidence. On 2026-08-28 the human approved Decisions #189–#195
+as the canonical deployed-qualification, required-region/no-ARM, and provider
+error-boundary contract. The Decisions log records that sign-off, amendments,
 and historical provenance for these controlling contracts. The setup-timeout
 implementation includes deterministic regression/race coverage and a one-shot
 deployed-host asset; opt-in deployed and Azurite execution remains separately
@@ -675,6 +666,23 @@ risk is API churn, not the absence of the capabilities below.
   `get_egress_decisions() -> EgressDecisions` are the first-class resource and
   egress audit signals. The controller must use them rather than inventing
   equivalents.
+
+### Regional binding and provider exception boundary
+
+The Sandbox Group resource ID and normalized authored `region` select the
+regional ACA data-plane endpoint directly. The adapter performs no ARM lookup
+or compatibility fallback. It compares the configured, persisted, and live
+Sandbox Group identity and region and fails closed on mismatch. It does not
+compare the Function App location with the Sandbox Group region; same-region
+and cross-region placement are both supported.
+
+`transport/aca_sdk.py` contains the complete preview-SDK exception boundary.
+Group-scoped `401`/`403` becomes authorization, group-scoped `404` becomes a
+permanent binding failure, and `429`/5xx/timeout or transport failure becomes
+transient. Sandbox-scoped `404` means missing session backing. Resume treats
+only the provider's already-running `409` as idempotent success; every other
+`409` is invalid state. No raw SDK exception, provider payload, identifier, or
+credential crosses into a controller route.
 
 ### Fail-closed creation and egress defaults
 
@@ -842,7 +850,7 @@ class AgentExecutionBackend(Protocol):
 ##### Residency/provisioning boundary
 
 * One group per app/environment in the customer subscription is the hard v1 invariant. The customer authors that group's region independently; the runtime does not require or validate equality with the Function App or state-account region. Customer IaC/customer identity creates standing ARM/RBAC resources; customer owns standing-IaC teardown. Runtime has SandboxGroup Data Owner scoped to the one pre-provisioned group and creates/resumes/deletes session sandboxes only. Runtime never creates/updates group ARM resources, images, or role assignments.
-* v1 uses preview default group quotas; 100 concurrency must be tested, not assumed. Multi-group regional failover/DR is deferred, while cross-region Function App-to-group placement is supported by #198. v1 ships composable documented sample IaC; customer-run composite quickstart is post-v1. Deploying scoped RBAC requires Owner or User Access Administrator.
+* v1 uses preview default group quotas; 100 concurrency must be tested, not assumed. Multi-group regional failover/DR is deferred, while cross-region Function App-to-group placement is supported by #194. v1 ships composable documented sample IaC; customer-run composite quickstart is post-v1. Deploying scoped RBAC requires Owner or User Access Administrator.
 * The runtime uses the public `python-3.<minor>` disk by default; a customer may supply a disk name or immutable ID override. The controller captures script root plus `.python_packages`, computes SHA-256 `digest_kind=funcs_zip`, and transfers content with the stdlib bootstrap; sandbox does not read storage. No custom OCI image is built by this runtime.
 
 ##### SDK corrections that are binding for consolidation
@@ -861,8 +869,8 @@ class AgentExecutionBackend(Protocol):
 
 * Management routes are session-scoped: `GET .../sessions/{session_id}/runs/{run_id}`, `.../result`, `.../events`, `POST .../cancel`; headers are `Prefer: respond-async`, `x-ms-session-id`, `Idempotency-Key`, `Last-Event-ID`.
 * Async accepted -> `202` + `Location` + `Retry-After: 2`. A failed async **status** read is `200`, never 5xx; a result URL is `410` when no result is available or its session is tombstoned. Active slot -> `409 active_run_exists`; same idempotency key/different payload -> `422 idempotency_key_conflict`; two typed setup/run cap breaches -> `504`. Deduplicate first, then active-run check: same key+payload replay; distinct key while active=409; retry after abandon rotates key.
-* Config/startup: absence of `session_runtime` (or of the `aca_sandbox` block within it) means `in_lang_worker`. On supported Linux x86_64 CPython 3.13/3.14 hosts, valid `aca_sandbox` configuration selects the real ACA backend; no unconditional unavailable-backend gate remains. Unsupported ACA combinations—including `workflows.enabled` and Dynamic Sessions `execute_python`—fail startup. Reject dropped `max_run_seconds`, `region`, `disk`, `content_package`. `auto_suspend_idle` legal set is `{60,120,300,600,1800,3600}` mapping to `auto_suspend_seconds`; `reclaim_idle` positive and > suspend idle; 10 of the 13 matrix rows fail closed (rows 6 and 7 are superseded by Decisions #87/#86, row 11 is structurally unrepresentable — see the matrix).
-* Config/startup and runtime gates fail closed on: group-not-pre-provisioned, cross-region binding, ABI/protocol/digest mismatch, anonymous ingress, missing readiness, unsafe egress defaults, and snapshot-incompatible mutable entrypoint/cmd/environment. (The former Shared-Key/dedicated-account preflight on state storage no longer applies — Decisions #86/#87; session state always reuses `AzureWebJobsStorage`, with no auth-mode gate at this layer.)
+* Config/startup: absence of `session_runtime` (or of the `aca_sandbox` block within it) means `in_lang_worker`. On supported Linux x86_64 CPython 3.13/3.14 hosts, valid `aca_sandbox` configuration selects the real ACA backend; no unconditional unavailable-backend gate remains. Unsupported ACA combinations—including `workflows.enabled` and Dynamic Sessions `execute_python`—fail startup. Require the Sandbox Group resource ID and normalized region; reject dropped `max_run_seconds`, `disk`, and `content_package`. `auto_suspend_idle` legal set is `{60,120,300,600,1800,3600}` mapping to `auto_suspend_seconds`; `reclaim_idle` positive and > suspend idle; 10 of the 13 matrix rows fail closed (rows 6 and 7 are superseded by Decisions #87/#86, row 11 is structurally unrepresentable — see the matrix).
+* Config/startup and runtime gates fail closed on: group-not-pre-provisioned, configured/persisted/live Sandbox Group identity or region mismatch, ABI/protocol/digest mismatch, anonymous ingress, missing readiness, unsafe egress defaults, and snapshot-incompatible mutable entrypoint/cmd/environment. A Function App/Sandbox Group region difference is explicitly allowed and is not a binding mismatch. (The former Shared-Key/dedicated-account preflight on state storage no longer applies — Decisions #86/#87; session state always reuses `AzureWebJobsStorage`, with no auth-mode gate at this layer.)
 * Required quality gates: ruff, strict mypy, pytest for every PR; full existing suite unchanged at the local seam; Azurite CAS/EGT/concurrency tests; no `src` import from tests/import graph test; typed seam conformance for local and ACA; journal/Table credential redaction; crash injection; golden traces every CI; real ACA smoke; and full e2e plus 100-concurrent and large-payload gates.
 
 #### Source contradictions, stale assertions, and required consolidation edits
@@ -898,7 +906,7 @@ by real ACA smoke.
 
 * Execution is seam-first and additive. `in_lang_worker` remains the default; declaring valid `aca_sandbox` configuration opts into the available backend on supported hosts, while unsupported/unsafe combinations fail startup without fallback. Discovery is read-only; registration is the only Azure-aware stage; execution is lazy.
 * The controller (Functions app) owns identity/owner resolution, Azure Tables, sandbox binding/provisioning, package capture/delivery, budgets, HTTP/SSE, egress-policy compilation, and reconciliation. The sandbox/harness owns stdlib bootstrap, MAF adapter, journal writes, whole-turn atomic commit, watchdog, in-process delegation, and workload-scoped use of its attached Sandbox Group managed identity.
-* Runtime sandbox groups are pre-provisioned customer IaC. Runtime never creates a group, never opens inbound ports, and only creates individual sandboxes in the bound region. Group absence or cross-region binding fails closed.
+* Runtime sandbox groups are pre-provisioned customer IaC. Runtime never creates a group, never opens inbound ports, and only creates individual sandboxes in the authored bound region. Group absence or configured/persisted/live Sandbox Group identity or region mismatch fails closed; Function App-to-group cross-region placement is allowed.
 * The deployment has a controller Functions process and a public or customer-selected sandbox disk, not a custom sandbox image. Harness code is importable for tests but guarded by `_ensure_sandbox()` and must raise outside a marked sandbox. Bootstrap, application, and dependency closure are delivered through the file plane; MAF is not baked.
 * Production contains exactly one transport implementation. Test doubles are only `tests/doubles/`, never importable from `src`; `UnavailableBackend` is a typed capability error, never a simulated backend. CI guards: no `src`→`tests` import, SDK imported only in `transport/aca_sdk.py`, and factory cannot return a double.
 
@@ -1046,10 +1054,12 @@ Invariants: no anonymous ingress; no ingress ports; one active run; free slot on
   credential-source isolation, identity boundaries, SSRF defenses, static
   single-level delegation, and whole-chain timeout behavior.
 * Real ACA acceptance requires create/submit/result, stop/resume readiness,
-  loss-to-`410`, egress audit, and 100-concurrent/large-payload validation.
-  Status/event visibility, cancellation/lifecycle repair, cost, and throttling
-  must meet the documented acceptance target; anonymous ingress is never a
-  fallback.
+  loss-to-`410`, egress audit, and large-payload validation. Current deployed
+  qualification uses N=5 as an orchestration diagnostic; 100-concurrent
+  acceptance remains human-only (Decision #192). Status/event visibility is
+  observed against the documented target but does not gate; cancellation,
+  lifecycle repair, cost, and throttling remain acceptance evidence. Anonymous
+  ingress is never a fallback.
 
 All changes run ruff, strict mypy, pytest, observability/redaction checks, and
 the relevant documentation and real-ACA validation slices.
@@ -1108,7 +1118,7 @@ session_runtime:
 
 * Keys are locked: `session_runtime`, `harness`, `aca_sandbox`, `sandbox_group_resource_id`, `region`, and `retention` (nested under `aca_sandbox`).
 * This is global application configuration in `agents.config.yaml`, never per-agent front matter. Per-agent harness/group/retention is deferred; future retention precedence is per-agent > app-level > group default.
-* The resource ID and region are non-secret and use existing environment substitution. Both are authored; the runtime performs no ARM discovery or placement-equality validation.
+* The resource ID and region are non-secret and use existing environment substitution. Both are authored; the runtime performs no ARM discovery or Function App placement-equality validation. The normalized region is forwarded as non-secret guest configuration because the delivered `agents.config.yaml` reconstructs the catalog; the Sandbox Group resource ID and controller credentials remain host-only.
 * No `max_run_seconds`, `disk`, or `content_package` field exists; reject dropped fields. Existing per-agent `timeout` is the sole run-duration knob. For a shared session sandbox, the entry/coordinator timeout controls the whole run; subagents are bounded by `min(subagent timeout, coordinator remaining)`.
 * The watchdog equals authored `timeout`; synchronous wait is `min(timeout, 180s)`. The in-lang-worker backend imposes no additional synchronous-wait cap of its own, but remains subject to the Azure Functions platform's own ~230-second HTTP timeout for synchronous responses regardless of backend ([service limits](https://learn.microsoft.com/azure/azure-functions/functions-scale#service-limits)); long-running work should use the existing async-accepted (`202`) pattern.
 * Disk defaults to public `python-3.<minor>` with an optional customer disk
@@ -1129,7 +1139,7 @@ session_runtime:
 | 2 | `workflows.enabled: true` | Fail startup; Dynamic Workflows are incompatible in v1. | 0008.7 #36 |
 | 3 | Dynamic Sessions code-interpreter configured | Fail startup; unsupported with ACA in v1. | 0008.7 #36 |
 | 4 | Agent is bound to a non-HTTP trigger | Fail startup; ACA is HTTP-only in v1. | Parent / FRD 0009 |
-| 5 | Missing/empty `sandbox_group_resource_id` or missing/invalid `region` | Fail startup. | 0008.10 + §15 |
+| 5 | Missing/empty `sandbox_group_resource_id` or missing/invalid `region` | Fail startup. | 0008.10 + Decision #194 |
 | 6 | ~~State account permits Shared Key or RBAC is not scoped~~ — **superseded** (Decision 87): the Shared-Key-disallowed check is dropped entirely, matching core Azure Functions' own `AzureWebJobsStorage` posture (Shared Key accepted by default). | N/A — condition is no longer checked; row retained for numbering stability. | 0008.3 (superseded by #87) |
 | 7 | ~~Production uses `AzureWebJobsStorage` rather than dedicated `AzureFunctionsAgentsStateStorage`~~ — **superseded** (Decision 86): there is no dedicated state-storage account at all; `AzureWebJobsStorage` is always reused for session state, in every environment, so this condition is structurally unrepresentable. | N/A — condition cannot occur; row retained for numbering stability. | 0008.3 #31 (superseded by #86) |
 | 8 | Neither function-key nor Easy Auth/Entra Functions authentication is configured | Fail startup; some valid Functions auth is mandatory, but Entra-only is not. | 0008.2 (method-agnostic) |
@@ -1318,6 +1328,9 @@ the next pass.
 | Condition | v1 requirement |
 |---|---|
 | Tables unavailable | Fail closed; never create/use unowned sandbox. |
+| Configured, persisted, and live Sandbox Group identity or region disagree | Fail closed as a binding mismatch; perform no ARM lookup or fallback. A different Function App region is allowed. |
+| Group `401`/`403`; group `404`; group `429`/5xx/timeout | Project typed, redacted authorization; permanent binding; or transient failure, respectively. |
+| Sandbox `404`; resume `409`; other `409` | Treat as missing backing; accept only already-running resume as idempotent; otherwise project typed invalid state. |
 | Generation/live-manifest mismatch | Not-found semantics + security event; quarantine suspect sandbox. |
 | Generation rollback | `409` + security event. |
 | Functions recycle after async ack | Sandbox run continues; request or reconciler adopts terminal journal state into Tables. |
@@ -1404,17 +1417,17 @@ an enabled v1 surface.
 
 #### 7. Required test coverage / acceptance gates
 
-* Config scenario fixture for every matrix row, absence/default, valid ACA config, dropped fields, supported-host and unsafe-configuration startup failures, HTTP-only restriction, ABI rule, and always-hard row 13.
+* Config scenario fixture for every matrix row, absence/default, valid ACA config, required normalized region, dropped fields, supported-host and unsafe-configuration startup failures, HTTP-only restriction, ABI rule, and always-hard row 13. Adapter tests prove direct regional endpoint construction with no ARM lookup/fallback, permit Function App/group region differences, and reject configured/persisted/live group identity or region mismatch.
 * Typed execution seam conformance against Local and ACA backend: all seven states, exclusive cursor semantics, typed cursor expiry, cancellation, result eviction, and default local parity.
 * Azurite: owner vectors, ETag one-active-run race across two controllers, entity-group atomicity, idempotency, generation monotonicity, tombstone/410, loss-always-tombstones, redaction, and generic operation begin/resume/advance/complete/abort with stale-token races. Cover provision reservation's owner claim/run/operation EGT, submit admission's operation EGT, rearm-vs-admission, and terminal-vs-reclaim interactions.
-* Stub transport plus real ACA adapter smoke: six verbs, direct file journal operations, `ensure_ready` authoritative under lag, idempotent cancel, no ingress ports, pre-provisioned group failure, SDK import firewall.
+* Stub transport plus real ACA adapter smoke: six verbs, direct file journal operations, `ensure_ready` authoritative under lag, idempotent cancel, no ingress ports, pre-provisioned group failure, SDK import firewall, and complete redacted provider translation for group `401`/`403`/`404`/`429`/5xx/timeout, sandbox `404`, already-running resume `409`, and other `409`.
 * HTTP: async submit/poll/result; both typed 504 reasons; 180-second mid-tool cancellation cleanup; three idempotency cases; replay after abandon requires key rotation; resume after disk suspension; disconnect does not cancel; failed async status read is `200` while unavailable result reads are `410`.
 * Crash injection: file-write/rename/pointer-fsync boundaries; disk-intact crash resumes same sandbox; lost sandbox tombstones; stopped/suspended redeploy digest mismatch; OOM/disk full fails cleanly; clock-skew grace; post-terminal lifecycle re-arm.
 * Reconciler: stale heartbeat verification, no false abandon, label-scoped platform divergence, per-sandbox lifecycle writes, no-live-delete CAS, backstop inequality, terminal/tombstone and completed-operation pruning, snapshot pruning, capacity reap-and-retry, resumed incomplete operations, required operation fields, and fail-closed orphan idle markers. Fault injection covers each provider create/lifecycle/content/manifest/journal phase and stable-label recovery after ambiguous create or launch response loss.
 * Security/egress: reject unsafe defaults/bypass, rule ordering lint, static and secret credential Transform sources, group-identity boundaries, redirect/DNS-rebind revalidation, block sandbox-to-control-plane SSRF, journal/Table redaction.
 * Harness: bootstrap ABI/protocol/digest failure, no anonymous ingress, workflows/code-interpreter fail-closed, semantic golden traces every CI, advertise capability only after exercised trace.
 * Delegation: static/single-level guard, cycle/depth guard, egress union, co-location/no second run, recoverable specialist failure, whole-chain sync timeout.
-* Real ACA E2E/full-system: create-submit-result, stop-resume-ensure-ready, egress deny/transform audit, and large-payload gates are evidenced by U3. The committed deployed destructive backing-loss proof has passed; only formal human sign-off remains deferred. The committed public Easy-Auth load runner uses N=5 as the sole agent/CI diagnostic validation for orchestration and cleanup; it is not capacity evidence. Decision #29 remains human-only N=100 formal acceptance and is not passed until human-supplied N=100 evidence is available. At default preview quota, assert <=2-second p95 status/event visibility at <=1 poll/s per active stream, reliable cancellation/lifecycle repair, and acceptable cost/throttling; failure is an explicit private-ingress/load-shaping review finding, never a reason to permit anonymous ingress. Every validation slice also requires `ruff`, strict `mypy`, and `pytest`, plus docs/observability/redaction gates.
+* Real ACA E2E/full-system: create-submit-result, stop-resume-ensure-ready, egress deny/transform audit, and large-payload gates are evidenced by U3. The committed deployed destructive backing-loss proof has passed; only formal human sign-off remains deferred. Under Decision #192, each Python 3.13/3.14 deployed job runs fresh-session acceptance, public turn, lifecycle, backing loss, and N=5 in order with provisioning concurrency 1. N=5 is diagnostic evidence for orchestration and cleanup, not capacity; Decision #29 remains human-only N=100 formal acceptance until human-supplied evidence exists. Observe status/event latency against the two-second p95 target at <=1 poll/s per active stream, but never gate on it; report reliable cancellation/lifecycle repair and acceptable cost/throttling. Failure is an explicit private-ingress/load-shaping review finding, never a reason to permit anonymous ingress. Every validation slice also requires `ruff`, strict `mypy`, and `pytest`, plus docs/observability/redaction gates.
 
 ## 11. Sandbox harness integration
 
@@ -1798,91 +1811,43 @@ remains. The smoke deploys no Function and performs no artifact attestation.
 
 ADO 298692 passed the low-level entrypoint, journal
 acceptance, real model turn, and cleanup. Post-main deployment, external
-attestation, py313/py314 lifecycle/loss/N=5 qualification, and rollback remain
-owned by issue #166.
+attestation, and Python 3.13/3.14 lifecycle/loss/N=5 qualification are now
+implemented by the §14 design. There is intentionally no rollback machinery.
 
-## 14. Post-main deployment and qualification amendment — issue #166
+## 14. Deployed ACA qualification — issue #166
 
-**Status: design finalized, implementation in progress.** Decisions 182–190
-record this amendment; it narrows §13's forward reference, which anticipated
-external attestation and rollback that Decisions 184 and 188 replace.
+**Status: Finalized and implemented in the current repository.** Decisions
+#189–#193 are the canonical qualification contract approved by the human on
+2026-08-28.
 
-Post-merge `main`/`release/*` qualification runs as additive stages inside
-`eng/ci/official-build.yml`. Top-level `pr: none`, the existing `Build`,
-`RunTests`, and `RunE2ETests` stages, and the §13 current-checkout smoke are
-unchanged. The new stages complement that smoke rather than replacing it: the
-smoke proves the current checkout, these prove a deployed build.
+The deployed qualification lives in `eng/ci/e2e-tests.yml`. `AcaSweep` starts
+without a dependency; one `AcaQualification` stage waits for both `Build` and
+the sweep. Qualification contains two independent jobs, Python 3.13 and Python
+3.14, which run in parallel. Each job assembles and deploys its own runtime
+fixture and then invokes one ordered suite; there are no separate deploy,
+cold-start, or qualify stages.
 
-Stage order is `AcaSweep` → `AcaDeploy*` → `AcaCold*` → `AcaQualify*`. Per #157
-the matrix is two-phase — both cold-start legs finish before either
-deployed-suite leg, with legs parallel inside a phase. Per #158 provisioning
-concurrency is 1 per leg and is passed explicitly, because the load helper
-defaults to 4. Load stays at N=5; N=100 remains human-only. Stages are
-`continueOnError` until the #156 promotion criteria are met.
+Each deployable fixture contains the wheel produced by `Build`, a pinned
+`requirements.txt`, and an embedded `BUILD_INFO.json`, and is deployed through
+the normal Flex Consumption remote-build path. The committed fixture owns the
+build-info route; product endpoint registration is not involved. The
+cold/fresh-session module runs first, before public turn, lifecycle, backing
+loss, and N=5. Within that first module, fresh-session acceptance, first-event,
+and terminal timing complete before the test reads the deployed marker and
+compares build ID, commit SHA, and live Python version. A missing or mismatched
+marker fails the test and suppresses latency metrics, preventing evidence from
+the wrong deployment from being reported as trustworthy.
 
-Deployment uses Flex remote build from a pinned `requirements.txt` plus the
-wheel the existing `Build` stage produces. The merged commit is not on PyPI, so
-shipping that wheel is what makes the deployed app the merge rather than the
-last release. Remote build additionally exercises the customer deployment path,
-so an Oryx or remote-build regression surfaces here.
+Automatic execution is limited to `IndividualCI` and `BatchedCI` builds of
+`refs/heads/main`; Manual runs are allowed from any branch. PullRequest and
+Schedule reasons do not run these stages. The sweep and both qualification jobs
+remain `continueOnError` and non-required; promotion to a blocking gate requires
+a separate human decision. Both runtime jobs pass provisioning concurrency 1.
+Automated load remains N=5, while N=100 is a human-only formal acceptance run.
+Client-side latency evidence is observe-only and never gates.
 
-Attestation is a `BUILD_INFO.json` marker stamped into the package and compared
-against the running build's `build_id`, `commit_sha`, and live
-`sys.version_info`. The marker must be a file inside the package: an app setting
-or resource tag can be changed without deploying, and a tag write is a separate
-ARM call that is not atomic with deployment. The route serving it belongs to the
-deployed fixture's `function_app.py` and touches no product module, so it needs
-no endpoint-response merge ordering.
-
-Cleanup is one non-fatal, age-scoped sweep before the run and none after. ACA
-idle-delete and the hourly reap already reclaim sandboxes, so a post-run reaper
-would mask their failure; running the sweep first turns a leftover into a signal
-that automatic cleanup has stopped working. There is no rollback machinery — the
-next merge corrects a bad deployment.
-
-Streaming visibility latency is measured during the N=5 pass as evidence for
-Decision #25, which conditionally accepted the file transport on an unmeasured
-2-second p95. The measurement is client-side p50/p95/p99, warning above 2 s and
-never gating. It reports observed poll cadence and events per batch so
-poll-interval latency is separable from transport latency, and it states that
-the true sandbox-write-to-client-observe delta is not captured: that needs a
-common clock across two machines, and the cheapest skew estimator is bounded by
-the file plane's per-call overhead, so its error bar would equal the budget
-under test.
-
-## 15. Required authored Sandbox Group region amendment
-
-**Status: Finalized.** The human approved Decisions 196–199 on 2026-08-27.
-
-ACA Sandbox endpoint selection is now explicit app-wide configuration:
-
-```yaml
-session_runtime:
-  aca_sandbox:
-    sandbox_group_resource_id: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID
-    region: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION
-```
-
-Both fields are required whenever `aca_sandbox` selects the backend. `region`
-is trimmed, normalized to lowercase, and restricted to ASCII letters and
-digits. There is no legacy default, ARM lookup, or compatibility fallback.
-The adapter parses the authored resource ID, combines it with the authored
-region, and constructs the ACA regional data-plane clients directly.
-
-The region is the Sandbox Group's region. It is deliberately independent of
-the Function App location: cross-region Function App/Sandbox Group placement
-is supported and no equality validation is performed.
-
-The SDK adapter owns the complete provider exception boundary. Group-scoped
-401/403 failures become authorization errors, group-scoped 404 becomes a
-permanent binding error, and 429/5xx/timeout or transport failures become
-transient errors. Sandbox-scoped 404 means the durable session has lost its
-backing sandbox. Resume treats only the provider's already-running 409 as
-idempotent success; other 409 responses become typed invalid-state errors.
-Provider payloads and raw Azure SDK exceptions never cross into chat,
-streaming, status, result, cancel, or events routes.
-
-The authored region is also forwarded as non-secret guest configuration because
-the sandbox harness reconstructs the agent catalog from the delivered
-`agents.config.yaml`. The Sandbox Group resource ID and controller credentials
-remain host-only.
+Cleanup is one nonfatal, six-hour age-scoped sweep before qualification and no
+post-run reaper. ACA idle-delete and the controller's periodic reaper remain
+responsible for current-run cleanup; deleting immediately after the suite would
+mask failures in those mechanisms. There is no retained-package rollback or
+automatic rollback machinery. A later deployment corrects a bad deployment.

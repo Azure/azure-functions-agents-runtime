@@ -39,10 +39,11 @@ session_runtime:
 ```
 
 Both fields are required. `region` is normalized to lowercase and must contain
-only ASCII letters and digits (for example, `westus2`). The runtime trusts this
-authored value and constructs the regional ACA data-plane client directly; it
-does not read the Sandbox Group through ARM or fall back to discovery. The
-Function App may run in a different region from the Sandbox Group.
+only ASCII letters and digits (for example, `westus2`). The authored value
+identifies and selects the Sandbox Group's regional ACA data-plane endpoint
+directly. The Function App and Sandbox Group may be in the same or different
+regions. The runtime does not read the Sandbox Group through ARM or fall back
+to discovery.
 
 ## Disk selection and content
 

@@ -61,59 +61,12 @@ extends:
               PoolName: 1es-pool-azfunc
               acaServiceConnection: ${{ parameters.acaServiceConnection }}
 
-      # ---------------------------------------------------------------------
-      # Post-main ACA deployment and qualification (issue #166).
-      #
-      # These stages live here rather than in official-build.yml because this
-      # is the end-to-end test pipeline: they deploy a built package to durable
-      # fixture Function Apps and qualify it against real Azure. official-build
-      # exists to build and release artifacts, not to run deployed E2E suites.
-      #
-      # They complement the current-checkout ACA smoke inside RunE2ETests
-      # rather than replacing it: that smoke proves the current checkout works,
-      # these prove a *deployed build* works. No app-level contention -- the
-      # smoke provisions a synthetic per-run app identity, these target the
-      # durable fixture apps -- though both share one Sandbox Group.
-      #
-      # Two-phase by design -- both runtimes finish cold start before either
-      # enters the expensive suite -- and every stage is continueOnError while
-      # the pipeline stabilizes. Promotion to a blocking gate is a separate,
-      # explicitly human-approved step.
-      #
-      # GATING. This pipeline has PR triggers (main, feature/*), so unlike
-      # official-build these stages MUST be gated or every PR would pay for a
-      # full deploy-and-qualify cycle. The condition is repeated per stage
-      # rather than hoisted into a variable: an incorrect single expression
-      # would silently skip or silently run all five, and a skipped stage
-      # reports the same green as one that never applied.
-      #
-      #   Manual                  -> allowed on ANY branch, so the stages stay
-      #                              testable from a topic branch.
-      #   IndividualCI/BatchedCI  -> main only, i.e. merges.
-      #   PullRequest             -> excluded. Note a PR build's SourceBranch
-      #                              is refs/pull/<N>/merge, never
-      #                              refs/heads/main, so the branch test alone
-      #                              would already exclude it; the Reason test
-      #                              makes that intent explicit rather than
-      #                              incidental.
-      #   Schedule                -> excluded. The weekly cron is not a merge,
-      #                              and these stages cost real Azure spend.
-      #
-      # Targets come from non-secret pipeline variables, matching how the
-      # existing ACA smoke sources ACA_SANDBOX_GROUP_RESOURCE_ID. None of these
-      # are credentials -- they are configuration that simply must not be
-      # committed to a public repository.
-      #
-      # Deliberately NOT a variable group: a `- group:` reference that does not
-      # resolve fails pipeline *compilation*, which would take Build and
-      # RunE2ETests down with it. Plain variables degrade to a failure inside
-      # the ACA stages, which are continueOnError.
-      # ---------------------------------------------------------------------
+      # Post-main deployed qualification. Manual runs are allowed on any branch;
+      # automatic runs are main-only, excluding PRs and schedules. Keep these
+      # conditions local so missing environment configuration fails only the
+      # nonblocking ACA work, not pipeline compilation.
       - stage: AcaSweep
         displayName: 'ACA pre-run leak sweep'
-        # No dependsOn: this starts alongside Build and costs no wall-clock. It
-        # is a leak *detector*, not cleanup -- see the template for why it runs
-        # before the qualification rather than after it.
         dependsOn: []
         condition: or(eq(variables['Build.Reason'], 'Manual'), and(in(variables['Build.Reason'], 'IndividualCI', 'BatchedCI'), eq(variables['Build.SourceBranch'], 'refs/heads/main')))
         jobs:
@@ -123,14 +76,15 @@ extends:
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
               poolName: 1es-pool-azfunc
 
-      - stage: AcaDeployColdPy313
-        displayName: 'ACA deploy + cold start (3.13)'
+      - stage: AcaQualification
+        displayName: 'ACA deployed qualification'
         dependsOn:
           - Build
           - AcaSweep
         condition: and(succeeded(), or(eq(variables['Build.Reason'], 'Manual'), and(in(variables['Build.Reason'], 'IndividualCI', 'BatchedCI'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))))
         jobs:
-          - template: /eng/templates/official/jobs/aca-deploy-cold.yml@self
+          # Parallel jobs keep one runtime's failure from suppressing the other.
+          - template: /eng/templates/official/jobs/aca-qualify.yml@self
             parameters:
               runtimeTarget: 'python313'
               pythonVersion: '3.13'
@@ -141,55 +95,11 @@ extends:
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
               poolName: 1es-pool-azfunc
 
-      - stage: AcaDeployColdPy314
-        displayName: 'ACA deploy + cold start (3.14)'
-        dependsOn:
-          - Build
-          - AcaSweep
-        condition: and(succeeded(), or(eq(variables['Build.Reason'], 'Manual'), and(in(variables['Build.Reason'], 'IndividualCI', 'BatchedCI'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))))
-        jobs:
-          - template: /eng/templates/official/jobs/aca-deploy-cold.yml@self
+          - template: /eng/templates/official/jobs/aca-qualify.yml@self
             parameters:
               runtimeTarget: 'python314'
               pythonVersion: '3.14'
               constraintsFile: 'eng/constraints/aca-fixture-py314.txt'
-              appSiteName: $(ACA_DEPLOYED_APP_SITE_NAME_PY314)
-              baseUrl: $(ACA_DEPLOYED_FUNCTION_BASE_URL_PY314)
-              acaServiceConnection: ${{ parameters.acaServiceConnection }}
-              artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
-              poolName: 1es-pool-azfunc
-
-      - stage: AcaQualifyPy313
-        displayName: 'ACA qualification suite (3.13)'
-        # Depends on BOTH cold legs: the phase boundary is what makes a
-        # cold-start regression fail fast for both runtimes before either
-        # spends its load budget.
-        dependsOn:
-          - AcaDeployColdPy313
-          - AcaDeployColdPy314
-        condition: and(succeeded(), or(eq(variables['Build.Reason'], 'Manual'), and(in(variables['Build.Reason'], 'IndividualCI', 'BatchedCI'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))))
-        jobs:
-          - template: /eng/templates/official/jobs/aca-qualify.yml@self
-            parameters:
-              runtimeTarget: 'python313'
-              pythonVersion: '3.13'
-              appSiteName: $(ACA_DEPLOYED_APP_SITE_NAME_PY313)
-              baseUrl: $(ACA_DEPLOYED_FUNCTION_BASE_URL_PY313)
-              acaServiceConnection: ${{ parameters.acaServiceConnection }}
-              artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
-              poolName: 1es-pool-azfunc
-
-      - stage: AcaQualifyPy314
-        displayName: 'ACA qualification suite (3.14)'
-        dependsOn:
-          - AcaDeployColdPy313
-          - AcaDeployColdPy314
-        condition: and(succeeded(), or(eq(variables['Build.Reason'], 'Manual'), and(in(variables['Build.Reason'], 'IndividualCI', 'BatchedCI'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))))
-        jobs:
-          - template: /eng/templates/official/jobs/aca-qualify.yml@self
-            parameters:
-              runtimeTarget: 'python314'
-              pythonVersion: '3.14'
               appSiteName: $(ACA_DEPLOYED_APP_SITE_NAME_PY314)
               baseUrl: $(ACA_DEPLOYED_FUNCTION_BASE_URL_PY314)
               acaServiceConnection: ${{ parameters.acaServiceConnection }}

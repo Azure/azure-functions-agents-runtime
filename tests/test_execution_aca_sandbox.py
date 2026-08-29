@@ -1175,7 +1175,10 @@ async def test_concurrent_retry_cannot_take_an_unexpired_journal_launch(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status_code", [None, 409, 423, 425, 429, 500, 502, 503, 504])
+@pytest.mark.parametrize(
+    "status_code",
+    [None, 409, 423, 425, 429, 500, 501, 502, 503, 504, 505, 599],
+)
 async def test_retryable_provision_content_failure_leaves_a_resumable_operation(
     tmp_path: Path,
     status_code: int | None,
@@ -3341,6 +3344,11 @@ async def test_backend_cancels_through_the_live_handle_and_adopts_the_terminal_r
         ),
         (
             SandboxFileOperationError("sensitive provider response", status_code=503),
+            503,
+            "sandbox_group_transient",
+        ),
+        (
+            SandboxFileOperationError("sensitive provider response", status_code=599),
             503,
             "sandbox_group_transient",
         ),
