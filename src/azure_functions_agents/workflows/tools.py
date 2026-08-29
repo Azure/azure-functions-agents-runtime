@@ -111,8 +111,9 @@ class _ToolTaskSpec(_TaskSpecBase):
         default=None,
         exclude_if=lambda value: value is None,
         description=(
-            "Optional bounded retry policy. A retry declared on the tool itself "
-            "overrides whatever is set here."
+            "Optional bounded execution policy: 'timeout' (ISO-8601, PT1S-PT10M) "
+            "for one attempt, 'retry', and 'continue_on_error'. A timeout or retry "
+            "declared on the tool itself overrides whatever is set here."
         ),
     )
 
@@ -162,7 +163,11 @@ class _SubAgentTaskSpec(_TaskSpecBase):
     execution: WorkflowTaskExecution | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
-        description="Optional bounded retry policy for this Sub Agent task.",
+        description=(
+            "Optional bounded execution policy for this Sub Agent task: "
+            "'timeout' (ISO-8601, PT1S-PT10M) for one attempt, 'retry', and "
+            "'continue_on_error'."
+        ),
     )
 
 
@@ -443,6 +448,9 @@ async def start_workflow(
             effective = resolve_workflow_task_execution(
                 task,
                 decorator_retry=declarations.retry if declarations is not None else None,
+                decorator_timeout=(
+                    declarations.timeout if declarations is not None else None
+                ),
             )
             if effective is not None:
                 effective_policies[task.id] = effective

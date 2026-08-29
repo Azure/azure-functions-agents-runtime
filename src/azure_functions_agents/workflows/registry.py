@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from .schema import WorkflowRetryPolicy
+from .schema import WorkflowRetryPolicy, WorkflowTaskExecution
 
 
 @dataclass(frozen=True)
@@ -43,8 +43,9 @@ class WorkflowToolEntry:
     exist yet, and silently returning a coroutine to the activity would
     surface as a confusing serialization error later.
 
-    ``retry`` is the optional ``@workflow_tool`` retry declaration. It is
-    authoritative at submission time and overrides a plan-authored policy.
+    ``retry`` is the optional ``@workflow_tool`` retry declaration, and
+    ``timeout`` the optional per-attempt deadline. Both are authoritative at
+    submission time and override a plan-authored policy.
     """
 
     name: str
@@ -52,6 +53,7 @@ class WorkflowToolEntry:
     handler: Callable[[dict[str, Any]], Any]
     public: bool
     retry: WorkflowRetryPolicy | None = None
+    timeout: str | None = None
 
 
 type WorkflowHandlerCatalog = Mapping[str, WorkflowToolEntry]
@@ -82,6 +84,7 @@ def make_workflow_tool_entry(
     *,
     public: bool = True,
     retry: WorkflowRetryPolicy | None = None,
+    timeout: str | None = None,
 ) -> WorkflowToolEntry:
     """Validate and construct one workflow handler-catalog entry."""
     if not isinstance(name, str) or not name:
@@ -103,12 +106,18 @@ def make_workflow_tool_entry(
         )
     if retry is not None and not isinstance(retry, WorkflowRetryPolicy):
         raise ValueError(f"workflow tool {name!r}: retry must be a WorkflowRetryPolicy")
+    if timeout is not None:
+        try:
+            WorkflowTaskExecution(timeout=timeout)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"workflow tool {name!r}: invalid timeout: {exc}") from None
     return WorkflowToolEntry(
         name=name,
         description=description,
         handler=handler,
         public=public,
         retry=retry,
+        timeout=timeout,
     )
 
 
@@ -126,6 +135,7 @@ def register_workflow_tool(
     *,
     public: bool = True,
     retry: WorkflowRetryPolicy | None = None,
+    timeout: str | None = None,
 ) -> None:
     """Register a workflow-safe tool.
 
@@ -142,6 +152,7 @@ def register_workflow_tool(
         handler,
         public=public,
         retry=retry,
+        timeout=timeout,
     )
 
 
