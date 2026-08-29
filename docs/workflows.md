@@ -857,8 +857,8 @@ downstream dependency behaves exactly as documented under
 Two bounds keep the object safe to publish: only the stable `error_code` and
 `kind` a failure already carries are included — never handler output, task
 arguments, or exception text — and per-instance failure detail is capped at the
-first 20 continued failures in `(node id, index)` order so a fully expanded plan
-stays inside Durable's custom-status size limit.
+first 20 continued failures in persisted plan order (then instance index) so a
+fully expanded plan stays inside Durable's custom-status size limit.
 
 A client that only understands version 2 is unaffected: it sees an unknown
 `schema_version` and degrades, exactly as it already must for any future

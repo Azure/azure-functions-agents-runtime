@@ -16,6 +16,7 @@ import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -220,10 +221,68 @@ async def test_malformed_policy_input_is_recorded_without_trusting_it(
 
     assert outcome["failure"]["kind"] == "handler_contract"
     span = _task_span(spans)
-    # ``max_attempts`` came from the rejected payload, so it is reported as read
-    # rather than repaired, and nothing beyond identifiers is attached.
-    assert span.attributes["af.workflow_task.max_attempts"] == 99
+    assert span.attributes["af.workflow_task.node_instance_id"] == "work"
+    # ``max_attempts`` is outside its validated domain, so it is dropped rather
+    # than reported: it is a metric dimension, and this is the one path whose
+    # payload is by definition the one that just failed validation.
+    assert "af.workflow_task.max_attempts" not in span.attributes
     assert span.attributes[obs.ATTR_FAULT_DOMAIN] == obs.FaultDomain.RUNTIME
+
+
+@pytest.mark.asyncio
+async def test_out_of_domain_policy_fields_never_become_metric_dimensions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dimensions: list[dict[str, Any]] = []
+    activity = _tool_activity(lambda args: {"ok": True})
+    task = _activity_task()
+    task["execution"] = {
+        "max_attempts": 12_345,
+        "continue_on_error": "sometimes",
+        "timeout_ms": -1,
+    }
+
+    with _capture_spans(monkeypatch):
+        monkeypatch.setattr(
+            obs,
+            "_workflow_task_start_counter",
+            SimpleNamespace(add=lambda count, attrs: dimensions.append(attrs)),
+        )
+        monkeypatch.setattr(
+            obs,
+            "_workflow_task_completion_counter",
+            SimpleNamespace(add=lambda count, attrs: dimensions.append(attrs)),
+        )
+        await activity(task)
+
+    assert dimensions
+    for attrs in dimensions:
+        assert "af.workflow_task.max_attempts" not in attrs
+        assert "af.workflow_task.continue_on_error" not in attrs
+        assert attrs["af.workflow_task.target_type"] == "tool"
+
+
+@pytest.mark.asyncio
+async def test_in_domain_policy_fields_survive_an_early_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A denied delivery still reports the policy it was actually carrying."""
+    activity = _tool_activity(lambda args: {"ok": True}, allowed_tools=())
+
+    with _capture_spans(monkeypatch) as spans:
+        await activity(_activity_task(execution=_retry_execution(timeout_ms=5_000)))
+
+    span = _task_span(spans)
+    assert span.attributes["af.workflow_task.max_attempts"] == 3
+    assert span.attributes["af.workflow_task.timeout_ms"] == 5_000
+    # A default ``continue_on_error`` is not persisted, and the early path
+    # reports the payload rather than re-deriving the effective policy.
+    assert "af.workflow_task.continue_on_error" not in span.attributes
+
+    with _capture_spans(monkeypatch) as spans:
+        await activity(_activity_task(execution=_execution(continue_on_error=True)))
+
+    assert _task_span(spans).attributes["af.workflow_task.continue_on_error"] is True
 
 
 @pytest.mark.asyncio

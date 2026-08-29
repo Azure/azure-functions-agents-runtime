@@ -597,6 +597,13 @@ async def _run_policy_attempt(
     return {"id": task_id, "ok": True, "result": result}
 
 
+def _in_range(value: Any, low: int, high: int) -> int | None:
+    """Return ``value`` only when it is an int inside the validated domain."""
+    if type(value) is int and low <= value <= high:
+        return value
+    return None
+
+
 def early_policy_outcome_with_telemetry(
     task: Mapping[str, Any],
     *,
@@ -608,12 +615,18 @@ def early_policy_outcome_with_telemetry(
 
     Authorization denials, unregistered targets, and malformed policy input
     never reach :func:`invoke_policy_handler`, so they would otherwise be the
-    only Activity deliveries with no span at all. Attributes are read
-    defensively because the input that produced a ``handler_contract`` outcome
-    is by definition not trusted to match the persisted schema.
+    only Activity deliveries with no span at all.
+
+    The policy fields are read from a payload that, for a ``handler_contract``
+    outcome, is exactly the one that just failed validation — and two of them
+    are metric dimensions, where an out-of-domain value would create a bogus
+    series instead of a bogus span attribute. They are therefore admitted only
+    inside their validated domain and dropped otherwise; identifiers stay
+    best-effort because they are span-only.
     """
     execution = task.get("execution")
     execution_map: Mapping[str, Any] = execution if isinstance(execution, Mapping) else {}
+    continue_on_error = execution_map.get("continue_on_error")
     attributes = {
         key: value
         for key, value in _task_span_attributes(
@@ -622,9 +635,19 @@ def early_policy_outcome_with_telemetry(
             node_instance_id=task.get("id"),
             target_type=target_type,
             target_name=target_name,
-            max_attempts=execution_map.get("max_attempts"),
-            timeout_ms=execution_map.get("timeout_ms"),
-            continue_on_error=execution_map.get("continue_on_error"),
+            max_attempts=_in_range(
+                execution_map.get("max_attempts"),
+                1,
+                MAX_POLICY_ATTEMPTS,
+            ),
+            timeout_ms=_in_range(
+                execution_map.get("timeout_ms"),
+                MIN_POLICY_TIMEOUT_MS,
+                MAX_POLICY_TIMEOUT_MS,
+            ),
+            continue_on_error=(
+                continue_on_error if type(continue_on_error) is bool else None
+            ),
         ).items()
         if isinstance(value, str | int | bool)
     }

@@ -1340,6 +1340,13 @@
 								(i.state === "completed" || i.state === "failed_continued")
 						).length;
 						bit += ` (${done}/${node.expanded_count})`;
+						// v3: a continued instance's code lives per instance, not
+						// on the node, so surface the distinct codes once.
+						const codes = new Set(insts
+							.filter((i) => i && typeof i === "object" &&
+								typeof i.last_error_code === "string" && i.last_error_code)
+							.map((i) => i.last_error_code));
+						if (codes.size) bit += ` [${Array.from(codes).join(", ")}]`;
 					}
 					bit += formatWorkflowExecutionDetail(node);
 					nodeBits.push(bit);

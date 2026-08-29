@@ -662,7 +662,7 @@ def _materialized_total(
 #: How many continued failures may carry their `last_failure_kind` /
 #: `last_error_code` detail in one status object. Durable caps a custom status
 #: at 16 KB, and a fully-expanded plan can materialize ``MAX_NODES`` instances;
-#: the cap is applied in deterministic (logical id, index) order so replay
+#: the cap is applied in persisted plan order, then instance index, so replay
 #: reproduces exactly the same status.
 _STATUS_FAILURE_DETAIL_LIMIT = 20
 

@@ -458,7 +458,7 @@ def test_format_workflow_status_renders_v3_task_execution_snapshot() -> None:
           },
         };
         const iteratedLine = formatWorkflowStatus(iterated);
-        if (!iteratedLine.includes("fan: aggregated (2/2)")) {
+        if (!iteratedLine.includes("fan: aggregated (2/2) [order_rejected]")) {
           throw new Error("v3 iterated node rendered as: " + iteratedLine);
         }
 
