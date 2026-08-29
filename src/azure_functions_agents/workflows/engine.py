@@ -38,6 +38,7 @@ from .activity import (
     ActivityFailure,
     WorkflowTaskTimeoutError,
     authorization_outcome,
+    early_policy_outcome_with_telemetry,
     failure_is_continuable,
     handler_contract_outcome,
     invoke_handler,
@@ -1247,10 +1248,22 @@ def register_workflows(
     @bp.activity_trigger(input_name="task")
     async def agents_workflow_run_tool(task: _ToolActivityInput) -> dict[str, Any]:
         policy_aware = "execution" in task
+
+        def early(outcome: Any) -> dict[str, Any]:
+            """Record the span for a failure that never reaches the handler."""
+            return dict(
+                early_policy_outcome_with_telemetry(
+                    task,
+                    target_type="tool",
+                    target_name=task.get("tool"),
+                    outcome=outcome,
+                )
+            )
+
         if policy_aware:
             invalid = validate_policy_activity_input(task, target_type="tool")
             if invalid is not None:
-                return dict(invalid)
+                return early(invalid)
         task_id = task["id"]
         tool_name = task["tool"]
         args = task["args"]
@@ -1258,7 +1271,7 @@ def register_workflows(
             workflow_agent_slug, policy = require_workflow_agent_policy(task)
         except RuntimeError:
             if policy_aware:
-                return dict(authorization_outcome(task_id))
+                return early(authorization_outcome(task_id))
             raise
         workflow_id = task["workflow_id"]
         if tool_name not in policy.allowed_tools:
@@ -1271,7 +1284,7 @@ def register_workflows(
                 tool_name,
             )
             if policy_aware:
-                return dict(authorization_outcome(task_id))
+                return early(authorization_outcome(task_id))
             raise RuntimeError(
                 f"task {task_id!r}: workflow tool {tool_name!r} is not authorized"
             )
@@ -1282,7 +1295,7 @@ def register_workflows(
         )
         if entry is None:
             if policy_aware:
-                return dict(handler_contract_outcome(task_id))
+                return early(handler_contract_outcome(task_id))
             raise ValueError(
                 f"task {task_id!r}: tool {tool_name!r} is not registered "
                 "in the workflow-safe tool registry"
@@ -1332,10 +1345,22 @@ def register_workflows(
         task: _SubAgentActivityInput,
     ) -> dict[str, Any]:
         policy_aware = "execution" in task
+
+        def early(outcome: Any) -> dict[str, Any]:
+            """Record the span for a failure that never reaches the Sub Agent."""
+            return dict(
+                early_policy_outcome_with_telemetry(
+                    task,
+                    target_type="sub_agent",
+                    target_name=task.get("agent"),
+                    outcome=outcome,
+                )
+            )
+
         if policy_aware:
             invalid = validate_policy_activity_input(task, target_type="sub_agent")
             if invalid is not None:
-                return dict(invalid)
+                return early(invalid)
         task_id = task["id"]
         agent_slug = task["agent"]
         workflow_id = task["workflow_id"]
@@ -1343,7 +1368,7 @@ def register_workflows(
             workflow_agent_slug, policy = require_workflow_agent_policy(task)
         except RuntimeError:
             if policy_aware:
-                return dict(authorization_outcome(task_id))
+                return early(authorization_outcome(task_id))
             raise
         if agent_slug not in policy.allowed_subagents:
             logger.error(
@@ -1355,7 +1380,7 @@ def register_workflows(
                 agent_slug,
             )
             if policy_aware:
-                return dict(authorization_outcome(task_id))
+                return early(authorization_outcome(task_id))
             raise RuntimeError(
                 f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} is not authorized"
             )
@@ -1369,7 +1394,7 @@ def register_workflows(
                 agent_slug,
             )
             if policy_aware:
-                return dict(authorization_outcome(task_id))
+                return early(authorization_outcome(task_id))
             raise RuntimeError(
                 f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} is not available"
             )
@@ -1407,6 +1432,7 @@ def register_workflows(
                     {},
                     task=task,
                     target=agent_slug,
+                    target_type="sub_agent",
                 )
             )
         try:
