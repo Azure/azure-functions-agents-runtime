@@ -36,7 +36,7 @@ from azure_functions_agents.registration.catalog import AgentCatalog
 
 from . import registry
 from .engine import register_workflows
-from .schema import WorkflowPlanPolicy
+from .schema import WorkflowPlanPolicy, WorkflowToolExecutionPolicy
 from .tools import build_workflow_tools
 
 type WorkflowAgentPolicyCatalog = Mapping[str, WorkflowPlanPolicy]
@@ -292,6 +292,7 @@ def build_workflow_handler_catalog(
                 workflow_tool.description,
                 workflow_tool.handler,
                 public=workflow_tool.public,
+                retry=workflow_tool.retry,
             )
         except ValueError as exc:
             logger.warning("Skipping workflow tool %r: %s", workflow_tool.name, exc)
@@ -319,6 +320,7 @@ def _register_workflow_tools(
                 entry.description,
                 entry.handler,
                 public=entry.public,
+                retry=entry.retry,
             )
         except ValueError as exc:
             logger.warning("Skipping workflow tool %r: %s", entry.name, exc)
@@ -420,6 +422,7 @@ def _build_plan_policy(
     allowed_tools: frozenset[str],
     workflow_subagents: Sequence[WorkflowSubagentRef],
     catalog: AgentCatalog | None,
+    handler_catalog: registry.WorkflowHandlerCatalog,
 ) -> WorkflowPlanPolicy:
     guidance: list[tuple[str, str]] = []
     for ref in workflow_subagents:
@@ -430,10 +433,16 @@ def _build_plan_policy(
                 "available in the AgentCatalog"
             )
         guidance.append((ref.agent, ref.when or entry.resolved.description))
+    tool_execution = {
+        name: WorkflowToolExecutionPolicy(retry=handler_catalog[name].retry)
+        for name in allowed_tools
+        if name in handler_catalog and handler_catalog[name].retry is not None
+    }
     return WorkflowPlanPolicy(
         allowed_tools=allowed_tools,
         allowed_subagents=frozenset(ref.agent for ref in workflow_subagents),
         subagent_guidance=tuple(guidance),
+        tool_execution=tool_execution,
     )
 
 
@@ -476,6 +485,7 @@ def build_workflow_agent_policy_catalog(
             allowed_tools,
             resolved.workflows.subagents,
             catalog,
+            handler_catalog,
         )
     return MappingProxyType(policies)
 
@@ -548,7 +558,7 @@ def build_workflow_integration(
     filtered_workflow_tools = _apply_workflow_exclude(tuple(workflow_tools or ()), metadata)
     handler_catalog = build_workflow_handler_catalog(filtered_workflow_tools)
     effective = _register_workflow_tools(filtered_workflow_tools)
-    policy = _build_plan_policy(effective, workflow_subagents, catalog)
+    policy = _build_plan_policy(effective, workflow_subagents, catalog, handler_catalog)
     register_workflows(
         app,
         catalog=catalog,
