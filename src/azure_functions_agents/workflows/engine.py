@@ -1097,7 +1097,11 @@ def _run_dynamic_workflow(
                 "total_count": len(state.by_id),
             }
 
-        _apply_dynamic_wave_results(state, wave, wave_results)
+        try:
+            _apply_dynamic_wave_results(state, wave, wave_results)
+        except BaseException:
+            _cancel_dynamic_wave_timers(wave, wave_tasks)
+            raise
         _publish_dynamic_status(context, state)
 
     _publish_dynamic_status(context, state)
