@@ -9,13 +9,14 @@ before succeeding on its third attempt.
 |---|---|---|---|---|---|---|
 | HTTP | ✅ (workflow-safe) | | | | | ✅ |
 
-## Configure retry on a workflow tool
+## Configure the execution policy on a workflow tool
 
-The retry policy belongs directly on the operation whose transient failures are
-safe to retry:
+The attempt deadline and the retry policy belong directly on the operation whose
+transient failures are safe to retry:
 
 ```python
 @workflow_tool(
+    timeout="PT5S",
     retry=WorkflowRetryPolicy(
         max_attempts=3,
         backoff=WorkflowRetryBackoff(
@@ -29,6 +30,10 @@ def reserve_inventory(args: dict[str, Any]) -> dict[str, Any]:
     ...
 ```
 
+`timeout` bounds one attempt: a delivery that has not returned within five
+seconds is reported as a retryable timeout, and Durable schedules the next
+attempt under the same backoff.
+
 When the dependency is temporarily unavailable, the handler raises the public
 retryable error:
 
@@ -39,10 +44,12 @@ raise WorkflowRetryableError(
 )
 ```
 
-No retry fields are required in the model-generated DAG. At workflow start, the
-runtime applies the `reserve_inventory` decorator policy to that task. A DAG may
-instead provide an `execution.retry` policy when the tool author has not
-declared one; see [Workflow task execution policy](../../docs/workflows.md#task-retry).
+No execution fields are required in the model-generated DAG. At workflow start,
+the runtime applies the `reserve_inventory` decorator policy to that task. A DAG
+may instead provide an `execution.timeout` or `execution.retry` policy when the
+tool author has not declared one, and `execution.continue_on_error` when a
+failed task should not stop the rest of the DAG; see
+[Task execution policy](../../docs/workflows.md#task-execution-policy).
 
 ## Sample-only failure simulation
 
