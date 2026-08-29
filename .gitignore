@@ -442,3 +442,7 @@ __blobstorage__/
 samples/harness-chat/*
 # MkDocs build output
 site/
+
+# E2E customer-dependency layout (created by the E2E pipeline)
+.e2e-python-packages/
+.python_packages/
