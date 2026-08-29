@@ -36,6 +36,19 @@ jobs:
       - bash: |
           python -m pip install --upgrade pip
           python -m pip install -U -e .[dev]
+          # Durable Functions Python 2.x pulls in durabletask, which depends on
+          # grpcio. The Python worker bundles its own grpcio, and loading a
+          # second copy of that native extension segfaults the worker on import
+          # (exit 139) unless the app's dependencies are presented through the
+          # customer dependency path the worker prioritizes. Give every app a
+          # .python_packages tree pointing at one shared install.
+          shared_packages="$(pwd)/.e2e-python-packages/lib/site-packages"
+          python -m pip install --target="$shared_packages" -e .
+          while IFS= read -r host_json; do
+            app="$(dirname "$host_json")"
+            mkdir -p "$app/.python_packages/lib"
+            ln -s "$shared_packages" "$app/.python_packages/lib/site-packages"
+          done < <(find tests/endtoend/apps samples -type f -name host.json -print)
         displayName: 'Install dependencies for $(PYTHON_VERSION)'
 
       - template: /eng/templates/install-core-tools.yml@self
