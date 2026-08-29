@@ -17,6 +17,7 @@ from azure_functions_agents.controller.http import (
 from azure_functions_agents.controller.idempotency import IdempotencyResultUnavailableError
 from azure_functions_agents.controller.readiness import (
     SessionActivationAuthorizationError,
+    SessionActivationConflictError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
 )
@@ -932,3 +933,38 @@ async def test_tombstoned_abandoned_run_keeps_status_but_result_is_gone() -> Non
 
     assert status_response.status_code == 200
     assert result_response.status_code == 410
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ("submit", "status", "result", "cancel"))
+async def test_invalid_state_returns_a_structured_sanitized_conflict(
+    surface: str,
+) -> None:
+    backend = FakeBackend(_status())
+    error = SessionActivationConflictError("traceId=provider-secret")
+    context = RunContext(run_id="run-1", session_id="session-1")
+    if surface == "submit":
+        backend.raise_on_start = error
+        response = await submit_run(
+            backend,  # type: ignore[arg-type]
+            StartRunRequest(prompt="hello"),
+            agent_slug="main",
+            respond_async=True,
+            budget=_expired_budget(),
+        )
+    elif surface == "status":
+        backend.raise_on_get = error
+        response = await read_status(backend, context)  # type: ignore[arg-type]
+    elif surface == "result":
+        backend.raise_on_get = error
+        response = await read_result(backend, context)  # type: ignore[arg-type]
+    else:
+        backend.raise_on_cancel = error
+        response = await cancel_run(backend, context)  # type: ignore[arg-type]
+
+    assert response.status_code == 409
+    assert response.body == {
+        "error": "sandbox_invalid_state",
+        "reason": "sandbox_invalid_state",
+    }
+    assert "provider-secret" not in str(response.body)

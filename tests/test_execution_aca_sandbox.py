@@ -817,7 +817,7 @@ async def test_get_run_propagates_provider_authorization_without_table_fallback(
     run = _run(session)
     store.runs[run.run_id] = run
     provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
-    provider.attach_error = SandboxGroupAuthorizationError()
+    provider.resume_error = SandboxGroupAuthorizationError()
     backend = AcaSandboxExecutionBackend(
         _binding(),
         runtime=_runtime(script_root, provider, store),
@@ -1954,7 +1954,7 @@ async def test_each_prelaunch_phase_streams_heartbeats_without_activation(
 
 
 @pytest.mark.asyncio
-async def test_prelaunch_events_attach_only_after_the_table_claims_launch(
+async def test_prelaunch_events_resume_only_after_the_table_claims_launch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2025,7 +2025,8 @@ async def test_prelaunch_events_attach_only_after_the_table_claims_launch(
 
     assert event.sequence == 1
     assert event.data == {"content": "ready"}
-    assert provider.attach_calls == 1
+    assert provider.attach_calls == 0
+    assert provider.resume_calls == 1
 
 
 @pytest.mark.asyncio
@@ -2123,7 +2124,8 @@ async def test_launch_claimed_prelaunch_cancel_falls_through_to_live_journal(
 
     assert status.state == "canceled"
     assert store.cancel_calls == 1
-    assert provider.attach_calls == 1
+    assert provider.attach_calls == 0
+    assert provider.resume_calls == 1
 
 
 @pytest.mark.asyncio
@@ -2169,7 +2171,8 @@ async def test_launch_claimed_cancel_waits_for_journal_before_returning(
     status = await asyncio.wait_for(pending, timeout=1.0)
 
     assert status.state == "canceled"
-    assert provider.attach_calls >= 1
+    assert provider.attach_calls == 0
+    assert provider.resume_calls >= 1
 
 
 @pytest.mark.asyncio
@@ -2187,7 +2190,7 @@ async def test_management_setup_timeout_after_a_durable_read_is_linked_not_500(
     store.runs[run.run_id] = run
     store.durable_operations[operation.operation_id] = operation
     provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
-    provider.attach_delay = 0.05
+    provider.resume_delay = 0.05
     original_start = SetupBudget.start
     monkeypatch.setattr(
         "azure_functions_agents.execution.aca_sandbox.SetupBudget.start",
@@ -2248,7 +2251,8 @@ async def test_launch_boundary_returns_durable_phase_when_journal_status_is_unav
 
     assert status.state == "accepted"
     assert status.phase == "executing"
-    assert provider.attach_calls == 1
+    assert provider.attach_calls == 0
+    assert provider.resume_calls == 1
 
 
 @pytest.mark.asyncio
@@ -2598,7 +2602,7 @@ async def test_existing_admission_timeout_after_commit_keeps_linked_run(
     assert store.session.active_operation_id is not None
     assert "abort_operation" not in store.operations
     assert [call for call in handle.calls if call.operation == "exec"] == []
-    attach_calls_before_cancel = provider.attach_calls
+    resume_calls_before_cancel = provider.resume_calls
 
     status = await backend.cancel_run(
         RunContext(
@@ -2612,7 +2616,7 @@ async def test_existing_admission_timeout_after_commit_keeps_linked_run(
     operation = store.durable_operations[store.session.active_operation_id]
     assert operation.kind == "submit_run"
     assert operation.phase == "submit_rearm"
-    assert provider.attach_calls == attach_calls_before_cancel
+    assert provider.resume_calls == resume_calls_before_cancel
 
 
 @pytest.mark.asyncio

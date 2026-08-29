@@ -20,6 +20,7 @@ from azure_functions_agents.controller.readiness import (
     HARNESS_PROTOCOL_PATH,
     ActivatedSession,
     SessionActivationAuthorizationError,
+    SessionActivationConflictError,
     SessionActivationError,
     SessionActivationGoneError,
     SessionActivationNotFoundError,
@@ -72,6 +73,7 @@ from azure_functions_agents.transport.transport_models import (
     SandboxFileOperationError,
     SandboxGroupAuthorizationError,
     SandboxGroupBinding,
+    SandboxInvalidStateError,
 )
 from tests.doubles.content_package import content_package
 from tests.doubles.fake_session_runtime import DEFAULT_GROUP_RESOURCE_ID
@@ -1346,7 +1348,7 @@ async def test_management_touch_propagates_non_concurrency_store_errors(
 
 
 @pytest.mark.asyncio
-async def test_attach_requires_the_provider_handshake_and_protocol_capabilities(
+async def test_ready_session_resumes_before_the_protocol_handshake(
     tmp_path: Path,
 ) -> None:
     script_root = _script_root(tmp_path)
@@ -1363,8 +1365,8 @@ async def test_attach_requires_the_provider_handshake_and_protocol_capabilities(
         allow_create=False,
     )
 
-    assert provider.attach_calls == 1
-    assert provider.resume_calls == 0
+    assert provider.attach_calls == 0
+    assert provider.resume_calls == 1
     assert [call.path for call in handle.calls] == [
         HARNESS_PROTOCOL_PATH,
         ATOMIC_CHECKPOINT_POINTER_PATH,
@@ -1403,7 +1405,7 @@ async def test_resume_requires_the_provider_handshake_and_protocol_capabilities(
 async def test_manifest_mismatch_quarantines_without_deleting_state(tmp_path: Path) -> None:
     script_root = _script_root(tmp_path)
     provider = _FakeProvider(_FakeHandle())
-    provider.attach_error = SandboxManifestMismatchError(frozenset({"sandbox_id"}))
+    provider.resume_error = SandboxManifestMismatchError(frozenset({"sandbox_id"}))
     session = _session(script_root)
     store = _FakeStore(session)
 
@@ -1419,6 +1421,32 @@ async def test_manifest_mismatch_quarantines_without_deleting_state(tmp_path: Pa
     assert store.session is not None
     assert store.session.status == "quarantined"
     assert store.operations == ["update:quarantined"]
+    assert provider.attach_calls == 0
+    assert provider.resume_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_sandbox_state_becomes_a_sanitized_activation_conflict(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    provider = _FakeProvider(_FakeHandle())
+    provider.resume_error = SandboxInvalidStateError("traceId=provider-secret")
+    session = _session(script_root)
+    store = _FakeStore(session)
+
+    with pytest.raises(SessionActivationConflictError) as caught:
+        await activate_session(
+            _runtime(script_root, provider, store),
+            _owner(),
+            session.session_id,
+            SetupBudget.start(),
+            allow_create=False,
+        )
+
+    assert "provider-secret" not in str(caught.value)
+    assert provider.attach_calls == 0
+    assert provider.resume_calls == 1
 
 
 @pytest.mark.asyncio
@@ -1669,7 +1697,7 @@ async def test_manifest_mismatch_releases_an_active_slot_before_quarantine(
 ) -> None:
     script_root = _script_root(tmp_path)
     provider = _FakeProvider(_FakeHandle())
-    provider.attach_error = SandboxManifestMismatchError(frozenset({"sandbox_id"}))
+    provider.resume_error = SandboxManifestMismatchError(frozenset({"sandbox_id"}))
     base_session = _session(script_root)
     active_session = session_with_admitted_run(
         base_session,
@@ -1869,11 +1897,11 @@ async def test_partial_delivery_stays_creating_until_reconciler_reclaims_candida
 async def test_setup_timeout_occurs_before_run_launch(tmp_path: Path) -> None:
     script_root = _script_root(tmp_path)
     provider = _FakeProvider(_FakeHandle())
-    provider.attach_delay = 0.1
+    provider.resume_delay = 0.1
     session = _session(script_root)
     store = _FakeStore(session)
 
-    with pytest.raises(SessionActivationSetupTimeoutError):
+    with pytest.raises(SessionActivationSetupTimeoutError) as caught:
         await activate_session(
             _runtime(script_root, provider, store),
             _owner(),
@@ -1881,6 +1909,8 @@ async def test_setup_timeout_occurs_before_run_launch(tmp_path: Path) -> None:
             SetupBudget.start(setup_seconds=0.05),
             allow_create=False,
         )
+
+    assert caught.value.metadata.phase is SetupPhase.SESSION_RESUME
 
 
 @pytest.mark.asyncio
