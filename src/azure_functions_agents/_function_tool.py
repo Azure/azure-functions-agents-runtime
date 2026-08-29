@@ -9,6 +9,8 @@ from typing import Any, TypeVar, overload
 from agent_framework import FunctionTool
 from pydantic import BaseModel
 
+import azure_functions_agents as _package
+
 __all__ = [
     "FunctionTool",
     "WorkflowTool",
@@ -29,6 +31,7 @@ class WorkflowToolMetadata:
     name: str | None = None
     description: str | None = None
     public: bool = True
+    retry: _package.WorkflowRetryPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,7 @@ class WorkflowTool:
     description: str
     handler: Callable[..., Any] | None
     public: bool = True
+    retry: _package.WorkflowRetryPolicy | None = None
 
 
 def get_workflow_tool_metadata(target: object) -> WorkflowToolMetadata | None:
@@ -139,6 +143,7 @@ def workflow_tool[DecoratedT](
     name: str | None = None,
     description: str | None = None,
     public: bool = True,
+    retry: _package.WorkflowRetryPolicy | None = None,
     **kwargs: Any,
 ) -> DecoratedT: ...
 
@@ -149,6 +154,7 @@ def workflow_tool[DecoratedT](
     name: str | None = None,
     description: str | None = None,
     public: bool = True,
+    retry: _package.WorkflowRetryPolicy | None = None,
     **kwargs: Any,
 ) -> Callable[[DecoratedT], DecoratedT]: ...
 
@@ -159,6 +165,7 @@ def workflow_tool[DecoratedT](
     name: str | None = None,
     description: str | None = None,
     public: bool = True,
+    retry: _package.WorkflowRetryPolicy | None = None,
     **kwargs: Any,
 ) -> DecoratedT | Callable[[DecoratedT], DecoratedT]:
     """Mark a ``tools/`` callable as a Dynamic Workflow tool.
@@ -170,10 +177,17 @@ def workflow_tool[DecoratedT](
         unknown = ", ".join(sorted(kwargs))
         raise TypeError(f"unknown workflow_tool argument(s): {unknown}")
 
+    # Delayed to avoid importing the workflows package while the public package
+    # initializer is still importing this decorator module.
+    from .workflows.schema import WorkflowRetryPolicy
+
+    if retry is not None and not isinstance(retry, WorkflowRetryPolicy):
+        raise TypeError("workflow_tool retry must be a WorkflowRetryPolicy")
     metadata = WorkflowToolMetadata(
         name=name,
         description=description,
         public=public,
+        retry=retry,
     )
 
     def decorator(inner: DecoratedT) -> DecoratedT:
