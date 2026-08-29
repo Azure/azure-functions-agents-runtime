@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import types
+from contextlib import nullcontext
 
 import pytest
 
@@ -276,6 +277,163 @@ def test_runtime_span_add_event_forwards_name_and_non_none_attributes() -> None:
     span.add_event("unit.test.event", {"kept": "value", "count": 2, "dropped": None})
 
     assert events == [("unit.test.event", {"kept": "value", "count": 2})]
+
+
+# --- workflow task Activity telemetry (FRD 0004) -----------------------------------------------
+
+
+def _fake_span() -> tuple[object, dict[str, object]]:
+    attributes: dict[str, object] = {}
+
+    class _Span:
+        def set_attribute(self, key: str, value: object) -> None:
+            attributes[key] = value
+
+        def set_status(self, status: object) -> None:
+            return None
+
+    return _Span(), attributes
+
+
+def _install_workflow_task_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
+    starts: list[dict[str, object]] = []
+    outcomes: list[dict[str, object]] = []
+    raw_span, attributes = _fake_span()
+
+    class _Tracer:
+        def start_as_current_span(self, name: str) -> object:
+            return nullcontext(raw_span)
+
+    monkeypatch.setattr(obs, "_enabled", True)
+    monkeypatch.setattr(obs, "_metrics_ready", True)
+    monkeypatch.setattr(
+        obs,
+        "_workflow_task_start_counter",
+        types.SimpleNamespace(add=lambda count, attrs: starts.append(attrs)),
+    )
+    monkeypatch.setattr(
+        obs,
+        "_workflow_task_completion_counter",
+        types.SimpleNamespace(add=lambda count, attrs: outcomes.append(attrs)),
+    )
+    monkeypatch.setattr(obs, "get_tracer", lambda: _Tracer())
+    return starts, outcomes, attributes
+
+
+def test_workflow_task_telemetry_keeps_high_cardinality_keys_off_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    starts, outcomes, attributes = _install_workflow_task_metrics(monkeypatch)
+
+    with obs.workflow_task_activity_telemetry({
+        "af.workflow_task.workflow_id": "wf-1",
+        "af.workflow_task.node_instance_id": "inspect[3]",
+        "af.workflow_task.target_name": "reserve_inventory",
+        "af.workflow_task.target_type": "tool",
+        "af.workflow_task.max_attempts": 3,
+        "af.workflow_task.continue_on_error": True,
+        "af.workflow_task.timeout_ms": 5000,
+        "af.workflow_task.retry_driver": "durable",
+    }) as telemetry:
+        telemetry.complete(
+            outcome_kind="handler_transient",
+            disposition="request_durable_retry",
+            error_code="inventory_busy",
+            fault_domain=obs.FaultDomain.APP,
+        )
+
+    # The span keeps every identifier for per-attempt investigation...
+    assert attributes["af.workflow_task.workflow_id"] == "wf-1"
+    assert attributes["af.workflow_task.node_instance_id"] == "inspect[3]"
+    assert attributes["af.workflow_task.error_code"] == "inventory_busy"
+    assert attributes[obs.ATTR_FAULT_DOMAIN] == obs.FaultDomain.APP
+    # ...but a counter keyed on them would create one series per task attempt.
+    assert starts == [{
+        "af.workflow_task.target_type": "tool",
+        "af.workflow_task.max_attempts": 3,
+        "af.workflow_task.continue_on_error": True,
+        "af.workflow_task.retry_driver": "durable",
+    }]
+    assert outcomes == [{
+        "af.workflow_task.target_type": "tool",
+        "af.workflow_task.max_attempts": 3,
+        "af.workflow_task.continue_on_error": True,
+        "af.workflow_task.retry_driver": "durable",
+        "af.workflow_task.outcome_kind": "handler_transient",
+        "af.workflow_task.disposition": "request_durable_retry",
+    }]
+
+
+def test_workflow_task_telemetry_leaves_a_successful_delivery_unflagged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, outcomes, attributes = _install_workflow_task_metrics(monkeypatch)
+
+    with obs.workflow_task_activity_telemetry({
+        "af.workflow_task.target_type": "sub_agent",
+    }) as telemetry:
+        telemetry.complete(outcome_kind="success", disposition="return_result")
+
+    assert obs.ATTR_FAULT_DOMAIN not in attributes
+    assert "af.workflow_task.error_code" not in attributes
+    assert outcomes[0]["af.workflow_task.outcome_kind"] == "success"
+
+
+def test_workflow_task_telemetry_sanitizes_attribute_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, attributes = _install_workflow_task_metrics(monkeypatch)
+
+    with obs.workflow_task_activity_telemetry({
+        "af.workflow_task.target_name": "bad\nname\x00here",
+        "af.workflow_task.workflow_id": "w" * 400,
+        "af.workflow_task.timeout_ms": None,
+    }) as telemetry:
+        telemetry.complete(outcome_kind="success", disposition="return_result")
+
+    assert attributes["af.workflow_task.target_name"] == "bad name here"
+    assert len(str(attributes["af.workflow_task.workflow_id"])) == 129
+    assert "af.workflow_task.timeout_ms" not in attributes
+
+
+def test_bounded_attribute_collapses_control_characters_and_caps_length() -> None:
+    assert obs.bounded_attribute("  tidy\tvalue  ") == "tidy value"
+    assert obs.bounded_attribute("x" * 200).endswith("…")
+
+
+def test_workflow_counter_creation_failure_does_not_clear_other_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_framework import observability as maf_observability
+
+    created: dict[str, object] = {}
+
+    class _Meter:
+        def create_counter(self, name: str, *, description: str) -> object:
+            if name == "azure_functions_agents.workflow_task.attempts":
+                raise RuntimeError("unsupported instrument")
+            counter = object()
+            created[name] = counter
+            return counter
+
+    monkeypatch.setattr(obs, "_metrics_ready", False)
+    monkeypatch.setattr(maf_observability, "get_meter", lambda: _Meter())
+
+    obs._ensure_metrics()
+
+    assert obs._workflow_task_start_counter is None
+    assert (
+        obs._workflow_task_completion_counter
+        is created["azure_functions_agents.workflow_task.outcomes"]
+    )
+    assert (
+        obs._sandbox_execution_counter
+        is created["azure_functions_agents.dynamic_session.executions"]
+    )
+    assert obs._web_request_counter is created["azure_functions_agents.web_request.requests"]
+    assert obs._delegate_call_counter is created["azure_functions_agents.delegate.calls"]
 
 
 def test_record_sandbox_execution_gated_when_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
