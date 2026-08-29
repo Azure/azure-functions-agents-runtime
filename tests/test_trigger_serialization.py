@@ -207,7 +207,7 @@ def test_single_document_and_sql_rows_serialize_without_to_json() -> None:
     assert _serialized(func.MySqlRow({"id": "mysql"})) == {"id": "mysql"}
 
 
-def test_native_contracts_are_preferred_before_adapters() -> None:
+def test_native_contracts_serialize_unrecognized_bindings() -> None:
     assert _serialized(_NativeContract()) == {"source": "native"}
     assert _serialized(_ModelContract()) == {"source": "model"}
 

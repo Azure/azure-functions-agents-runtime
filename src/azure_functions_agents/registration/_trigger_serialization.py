@@ -372,13 +372,13 @@ def _serialize_item(binding: object) -> JsonValue:
     if isinstance(binding, dict):
         return _json_safe(binding)
 
-    native_payload = _native_contract_payload(binding)
-    if isinstance(native_payload, dict):
-        return _mapping_json_safe(native_payload)
-
     adapter_payload = _adapter_payload(binding)
     if isinstance(adapter_payload, (dict, list)):
         return adapter_payload
+
+    native_payload = _native_contract_payload(binding)
+    if isinstance(native_payload, dict):
+        return _mapping_json_safe(native_payload)
 
     if isinstance(binding, (list, tuple, UserList)):
         return [_serialize_item(item) for item in binding]
@@ -399,13 +399,13 @@ def serialize_trigger_data(trigger_data: object) -> str:
     if isinstance(trigger_data, dict):
         return json.dumps(_json_safe(trigger_data), ensure_ascii=False, default=str)
 
-    native_payload = _native_contract_payload(trigger_data)
-    if isinstance(native_payload, dict):
-        return json.dumps(_mapping_json_safe(native_payload), ensure_ascii=False, default=str)
-
     adapter_payload = _adapter_payload(trigger_data)
     if isinstance(adapter_payload, (dict, list)):
         return json.dumps(adapter_payload, ensure_ascii=False, default=str)
+
+    native_payload = _native_contract_payload(trigger_data)
+    if isinstance(native_payload, dict):
+        return json.dumps(_mapping_json_safe(native_payload), ensure_ascii=False, default=str)
 
     if isinstance(trigger_data, (list, tuple, UserList)):
         return json.dumps(
