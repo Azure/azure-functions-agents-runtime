@@ -928,6 +928,59 @@ parsing progress text. Static v1 workflows may continue returning their current
 string `custom_status`; clients must accept either shape during the experimental
 compatibility window.
 
+#### Task execution observability
+
+The task execution policy is only useful if an operator can see what it did.
+Two surfaces carry that, and the split follows the replay boundary.
+
+**Activity span.** Each delivery of a policy-aware task records one
+`workflow.task.activity` span from the Activity — never from the orchestrator,
+which re-executes from history on every replay and would re-emit it each time.
+The span carries identifiers (`workflow_id`, `task_id`, `node_instance_id`),
+the frozen policy (`max_attempts`, `timeout_ms`, `continue_on_error`,
+`retry_driver`), the target (`target_type`, `target_name`), and the terminal
+classification (`outcome_kind`, `error_code`, `disposition`). Deliveries a
+policy denies before the handler runs — authorization, unregistered target,
+malformed persisted input — record the same span, so a denied task is not the
+one delivery with no telemetry at all.
+
+`disposition` states what the Activity did (`return_result`,
+`request_durable_retry`, `return_failure`, `abort`), never what Durable will
+decide next: the Activity raises the retry marker but cannot see the budget
+Durable is tracking. A failing delivery also carries `af.fault_domain` — `app`
+for anything a handler produced, `runtime` for a policy denial or a violated
+Activity contract — because the failure is *returned*, so the span would
+otherwise look successful.
+
+Two counters accompany the span. Their dimensions are a strict low-cardinality
+subset of the span attributes; workflow ids, node instance ids, target names,
+and handler-authored error codes would otherwise create one metric series per
+task attempt.
+
+**Structured status.** A dynamically controlled plan that froze at least one
+execution policy publishes `schema_version: 3`. It keeps every version 2 field
+with the same meaning and adds `retry_driver: "durable"`, the counts
+`pending` / `failed` / `failed_continued`, the per-node `max_attempts`, and the
+sanitized `last_failure_kind` / `last_error_code` of a continued failure. A plan
+that froze none keeps emitting version 2 unchanged, which is what keeps an older
+history and an older client working.
+
+Attempts in flight are deliberately absent (Decision 73): Durable owns the
+budget and a replayed orchestration cannot observe it, so the status discloses
+the declared budget and the retry driver rather than claiming attempt
+observability it does not have.
+
+`failed_continued` is a *reporting* projection, not a scheduler state. The
+instance stays `completed` internally so the aggregate `{index, status, result}`
+contract and every terminal-state predicate in the scheduler are untouched.
+
+The node whose failure ends the workflow is recorded and published before the
+failure propagates, so the last status names it instead of freezing on the
+pre-failure snapshot. `_await_wave` reports each node's own outcome in wave
+order, so the failing instance is identified positionally — an opaque Durable
+failure is attributed just as precisely as a classified one, and only the
+*reason* is left to the Durable error.
+
 #### Sample
 
 The Dynamic Workflow sample for this extension must demonstrate:
@@ -1023,6 +1076,14 @@ The Dynamic Workflow sample for this extension must demonstrate:
 | 79 | Continued node state | Add a `failed_continued` status state / commit a sanitized failure result under the existing `completed` state | Reuse `completed` with a `failed` result envelope. A new state changes the `schema_version: 2` status contract, which belongs to the observability slice that follows this one; the result envelope already gives a plan a deterministic value to branch on | Agent | 2026-08-29 |
 | 80 | Per-node outcomes on a failed wave | Re-dispatch per task / read each node's own outcome from the awaited wave | Read each node's own outcome. The native-retry slice already selects over individual wave tasks (`_await_wave`) because Durable composites do not notify a composite parent, so the awaited wave hands back per-node outcomes in wave order and a continuable wave is applied node by node. `_first_wave_failure` still fails the whole wave when no task declared `continue_on_error`, so existing plans are unaffected | Agent, architecture review | 2026-08-29 |
 | 81 | Runtime rollback across a policy version | Version the orchestrator entry points / require in-flight drain | Require drain. Persisted policy keys are additive and forward-tolerant, so an upgrade replays cleanly, but an older orchestrator cannot honor semantics it does not implement: a rollback must drain or terminate workflows started with the newer fields | Agent, architecture review | 2026-08-29 |
+| 82 | Where task telemetry is emitted | Span per orchestrator scheduling decision / span per Activity delivery | Per Activity delivery. The orchestrator re-executes from history on every replay, so a span opened there would be re-emitted for work that already happened; the Activity body runs exactly once per delivery | Agent, architecture review | 2026-08-29 |
+| 83 | Retry disposition naming | Report the retry decision (`durable` / `fail`) / report what the Activity did | Report what the Activity did (`return_result`, `request_durable_retry`, `return_failure`, `abort`). The Activity raises the retry marker but cannot see the budget Durable is tracking, so naming it a decision would claim knowledge the runtime does not have | Agent, architecture review | 2026-08-29 |
+| 84 | Metric dimensions | Reuse the full span attribute set / a bounded low-cardinality subset | A bounded subset (`target_type`, `max_attempts`, `continue_on_error`, `retry_driver`, `outcome_kind`, `disposition`). Workflow ids, node instance ids, target names, and handler-authored error codes would create one time series per task attempt; they stay on the span | Agent, architecture review | 2026-08-29 |
+| 85 | Failure span classification | Let the span's escaping exception classify it / classify explicitly on completion | Classify explicitly. Terminal failures are *returned*, so the span would otherwise close successfully, and the private Durable retry marker would be recorded as a runtime exception on every retry. The completion call sets the error status and a per-kind fault domain, and the span closes before the marker is raised | Agent, architecture review | 2026-08-29 |
+| 86 | Structured status version gate | Always emit the new version / gate on the persisted execution policy | Gate on the persisted input. A plan that froze no policy keeps emitting `schema_version: 2` byte-identically, so an older history replays unchanged and a version 2 client is unaffected. A capability flag inside version 2 would silently change a shipped shape instead of declaring a new one | Agent, architecture review | 2026-08-29 |
+| 87 | Continued node state (revisits 79) | Introduce a `failed_continued` scheduler state / project it only in the status | Project it. `_aggregate_dynamic_node` copies the instance state into the persisted `{index, status, result}` aggregate, so a new scheduler state would change a shipped result contract and every terminal-state predicate. The instance stays `completed` and carries private continuation metadata that only the status reads — never inferred from the result shape, since a handler may legitimately return a `failed` key | Agent, architecture review | 2026-08-29 |
+| 88 | Reporting an exhausted, non-continued failure | Leave the pre-failure snapshot as the last status / record the node before propagating | Record it. The failing node is marked and the status published before the exception propagates, so an operator sees which node ended the workflow. `_await_wave` reports per-node outcomes in wave order, so the instance is identified positionally and an opaque Durable failure is attributed as precisely as a classified one; only the reason is left to the Durable error | Agent, architecture review | 2026-08-29 |
+| 89 | Status size under a maximal expansion | Emit failure detail for every instance / cap it deterministically | Cap it at the first 20 continued failures in `(node id, index)` order. `MAX_NODES` instances with maximal failure fields approach Durable's 16 KB custom-status limit, and an order-based cap keeps the status a pure function of persisted history | Agent, architecture review | 2026-08-29 |
 
 ## 6. Test plan
 
@@ -1156,6 +1217,27 @@ The Dynamic Workflow sample for this extension must demonstrate:
   - a sample discovers a collection, dynamically fans out, skips one item, and
     aggregates results;
   - the scenario completes with deterministic output on Azure Storage and DTS.
+- [x] Task execution observability: `tests/test_workflow_execution_telemetry.py`
+  - a delivery records one `workflow.task.activity` span with the frozen policy
+    and the terminal classification, and no attempt number;
+  - a retryable failure is recorded before the private Durable marker is raised,
+    so a declared retry is never a recorded span exception;
+  - denials and malformed persisted input record their own span without trusting
+    the payload they came from;
+  - a task with no frozen policy records no span at all;
+  - counters receive only the low-cardinality dimension subset
+    (`tests/test_observability.py`);
+  - a plan with no frozen policy keeps emitting `schema_version: 2`;
+  - a policy-aware plan publishes version 3 with `retry_driver`, the new counts,
+    and `max_attempts`;
+  - a continued failure reports `failed_continued` while the ordered aggregate
+    still reports `completed`;
+  - the node that ended the workflow is named in the final status, including
+    when the Durable failure carries no sanitized classification;
+  - a maximally expanded plan stays inside Durable's custom-status size limit
+    with a deterministic failure-detail cap;
+  - the built-in UI renders version 3 and still degrades an unknown version to
+    JSON (`tests/test_chat_ui.py`).
 
 ## 7. Docs impact
 
@@ -1194,6 +1276,12 @@ The Dynamic Workflow sample for this extension must demonstrate:
   the `activity.py` / `engine.py` module map rows in `docs/architecture.md`, the
   `@workflow_tool` example in `README.md`, and the `workflow-retry-policy`
   sample README.
+- [x] Task execution observability: document the `workflow.task.activity` span,
+  its attributes, and the two low-cardinality counters under "Observability" in
+  `docs/workflows.md`; add `custom_status` schema version 3 to the status
+  envelope section; update the `engine.py`, `activity.py`, and
+  `_observability.py` module map rows plus the observability extension-point
+  note in `docs/architecture.md`.
 
 ## 8. Status & sign-off
 
@@ -1266,3 +1354,15 @@ The Dynamic Workflow sample for this extension must demonstrate:
   over individual wave tasks; per-node outcomes now come from `_await_wave`
   directly, which removed the extra per-child read this slice originally needed
   (Decision 80).
+- **Execution observability architecture review:** An independent rubber-duck
+  review on 2026-08-29 evaluated the third stacked slice against the
+  timeout/continuation branch it builds on. It confirmed that the replay
+  boundary is sound (telemetry is Activity-only) and that gating the new status
+  version on the persisted execution policy is the correct compatibility
+  boundary. It raised five blocking findings — a new `failed_continued`
+  scheduler state would have changed the shipped `{index, status, result}`
+  aggregate contract; the slice claimed exhaustion observability the runtime did
+  not have; the metric counters reused high-cardinality span attributes; failure
+  spans would have been misclassified or closed as successful; and the FRD did
+  not yet record the contract. They are resolved by Decisions 87, 83/88, 84, 85,
+  and this entry respectively. FRD status remains `Finalized`.
