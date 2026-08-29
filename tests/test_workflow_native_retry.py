@@ -484,7 +484,9 @@ class _RecordingContext:
         return self.last_wave
 
     def task_any(self, tasks: list[_RecordingTask]) -> _RecordingTask:
-        return _RecordingTask()
+        selection = _RecordingTask()
+        selection.candidates = list(tasks)
+        return selection
 
     def set_custom_status(self, status: str) -> None:
         return None
@@ -501,9 +503,12 @@ def _orchestrate(context: _RecordingContext) -> dict[str, Any]:
     orchestrator = app.function(engine.ORCHESTRATOR_NAME).__closure__[0].cell_contents
     generator = orchestrator(context)
     try:
-        next(generator)
+        selection = next(generator)
         while True:
-            generator.send(context.last_wave)
+            winner = next(
+                task for task in selection.candidates if task is not context.cancel_task
+            )
+            selection = generator.send(winner)
     except StopIteration as stop:
         return stop.value
 
@@ -590,11 +595,11 @@ def test_exhausted_native_retry_reports_the_sanitized_application_failure() -> N
         )
 
     class _ExhaustedContext(_RecordingContext):
-        def task_all(self, tasks: list[_RecordingTask]) -> _RecordingTask:
-            self.last_wave = _RecordingTask(
-                TaskFailedError("Activity failed.", raised.value)
-            )
-            return self.last_wave
+        def call_activity_with_retry(
+            self, name: str, retry_policy: Any, payload: dict[str, Any]
+        ) -> _RecordingTask:
+            self.retried.append((payload, retry_policy))
+            return _RecordingTask(TaskFailedError("Activity failed.", raised.value))
 
     context = _ExhaustedContext(
         [

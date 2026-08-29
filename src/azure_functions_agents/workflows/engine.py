@@ -223,6 +223,50 @@ def _completed_task_outcome(task: Any) -> Any:
         return exc
 
 
+def _await_wave(
+    context: df.DurableOrchestrationContext,
+    cancel_task: Any,
+    wave_tasks: list[Any],
+) -> Any:
+    """Await a whole wave alongside the cancel event, one completion at a time.
+
+    Durable's composite tasks only learn about a child completing when that
+    child is a *leaf*: ``CompositeTask`` subclasses never notify their own
+    parent. Racing the cancel event against ``task_all(wave)`` would therefore
+    nest one composite inside another and never resume. Selecting over the
+    individual wave tasks keeps every child a leaf of the task being awaited.
+
+    Yields to Durable until either the cancel event wins or every wave task has
+    completed. Returns ``None`` when canceled, otherwise the per-task outcomes
+    in wave order, where a failed task contributes its exception.
+    """
+    outcomes: dict[int, Any] = {}
+    pending = list(range(len(wave_tasks)))
+    while pending:
+        winner = yield context.task_any(
+            [cancel_task, *(wave_tasks[index] for index in pending)]
+        )
+        if winner is cancel_task:
+            return None
+        completed = next(
+            (index for index in pending if wave_tasks[index] is winner),
+            None,
+        )
+        if completed is None:
+            raise RuntimeError("workflow task selection returned an unknown task")
+        pending.remove(completed)
+        outcomes[completed] = _completed_task_outcome(wave_tasks[completed])
+    return [outcomes[index] for index in range(len(wave_tasks))]
+
+
+def _first_wave_failure(wave_results: list[Any]) -> BaseException | None:
+    """Return the first failure in wave order, matching ``task_all`` semantics."""
+    for outcome in wave_results:
+        if isinstance(outcome, BaseException):
+            return outcome
+    return None
+
+
 def _plan_is_dynamic(tasks: list[WorkflowTaskInput]) -> bool:
     """Return whether any task opts into data-driven control flow.
 
@@ -355,9 +399,8 @@ def _run_static_workflow(
         context.set_custom_status(
             f"{len(results)}/{total} tasks done, running={','.join(wave)}"
         )
-        wave_task = context.task_all(wave_tasks)
-        winner = yield context.task_any([cancel_task, wave_task])
-        if winner is cancel_task:
+        wave_results = yield from _await_wave(context, cancel_task, wave_tasks)
+        if wave_results is None:
             reason = cancel_task.result
             for spec, t in zip(wave_specs, wave_tasks, strict=True):
                 if spec["type"] == WAIT_TASK_TYPE and not t.is_completed:
@@ -379,14 +422,14 @@ def _run_static_workflow(
                 "total_count": total,
             }
 
-        wave_results = _completed_task_outcome(wave_task)
-        if isinstance(wave_results, BaseException):
+        failure = _first_wave_failure(wave_results)
+        if failure is not None:
             for spec, t in zip(wave_specs, wave_tasks, strict=True):
                 if spec["type"] == WAIT_TASK_TYPE and not t.is_completed:
                     t.cancel()
             raise _decode_wave_failure(
                 [spec["id"] for spec in wave_specs if spec.get("policy_aware")],
-                wave_results,
+                failure,
             )
         for spec, raw in zip(wave_specs, wave_results, strict=True):
             tid = spec["id"]
@@ -1045,9 +1088,8 @@ def _run_dynamic_workflow(
 
         wave_tasks = _dispatch_dynamic_wave(context, state, wave)
         _publish_dynamic_status(context, state)
-        wave_task = context.task_all(wave_tasks)
-        winner = yield context.task_any([cancel_task, wave_task])
-        if winner is cancel_task:
+        wave_results = yield from _await_wave(context, cancel_task, wave_tasks)
+        if wave_results is None:
             reason = cancel_task.result
             _restore_canceled_dynamic_wave(state, wave, wave_tasks)
             _publish_dynamic_status(context, state)
@@ -1065,8 +1107,8 @@ def _run_dynamic_workflow(
                 "total_count": len(state.by_id),
             }
 
-        wave_results = _completed_task_outcome(wave_task)
-        if isinstance(wave_results, BaseException):
+        wave_failure = _first_wave_failure(wave_results)
+        if wave_failure is not None:
             _cancel_dynamic_wave_timers(wave, wave_tasks)
             raise _decode_wave_failure(
                 [
@@ -1074,7 +1116,7 @@ def _run_dynamic_workflow(
                     for instance in wave
                     if _persisted_execution(state.by_id[instance["logical_id"]]) is not None
                 ],
-                wave_results,
+                wave_failure,
             )
         try:
             _apply_dynamic_wave_results(state, wave, wave_results)

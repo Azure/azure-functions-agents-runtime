@@ -303,10 +303,34 @@ class _FakeOrchestrationContext:
         return self.last_wave
 
     def task_any(self, tasks: list[_Task]) -> _Task:
-        return _Task()
+        # The engine selects over individual wave tasks (Durable composites do
+        # not propagate completion to their own parent), so record the
+        # candidates and let the driver hand back one winner at a time.
+        selection = _Task()
+        selection.candidates = list(tasks)
+        self.last_wave = selection
+        return selection
 
     def set_custom_status(self, status: str) -> None:
         self.statuses.append(status)
+
+
+def _drive(context: _FakeOrchestrationContext, selection: Any) -> Any:
+    """Return the winner for one ``task_any`` selection.
+
+    Defaults to completing wave tasks in order; a context may set
+    ``cancel_next`` to make the cancel event win instead.
+    """
+    candidates = getattr(selection, "candidates", None)
+    if candidates is None:
+        return selection
+    if getattr(context, "cancel_next", False):
+        context.cancel_next = False
+        return context.cancel_task
+    for candidate in candidates:
+        if candidate is not context.cancel_task:
+            return candidate
+    return context.cancel_task
 
 
 def _run_orchestrator(
@@ -315,20 +339,29 @@ def _run_orchestrator(
 ) -> dict[str, Any]:
     generator = orchestrator(context)
     try:
-        next(generator)
+        selection = next(generator)
         while True:
-            generator.send(context.last_wave)
+            selection = generator.send(_drive(context, selection))
     except StopIteration as stop:
         return stop.value
 
 
-def test_orchestrator_preserves_activity_failure() -> None:
-    class _FailedWaveContext(_FakeOrchestrationContext):
-        def task_all(self, tasks: list[_Task]) -> _Task:
-            self.last_wave = _Task(RuntimeError("activity authorization failed"))
-            return self.last_wave
+def _drive_one_wave(generator: Any, context: _FakeOrchestrationContext, selection: Any) -> Any:
+    """Complete every task in the yielded wave; return the next yielded selection.
 
-    context = _FailedWaveContext(
+    The engine now selects over individual wave tasks, so one wave takes one
+    ``send`` per task instead of a single composite completion.
+    """
+    remaining = [t for t in selection.candidates if t is not context.cancel_task]
+    while remaining:
+        selection = generator.send(remaining.pop(0))
+        candidates = getattr(selection, "candidates", [])
+        remaining = [t for t in remaining if t in candidates]
+    return selection
+
+
+def test_orchestrator_preserves_activity_failure() -> None:
+    context = _FakeOrchestrationContext(
         [
             {
                 "id": "publish",
@@ -338,7 +371,7 @@ def test_orchestrator_preserves_activity_failure() -> None:
                 "depends_on": [],
             }
         ],
-        lambda name, payload: {"id": payload["id"], "result": {"ok": True}},
+        lambda name, payload: RuntimeError("activity authorization failed"),
     )
     orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
 
@@ -608,14 +641,14 @@ def test_dynamic_activity_failure_cancels_pending_wave_timer() -> None:
     class _FailedSecondWaveContext(_DynamicContext):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
-            self.wave_count = 0
+            self.activity_calls = 0
 
-        def task_all(self, tasks: list[_Task]) -> _Task:
-            self.wave_count += 1
-            if self.wave_count == 2:
-                self.last_wave = _Task(RuntimeError("dynamic activity failed"))
-                return self.last_wave
-            return super().task_all(tasks)
+        def call_activity(self, name: str, payload: dict[str, Any]) -> _Task:
+            self.activity_calls += 1
+            if self.activity_calls == 2:
+                self.calls.append((name, payload))
+                return _Task(RuntimeError("dynamic activity failed"))
+            return super().call_activity(name, payload)
 
     tasks = [
         {
@@ -1613,8 +1646,8 @@ def test_dynamic_cancellation_cancels_timer_and_returns_partial() -> None:
     orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
 
     gen = orchestrator(context)
-    next(gen)  # yields the t1 wave
-    gen.send(context.last_wave)  # completes t1, expands w1, dispatches its timer
+    selection = next(gen)  # yields the t1 wave
+    _drive_one_wave(gen, context, selection)  # completes t1, expands w1, dispatches its timer
     result: dict[str, Any] = {}
     try:
         gen.send(context.cancel_task)  # cancel while the timer is pending
@@ -1671,9 +1704,9 @@ def test_dynamic_cancellation_preserves_completed_iteration_instances() -> None:
     orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
 
     gen = orchestrator(context)
-    next(gen)  # discover
-    gen.send(context.last_wave)  # first inspect wave
-    gen.send(context.last_wave)  # final inspect instance
+    selection = next(gen)  # discover
+    selection = _drive_one_wave(gen, context, selection)  # first inspect wave
+    _drive_one_wave(gen, context, selection)  # final inspect instance
     result: dict[str, Any] = {}
     try:
         gen.send(context.cancel_task)
