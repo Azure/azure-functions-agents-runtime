@@ -42,7 +42,7 @@ raise WorkflowRetryableError(
 No retry fields are required in the model-generated DAG. At workflow start, the
 runtime applies the `reserve_inventory` decorator policy to that task. A DAG may
 instead provide an `execution.retry` policy when the tool author has not
-declared one; see [Workflow task execution policy](../../docs/workflows.md#task-execution-policy).
+declared one; see [Workflow task execution policy](../../docs/workflows.md#task-retry).
 
 ## Sample-only failure simulation
 
