@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, Literal
 
-from azure.durable_functions import DurableOrchestrationClient
+from azure.durable_functions import DurableFunctionsClient
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from azure_functions_agents._function_tool import tool as define_tool
@@ -269,7 +269,7 @@ def _is_active_status(status: Any) -> bool:
 
 
 async def fetch_session_workflows(
-    durable_client: DurableOrchestrationClient,
+    durable_client: DurableFunctionsClient,
     workflow_agent_slug: str,
     session_id: str,
 ) -> list[dict[str, Any]]:
@@ -298,7 +298,7 @@ async def fetch_session_workflows(
 
 
 async def count_active_session_workflows(
-    durable_client: DurableOrchestrationClient,
+    durable_client: DurableFunctionsClient,
     workflow_agent_slug: str,
     session_id: str,
 ) -> int:
@@ -320,7 +320,7 @@ async def count_active_session_workflows(
 
 
 async def fetch_session_workflow_status(
-    durable_client: DurableOrchestrationClient,
+    durable_client: DurableFunctionsClient,
     workflow_agent_slug: str,
     session_id: str,
     workflow_id: str,
@@ -644,7 +644,7 @@ def _build_session(
     workflow_agent_slug: str,
     session_id: str | None,
     agent_name: str,
-    durable_client: DurableOrchestrationClient | None,
+    durable_client: DurableFunctionsClient | None,
 ) -> WorkflowSessionContext | None:
     if not session_id or durable_client is None:
         return None
@@ -661,7 +661,7 @@ def build_workflow_tools(
     session_id: str | None = None,
     workflow_agent_slug: str = "main",
     agent_name: str = "main",
-    durable_client: DurableOrchestrationClient | None = None,
+    durable_client: DurableFunctionsClient | None = None,
     policy: WorkflowPlanPolicy | None = None,
 ) -> list[Any]:
     """Return the list of workflow tool objects to inject for an agent."""
