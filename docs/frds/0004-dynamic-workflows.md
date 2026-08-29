@@ -1011,10 +1011,18 @@ The Dynamic Workflow sample for this extension must demonstrate:
 | 67 | Retry driver | Orchestrator-managed retry timers / Durable native Activity retry / both with a selector | Use Durable native Activity retry only. An orchestrator-managed retry loop would duplicate scheduling Durable already owns and would need its own timers, attempt state, and status vocabulary | Human (TsuyoshiUshio) | 2026-08-29 |
 | 68 | Durable SDK version | Keep `azure-functions-durable` 1.x / adopt 2.0.0b2 | Adopt 2.0.0b2: 1.x `RetryOptions` can only express a first interval and an attempt count, so an authored exponential backoff cannot be honored. Carry only the collateral the bump forces, including a Durable client whose lifetime spans SSE stream consumption | Agent, architecture review | 2026-08-29 |
 | 69 | Retryable-versus-terminal signaling | Retry every Activity exception / a retry predicate / raise for retryable and return for terminal | Durable's `RetryPolicy` has no exception predicate, so the Activity raises a private versioned marker for retryable failures and returns a structured outcome for terminal ones. Retryability is derived from the failure classification, never trusted from the worker payload | Agent, architecture review | 2026-08-29 |
-| 70 | Per-attempt task timeout | Required by native retry / independent follow-up | Not required: Durable retries on Activity failure, and an unbounded attempt is already bounded by an internal one-hour `retry_timeout`. Keep that ceiling internal and defer the authored `execution.timeout` surface | Agent, architecture review | 2026-08-29 |
+| 70 | Per-attempt task timeout | Required by native retry / independent follow-up | Not required: Durable retries on Activity failure, and an unbounded attempt is already bounded by an internal one-hour `retry_timeout`. Keep that ceiling internal and defer the authored `execution.timeout` surface (superseded by Decision 74) | Agent, architecture review | 2026-08-29 |
 | 71 | Replay of pre-retry histories | Re-resolve policy from the deployed tool registration / dispatch from the persisted payload only | Select the retry driver and the result envelope from the persisted orchestration input alone, so deploying a new retry declaration cannot change how an in-flight workflow replays | Agent, architecture review | 2026-08-29 |
 | 72 | Persisted policy forward compatibility | Strict `extra="forbid"` on the replayed shape / ignore unknown keys | Ignore unknown keys on every model read back from Durable history, and require keys added by a later runtime to be optional, so a history written on either side of an upgrade still validates | Agent, architecture review | 2026-08-29 |
 | 73 | Attempt number in the task context | Expose the current attempt / expose only a stable idempotency key | Expose only the idempotency key. Durable owns the attempt budget and a replayed orchestration cannot observe the attempt, so publishing one would be a value handlers could not trust | Agent | 2026-08-29 |
+| 74 | Attempt deadline default | Always persist a runtime-default deadline / persist one only when authored | Persist `timeout_ms` only when a task or a `@workflow_tool` declared it. An absent key reproduces the previous unbounded-attempt behavior exactly, so a plan that uses neither new field freezes a payload identical to the one the native-retry runtime wrote | Agent, architecture review | 2026-08-29 |
+| 75 | Timeout failure classification | Terminal / retryable | Retryable. A timeout is the canonical transient failure, so it raises the private Durable marker and Durable schedules the next attempt under the frozen policy; with the default single attempt it simply fails with `workflow_task_timeout` | Agent | 2026-08-29 |
+| 76 | Sub Agent attempt bound | Cross-validate the authored timeout against the resolved agent timeout at submission / apply both bounds independently | Apply both. A Sub Agent Activity already passes its resolved agent timeout into the leaf run, so an authored `execution.timeout` is simply a second, tighter-or-looser bound. Architecture review found the inner bound would otherwise report a non-retryable `execution_unknown`, so the inner `TimeoutError` is mapped onto the same retryable timeout classification | Agent, architecture review | 2026-08-29 |
+| 77 | Uncancellable synchronous handlers | Withhold `timeout` from tool tasks / run handlers in a terminable boundary / bound the wait and document the exposure | Bound the wait. Workflow tool handlers are synchronous and a worker thread cannot be cancelled, so a timed-out attempt is reported while the handler may still run. A terminable boundary is a much larger change than this slice, and the exposure is the at-least-once delivery the idempotency key already exists for. The limitation is documented in `docs/workflows.md` and in the module docstring, and a warning is logged | Agent, architecture review | 2026-08-29 |
+| 78 | Continuable failure signalling | Add a `continuable` flag to the persisted failure / derive it from the persisted `kind` | Derive it. The Activity outcome is validated with an exact key set, so adding a key would make a failure written by the native-retry runtime fail validation on replay. `kind` is already persisted and validated, and `authorization` / `handler_contract` are never continuable, so `continue_on_error` cannot be used to cross the authorization boundary | Agent, architecture review | 2026-08-29 |
+| 79 | Continued node state | Add a `failed_continued` status state / commit a sanitized failure result under the existing `completed` state | Reuse `completed` with a `failed` result envelope. A new state changes the `schema_version: 2` status contract, which belongs to the observability slice that follows this one; the result envelope already gives a plan a deterministic value to branch on | Agent | 2026-08-29 |
+| 80 | Per-node outcomes on a failed wave | Re-dispatch per task / read each node's own outcome from the awaited wave | Read each node's own outcome. The native-retry slice already selects over individual wave tasks (`_await_wave`) because Durable composites do not notify a composite parent, so the awaited wave hands back per-node outcomes in wave order and a continuable wave is applied node by node. `_first_wave_failure` still fails the whole wave when no task declared `continue_on_error`, so existing plans are unaffected | Agent, architecture review | 2026-08-29 |
+| 81 | Runtime rollback across a policy version | Version the orchestrator entry points / require in-flight drain | Require drain. Persisted policy keys are additive and forward-tolerant, so an upgrade replays cleanly, but an older orchestrator cannot honor semantics it does not implement: a rollback must drain or terminate workflows started with the newer fields | Agent, architecture review | 2026-08-29 |
 
 ## 6. Test plan
 
@@ -1180,6 +1188,12 @@ The Dynamic Workflow sample for this extension must demonstrate:
   project-discovered skills, and direct/delegated capability paths.
 - [ ] Evolution #1276: update the selected workflow sample and its README with a
   collection-driven fan-out/fan-in scenario.
+- [x] Task execution policy: document the per-attempt `execution.timeout` and
+  `execution.continue_on_error` surface, the deadline-bounds-the-wait
+  limitation, and the continuable failure table in `docs/workflows.md`; update
+  the `activity.py` / `engine.py` module map rows in `docs/architecture.md`, the
+  `@workflow_tool` example in `README.md`, and the `workflow-retry-policy`
+  sample README.
 
 ## 8. Status & sign-off
 
@@ -1238,3 +1252,17 @@ The Dynamic Workflow sample for this extension must demonstrate:
   replay safety when switching a task between `call_activity` and
   `call_activity_with_retry`. Both are resolved by Decisions 71 and 72 and are
   covered by tests. FRD status remains `Finalized`.
+- **Timeout and continue-on-error architecture review:** An independent
+  rubber-duck review on 2026-08-29 evaluated the second stacked slice against the
+  native-retry branch it builds on. It confirmed that per-node wave outcomes are
+  deterministic, that continuation can only follow an exhausted or terminal
+  attempt, and that rejecting `authorization` / `handler_contract` preserves the
+  authorization boundary. It raised three blocking findings — uncancellable
+  synchronous handlers, runtime rollback across a policy version, and a Sub
+  Agent's own timeout bypassing the retryable timeout classification. They are
+  resolved by Decisions 77, 81, and 76 respectively; the Sub Agent finding is
+  fixed in code, the other two are bounded and documented. FRD status remains
+  `Finalized`. The slice was later rebased onto the native-retry fix that selects
+  over individual wave tasks; per-node outcomes now come from `_await_wave`
+  directly, which removed the extra per-child read this slice originally needed
+  (Decision 80).
