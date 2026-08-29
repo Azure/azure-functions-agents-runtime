@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -487,12 +488,12 @@ def test_tool_activity_reauthorizes_current_agent_policy() -> None:
         "workflow_id": "workflow-1",
     }
 
-    assert allowed(payload) == {
+    assert asyncio.run(allowed(payload)) == {
         "id": "publish",
         "result": {"published": {"value": 1}},
     }
     with pytest.raises(RuntimeError, match="not authorized"):
-        revoked(payload)
+        asyncio.run(revoked(payload))
 
 
 @pytest.mark.parametrize("workflow_agent_policies", [None, {}])
@@ -509,14 +510,16 @@ def test_tool_activity_missing_agent_policy_fails_closed(
     )
 
     with pytest.raises(RuntimeError, match="agent policy"):
-        activity(
-            {
-                "id": "publish",
-                "tool": "publish",
-                "args": {},
-                "workflow_agent_slug": "missing",
-                "workflow_id": "workflow-1",
-            }
+        asyncio.run(
+            activity(
+                {
+                    "id": "publish",
+                    "tool": "publish",
+                    "args": {},
+                    "workflow_agent_slug": "missing",
+                    "workflow_id": "workflow-1",
+                }
+            )
         )
 
 
