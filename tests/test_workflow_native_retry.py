@@ -558,6 +558,40 @@ def test_history_without_a_persisted_policy_keeps_the_legacy_dispatch() -> None:
     assert "task_id" not in payload
 
 
+def test_data_driven_plans_use_the_same_retry_driver() -> None:
+    """A ``when``/``for_each`` plan runs on the dynamic scheduler; retry still applies."""
+    execution = {"max_attempts": 3, "durable_retry_policy": dict(_DURABLE_POLICY)}
+    retried_node = _tool_node("work", execution)
+    retried_node["depends_on"] = ["gate"]
+    retried_node["when"] = {
+        "ref": "${gate.result.go}",
+        "operator": "equals",
+        "value": True,
+    }
+    context = _RecordingContext(
+        [_tool_node("gate"), retried_node],
+        {
+            "gate": {"id": "gate", "result": {"go": True}},
+            "work": {"id": "work", "ok": True, "result": {"published": True}},
+        },
+    )
+    context._input["policy"] = {
+        "allowed_tools": ["publish"],
+        "allowed_subagents": [],
+    }
+
+    assert _orchestrate(context) == {
+        "results": {"gate": {"go": True}, "work": {"published": True}}
+    }
+    # The policy-free node keeps the legacy driver and envelope; only the node
+    # whose policy was persisted is handed to Durable's retry driver.
+    assert [payload["id"] for payload in context.plain] == ["gate"]
+    [(payload, retry_policy)] = context.retried
+    assert payload["id"] == "work"
+    assert payload["execution"] == execution
+    assert retry_policy.max_number_of_attempts == 3
+
+
 def test_terminal_outcome_fails_the_workflow_with_the_application_error_code() -> None:
     context = _RecordingContext(
         [
