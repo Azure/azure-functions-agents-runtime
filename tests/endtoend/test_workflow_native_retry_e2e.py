@@ -193,14 +193,20 @@ def test_exhausted_retry_fails_with_the_application_error_code(
     status = _await_terminal(retry_sample_host.base_url, workflow_id)
 
     assert status["runtimeStatus"] == "Failed", status
-    output = str(status.get("output"))
-    # The application's own sanitized failure survives, rather than degrading to
-    # an opaque Durable TaskFailedError message.
-    assert "inventory_temporarily_unavailable" in output
-    assert "Inventory reservation is temporarily unavailable." in output
-    assert "reserve_inventory" in output
 
     incident = json.loads(blob.download_blob().readall())
     # Durable stopped at the declared attempt budget: no more, no fewer.
     assert incident["transient_failures_observed"] == MAX_ATTEMPTS
     assert incident["failures_remaining"] == 99 - MAX_ATTEMPTS
+
+    # The application's own sanitized failure survives, rather than degrading to
+    # an opaque Durable TaskFailedError message. Only the Azure Storage backend
+    # surfaces the orchestration failure through the status API's `output`; the
+    # Durable Task Scheduler backend reports `output: null` for a failed
+    # orchestration, so fall back to the host log there rather than asserting
+    # nothing.
+    output = status.get("output")
+    failure_text = str(output) if output is not None else retry_sample_host.read_output()
+    assert "inventory_temporarily_unavailable" in failure_text
+    assert "Inventory reservation is temporarily unavailable." in failure_text
+    assert "reserve_inventory" in failure_text
