@@ -146,7 +146,26 @@ _USAGE_FIELD_NAMES: dict[str, str] = {
     "input_token_count": "input_tokens",
     "output_token_count": "output_tokens",
 }
+_DETAILED_TOKEN_USAGE_ENV = "AZURE_FUNCTIONS_AGENTS_DETAILED_TOKEN_USAGE"
+_DETAILED_TOKEN_USAGE_TRUE_VALUES = {"true", "1", "yes", "y"}
+_DETAILED_TOKEN_USAGE_FALSE_VALUES = {"false", "0", "no", "n"}
 _FINAL_USAGE_TIMEOUT_SECONDS = 1.0
+
+
+def _resolve_detailed_token_usage() -> bool:
+    value = runtime_env_value(_DETAILED_TOKEN_USAGE_ENV)
+    if not value:
+        return False
+    normalized = value.lower()
+    if normalized in _DETAILED_TOKEN_USAGE_TRUE_VALUES:
+        return True
+    if normalized in _DETAILED_TOKEN_USAGE_FALSE_VALUES:
+        return False
+    logger.warning("Ignoring invalid %s value: %s", _DETAILED_TOKEN_USAGE_ENV, value)
+    return False
+
+
+_DETAILED_TOKEN_USAGE_ENABLED = _resolve_detailed_token_usage()
 
 
 def _normalize_usage_details(usage_details: Any) -> dict[str, int]:
@@ -165,6 +184,20 @@ def _normalize_usage_details(usage_details: Any) -> dict[str, int]:
         ):
             normalized[record_name] = value
     return normalized
+
+
+def _normalize_detailed_usage_details(usage_details: Any) -> dict[str, int]:
+    """Return every valid numeric usage dimension reported by MAF."""
+    if not isinstance(usage_details, Mapping):
+        return {}
+    return {
+        key: value
+        for key, value in usage_details.items()
+        if isinstance(key, str)
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+        and value >= 0
+    }
 
 
 def _response_usage_details(response: Any) -> Any:
@@ -221,6 +254,31 @@ class _AgentUsageRecorder:
             logger.info(
                 "Agent token usage: %s",
                 json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+            )
+        except Exception:
+            return
+
+        if not _DETAILED_TOKEN_USAGE_ENABLED:
+            return
+        try:
+            detail_payload: dict[str, Any] = {
+                "agent_name": self.agent_name,
+                "event_name": "agent_token_usage_detail",
+                "execution_role": self.execution_role,
+                "model": self.inference_target.model,
+                "model_publisher": _model_publisher(self.inference_target.provider),
+                "provider": self.inference_target.provider,
+                "schema_version": 1,
+                "usage_details": _normalize_detailed_usage_details(usage_details),
+            }
+            logger.info(
+                "Agent token usage detail: %s",
+                json.dumps(
+                    detail_payload,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
             )
         except Exception:
             return

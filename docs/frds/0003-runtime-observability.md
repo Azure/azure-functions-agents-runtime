@@ -4,7 +4,7 @@ title: Runtime-owned observability (OpenTelemetry)
 status: Finalized            # Draft → In review → Finalized  (→ Implemented after merge)
 author: larohra
 created: 2026-07-01
-updated: 2026-07-02
+updated: 2026-08-25
 issues: []
 pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/79]
 branch: larohra/add-observability
@@ -61,6 +61,8 @@ runtime's, or a downstream platform, and they can't see it at all without hand-r
 - Automatic per-tool span enrichment in the tool wrapper — deferred (P1).
 - Shipping dashboards/alerts as reusable infra — sample-app/optional only (P1).
 - Changing agent authoring semantics or any non-observability behavior.
+- Estimating token attribution that the provider does not report, including prompt-vs-tool-result
+  allocation or individual model-round usage reconstructed from aggregate totals.
 
 ## 4. Proposed design
 
@@ -143,6 +145,37 @@ explicit, documented extension to the discover → translate → register → ex
   `azurefunctions-agents-runtime[monitor]`; the default install is lighter (the OpenTelemetry SDK and
   the Azure Monitor Distro are no longer pulled in).
 
+### Follow-up: opt-in detailed token usage
+
+`runner.py` already attempts one `agent_token_usage` log record for every actual MAF invocation.
+That stable event remains byte-for-byte compatible: its name, prefix, fields, null behavior, and
+default emission do not change. The recorder emits it first using the existing normalization and
+serialization path. Detail construction and emission happen afterward in a separately guarded
+block, so any detail-side failure cannot suppress or alter the stable event.
+
+When `AZURE_FUNCTIONS_AGENTS_DETAILED_TOKEN_USAGE` resolves to true, the same recorder also emits one
+additional, versioned `agent_token_usage_detail` record through the shared runtime logger. The detail
+record uses the distinct `Agent token usage detail: ` message prefix and this exact top-level schema:
+`schema_version` (initially `1`), `event_name`, `agent_name`, `execution_role`, `provider`, `model`,
+`model_publisher`, and `usage_details`. Fields may be added compatibly within schema version 1;
+removing, renaming, or changing a field's meaning requires a new version. `usage_details` uses the
+raw MAF key vocabulary (for example `input_token_count`, not the stable event's `input_tokens`) and
+contains every non-negative integer dimension reported by MAF. A separate detail normalizer
+preserves provider-specific cache and reasoning dimensions without changing the stable normalizer,
+guessing aliases, or deriving values that the provider did not return. Invalid values (booleans,
+negative integers, strings, and non-integers) are omitted. Missing usage produces an empty object so
+the attempt remains observable.
+
+The detail record is disabled by default and changes neither model requests nor agent responses.
+The environment flag is resolved once when `runner.py` loads and accepts the repository's normal
+boolean forms. A dedicated resolver distinguishes unset/empty (silent false) from an unrecognized
+non-empty value (false plus one warning), rather than relying on `_to_bool`'s silent default.
+Because usage dimensions are numeric accounting metadata, this feature is independent of
+`ENABLE_SENSITIVE_DATA`. MAF aggregates numeric dimensions across model rounds within one
+invocation; the event preserves that final mapping, but which provider-specific keys are present
+remains provider- and SDK-dependent. Provider-controlled keys are emitted verbatim, with numeric
+values only.
+
 ## 5. Decisions log
 
 | # | Decision | Options considered | Choice | Decided by | Date |
@@ -168,6 +201,14 @@ explicit, documented extension to the discover → translate → register → ex
 | 19 | Preventing double export when the worker also configures Azure Monitor | always configure / detect existing provider and skip / rely on distro idempotency | Detect an already-installed OTel SDK TracerProvider (e.g. the worker's `PYTHON_APPLICATIONINSIGHTS_ENABLE_TELEMETRY` path) and skip the runtime's `configure_azure_monitor()`; MAF instrumentation + runtime spans still ride the existing provider | Human (larohra) — PR #79 review | 2026-07-02 |
 | 20 | Revisit #18 — exporter packaging + the `observability` config block (new feedback) | keep bundled (#18) / ship an optional `[monitor]` extra **and** remove the `observability` config block | **Reverse #18:** ship `azure-monitor-opentelemetry` as an optional **`[monitor]` extra** (the default install then drops the OpenTelemetry SDK + ~20 transitive packages, which reach the install *only* via the Distro) and **remove the `observability` config block** — the extra is the single opt-in, so the config `enabled` flag / double gate is redundant. Enablement = `[monitor]` installed + `APPLICATIONINSIGHTS_CONNECTION_STRING`; runtime spans emit only when a real OTel provider is active (else suppressed); a connection-string-set-but-exporter-missing state logs an actionable warning (no silent gap). `capture_sensitive_data` becomes **env-only, reusing MAF's `ENABLE_SENSITIVE_DATA`** (drop `AZURE_FUNCTIONS_AGENTS_CAPTURE_SENSITIVE_DATA`; verified MAF auto-reads it, so keeping our own name would clobber it). Noise control now runs **unconditionally**. Force-disable env knob deferred as a follow-up. The `dev` extra pulls the exporter so CI/tests/mypy still resolve it. **Follow-ups (not in this change):** rewrite §4 packaging rationale, runtime version bump. | Human (larohra) — new feedback | 2026-07-02 |
 
+| 21 | Detailed token event compatibility | extend existing event / add a separate event | Preserve `agent_token_usage` exactly and add versioned `agent_token_usage_detail` only when opted in, allowing the follow-up commit to be reverted independently | Human scope; Agent design | 2026-08-25 |
+| 22 | Detail source of truth | normalize selected provider aliases / preserve MAF dimensions / estimate prompt and tool shares | Preserve every valid numeric MAF usage dimension under `usage_details`; do not estimate unavailable attribution | Human scope; Agent design | 2026-08-25 |
+| 23 | Enablement | default on / config schema / environment opt-in | Environment-only `AZURE_FUNCTIONS_AGENTS_DETAILED_TOKEN_USAGE`, default false; no authoring/schema change | Human | 2026-08-25 |
+| 24 | Sensitive-data relationship | require `ENABLE_SENSITIVE_DATA` / independent | Independent: the event contains numeric usage metadata and existing non-sensitive invocation identity, never prompts, tool payloads, or responses | Agent | 2026-08-25 |
+| 25 | Stable-event failure isolation | one shared emission block / canonical first plus separately guarded detail | Emit the unchanged canonical record first; detail normalization and logging cannot suppress it | Agent (architecture review) | 2026-08-25 |
+| 26 | Detail log identity and versioning | reuse canonical prefix / distinct prefix; implicit / explicit version | Use `Agent token usage detail: ` and top-level `schema_version: 1`; additive fields are compatible within v1 | Agent (architecture review) | 2026-08-25 |
+| 27 | Flag resolution lifetime | per emission / module load | Resolve once when `runner.py` loads so invalid values warn once and behavior remains stable for the worker lifetime | Agent (architecture review) | 2026-08-25 |
+
 ## 6. Test plan
 
 - [x] Unit: `tests/test_observability.py` — enabled/sensitive resolution (config + env precedence),
@@ -181,6 +222,15 @@ explicit, documented extension to the discover → translate → register → ex
   `observability` key.
 - [ ] Fixture scenario: not required — the config change is covered by existing config-loader/schema
   tests; add `tests/fixtures/config_scenarios/<nn_observability>/` only if authoring grows.
+- [x] Follow-up unit: detailed usage is absent by default and emitted exactly once when enabled.
+- [x] Follow-up unit: canonical and provider-specific non-negative integer dimensions are preserved;
+  invalid values are omitted; unavailable usage emits an empty detail object.
+- [x] Follow-up regression: the existing `agent_token_usage` payload remains exactly unchanged in both
+  opt-in states and across non-streaming, streaming, delegate, and Workflow Sub Agent paths.
+- [x] Follow-up failure isolation: malformed detail input or detail serialization failure cannot
+  suppress the stable event; detail uses a distinct prefix and `schema_version: 1`.
+- [x] Follow-up E2E: the Dynamic Workflow token benchmark captures detailed records and reports
+  provider dimensions without changing paired canonical-report equality.
 
 ## 7. Docs impact
 
@@ -191,6 +241,11 @@ explicit, documented extension to the discover → translate → register → ex
   and startup trace, plus a §6 boundary note; linked `observability.md` in §7.
 - [x] `README.md` — added an "Observability" section under Deployment Notes (on by default with a
   connection string; links `docs/observability.md`).
+- [x] Follow-up: document `AZURE_FUNCTIONS_AGENTS_DETAILED_TOKEN_USAGE`, its event schema, volume,
+  provider variability, and aggregate-per-MAF-invocation limitation in `docs/observability.md`.
+- [x] Follow-up: update the `runner.py` module-map entry in `docs/architecture.md`.
+- [x] Follow-up: update the workflow token benchmark methodology and PR results with the detailed E2E
+  analysis.
 
 ## 8. Status & sign-off
 
@@ -206,3 +261,14 @@ log #20); the runtime version bump is a follow-up.
   in code + docs; `docs/front-matter-spec.md` OTLP wording corrected; `af.operation_id` scoped to the
   sandbox span. See Decisions log #11–#13.
 - **Human sign-off:** @larohra — 2026-07-01. **Finalized.** Set `status: Implemented` after PR #79 merges.
+- **Detailed-token follow-up scope sign-off:** @tsuyoshiushio — 2026-08-25. The follow-up must remain
+  opt-in, preserve default behavior, retain the initial benchmark data in the PR, and land as a
+  separately revertible commit.
+- **Detailed-token architecture review:** independent `rubber-duck` review completed 2026-08-25.
+  Canonical-first failure isolation, a distinct detail prefix, explicit schema versioning, flag
+  lifetime, field vocabulary, and provider variability were resolved before implementation; the
+  re-review found no blockers.
+- **Detailed-token testing review:** independent `rubber-duck` review completed 2026-08-25 with no
+  correctness blockers. Follow-up coverage now directly exercises compact/detail correlation and
+  parser guard branches, enabled streaming emission, exact compact serialization, and worker
+  `PYTHONPATH` isolation.

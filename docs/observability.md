@@ -66,6 +66,50 @@ The host lifecycle lines you *do* see in the logs list (`Executing…`, `Execute
 `Function duration…`) come from the Functions **host** — a separate telemetry plane from the
 runtime's worker spans. Use the [Quick KQL](#quick-kql) below to pull a whole run together.
 
+## Opt-in detailed token usage log
+
+The runtime always attempts one compact `Agent token usage: {json}` INFO record per actual MAF
+invocation. To add the provider's complete numeric usage mapping, set:
+
+```text
+AZURE_FUNCTIONS_AGENTS_DETAILED_TOKEN_USAGE=true
+```
+
+This default-off setting adds one `Agent token usage detail: {json}` record after the compact record.
+The existing record is unchanged. The detail payload has `schema_version: 1`, the same non-sensitive
+agent/model identity fields, and a `usage_details` object containing every non-negative integer
+dimension MAF returned:
+
+```json
+{
+  "agent_name": "support",
+  "event_name": "agent_token_usage_detail",
+  "execution_role": "primary",
+  "model": "gpt-5.4-mini",
+  "model_publisher": null,
+  "provider": "foundry",
+  "schema_version": 1,
+  "usage_details": {
+    "input_token_count": 4521,
+    "openai.cached_input_tokens": 1024,
+    "output_token_count": 295,
+    "total_token_count": 4816
+  }
+}
+```
+
+Available keys vary by provider, model, and SDK version; provider-controlled key names are preserved
+verbatim. MAF aggregates numeric dimensions across the model rounds inside one agent invocation, so
+this is an invocation total rather than a per-round breakdown. The runtime does not estimate
+prompt-vs-tool-result allocation or synthesize missing cache/reasoning counts. On streaming paths,
+usage may be empty if the final MAF response is unavailable within the bounded collection window.
+
+The setting accepts `true`/`1`/`yes`/`y` and `false`/`0`/`no`/`n` (case-insensitive). Invalid values
+remain disabled and produce one startup warning. Enabling it doubles the runtime's token-usage log
+record count, but does not change model requests, agent responses, or sensitive-data capture. These
+records use the internal `azure.functions.*` logger described above; they are useful in local/host
+diagnostic output but do not appear in the app's Application Insights `traces` table.
+
 ## Attribute naming: what `af.` means
 
 Every attribute the runtime adds is prefixed **`af.`** — short for **Azure Functions agents**.

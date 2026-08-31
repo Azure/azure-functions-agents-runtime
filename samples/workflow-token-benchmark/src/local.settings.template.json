@@ -1,0 +1,14 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "DURABLE_TASK_SCHEDULER_CONNECTION_STRING": "Endpoint=http://localhost:8080;Authentication=None",
+    "TASKHUB_NAME": "tokenbenchmark",
+    "AZURE_FUNCTIONS_AGENTS_PROVIDER": "foundry",
+    "FOUNDRY_PROJECT_ENDPOINT": "",
+    "FOUNDRY_MODEL": "gpt-5.4-mini",
+    "AZURE_FUNCTIONS_AGENTS_DETAILED_TOKEN_USAGE": "true",
+    "TOKEN_BENCHMARK_CONTAINER": "token-benchmark-reports"
+  }
+}

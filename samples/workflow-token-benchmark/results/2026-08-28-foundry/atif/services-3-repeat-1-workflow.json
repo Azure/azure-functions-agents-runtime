@@ -1,0 +1,35 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "services-3-repeat-1-candidate",
+  "agent": {
+    "name": "workflow-token-benchmark",
+    "version": "1",
+    "model_name": "gpt-5.4-mini"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "user",
+      "message": "{\"instruction\": \"Inspect every requested service exactly once, preserve request order, and publish a complete incident report matching the reference facts.\", \"reference_report\": {\"elevated_service_count\": 2, \"schema_version\": 1, \"service_count\": 3, \"services\": [{\"cpu_p95_percent\": 60, \"deploy_age_minutes\": 135, \"deploy_revision\": \"7118151816c7\", \"errors\": 8, \"evidence_lines\": 40, \"latency_p95_ms\": 996, \"service\": \"checkout-api-00\", \"status\": \"attention\", \"warnings\": 18}, {\"cpu_p95_percent\": 39, \"deploy_age_minutes\": 209, \"deploy_revision\": \"7525c3857e90\", \"errors\": 4, \"evidence_lines\": 40, \"latency_p95_ms\": 1375, \"service\": \"checkout-api-01\", \"status\": \"attention\", \"warnings\": 5}, {\"cpu_p95_percent\": 41, \"deploy_age_minutes\": 142, \"deploy_revision\": \"27e36c000443\", \"errors\": 3, \"evidence_lines\": 40, \"latency_p95_ms\": 298, \"service\": \"checkout-api-02\", \"status\": \"healthy\", \"warnings\": 14}], \"total_errors\": 15, \"trial_id\": \"services-3-repeat-1\"}, \"request\": {\"evidence_lines\": 40, \"services\": [\"checkout-api-00\", \"checkout-api-01\", \"checkout-api-02\"], \"trial_id\": \"services-3-repeat-1\"}}"
+    },
+    {
+      "step_id": 2,
+      "source": "agent",
+      "model_name": "gpt-5.4-mini",
+      "message": "{\"elevated_service_count\": 2, \"schema_version\": 1, \"service_count\": 3, \"services\": [{\"cpu_p95_percent\": 60, \"deploy_age_minutes\": 135, \"deploy_revision\": \"7118151816c7\", \"errors\": 8, \"evidence_lines\": 40, \"latency_p95_ms\": 996, \"service\": \"checkout-api-00\", \"status\": \"attention\", \"warnings\": 18}, {\"cpu_p95_percent\": 39, \"deploy_age_minutes\": 209, \"deploy_revision\": \"7525c3857e90\", \"errors\": 4, \"evidence_lines\": 40, \"latency_p95_ms\": 1375, \"service\": \"checkout-api-01\", \"status\": \"attention\", \"warnings\": 5}, {\"cpu_p95_percent\": 41, \"deploy_age_minutes\": 142, \"deploy_revision\": \"27e36c000443\", \"errors\": 3, \"evidence_lines\": 40, \"latency_p95_ms\": 298, \"service\": \"checkout-api-02\", \"status\": \"healthy\", \"warnings\": 14}], \"total_errors\": 15, \"trial_id\": \"services-3-repeat-1\"}"
+    }
+  ],
+  "final_metrics": {
+    "total_steps": 2,
+    "extra": {
+      "report_latency_ms": 7112,
+      "deterministic_quality_score": 1.0,
+      "deterministic_quality_exact": true
+    },
+    "total_prompt_tokens": 5579,
+    "total_completion_tokens": 288
+  },
+  "extra": {
+    "trial_id": "services-3-repeat-1"
+  }
+}

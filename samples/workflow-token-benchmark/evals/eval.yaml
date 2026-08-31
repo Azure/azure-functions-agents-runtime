@@ -1,0 +1,28 @@
+name: workflow-token-benchmark-quality
+description: Grades benchmark reports against deterministic reference facts.
+type: capability
+
+scoring:
+  threshold: 0.75
+
+stimuli:
+  - name: report-quality
+    prompt: |
+      Inspect every requested service exactly once, preserve request order, and
+      publish a complete incident report matching the reference facts included
+      in the user message.
+    rubric:
+      - The report covers every requested service exactly once and in request order.
+      - Every service status, count, metric, and deployment field matches the reference report.
+      - Top-level service counts, elevated counts, errors, schema version, and trial ID are correct.
+      - The response contains only a clear, internally consistent incident report without fabricated fields.
+    graders:
+      - type: prompt
+        config:
+          prompt: |
+            Treat the reference_report object in the user message as authoritative.
+            Compare the final agent report directly against it. Do not reward one
+            execution mode over another.
+          scoring: scale_1_5
+          threshold: 0.75
+          evidence: [trajectory]
