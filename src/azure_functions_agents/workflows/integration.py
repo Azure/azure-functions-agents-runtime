@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -27,6 +28,7 @@ import azure.functions as func
 
 from azure_functions_agents._function_tool import WorkflowTool
 from azure_functions_agents._logger import logger
+from azure_functions_agents.config.merge import DEFAULT_TIMEOUT
 from azure_functions_agents.config.schema import (
     TRIGGER_TYPES,
     ResolvedAgent,
@@ -36,7 +38,7 @@ from azure_functions_agents.registration.catalog import AgentCatalog
 
 from . import registry
 from .engine import register_workflows
-from .schema import WorkflowPlanPolicy
+from .schema import WorkflowPlanPolicy, WorkflowToolExecutionPolicy
 from .tools import build_workflow_tools
 
 type WorkflowAgentPolicyCatalog = Mapping[str, WorkflowPlanPolicy]
@@ -292,6 +294,8 @@ def build_workflow_handler_catalog(
                 workflow_tool.description,
                 workflow_tool.handler,
                 public=workflow_tool.public,
+                timeout=workflow_tool.timeout,
+                retry=workflow_tool.retry,
             )
         except ValueError as exc:
             logger.warning("Skipping workflow tool %r: %s", workflow_tool.name, exc)
@@ -319,6 +323,8 @@ def _register_workflow_tools(
                 entry.description,
                 entry.handler,
                 public=entry.public,
+                timeout=entry.timeout,
+                retry=entry.retry,
             )
         except ValueError as exc:
             logger.warning("Skipping workflow tool %r: %s", entry.name, exc)
@@ -420,8 +426,10 @@ def _build_plan_policy(
     allowed_tools: frozenset[str],
     workflow_subagents: Sequence[WorkflowSubagentRef],
     catalog: AgentCatalog | None,
+    handler_catalog: registry.WorkflowHandlerCatalog,
 ) -> WorkflowPlanPolicy:
     guidance: list[tuple[str, str]] = []
+    subagent_timeouts: dict[str, int] = {}
     for ref in workflow_subagents:
         entry = catalog.get(ref.agent) if catalog is not None else None
         if entry is None:
@@ -430,10 +438,35 @@ def _build_plan_policy(
                 "available in the AgentCatalog"
             )
         guidance.append((ref.agent, ref.when or entry.resolved.description))
+        try:
+            resolved_timeout = getattr(entry.resolved, "timeout", DEFAULT_TIMEOUT)
+            timeout_ms = Decimal(str(resolved_timeout)) * 1_000
+        except InvalidOperation as exc:
+            raise RuntimeError(
+                f"Workflow Sub Agent {ref.agent!r} has an invalid resolved timeout"
+            ) from exc
+        if not timeout_ms.is_finite():
+            raise RuntimeError(
+                f"Workflow Sub Agent {ref.agent!r} has a non-finite resolved timeout"
+            )
+        subagent_timeouts[ref.agent] = int(
+            timeout_ms.to_integral_value(rounding=ROUND_FLOOR)
+        )
+    tool_execution = {
+        name: WorkflowToolExecutionPolicy(
+            timeout=handler_catalog[name].timeout,
+            retry=handler_catalog[name].retry,
+        )
+        for name in allowed_tools
+        if handler_catalog[name].timeout is not None
+        or handler_catalog[name].retry is not None
+    }
     return WorkflowPlanPolicy(
         allowed_tools=allowed_tools,
         allowed_subagents=frozenset(ref.agent for ref in workflow_subagents),
         subagent_guidance=tuple(guidance),
+        tool_execution=tool_execution,
+        subagent_timeout_ms=subagent_timeouts,
     )
 
 
@@ -476,6 +509,7 @@ def build_workflow_agent_policy_catalog(
             allowed_tools,
             resolved.workflows.subagents,
             catalog,
+            handler_catalog,
         )
     return MappingProxyType(policies)
 
@@ -548,7 +582,12 @@ def build_workflow_integration(
     filtered_workflow_tools = _apply_workflow_exclude(tuple(workflow_tools or ()), metadata)
     handler_catalog = build_workflow_handler_catalog(filtered_workflow_tools)
     effective = _register_workflow_tools(filtered_workflow_tools)
-    policy = _build_plan_policy(effective, workflow_subagents, catalog)
+    policy = _build_plan_policy(
+        effective,
+        workflow_subagents,
+        catalog,
+        handler_catalog,
+    )
     register_workflows(
         app,
         catalog=catalog,

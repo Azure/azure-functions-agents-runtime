@@ -441,21 +441,45 @@ Function activities:
 ```python
 from typing import Any
 
-from azure_functions_agents import workflow_tool
+from azure_functions_agents import (
+    WorkflowRetryBackoff,
+    WorkflowRetryPolicy,
+    current_workflow_task_context,
+    workflow_tool,
+)
 
 
-@workflow_tool(description="Fetch recent log lines for a service.")
-def fetch_logs(args: dict[str, Any]) -> dict[str, Any]:
+@workflow_tool(
+    description="Fetch recent log lines for a service.",
+    timeout="PT30S",
+    retry=WorkflowRetryPolicy(
+        max_attempts=3,
+        backoff=WorkflowRetryBackoff(
+            initial="PT1S",
+            multiplier=2.0,
+            max="PT10S",
+        ),
+    ),
+)
+async def fetch_logs(args: dict[str, Any]) -> dict[str, Any]:
+    context = current_workflow_task_context()
+    # Use context.idempotency_key to deduplicate side effects.
+    # context.attempt is None while Durable Python 2.x owns retry.
     return {"service": args["service"], "lines": ["..."]}
 ```
 
 Use both `@tool` and `@workflow_tool` when the same callable should be
 available both directly in chat and inside workflows. See
 [`docs/workflows.md`](docs/workflows.md) for the Activity handler
-contract and `workflows.exclude`. Any agent can enable workflows; triggers and
-built-in endpoints independently determine how that agent is invoked. See the
+contract, decorator-over-DAG policy precedence, Durable-owned retries,
+continued failure, idempotency, and `workflows.exclude`. Any agent can enable
+workflows; triggers and built-in endpoints independently determine how that
+agent is invoked. See the
 [`per-agent-workflows`](samples/per-agent-workflows) sample for two independent
-non-main workflow-enabled agents sharing one Durable engine.
+non-main workflow-enabled agents sharing one Durable engine. The
+[`workflow-incident-triage`](samples/workflow-incident-triage) sample includes a
+deterministic execution-policy plan covering transient retry, async timeout
+exhaustion, continued `for_each` failure, and explicit recovery.
 
 ## Built-in Endpoint Routes
 

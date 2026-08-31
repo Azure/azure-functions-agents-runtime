@@ -36,6 +36,13 @@ jobs:
       - bash: |
           python -m pip install --upgrade pip
           python -m pip install -U -e .[dev]
+          shared_packages="$(pwd)/.e2e-python-packages/lib/site-packages"
+          python -m pip install --target="$shared_packages" -e .
+          while IFS= read -r host_json; do
+            app="$(dirname "$host_json")"
+            mkdir -p "$app/.python_packages/lib"
+            ln -s "$shared_packages" "$app/.python_packages/lib/site-packages"
+          done < <(find tests/endtoend/apps samples -type f -name host.json -print)
         displayName: 'Install dependencies for $(PYTHON_VERSION)'
 
       - template: /eng/templates/install-core-tools.yml@self

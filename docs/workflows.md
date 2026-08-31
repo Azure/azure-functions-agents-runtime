@@ -12,9 +12,8 @@
 > demonstrates workflow Sub Agents. The
 > [Engineering Operations Hub](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/per-agent-workflows/README.md)
 > demonstrates two non-main workflow-enabled agents with independent policies in one app.
-> Larger features such as sub-orchestrations,
-> configurable retry policies, and MCP Tasks integration are tracked as v2
-> follow-up work.
+> Larger features such as sub-orchestrations and MCP Tasks integration are
+> tracked as follow-up work.
 
 Dynamic workflows let a markdown agent author and run **distributed,
 observable, durable** plans without writing orchestration code. Flip
@@ -227,11 +226,38 @@ def fetch_logs(args: dict[str, Any]) -> dict[str, Any]:
     return {"service": service, "lines": ["..."]}
 ```
 
-The Activity runner calls the handler as `handler(args)`. v1 handlers
-must be synchronous, accept a single dictionary argument, and return a
-JSON-serializable value. Async handlers, reserved workflow-management
-names, and duplicate workflow names are rejected or skipped during
-startup.
+The Activity runner calls the handler once as `handler(args)`. Handlers may be
+sync, async, or return an awaitable from a sync function. They accept one
+dictionary argument and must return a JSON-serializable value. Reserved
+workflow-management names and duplicate workflow names fail startup.
+
+Tool authors can declare authoritative timeout and retry behavior:
+
+```python
+from azure_functions_agents import (
+    WorkflowRetryBackoff,
+    WorkflowRetryPolicy,
+    workflow_tool,
+)
+
+RETRY = WorkflowRetryPolicy(
+    max_attempts=3,
+    backoff=WorkflowRetryBackoff(
+        initial="PT1S",
+        multiplier=2.0,
+        max="PT10S",
+    ),
+)
+
+@workflow_tool(timeout="PT30S", retry=RETRY)
+async def fetch_inventory(args: dict[str, object]) -> dict[str, object]:
+    ...
+```
+
+Decorator `timeout` and `retry` declarations are authoritative independently.
+The DAG fills only a field the decorator omitted; retry policies are selected
+whole and never merge nested backoff fields. Declaring
+`WorkflowRetryPolicy(max_attempts=1)` explicitly prohibits DAG-authored retry.
 
 Normal tools keep their existing behavior: a plain public function or an
 `@tool`/`FunctionTool` in `tools/*.py` becomes a normal MAF tool. Use both
@@ -277,9 +303,6 @@ A workflow plan is a list of tasks with `depends_on` edges. Task types:
 - **`sub_agent`** — invoke one leaf specialist authorized by
   `workflows.subagents`, using `agent` and a self-contained `task`.
 
-v1 does not support per-task timeout or retry fields yet. Those are v2
-hardening controls.
-
 ```json
 {
   "tasks": [
@@ -294,12 +317,86 @@ hardening controls.
 }
 ```
 
+### Task execution policy
+
+`tool` and `sub_agent` tasks accept an optional `execution` object:
+
+```json
+{
+  "id": "fetch",
+  "type": "tool",
+  "tool": "fetch_inventory",
+  "args": {"region": "west"},
+  "execution": {
+    "timeout": "PT20S",
+    "retry": {
+      "max_attempts": 3,
+      "backoff": {
+        "initial": "PT1S",
+        "multiplier": 2.0,
+        "max": "PT10S"
+      }
+    },
+    "continue_on_error": true
+  }
+}
+```
+
+Timeout and retry resolve at submission and the effective policy is persisted
+with the Durable input. Attempts are limited to 1–5, timeouts to
+`PT1S`–`PT10M`, and total configured attempt deadlines plus delays to one hour.
+New workflows use Durable Python 2.x Activity retry with the authored
+exponential coefficient and maximum interval. A conservative integer ceiling
+admits the policy within the one-hour bound. The persisted marker also forms a
+compatibility boundary: workflows started by an older release have no marker
+and replay their precomputed integer-delay timers unchanged. `wait` tasks do not
+accept `execution`.
+
+The Activity wrapper owns each attempt deadline. Sync handlers run in a worker
+thread and may continue after the wrapper stops waiting; async handlers are
+cooperatively canceled. Durable delivery remains at least once, so
+side-effecting handlers must deduplicate. During a policy-aware delivery,
+`current_workflow_task_context()` returns a frozen `WorkflowTaskContext` with
+the workflow/task/instance ids, maximum attempts, deadline, and a stable
+`af-wf-task-v1:...` idempotency key. The key remains unchanged across policy
+retries and redelivery. `attempt` is `None` for new Durable-owned retry because
+the preview API does not expose the delivery number; it remains one-based only
+when replaying an older runtime-managed history.
+
+Raise `WorkflowRetryableError(code, message)` only when retry is safe. Raise
+`WorkflowTerminalError(code, message)` for a non-retryable application
+failure. Unknown exceptions are sanitized and terminal by default; timeout and
+Activity infrastructure failures are retryable. Error codes are lowercase
+ASCII identifiers up to 64 characters and application codes cannot start with
+`workflow_`.
+
+After retry exhaustion, `continue_on_error: true` converts only continuable
+execution failures into a dependency-satisfying result:
+
+```json
+{
+  "failed": true,
+  "error_code": "inventory_unavailable",
+  "error": "Inventory is temporarily unavailable.",
+  "kind": "handler_transient",
+  "attempts": 3
+}
+```
+
+Authorization, malformed plan/reference, handler-contract, cancellation, and
+termination failures never continue. Each `for_each` instance owns an
+independent Durable retry lifecycle and idempotency key; its ordered aggregate can contain
+`failed_continued` entries. A downstream `when` must explicitly decide whether
+to recover from that result.
+
 Authored task ids allow letters, numbers, underscore, and hyphen only.
 `item` and `index` are reserved and rejected as authored task ids because they
 always identify `for_each` iteration locals.
 `[` and `]` are rejected — the runtime reserves the `<id>[<index>]`
 namespace for the materialized `for_each` instance ids it renders (see
-below), so you can neither author them nor reference them.
+below), so you can neither author them nor reference them. This is stricter
+than the initial static-DAG preview: rename legacy ids containing punctuation
+(for example, `fetch.logs` to `fetch_logs`) before upgrading.
 
 ### Data-driven control flow (`when` / `for_each`)
 
@@ -453,11 +550,14 @@ Each invocation is stateless and receives only its resolved `task`. The
 specialist uses its own model, instructions, normal tools, MCP servers, skills,
 `web_request` configuration, and timeout. It does not receive the parent's
 history, sandbox, workflow-management tools, or chat-time delegation tools.
-Success returns `{"agent": "<slug>", "text": "<answer>"}`. A specialist error or
-timeout fails the parent workflow. Timeout and missing-specialist failures have
-distinct messages. Other failures expose only the stable, non-sensitive
-`workflow_subagent_execution_failed` error code; provider and tool details stay
-in runtime logs. Operators can correlate those logs using the Workflow ID, node
+Success returns `{"agent": "<slug>", "text": "<answer>"}`. Policy-aware Sub
+Agent attempts use the same retry, continuation, context, and sanitized outcome
+contract as workflow tools. Their timeout defaults to and cannot exceed the
+smaller of the specialist's resolved timeout and `PT10M`; a task may request a
+shorter value. Policy-free Sub Agents retain their resolved timeout. Missing
+specialists and revoked grants remain non-retryable and non-continuable.
+Provider and tool details stay in runtime logs. Operators can correlate those
+logs using the Workflow ID, node
 ID, and specialist slug.
 
 Sub Agent execution can be delivered more than once after a worker failure.
@@ -501,8 +601,8 @@ whole expansion atomically if it would exceed `max_nodes`
 iterated arrays bounded upstream. `max_parallelism` still caps how many ready
 instances run concurrently.
 
-Future v2 hardening adds configurable frontmatter caps, per-tool timeout
-caps, retry policy, storage hygiene, and large-output offloading.
+Future hardening includes configurable frontmatter caps, storage hygiene, and
+large-output offloading.
 
 ### Determinism contract
 
@@ -584,7 +684,7 @@ and `runtime_status` is `Failed`.
 
 ### `custom_status` schema versions
 
-`custom_status` has two accepted shapes; clients must accept **either**
+`custom_status` has three accepted shapes; clients must accept **all**
 during the experimental compatibility window:
 
 - **Schema version 1** — a free-form string, as shown above. Static plans
@@ -592,6 +692,8 @@ during the experimental compatibility window:
 - **Schema version 2** — a structured JSON object emitted by dynamically
   controlled workflows. The status tools and HTTP endpoint pass it through
   unchanged; the built-in UI renders its states rather than parsing text.
+- **Schema version 3** — emitted whenever any task is policy-aware. It retains
+  the version-2 node/instance structure and adds execution state.
 
 ```json
 {
@@ -623,6 +725,72 @@ Logical node states are `pending`, `running`, `skipped`, `expanded`,
 `aggregated`. A `for_each` node is `expanded` after materialization,
 `running` while any instance is in flight, and `aggregated` once its ordered
 result array is committed.
+
+Version 3 counts executable units with `pending`, `running`, `retry_wait`,
+`completed`, `skipped`, `failed_continued`, and terminal `failed` buckets. A policy-aware normal
+node or individual `for_each` instance reports `max_attempts`, reports
+`attempt` after first dispatch, reports `next_retry_time` only in
+`retry_wait`, and retains `last_failure_kind` / `last_error_code` after a later
+success. A `for_each` logical node has no synthetic attempt fields. Status
+never includes arguments, results, messages, session identity, or idempotency
+keys.
+
+```json
+{
+  "schema_version": 3,
+  "counts": {
+    "logical_total": 2,
+    "materialized_total": 2,
+    "pending": 1,
+    "running": 0,
+    "retry_wait": 1,
+    "completed": 0,
+    "skipped": 0,
+    "failed_continued": 0,
+    "failed": 0
+  },
+  "nodes": {
+    "fetch": {
+      "state": "retry_wait",
+      "attempt": 1,
+      "max_attempts": 3,
+      "next_retry_time": "2026-08-24T00:00:01+00:00",
+      "last_failure_kind": "handler_transient",
+      "last_error_code": "inventory_unavailable"
+    },
+    "summarize": {
+      "state": "pending",
+      "max_attempts": 1
+    }
+  }
+}
+```
+
+New native-retry histories use version 4 and identify the owner explicitly.
+The Activity remains `running` through Durable backoff. Because the preview API
+does not expose intermediate deliveries, version 4 omits `retry_wait`,
+`attempt`, `next_retry_time`, and intermediate failure fields:
+
+```json
+{
+  "schema_version": 4,
+  "retry_driver": "durable",
+  "counts": {
+    "logical_total": 2,
+    "materialized_total": 2,
+    "pending": 1,
+    "running": 1,
+    "completed": 0,
+    "skipped": 0,
+    "failed_continued": 0,
+    "failed": 0
+  },
+  "nodes": {
+    "fetch": {"state": "running", "max_attempts": 3},
+    "summarize": {"state": "pending", "max_attempts": 1}
+  }
+}
+```
 
 ## Completion delivery
 
@@ -807,17 +975,29 @@ agent-wide throttle.
   Static plans return a concise string (`"3/7 tasks done, current=summarize"`);
   dynamically controlled plans return the structured `schema_version: 2`
   snapshot (see [status envelope](#custom_status-schema-versions)) with
-  per-node and per-instance state.
+  per-node and per-instance state. New policy-aware plans return
+  `schema_version: 4` with `retry_driver: "durable"`; legacy histories retain
+  schema version 3 and its explicit attempt/retry-wait state.
+- **Activity telemetry** — policy-aware deliveries emit
+  `workflow.task.activity` spans and start/completion counters with bounded
+  workflow/task identity, target, policy source, outcome, retry ownership, and
+  timeout. Legacy deliveries additionally include attempt, runtime decision,
+  and selected delay; native deliveries omit values the Durable API does not
+  expose. Arguments, results, exception text, messages, and idempotency keys are
+  excluded. Orchestrator replay emits no attempt metrics.
 
 ## Requirements
 
-- `azure-functions-durable` (installed transitively with
-  `azure-functions-agents`).
+- The pinned preview pair `azure-functions==2.3.0b2` and
+  `azure-functions-durable==2.0.0b2` (installed transitively with
+  `azure-functions-agents`). These are preview dependencies and may introduce
+  breaking changes before stable release.
 - An Azure Storage connection string in `AzureWebJobsStorage` (already
   required for non-HTTP triggers; Azurite works locally). DTS is an
   optional Durable backend when configured in `host.json`.
-- The default extension bundle (`[4.*, 5.0.0)`) already ships the Durable
-  Task extension — no `host.json` changes are required.
+- The stable extension bundle
+  (`Microsoft.Azure.Functions.ExtensionBundle`, `[4.37.1, 5.0.0)`) in
+  `host.json`.
 
 ## v1 scope and v2 backlog
 
@@ -834,7 +1014,10 @@ v1 includes:
 - result templating with `${node_id.result}`, dotted paths, and the
   `${item}` / `${item.path}` / `${index}` iteration locals;
 - structured `schema_version: 2` status snapshots alongside legacy string
-  `custom_status`;
+  `custom_status`, plus schema version 4 for native execution policy and
+  version 3 compatibility for older histories;
+- bounded per-task timeout, deterministic retry/backoff, continued failure,
+  async handlers, stable idempotency context, and Activity telemetry;
 - cooperative cancel and hard terminate;
 - live progress in the built-in chat UI;
 - workflow starts from supported Markdown-declared triggers;
@@ -844,7 +1027,6 @@ v1 includes:
 - fixed v1 guardrails for plan size, parallelism, wait duration, active
   workflows per session, and status-list result count.
 
-v2 follow-up work includes sub-orchestrations and bounded nested agents,
-configurable caps, retry and timeout policies, HMAC-backed workflow identity,
-blob-offloaded large outputs, an MCP Tasks bridge, richer error taxonomy, and
-storage hygiene.
+Follow-up work includes sub-orchestrations and bounded nested agents,
+configurable caps, HMAC-backed workflow identity, blob-offloaded large outputs,
+an MCP Tasks bridge, and storage hygiene.

@@ -462,6 +462,8 @@ _web_request_counter: Any = None
 _web_request_error_counter: Any = None
 _delegate_call_counter: Any = None
 _delegate_error_counter: Any = None
+_workflow_task_start_counter: Any = None
+_workflow_task_completion_counter: Any = None
 _metrics_ready = False
 
 
@@ -469,6 +471,7 @@ def _ensure_metrics() -> None:
     global _meter, _sandbox_execution_counter, _sandbox_error_counter
     global _web_request_counter, _web_request_error_counter, _metrics_ready
     global _delegate_call_counter, _delegate_error_counter
+    global _workflow_task_start_counter, _workflow_task_completion_counter
     if _metrics_ready:
         return
     _metrics_ready = True
@@ -485,38 +488,104 @@ def _ensure_metrics() -> None:
             _meter = None
     if _meter is None:
         return
-    try:
-        _sandbox_execution_counter = _meter.create_counter(
+    def create_counter(name: str, description: str) -> Any:
+        try:
+            return _meter.create_counter(name, description=description)
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+    _sandbox_execution_counter = create_counter(
             "azure_functions_agents.dynamic_session.executions",
-            description="ACA dynamic-session code executions.",
+            "ACA dynamic-session code executions.",
         )
-        _sandbox_error_counter = _meter.create_counter(
+    _sandbox_error_counter = create_counter(
             "azure_functions_agents.dynamic_session.errors",
-            description="ACA dynamic-session executions that produced an error or stderr.",
+            "ACA dynamic-session executions that produced an error or stderr.",
         )
-        _web_request_counter = _meter.create_counter(
+    _web_request_counter = create_counter(
             "azure_functions_agents.web_request.requests",
-            description="web_request system tool invocations.",
+            "web_request system tool invocations.",
         )
-        _web_request_error_counter = _meter.create_counter(
+    _web_request_error_counter = create_counter(
             "azure_functions_agents.web_request.errors",
-            description="web_request invocations blocked or failed (SSRF, timeout, transport error).",
+            "web_request invocations blocked or failed (SSRF, timeout, transport error).",
         )
-        _delegate_call_counter = _meter.create_counter(
+    _delegate_call_counter = create_counter(
             "azure_functions_agents.delegate.calls",
-            description="delegate_<slug> tool invocations (chat-time sub-agent delegation).",
+            "delegate_<slug> tool invocations (chat-time sub-agent delegation).",
         )
-        _delegate_error_counter = _meter.create_counter(
+    _delegate_error_counter = create_counter(
             "azure_functions_agents.delegate.errors",
-            description="delegate_<slug> invocations that failed or timed out (specialist-side; sanitized before reaching the model).",
+            "delegate_<slug> invocations that failed or timed out.",
         )
-    except Exception:  # pragma: no cover - defensive
-        _sandbox_execution_counter = None
-        _sandbox_error_counter = None
-        _web_request_counter = None
-        _web_request_error_counter = None
-        _delegate_call_counter = None
-        _delegate_error_counter = None
+    _workflow_task_start_counter = create_counter(
+            "azure_functions_agents.workflow_task.starts",
+            "Policy-aware workflow Activity deliveries.",
+        )
+    _workflow_task_completion_counter = create_counter(
+            "azure_functions_agents.workflow_task.completions",
+            "Policy-aware workflow Activity outcomes.",
+        )
+
+
+class WorkflowTaskActivityTelemetry:
+    """No-op-safe telemetry recorder for one actual policy-aware Activity delivery."""
+
+    def __init__(self, span: RuntimeSpan, attributes: dict[str, Any]) -> None:
+        self._span = span
+        self._attributes = attributes
+
+    def complete(
+        self,
+        *,
+        outcome_kind: str,
+        error_code: str | None,
+        retry_decision: str,
+        selected_delay_ms: int | None,
+    ) -> None:
+        attributes = {
+            **self._attributes,
+            "af.workflow_task.outcome_kind": bounded_content(outcome_kind)[:128],
+            "af.workflow_task.error_code": (
+                bounded_content(error_code)[:128] if error_code is not None else None
+            ),
+            "af.workflow_task.retry_decision": retry_decision,
+            "af.workflow_task.selected_delay_ms": selected_delay_ms,
+        }
+        for key, value in attributes.items():
+            self._span.set_attribute(key, value)
+        if not _enabled:
+            return
+        _ensure_metrics()
+        if _workflow_task_completion_counter is not None:
+            with suppress(Exception):
+                _workflow_task_completion_counter.add(
+                    1,
+                    {key: value for key, value in attributes.items() if value is not None},
+                )
+
+
+@contextmanager
+def workflow_task_activity_telemetry(
+    attributes: Mapping[str, Any],
+) -> Iterator[WorkflowTaskActivityTelemetry]:
+    """Record one policy-aware Activity delivery without exposing task content."""
+    safe = {
+        key: (bounded_content(value)[:128] if isinstance(value, str) else value)
+        for key, value in attributes.items()
+        if value is not None
+    }
+    with start_span(
+        "workflow.task.activity",
+        fault_domain=FaultDomain.RUNTIME,
+        attributes=safe,
+    ) as span:
+        if _enabled:
+            _ensure_metrics()
+            if _workflow_task_start_counter is not None:
+                with suppress(Exception):
+                    _workflow_task_start_counter.add(1, safe)
+        yield WorkflowTaskActivityTelemetry(span, safe)
 
 
 def record_sandbox_execution(*, error: bool) -> None:

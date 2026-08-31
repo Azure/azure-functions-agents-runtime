@@ -661,10 +661,12 @@ workflow-management tools (`start_workflow`, `get_workflow_status`,
 agent-allowed public `@workflow_tool` handlers discovered from `tools/*.py` as
 workflow task targets. No new role or starter fields are required; workflow
 identity comes from the agent's canonical slug.
-The v1 runtime currently requires workflow tool handlers to be synchronous,
-accept one dictionary argument, and return JSON-serializable values. This is an
-implementation constraint of the v1 registry and Activity runner, not a Durable
-Functions requirement.
+Workflow tool handlers may be synchronous, asynchronous, or return an
+awaitable; they accept one dictionary argument and return a JSON-serializable
+value. `@workflow_tool` may also declare authoritative `timeout` and `retry`
+policy. DAG policy fills only decorator fields that were omitted. See
+[Dynamic Workflows: task execution policy](workflows.md#task-execution-policy)
+for policy syntax, precedence, idempotency, and failure behavior.
 
 Normal custom tools keep their existing behavior. Plain public functions and `@tool`/`FunctionTool` values in `tools/*.py` are normal MAF tools; `@workflow_tool` marks a callable for workflow execution. Use both decorators when a callable should be available both directly in chat and inside workflow tasks. Use `_`-prefixed helpers for functions that should be neither normal tools nor workflow tools.
 

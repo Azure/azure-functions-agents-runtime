@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, Literal
 
-from azure.durable_functions import DurableOrchestrationClient
+from azure.durable_functions import DurableFunctionsClient
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from azure_functions_agents._function_tool import tool as define_tool
@@ -34,9 +34,12 @@ from .context import (
 )
 from .engine import CANCEL_EVENT_NAME, ORCHESTRATOR_NAME
 from .schema import (
+    EffectiveWorkflowTaskExecution,
     PlanValidationError,
     WorkflowPlanPolicy,
+    WorkflowTaskExecution,
     plan_to_activity_inputs,
+    resolve_workflow_task_execution,
     validate_plan,
 )
 
@@ -61,7 +64,15 @@ class _ConditionSpec(BaseModel):
 class _TaskSpecBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    id: str = Field(description="Unique identifier for this task within the plan.")
+    id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description=(
+            "Unique task identifier using letters, numbers, underscore, or hyphen. "
+            "The names 'item' and 'index' are reserved."
+        ),
+    )
     depends_on: list[str] = Field(
         default_factory=list,
         description=(
@@ -103,6 +114,11 @@ class _ToolTaskSpec(_TaskSpecBase):
             "Optional full upstream-result reference resolving to a JSON array. "
             "One task instance is created for each array item."
         ),
+    )
+    execution: WorkflowTaskExecution | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Optional bounded timeout, retry, and failure-continuation policy.",
     )
 
 
@@ -147,6 +163,11 @@ class _SubAgentTaskSpec(_TaskSpecBase):
             "Optional full upstream-result reference resolving to a JSON array. "
             "One Sub Agent task is created for each array item."
         ),
+    )
+    execution: WorkflowTaskExecution | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Optional bounded timeout, retry, and failure-continuation policy.",
     )
 
 
@@ -269,7 +290,7 @@ def _is_active_status(status: Any) -> bool:
 
 
 async def fetch_session_workflows(
-    durable_client: DurableOrchestrationClient,
+    durable_client: DurableFunctionsClient,
     workflow_agent_slug: str,
     session_id: str,
 ) -> list[dict[str, Any]]:
@@ -298,7 +319,7 @@ async def fetch_session_workflows(
 
 
 async def count_active_session_workflows(
-    durable_client: DurableOrchestrationClient,
+    durable_client: DurableFunctionsClient,
     workflow_agent_slug: str,
     session_id: str,
 ) -> int:
@@ -320,7 +341,7 @@ async def count_active_session_workflows(
 
 
 async def fetch_session_workflow_status(
-    durable_client: DurableOrchestrationClient,
+    durable_client: DurableFunctionsClient,
     workflow_agent_slug: str,
     session_id: str,
     workflow_id: str,
@@ -406,6 +427,7 @@ async def start_workflow(
             "workflow tools are registered but the per-app allowlist was "
             "never configured (build_workflow_integration was not called)"
         )
+    effective_policies: dict[str, EffectiveWorkflowTaskExecution] = {}
     try:
         if policy is None:
             assert allowed_tools is not None
@@ -417,6 +439,27 @@ async def start_workflow(
             params.model_dump(exclude_unset=True),
             policy=policy,
         )
+        for task in plan.tasks:
+            if task.type == "tool":
+                declarations = policy.tool_execution.get(task.tool or "")
+                effective = resolve_workflow_task_execution(
+                    task,
+                    decorator_timeout=(
+                        declarations.timeout if declarations is not None else None
+                    ),
+                    decorator_retry=(
+                        declarations.retry if declarations is not None else None
+                    ),
+                )
+            elif task.type == "sub_agent":
+                effective = resolve_workflow_task_execution(
+                    task,
+                    subagent_timeout_ms=policy.subagent_timeout_ms.get(task.agent or ""),
+                )
+            else:
+                effective = resolve_workflow_task_execution(task)
+            if effective is not None:
+                effective_policies[task.id] = effective
     except PlanValidationError as exc:
         metadata: dict[str, str | None] = {}
         if exc.error_code is not None:
@@ -424,6 +467,8 @@ async def start_workflow(
             metadata["node_id"] = exc.node_id
             metadata["path"] = exc.path
         return _error(str(exc), **metadata)
+    except ValueError as exc:
+        return _error(str(exc))
 
     workflow_agent = {
         "workflow_agent_slug": session.workflow_agent_slug,
@@ -461,7 +506,7 @@ async def start_workflow(
             ORCHESTRATOR_NAME,
             instance_id=instance_id,
             client_input={
-                "tasks": plan_to_activity_inputs(plan),
+                "tasks": plan_to_activity_inputs(plan, effective_policies),
                 "workflow_agent_slug": session.workflow_agent_slug,
                 "workflow_agent": workflow_agent,
                 "policy": {
@@ -644,7 +689,7 @@ def _build_session(
     workflow_agent_slug: str,
     session_id: str | None,
     agent_name: str,
-    durable_client: DurableOrchestrationClient | None,
+    durable_client: DurableFunctionsClient | None,
 ) -> WorkflowSessionContext | None:
     if not session_id or durable_client is None:
         return None
@@ -661,7 +706,7 @@ def build_workflow_tools(
     session_id: str | None = None,
     workflow_agent_slug: str = "main",
     agent_name: str = "main",
-    durable_client: DurableOrchestrationClient | None = None,
+    durable_client: DurableFunctionsClient | None = None,
     policy: WorkflowPlanPolicy | None = None,
 ) -> list[Any]:
     """Return the list of workflow tool objects to inject for an agent."""

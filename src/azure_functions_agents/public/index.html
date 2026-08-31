@@ -299,6 +299,8 @@
 
 		.workflow-card {
 			max-width: 85%;
+			min-width: 0;
+			box-sizing: border-box;
 			padding: 10px 12px;
 			border-radius: 12px;
 			border-bottom-left-radius: 4px;
@@ -360,6 +362,7 @@
 		.workflow-card-custom-status {
 			color: var(--muted);
 			margin-bottom: 4px;
+			overflow-wrap: anywhere;
 		}
 
 		.workflow-card-output {
@@ -1260,11 +1263,13 @@
 		}
 
 		// Format a workflow's `custom_status` for the card's status line.
-		// Two shapes are accepted during the experimental compatibility
+		// Three shapes are accepted during the experimental compatibility
 		// window (see docs/workflows.md "Status envelope"):
 		//   - schema version 1: a legacy free-form string, returned verbatim.
 		//   - schema version 2: a structured snapshot object rendered as a
 		//     concise counts + per-node state summary.
+		//   - schema version 3: the structured snapshot plus task execution,
+		//     retry, and continued-failure state.
 		// Returns a plain string (never HTML). The caller is responsible for
 		// escaping it. Never throws: unknown/object shapes degrade to JSON or
 		// an empty string so a future or malformed status can't break polling.
@@ -1274,7 +1279,7 @@
 			if (typeof customStatus === "string") return customStatus;
 			if (customStatus === null || typeof customStatus !== "object") return "";
 			try {
-				if (customStatus.schema_version === 2) {
+				if (customStatus.schema_version === 2 || customStatus.schema_version === 3) {
 					return formatDynamicWorkflowStatus(customStatus);
 				}
 				// Unknown object shape (e.g. a future schema_version): degrade
@@ -1288,7 +1293,7 @@
 			}
 		}
 
-		// Render a schema_version=2 structured status object into one concise
+		// Render a schema_version=2/3 structured status object into one concise
 		// line: aggregate counts, then a per-logical-node state list. For
 		// `for_each` nodes it also surfaces the expanded instance progress so
 		// expanded / running / skipped / aggregated states are all visible.
@@ -1300,6 +1305,9 @@
 			const logicalTotal = num(counts.logical_total);
 			const running = num(counts.running);
 			const skipped = num(counts.skipped);
+			const retryWait = num(counts.retry_wait);
+			const failedContinued = num(counts.failed_continued);
+			const failed = num(counts.failed);
 			// Prefer the materialized denominator (it includes expanded
 			// instances); fall back to the logical count for plans that
 			// never expanded a collection.
@@ -1307,6 +1315,9 @@
 			const parts = [`${completed}/${denom} done`];
 			if (running) parts.push(`${running} running`);
 			if (skipped) parts.push(`${skipped} skipped`);
+			if (retryWait) parts.push(`${retryWait} retrying`);
+			if (failedContinued) parts.push(`${failedContinued} continued failure`);
+			if (failed) parts.push(`${failed} failed`);
 			let summary = parts.join(" · ");
 
 			const nodes = (status.nodes && typeof status.nodes === "object") ? status.nodes : null;
@@ -1316,14 +1327,35 @@
 					if (!node || typeof node !== "object") continue;
 					const state = typeof node.state === "string" ? node.state : "unknown";
 					let bit = `${nodeId}: ${state}`;
+					if (typeof node.max_attempts === "number") {
+						const attempt = typeof node.attempt === "number" ? node.attempt : 0;
+						bit += ` (${attempt}/${node.max_attempts})`;
+						if (state === "retry_wait" && typeof node.next_retry_time === "string") {
+							bit += ` retry ${node.next_retry_time}`;
+						}
+					}
 					if (typeof node.expanded_count === "number") {
 						const insts = (node.instances && typeof node.instances === "object")
 							? Object.values(node.instances)
 							: [];
 						const done = insts.filter(
-							(i) => i && typeof i === "object" && i.state === "completed"
+							(i) => i && typeof i === "object" &&
+								(i.state === "completed" || i.state === "failed_continued")
 						).length;
 						bit += ` (${done}/${node.expanded_count})`;
+						if (status.schema_version === 3) {
+							const executionBits = Object.entries(node.instances || {})
+								.filter(([, i]) => i && typeof i === "object" &&
+									typeof i.max_attempts === "number")
+								.map(([id, i]) => {
+									const attempt = typeof i.attempt === "number" ? i.attempt : 0;
+									const retry = i.state === "retry_wait" &&
+										typeof i.next_retry_time === "string"
+										? ` retry ${i.next_retry_time}` : "";
+									return `${id} ${i.state} ${attempt}/${i.max_attempts}${retry}`;
+								});
+							if (executionBits.length) bit += ` [${executionBits.join("; ")}]`;
+						}
 					}
 					nodeBits.push(bit);
 				}

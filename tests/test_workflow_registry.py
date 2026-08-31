@@ -3,7 +3,7 @@
 Exercises:
 
 - ``register_workflow_tool`` invariants: collision, reserved names,
-  async rejection, public/private flag.
+  async acceptance, public/private flag.
 - ``validate_plan(allowed_tools=...)`` honoring the explicit allowlist
   and isolating it from the module-level fallback used by older tests.
 - ``build_workflow_integration`` registering discovered workflow tools,
@@ -13,17 +13,31 @@ Exercises:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import get_type_hints
 
 import pytest
 
-from azure_functions_agents._function_tool import WorkflowTool
+from azure_functions_agents._function_tool import (
+    WorkflowTool,
+    WorkflowToolMetadata,
+    workflow_tool,
+)
 from azure_functions_agents.config.schema import WorkflowSubagentRef
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows import context, engine, integration, registry, schema, tools
+
+
+def test_workflow_tool_public_annotations_resolve_at_runtime() -> None:
+    expected = schema.WorkflowRetryPolicy | None
+
+    assert get_type_hints(WorkflowTool)["retry"] == expected
+    assert get_type_hints(WorkflowToolMetadata)["retry"] == expected
+    assert get_type_hints(workflow_tool)["retry"] == expected
 
 
 @pytest.fixture(autouse=True)
@@ -178,12 +192,107 @@ def test_reserved_names_match_management_tools():
     assert actual == set(registry.RESERVED_TOOL_NAMES)
 
 
-def test_register_workflow_tool_rejects_async_handler():
+@pytest.mark.asyncio
+async def test_built_management_tools_share_only_the_current_request_client():
+    class _RequestClient:
+        def __init__(self, *, closed=False):
+            self.closed = closed
+            self.calls = []
+            self.workflow_id = None
+
+        def _record(self, operation):
+            assert not self.closed
+            self.calls.append(operation)
+
+        async def get_status_all(self, *args, **kwargs):
+            self._record("get_status_all")
+            if self.workflow_id is None:
+                return []
+            return [_FakeStatus(self.workflow_id, "Running")]
+
+        async def start_new(self, *args, **kwargs):
+            self._record("start_new")
+            self.workflow_id = kwargs["instance_id"]
+            return self.workflow_id
+
+        async def get_status(self, workflow_id):
+            self._record("get_status")
+            return _FakeStatus(workflow_id, "Running")
+
+        async def raise_event(self, *args, **kwargs):
+            self._record("raise_event")
+
+        async def terminate(self, *args, **kwargs):
+            self._record("terminate")
+
+    stale_client = _RequestClient(closed=True)
+    tools.build_workflow_tools(
+        session_id="same-session",
+        workflow_agent_slug="test-agent",
+        durable_client=stale_client,
+    )
+    current_client = _RequestClient()
+    current_tools = {
+        tool.name: tool
+        for tool in tools.build_workflow_tools(
+            session_id="same-session",
+            workflow_agent_slug="test-agent",
+            durable_client=current_client,
+        )
+    }
+    registry.set_app_config(frozenset())
+
+    started = json.loads(
+        await current_tools["start_workflow"].func(
+            tasks=[{"id": "pause", "type": "wait", "duration": "PT1S"}]
+        )
+    )
+    workflow_id = started["workflow_id"]
+    await current_tools["get_workflow_status"].func(workflow_id=workflow_id)
+    await current_tools["list_workflows"].func()
+    await current_tools["cancel_workflow"].func(workflow_id=workflow_id)
+    await current_tools["terminate_workflow"].func(workflow_id=workflow_id)
+
+    assert stale_client.calls == []
+    assert current_client.calls == [
+        "get_status_all",
+        "start_new",
+        "get_status",
+        "get_status_all",
+        "raise_event",
+        "terminate",
+    ]
+
+
+def test_register_workflow_tool_accepts_async_handler():
     async def async_handler(args):
         return {}
 
-    with pytest.raises(ValueError, match="async handlers are not supported"):
-        registry.register_workflow_tool("asynctool", "no", async_handler)
+    registry.register_workflow_tool("asynctool", "yes", async_handler)
+    assert registry.get_entry("asynctool").handler is async_handler
+
+
+def test_registry_freezes_workflow_execution_metadata():
+    retry = schema.WorkflowRetryPolicy(
+        max_attempts=2,
+        backoff=schema.WorkflowRetryBackoff(
+            initial="PT1S", multiplier=2.0, max="PT2S"
+        ),
+    )
+    registry.register_workflow_tool(
+        "bounded",
+        "bounded tool",
+        _noop,
+        timeout="PT5S",
+        retry=retry,
+    )
+
+    entry = registry.get_entry("bounded")
+    assert entry is not None
+    assert entry.timeout == "PT5S"
+    assert entry.retry is retry
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        entry.timeout = "PT6S"
 
 
 def test_register_workflow_tool_rejects_non_callable():
@@ -436,11 +545,44 @@ def test_integration_builds_owner_specific_policy_and_sub_agent_guidance() -> No
             ("pr_status_analyst", "Analyze one pull request."),
             ("report_writer", "Create an actionable report."),
         ),
+        subagent_timeout_ms={
+            "pr_status_analyst": 900_000,
+            "report_writer": 900_000,
+        },
     )
     assert "### Available workflow Sub Agents" in result.chat_system_addendum
     assert "`pr_status_analyst`" in result.chat_system_addendum
     assert "Analyze one pull request." in result.chat_system_addendum
     assert "`${node_id.result.text}`" in result.chat_system_addendum
+
+
+def test_integration_derives_immutable_execution_resolution_metadata() -> None:
+    catalog = _agent_catalog(analyst="Analyze one report.")
+    catalog["analyst"].resolved.timeout = 45.5
+    retry = _bounded_retry()
+    result = integration.build_workflow_integration(
+        _FakeApp(),
+        _enable_metadata(),
+        workflow_tools=[
+            WorkflowTool(
+                "publish",
+                "Publish.",
+                _noop,
+                timeout="PT5S",
+                retry=retry,
+            )
+        ],
+        workflow_subagents=[WorkflowSubagentRef(agent="analyst")],
+        catalog=catalog,
+    )
+
+    assert result.plan_policy is not None
+    assert result.plan_policy.tool_execution["publish"] == (
+        schema.WorkflowToolExecutionPolicy(timeout="PT5S", retry=retry)
+    )
+    assert result.plan_policy.subagent_timeout_ms == {"analyst": 45_500}
+    with pytest.raises(TypeError):
+        result.plan_policy.subagent_timeout_ms["analyst"] = 1
 
 
 def test_integration_fails_closed_when_authorized_sub_agent_is_missing() -> None:
@@ -592,7 +734,8 @@ def test_addendum_documents_workflow_notification_contract():
 # ---- workflow activity failure handling -------------------------------------
 
 
-def test_workflow_activity_logs_tool_exceptions_without_raising_raw_details(caplog):
+@pytest.mark.asyncio
+async def test_workflow_activity_logs_tool_exceptions_without_raising_raw_details(caplog):
     secret_message = "downstream API token and account details"
 
     def exploding_tool(args):
@@ -610,7 +753,7 @@ def test_workflow_activity_logs_tool_exceptions_without_raising_raw_details(capl
     )
 
     with pytest.raises(RuntimeError) as excinfo:
-        activity(
+        await activity(
             {
                 "id": "explode",
                 "tool": "exploding",
@@ -871,6 +1014,22 @@ def test_start_workflow_params_serialize_dynamic_task_fields_when_supplied() -> 
     }
 
 
+def test_start_workflow_params_reject_execution_on_wait_task() -> None:
+    with pytest.raises(ValueError, match="execution"):
+        tools.StartWorkflowParams.model_validate(
+            {
+                "tasks": [
+                    {
+                        "id": "pause",
+                        "type": "wait",
+                        "duration": "PT1S",
+                        "execution": {},
+                    }
+                ]
+            }
+        )
+
+
 @pytest.mark.asyncio
 async def test_start_workflow_serializes_stable_reference_validation_metadata() -> None:
     class _UnexpectedClient:
@@ -1045,3 +1204,160 @@ async def test_start_workflow_persists_sorted_owner_policy_in_client_input():
     persisted = client.client_input["policy"]
     assert persisted["allowed_tools"] == sorted(policy.allowed_tools)
     assert persisted["allowed_subagents"] == ["alpha", "zeta"]
+
+
+def _bounded_retry(attempts: int = 2) -> schema.WorkflowRetryPolicy:
+    return schema.WorkflowRetryPolicy(
+        max_attempts=attempts,
+        backoff=schema.WorkflowRetryBackoff(
+            initial="PT1S",
+            multiplier=2.0,
+            max="PT5S",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_workflow_persists_decorator_precedence_as_effective_policy():
+    client = _CappedDurableClient([])
+    session = context.WorkflowSessionContext(
+        workflow_agent_slug="coordinator",
+        session_id="session-1",
+        agent_name="coordinator",
+        durable_client=client,
+    )
+    policy = schema.WorkflowPlanPolicy(
+        allowed_tools=frozenset({"publish"}),
+        tool_execution={
+            "publish": schema.WorkflowToolExecutionPolicy(
+                timeout="PT5S",
+                retry=schema.WorkflowRetryPolicy(max_attempts=1),
+            )
+        },
+    )
+    params = tools.StartWorkflowParams(
+        tasks=[
+            {
+                "id": "publish",
+                "tool": "publish",
+                "execution": {
+                    "timeout": "PT20S",
+                    "retry": _bounded_retry().model_dump(),
+                    "continue_on_error": True,
+                },
+            }
+        ]
+    )
+
+    result = json.loads(await tools.start_workflow(params, session, policy=policy))
+
+    assert "workflow_id" in result
+    assert client.start_kwargs["client_input"]["tasks"][0]["execution"] == {
+        "timeout_ms": 5_000,
+        "max_attempts": 1,
+        "retry_delays_ms": [],
+        "continue_on_error": True,
+        "timeout_source": "decorator",
+        "retry_source": "decorator",
+        "durable_retry_policy": {
+            "first_retry_interval_ms": 0,
+            "max_number_of_attempts": 1,
+            "backoff_coefficient": 1.0,
+            "max_retry_interval_ms": 0,
+            "retry_timeout_ms": 3_600_000,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_start_workflow_persists_authored_empty_execution_defaults():
+    client = _CappedDurableClient([])
+    session = context.WorkflowSessionContext(
+        workflow_agent_slug="coordinator",
+        session_id="session-1",
+        agent_name="coordinator",
+        durable_client=client,
+    )
+    policy = schema.WorkflowPlanPolicy(allowed_tools=frozenset({"publish"}))
+    params = tools.StartWorkflowParams(
+        tasks=[{"id": "publish", "tool": "publish", "execution": {}}]
+    )
+
+    result = json.loads(await tools.start_workflow(params, session, policy=policy))
+
+    assert "workflow_id" in result
+    assert client.start_kwargs["client_input"]["tasks"][0]["execution"] == {
+        "timeout_ms": 600_000,
+        "max_attempts": 1,
+        "retry_delays_ms": [],
+        "continue_on_error": False,
+        "timeout_source": "runtime_default",
+        "retry_source": "runtime_default",
+        "durable_retry_policy": {
+            "first_retry_interval_ms": 0,
+            "max_number_of_attempts": 1,
+            "backoff_coefficient": 1.0,
+            "max_retry_interval_ms": 0,
+            "retry_timeout_ms": 3_600_000,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_start_workflow_rejects_subagent_timeout_above_resolved_bound():
+    client = _CappedDurableClient([])
+    session = context.WorkflowSessionContext(
+        workflow_agent_slug="coordinator",
+        session_id="session-1",
+        agent_name="coordinator",
+        durable_client=client,
+    )
+    policy = schema.WorkflowPlanPolicy(
+        allowed_tools=frozenset(),
+        allowed_subagents=frozenset({"analyst"}),
+        subagent_timeout_ms={"analyst": 60_000},
+    )
+    params = tools.StartWorkflowParams(
+        tasks=[
+            {
+                "id": "analyze",
+                "type": "sub_agent",
+                "agent": "analyst",
+                "task": "Analyze.",
+                "execution": {"timeout": "PT2M"},
+            }
+        ]
+    )
+
+    result = json.loads(await tools.start_workflow(params, session, policy=policy))
+
+    assert "resolved agent timeout" in result["error"]
+    assert client.started is False
+
+
+@pytest.mark.asyncio
+async def test_start_workflow_keeps_policy_free_task_input_byte_compatible():
+    client = _CappedDurableClient([])
+    session = context.WorkflowSessionContext(
+        workflow_agent_slug="coordinator",
+        session_id="session-1",
+        agent_name="coordinator",
+        durable_client=client,
+    )
+    policy = schema.WorkflowPlanPolicy(allowed_tools=frozenset({"publish"}))
+    params = tools.StartWorkflowParams(
+        tasks=[{"id": "publish", "tool": "publish", "args": {"value": "ok"}}]
+    )
+
+    result = json.loads(await tools.start_workflow(params, session, policy=policy))
+
+    assert "workflow_id" in result
+    assert client.start_kwargs["client_input"]["tasks"] == [
+        {
+            "id": "publish",
+            "type": "tool",
+            "tool": "publish",
+            "args": {"value": "ok"},
+            "depends_on": [],
+        }
+    ]

@@ -4,8 +4,8 @@ title: Dynamic workflows
 status: Finalized
 author: TsuyoshiUshio
 created: 2026-07-06
-updated: 2026-08-14
-issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108, https://github.com/Azure/azure-functions-agents-runtime/issues/109, https://github.com/Azure/azure-functions-bucees-planning/issues/1274, https://github.com/Azure/azure-functions-bucees-planning/issues/1275, https://github.com/Azure/azure-functions-bucees-planning/issues/1276]
+updated: 2026-08-27
+issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108, https://github.com/Azure/azure-functions-agents-runtime/issues/109, https://github.com/Azure/azure-functions-agents-runtime/issues/139, https://github.com/Azure/azure-functions-bucees-planning/issues/1274, https://github.com/Azure/azure-functions-bucees-planning/issues/1275, https://github.com/Azure/azure-functions-bucees-planning/issues/1276, https://github.com/Azure/azure-functions-bucees-planning/issues/1278]
 pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117, https://github.com/Azure/azure-functions-agents-runtime/pull/151, https://github.com/Azure/azure-functions-agents-runtime/pull/163]
 ---
 
@@ -38,6 +38,11 @@ workflow-enabled agent with agent/session isolation. The
 [multi-agent addendum](#multi-agent-workflow-isolation-addendum-pr-151)
 records only that extension's behavioral and architectural delta instead of
 repeating the base workflow design.
+
+Planning issue #1278 adds a further evolution for reliable per-task execution:
+bounded retry, timeout and deterministic backoff, explicit continued failures,
+async workflow handlers, and a stable idempotency context. That extension is
+specified below as part of this single Dynamic Workflows FRD and is finalized.
 
 ## 2. Motivation / problem
 
@@ -100,16 +105,14 @@ explicitly opt a function into the Durable Activity execution path.
 
 - Hand-authored workflow YAML/markdown templates; workflow plans remain
   LLM-authored through `start_workflow`.
-- Per-task retry/timeout/concurrency settings in v1, beyond reserving
-  `@workflow_tool(...)` as the future metadata surface.
+- Per-task concurrency overrides; execution-policy retries remain subject to the
+  workflow's existing app-wide parallelism ceiling.
 - Sub-orchestrations, nested/stateful Sub Agent tasks, MCP Tasks integration,
   or cross-app workflow coordination. Stateless leaf Sub Agent tasks are in v1.
 - Changing normal MAF tool execution semantics.
 - Automatically promoting every compatible plain function into a workflow tool.
 - General-purpose expressions, arbitrary code evaluation, loops other than bounded
   array iteration, or a visual workflow designer.
-- Retry, timeout, backoff, or continue-on-error policy; those are tracked by
-  planning issue #1278.
 - Configurable resource ceilings and large-result offload; those are tracked by
   planning issue #1279.
 
@@ -215,9 +218,11 @@ def get_service_health(args: dict[str, object]) -> dict[str, object]:
     return {"service": args["service"], "status": "healthy"}
 ```
 
-The single-callable "both" pattern is only viable for synchronous callables that
-can satisfy both the MAF and workflow Activity contracts. Async normal tools must
-use the separate-adapter pattern below for workflow support.
+The single-callable "both" pattern is viable for synchronous or asynchronous
+callables that satisfy both the MAF and workflow Activity contracts. Both
+decorator orders are supported for `async def` just as they are for `def`.
+Authors should use the separate-adapter pattern below when the normal-tool and
+workflow Activity contracts require different argument models or behavior.
 
 When normal tools use a Pydantic model but workflow Activities use `dict`
 arguments, authors should share internal business logic and expose separate
@@ -559,9 +564,10 @@ optional fields to each existing task type:
   materializes one instance of the task per array element.
 
 No frontmatter field is added. Existing plans that omit both fields retain their
-current validation, scheduling, result, and status behavior. The optional fields
-are omitted with exclude-unset/exclude-none serialization when absent so static
-plan model dumps and Durable wire payloads do not gain `null` fields.
+scheduling, result, and status behavior, except for the explicitly approved
+task-id namespace restriction in Decisions 53 and 55. The optional fields are
+omitted with exclude-unset/exclude-none serialization when absent so static plan
+model dumps and Durable wire payloads do not gain `null` fields.
 
 #### Before and after
 
@@ -938,6 +944,619 @@ The Dynamic Workflow sample for this extension must demonstrate:
 4. status output showing expanded, running, skipped, and aggregated states; and
 5. deterministic completion on both Azure Storage and DTS Durable backends.
 
+### Task execution policy (planning issue #1278; finalized)
+
+> **Extension status:** Finalized. Decisions 67-79 were independently reviewed;
+> Decision 68 was approved on 2026-08-20, and Decision 80 records human approval
+> of the remaining proposal set and authorizes implementation.
+
+Durable Activities are delivered at least once: a worker can finish external
+side effects and fail before its completion is checkpointed, causing the same
+Activity to be delivered again. The current workflow engine also treats every
+Activity exception as a terminal workflow failure and has no per-task deadline.
+That combination is insufficient for transient I/O failures, but indiscriminate
+automatic retry would make non-idempotent side effects less safe.
+
+This extension adds an explicit, bounded execution policy to `tool` and
+`sub_agent` tasks. It keeps no-retry, fail-fast behavior as the compatibility
+default, publishes a stable idempotency context for application code, and lets
+the orchestrator retry only failures classified as retryable. It does not promise
+exactly-once execution.
+
+#### Public authoring and metadata surface
+
+The LLM-authored task schema gains one optional `execution` object:
+
+```json
+{
+  "id": "fetch_inventory",
+  "type": "tool",
+  "tool": "fetch_inventory",
+  "args": {"region": "westus2"},
+  "execution": {
+    "timeout": "PT30S",
+    "retry": {
+      "max_attempts": 3,
+      "backoff": {
+        "initial": "PT1S",
+        "multiplier": 2.0,
+        "max": "PT10S"
+      }
+    },
+    "continue_on_error": true
+  }
+}
+```
+
+- `execution.timeout` is an ISO-8601 duration for one Activity attempt.
+- `execution.retry.max_attempts` includes the first attempt. `1` means no
+  automatic retry.
+- `execution.retry.backoff` is required when `max_attempts > 1`. `initial` and
+  `max` are ISO-8601 durations; `multiplier` is a finite number.
+- `execution.continue_on_error` controls DAG propagation only after a task
+  reaches a terminal execution failure or exhausts retries. It defaults to
+  `false`.
+- `wait` tasks reject `execution`: Durable timers already have explicit
+  `duration` / `until` semantics and neither execute a handler nor retry.
+- Unknown keys are rejected by the agent-facing tool schema and the runtime plan
+  schema before a Durable instance is created.
+
+Decision #8 reserved `@workflow_tool(...)` for execution metadata. The decorator
+therefore gains optional authoritative `timeout` and `retry` declarations, with
+the retry value validated by the same exported `WorkflowRetryPolicy` model used
+by plan translation:
+
+```python
+from azure_functions_agents import (
+    WorkflowRetryBackoff,
+    WorkflowRetryPolicy,
+    workflow_tool,
+)
+
+
+@workflow_tool(
+    timeout="PT30S",
+    retry=WorkflowRetryPolicy(
+        max_attempts=3,
+        backoff=WorkflowRetryBackoff(
+            initial="PT1S",
+            multiplier=2.0,
+            max="PT10S",
+        ),
+    ),
+)
+async def fetch_inventory(args: dict[str, object]) -> dict[str, object]:
+    ...
+```
+
+`continue_on_error` is deliberately not decorator metadata. Whether a failed
+node satisfies its outgoing DAG edges is a property of that node in a particular
+plan, not a reusable handler default.
+
+No app-global or frontmatter execution defaults are added. For a `tool` task,
+each `@workflow_tool` declaration is authoritative for its corresponding field:
+when the decorator declares `timeout`, the effective timeout is that value
+regardless of a task-level value; when it declares `retry`, the effective retry
+policy is that whole object regardless of a task-level value. A task-level field
+is used only when the decorator omits that field. This lets an LLM-authored DAG
+request retry or timeout behavior for tools that do not declare it without
+overriding the tool author's knowledge of side effects, idempotency, or safe
+execution limits. In particular, `retry=WorkflowRetryPolicy(max_attempts=1)` is
+an explicit tool-author prohibition on DAG-requested automatic retry.
+Tool authors whose handlers are not safe to retry must declare that policy;
+omitting decorator retry metadata deliberately delegates the retry choice to the
+DAG.
+
+Resolution is field-level between `timeout` and `retry`, but retry policies never
+field-merge internally. For `tool` tasks:
+
+| Decorator field | Task field | Effective field |
+| --- | --- | --- |
+| declared | omitted or declared | decorator value |
+| omitted | declared | task value |
+| omitted | omitted | field-specific runtime default |
+
+For a `sub_agent` task, which has no decorator metadata, an explicit task timeout
+is bounded by the specialist's resolved agent timeout and the fixed runtime
+limit; omitted timeout continues to use the specialist's resolved agent timeout,
+subject to the policy-aware clamp below. Omitted retry means one attempt.
+`continue_on_error` always defaults to `false`.
+
+The JSON task surface and Python decorator use the same nested
+`WorkflowRetryPolicy` / `WorkflowRetryBackoff` shape; there is no second flat
+decorator-only representation.
+
+A task becomes **policy-aware** when its authored JSON contains the `execution`
+key, including an empty or all-default object, or its workflow tool has
+timeout/retry decorator metadata. Presence, rather than whether the resolved
+values differ from defaults, is the scheduler and status-version switch. A
+policy-aware task always receives an effective timeout: omitted tool timeout
+becomes `PT10M`; omitted Sub Agent timeout becomes the smaller of its resolved
+agent timeout and `PT10M`. This policy-aware default makes retry admission
+bounded. A policy-free task preserves existing behavior exactly: a tool has no
+library-owned deadline, and a Sub Agent uses its existing resolved timeout
+without the new clamp.
+
+The effective policy is validated and persisted in each policy-aware task's
+Durable input at workflow start. Replay never re-reads decorator metadata,
+frontmatter, wall-clock time, or environment state. Deployment-time capability
+changes continue to be enforced independently by Activity-time reauthorization.
+
+#### Pipeline mapping and module ownership
+
+| Pipeline stage | Module(s) | Change |
+| --- | --- | --- |
+| discover | `discovery/tools.py`, `_function_tool.py` | Accept sync and async `@workflow_tool` handlers. Capture typed authoritative timeout/retry declarations without applying owner policy or importing Azure concepts. |
+| translate | `config/schema.py`, `workflows/schema.py`, `workflows/tools.py` | Keep the existing Sub Agent timeout source, add typed task/decorator execution policy models, validate fixed bounds and incompatible task shapes, resolve precedence, and serialize only the effective policy. No new `workflows:` frontmatter keys are added. |
+| register | `app.py`, `workflows/integration.py`, `workflows/registry.py` | Remove the registry's async-handler rejection, freeze sync/async handler entries with execution declarations in the existing complete catalog, and build unchanged per-agent capability policies. Registration remains the only Azure-aware stage and still registers one Durable blueprint per app. |
+| execute | `workflows/engine.py`, `workflows/policy.py`, `workflows/context.py`, `runner.py`, `_observability.py`, `workflows/tools.py`, `public/index.html` | Execute/await policy-aware handlers through a dedicated Activity policy module, validate input with strict boundary-only Pydantic models, classify sanitized outcomes, expose invocation context, apply continued-failure DAG semantics, reauthorize every Activity delivery, and publish versioned status/telemetry. New histories delegate retryable Activity failures and backoff to Durable Python 2.x; histories without the persisted native policy retain the explicit Activity/timer driver for replay compatibility. Broaden scheduler selection so `when`, `for_each`, or any non-default effective execution policy enters the structured scheduler; the legacy static scheduler remains only for plans with none of those features. Durable calls, cancellation races, and `yield` points remain visible in the top-level generator. |
+
+`config/loader.py`, `config/merge.py`, and registration handlers require no new
+policy logic. They continue to produce and consume typed `ResolvedAgent` values;
+the workflow modules do not re-parse YAML or frontmatter during registration or
+execution.
+
+#### Fixed limits and validation
+
+This extension does not take over issue #1279's configurable governance work.
+It introduces fixed code-level safety bounds:
+
+| Limit | Proposed bound |
+| --- | --- |
+| attempts per task instance, including the first | `1..5` |
+| effective timeout per policy-aware attempt | `PT1S..PT10M` |
+| initial retry delay | `PT0S..PT5M` |
+| backoff multiplier | `1.0..10.0` |
+| maximum retry delay | `PT0S..PT15M`, and not less than `initial` |
+| worst-case configured task elapsed time | at most `PT1H`, computed from all attempt timeouts and delays |
+
+Every policy-aware task has a timeout after precedence resolution. An omitted
+tool timeout defaults to `PT10M`; an omitted Sub Agent timeout uses
+`min(resolved_agent_timeout, PT10M)`. An explicit tool timeout above `PT10M` is
+rejected rather than silently clamped. An explicit Sub Agent task timeout must
+not exceed either its resolved agent timeout or `PT10M`; exceeding either limit
+is rejected. Policy-free tasks are outside these new admission calculations and
+retain their existing deadline behavior.
+
+All authored policy durations are normalized to integer milliseconds before
+Durable persistence. NaN, infinity, negative values, authored fractional
+milliseconds, overflow, an omitted backoff for multiple attempts, and a policy
+whose computed worst case exceeds one hour are rejected at submission. Derived
+backoff delays follow the deterministic rounding rule below. Attempts do not
+consume additional `MAX_NODES`; every attempt does consume execution capacity
+and appears in status/telemetry. Active Durable Activity attempts remain subject
+to `MAX_PARALLELISM`; retry-delay timers do not occupy a parallel Activity slot.
+`MAX_PARALLELISM` does not bound operating-system threads after an Activity
+deadline: a timed-out sync handler can continue in the event loop's worker
+executor after its Activity attempt has returned, so real handler work may
+temporarily exceed the Durable dispatch bound and repeated sync timeouts can
+consume worker threads. Authors of blocking handlers must set upstream deadlines
+or prefer async I/O.
+
+The runtime bounds are admission limits, not a promise that an Azure Functions
+hosting plan will permit the full duration. Operators must configure the host's
+`functionTimeout` and upstream SDK deadlines consistently with the task policy.
+
+#### Activity outcome and failure taxonomy
+
+Capability-bearing Activities return a small internal outcome envelope instead
+of throwing application failures across the Durable boundary:
+
+```json
+{
+  "ok": false,
+  "failure": {
+    "error_code": "workflow_task_timeout",
+    "error": "Task attempt timed out.",
+    "kind": "timeout",
+    "retryable": true
+  }
+}
+```
+
+The envelope is runtime-internal until the orchestrator either retries, fails
+the workflow, or materializes a continued-failure result. Messages are sanitized
+and bounded; raw exception text, provider response bodies, stack traces,
+credentials, arguments, and model output remain in correlated operator logs only.
+
+Failures are classified as follows:
+
+| Failure | Classification | Retry | Continuable |
+| --- | --- | --- | --- |
+| attempt deadline reached | `timeout` | yes, if attempts remain | yes |
+| handler raises exported `WorkflowRetryableError` | `handler_transient` | yes, if attempts remain | yes |
+| Durable reports an Activity infrastructure/worker failure before a runtime outcome is available | `activity_infrastructure` | yes, if attempts remain | yes after exhaustion |
+| handler raises exported `WorkflowTerminalError` | `handler_terminal` | no | yes |
+| unknown handler/provider/model exception | `execution_unknown` with sanitized detail | no by default | yes |
+| result is not JSON-serializable or violates the handler contract | `handler_contract` | no | no |
+| missing/removed owner policy, disallowed target, missing catalog target | `authorization` | no | no |
+| plan/template/`when`/`for_each`/scheduler invariant failure | existing control-plane code | no | no |
+| cooperative cancel or hard terminate | control signal | no | no |
+
+`WorkflowRetryableError` and `WorkflowTerminalError` carry a stable,
+application-chosen `error_code` plus a safe public message. `error_code` must
+match the ASCII grammar `^[a-z][a-z0-9_]{0,63}$` and cannot use the
+runtime-reserved `workflow_` prefix. Their constructors raise `ValueError` for an
+invalid code. Public messages are normalized by replacing C0/C1 control
+characters with spaces, collapsing whitespace, trimming the result, and
+truncating it to 256 Unicode code points. An empty normalized message becomes
+`"Task execution failed."`. Runtime-owned messages obey the same 256-code-point
+limit. These bounds are part of the public compatibility contract. Unknown
+exceptions are terminal by default: retry must be an explicit handler signal or
+a runtime-owned timeout/infrastructure classification.
+
+The runtime's own `error_code` values are stable API; messages may improve.
+Provider-specific retry inference is intentionally out of scope because SDK
+exception taxonomies vary and replayed workflow history must not depend on a
+mutable provider mapping.
+
+#### Timeout ownership
+
+The timeout is owned by the Activity invocation wrapper, not by the orchestrator
+and not by the handler:
+
+1. An async workflow handler is awaited directly under the effective deadline.
+2. A sync handler runs through the worker thread executor so the async Activity
+   wrapper can stop waiting at the same deadline.
+3. A Workflow Sub Agent attempt wraps `run_leaf_agent_task()` with the effective
+   deadline; its existing resolved agent timeout is the policy-free fallback and
+   an upper bound on any policy-aware task timeout, with `PT10M` as an additional
+   fixed upper bound.
+4. A policy-aware task with omitted timeout uses the bounded effective default
+   described above; policy-free tasks retain their existing behavior.
+5. The Activity converts its own deadline expiry into the retryable sanitized
+   timeout outcome above.
+
+Timeout is not a process-kill guarantee. Cancellation of an async handler is
+cooperative, and Python cannot forcibly stop a sync thread. A timed-out sync
+handler, outbound SDK call, or model/tool call may continue until it observes
+cancellation, reaches its own SDK deadline, or the host terminates the invocation.
+The Azure Functions host's `functionTimeout` remains the outer operator-owned
+ceiling and may independently interrupt/redeliver an Activity. Handler authors
+must configure upstream deadlines and idempotency; the library does not mutate
+`host.json`.
+
+#### Idempotency and Durable at-least-once delivery
+
+Every `tool` and `sub_agent` task instance receives a stable idempotency key:
+
+```text
+af-wf-task-v1:<sha256(length-delimited workflow_id, node_instance_id)>
+```
+
+The key is stable across orchestrator replay, policy retries, worker
+redelivery, and duplicate completion delivery. A `for_each` instance uses its
+runtime-owned `<logical-id>[<index>]` node instance id, so different source
+positions receive different keys even when their values are equal. Legacy
+runtime-managed histories expose a separate one-based attempt number. Native
+Durable histories cannot distinguish a policy retry from an at-least-once
+redelivery and expose no delivery number.
+
+The existing single-`dict` handler input contract remains unchanged. A public,
+read-only `WorkflowTaskContext` is made available through
+`current_workflow_task_context()` while a workflow tool or Workflow Sub Agent
+leaf executes. It contains `workflow_id`, logical `task_id`, materialized
+`node_instance_id`, optional `attempt`, `max_attempts`, `idempotency_key`, and the
+effective deadline. `attempt` is `None` for native Durable retry deliveries. The
+context does not contain raw session identity or grant mutable runtime services.
+It propagates into async calls and the sync thread executor and is cleared in
+`finally`.
+
+The runtime does not provide a transactional inbox/outbox and cannot guarantee
+exactly once. Side-effecting tools must atomically deduplicate on
+`idempotency_key`, use an idempotent provider operation key, or overwrite a
+stable destination. A duplicate attempt may have completed externally even when
+the workflow observes timeout or infrastructure failure. Sub Agent model calls
+may also be repeated and billed more than once.
+
+#### Deterministic retry and backoff
+
+Selective retry uses Durable Python 2.x while preserving the runtime's failure
+classification. The Activity returns terminal, authorization, unknown, and
+contract outcomes normally, but converts a validated retryable outcome to a
+private typed exception. Durable therefore retries only the selected failures.
+
+For failed attempt number `n` (the first attempt is `1`), the unrounded delay
+before attempt `n + 1` is:
+
+```text
+min(max_backoff, initial_backoff * multiplier ** (n - 1))
+```
+
+Submission converts the JSON multiplier to `Decimal` from its canonical decimal
+string and computes the complete `max_attempts - 1` integer-millisecond legacy
+delay sequence for admission validation and replay compatibility. Each legacy
+value is rounded down with `ROUND_FLOOR` and capped at `max_backoff`.
+
+New histories also persist the authored exponential shape and map it to Durable
+Python 2.x `RetryPolicy`: initial delay, maximum attempts, multiplier, and maximum
+delay. The compatibility API is
+`DurableOrchestrationContext.call_activity_with_retry(name, RetryPolicy, input)`;
+the installed `2.0.0b2` package accepts `durabletask.task.RetryPolicy` directly.
+The mapping also sets `retry_timeout` to the fixed one-hour policy ceiling.
+Admission uses a conservative ceiling of the native delay sequence so
+attempt-timeout plus backoff cannot exceed that ceiling. Durable owns retry
+scheduling and replay for those histories. Its
+floating-point/timedelta calculation can retain sub-millisecond intermediate
+values, so exact deadlines can differ slightly from the legacy floored sequence.
+Jitter remains out of scope.
+
+Retries re-resolve no plan templates: each task instance's resolved args or Sub
+Agent instruction, target, effective policy, and idempotency key are frozen
+before its first delivery. Each delivery reauthorizes the target against the
+currently deployed owner policy immediately before dispatch. If authorization is
+revoked during backoff, the next delivery fails terminally without invoking the
+target.
+
+Activity return-vs-raise behavior uses the same driver marker. Legacy deliveries
+return retryable envelopes unchanged so old explicit retry histories keep their
+recorded classification and timer sequence. Native deliveries raise the private
+exception `from None`; its string is exactly the bounded, versioned, sanitized
+JSON payload, and it never chains the original handler exception. Unknown
+handler errors continue to become returned non-retryable sanitized outcomes, so
+raw messages and stack traces do not enter Durable history.
+
+After exhaustion, the orchestrator accepts failure details only when both the
+private exception type and versioned bounded JSON payload validate. Any other
+`TaskFailedError` becomes the sanitized
+`workflow_task_activity_infrastructure` failure.
+
+The persisted native-policy field is also the retry-driver marker. New histories
+call `call_activity_with_retry`; older payloads without the field keep the
+explicit Activity/timer sequence so an in-flight orchestration does not change
+its replay history after deployment. No per-node sub-orchestration is added.
+
+Durable 2.x preview does not expose an Activity delivery number or native
+retry-wait state. Native histories therefore use status schema version 4 with
+`retry_driver: "durable"`; native backoff remains `running`, and status does not
+publish `attempt`, `retry_wait`, or `next_retry_time`. Activity telemetry omits
+attempt and selected-delay attributes and records that retry ownership is
+native. `WorkflowTaskContext.attempt` is `None` for native deliveries. An
+exhausted retry reports `attempts: max_attempts`; returned terminal failures and
+successful results omit attempts because a terminal outcome may follow an
+unobservable retryable delivery. The idempotency key remains stable. Because the
+native Activity task remains unresolved during backoff, it occupies one
+`MAX_PARALLELISM` wave slot for its complete retry lifecycle.
+
+#### Continued failures, dependencies, `when`, and `for_each`
+
+With `continue_on_error: false` (the default), a terminal or exhausted execution
+failure stops new scheduling. Activities already dispatched in the same wave may
+still finish. Their outcomes are applied in deterministic node/instance order,
+then the lowest ordered non-continuable failure becomes the workflow's terminal
+failure. No claim is made that fail-fast recalls in-flight side effects.
+
+With `continue_on_error: true`, a continuable failure becomes a dependency-
+satisfying `failed_continued` result:
+
+```json
+{
+  "failed": true,
+  "error_code": "inventory_unavailable",
+  "error": "Inventory is temporarily unavailable.",
+  "kind": "handler_transient",
+  "attempts": 3
+}
+```
+
+The node's outgoing `depends_on` edges are satisfied, but failure does not
+automatically propagate or skip descendants. A downstream task that should run
+only on success or failure must say so explicitly with `when`, for example
+`{"ref": "${fetch_inventory.result.failed}", "operator": "equals", "value": true}`.
+Templates can consume the complete failure result. Invalid traversal still uses
+the existing controlled reference failure and cannot itself be continued.
+
+`when` is evaluated before the first attempt. A false predicate remains
+`skipped`, runs no handler, consumes no attempts, and ignores `execution`.
+Retries never re-evaluate `when`.
+
+Every materialized `for_each` instance inherits the logical task's effective
+execution policy but receives its own attempt counter, timeout, backoff timer,
+idempotency key, and outcome. Continued failures do not stop sibling instances.
+The source-ordered aggregate adds `failed_continued` as a status and places the
+failure result in that position:
+
+```json
+[
+  {"index": 0, "status": "completed", "result": {"service": "api"}},
+  {"index": 1, "status": "failed_continued", "result": {
+    "failed": true,
+    "error_code": "inventory_unavailable",
+    "error": "Inventory is temporarily unavailable.",
+    "kind": "handler_transient",
+    "attempts": 3
+  }},
+  {"index": 2, "status": "skipped", "result": null}
+]
+```
+
+The logical node becomes `aggregated_with_errors` after every instance is
+`completed`, `skipped`, or `failed_continued`; that state satisfies downstream
+dependencies. Any instance whose failure is not continued fails the workflow
+after the current wave's outcomes are deterministically applied. Dynamic
+collection resolution, materialized-node accounting, target authorization, and
+source ordering remain unchanged.
+
+`continue_on_error` cannot convert authorization, invalid plan/reference,
+serialization/contract, scheduler invariant, cancellation, or termination into
+success. It affects only the execution failure classes marked continuable in the
+taxonomy.
+
+#### Cancellation and termination
+
+Cooperative cancellation races active Activity tasks and legacy retry timers
+through the existing external `cancel` event:
+
+- no new attempts or downstream nodes are scheduled after the event is observed;
+- legacy runtime-owned backoff timers and wait-task timers are canceled;
+- a native retry/backoff cannot be canceled separately because Durable owns the
+  compound Activity task; the canceled parent ignores its late result, but
+  already-scheduled native deliveries may continue until success or exhaustion;
+- completed results and `failed_continued` results already committed are
+  preserved in the cancellation output;
+- Activities not yet dispatched are abandoned;
+- already-dispatched async handlers, sync handlers, SDK calls, and Sub Agent
+  work do not receive the orchestrator's external event and may continue until
+  their own Activity deadline or host termination; late results are ignored by
+  the canceled orchestration. An Activity-owned timeout may cooperatively cancel
+  an async handler, but orchestrator cancellation cannot recall it.
+
+Hard termination remains Durable's abrupt `terminate` operation. It creates no
+continued result, performs no retry, and cannot promise to recall an Activity
+already executing on a worker. A cancel or terminate signal always wins over an
+otherwise eligible retry once the orchestrator observes it.
+
+#### Workflow Sub Agents and async workflow tools
+
+Execution policy applies to both capability-bearing task types:
+
+- Workflow Sub Agents retain their stateless leaf boundary and fixed
+  `{agent, text}` success result. For a policy-aware task, both the omitted
+  timeout default and the upper bound are
+  `min(resolved_agent_timeout, PT10M)`; a task may request a shorter timeout.
+  A policy-free task retains the unclamped resolved timeout. Automatic retry
+  remains opt-in with `max_attempts > 1`. Every attempt is a fresh model
+  invocation, can call tools, can be billed separately, and receives the stable
+  task context for correlation and idempotent leaf tools.
+- `@workflow_tool` discovery accepts both `def` and `async def`. The registry
+  stores a callable without invoking it. The async Activity runner calls the
+  handler once and awaits the result if it is awaitable; sync handlers preserve
+  the existing single-dictionary behavior. Returning an awaitable from a
+  nominally sync callable is supported by the same awaitable check.
+
+The handler is invoked exactly once per delivered Activity attempt. The wrapper
+must not call a sync handler once to inspect its return and again to await it.
+Sync and async handlers share input validation, timeout, context propagation,
+failure sanitization, JSON serialization, retry, and observability semantics.
+
+#### Authorization and policy persistence
+
+Execution policy never grants a tool or Sub Agent capability. Submission still
+validates the static target against the workflow owner's immutable policy, and
+every Activity attempt still reauthorizes against the currently deployed
+per-agent policy and complete app catalog. `for_each` data cannot select a target.
+
+The persisted start-time owner policy remains defense in depth for orchestration
+materialization; deployed-policy Activity reauthorization remains authoritative
+for dispatch. A retry after a restrictive deployment fails closed. An
+authorization failure is non-retryable and non-continuable so
+`continue_on_error` cannot turn revoked capability use into a satisfied DAG edge.
+Agent/session management isolation and non-existence semantics are unchanged.
+
+#### Structured status, results, and observability
+
+The top-level status envelope remains unchanged. Orchestrator routing treats
+`when`, `for_each`, or any policy-aware task as requiring the structured
+scheduler. `custom_status` gains schema version 3 whenever at least one task is
+policy-aware:
+
+- static plans with no execution policy keep the version-1 status string;
+- dynamic `when` / `for_each` plans with no execution policy keep version 2;
+- any policy-aware plan, including an otherwise static DAG, emits version 3,
+  which is version 2 plus execution state.
+
+Version 3 adds node/instance states `retry_wait`, `failed_continued`, `failed`, and
+`aggregated_with_errors`, plus bounded fields `attempt`, `max_attempts`,
+`next_retry_time`, `last_failure_kind`, and `last_error_code`. It never includes
+args, results, exception text, session identity, or the idempotency key. Status
+consumers continue accepting all three experimental shapes.
+
+The execution fields belong to one executable unit: a non-iterated logical node,
+or an individual materialized `for_each` instance. A `for_each` logical node
+never reports a synthetic attempt or failure roll-up. A policy-aware executable
+unit always reports `max_attempts`; it reports one-based `attempt` after its
+first dispatch. `next_retry_time` is an RFC 3339 UTC timestamp present only in
+`retry_wait`. `last_failure_kind` and `last_error_code` appear only after a
+failure and remain as diagnostic history if a later attempt succeeds.
+Policy-free units in a version-3 plan omit all five execution fields.
+
+New native-retry histories emit schema version 4 and
+`retry_driver: "durable"`. Version 4 uses `running` while Durable owns an
+Activity retry or backoff and omits `attempt`, `next_retry_time`,
+`last_failure_kind`, and `last_error_code` because the preview API does not
+expose intermediate deliveries. A missing intermediate field in version 4 must
+not be interpreted as evidence that no retry occurred. Histories created before
+the native-policy marker remain version 3 and retain the fields above.
+
+Version-3 `counts` classify executable units, not retry attempts or logical
+aggregate nodes. They contain `logical_total`, `materialized_total`, `pending`,
+`running`, `retry_wait`, `completed`, `skipped`, and `failed_continued`;
+terminal fail-fast units are counted in `failed`, and
+`aggregated_with_errors` is represented only by its logical node state. The
+state buckets sum to `materialized_total`. For example:
+
+```json
+{
+  "schema_version": 3,
+  "counts": {
+    "logical_total": 3,
+    "materialized_total": 5,
+    "pending": 0,
+    "running": 0,
+    "retry_wait": 2,
+    "completed": 2,
+    "skipped": 0,
+    "failed_continued": 1,
+    "failed": 0
+  },
+  "nodes": {
+    "discover": {"state": "completed"},
+    "fetch": {
+      "state": "retry_wait",
+      "attempt": 1,
+      "max_attempts": 3,
+      "next_retry_time": "2026-08-23T17:08:00Z",
+      "last_failure_kind": "timeout",
+      "last_error_code": "workflow_task_timeout"
+    },
+    "analyze": {
+      "state": "running",
+      "expanded_count": 3,
+      "instances": {
+        "analyze[0]": {
+          "state": "completed",
+          "attempt": 1,
+          "max_attempts": 3
+        },
+        "analyze[1]": {
+          "state": "failed_continued",
+          "attempt": 3,
+          "max_attempts": 3,
+          "last_failure_kind": "handler_transient",
+          "last_error_code": "inventory_unavailable"
+        },
+        "analyze[2]": {
+          "state": "retry_wait",
+          "attempt": 1,
+          "max_attempts": 3,
+          "next_retry_time": "2026-08-23T17:08:00Z",
+          "last_failure_kind": "timeout",
+          "last_error_code": "workflow_task_timeout"
+        }
+      }
+    }
+  }
+}
+```
+
+A fail-fast execution failure returns the existing flat controlled-failure form
+with `failed: true`, sanitized `error`, stable `error_code`, `node_id`,
+`attempts`, `kind`, and committed `results`; `status_envelope()` maps it to
+`runtime_status: "Failed"`. A fully completed workflow containing only continued
+failures has `runtime_status: "Completed"`; callers inspect result envelopes and
+version-3 node states for partial failure. Cooperative cancel and hard terminate
+retain `Canceled` and `Terminated`.
+
+Each Activity delivery emits correlated logs/spans and counters with workflow
+ID, logical task ID, node instance ID, target type/name, policy source, outcome
+kind, retry ownership, and timeout. Legacy histories also report attempt number,
+runtime retry decision, and selected backoff. Native histories omit unavailable
+attempt/delay values. Sensitive args, results, provider details, raw session IDs,
+and idempotency keys follow the existing sensitive-data policy. Orchestrator
+replay must not double-count Activity metrics; telemetry is emitted by actual
+Activity delivery, while orchestration decisions use replay-safe logging or
+suppress replay duplicates.
+
 ## 5. Decisions log
 
 | # | Decision | Options considered | Choice | Decided by | Date |
@@ -1007,6 +1626,27 @@ The Dynamic Workflow sample for this extension must demonstrate:
 | 63 | Built-in skill packaging | Generate content in code / external public file / packaged workflow asset | Store `SKILL.md` under `workflows/skills/data-driven-workflows`, resolve relative to `integration.py`, add `workflows/skills/**` package data, and verify a built wheel | Agent, architecture review | 2026-08-19 |
 | 64 | Legacy Durable payload decoding | Require all new keys / revalidate via Pydantic / optional typed keys with one compatibility boundary | Mark dynamic keys `NotRequired`, apply defaults once at the persisted JSON boundary, and trust the previously validated payload internally | Agent, architecture review | 2026-08-19 |
 | 65 | Progressive-disclosure selection pointer | Keep a qualified shared-addendum pointer / rely on public docs / use only MAF skill metadata | Keep the narrow load condition in the Skill description and remove the shared-addendum pointer after E2E showed that mentioning the Skill there caused fixed DAGs to load it speculatively | Agent, E2E evidence | 2026-08-19 |
+| 66 | Record task execution policy | Create FRD 0008 / evolve FRD 0004 | Keep one Dynamic Workflows FRD and add planning issue #1278 as an independently reviewed evolution section; do not add a new FRD index entry | Human | 2026-08-19 |
+| 67 | Public task policy surface | Flat fields / reusable `execution` object / decorator-only policy | Add an optional typed `execution` object to tool and Sub Agent tasks; use the same nested retry/backoff models for `@workflow_tool(timeout=..., retry=...)` declarations and keep `continue_on_error` task-local | Agent proposal, architecture review | 2026-08-19 |
+| 68 | Policy precedence and replay | Task overrides decorator / decorator overrides corresponding task field / decorator as a numeric ceiling | Treat each declared decorator field as authoritative and use the corresponding task field only when decorator metadata omits it; treat retry as a whole object, apply fixed bounds, bound Sub Agent task timeout by its resolved timeout, and persist the effective start-time policy so replay never re-reads metadata | Human (TsuyoshiUshio) | 2026-08-20 |
+| 69 | Task-type applicability | Tool only / tool plus Sub Agent / every task including waits | Apply policy to `tool` and stateless `sub_agent` Activities; reject it on `wait` timers | Agent proposal | 2026-08-19 |
+| 70 | Failure classification | Retry every exception / provider-specific inference / explicit stable taxonomy | Retry runtime timeout/infrastructure failures and explicit `WorkflowRetryableError`; treat unknown execution failures as terminal, and make control-plane/authorization/contract failures non-continuable | Agent proposal | 2026-08-19 |
+| 71 | Timeout ownership | Orchestrator timer / Activity wrapper / Durable host only | The Activity wrapper owns each policy-aware attempt deadline, using a bounded `PT10M` fallback when target/task metadata omits one; policy-free behavior is unchanged, the handler cooperates, and the Durable host remains an independent outer ceiling that may cause redelivery | Agent proposal, architecture review | 2026-08-19 |
+| 72 | Idempotency contract | Exactly-once claim / raw identifiers / stable derived key plus context | Publish a versioned SHA-256 task-instance key and read-only invocation context, keep attempt separate, and explicitly retain Durable at-least-once semantics | Agent proposal | 2026-08-19 |
+| 73 | Retry and backoff execution | Durable retry API / orchestrator selective loop / Activity-local sleep | Use an orchestrator-owned selective retry loop and deterministic Durable timers with integer-millisecond exponential backoff and no jitter | Agent proposal | 2026-08-19 |
+| 74 | Continued failure behavior | Treat as success/null / block descendants / explicit failure result that satisfies dependencies | Materialize a sanitized `failed_continued` result, satisfy outgoing dependencies, require explicit downstream `when`, and never allow continuation to bypass control-plane or authorization failures | Agent proposal | 2026-08-19 |
+| 75 | Dynamic-control-flow interaction | One policy per logical node only / independent policy per materialized instance / disallow policies with `for_each` | Evaluate `when` once before execution; give each `for_each` instance independent attempts, timeout, backoff, idempotency, and source-ordered continued-failure aggregation | Agent proposal | 2026-08-19 |
+| 76 | Cancellation and retry | Finish configured retries / cancel timers only / stop scheduling and best-effort cancel active work | Once observed, cancel stops new attempts and retry timers and preserves committed partial results; already-dispatched or sync work may continue and its late result is ignored | Agent proposal | 2026-08-19 |
+| 77 | Async workflow handlers | Keep sync-only / separate async decorator / accept sync and async uniformly | Keep one `@workflow_tool` decorator and Activity contract, remove the registry rejection, await awaitables once, and apply identical context, timeout, failure, serialization, and retry semantics | Agent proposal, architecture review | 2026-08-19 |
+| 78 | Authorization during retries | Trust start-time policy / retry under persisted grant / reauthorize every attempt | Reauthorize every attempt against the deployed owner policy; revocation is terminal, non-retryable, and non-continuable | Agent proposal | 2026-08-19 |
+| 79 | Bounds, routing, and status compatibility | Configurable limits now / unbounded policy / fixed limits plus versioned status | Use fixed attempts/duration/elapsed bounds pending issue #1279; route any policy-aware plan through the structured scheduler, preserve status versions 1/2 for unchanged plans, and emit version 3 only for policy-aware plans | Agent proposal, architecture review | 2026-08-19 |
+| 80 | Task execution policy design approval | Revise individual Decisions 67 and 69-79 / approve the reviewed proposal set / defer implementation | Approve Decisions 67 and 69-79 as proposed, retain the separately approved precedence in Decision 68, finalize the task execution policy extension, and authorize implementation under the repository ExecPlan process | Human (TsuyoshiUshio) | 2026-08-23 |
+| 81 | Final implementation-contract clarifications | Leave details to implementation / define replay-safe public contracts before coding | Make authored `execution` presence the policy-aware switch; specify status v3 ownership/counts/nullability, decimal floor backoff precomputation, bounded error codes/messages, orchestrator-side-only cancellation, policy-aware Sub Agent clamping, async dual decorators, and the sync-timeout concurrency caveat | Agent, final architecture review | 2026-08-23 |
+| 82 | Execution-policy sample design and validation | Add a system-test mode to `workflow-incident-triage` / create a focused user-story sample / document only | Extract the policy demonstration into a dedicated retry sample with one order-recovery story. Keep its canonical DAG as a deployed Skill resource instead of duplicating JSON in agent instructions, and require opt-in Foundry E2E across natural language, Skill resource loading, tool-call generation, Durable execution, and terminal status. Re-run the incident-triage sample after extraction. | Human (TsuyoshiUshio) | 2026-08-24 |
+| 83 | Retry implementation boundary after Durable Python 2.x spike | Keep retry logic distributed in the engine / adopt preview 2.x with per-node sub-orchestrations / preserve Option A behavior behind explicit internal contracts | Keep runtime-managed selective retry for the current release because preview 2.x cannot preserve attempt context, retry-wait status, structured exhaustion details, or cooperative cancellation. Extract policy-aware Activity execution, outcomes, and retry decisions into `workflows/policy.py`; use strict Pydantic only at the Activity boundary and retain TypedDict/plain JSON plus visible Durable side effects in the replay-sensitive orchestrator. Do not add per-node sub-orchestrations now. Reassess replacing the scheduler when stable 2.x can satisfy the recorded observable contract or after explicitly approving contract changes. | Human (TsuyoshiUshio) and Agent, informed by preserved 2.x spike | 2026-08-25 |
+| 84 | Retry sample transient-dependency simulation | Branch on workflow attempt metadata / keep an E2E-only fixture / persist simulated dependency state externally | Make the customer sample's reservation tool lazily persist a workflow-scoped inventory incident in Azure Blob Storage and raise the public retryable error while that dependency state remains unavailable. Keep the simulation entirely inside the tool so customer-visible agent authoring contains no setup task or test-only state plumbing. | Human (TsuyoshiUshio) and Agent | 2026-08-26 |
+| 85 | Customer retry sample versus policy E2E | Keep the fixed Skill/DAG in the sample / remove precedence coverage / separate customer authoring from the deterministic fixture | Make `samples/workflow-retry-policy` show ordinary model-generated DAG authoring plus one decorator retry policy. Move the canonical Skill resource, intentionally conflicting DAG policy, attempt-driven deterministic failure, and model/status precedence assertions into a purpose-built app and pytest under `tests/endtoend`. | Human (TsuyoshiUshio) and Agent | 2026-08-26 |
+| 86 | Adopt Durable Python 2.x native Activity retry | Keep the runtime-managed driver / use a per-node sub-orchestrator / use direct `call_activity_with_retry` with a legacy history path | Pin `azure-functions==2.3.0b2` and `azure-functions-durable==2.0.0b2`, require the preview extension bundle for workflow apps, and use direct native Activity retry for newly persisted policies. Persist the driver marker into Activity input so legacy deliveries still return retryable envelopes; native deliveries alone raise a sanitized, unchained private exception. Preserve old payloads on the runtime-managed driver, publish status v4 for native histories, make Activity attempt unavailable rather than fabricated, and use conservative native elapsed-time admission plus `retry_timeout`. Do not add per-node sub-orchestrations. This supersedes Decision 83 for new histories. | Human (TsuyoshiUshio) and Agent, informed by the preserved 2.x spike and independent architecture review | 2026-08-27 |
 
 ## 6. Test plan
 
@@ -1023,7 +1663,9 @@ The Dynamic Workflow sample for this extension must demonstrate:
     normal and workflow tool inventories.
 - [ ] Unit: workflow discovery/registry tests
   - compatible `@workflow_tool` handlers register automatically;
-  - async/incompatible handlers are skipped with warning logs;
+  - incompatible handlers are skipped with warning logs;
+  - the original async-handler skip expectation is superseded by Evolution
+    #1278, which registers sync and async handlers uniformly;
   - duplicate/reserved names are handled with clear warnings/errors;
   - `@workflow_tool` using a reserved runtime management name such as
     `start_workflow` is rejected;
@@ -1037,10 +1679,20 @@ The Dynamic Workflow sample for this extension must demonstrate:
 - [ ] Fixture scenario:
   `tests/fixtures/config_scenarios/<next>_dynamic_workflow_tools/`
   - `tools/` contains normal-only, workflow-only, both, and helper functions.
-- [ ] Sample tests: update `tests/test_incident_tools.py` for the decorator-based
-  sample layout.
-- [ ] E2E: run the `workflow-incident-triage` sample locally with Azurite/Durable
-  storage and confirm a workflow can start, execute sample tools, and complete.
+- [x] Sample tests:
+  - keep `tests/test_incident_tools.py` focused on the incident-triage story after
+    extracting execution-policy probes;
+  - add focused contracts for the dedicated retry sample's ordinary agent
+    instructions, decorator policy, and internal Blob-backed failure simulation.
+- [x] Model-backed repository E2E:
+  - keep the canonical Skill resource and deliberately conflicting DAG policy
+    under `tests/endtoend/apps/workflow-retry-policy`, not in the customer sample;
+  - use the official E2E provider overlay and Functions host harness;
+  - prove natural-language prompt → Skill/resource tools → `start_workflow` →
+    Durable terminal status, including three attempts under the authoritative
+    decorator retry;
+  - re-run `workflow-incident-triage` with Azurite/Durable storage after
+    extraction and confirm its original incident workflow still completes.
 - [x] Evolution #112: workflow-enabled HTTP and non-HTTP handlers receive the
   Durable client and trigger addendum while workflow-disabled handlers keep
   their existing signatures.
@@ -1140,6 +1792,70 @@ The Dynamic Workflow sample for this extension must demonstrate:
   - a sample discovers a collection, dynamically fans out, skips one item, and
     aggregates results;
   - the scenario completes with deterministic output on Azure Storage and DTS.
+- [x] Evolution #1278: schema, metadata, and precedence
+  - validate task `execution`, exported retry/error/context types, decorator
+    declarations, fixed bounds, decorator-field precedence, whole-object retry
+    selection, and rejection on wait tasks;
+  - verify a DAG can request timeout or retry when the corresponding decorator
+    field is absent, while a declared decorator field remains authoritative;
+  - verify decorator `retry` with `max_attempts=1` suppresses a task-requested
+    retry policy with more than one attempt;
+  - treat present-but-empty `execution` as policy-aware while preserving
+    policy-free serialization when the key is absent;
+  - enforce the public error-code grammar and deterministic message normalization;
+  - preserve byte-for-byte-equivalent model dumps and Durable inputs when policy
+    is omitted;
+  - persist the effective policy so replay and deployment metadata changes do not
+    alter attempts or deadlines.
+- [x] Evolution #1278: sync/async Activity execution and timeout
+  - execute sync, async, and sync-returning-awaitable handlers exactly once per
+    delivered attempt;
+  - propagate and clear `WorkflowTaskContext` across awaits and executor threads;
+  - cover success, cooperative async timeout, non-cooperative sync timeout,
+    host/infrastructure failure, cancellation, sanitized exceptions, and
+    non-JSON results.
+- [x] Evolution #1278: retry, backoff, and idempotency
+  - replay produces identical attempt numbers, millisecond delays, timer
+    deadlines, idempotency keys, and scheduling order;
+  - verify Decimal `ROUND_FLOOR` delay precomputation for fractional products and
+    persist the integer-millisecond sequence;
+  - retry only explicit transient, timeout, and infrastructure failures;
+  - verify max-attempt exhaustion, zero/maximum delay, multiplier clamping,
+    one-hour admission rejection, duplicate delivery, and no random/wall-clock
+    access;
+  - reauthorize every attempt and fail closed without invoking a revoked target.
+- [x] Evolution #1278: continued failures and dynamic control flow
+  - fail-fast stops new scheduling after deterministically applying current-wave
+    outcomes;
+  - continued normal-task failures satisfy dependencies and support downstream
+    `when` checks over the failure envelope;
+  - `when: false` consumes no attempt and is not re-evaluated;
+  - `for_each` instances retry independently and aggregate completed, skipped,
+    and `failed_continued` entries in source order;
+  - authorization, contract, template, condition, iteration, cancellation, and
+    termination failures cannot be continued.
+- [x] Evolution #1278: Workflow Sub Agents
+  - use the resolved specialist timeout as fallback and reject a task timeout
+    above either that value or the fixed runtime bound;
+  - retry only when explicitly requested, preserve stateless leaf capabilities,
+    expose correlation/idempotency context to leaf execution, and keep
+    `{agent, text}` success results.
+- [x] Evolution #1278: cancellation, status, and observability
+  - cancel active wait/backoff timers, schedule no later attempt, preserve
+    committed results, do not claim to signal already-dispatched async or sync
+    Activities, and ignore late Activity completion;
+  - keep v1/v2 status for unchanged plans and verify v3 retry/timeout/continued
+    states, field omission, executable-unit counts, and `for_each` ownership
+    through tools, HTTP status, list results, and the built-in UI;
+  - prove Activity telemetry represents actual deliveries without orchestrator
+    replay double-counting and without sensitive fields.
+- [ ] Evolution #1278: E2E on Azure Storage and DTS
+  - a deterministic fake transient tool fails twice then succeeds under one
+    stable idempotency key;
+  - an async tool times out and exhausts retries;
+  - a continued `for_each` failure produces partial ordered output and allows an
+    explicit downstream recovery node;
+  - cooperative cancel during backoff reaches `Canceled` without a later retry.
 
 ## 7. Docs impact
 
@@ -1172,6 +1888,25 @@ The Dynamic Workflow sample for this extension must demonstrate:
   project-discovered skills, and direct/delegated capability paths.
 - [ ] Evolution #1276: update the selected workflow sample and its README with a
   collection-driven fan-out/fan-in scenario.
+- [x] Evolution #1278: update `docs/workflows.md` with task/decorator policy
+  syntax, precedence, failure taxonomy, timeout ownership, idempotency guidance,
+  continued results, Sub Agent caveats, cancellation, limits, and status v3.
+- [x] Evolution #1278: update `docs/architecture.md` for effective-policy
+  translation, Activity outcome/context ownership, deterministic retry timers,
+  reauthorization, and structured status/telemetry.
+- [x] Evolution #1278: update `docs/front-matter-spec.md` only to cross-reference
+  workflow execution policy; no new frontmatter key is proposed.
+- [x] Evolution #1278: update the public API reference/README for async
+  `@workflow_tool`, exported policy/error/context types, and the explicit
+  at-least-once contract.
+- [x] Evolution #1278: add a dedicated, user-centered retry sample whose normal
+  agent instructions generate the DAG and whose workflow tool simulates a
+  transient dependency through internal Blob state. Keep the immutable
+  precedence plan only in the E2E test app so customers do not mistake test
+  scaffolding for required retry authoring.
+- [x] Evolution #1278: migrate new histories to Durable Python 2.x native
+  Activity retry, preserve marker-free legacy replay, publish status v4, and
+  update the retry sample/E2E for attempt-free delivery context.
 
 ## 8. Status & sign-off
 
@@ -1218,3 +1953,37 @@ The Dynamic Workflow sample for this extension must demonstrate:
 - **Dynamic control flow human sign-off:** TsuyoshiUshio, 2026-08-14. Approved
   Decisions 43-53 as proposed and authorized implementation and testing. FRD
   status returned to `Finalized`.
+- **Task execution policy extension:** Drafted for planning issue #1278 on
+  2026-08-19. An independent rubber-duck architecture review found three
+  blocking ambiguities: policy-aware timeout bounds versus the existing Sub
+  Agent timeout fallback, retry admission for timeout-less tools, and scheduler
+  routing for otherwise-static policy-bearing plans. It also identified the
+  retry-model shape and registry async rejection as non-blocking inconsistencies.
+  The draft now resolves those findings with a bounded policy-aware timeout
+  fallback, one nested retry/backoff model, explicit structured-scheduler
+  routing, and registry ownership. A focused re-review found only one
+  non-blocking wording inconsistency in the Sub Agent timeout fallback; that text
+  was corrected. No blocking findings remain.
+- **Task execution policy precedence decision:** TsuyoshiUshio, 2026-08-20.
+  Approved authoritative per-field `@workflow_tool` declarations with DAG values
+  filling only undeclared fields, whole-object retry selection, and Sub Agent
+  timeout bounded by its resolved timeout. Decision 68 is human-approved.
+- **Task execution policy human sign-off:** TsuyoshiUshio, 2026-08-23. Approved
+  Decisions 67 and 69-79 as proposed, retained Decision 68, finalized the
+  extension, and authorized implementation through the repository's ExecPlan
+  process.
+- **Task execution policy final architecture review:** An independent rubber-duck
+  review on 2026-08-23 identified implementation-blocking ambiguity in the
+  policy-aware routing predicate, status v3 wire shape, fractional backoff
+  rounding, public failure bounds, and cancellation of already-dispatched
+  Activities. Decision 81 records the concrete replay-safe resolutions; the
+  re-review also aligned Sub Agent clamping, async dual decorators, and the sync
+  timeout concurrency caveat. No implementation ambiguity remains.
+- **Native retry migration sign-off:** TsuyoshiUshio, 2026-08-27. Approved the
+  preview Durable Python 2.x dependency and native Activity retry for new
+  histories, with marker-free legacy replay retained.
+- **Native retry architecture review:** Two independent rubber-duck passes on
+  2026-08-27 required strict return-versus-raise behavior, optional attempt
+  context, private failure sanitization, conservative elapsed admission, status
+  version 4, and explicit cancellation limits. The revised design resolved all
+  blocking findings before implementation.

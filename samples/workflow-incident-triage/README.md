@@ -21,9 +21,10 @@ the optional Durable Task Scheduler backend. It also demonstrates the
 data-driven control flow from Issue #1276: a discovery tool returns a
 bounded array, a per-service task fans out over it with `for_each`, an
 item-level `when` predicate skips out-of-scope services, and a downstream
-task consumes the ordered `{index, status, result}` aggregate. It
-deliberately does not demonstrate v2 features such as sub-orchestrations or
-sub-agent tasks.
+task consumes the ordered `{index, status, result}` aggregate. It deliberately
+does not demonstrate task execution policies, sub-orchestrations, or Sub Agent
+tasks. See the focused
+[`workflow-retry-policy`](../workflow-retry-policy/) sample for retry policy.
 
 ## Run locally
 
@@ -163,7 +164,7 @@ Restart `func start` after any swap so the host reloads `host.json`.
 
 ## Workflow-safe tools registered by this sample
 
-`src/tools/incident_tools.py` defines seven synthetic-but-realistic
+`src/tools/incident_tools.py` defines synthetic-but-realistic
 handlers decorated with `@workflow_tool`. `create_function_app()`
 discovers them from the normal `tools/` directory and registers them with
 the app-wide workflow engine; this sample's workflow-enabled agent enables them

@@ -10,8 +10,8 @@ readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.13"
 dependencies = [
-    "azure-functions>=2.1.0,<3",
-    "azure-functions-durable>=1.2.10,<2",
+    "azure-functions==2.3.0b2",
+    "azure-functions-durable==2.0.0b2",
     # Keep this trio exact: foundry 1.10.4 imports an OpenAI module absent from 1.10.2.
     "agent-framework-core==1.13.0",
     "agent-framework-openai==1.10.2",

@@ -13,6 +13,7 @@ from agent_framework import (
     ChatResponse,
     HistoryProvider,
     Message,
+    SkillsProvider,
 )
 
 from azure_functions_agents import runner
@@ -184,6 +185,42 @@ def test_build_agent_session_forwards_system_instructions(monkeypatch: Any) -> N
     assert captured[0]["disable_web_search"] is True
     assert captured[0]["disable_tool_auto_approval"] is True
     assert captured[0]["default_options"] == {"store": False}
+
+
+def test_build_role_agent_auto_approves_read_only_skill_tools(
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def fake_create_harness_agent(_client: Any, **kwargs: Any) -> _FakeAgent:
+        captured.append(kwargs)
+        return _FakeAgent()
+
+    import agent_framework
+
+    monkeypatch.setattr(
+        agent_framework,
+        "create_harness_agent",
+        fake_create_harness_agent,
+    )
+
+    runner._build_role_agent(
+        object(),
+        agent_instructions=None,
+        tools=[],
+        skill_paths=[tmp_path],
+        agent_name="skills-agent",
+        history_provider=None,
+        agent_configuration=AgentConfiguration(),
+    )
+
+    provider = captured[0]["skills_provider"]
+    assert isinstance(provider, SkillsProvider)
+    assert provider._disable_load_skill_approval is True
+    assert provider._disable_read_skill_resource_approval is True
+    assert provider._disable_run_skill_script_approval is False
+    assert "skills_paths" not in captured[0]
 
 
 def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:

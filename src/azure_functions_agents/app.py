@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -212,7 +212,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         workflow_handler_catalog,
     )
     app: func.FunctionApp = (
-        df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
+        cast(func.FunctionApp, df.DFApp(http_auth_level=func.AuthLevel.FUNCTION))
         if workflow_agent_policies
         else func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
     )
