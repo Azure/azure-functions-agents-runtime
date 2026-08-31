@@ -258,7 +258,7 @@ async def _as_sdk_response[T](operation: Awaitable[T]) -> T:
 
 
 class FakeSdkSandboxClient:
-    """A direct-file SDK-client stand-in with advisory ``get`` intentionally forbidden.
+    """A direct-file SDK-client stand-in with configurable sandbox state reads.
 
     File operations translate this repository's own
     :class:`SandboxFileNotFoundError` (raised by the underlying
@@ -275,6 +275,10 @@ class FakeSdkSandboxClient:
         self.calls = self.transport.calls
         self.closed = False
         self.deleted = False
+        self.state: Literal[
+            "Running", "Stopped", "Suspended", "Resuming", "Stopping", "Creating", "Deleting"
+        ] | None = "Running"
+        self.get_error: Exception | None = None
         self.stop_kwargs: dict[str, object] | None = None
         self.delete_kwargs: dict[str, object] | None = None
         self.lifecycle_policy = FakeSdkLifecyclePolicy(
@@ -376,7 +380,9 @@ class FakeSdkSandboxClient:
 
     async def get(self, **kwargs: object) -> FakeSdkSandboxSummary:
         del kwargs
-        return FakeSdkSandboxSummary(lifecycle=self.lifecycle_policy)
+        if self.get_error is not None:
+            raise self.get_error
+        return FakeSdkSandboxSummary(state=self.state, lifecycle=self.lifecycle_policy)
 
     async def begin_stop(
         self,

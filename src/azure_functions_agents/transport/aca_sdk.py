@@ -634,12 +634,11 @@ class AcaSandboxAdapter:
         except HttpResponseError as exc:
             if _is_authorization_rejection(exc):
                 raise SandboxGroupAuthorizationError(status_code=exc.status_code or 403) from None
-            if _is_already_running_on_resume(exc):
-                resumed = True
-            elif exc.status_code == 409:
-                raise SandboxInvalidStateError(_RESUME_INVALID_STATE_MESSAGE) from None
-            else:
+            if exc.status_code != 409:
                 raise
+            if not await handle.has_resume_progress_state():
+                raise SandboxInvalidStateError(_RESUME_INVALID_STATE_MESSAGE) from None
+            resumed = True
         finally:
             if not resumed:
                 await handle.close()
@@ -1085,6 +1084,24 @@ class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
         self._ensure_open()
         await self._sdk_client.resume()
 
+    async def has_resume_progress_state(self) -> bool:
+        """Return whether a resume conflict left the sandbox running or resuming."""
+
+        self._ensure_open()
+        try:
+            sandbox: Sandbox = await self._sdk_client.get()
+        except ResourceNotFoundError:
+            return False
+        except HttpResponseError as exc:
+            if _is_authorization_rejection(exc):
+                raise SandboxGroupAuthorizationError(status_code=exc.status_code or 403) from None
+            if exc.status_code == 404:
+                return False
+            raise SandboxProvisioningError("Sandbox state lookup failed.") from None
+        except AzureError:
+            raise SandboxProvisioningError("Sandbox state lookup failed.") from None
+        return sandbox.state in _RESUME_PROGRESS_STATES
+
     async def delete(self) -> None:
         """Delete only this individual session sandbox."""
 
@@ -1316,8 +1333,8 @@ def _is_definitive_client_rejection(exc: HttpResponseError) -> bool:
 
 
 _AUTHORIZATION_STATUS_CODES = frozenset({401, 403})
-
 _RESUME_INVALID_STATE_MESSAGE = "Sandbox state does not permit resume (409 conflict)."
+_RESUME_PROGRESS_STATES = frozenset({"Running", "Resuming"})
 
 
 def _is_authorization_rejection(exc: HttpResponseError) -> bool:
@@ -1397,17 +1414,6 @@ async def _fetch_inventory_page[RawItem, ProjectedItem](
 
 def _is_capacity_rejection(exc: HttpResponseError) -> bool:
     return exc.status_code in {409, 429, 503}
-
-
-_RUNNING_STATE_INDICATOR = "Current state: Running"
-
-
-def _is_already_running_on_resume(exc: HttpResponseError) -> bool:
-    """True when a 409 indicates the sandbox is already Running."""
-    if exc.status_code != 409:
-        return False
-    message = str(exc.message) if exc.message else ""
-    return _RUNNING_STATE_INDICATOR in message
 
 
 def _retry_after_seconds(exc: HttpResponseError) -> float | None:

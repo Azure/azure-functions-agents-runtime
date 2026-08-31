@@ -1188,6 +1188,7 @@ Canonical stored/wire run states: `accepted`, `running`, `succeeded`, `failed`, 
 | Unknown run | `404`. |
 | Auth/authz | `401`/`403`. |
 | Different submission while active run holds slot | Flat `409 active_run_exists`, naming active run. |
+| Sandbox lifecycle rejects idempotent resume | Sanitized `409 sandbox_invalid_state` from submission, status, result, events, or cancel; body contains only `error` and `reason` set to that value. |
 | Same Idempotency-Key, different payload | `422 idempotency_key_conflict`; never a bare ambiguous `409`. |
 | Result evicted or session tombstoned | Result `410 Gone`; terminal status remains available until terminal row pruning, after which status also returns `410`. |
 

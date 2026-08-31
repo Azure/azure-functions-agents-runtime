@@ -26,6 +26,7 @@ from azure_functions_agents.controller.readiness import (
     ActivatedSession,
     ProvisionedSubmission,
     SessionActivationAuthorizationError,
+    SessionActivationConflictError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
     SessionRunOwnershipChangedError,
@@ -104,6 +105,7 @@ from azure_functions_agents.transport.transport_models import (
     SandboxFileNotFoundError,
     SandboxFileOperationError,
     SandboxGroupAuthorizationError,
+    SandboxInvalidStateError,
 )
 from tests.doubles.content_package import content_package
 from tests.doubles.fake_session_runtime import (
@@ -828,6 +830,76 @@ async def test_get_run_propagates_provider_authorization_without_table_fallback(
         await backend.get_run(RunContext(run_id=run.run_id, session_id=session.session_id))
 
     assert str(caught.value) == SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_get_run_propagates_provider_invalid_state_without_table_fallback(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    run = _run(session)
+    store.runs[run.run_id] = run
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    provider.resume_error = SandboxInvalidStateError("provider-secret")
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    with pytest.raises(SessionActivationConflictError) as caught:
+        await backend.get_run(RunContext(run_id=run.run_id, session_id=session.session_id))
+
+    assert "provider-secret" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_read_events_propagates_provider_invalid_state(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    run = _run(session)
+    store.runs[run.run_id] = run
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    provider.resume_error = SandboxInvalidStateError("provider-secret")
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    with pytest.raises(SessionActivationConflictError):
+        await anext(
+            backend.read_events(
+                RunContext(run_id=run.run_id, session_id=session.session_id),
+                after_sequence=0,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_propagates_provider_invalid_state(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    run = _run(session, state="running")
+    store.runs[run.run_id] = run
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    provider.resume_error = SandboxInvalidStateError("provider-secret")
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    with pytest.raises(SessionActivationConflictError):
+        await backend.cancel_run(RunContext(run_id=run.run_id, session_id=session.session_id))
 
 
 @pytest.mark.asyncio

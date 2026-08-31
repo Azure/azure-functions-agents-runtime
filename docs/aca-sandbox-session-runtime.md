@@ -249,10 +249,14 @@ partial progress when its deadline is reached.
 A capacity-triggered targeted retry may therefore remain capacity-exhausted
 until the timer reclaims unrelated stale resources.
 
-File-plane `409` readiness is lifecycle-aware: the controller resumes only
-when it owns that mutation, honors provider `Retry-After`, and uses capped
-jittered backoff with per-candidate and whole-flow budgets. Absent backing is
-never probed. ARM binding retries are limited to
+File-plane `409` readiness is lifecycle-aware: every reusable existing session
+is idempotently resumed before its manifest handshake, even when durable state
+is `ready`; that state is not evidence that ACA compute remains running. An
+incompatible sandbox lifecycle state returns a sanitized `409` from submission,
+status, result, events, or cancel with
+`{"error":"sandbox_invalid_state","reason":"sandbox_invalid_state"}`. The
+controller honors provider `Retry-After` and uses capped jittered backoff with
+per-candidate and whole-flow budgets. Absent backing is never probed. ARM binding retries are limited to
 `408/409/425/429/500/502/503/504`; authorization and permanent responses retain
 their sanitized classification. Authorization failures surface as
 `sandbox_group_authorization_failed` rather than an opaque setup timeout.

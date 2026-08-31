@@ -23,6 +23,7 @@ from ..controller.journal_integrity import (
 from ..controller.readiness import (
     ActivatedSession,
     SessionActivationAuthorizationError,
+    SessionActivationConflictError,
     SessionActivationError,
     SessionActivationGoneError,
     SessionActivationNotFoundError,
@@ -767,6 +768,8 @@ class AcaSandboxExecutionBackend:
             return None, _tombstoned_status(refreshed.run, phase=_public_phase(refreshed))
         except SessionActivationAuthorizationError:
             raise
+        except SessionActivationConflictError:
+            raise
         except (
             SessionActivationError,
             SetupBudgetExpiredError,
@@ -836,6 +839,8 @@ class AcaSandboxExecutionBackend:
             except SessionActivationAuthorizationError:
                 # Let event preflight surface the same management authorization
                 # response rather than silently ending through the fallback below.
+                raise
+            except SessionActivationConflictError:
                 raise
             except (
                 SessionActivationError,
@@ -943,6 +948,8 @@ class AcaSandboxExecutionBackend:
             except SessionActivationGoneError:
                 raise
             except SessionActivationAuthorizationError:
+                raise
+            except SessionActivationConflictError:
                 raise
             except (SandboxFileNotFoundError, SandboxFileOperationError):
                 durable, fallback_status = await self._cancel_file_error_status(
