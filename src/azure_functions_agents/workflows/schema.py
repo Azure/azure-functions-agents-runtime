@@ -142,6 +142,7 @@ class WorkflowToolExecutionPolicy:
     """Immutable ``@workflow_tool`` declarations used at submission time."""
 
     retry: WorkflowRetryPolicy | None = None
+    timeout: str | None = None
 
 
 def _empty_tool_execution_policies() -> Mapping[str, WorkflowToolExecutionPolicy]:
@@ -172,9 +173,15 @@ type JsonScalar = str | int | float | bool | None
 MAX_POLICY_ATTEMPTS = 5
 MAX_INITIAL_BACKOFF_MS = 5 * 60 * 1_000
 MAX_BACKOFF_MS = 15 * 60 * 1_000
+# Authored per-attempt deadline bounds. The lower bound keeps a timeout from
+# being shorter than a realistic cold start; the upper bound keeps a single
+# attempt well inside the elapsed ceiling below.
+MIN_POLICY_TIMEOUT_MS = 1_000
+MAX_POLICY_TIMEOUT_MS = 10 * 60 * 1_000
 # Bounded-execution safety ceiling handed to Durable as ``retry_timeout``. It is
-# an internal guard against an Activity that never fails and never returns, not
-# an authored value: a per-attempt ``execution.timeout`` is a follow-up change.
+# an internal guard against an Activity that never fails and never returns, and
+# it also bounds the worst-case authored schedule of attempt deadlines plus
+# retry delays.
 MAX_POLICY_ELAPSED_MS = 60 * 60 * 1_000
 
 
@@ -259,7 +266,19 @@ class WorkflowTaskExecution(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
+    timeout: str | None = None
     retry: WorkflowRetryPolicy | None = None
+    continue_on_error: bool = False
+
+    @field_validator("timeout")
+    @classmethod
+    def validate_timeout(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        timeout_ms = _policy_duration_ms(value, field_name="execution.timeout")
+        if not MIN_POLICY_TIMEOUT_MS <= timeout_ms <= MAX_POLICY_TIMEOUT_MS:
+            raise ValueError("execution.timeout must be between PT1S and PT10M")
+        return value
 
 
 class DurableRetryPolicyInput(TypedDict):
@@ -279,10 +298,16 @@ class EffectiveWorkflowTaskExecution(TypedDict):
     version is deployed later, so it only ever grows: readers must tolerate
     unknown keys, and any key added by a later runtime must be ``NotRequired``
     with a default that reproduces this version's behavior.
+
+    ``timeout_ms`` and ``continue_on_error`` are written only when the plan or
+    the tool declaration asked for them, so a task that uses neither produces a
+    payload identical to the one an earlier runtime would have written.
     """
 
     max_attempts: int
     durable_retry_policy: DurableRetryPolicyInput
+    timeout_ms: NotRequired[int]
+    continue_on_error: NotRequired[bool]
 
 
 def durable_retry_policy_input(retry: WorkflowRetryPolicy) -> DurableRetryPolicyInput:
@@ -439,31 +464,57 @@ def resolve_workflow_task_execution(
     task: WorkflowTask,
     *,
     decorator_retry: WorkflowRetryPolicy | None = None,
+    decorator_timeout: str | None = None,
 ) -> EffectiveWorkflowTaskExecution | None:
-    """Freeze the retry policy for one task at submission time.
+    """Freeze the execution policy for one task at submission time.
 
     A ``@workflow_tool`` declaration is authoritative and overrides whatever the
     plan author wrote. ``None`` means the task is policy-free, and no execution
     payload may be persisted for it — which is what keeps histories written by
     earlier runtime versions on the legacy dispatch path during replay.
+
+    ``continue_on_error`` is deliberately task-local: whether a workflow can
+    proceed past a failed node is a property of the plan, not of the tool.
     """
     authored = "execution" in task.model_fields_set
-    if not authored and decorator_retry is None:
+    declared = decorator_retry is not None or decorator_timeout is not None
+    if not authored and not declared:
         return None
     if task.type == WAIT_TASK_TYPE:
         raise ValueError("execution is not valid on type=wait tasks")
-    if task.type != TOOL_TASK_TYPE and decorator_retry is not None:
+    if task.type != TOOL_TASK_TYPE and declared:
         raise ValueError("workflow tool decorator policy is only valid on type=tool tasks")
     execution = task.execution or WorkflowTaskExecution()
     retry = decorator_retry if decorator_retry is not None else execution.retry
     if retry is None:
         retry = WorkflowRetryPolicy()
-    if sum(native_retry_delays_ceiling_ms(retry)) > MAX_POLICY_ELAPSED_MS:
-        raise ValueError("configured retry delays must not exceed PT1H in total")
-    return EffectiveWorkflowTaskExecution(
+    if decorator_timeout is not None:
+        # Validate a decorator-declared duration against the same bounds the
+        # authored field uses before it is frozen into Durable history.
+        timeout_text = WorkflowTaskExecution(timeout=decorator_timeout).timeout
+    else:
+        timeout_text = execution.timeout
+    timeout_ms = (
+        None
+        if timeout_text is None
+        else _policy_duration_ms(timeout_text, field_name="execution.timeout")
+    )
+    elapsed_ms = sum(native_retry_delays_ceiling_ms(retry))
+    if timeout_ms is not None:
+        elapsed_ms += retry.max_attempts * timeout_ms
+    if elapsed_ms > MAX_POLICY_ELAPSED_MS:
+        raise ValueError(
+            "configured attempt deadlines and retry delays must not exceed PT1H in total"
+        )
+    effective = EffectiveWorkflowTaskExecution(
         max_attempts=retry.max_attempts,
         durable_retry_policy=durable_retry_policy_input(retry),
     )
+    if timeout_ms is not None:
+        effective["timeout_ms"] = timeout_ms
+    if execution.continue_on_error:
+        effective["continue_on_error"] = True
+    return effective
 
 
 class WorkflowPlan(BaseModel):
@@ -1361,7 +1412,9 @@ __all__ = [
     "MAX_PARALLELISM",
     "MAX_POLICY_ATTEMPTS",
     "MAX_POLICY_ELAPSED_MS",
+    "MAX_POLICY_TIMEOUT_MS",
     "MAX_WAIT_DURATION",
+    "MIN_POLICY_TIMEOUT_MS",
     "SUB_AGENT_TASK_TYPE",
     "SUPPORTED_TASK_TYPES",
     "TOOL_TASK_TYPE",

@@ -8,6 +8,15 @@ Activity to distinguish "retry me" (raise) from "this is terminal" (return).
 
 Tasks without a persisted ``execution`` payload keep the legacy shape untouched
 so histories written before this runtime version replay unchanged.
+
+A persisted ``timeout_ms`` bounds *the attempt the orchestration waits for*, not
+the worker: workflow tool handlers are synchronous and run on a worker thread,
+and a thread cannot be cancelled from the outside. When an attempt deadline
+expires the delivery reports a retryable timeout immediately while the handler
+may still be running. That is the same at-least-once exposure Durable already
+has for a redelivered Activity, and the mitigation is the same: a handler with
+side effects keys them on
+:attr:`~azure_functions_agents.WorkflowTaskContext.idempotency_key`.
 """
 
 from __future__ import annotations
@@ -33,18 +42,32 @@ from .schema import (
     MAX_BACKOFF_MS,
     MAX_POLICY_ATTEMPTS,
     MAX_POLICY_ELAPSED_MS,
+    MAX_POLICY_TIMEOUT_MS,
+    MIN_POLICY_TIMEOUT_MS,
     EffectiveWorkflowTaskExecution,
     WorkflowRetryableError,
     WorkflowTerminalError,
 )
 
 type ActivityFailureKind = Literal[
+    "timeout",
     "handler_transient",
     "handler_terminal",
     "execution_unknown",
     "handler_contract",
     "authorization",
 ]
+
+
+class WorkflowTaskTimeoutError(Exception):
+    """Internal signal that a nested execution bound expired inside one attempt.
+
+    A Workflow Sub Agent already carries its own resolved agent timeout, which
+    can be tighter than the attempt deadline. Raising this from that inner bound
+    keeps both timeouts on the same classification instead of degrading the
+    inner one to an unknown execution failure.
+    """
+
 
 
 class ActivityFailure(TypedDict):
@@ -103,6 +126,14 @@ class EffectiveExecutionModel(BaseModel):
 
     max_attempts: int = Field(ge=1, le=MAX_POLICY_ATTEMPTS)
     durable_retry_policy: DurableRetryPolicyModel
+    # Optional so a history written before per-attempt deadlines existed still
+    # validates; ``None`` reproduces that history's unbounded-attempt behavior.
+    timeout_ms: int | None = Field(
+        default=None,
+        ge=MIN_POLICY_TIMEOUT_MS,
+        le=MAX_POLICY_TIMEOUT_MS,
+    )
+    continue_on_error: bool = False
 
     @model_validator(mode="after")
     def validate_schedule(self) -> EffectiveExecutionModel:
@@ -122,8 +153,16 @@ class EffectiveExecutionModel(BaseModel):
         return self
 
     def to_wire(self) -> EffectiveWorkflowTaskExecution:
-        """Return the original JSON-safe TypedDict contract."""
-        return cast(EffectiveWorkflowTaskExecution, self.model_dump())
+        """Return the original JSON-safe TypedDict contract.
+
+        ``exclude_defaults`` keeps optional keys out of the payload unless they
+        were persisted, so the wire shape stays identical to the one written by
+        a runtime that did not know about them.
+        """
+        return cast(
+            EffectiveWorkflowTaskExecution,
+            self.model_dump(exclude_defaults=True),
+        )
 
 
 class PolicyActivityInputModel(BaseModel):
@@ -148,12 +187,31 @@ _ACTIVITY_WHITESPACE_RE = re.compile(r"\s+")
 # Retryability is a property of the classification, never of what a worker
 # claims: an outcome whose flag disagrees with its kind is a contract failure.
 _FAILURE_RETRYABLE: dict[ActivityFailureKind, bool] = {
+    "timeout": True,
     "handler_transient": True,
     "handler_terminal": False,
     "execution_unknown": False,
     "handler_contract": False,
     "authorization": False,
 }
+# Whether ``execution.continue_on_error`` may convert an already-terminal
+# failure into a satisfied dependency edge. A denied target and a violated
+# Activity contract never can: continuation is an application-level decision
+# about application-level failures, not a way around the authorization boundary
+# or a malformed history.
+_FAILURE_CONTINUABLE: dict[ActivityFailureKind, bool] = {
+    "timeout": True,
+    "handler_transient": True,
+    "handler_terminal": True,
+    "execution_unknown": True,
+    "handler_contract": False,
+    "authorization": False,
+}
+
+
+def failure_is_continuable(failure: ActivityFailure) -> bool:
+    """Return whether ``continue_on_error`` may apply to a validated failure."""
+    return _FAILURE_CONTINUABLE.get(failure["kind"], False)
 
 
 def handler_contract_failure() -> ActivityFailure:
@@ -254,18 +312,24 @@ def handler_contract_outcome(task_id: str) -> ActivityFailureOutcome:
     return {"id": task_id, "ok": False, "failure": handler_contract_failure()}
 
 
-def _policy_activity_context(task: Mapping[str, Any]) -> WorkflowTaskContext:
+def _policy_activity_context(
+    task: Mapping[str, Any],
+) -> tuple[WorkflowTaskContext, float | None]:
     """Validate persisted policy-aware Activity fields without repairing bad history."""
     validated = PolicyActivityInputModel.model_validate(task)
-    return WorkflowTaskContext(
-        workflow_id=validated.workflow_id,
-        task_id=validated.task_id,
-        node_instance_id=validated.id,
-        max_attempts=validated.execution.max_attempts,
-        idempotency_key=workflow_task_idempotency_key(
-            validated.workflow_id,
-            validated.id,
+    timeout_ms = validated.execution.timeout_ms
+    return (
+        WorkflowTaskContext(
+            workflow_id=validated.workflow_id,
+            task_id=validated.task_id,
+            node_instance_id=validated.id,
+            max_attempts=validated.execution.max_attempts,
+            idempotency_key=workflow_task_idempotency_key(
+                validated.workflow_id,
+                validated.id,
+            ),
         ),
+        None if timeout_ms is None else timeout_ms / 1000,
     )
 
 
@@ -310,7 +374,7 @@ async def invoke_policy_handler(
     attempt. Everything else returns a terminal outcome the orchestrator
     interprets deterministically during replay.
     """
-    context = _policy_activity_context(task)
+    context, timeout = _policy_activity_context(task)
     token = _set_workflow_task_context(context)
     task_id = str(task["id"])
 
@@ -321,11 +385,48 @@ async def invoke_policy_handler(
             raise_for_durable_retry(outcome)
         return outcome
 
+    def timed_out() -> ActivityOutcome:
+        logger.warning(
+            "workflow task attempt timed out: workflow_id=%s node_id=%s target=%s",
+            context.workflow_id,
+            context.node_instance_id,
+            target,
+        )
+        return finish(failure_outcome(
+            task_id,
+            error_code="workflow_task_timeout",
+            error="Task attempt timed out.",
+            kind="timeout",
+        ))
+
     try:
+        # ``asyncio.timeout(None)`` is a no-op scope, so a task without a
+        # persisted deadline takes exactly the same path as one with it.
+        timeout_scope = asyncio.timeout(timeout)
         try:
-            result = await invoke_handler(handler, args)
+            async with timeout_scope:
+                result = await invoke_handler(handler, args)
         except asyncio.CancelledError:
+            # Cancellation the deadline caused was already converted to
+            # TimeoutError on scope exit, so this is the host cancelling us.
             raise
+        except WorkflowTaskTimeoutError:
+            return timed_out()
+        except TimeoutError:
+            if timeout_scope.expired():
+                return timed_out()
+            logger.exception(
+                "workflow task execution failed: workflow_id=%s node_id=%s target=%s",
+                context.workflow_id,
+                context.node_instance_id,
+                target,
+            )
+            return finish(failure_outcome(
+                task_id,
+                error_code="workflow_task_execution_unknown",
+                error="Task execution failed.",
+                kind="execution_unknown",
+            ))
         except WorkflowRetryableError as exc:
             return finish(failure_outcome(
                 task_id,
@@ -379,7 +480,9 @@ __all__ = [
     "ActivityFailureOutcome",
     "ActivityOutcome",
     "ActivitySuccessOutcome",
+    "WorkflowTaskTimeoutError",
     "authorization_outcome",
+    "failure_is_continuable",
     "failure_outcome",
     "handler_contract_outcome",
     "invoke_handler",

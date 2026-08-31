@@ -293,6 +293,7 @@ def build_workflow_handler_catalog(
                 workflow_tool.handler,
                 public=workflow_tool.public,
                 retry=workflow_tool.retry,
+                timeout=workflow_tool.timeout,
             )
         except ValueError as exc:
             logger.warning("Skipping workflow tool %r: %s", workflow_tool.name, exc)
@@ -321,6 +322,7 @@ def _register_workflow_tools(
                 entry.handler,
                 public=entry.public,
                 retry=entry.retry,
+                timeout=entry.timeout,
             )
         except ValueError as exc:
             logger.warning("Skipping workflow tool %r: %s", entry.name, exc)
@@ -434,9 +436,16 @@ def _build_plan_policy(
             )
         guidance.append((ref.agent, ref.when or entry.resolved.description))
     tool_execution = {
-        name: WorkflowToolExecutionPolicy(retry=handler_catalog[name].retry)
+        name: WorkflowToolExecutionPolicy(
+            retry=handler_catalog[name].retry,
+            timeout=handler_catalog[name].timeout,
+        )
         for name in allowed_tools
-        if name in handler_catalog and handler_catalog[name].retry is not None
+        if name in handler_catalog
+        and (
+            handler_catalog[name].retry is not None
+            or handler_catalog[name].timeout is not None
+        )
     }
     return WorkflowPlanPolicy(
         allowed_tools=allowed_tools,

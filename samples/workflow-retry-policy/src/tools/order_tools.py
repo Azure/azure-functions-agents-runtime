@@ -106,6 +106,7 @@ def load_order(args: dict[str, Any]) -> dict[str, Any]:
         "Reads the simulated inventory incident from Azure Blob Storage. "
         "Returns {order_id, sku, reserved, transient_failures_observed}."
     ),
+    timeout="PT5S",
     retry=_RETRY_POLICY,
 )
 def reserve_inventory(args: dict[str, Any]) -> dict[str, Any]:

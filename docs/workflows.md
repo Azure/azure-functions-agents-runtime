@@ -13,7 +13,7 @@
 > [Engineering Operations Hub](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/per-agent-workflows/README.md)
 > demonstrates two non-main workflow-enabled agents with independent policies in one app.
 > Larger features such as sub-orchestrations,
-> per-task timeouts, and MCP Tasks integration are tracked as v2
+> blob-offloaded outputs, and MCP Tasks integration are tracked as v2
 > follow-up work.
 
 Dynamic workflows let a markdown agent author and run **distributed,
@@ -277,8 +277,9 @@ A workflow plan is a list of tasks with `depends_on` edges. Task types:
 - **`sub_agent`** — invoke one leaf specialist authorized by
   `workflows.subagents`, using `agent` and a self-contained `task`.
 
-A `tool` or `sub_agent` task may carry an `execution.retry` policy; see
-[Task retry](#task-retry). Per-task timeouts remain a v2 hardening control.
+A `tool` or `sub_agent` task may carry an `execution` policy with a per-attempt
+`timeout`, a `retry` policy, and `continue_on_error`; see
+[Task execution policy](#task-execution-policy).
 
 ```json
 {
@@ -504,11 +505,62 @@ instances run concurrently.
 Future v2 hardening adds configurable frontmatter caps, per-tool timeout
 caps, storage hygiene, and large-output offloading.
 
+### Task execution policy
+
+A tool or Sub Agent task can carry a bounded `execution` policy with three
+independent controls:
+
+| Field | Meaning |
+|---|---|
+| `execution.timeout` | Per-attempt deadline, ISO-8601 `PT1S`–`PT10M`. |
+| `execution.retry` | Bounded Durable native retry; see [Task retry](#task-retry). |
+| `execution.continue_on_error` | Let the DAG proceed past this task's final failure; see [Continuing past a failed task](#continuing-past-a-failed-task). |
+
+`timeout` and `retry` are best declared on the tool itself, where the knowledge
+of what is slow and what is safe to retry lives:
+
+```python
+@workflow_tool(description="Reserve inventory.", timeout="PT5S", retry=_RETRY)
+def reserve_inventory(args: dict) -> dict:
+    ...
+```
+
+A plan may author the same fields on a task, but a tool declaration wins for
+`timeout` and `retry`. `continue_on_error` is deliberately task-local and never
+decorator metadata: whether a workflow can proceed past a failed node is a
+property of the plan, not of the tool. It always defaults to `false`.
+
+The whole policy is frozen into the orchestration input at submission time.
+Tasks that declare none of it persist nothing, so a workflow started before a
+tool declared a policy keeps replaying exactly as it was scheduled.
+
+#### Attempt deadline
+
+An attempt that has not returned within `execution.timeout` is reported as a
+**retryable** `workflow_task_timeout` failure, so Durable schedules the next
+attempt under the declared backoff. With the default single attempt, the task
+simply fails with that error code.
+
+The attempt deadline and the retry schedule are bounded together: the worst
+case of `max_attempts × timeout` plus the retry delays must stay inside the
+internal one-hour ceiling, and a plan that exceeds it is rejected at submission.
+
+> **The deadline bounds the wait, not the worker.** Workflow tool handlers are
+> synchronous and run on a worker thread, and a thread cannot be cancelled from
+> the outside. When an attempt deadline expires the delivery is reported as
+> timed out immediately while the handler may still be running to completion.
+> That is the same at-least-once exposure Durable already has for a redelivered
+> Activity, and the mitigation is the same: key side effects on
+> `current_workflow_task_context().idempotency_key`.
+
+A Workflow Sub Agent also carries its own resolved agent `timeout`. Whichever
+bound expires first wins, and both are reported as the same retryable
+`workflow_task_timeout` failure.
+
 ### Task retry
 
 A tool or Sub Agent task can opt into **Durable native retry**. Declare it on
 the tool, where the knowledge of what is safe to retry actually lives:
-
 ```python
 from azure_functions_agents import (
     WorkflowRetryBackoff,
@@ -571,13 +623,62 @@ The attempt number is deliberately not exposed: Durable owns the attempt
 budget, and a replayed orchestration cannot observe it.
 
 Retry is bounded overall by an internal one-hour ceiling passed to Durable as
-`retry_timeout`. Per-attempt timeouts and continuing a workflow past a failed
-task are not part of this release.
+`retry_timeout`.
 
 Only tasks whose policy was frozen at submission time are dispatched with
 retry. A workflow started before its tool declared a policy keeps replaying
 exactly as it was scheduled, so deploying a new retry declaration never
 disturbs an in-flight workflow.
+
+### Continuing past a failed task
+
+By default a task failure fails the workflow. `execution.continue_on_error`
+lets the DAG proceed instead:
+
+```json
+{
+  "id": "enrich",
+  "type": "tool",
+  "tool": "enrich_record",
+  "args": {"record": "${load.result}"},
+  "depends_on": ["load"],
+  "execution": {"timeout": "PT30S", "continue_on_error": true}
+}
+```
+
+Continuation applies **only after the attempt budget is spent**: a retryable
+failure is retried first, and only the terminal or exhausted outcome can be
+continued. That is what keeps downstream dependency handling deterministic —
+a node is never continued while an attempt is still owed.
+
+A continued node completes with a sanitized failure result, using the same
+`failed` shape the orchestrator returns for
+[controlled runtime failures](#controlled-runtime-failures):
+
+```json
+{
+  "failed": true,
+  "error_code": "inventory_rejected",
+  "error": "The reservation was rejected.",
+  "kind": "handler_terminal"
+}
+```
+
+Downstream tasks depending on it therefore run, and a `when` predicate can
+branch on `${enrich.result.failed}` to route recovery work.
+
+`continue_on_error` cannot convert every failure into a satisfied edge. Only
+application-level failures are continuable:
+
+| `kind` | Continuable |
+|---|---|
+| `timeout`, `handler_transient` | ✅ after retries are exhausted |
+| `handler_terminal`, `execution_unknown` | ✅ |
+| `authorization` | ❌ — a denied tool or Sub Agent always fails the workflow |
+| `handler_contract` | ❌ — a malformed Activity outcome always fails the workflow |
+
+An opaque Durable failure carries no classification, so it is never continued
+either.
 
 ### Determinism contract
 
@@ -918,9 +1019,10 @@ v1 includes:
   `host.json`;
 - fixed v1 guardrails for plan size, parallelism, wait duration, active
   workflows per session, and status-list result count;
-- Durable native retry declared on a workflow tool or a task.
+- Durable native retry, a per-attempt task timeout, and `continue_on_error`
+  declared on a workflow tool or a task.
 
 v2 follow-up work includes sub-orchestrations and bounded nested agents,
-configurable caps, per-task timeout policies, HMAC-backed workflow identity,
+configurable caps, HMAC-backed workflow identity,
 blob-offloaded large outputs, an MCP Tasks bridge, richer error taxonomy, and
 storage hygiene.

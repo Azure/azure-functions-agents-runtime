@@ -32,6 +32,7 @@ class WorkflowToolMetadata:
     description: str | None = None
     public: bool = True
     retry: _package.WorkflowRetryPolicy | None = None
+    timeout: str | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class WorkflowTool:
     handler: Callable[..., Any] | None
     public: bool = True
     retry: _package.WorkflowRetryPolicy | None = None
+    timeout: str | None = None
 
 
 def get_workflow_tool_metadata(target: object) -> WorkflowToolMetadata | None:
@@ -144,6 +146,7 @@ def workflow_tool[DecoratedT](
     description: str | None = None,
     public: bool = True,
     retry: _package.WorkflowRetryPolicy | None = None,
+    timeout: str | None = None,
     **kwargs: Any,
 ) -> DecoratedT: ...
 
@@ -155,6 +158,7 @@ def workflow_tool[DecoratedT](
     description: str | None = None,
     public: bool = True,
     retry: _package.WorkflowRetryPolicy | None = None,
+    timeout: str | None = None,
     **kwargs: Any,
 ) -> Callable[[DecoratedT], DecoratedT]: ...
 
@@ -166,6 +170,7 @@ def workflow_tool[DecoratedT](
     description: str | None = None,
     public: bool = True,
     retry: _package.WorkflowRetryPolicy | None = None,
+    timeout: str | None = None,
     **kwargs: Any,
 ) -> DecoratedT | Callable[[DecoratedT], DecoratedT]:
     """Mark a ``tools/`` callable as a Dynamic Workflow tool.
@@ -179,15 +184,20 @@ def workflow_tool[DecoratedT](
 
     # Delayed to avoid importing the workflows package while the public package
     # initializer is still importing this decorator module.
-    from .workflows.schema import WorkflowRetryPolicy
+    from .workflows.schema import WorkflowRetryPolicy, WorkflowTaskExecution
 
     if retry is not None and not isinstance(retry, WorkflowRetryPolicy):
         raise TypeError("workflow_tool retry must be a WorkflowRetryPolicy")
+    if timeout is not None:
+        # Reject an unusable duration at import time rather than at the first
+        # workflow submission that happens to reference this tool.
+        WorkflowTaskExecution(timeout=timeout)
     metadata = WorkflowToolMetadata(
         name=name,
         description=description,
         public=public,
         retry=retry,
+        timeout=timeout,
     )
 
     def decorator(inner: DecoratedT) -> DecoratedT:
