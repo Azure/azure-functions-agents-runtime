@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
 from agent_framework import (
+    AgentSession,
     BaseChatClient,
     ChatMiddlewareLayer,
     ChatResponse,
     HistoryProvider,
     Message,
+    SessionContext,
 )
 
 from azure_functions_agents import runner
@@ -184,6 +187,62 @@ def test_build_agent_session_forwards_system_instructions(monkeypatch: Any) -> N
     assert captured[0]["disable_web_search"] is True
     assert captured[0]["disable_tool_auto_approval"] is True
     assert captured[0]["default_options"] == {"store": False}
+
+
+def test_build_role_agent_only_skips_approval_for_read_only_skill_tools(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Role agents can load trusted skill content without enabling script execution."""
+    captured: dict[str, Any] = {}
+    skill_dir = tmp_path / "test-skill"
+    (skill_dir / "references").mkdir(parents=True)
+    (skill_dir / "scripts").mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: test-skill\ndescription: Test skill\n---\n\n# Test skill\n",
+        encoding="utf-8",
+    )
+    (skill_dir / "references" / "guide.md").write_text("Read me.", encoding="utf-8")
+    (skill_dir / "scripts" / "run.py").write_text("print('unsafe')", encoding="utf-8")
+
+    def fake_create_harness_agent(_client: Any, **kwargs: Any) -> _FakeAgent:
+        captured.update(kwargs)
+        return _FakeAgent()
+
+    import agent_framework
+
+    monkeypatch.setattr(
+        agent_framework,
+        "create_harness_agent",
+        fake_create_harness_agent,
+        raising=False,
+    )
+
+    agent = runner._build_role_agent(
+        object(),
+        agent_instructions=None,
+        tools=[],
+        skill_paths=[skill_dir],
+        agent_name=None,
+        history_provider=None,
+        agent_configuration=AgentConfiguration(),
+    )
+    context = SessionContext(input_messages=[])
+    asyncio.run(
+        captured["skills_provider"].before_run(
+            agent=agent,
+            session=AgentSession(),
+            context=context,
+            state={},
+        )
+    )
+
+    approval_modes = {tool.name: tool.approval_mode for tool in context.tools}
+    assert approval_modes == {
+        "load_skill": "never_require",
+        "read_skill_resource": "never_require",
+        "run_skill_script": "always_require",
+    }
+    assert "skills_paths" not in captured
 
 
 def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
