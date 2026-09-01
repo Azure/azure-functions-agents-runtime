@@ -92,6 +92,7 @@ from ..transport.transport_models import (
     SandboxGroupAuthorizationError,
     SandboxGroupAuthorizationFailureReason,
     SandboxGroupBinding,
+    SandboxInvalidStateError,
     SandboxLifecyclePolicy,
     SandboxProvisioningLabels,
 )
@@ -205,6 +206,10 @@ class SessionActivationAuthorizationError(SessionActivationError):
     def __init__(self, message: str, *, status_code: int = 403) -> None:
         self.status_code = status_code if status_code in {401, 403} else 403
         super().__init__(message)
+
+
+class SessionActivationConflictError(SessionActivationError):
+    """The sandbox state does not permit the requested lifecycle operation."""
 
 
 class SessionCreationUnavailableError(SessionActivationError):
@@ -641,11 +646,10 @@ async def _activate_existing_session(
     )
     handle: SandboxSessionHandle | None = None
     try:
-        handle = await _attach_or_resume_existing_session(
+        handle = await _resume_existing_session(
             provider,
             persisted,
             expected,
-            session,
             setup_deadline,
         )
         await _within_setup_budget(
@@ -662,6 +666,11 @@ async def _activate_existing_session(
         raise SessionActivationAuthorizationError(
             SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
             status_code=exc.status_code,
+        ) from None
+    except SandboxInvalidStateError:
+        await _close_handle_if_open(handle)
+        raise SessionActivationConflictError(
+            "Sandbox lifecycle state prevents session activation."
         ) from None
     except SandboxManifestMismatchError:
         await _quarantine_detected_binding(
@@ -696,35 +705,22 @@ async def _activate_existing_session(
     )
 
 
-async def _attach_or_resume_existing_session(
+async def _resume_existing_session(
     provider: SandboxSessionProvider,
     persisted: PersistedSandboxBinding,
     expected: ExpectedSandboxManifestBinding,
-    session: DurableSessionRecord,
     setup_deadline: SetupDeadline,
 ) -> SandboxSessionHandle:
-    if session.status == "suspended":
-        return await _within_setup_budget(
-            provider.resume(
-                persisted,
-                expected,
-                readiness_timeout_seconds=setup_deadline.remaining_setup_seconds(
-                    phase=SetupPhase.SESSION_RESUME
-                ),
-            ),
-            setup_deadline,
-            phase=SetupPhase.SESSION_RESUME,
-        )
     return await _within_setup_budget(
-        provider.attach(
+        provider.resume(
             persisted,
             expected,
             readiness_timeout_seconds=setup_deadline.remaining_setup_seconds(
-                phase=SetupPhase.SESSION_ATTACH
+                phase=SetupPhase.SESSION_RESUME
             ),
         ),
         setup_deadline,
-        phase=SetupPhase.SESSION_ATTACH,
+        phase=SetupPhase.SESSION_RESUME,
     )
 
 

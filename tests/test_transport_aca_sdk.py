@@ -43,6 +43,7 @@ from azure_functions_agents.transport.transport_models import (
     SandboxGroupAuthorizationError,
     SandboxGroupBinding,
     SandboxGroupBindingError,
+    SandboxInvalidStateError,
     SandboxLifecyclePolicy,
     SandboxProvisioningError,
     SandboxProvisioningLabels,
@@ -2114,3 +2115,246 @@ def test_file_projections_preserve_sdk_string_mode() -> None:
 
     assert entry.mode == "0644"
     assert stat.mode == "0644"
+
+
+@pytest.mark.asyncio
+async def test_resume_409_with_arbitrary_wording_and_running_state_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    sandbox.state = "Running"
+    expected = _expected(sandbox.sandbox_id)
+    sandbox.transport.seed_file(SESSION_MANIFEST_PATH, json.dumps(asdict(expected)).encode())
+
+    already_running = HttpResponseError("arbitrary response wording")
+    already_running.status_code = 409
+
+    async def racing_resume(**kwargs: object) -> None:
+        del kwargs
+        raise already_running
+
+    monkeypatch.setattr(sandbox, "resume", racing_resume)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    handle = await adapter.resume(
+        PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
+        expected,
+        readiness_timeout_seconds=1,
+    )
+
+    assert [call.operation for call in sandbox.calls] == ["read_file"]
+    assert not sandbox.closed
+    await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_409_with_resuming_state_proceeds_to_manifest_handshake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    sandbox.state = "Resuming"
+    expected = _expected(sandbox.sandbox_id)
+    sandbox.transport.seed_file(SESSION_MANIFEST_PATH, json.dumps(asdict(expected)).encode())
+
+    conflict = HttpResponseError("state conflict")
+    conflict.status_code = 409
+
+    async def racing_resume(**kwargs: object) -> None:
+        del kwargs
+        raise conflict
+
+    monkeypatch.setattr(sandbox, "resume", racing_resume)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    handle = await adapter.resume(
+        PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
+        expected,
+        readiness_timeout_seconds=1,
+    )
+
+    assert [call.operation for call in sandbox.calls] == ["read_file"]
+    await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_409_ignores_misleading_running_text_when_state_is_not_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+
+    sandbox.state = "Deleting"
+    invalid_state = HttpResponseError("Current state: Running")
+    invalid_state.status_code = 409
+
+    async def deleting_resume(**kwargs: object) -> None:
+        del kwargs
+        raise invalid_state
+
+    monkeypatch.setattr(sandbox, "resume", deleting_resume)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(SandboxInvalidStateError, match="does not permit resume"):
+        await adapter.resume(
+            PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
+            expected,
+            readiness_timeout_seconds=1,
+        )
+
+    assert sandbox.closed
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_resume_409_translates_state_read_authorization_and_closes_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+
+    resume_conflict = HttpResponseError("resume conflict")
+    resume_conflict.status_code = 409
+    state_read_rejection = HttpResponseError("sensitive provider response body")
+    state_read_rejection.status_code = status_code
+    sandbox.get_error = state_read_rejection
+
+    async def conflicting_resume(**kwargs: object) -> None:
+        del kwargs
+        raise resume_conflict
+
+    monkeypatch.setattr(sandbox, "resume", conflicting_resume)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(SandboxGroupAuthorizationError) as caught:
+        await adapter.resume(
+            PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
+            expected,
+            readiness_timeout_seconds=1,
+        )
+
+    assert "sensitive provider response body" not in str(caught.value)
+    assert caught.value.status_code == status_code
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert sandbox.closed
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [None, 404])
+async def test_resume_409_with_missing_state_read_raises_sanitized_conflict_and_closes_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int | None,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+
+    resume_conflict = HttpResponseError("resume conflict")
+    resume_conflict.status_code = 409
+    if status_code is None:
+        sandbox.get_error = ResourceNotFoundError("sensitive provider response body")
+    else:
+        state_read_missing = HttpResponseError("sensitive provider response body")
+        state_read_missing.status_code = status_code
+        sandbox.get_error = state_read_missing
+
+    async def conflicting_resume(**kwargs: object) -> None:
+        del kwargs
+        raise resume_conflict
+
+    monkeypatch.setattr(sandbox, "resume", conflicting_resume)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(SandboxInvalidStateError) as caught:
+        await adapter.resume(
+            PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
+            expected,
+            readiness_timeout_seconds=1,
+        )
+
+    assert "sensitive provider response body" not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert sandbox.closed
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_non_409_error_propagates_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+
+    server_error = HttpResponseError("internal server error")
+    server_error.status_code = 500
+
+    async def failing_resume(**kwargs: object) -> None:
+        del kwargs
+        raise server_error
+
+    monkeypatch.setattr(sandbox, "resume", failing_resume)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(HttpResponseError, match="internal server error"):
+        await adapter.resume(
+            PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
+            expected,
+            readiness_timeout_seconds=1,
+        )
+
+    assert sandbox.closed
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_409_state_read_errors_are_typed_sanitized_and_close_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+
+    rejection = HttpResponseError("resume conflict")
+    rejection.status_code = 409
+    sensitive_trace_id = "abc123-trace-id"
+    state_read_error = HttpResponseError(f"traceId={sensitive_trace_id}")
+    state_read_error.status_code = 500
+    sandbox.get_error = state_read_error
+
+    async def failing_resume(**kwargs: object) -> None:
+        del kwargs
+        raise rejection
+
+    monkeypatch.setattr(sandbox, "resume", failing_resume)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(SandboxProvisioningError, match="Sandbox state lookup failed") as caught:
+        await adapter.resume(
+            PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
+            expected,
+            readiness_timeout_seconds=1,
+        )
+
+    assert sensitive_trace_id not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert sandbox.closed
+    await adapter.close()
