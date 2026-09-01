@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     StrictBool,
@@ -14,6 +15,19 @@ from pydantic import (
 )
 
 type EndpointAuthMode = Literal["function", "admin", "anonymous", "entra"]
+
+
+def _reject_boolean_token_limit(value: object) -> object:
+    if isinstance(value, bool):
+        raise ValueError("token limits must be integers")
+    return value
+
+
+type PositiveTokenLimit = Annotated[
+    int,
+    BeforeValidator(_reject_boolean_token_limit),
+    Field(gt=0),
+]
 
 
 class McpFilter(BaseModel):
@@ -225,11 +239,37 @@ class SystemToolsAgentOverride(BaseModel):
     web_request: bool | None = None
 
 
+class AgentFrameworkCompactionConfig(BaseModel):
+    """Microsoft Agent Framework conversation-compaction settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_context_window_tokens: PositiveTokenLimit | None = None
+
+
+class AgentFrameworkConfiguration(BaseModel):
+    """Microsoft Agent Framework-specific agent configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    compaction: AgentFrameworkCompactionConfig | None = None
+
+
+class AgentConfiguration(BaseModel):
+    """Portable and framework-specific agent configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_output_tokens: PositiveTokenLimit | None = None
+    agent_framework: AgentFrameworkConfiguration | None = None
+
+
 class GlobalConfig(BaseModel):
     """Top-level agents.config.yaml schema."""
 
     model_config = ConfigDict(extra="forbid")
 
+    agent_configuration: AgentConfiguration | None = None
     system_tools: SystemToolsConfig | None = None
     model: str | None = None
     timeout: float | None = None
@@ -252,6 +292,7 @@ class AgentSpec(BaseModel):
 
     name: str
     description: str
+    agent_configuration: AgentConfiguration | None = None
     trigger: TriggerSpec | None = None
     builtin_endpoints: bool | BuiltinEndpointsConfig | None = None
     model: str | None = None
@@ -310,6 +351,7 @@ class ResolvedAgent(BaseModel):
     substitute_variables: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
     source_file: str | None = None
+    agent_configuration: AgentConfiguration = Field(default_factory=AgentConfiguration)
 
 
 GlobalConfig.model_rebuild()
@@ -376,6 +418,7 @@ TRIGGER_TYPES: dict[str, dict[str, Any]] = {
 # markdown formatting and internal document links.
 
 GLOBAL_CONFIG_DESCRIPTIONS: dict[str, str] = {
+    "agent_configuration": "Portable and SDK-specific defaults inherited by every agent. [Details](./front-matter-spec.md#agent_configuration)",
     "system_tools": "System-level tools configuration. [Details](#global-system_tools)",
     "model": "Default LLM model identifier for all agents",
     "timeout": "Default execution timeout in seconds",
@@ -383,6 +426,7 @@ GLOBAL_CONFIG_DESCRIPTIONS: dict[str, str] = {
 }
 
 GLOBAL_CONFIG_DEFAULTS: dict[str, str] = {
+    "agent_configuration": "`null`",
     "system_tools": "`{}`",
     "model": "Resolved from env/provider",
     "timeout": "`900`",
@@ -410,6 +454,7 @@ AGENT_SPEC_REQUIRED_DESCRIPTIONS: dict[str, str] = {
 }
 
 AGENT_SPEC_OPTIONAL_DESCRIPTIONS: dict[str, str] = {
+    "agent_configuration": "Portable and SDK-specific execution settings. Recursively inherits global values. [Details](./front-matter-spec.md#agent_configuration)",
     "builtin_endpoints": "Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints)",
     "model": "Override LLM model for this agent",
     "timeout": "Override execution timeout (seconds) for this agent",

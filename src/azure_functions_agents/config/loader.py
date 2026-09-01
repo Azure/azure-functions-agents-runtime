@@ -105,19 +105,17 @@ def _normalize_agent_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 def _format_validation_error(source_file: Path, exc: ValidationError) -> ValueError:
-    error = exc.errors()[0]
-    location = (
-        ".".join(str(part) for part in error.get("loc", ()) if part != "__root__") or "<root>"
-    )
-    message = error.get("msg", str(exc))
+    location, message = _most_specific_validation_issue(exc)
     return ValueError(
         f"{source_file}: field `{location}`: {message}. See {_FRONTMATTER_SCHEMA_LINK}"
     )
 
 
-def _first_validation_issue(exc: ValidationError) -> tuple[str, str]:
-    error = exc.errors()[0]
-    location = ".".join(str(part) for part in error.get("loc", ()) if part != "__root__") or "<root>"
+def _most_specific_validation_issue(exc: ValidationError) -> tuple[str, str]:
+    error = max(exc.errors(), key=lambda issue: len(issue.get("loc", ())))
+    location = (
+        ".".join(str(part) for part in error.get("loc", ()) if part != "__root__") or "<root>"
+    )
     reason = str(error.get("msg", str(exc))).strip()
     return location, reason
 
@@ -158,7 +156,7 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
     try:
         return AgentSpec.model_validate(normalized)
     except ValidationError as exc:
-        field, reason = _first_validation_issue(exc)
+        field, reason = _most_specific_validation_issue(exc)
         logger.error(
             "frontmatter_validation_error: file=%s field=%s reason=%s schema=%s",
             source_file,

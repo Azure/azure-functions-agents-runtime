@@ -8,3 +8,7 @@ system_tools:
 # Default runtime configuration
 model: $FOUNDRY_MODEL
 timeout: 900
+
+# Portable defaults inherited by each agent
+agent_configuration:
+  max_output_tokens: 4096

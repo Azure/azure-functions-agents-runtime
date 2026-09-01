@@ -15,8 +15,10 @@ from .client_manager import get_client_manager
 from .composition import BindingAgentEntry
 from .config.env import runtime_env_value
 from .config.merge import DEFAULT_TIMEOUT
-from .config.schema import WebRequestConfig
+from .config.schema import AgentConfiguration, WebRequestConfig
 from .runner import (
+    AgentFunctionTool,
+    _assemble_agent_inputs,
     _build_chat_options_from_environment,
     _build_history_provider,
     _build_role_agent,
@@ -65,7 +67,7 @@ class AgentBlueprint:
         config = self.entry.config
         chat_client, _ = get_client_manager().build_chat_client_with_target(config.model)
         excluded = set(config.tools.exclude) if config.tools is not None else set()
-        user_tools = [
+        user_tools: list[AgentFunctionTool] = [
             tool
             for tool in self.entry.discovery.user_tools
             if str(getattr(tool, "name", "") or "") not in excluded
@@ -91,26 +93,34 @@ class AgentBlueprint:
                 fallback_session_id=invocation.invocation_id if invocation else None,
             )
 
-        return _build_role_agent(
-            chat_client,
+        resolved_tools, effective_instructions = _assemble_agent_inputs(
             instructions=self.entry.definition.instructions,
             tools=user_tools,
             mcp_tools=[
                 definition.build_tool()
                 for _, definition in self.entry.discovery.mcp_servers
             ],
-            skill_paths=[path for _, path in self.entry.discovery.skills],
             sandbox_tools=sandbox_tools,
             web_request_tools=web_request_tools,
             system_addendum=None,
             workflow_enabled=False,
             workflow_durable_client=None,
+            workflow_agent_slug=None,
             agent_name=self.slug,
             resolved_id=invocation.invocation_id if invocation else None,
+            delegate_tools=None,
+            workflow_policy=None,
+        )
+        return _build_role_agent(
+            chat_client,
+            agent_instructions=effective_instructions,
+            tools=resolved_tools,
+            skill_paths=[path for _, path in self.entry.discovery.skills],
+            agent_name=self.slug,
             history_provider=(
                 _build_history_provider() if enable_persistent_history else None
             ),
-            delegate_tools=None,
+            agent_configuration=config.agent_configuration or AgentConfiguration(),
         )
 
 

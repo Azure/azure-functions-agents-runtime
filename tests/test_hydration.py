@@ -156,8 +156,8 @@ def test_blueprint_build_materializes_fresh_mutable_dependencies(
     assert len(clients) == len(mcp_tools) == len(histories) == len(builds) == 2
     assert builds[0]["client"] is not builds[1]["client"]
     assert builds[0]["tools"] is not builds[1]["tools"]
-    assert builds[0]["mcp_tools"][0] is not builds[1]["mcp_tools"][0]
-    assert builds[0]["web_request_tools"][0] is not builds[1]["web_request_tools"][0]
+    assert builds[0]["tools"][1] is not builds[1]["tools"][1]
+    assert builds[0]["tools"][2] is not builds[1]["tools"][2]
     assert builds[0]["history_provider"] is not builds[1]["history_provider"]
 
 

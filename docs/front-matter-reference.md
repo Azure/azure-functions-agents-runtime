@@ -14,6 +14,7 @@ Optional file in the root directory. All properties are optional.
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
+| `agent_configuration` | object | No | `null` | Portable and framework-specific defaults inherited by every agent. [Details](./front-matter-spec.md#agent_configuration) |
 | `system_tools` | object | No | `{}` | System-level tools configuration. [Details](#global-system_tools) |
 | `model` | string | No | Resolved from env/provider | Default LLM model identifier for all agents |
 | `timeout` | number | No | `900` | Default execution timeout in seconds |
@@ -70,6 +71,7 @@ YAML front matter at the top of each agent markdown file.
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
+| `agent_configuration` | object | No | `null` | Portable and framework-specific execution settings. Recursively inherits global values. [Details](./front-matter-spec.md#agent_configuration) |
 | `builtin_endpoints` | boolean \| object | No | `false` | Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints) |
 | `model` | string | No | Inherited from global | Override LLM model for this agent |
 | `timeout` | number | No | Inherited from global | Override execution timeout (seconds) for this agent |
@@ -124,6 +126,39 @@ Enable built-in endpoints for interactive testing, programmatic access, and agen
 **Note:** `debug_chat_ui: true` automatically enables `chat_api: true`
 
 **See:** [Front Matter Spec - builtin_endpoints](./front-matter-spec.md#builtin_endpoints)
+
+### Global and agent: `agent_configuration`
+
+Configure portable output limits and Microsoft Agent Framework-specific conversation compaction:
+
+```yaml
+agent_configuration:
+  max_output_tokens: 4096
+  agent_framework:
+    compaction:
+      max_context_window_tokens: 8192
+```
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `max_output_tokens` | PositiveTokenLimit | No | `null` | Positive model output-token limit. May be configured without compaction. |
+| `agent_framework` | object | No | `{}` | Microsoft Agent Framework-specific settings. |
+
+#### `agent_configuration.agent_framework`
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `compaction` | object | No | `{}` | Microsoft Agent Framework conversation-compaction settings. |
+
+#### `agent_configuration.agent_framework.compaction`
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `max_context_window_tokens` | PositiveTokenLimit | No | `null` | Positive total context budget used by conversation compaction. Requires an effective `max_output_tokens` smaller than this value. |
+
+Agent values recursively inherit global values. Explicit `null` clears an inherited leaf or subtree. When context compaction is configured, the effective `max_output_tokens` must be present and less than `max_context_window_tokens`.
+
+**See:** [Front Matter Spec - agent_configuration](./front-matter-spec.md#agent_configuration)
 
 ### Agent: `system_tools`
 

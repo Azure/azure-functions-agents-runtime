@@ -11,6 +11,9 @@ from types import SimpleNamespace
 from typing import Any
 
 from azure_functions_agents.config.schema import (
+    AgentConfiguration,
+    AgentFrameworkCompactionConfig,
+    AgentFrameworkConfiguration,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     EndpointAuthConfig,
@@ -984,3 +987,108 @@ def test_workflow_http_handler_rejects_invalid_schema_response(
     )
     assert response.status_code == 500
     assert json.loads(response.body)["error"] == "Agent response validation failed"
+
+
+# ---------------------------------------------------------------------------
+# agent_configuration forwarding
+# ---------------------------------------------------------------------------
+
+
+def _resolved_agent_with_configuration(
+    agent_configuration: AgentConfiguration,
+) -> ResolvedAgent:
+    source = Path(__file__).resolve()
+    return ResolvedAgent(
+        name="HarnessAgent",
+        description="desc",
+        trigger=None,
+        instructions="Be helpful",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(),
+        model=None,
+        timeout=30.0,
+        enabled_mcp_names=[],
+        enabled_skills_names=[],
+        tool_filter=ToolsFilter(),
+        tools_disabled=False,
+        sandbox_config=None,
+        input_schema=None,
+        response_schema=None,
+        response_example=None,
+        metadata={},
+        source_file=str(source),
+        agent_configuration=agent_configuration,
+    )
+
+
+def test_http_handler_forwards_agent_configuration(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+    config = AgentConfiguration(
+        max_output_tokens=4_096,
+        agent_framework=AgentFrameworkConfiguration(
+            compaction=AgentFrameworkCompactionConfig(max_context_window_tokens=64_000)
+        ),
+    )
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return SimpleNamespace(content="ok", session_id="s1")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_http_agent_handler(
+        _resolved_agent_with_configuration(config), AgentCapabilities()
+    )
+    asyncio.run(handler(DummyRequest({"prompt": "hi"})))
+
+    assert captured.get("agent_configuration") is config
+
+
+def test_http_handler_forwards_empty_agent_configuration(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+    config = AgentConfiguration()
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return SimpleNamespace(content="ok", session_id="s1")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_http_agent_handler(
+        _resolved_agent_with_configuration(config), AgentCapabilities()
+    )
+    asyncio.run(handler(DummyRequest({"prompt": "hi"})))
+
+    assert captured.get("agent_configuration") is config
+
+
+def test_non_http_handler_forwards_agent_configuration(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+    config = AgentConfiguration()
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return SimpleNamespace(content="ok", session_id="s1", tool_calls=[])
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.uuid.uuid4",
+        lambda: SimpleNamespace(hex="test-session"),
+    )
+
+    handler = make_agent_handler(
+        _resolved_agent_with_configuration(config), "timer_trigger", AgentCapabilities()
+    )
+    asyncio.run(handler({}))
+
+    assert captured.get("agent_configuration") is config
+

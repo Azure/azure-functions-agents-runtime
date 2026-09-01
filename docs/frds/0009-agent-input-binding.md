@@ -1,5 +1,5 @@
 ---
-frd: 0008
+frd: 0009
 title: Python markdown agent binding
 status: Finalized
 author: hallvictoria
@@ -10,7 +10,7 @@ pull_requests: []
 branch: hallvictoria/agent-binding
 ---
 
-# FRD 0008 — Python markdown agent binding
+# FRD 0009 — Python markdown agent binding
 
 ## 1. Summary
 
