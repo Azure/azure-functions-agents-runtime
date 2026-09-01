@@ -110,6 +110,11 @@ except ImportError:
 
 from ._function_tool import tool, workflow_tool  # noqa: E402
 from .app import create_function_app  # noqa: E402
+from .bindings import (  # noqa: E402
+    AiApp,
+    DurableAiApp,
+    markdown_agent,
+)
 from .client_manager import (  # noqa: E402
     ClientManager,
     MAFClientManager,
@@ -118,6 +123,7 @@ from .client_manager import (  # noqa: E402
     shutdown_client_manager,
 )
 from .config.paths import resolve_config_dir, set_app_root  # noqa: E402
+from .durable import DurableAgentContext  # noqa: E402
 from .runner import (  # noqa: E402
     DEFAULT_MODEL,
     DEFAULT_TIMEOUT,
@@ -132,13 +138,17 @@ __all__ = [
     "DEFAULT_MODEL",
     "DEFAULT_TIMEOUT",
     "AgentResult",
+    "AiApp",
     "ClientManager",
+    "DurableAgentContext",
+    "DurableAiApp",
     "MAFClientManager",
     "__version__",
     "create_function_app",
     "create_sandbox_tools",
     "create_web_request_tools",
     "get_client_manager",
+    "markdown_agent",
     "resolve_config_dir",
     "run_agent",
     "run_agent_stream",

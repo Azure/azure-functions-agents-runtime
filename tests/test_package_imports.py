@@ -25,13 +25,17 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "DEFAULT_MODEL",
         "DEFAULT_TIMEOUT",
         "AgentResult",
+        "AiApp",
         "ClientManager",
+        "DurableAgentContext",
+        "DurableAiApp",
         "MAFClientManager",
         "__version__",
         "create_function_app",
         "create_sandbox_tools",
         "create_web_request_tools",
         "get_client_manager",
+        "markdown_agent",
         "resolve_config_dir",
         "run_agent",
         "run_agent_stream",
@@ -43,6 +47,10 @@ def test_public_exports_include_only_supported_preview_api() -> None:
     ]
     assert not hasattr(azure_functions_agents, "run_copilot_agent")
     assert not hasattr(azure_functions_agents, "run_copilot_agent_stream")
+    assert not hasattr(azure_functions_agents, "AiAgent")
+    assert not hasattr(azure_functions_agents, "SyncAiAgent")
+    assert not hasattr(azure_functions_agents, "shutdown_agent_cache")
+    assert not hasattr(azure_functions_agents, "shutdown_agent_runtime")
 
 
 def test_tool_shim_is_callable() -> None:

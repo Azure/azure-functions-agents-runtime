@@ -142,6 +142,98 @@ func start
 
 Your agent is now running at `http://localhost:7071/agents/main/` with a built-in chat UI, HTTP API (`/agents/main/chat`, `/agents/main/chatstream`), and MCP tool exposed through the Functions MCP endpoint (`/runtime/webhooks/mcp`).
 
+## Hybrid Functions with markdown agents
+
+Use `markdown_agent` when an existing Function should keep its trigger and deterministic logic while invoking a markdown-defined agent in process. The smart decorator must be innermost, immediately above the handler:
+
+```python
+import json
+
+from agent_framework import Agent
+from azurefunctions.extensions.http.fastapi import Request, Response
+
+from azure_functions_agents import AiApp
+
+app = AiApp()
+
+
+@app.route(route="orders/{orderId}", methods=["POST"])
+@app.markdown_agent(arg_name="order_agent", agent_name="order-fulfillment")
+async def process_order(
+  req: Request,
+  order_agent: Agent,
+) -> Response:
+  response = await order_agent.run(
+    json.dumps(
+      {
+        "order_id": req.path_params["orderId"],
+        "order": await req.json(),
+        "task": "validate",
+      }
+    )
+  )
+  return Response(content=response.text)
+```
+
+Existing `func.FunctionApp()` instances can use `markdown_agent(app, ...)` instead. `create_function_app()` now returns an enhanced `AiApp` or `DurableAiApp`, preserving its existing declarative routes and triggers while allowing hybrid handlers to be added.
+
+`agent_name` is the source filename stem or normalized slug, not the front-matter display name. For bindings, the agent file requires only string `name` and `description` fields; those fields and the markdown instructions follow the standard environment-substitution behavior, including `substitute_variables: false`. Other per-agent front-matter fields are ignored. Model, timeout, system tools, discovered tools, skills, and MCP servers come from app-level configuration.
+
+Capability assets are discovered app-wide before global tool exclusions are applied.
+Because smart-binding front matter has no per-agent capability filters, any malformed
+tool, skill, or MCP definition prevents all smart bindings in that app from
+registering. Fix or remove the failing asset rather than starting with a silently
+partial capability inventory.
+
+Function and activity handlers using `markdown_agent` must be declared with `async def`. They receive a raw `agent_framework.Agent` that is built and entered for that Function invocation, then closed when the handler returns, raises, or is cancelled. The app caches only an immutable blueprint and reusable dependency descriptions, never the live Agent or its MCP tools. These handlers control sessions, run options, middleware, streaming, and model-call timeouts; the Azure Functions invocation timeout remains the outer bound. Do not retain the Agent after the handler returns.
+
+Durable apps use `DurableAiApp` or a caller-owned `df.DFApp`. Applying `markdown_agent`
+to an `async def` activity handler injects a raw Agent without a mode selector.
+Orchestrators registered on `DurableAiApp` receive a `DurableAgentContext` and can
+schedule a stateless Agent call without authoring an activity:
+
+```python
+import azure.durable_functions as df
+
+from azure_functions_agents import DurableAgentContext, DurableAiApp
+
+app = DurableAiApp()
+
+
+@app.orchestration_trigger(context_name="context")
+def order_orchestrator(context: DurableAgentContext):
+  assessment = yield context.call_agent(
+    "order-fulfillment",
+    {"order": context.get_input(), "task": "assess risk"},
+  )
+  return (yield context.call_agent(
+    "order-fulfillment",
+    {"assessment": assessment, "task": "create a plan"},
+    retry_options=df.RetryOptions(
+      first_retry_interval_in_milliseconds=5_000,
+      max_number_of_attempts=3,
+    ),
+  ))
+```
+
+`call_agent()` accepts a string or JSON-safe value and returns response text. It only
+schedules Durable work during orchestration replay; agent lookup, hydration, model
+calls, and tools run in the indexed
+`azure_functions_agents_run_markdown_agent` activity. Every attempt uses a fresh Agent
+with persistent history disabled, so pass prior results explicitly as shown above.
+The model timeout applies inside each activity attempt, the Functions host timeout is
+the outer bound, and optional `RetryOptions` schedules complete fresh attempts.
+
+Use an explicit `@app.activity_trigger` plus `@app.markdown_agent` when the application
+must own the activity name, structured result, transcript selection, session behavior,
+or idempotency contract. Caller-owned `df.DFApp` instances use this explicit pattern;
+transparent context wrapping is provided by `DurableAiApp`.
+
+See [`samples/hybrid-function-agent/`](samples/hybrid-function-agent/) for an `AiApp` with HTTP and queue handlers, and [`samples/hybrid-durable-agent/`](samples/hybrid-durable-agent/) for a `DurableAiApp` using `call_agent()` from an orchestrator.
+Both samples demonstrate a production-oriented handoff: deterministic Python validates
+and normalizes orders, calculates trusted monetary fields, derives review signals, and
+removes unnecessary PII before the agent performs contextual assessment or planning.
+
 ## Features
 
 **Architecture overview:** see [`docs/architecture.md`](docs/architecture.md) for the module map and data flow pipeline.

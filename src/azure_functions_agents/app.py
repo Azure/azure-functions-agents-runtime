@@ -6,12 +6,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-import azure.durable_functions as df
 import azure.functions as func
 
 from ._logger import logger
 from ._observability import configure_observability
 from ._source_marker import source_marker
+from .bindings import AiApp, DurableAiApp
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
@@ -212,9 +212,9 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         workflow_handler_catalog,
     )
     app: func.FunctionApp = (
-        df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
+        DurableAiApp(http_auth_level=func.AuthLevel.FUNCTION, app_root=resolved_root)
         if workflow_agent_policies
-        else func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+        else AiApp(http_auth_level=func.AuthLevel.FUNCTION, app_root=resolved_root)
     )
 
     # --- Two-pass composition, pass 2 (FRD 0007 §4.2): mutate `app` --------------------

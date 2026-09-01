@@ -90,6 +90,25 @@ name — for example `server.address` for the session-pool host. MAF keeps emitt
 
 ## Spans and attributes we emit today
 
+### Span `agent.binding.invoke <slug>`
+
+One span surrounds each async smart-binding handler invocation, including fresh Agent hydration, all customer-controlled calls on the raw Agent, and Agent closure. MAF model and tool spans inherit the active Functions trace context. Attributes include `gen_ai.agent.name`, the configured `gen_ai.request.model`, `faas.name` and `faas.invocation_id` when a Functions `Context` is present, `af.lifecycle_stage=agent_run`, and `af.binding.outcome` (`success`, `cancelled`, or `error`). Async customer code owns model-call timeout policy, so the binding does not emit a timeout outcome for raw Agent calls.
+
+### Span `agent.binding.run <slug>`
+
+One span surrounds each runtime-managed `run_blueprint()` call. This includes the
+internal activity scheduled by `DurableAgentContext.call_agent()`. It records
+`gen_ai.agent.name`, `gen_ai.request.model`, `faas.name`, `faas.invocation_id`, and
+`durable.instance_id` when available, plus `af.lifecycle_stage=agent_run` and
+`af.binding.outcome` (`success`, `cancelled`, `timeout`, or `error`). MAF model and tool
+spans are nested below it.
+
+Durable orchestrator replay only rebuilds the recorded activity schedule; it does not
+run the internal activity or emit another managed Agent span. A Durable retry is a new
+activity invocation with a new `faas.invocation_id` and the same
+`durable.instance_id`. Inputs and response text are not copied into span attributes by
+this path, regardless of sensitive-data settings.
+
 ### Cross-cutting `af.*` (any runtime span)
 
 | Attribute | Meaning |

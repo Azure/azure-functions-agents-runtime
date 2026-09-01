@@ -345,6 +345,32 @@ def _build_chat_options_from_environment() -> dict[str, Any] | None:
     return {"reasoning": reasoning}
 
 
+# Agent + session construction
+# ---------------------------------------------------------------------------
+
+
+def _build_skills_provider(skill_paths: list[Path] | None) -> Any:
+    """Return a :class:`SkillsProvider` for the given skill directories, or ``None``."""
+    if not skill_paths:
+        return None
+    # ``SkillsProvider`` is marked experimental in MAF; constructing it emits an
+    # ``ExperimentalWarning``. We acknowledge the experimental status — it is
+    # the documented integration point for SKILL.md-based progressive disclosure —
+    # and suppress just that one warning so cold-start logs stay quiet.
+    import warnings
+
+    from agent_framework import SkillsProvider
+    from agent_framework._feature_stage import ExperimentalWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=ExperimentalWarning)
+        return SkillsProvider.from_paths(
+            list(skill_paths),
+            disable_load_skill_approval=True,
+            disable_read_skill_resource_approval=True,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Chat-time sub-agent delegation (FRD 0007)
 # ---------------------------------------------------------------------------
