@@ -343,6 +343,88 @@ async def test_exhaustion_round_trips_only_this_runtimes_private_payload() -> No
     assert decode_durable_retry_failure("work", RuntimeError("boom")) is None
 
 
+def _private_failure_payload(outcome: Any, *, version: int = 1, **extra: Any) -> str:
+    """Serialize a private exhaustion payload the way ``raise_for_durable_retry`` does."""
+    return json.dumps(
+        {"version": version, "outcome": outcome, **extra},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _durable_failure(message: str) -> TaskFailedError:
+    """Wrap ``message`` so it reaches the decoder's payload-inspection branch.
+
+    Durable rebuilds the failure from the raised exception's type and text, so
+    constructing it from a real ``DurableRetryableActivityError`` is what makes
+    ``details.is_caused_by()`` accept it — every case below therefore fails on
+    the payload itself, not on the earlier type guard.
+    """
+    return TaskFailedError("Activity failed.", DurableRetryableActivityError(message))
+
+
+_RETRYABLE_OUTCOME = {
+    "id": "work",
+    "ok": False,
+    "failure": {
+        "error_code": "service_busy",
+        "error": "Try again.",
+        "kind": "handler_transient",
+        "retryable": True,
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("malformed json", "not json at all"),
+        (
+            "wrong payload version",
+            _private_failure_payload(_RETRYABLE_OUTCOME, version=2),
+        ),
+        (
+            "extra payload key",
+            _private_failure_payload(_RETRYABLE_OUTCOME, unexpected="value"),
+        ),
+        (
+            "success outcome",
+            _private_failure_payload({"id": "work", "ok": True, "result": {"done": True}}),
+        ),
+        (
+            "non-retryable outcome",
+            _private_failure_payload(
+                {
+                    "id": "work",
+                    "ok": False,
+                    "failure": {
+                        "error_code": "order_rejected",
+                        "error": "The order was rejected.",
+                        "kind": "handler_terminal",
+                        "retryable": False,
+                    },
+                }
+            ),
+        ),
+    ],
+)
+def test_decoder_refuses_payloads_it_did_not_write(case: str, message: str) -> None:
+    """Anything but this runtime's own retryable payload keeps the raw failure."""
+    failure = _durable_failure(message)
+
+    # Guard the guard: each case must actually reach the payload inspection.
+    assert failure.details.is_caused_by(DurableRetryableActivityError), case
+    assert decode_durable_retry_failure("work", failure) is None, case
+
+
+def test_decoder_accepts_its_own_retryable_payload() -> None:
+    """The positive control for the rejection cases above."""
+    failure = _durable_failure(_private_failure_payload(_RETRYABLE_OUTCOME))
+
+    assert decode_durable_retry_failure("work", failure) == _RETRYABLE_OUTCOME["failure"]
+
+
 @pytest.mark.asyncio
 async def test_task_context_exposes_an_attempt_stable_idempotency_key() -> None:
     observed: list[Any] = []
@@ -363,6 +445,40 @@ async def test_task_context_exposes_an_attempt_stable_idempotency_key() -> None:
 
 
 @pytest.mark.asyncio
+async def test_context_is_reset_when_a_retryable_failure_becomes_the_marker() -> None:
+    """The contextvar must not leak when the handler exits via the retry marker."""
+    from azure_functions_agents import WorkflowRetryableError
+
+    observed: list[Any] = []
+
+    def handler(args: dict[str, Any]) -> None:
+        observed.append(current_workflow_task_context())
+        raise WorkflowRetryableError("service_busy", "Try again.")
+
+    with pytest.raises(DurableRetryableActivityError):
+        await invoke_policy_handler(handler, {}, task=_native_task(), target="publish")
+
+    assert observed[0] is not None
+    assert current_workflow_task_context() is None
+
+
+@pytest.mark.asyncio
+async def test_cancellation_propagates_unchanged_and_resets_the_context() -> None:
+    """Cancellation is not an application failure, so it must not become a retry."""
+    observed: list[Any] = []
+
+    def handler(args: dict[str, Any]) -> None:
+        observed.append(current_workflow_task_context())
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await invoke_policy_handler(handler, {}, task=_native_task(), target="publish")
+
+    assert observed[0] is not None
+    assert current_workflow_task_context() is None
+
+
+@pytest.mark.asyncio
 async def test_malformed_persisted_policy_is_a_terminal_contract_failure() -> None:
     task = _native_task()
     task["execution"]["durable_retry_policy"]["max_number_of_attempts"] = 2
@@ -371,6 +487,49 @@ async def test_malformed_persisted_policy_is_a_terminal_contract_failure() -> No
     outcome = await activity({**task, "tool": "publish", "args": {}, **_AGENT})
 
     assert outcome["failure"]["kind"] == "handler_contract"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "policy_overrides", "execution_overrides"),
+    [
+        # The ceiling is the runtime's own bounded-execution guard, so a history
+        # claiming a different one was not written by this contract.
+        ("retry timeout is not the runtime ceiling", {"retry_timeout_ms": 60_000}, {}),
+        (
+            "multi-attempt policy has no first interval",
+            {"first_retry_interval_ms": 0},
+            {},
+        ),
+        (
+            "maximum interval is below the first",
+            {"first_retry_interval_ms": 4_000, "max_retry_interval_ms": 1_000},
+            {},
+        ),
+        (
+            "single attempt still configures backoff",
+            {"max_number_of_attempts": 1},
+            {"max_attempts": 1},
+        ),
+    ],
+)
+async def test_inconsistent_persisted_schedule_is_a_terminal_contract_failure(
+    case: str,
+    policy_overrides: dict[str, Any],
+    execution_overrides: dict[str, Any],
+) -> None:
+    """A self-inconsistent persisted policy fails closed instead of being repaired."""
+    task = _native_task()
+    task["execution"].update(execution_overrides)
+    task["execution"]["durable_retry_policy"].update(policy_overrides)
+    activity = _tool_activity({"publish"})
+
+    outcome = await activity({**task, "tool": "publish", "args": {}, **_AGENT})
+
+    assert outcome["ok"] is False, case
+    assert outcome["failure"]["kind"] == "handler_contract", case
+    # Terminal, so Durable is never asked to retry a history it cannot trust.
+    assert outcome["failure"]["retryable"] is False, case
 
 
 @pytest.mark.asyncio
