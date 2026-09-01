@@ -41,10 +41,7 @@ _JSON_THROTTLE_MAX_ATTEMPTS = 4
 _JSON_THROTTLE_STATUSES = frozenset({429, 503})
 _FRONTEND_UNAVAILABLE_STATUSES = frozenset({502, 503})
 _FRONTEND_UNAVAILABLE_RETRY_SECONDS = 2.0
-# Every 503 this service emits asks for two seconds; ten leaves headroom without
-# admitting a wait long enough to exhaust a caller's own budget. The 120-second
-# Retry-After belongs to the 504 setup-timeout path, which is a real outcome
-# these suites assert on and is deliberately not retried here.
+# A 504 is an asserted setup outcome, not a retryable frontend response.
 _JSON_THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS = 10.0
 
 
@@ -473,7 +470,6 @@ async def json_request(
             return status, body, resp_headers
         await asyncio.sleep(delay)
 
-    # Unreachable — the loop always returns.
     raise AssertionError("unreachable")
 
 
@@ -793,6 +789,5 @@ async def _json_body(response: ClientResponse) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise AssertionError("Expected a JSON object response.")
     return payload
-
 
 

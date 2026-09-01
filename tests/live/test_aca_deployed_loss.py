@@ -496,11 +496,7 @@ async def _wait_for_loss_projection(
             expected_session_id=accepted.session_id,
             expected_run_id=accepted.run_id,
         ) and status_code == 200:
-            # Re-read the public status. The one above was captured before the
-            # table reads, so it can predate the terminal write the gate just
-            # observed and report a pre-loss state. The public projection is
-            # derived from the run record, so once the table is terminal this
-            # read is deterministic rather than another race.
+            # Re-read after durable terminal evidence to avoid a stale projection.
             status_code, status, _ = await json_request(
                 client,
                 "GET",

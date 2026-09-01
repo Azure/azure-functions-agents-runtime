@@ -363,8 +363,6 @@ async def test_targeted_reconciliation_does_not_use_timer_pass_deadline(
 
     await runtime.reconcile_session(partition, "targeted-session")
 
-    # The deadline is asserted, not just accepted: reconciling without one must
-    # forward None rather than borrow the timer pass deadline.
     assert calls == [(partition, "targeted-session", None)]
 
 

@@ -884,8 +884,6 @@ class AcaSandboxExecutionBackend:
                 SessionActivationConflictError,
                 SessionActivationTransientError,
             ):
-                # Let event preflight surface the same structured management
-                # response rather than silently ending through the fallback below.
                 raise
             except (
                 SessionActivationError,

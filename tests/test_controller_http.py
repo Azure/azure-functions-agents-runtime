@@ -641,7 +641,6 @@ async def test_launch_indeterminate_returns_committed_202_with_executing_phase()
     assert async_response.body["run_id"] == "run-1"
     assert all(k in async_response.body for k in urls)
 
-    # Sync caller also gets 202 (not 504); run is committed and may be executing
     assert sync_response.status_code == 202
     assert sync_response.body["admission"] == "committed"
     assert sync_response.body["phase"] == "executing"
@@ -995,14 +994,7 @@ async def test_tombstoned_abandoned_run_keeps_status_but_result_is_gone() -> Non
     assert result_response.status_code == 410
 
 
-# ---------------------------------------------------------------------------
-# Cross-layer regression: a provider status must reach the caller as an HTTP status.
-#
-# The transport tests prove classification and the handler tests prove response
-# shape, but the defect this guards against lived in the seam between them: the
-# transport raised a typed error that nothing on the request path caught, so it
-# escaped as an untyped 500. Testing either side alone would have stayed green.
-# ---------------------------------------------------------------------------
+
 
 
 class _ProviderBoundBackend:

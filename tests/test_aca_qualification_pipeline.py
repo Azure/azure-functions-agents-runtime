@@ -303,9 +303,17 @@ class TestAcaStageGating:
 
     def test_aca_settings_use_basic_pipeline_variables_not_variable_groups(self) -> None:
         pipeline = self._e2e_pipeline()
-        assert not re.search(r"(?m)^\s*-\s*group\s*:", pipeline)
-        assert "ordinary variable directly on this" in pipeline
-        assert "shared YAML variable templates, not Azure DevOps variable groups" in pipeline
+        template = (
+            Path(__file__).resolve().parents[1]
+            / "eng"
+            / "templates"
+            / "official"
+            / "jobs"
+            / "aca-qualify.yml"
+        ).read_text(encoding="utf-8")
+        assert not re.search(r"(?m)^\s*-\s*group\s*:", pipeline + template)
+        assert "$(ACA_DEPLOYED_APP_SITE_NAME_PY313)" in template
+        assert "$(ACA_SANDBOX_REGION)" in template
 
     def test_every_aca_stage_declares_a_condition(self) -> None:
         for name, block in self._aca_stage_blocks().items():
@@ -711,9 +719,6 @@ class TestFixtureRouteBinding:
 class TestDeployedAcaQualificationFixtureContract:
     """Keep the deployed fixture aligned with the live suites that invoke it."""
 
-    # The exact suite file set is intentional: support modules and unrelated live
-    # fixtures contain constants for different deployed apps, so globbing all
-    # live files would create false requirements for this fixture.
     _LIVE_SUITE_NAMES = (
         "test_aca_deployed_agent_turn.py",
         "test_aca_deployed_cold_start.py",

@@ -55,11 +55,7 @@ def throttled_admission_retry_delay(
     return throttle_retry_after_seconds(headers)
 
 
-# Events delivered by a single journal poll are parsed from the stream
-# microseconds apart. This window is wide enough to hold one such burst together
-# and far narrower than any plausible poll interval, so it separates bursts
-# without merging genuinely distinct polls. Grouping on exact timestamp equality
-# instead would put every real event in its own batch.
+# Bound one poll burst without allowing adjacent events to chain indefinitely.
 _BATCH_WINDOW_SECONDS = 0.05
 
 
@@ -229,8 +225,6 @@ def observed_event_batches(
     batch_start = ordered[0]
     current_count = 1
     for timestamp in ordered[1:]:
-        # Bound the complete burst. Comparing adjacent events would transitively
-        # merge a steady trickle into an arbitrarily long batch.
         if timestamp - batch_start <= batch_window_seconds:
             current_count += 1
             continue

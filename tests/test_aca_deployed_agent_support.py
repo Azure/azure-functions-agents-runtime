@@ -262,11 +262,6 @@ class TestSseReaderRetryLoop:
         assert [h.get("Last-Event-ID") for h in session.request_headers] == ["3", "3"]
 
 
-# ---------------------------------------------------------------------------
-# json_request throttle-retry tests
-# ---------------------------------------------------------------------------
-
-
 class _FakeJsonResponse:
     """One aiohttp-shaped response for json_request faking."""
 

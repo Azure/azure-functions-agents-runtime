@@ -2041,11 +2041,6 @@ def test_file_projections_preserve_sdk_string_mode() -> None:
     assert stat.mode == "0644"
 
 
-# ---------------------------------------------------------------------------
-# Resume 409 idempotency (already-Running sandbox)
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_resume_409_with_arbitrary_wording_and_running_state_succeeds(
     monkeypatch: pytest.MonkeyPatch,

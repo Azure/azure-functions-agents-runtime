@@ -277,9 +277,6 @@ def _runtime(
     provider: FakeSandboxSessionProvider,
     store: FakeSessionStateStore,
     *,
-    # Three parameters, matching the reconciler the app registers. A
-    # two-parameter annotation here would invite doubles that accept the wrong
-    # arity, and mypy does not check this directory.
     targeted_reconciler: (
         Callable[[OwnerPartition, str, SetupDeadline | None], Awaitable[None]] | None
     ) = None,
@@ -817,7 +814,6 @@ async def test_duplicate_submit_reuses_run_after_launch_response_loss(
     assert exc_info.value.handle.session_id == session.session_id
     assert exc_info.value.handle.phase == "executing"
 
-    # Durable state: run remains accepted, operation stays active for reconciliation
     durable_run = store.runs.get(exc_info.value.handle.run_id)
     assert durable_run is not None
     assert durable_run.status == "accepted"

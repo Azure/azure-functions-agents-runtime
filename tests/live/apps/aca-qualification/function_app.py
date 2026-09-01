@@ -31,9 +31,6 @@ app = create_function_app()
 _APP_ROOT = Path(__file__).resolve().parent
 _BUILD_INFO_PATH = _APP_ROOT / "BUILD_INFO.json"
 
-# Content-size evidence is capped so a pathological tree cannot make the probe
-# itself the slow thing being measured. Well above the ~6k entries a normal
-# closure produces, and far below the platform's 65,535 ZIP-entry limit.
 _MAX_SCANNED_ENTRIES = 20_000
 
 
@@ -74,8 +71,6 @@ def _content_size() -> dict[str, Any]:
                 continue
             total_bytes += path.stat().st_size
         except OSError:
-            # A file that vanishes or denies stat mid-scan is not worth failing
-            # the probe over; it is counted as an entry and skipped for size.
             pass
         entry_count += 1
     return {
@@ -110,9 +105,6 @@ def build_info(req: Request) -> JSONResponse:
     payload = {
         "build": _load_marker(),
         "runtime": {
-            # Live, not stamped: with remote build nothing in the pipeline pins
-            # the interpreter, so this is the only confirmation that the 3.13
-            # leg actually ran on 3.13.
             "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
             "python_micro": sys.version_info.micro,
         },

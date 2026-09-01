@@ -36,9 +36,6 @@ resources:
       ref: refs/tags/release
 
 variables:
-  # These are shared YAML variable templates, not Azure DevOps variable groups.
-  # Configure every ACA_* value as an ordinary variable directly on this
-  # pipeline. Do not add a `group:` dependency for qualification settings.
   - template: ci/variables/build.yml@eng
   - template: ci/variables/cfs.yml@eng
 
@@ -64,10 +61,6 @@ extends:
               PoolName: 1es-pool-azfunc
               acaServiceConnection: ${{ parameters.acaServiceConnection }}
 
-      # Post-main deployed qualification. Manual runs are allowed on any branch;
-      # automatic runs are main-only, excluding PRs and schedules. Keep these
-      # conditions local so missing environment configuration fails only the
-      # nonblocking ACA work, not pipeline compilation.
       - stage: AcaSweep
         displayName: 'ACA pre-run leak sweep'
         dependsOn: []
@@ -86,7 +79,6 @@ extends:
           - AcaSweep
         condition: and(succeeded(), or(eq(variables['Build.Reason'], 'Manual'), and(in(variables['Build.Reason'], 'IndividualCI', 'BatchedCI'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))))
         jobs:
-          # The job template's matrix runs both runtimes in parallel.
           - template: /eng/templates/official/jobs/aca-qualify.yml@self
             parameters:
               acaServiceConnection: ${{ parameters.acaServiceConnection }}

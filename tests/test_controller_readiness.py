@@ -745,9 +745,6 @@ async def test_targeted_reconciliation_passes_a_deadline_argument_even_when_abse
     store = _FakeStore()
     seen: list[object] = []
 
-    # Three required positional parameters, mirroring the reconciler the app
-    # registers. A ``*args`` double would accept any arity and so could never
-    # detect a mismatch -- which is why this went undetected.
     async def reconciliation(
         partition: OwnerPartition,
         session_id: str,

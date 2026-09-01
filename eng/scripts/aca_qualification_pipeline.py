@@ -55,10 +55,6 @@ from typing import Any
 _MARKER_FILENAME = "BUILD_INFO.json"
 _MARKER_SCHEMA = 1
 
-# A sweep hunts *other* runs' leftovers, so it cannot narrow by this run's
-# Build.BuildId the way the reaper does. Age is the substitute safety property:
-# comfortably longer than any qualification run and than the controller's
-# ~1 hour reconciliation cadence, so a live sandbox can never be in scope.
 _DEFAULT_MAX_AGE_HOURS = 6
 
 _GROUP_RESOURCE_ID_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"
@@ -72,11 +68,6 @@ _DEFAULT_FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "tests" / "live" /
 
 class QualificationPipelineError(Exception):
     """A redacted pipeline configuration or verification failure."""
-
-
-# --------------------------------------------------------------------------
-# Build marker
-# --------------------------------------------------------------------------
 
 
 def build_marker(
@@ -111,11 +102,6 @@ def stamp_marker(app_root: Path, marker: Mapping[str, Any]) -> Path:
     target = app_root / _MARKER_FILENAME
     target.write_text(json.dumps(dict(marker), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return target
-
-
-# --------------------------------------------------------------------------
-# Deploy package assembly
-# --------------------------------------------------------------------------
 
 
 def select_runtime_wheel(candidate_filenames: Iterable[str]) -> str:
@@ -285,17 +271,11 @@ def content_report(reported: Mapping[str, Any]) -> str:
     if not isinstance(entries, int) or not isinstance(total, int):
         return "content=unavailable"
     mib = total / (1024 * 1024)
-    # 256 MiB and 65,535 entries are the platform caps the closure must stay under.
     return (
         f"content_entries={entries} (cap 65535, {entries / 65535:.1%}) "
         f"content_size={mib:.1f}MiB (cap 256MiB, {mib / 256:.1%}) "
         f"truncated={str(content.get('truncated', False)).lower()}"
     )
-
-
-# --------------------------------------------------------------------------
-# Pre-run sweep
-# --------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,8 +339,6 @@ def render_sweep_report(selection: SweepSelection, *, deleted: int, max_age_hour
 
 
 _MAX_REASON_CHARS = 400
-# Anything resembling a credential, token, signature, or bearer value is dropped
-# before a reason reaches the log.
 _SECRETISH = re.compile(
     r"(?i)(bearer\s+\S+|[?&](sig|sv|se|st|skoid|sig)=[^&\s]+|eyJ[A-Za-z0-9_\-.]{20,})"
 )
@@ -390,11 +368,7 @@ async def sweep_with_adapter(
     """
     try:
         async with asyncio.timeout(_PROBE_TIMEOUT_SECONDS):
-            # An empty selector means "no label filter". The group is
-            # CI-dedicated, so age alone is the correct scope: label-scoping
-            # would silently miss leaks minted with labels this script does not
-            # know about, and a selector that matches nothing looks exactly like
-            # a clean group.
+            # Empty selection keeps mislabeled leaks visible.
             summaries = await adapter.list_sandboxes(labels={})
         selection = select_stale_sandboxes(summaries, now=now, max_age_hours=max_age_hours)
         deleted = 0
@@ -443,15 +417,6 @@ def run_sweep(
             _sweep(group_resource_id, configured_region, max_age_hours=max_age_hours)
         )
     except Exception as error:  # noqa: BLE001 - advisory
-        # A crash is not the same as a clean group, and must not read like one.
-        # The sweep did not observe anything, so nothing can be concluded about
-        # whether sandboxes leaked.
-        #
-        # The reason is included, redacted. Redaction exists to keep prompts,
-        # tokens, and customer content out of logs -- not to make an
-        # infrastructure failure undiagnosable. A bare exception class name
-        # cannot distinguish "DNS blocked" from "denied" from "wrong endpoint",
-        # which leaves an operator with nothing to act on.
         print(
             "##vso[task.logissue type=warning]ACA pre-run sweep DID NOT RUN "
             f"({type(error).__name__}: {_redacted_reason(error)}). No conclusion "
@@ -467,11 +432,6 @@ def run_sweep(
             "may have stopped working."
         )
     return 0
-
-
-# --------------------------------------------------------------------------
-# Deployment preflight
-# --------------------------------------------------------------------------
 
 
 def deploy_preflight_failure_message(
@@ -544,12 +504,7 @@ def run_preflight_deploy(args: argparse.Namespace) -> int:
             "site_read",
             ["functionapp", "show", "--name", app_name, "--resource-group", resource_group],
         ),
-        # Deliberately NOT checking `list-publishing-profiles`. Flex Consumption
-        # disables SCM basic auth by default, so that call fails on a healthy,
-        # deployable app -- and One Deploy authenticates through Entra/ARM and
-        # never needs those credentials. Checking it turned a correct
-        # configuration into a preflight failure, which is worse than not
-        # checking at all: it blocks a deployment that would have succeeded.
+        # Flex disables SCM basic auth, so publishing-profile checks are invalid.
     )
     for check_name, command in checks:
         try:
@@ -603,8 +558,6 @@ def run_deploy(args: argparse.Namespace) -> int:
 
     archive_path = Path(args.archive_path)
     _write_deployment_archive(Path(args.staging_root), archive_path)
-    # Flex Consumption performs a remote Oryx build for a ZIP carrying
-    # requirements.txt. SCM_DO_BUILD_DURING_DEPLOYMENT is unsupported on this SKU.
     _run_az(
         [
             "functionapp",
@@ -621,7 +574,6 @@ def run_deploy(args: argparse.Namespace) -> int:
         timeout_seconds=_DEPLOY_TIMEOUT_SECONDS,
     )
 
-    # Portal-readable metadata is best effort and never part of attestation.
     try:
         _run_az(
             [
@@ -647,11 +599,6 @@ def run_deploy(args: argparse.Namespace) -> int:
         )
     print("Function App deployment completed.")
     return 0
-
-
-# --------------------------------------------------------------------------
-# CLI
-# --------------------------------------------------------------------------
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -708,8 +655,6 @@ def _parser() -> argparse.ArgumentParser:
 
 _READINESS_DEADLINE_SECONDS = 300.0
 _READINESS_POLL_SECONDS = 10.0
-# The platform returns these while an app restarts after a deployment. They mean
-# "not ready yet", not "wrong build", so they are retried rather than failed.
 _NOT_READY_STATUSES = frozenset({408, 429, *range(500, 600)})
 
 
@@ -738,13 +683,9 @@ async def fetch_build_info(base_url: str, token_scope: str) -> dict[str, Any]:
                         payload = await response.json(content_type=None)
                         break
                     last_status = response.status
-                    # An auth or not-found answer is a real answer: the app is
-                    # up and telling us something. Only restart-shaped statuses
-                    # are worth waiting on.
                     if response.status not in _NOT_READY_STATUSES:
                         raise QualificationPipelineError(f"buildinfo_http_{response.status}")
             except aiohttp.ClientError as error:
-                # A connection reset mid-restart is the same condition as a 503.
                 last_status = last_status or -1
                 if time.monotonic() >= deadline:
                     raise QualificationPipelineError(

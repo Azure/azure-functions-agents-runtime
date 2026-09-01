@@ -494,9 +494,6 @@ async def _verify_held_load_sessions(
             event.terminal_at - item.submitted_at
             for item, event in zip(state.held, event_evidence, strict=True)
         ],
-        # Without this the visibility series is silently empty: the parameter
-        # defaults to (), so omitting it leaves every gap/cadence metric absent
-        # while the run still reports success.
         [event.observed_event_timestamps for event in event_evidence],
     )
 

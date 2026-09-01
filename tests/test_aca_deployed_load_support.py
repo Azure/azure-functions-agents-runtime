@@ -17,8 +17,6 @@ def test_realistic_burst_timestamps_are_grouped_into_one_batch() -> None:
     timestamps: list[float] = []
     moment = 100.0
     for _ in range(4):
-        # Three events delivered by one poll, parsed a fraction of a millisecond
-        # apart, then roughly a second until the next poll.
         timestamps.extend(moment + offset * 0.0004 for offset in range(3))
         moment += 1.0
 
@@ -118,11 +116,6 @@ def test_latency_metrics_reports_visibility_attribution_and_warning() -> None:
     assert "visibility_attribution=poll_timing_dominates" in report
     assert "does not capture true sandbox-write-to-client-observe delta" in report
     assert "clock-skew correction would add error comparable to the 2s budget" in report
-
-
-# ---------------------------------------------------------------------------
-# throttle_retry_after_seconds
-# ---------------------------------------------------------------------------
 
 
 def test_throttle_retry_returns_seconds_for_valid_retry_after() -> None:

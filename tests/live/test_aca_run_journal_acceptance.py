@@ -62,7 +62,6 @@ async def test_live_aca_run_journal_acceptance(
         timeout=30.0,
     )
 
-    # Generous ceiling to cover cold sandbox startup and closure imports.
     status = await SandboxRunControl().submit(
         aca_run_journal_handle,
         run_id,
@@ -73,12 +72,7 @@ async def test_live_aca_run_journal_acceptance(
     assert status.run_id == run_id
     assert status.session_id == session_id
     assert status.result_available is False
-    # The harness publishes "accepted" before catalog lookup, so either that state or the
-    # unmatched agent's immediate terminal failure is expected.
     assert status.state in {"accepted", "failed"}
     if status.state == "failed":
         assert status.error is not None
-        # The deliberately unknown agent may fail through catalog lookup or the
-        # journal wrapper before this reader observes the earlier accepted row.
-        # This smoke owns launch/journal acceptance, not that internal race.
         assert status.error.fault_domain == "harness"

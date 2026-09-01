@@ -1,17 +1,3 @@
-# Pre-run leak sweep.
-#
-# Deliberately runs BEFORE the qualification rather than cleaning up after it.
-# ACA idle-delete and the controller's hourly reconciliation already reclaim
-# sandboxes, so an end-of-run reaper would mostly be redundant -- and worse, by
-# tidying up after every run it would mask the failure of both mechanisms. We
-# would keep paying for leaks and never see them.
-#
-# Running first turns a leftover into a signal: nothing found means automatic
-# cleanup is working; anything found means it is not, and says so loudly.
-#
-# Never fatal. A leak is worth shouting about, but not worth blocking a
-# qualification that has not started yet.
-
 parameters:
   - name: acaServiceConnection
     type: string
@@ -56,11 +42,6 @@ jobs:
           scriptType: bash
           scriptLocation: inlineScript
           inlineScript: |
-            # The sweep hunts other runs' leftovers, so it cannot narrow by this
-            # run's BuildId the way the reaper does. Age is the substitute safety
-            # property: six hours is far longer than any qualification run and
-            # than the controller's ~1h reconciliation cadence, so a live
-            # sandbox can never fall in scope.
             python eng/scripts/aca_qualification_pipeline.py sweep \
               --region "$(ACA_SANDBOX_REGION)" \
               --max-age-hours 6
