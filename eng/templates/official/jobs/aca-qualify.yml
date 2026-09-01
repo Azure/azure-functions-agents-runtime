@@ -2,16 +2,6 @@
 # first acceptance remains the newly deployed Function App's first request.
 
 parameters:
-  - name: runtimeTarget
-    type: string
-  - name: pythonVersion
-    type: string
-  - name: constraintsFile
-    type: string
-  - name: appSiteName
-    type: string
-  - name: baseUrl
-    type: string
   - name: acaServiceConnection
     type: string
   - name: artifactFeed
@@ -20,8 +10,23 @@ parameters:
     type: string
 
 jobs:
-  - job: AcaQualify_${{ parameters.runtimeTarget }}
-    displayName: 'ACA deploy + qualification (${{ parameters.pythonVersion }})'
+  - job: AcaQualify
+    displayName: 'ACA deploy + qualification (Python $(pythonVersion))'
+    strategy:
+      maxParallel: 2
+      matrix:
+        python313:
+          runtimeTarget: 'python313'
+          pythonVersion: '3.13'
+          constraintsFile: 'eng/constraints/aca-fixture-py313.txt'
+          appSiteName: $(ACA_DEPLOYED_APP_SITE_NAME_PY313)
+          baseUrl: $(ACA_DEPLOYED_FUNCTION_BASE_URL_PY313)
+        python314:
+          runtimeTarget: 'python314'
+          pythonVersion: '3.14'
+          constraintsFile: 'eng/constraints/aca-fixture-py314.txt'
+          appSiteName: $(ACA_DEPLOYED_APP_SITE_NAME_PY314)
+          baseUrl: $(ACA_DEPLOYED_FUNCTION_BASE_URL_PY314)
     # Nonblocking during stabilization. Promotion to a blocking gate is a
     # separate, explicitly human-approved step.
     continueOnError: true
@@ -52,39 +57,8 @@ jobs:
 
       - bash: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install -U -e ".[dev,aca_sandbox]"
+          python eng/scripts/aca_qualification_pipeline.py install-tooling
         displayName: 'Install pipeline tooling'
-
-      - task: AzureCLI@2
-        displayName: 'Preflight deployment rights'
-        inputs:
-          azureSubscription: ${{ parameters.acaServiceConnection }}
-          scriptType: bash
-          scriptLocation: inlineScript
-          inlineScript: |
-            set -euo pipefail
-            python eng/scripts/aca_qualification_pipeline.py preflight-deploy \
-              --app-name "${{ parameters.appSiteName }}" \
-              --resource-group "$(ACA_DEPLOYED_RESOURCE_GROUP)"
-        env:
-          AZURE_TOKEN_CREDENTIALS: 'dev'
-
-      - task: AzureCLI@2
-        displayName: 'Configure Sandbox Group region'
-        inputs:
-          azureSubscription: ${{ parameters.acaServiceConnection }}
-          scriptType: bash
-          scriptLocation: inlineScript
-          inlineScript: |
-            set -euo pipefail
-            az functionapp config appsettings set \
-              --name "${{ parameters.appSiteName }}" \
-              --resource-group "$(ACA_DEPLOYED_RESOURCE_GROUP)" \
-              --settings AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION="$(ACA_SANDBOX_REGION)" \
-              --output none
-        env:
-          AZURE_TOKEN_CREDENTIALS: 'dev'
 
       - bash: |
           set -euo pipefail
@@ -95,7 +69,7 @@ jobs:
           python eng/scripts/aca_qualification_pipeline.py assemble \
             --artifact-root "$(Pipeline.Workspace)/azurefunctions-agents-runtime" \
             --staging-root "$(Build.ArtifactStagingDirectory)/aca-fixture" \
-            --constraints-file "${{ parameters.constraintsFile }}" \
+            --constraints-file "$(constraintsFile)" \
             --commit-sha "$(Build.SourceVersion)" \
             --build-id "$(Build.BuildId)" \
             --branch "$(Build.SourceBranch)" \
@@ -103,46 +77,21 @@ jobs:
         displayName: 'Assemble the deployable fixture'
 
       - task: AzureCLI@2
-        displayName: 'Deploy with remote build'
+        displayName: 'Preflight and deploy with remote build'
         inputs:
           azureSubscription: ${{ parameters.acaServiceConnection }}
           scriptType: bash
           scriptLocation: inlineScript
           inlineScript: |
             set -euo pipefail
-            cd "$(Build.ArtifactStagingDirectory)/aca-fixture"
-            zip -qr "$(Build.ArtifactStagingDirectory)/aca-fixture.zip" .
-
-            # Flex Consumption always performs a remote (Oryx) build when a zip
-            # carrying requirements.txt is deployed, so there is no build toggle
-            # to set. SCM_DO_BUILD_DURING_DEPLOYMENT in particular is rejected
-            # outright -- "not supported with this SKU" -- and setting it fails
-            # the deployment. Remote build is still what happens here, which is
-            # the point: this is the same path a customer uses.
-            az functionapp deployment source config-zip \
-              --name "${{ parameters.appSiteName }}" \
+            python eng/scripts/aca_qualification_pipeline.py deploy \
+              --staging-root "$(Build.ArtifactStagingDirectory)/aca-fixture" \
+              --archive-path "$(Build.ArtifactStagingDirectory)/aca-fixture.zip" \
+              --app-name "$(appSiteName)" \
               --resource-group "$(ACA_DEPLOYED_RESOURCE_GROUP)" \
-              --src "$(Build.ArtifactStagingDirectory)/aca-fixture.zip" \
-              --output none
-        env:
-          AZURE_TOKEN_CREDENTIALS: 'dev'
-
-      - task: AzureCLI@2
-        displayName: 'Tag the app with build metadata (best effort)'
-        continueOnError: true
-        inputs:
-          azureSubscription: ${{ parameters.acaServiceConnection }}
-          scriptType: bash
-          scriptLocation: inlineScript
-          inlineScript: |
-            # Portal-readable metadata only, never the attestation gate: a tag is
-            # a separate ARM call and so is not atomic with the deployment.
-            az tag update --operation merge \
-              --resource-group "$(ACA_DEPLOYED_RESOURCE_GROUP)" \
-              --name "${{ parameters.appSiteName }}" \
-              --resource-type Microsoft.Web/sites \
-              --tags "build_id=$(Build.BuildId)" "commit_sha=$(Build.SourceVersion)" \
-              --output none || true
+              --region "$(ACA_SANDBOX_REGION)" \
+              --build-id "$(Build.BuildId)" \
+              --commit-sha "$(Build.SourceVersion)"
         env:
           AZURE_TOKEN_CREDENTIALS: 'dev'
 
@@ -155,15 +104,15 @@ jobs:
           inlineScript: |
             set -euo pipefail
             python eng/scripts/aca_deployed_qualification.py deployed-suite \
-              --runtime-target "${{ parameters.runtimeTarget }}" \
+              --runtime-target "$(runtimeTarget)" \
               --load-concurrency 5 \
               --provision-concurrency 1
         env:
           AZURE_TOKEN_CREDENTIALS: 'dev'
           AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE: '1'
           ACA_DEPLOYED_COLD_START_SAMPLES: '3'
-          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL: ${{ parameters.baseUrl }}
-          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME: ${{ parameters.appSiteName }}
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL: $(baseUrl)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME: $(appSiteName)
           AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG: $(ACA_DEPLOYED_AGENT_SLUG)
           AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE: $(ACA_DEPLOYED_EASY_AUTH_TOKEN_SCOPE)
           AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE: $(ACA_DEPLOYED_EASY_AUTH_AUDIENCE)
@@ -173,6 +122,6 @@ jobs:
           AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID: $(ACA_DEPLOYED_APP_SUBSCRIPTION_ID)
           AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_BUILD_ID: $(Build.BuildId)
           AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_COMMIT_SHA: $(Build.SourceVersion)
-          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_PYTHON_VERSION: ${{ parameters.pythonVersion }}
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_PYTHON_VERSION: $(pythonVersion)
           AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
           AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION: $(ACA_SANDBOX_REGION)

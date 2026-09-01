@@ -22,7 +22,7 @@ the deployed qualification suites (`tests/live/test_aca_deployed_*.py`).
 | `deployed_load.agent.md` | Load/loss built-in-endpoint agent, slug `deployed_load` |
 | `tools/qualification_hold.py` | Fixture-only tool that holds an active run for load and backing-loss suites |
 | `function_app.py` | `create_function_app()` plus the fixture-only `/__buildinfo` route |
-| `host.json` | Empty route prefix, so agent routes are `/agents/<slug>/...` |
+| `host.json` | Default `/api` route prefix, so agent routes are `/api/agents/<slug>/...` |
 | `requirements.txt` | Generated, fully pinned; installs the runtime wheel by filename |
 
 ## No configuration is committed
@@ -31,6 +31,9 @@ Every environment-specific value is read from app settings at load time using
 `$VAR` substitution — the sandbox group resource ID, the model endpoint and
 deployment, and storage. Nothing identifying a subscription, resource group,
 site, or endpoint appears in this directory.
+
+CI supplies those settings from ordinary variables configured directly on the
+pipeline. They do not come from an Azure DevOps variable group.
 
 ## `/__buildinfo`
 
@@ -43,6 +46,10 @@ only if the package containing it is genuinely on disk, so the app cannot report
 a build it is not running. An app setting or resource tag could be changed
 without deploying anything, which is exactly where "the service reports its own
 version" stops being evidence.
+
+This is intentionally not a detached content-addressed chain: it does not prove
+the wheel digest, installed package version, deploy-input manifest, or deployment
+storage version. FRD 0008 Decision 196 records that narrowed scope.
 
 The route is defined here, in the fixture, and touches no product module — in
 particular not `registration/endpoints.py` (FRD 0008 Decision 172).

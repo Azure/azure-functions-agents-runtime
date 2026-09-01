@@ -227,18 +227,15 @@ def observed_event_batches(
         return ()
     batches: list[ObservedEventBatch] = []
     batch_start = ordered[0]
-    previous = ordered[0]
     current_count = 1
     for timestamp in ordered[1:]:
-        # Compare against the previous event, not the batch start, so a steady
-        # trickle is not merged into one ever-growing batch.
-        if timestamp - previous <= batch_window_seconds:
+        # Bound the complete burst. Comparing adjacent events would transitively
+        # merge a steady trickle into an arbitrarily long batch.
+        if timestamp - batch_start <= batch_window_seconds:
             current_count += 1
-            previous = timestamp
             continue
         batches.append(ObservedEventBatch(batch_start, current_count))
         batch_start = timestamp
-        previous = timestamp
         current_count = 1
     batches.append(ObservedEventBatch(batch_start, current_count))
     return tuple(batches)

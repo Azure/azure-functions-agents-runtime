@@ -37,6 +37,11 @@ def test_slow_trickle_is_not_merged_into_one_batch() -> None:
     assert support.events_per_batch([0.0, 0.2, 0.4, 0.6]) == (1, 1, 1, 1)
 
 
+def test_subwindow_trickle_cannot_chain_into_an_unbounded_batch() -> None:
+    """Adjacent events inside the window must not extend a burst transitively."""
+    assert support.events_per_batch([0.0, 0.03, 0.06, 0.09]) == (2, 2)
+
+
 def test_observed_event_visibility_requires_at_least_two_events() -> None:
     assert support.observed_event_batches([]) == ()
     assert support.visibility_gap_seconds([1.0], waiting_only=True) == ()

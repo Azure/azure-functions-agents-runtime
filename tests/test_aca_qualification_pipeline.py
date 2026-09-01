@@ -15,6 +15,9 @@ import asyncio
 import inspect
 import json
 import re
+import subprocess
+import zipfile
+from argparse import Namespace
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,9 +25,13 @@ from pathlib import Path
 import pytest
 from eng.scripts import aca_deployed_qualification
 from eng.scripts.aca_qualification_pipeline import (
+    _DEPLOY_CONFIGURATION_TIMEOUT_SECONDS,
+    _DEPLOY_TIMEOUT_SECONDS,
     _NOT_READY_STATUSES,
     QualificationPipelineError,
     _redacted_reason,
+    _run_az,
+    _write_deployment_archive,
     build_marker,
     compare_marker,
     content_report,
@@ -32,6 +39,7 @@ from eng.scripts.aca_qualification_pipeline import (
     parse_created_at,
     render_requirements,
     render_sweep_report,
+    run_deploy,
     select_runtime_wheel,
     select_stale_sandboxes,
     stamp_marker,
@@ -278,10 +286,26 @@ class TestAcaStageGating:
         block = self._aca_stage_blocks()["AcaQualification"]
         assert block.count(
             "template: /eng/templates/official/jobs/aca-qualify.yml@self"
-        ) == 2
-        assert block.count("runtimeTarget: 'python313'") == 1
-        assert block.count("runtimeTarget: 'python314'") == 1
+        ) == 1
         assert "AcaDeployCold" not in block
+        template = (
+            Path(__file__).resolve().parents[1]
+            / "eng"
+            / "templates"
+            / "official"
+            / "jobs"
+            / "aca-qualify.yml"
+        ).read_text(encoding="utf-8")
+        assert "strategy:" in template
+        assert "maxParallel: 2" in template
+        assert template.count("runtimeTarget: 'python313'") == 1
+        assert template.count("runtimeTarget: 'python314'") == 1
+
+    def test_aca_settings_use_basic_pipeline_variables_not_variable_groups(self) -> None:
+        pipeline = self._e2e_pipeline()
+        assert not re.search(r"(?m)^\s*-\s*group\s*:", pipeline)
+        assert "ordinary variable directly on this" in pipeline
+        assert "shared YAML variable templates, not Azure DevOps variable groups" in pipeline
 
     def test_every_aca_stage_declares_a_condition(self) -> None:
         for name, block in self._aca_stage_blocks().items():
@@ -411,7 +435,7 @@ class TestPipelineEnvironmentContract:
 
     def test_deploy_configures_the_region_app_setting(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        source = (
+        template = (
             root
             / "eng"
             / "templates"
@@ -419,9 +443,11 @@ class TestPipelineEnvironmentContract:
             / "jobs"
             / "aca-qualify.yml"
         ).read_text(encoding="utf-8")
-        assert source.count(
-            'AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION="$(ACA_SANDBOX_REGION)"'
-        ) == 1
+        script = (root / "eng" / "scripts" / "aca_qualification_pipeline.py").read_text(
+            encoding="utf-8"
+        )
+        assert template.count('--region "$(ACA_SANDBOX_REGION)"') == 1
+        assert "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION={region}" in script
 
     def test_current_checkout_smoke_wires_region_for_run_and_cleanup(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -501,7 +527,11 @@ class TestCombinedDeployedSuite:
         assert template.count(" deployed-suite ") == 1
         assert template.count("- checkout: self") == 1
         assert template.count("UsePythonVersion@0") == 1
-        assert template.count('python -m pip install -U -e ".[dev,aca_sandbox]"') == 1
+        assert template.count(
+            "python eng/scripts/aca_qualification_pipeline.py install-tooling"
+        ) == 1
+        assert template.count("python eng/scripts/aca_qualification_pipeline.py deploy") == 1
+        assert " preflight-deploy " not in template
         assert "continueOnError: true" in template
         for name in (
             "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_BUILD_ID",
@@ -512,6 +542,99 @@ class TestCombinedDeployedSuite:
         assert not (
             root / "eng" / "templates" / "official" / "jobs" / "aca-deploy-cold.yml"
         ).exists()
+
+
+class TestDeploymentCommand:
+    def test_azure_cli_failure_diagnostics_are_omitted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def failed(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            del args, kwargs
+            return subprocess.CompletedProcess(
+                args=["az"],
+                returncode=1,
+                stdout="",
+                stderr="request failed with Bearer secret-token-value",
+            )
+
+        monkeypatch.setattr(subprocess, "run", failed)
+
+        with pytest.raises(QualificationPipelineError) as caught:
+            _run_az(["functionapp", "show"])
+
+        assert "secret-token-value" not in str(caught.value)
+        assert str(caught.value) == "az_failed:functionapp:show:exit_1"
+
+    def test_azure_cli_timeout_is_a_typed_redacted_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def timed_out(*args: object, **kwargs: object) -> None:
+            del args, kwargs
+            raise subprocess.TimeoutExpired("az", 30)
+
+        monkeypatch.setattr(subprocess, "run", timed_out)
+
+        with pytest.raises(
+            QualificationPipelineError,
+            match=r"az_timeout:functionapp:show:30s",
+        ):
+            _run_az(["functionapp", "show"])
+
+    def test_archive_contains_staged_files_relative_to_its_root(self, tmp_path: Path) -> None:
+        staging = tmp_path / "staging"
+        (staging / "nested").mkdir(parents=True)
+        (staging / "host.json").write_text("{}", encoding="utf-8")
+        (staging / "nested" / "file.txt").write_text("content", encoding="utf-8")
+        archive = tmp_path / "fixture.zip"
+
+        _write_deployment_archive(staging, archive)
+
+        with zipfile.ZipFile(archive) as package:
+            assert package.namelist() == ["host.json", "nested/file.txt"]
+
+    def test_deploy_combines_preflight_region_upload_and_best_effort_tag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / "host.json").write_text("{}", encoding="utf-8")
+        archive = tmp_path / "fixture.zip"
+        commands: list[tuple[list[str], float]] = []
+
+        def fake_run_az(args: list[str], *, timeout_seconds: float = 30.0) -> None:
+            commands.append((args, timeout_seconds))
+
+        monkeypatch.setattr(
+            "eng.scripts.aca_qualification_pipeline._run_az",
+            fake_run_az,
+        )
+
+        result = run_deploy(
+            Namespace(
+                staging_root=str(staging),
+                archive_path=str(archive),
+                app_name="qualification-app",
+                resource_group="qualification-rg",
+                region="westus3",
+                build_id="12345",
+                commit_sha=_COMMIT,
+            )
+        )
+
+        assert result == 0
+        assert [command[:3] for command, _ in commands] == [
+            ["functionapp", "show", "--name"],
+            ["functionapp", "config", "appsettings"],
+            ["functionapp", "deployment", "source"],
+            ["tag", "update", "--operation"],
+        ]
+        assert [timeout for _, timeout in commands] == [
+            30.0,
+            _DEPLOY_CONFIGURATION_TIMEOUT_SECONDS,
+            _DEPLOY_TIMEOUT_SECONDS,
+            30.0,
+        ]
+        assert archive.is_file()
 
 
 class TestFixtureRouteBinding:

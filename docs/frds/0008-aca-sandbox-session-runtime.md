@@ -4,7 +4,7 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-08-28
+updated: 2026-08-31
 issues: [166]
 pull_requests: []
 branch: feature/aca-sandboxes
@@ -441,6 +441,7 @@ controlling amendments.
 | 193 | Qualification cleanup and rollback | Post-run cleanup and rollback / pre-run signal only | Run one nonfatal, age-scoped sweep before qualification and no post-run cleanup, so automatic idle-delete/reaping failures remain visible. Provide no retained-package rollback machinery; a later deployment corrects a bad deployment. | Human | 2026-08-28 | #166 |
 | 194 | Required Sandbox Group region and endpoint | ARM discovery/equality check / authored direct endpoint | Require the normalized Sandbox Group `region` beside its resource ID. Construct the regional data-plane client directly, with no ARM lookup or fallback. Function App and Sandbox Group may be in the same or different regions; compare only configured, persisted, and live Sandbox Group identity and region, and fail closed on those mismatches. | Human | 2026-08-28 | Revises #99/#184/#188 |
 | 195 | ACA provider error boundary | Raw SDK propagation / complete typed and redacted boundary | No Azure SDK exception crosses `aca_sdk.py`: group 401/403 is authorization, group 404 is binding, group 429/5xx/timeout is transient, and sandbox 404 is missing backing. Only an already-running resume 409 is idempotent; every other 409 is invalid state. Routes expose only typed, redacted projections. | Human | 2026-08-28 | Refines #159/#184/#187/#188 |
+| 196 | Deployed-build attestation scope | Full detached artifact/storage hash chain / lightweight in-package provenance | Keep the embedded `BUILD_INFO.json` check for build ID, commit SHA, and live Python minor. Do not add wheel SHA-256, installed-package-version, deploy-input-manifest, deployment-storage-version, or rollback attestation. This intentionally narrows the original issue #166 request while retaining proof that the responding app contains this pipeline's marker. | Human | 2026-08-31 | Refines #191; narrows #166 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -1838,6 +1839,11 @@ compares build ID, commit SHA, and live Python version. A missing or mismatched
 marker fails the test and suppresses latency metrics, preventing evidence from
 the wrong deployment from being reported as trustworthy.
 
+This is deliberately lightweight in-package provenance, not a detached
+content-addressed attestation chain. It does not prove the exact wheel digest,
+installed package version, deploy-input manifest, or deployment-storage version.
+Decision #196 intentionally narrows those original issue #166 requirements.
+
 Automatic execution is limited to `IndividualCI` and `BatchedCI` builds of
 `refs/heads/main`; Manual runs are allowed from any branch. PullRequest and
 Schedule reasons do not run these stages. The sweep and both qualification jobs
@@ -1845,6 +1851,11 @@ remain `continueOnError` and non-required; promotion to a blocking gate requires
 a separate human decision. Both runtime jobs pass provisioning concurrency 1.
 Automated load remains N=5, while N=100 is a human-only formal acceptance run.
 Client-side latency evidence is observe-only and never gates.
+
+ACA environment settings are ordinary/basic variables configured directly on
+the E2E pipeline, not Azure DevOps variable groups. Existing `- template:`
+entries under the YAML `variables:` list are shared variable-template imports
+for build infrastructure and are not variable-group dependencies.
 
 Cleanup is one nonfatal, six-hour age-scoped sweep before qualification and no
 post-run reaper. ACA idle-delete and the controller's periodic reaper remain

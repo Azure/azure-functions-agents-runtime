@@ -33,9 +33,15 @@ commit SHA, and Python runtime. A mismatch fails the test and suppresses cold
 latency metrics, so evidence from the wrong deployment is never presented as
 trustworthy.
 
-## Required pipeline variables
+This is intentionally lightweight in-package provenance. It does not attest the
+wheel digest, installed package version, deploy-input manifest, or deployment
+storage version; FRD 0008 Decision 196 explicitly narrows those original issue
+#166 requirements.
 
-Configure these names on the E2E pipeline without committing their values:
+## Required basic pipeline variables
+
+Configure these ordinary/basic variables directly on the E2E pipeline without
+committing their values:
 
 - `ACA_DEPLOYED_APP_SUBSCRIPTION_ID`
 - `ACA_DEPLOYED_RESOURCE_GROUP`
@@ -50,6 +56,11 @@ Configure these names on the E2E pipeline without committing their values:
 - `ACA_DEPLOYED_TABLE_NAME`
 - `ACA_SANDBOX_GROUP_RESOURCE_ID`
 - `ACA_SANDBOX_REGION`
+
+Do not place these values in, or add a dependency on, an Azure DevOps variable
+group. The `- template:` entries under `variables:` in `e2e-tests.yml` import
+shared YAML variable templates for build infrastructure; they are distinct from
+variable groups and do not supply the ACA settings.
 
 The service connection selected by the `acaServiceConnection` pipeline
 parameter must be authorized for the pipeline. The pipeline intentionally marks

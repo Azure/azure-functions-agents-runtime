@@ -74,12 +74,17 @@ and remain runnable by hand.
 
 Supports the post-main deployment and qualification stages.
 
+ACA environment settings are ordinary variables configured directly on the E2E
+pipeline. They are not sourced from an Azure DevOps variable group; the
+pipeline's existing `- template:` entries are unrelated YAML variable templates.
+
 | Command | Purpose |
 | --- | --- |
+| `install-tooling` | Install the shared Python dependencies used by qualification and sweep jobs |
 | `stamp` | Write `BUILD_INFO.json` into the fixture app before packaging |
 | `assemble` | Build the deployable upload from the build artifact: fixture source, runtime wheel, marker, and pinned requirements |
-| `preflight-deploy` | Fail fast, with a named remediation, when the deployment identity lacks rights on the target app |
-| `check-build` | Verify the deployed app is running this build, on the expected Python minor |
+| `deploy` | Preflight deployment rights, configure the authored region, package and deploy the staged fixture, and add best-effort portal metadata |
+| `check-build` | Verify lightweight in-package build ID, commit SHA, and Python-minor provenance |
 | `sweep` | Report and clear sandboxes left by earlier runs; never fatal |
 
 `check-build` is meaningful only because the marker is a *file inside the

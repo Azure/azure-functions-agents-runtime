@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Post-main ACA qualification pipeline helpers (FRD 0008 §14, issue #166).
 
-Five commands, each doing one thing the official pipeline needs:
+Six commands, each doing one thing the official pipeline needs:
+
+``install-tooling``
+    Install the shared Python tooling used by qualification and sweep jobs.
 
 ``stamp``
     Write ``BUILD_INFO.json`` into the fixture app before it is packaged, so the
@@ -11,9 +14,9 @@ Five commands, each doing one thing the official pipeline needs:
     Copy the live fixture app and exactly one built runtime wheel into an upload
     directory, then write the marker and final remote-build ``requirements.txt``.
 
-``preflight-deploy``
-    Verify the deployment identity can read the target Function App and its
-    publishing configuration before One Deploy can fail later with an opaque 403.
+``deploy``
+    Verify deployment rights, configure the authored region, package the staged
+    fixture, deploy it, and add best-effort portal metadata.
 
 ``check-build``
     Ask the deployed app what it is running and compare it with this build. The
@@ -27,8 +30,8 @@ Five commands, each doing one thing the official pipeline needs:
     Look for sandboxes left behind by *earlier* runs, report them, and delete
     them. Never fatal.
 
-Nothing here fails a qualification on its own except ``check-build``: if the app
-is not the build we deployed, everything downstream is measuring the wrong thing.
+Each command fails closed on its own contract. ``check-build`` specifically
+prevents qualification evidence from being attributed to the wrong deployment.
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ import shutil
 import subprocess
 import sys
 import time
+import zipfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -61,6 +65,8 @@ _GROUP_RESOURCE_ID_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"
 _GROUP_REGION_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION"
 _PROBE_TIMEOUT_SECONDS = 30.0
 _DEPLOY_PREFLIGHT_TIMEOUT_SECONDS = 30.0
+_DEPLOY_CONFIGURATION_TIMEOUT_SECONDS = 300.0
+_DEPLOY_TIMEOUT_SECONDS = 1_200.0
 _DEFAULT_FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "tests" / "live" / "apps" / "aca-qualification"
 
 
@@ -492,17 +498,41 @@ def deploy_preflight_failure_message(
 
 def _run_az(args: Sequence[str], *, timeout_seconds: float = _DEPLOY_PREFLIGHT_TIMEOUT_SECONDS) -> None:
     command = ["az", *args, "--only-show-errors", "--output", "json"]
-    completed = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout_seconds,
-    )
+    operation = ":".join(args[:2])
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        raise QualificationPipelineError(
+            f"az_timeout:{operation}:{int(timeout_seconds)}s"
+        ) from None
+    except OSError as error:
+        raise QualificationPipelineError(
+            f"az_unavailable:{operation}:{type(error).__name__}"
+        ) from None
     if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout).strip().splitlines()
-        suffix = f":{detail[-1][:200]}" if detail else ""
-        raise QualificationPipelineError(f"az_failed:{args[0]}:{suffix}") from None
+        raise QualificationPipelineError(
+            f"az_failed:{operation}:exit_{completed.returncode}"
+        ) from None
+
+
+def run_install_tooling() -> int:
+    """Install the common qualification dependencies for either pipeline job."""
+    commands = (
+        [sys.executable, "-m", "pip", "install", "--upgrade", "pip"],
+        [sys.executable, "-m", "pip", "install", "-U", "-e", ".[dev,aca_sandbox]"],
+    )
+    for command in commands:
+        try:
+            subprocess.run(command, check=True)
+        except subprocess.CalledProcessError as error:
+            raise QualificationPipelineError("pipeline_tooling_install_failed") from error
+    return 0
 
 
 def run_preflight_deploy(args: argparse.Namespace) -> int:
@@ -524,24 +554,98 @@ def run_preflight_deploy(args: argparse.Namespace) -> int:
     for check_name, command in checks:
         try:
             _run_az(command)
-        except subprocess.TimeoutExpired:
-            raise QualificationPipelineError(
-                deploy_preflight_failure_message(
-                    app_name=app_name,
-                    resource_group=resource_group,
-                    check_name=check_name,
-                    slow=True,
-                )
-            ) from None
         except QualificationPipelineError as error:
             raise QualificationPipelineError(
                 deploy_preflight_failure_message(
                     app_name=app_name,
                     resource_group=resource_group,
                     check_name=check_name,
+                    slow=str(error).startswith("az_timeout:"),
                 )
             ) from error
     print("Function App deployment preflight succeeded.")
+    return 0
+
+
+def _write_deployment_archive(staging_root: Path, archive_path: Path) -> None:
+    if not staging_root.is_dir():
+        raise QualificationPipelineError(f"staging_root_missing:{staging_root.name}")
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_path.unlink(missing_ok=True)
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(staging_root.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(staging_root).as_posix())
+
+
+def run_deploy(args: argparse.Namespace) -> int:
+    """Preflight and deploy one staged fixture through the customer-equivalent path."""
+    run_preflight_deploy(args)
+    region = args.region.strip()
+    if not region:
+        raise QualificationPipelineError("deployment_region_empty")
+
+    _run_az(
+        [
+            "functionapp",
+            "config",
+            "appsettings",
+            "set",
+            "--name",
+            args.app_name,
+            "--resource-group",
+            args.resource_group,
+            "--settings",
+            f"AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION={region}",
+        ],
+        timeout_seconds=_DEPLOY_CONFIGURATION_TIMEOUT_SECONDS,
+    )
+
+    archive_path = Path(args.archive_path)
+    _write_deployment_archive(Path(args.staging_root), archive_path)
+    # Flex Consumption performs a remote Oryx build for a ZIP carrying
+    # requirements.txt. SCM_DO_BUILD_DURING_DEPLOYMENT is unsupported on this SKU.
+    _run_az(
+        [
+            "functionapp",
+            "deployment",
+            "source",
+            "config-zip",
+            "--name",
+            args.app_name,
+            "--resource-group",
+            args.resource_group,
+            "--src",
+            str(archive_path),
+        ],
+        timeout_seconds=_DEPLOY_TIMEOUT_SECONDS,
+    )
+
+    # Portal-readable metadata is best effort and never part of attestation.
+    try:
+        _run_az(
+            [
+                "tag",
+                "update",
+                "--operation",
+                "merge",
+                "--resource-group",
+                args.resource_group,
+                "--name",
+                args.app_name,
+                "--resource-type",
+                "Microsoft.Web/sites",
+                "--tags",
+                f"build_id={args.build_id}",
+                f"commit_sha={args.commit_sha}",
+            ]
+        )
+    except QualificationPipelineError as error:
+        print(
+            "##vso[task.logissue type=warning]Function App metadata tag failed: "
+            f"{_redacted_reason(error)}"
+        )
+    print("Function App deployment completed.")
     return 0
 
 
@@ -553,6 +657,11 @@ def run_preflight_deploy(args: argparse.Namespace) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
+
+    subcommands.add_parser(
+        "install-tooling",
+        help="install Python dependencies shared by qualification pipeline jobs",
+    )
 
     stamp = subcommands.add_parser("stamp", help="write BUILD_INFO.json into the fixture app")
     stamp.add_argument("--app-root", required=True)
@@ -572,12 +681,17 @@ def _parser() -> argparse.ArgumentParser:
     assemble.add_argument("--branch", required=True)
     assemble.add_argument("--runtime-version", required=True)
 
-    preflight = subcommands.add_parser(
-        "preflight-deploy",
-        help="verify Function App deploy permissions before One Deploy",
+    deploy = subcommands.add_parser(
+        "deploy",
+        help="preflight, configure, package, and deploy one staged fixture",
     )
-    preflight.add_argument("--app-name", required=True)
-    preflight.add_argument("--resource-group", required=True)
+    deploy.add_argument("--staging-root", required=True)
+    deploy.add_argument("--archive-path", required=True)
+    deploy.add_argument("--app-name", required=True)
+    deploy.add_argument("--resource-group", required=True)
+    deploy.add_argument("--region", required=True)
+    deploy.add_argument("--build-id", required=True)
+    deploy.add_argument("--commit-sha", required=True)
 
     check = subcommands.add_parser("check-build", help="verify the deployed app is this build")
     check.add_argument("--base-url", required=True)
@@ -680,6 +794,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
     """Dispatch one qualification pipeline command."""
     args = _parser().parse_args(arguments)
     try:
+        if args.command == "install-tooling":
+            return run_install_tooling()
         if args.command == "stamp":
             marker = build_marker(
                 commit_sha=args.commit_sha,
@@ -694,8 +810,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
             staging_root = assemble_upload_directory(args)
             print(f"Assembled upload directory {staging_root}.")
             return 0
-        if args.command == "preflight-deploy":
-            return run_preflight_deploy(args)
+        if args.command == "deploy":
+            return run_deploy(args)
         if args.command == "check-build":
             return run_check_build(args)
         return run_sweep(

@@ -36,6 +36,9 @@ resources:
       ref: refs/tags/release
 
 variables:
+  # These are shared YAML variable templates, not Azure DevOps variable groups.
+  # Configure every ACA_* value as an ordinary variable directly on this
+  # pipeline. Do not add a `group:` dependency for qualification settings.
   - template: ci/variables/build.yml@eng
   - template: ci/variables/cfs.yml@eng
 
@@ -83,25 +86,9 @@ extends:
           - AcaSweep
         condition: and(succeeded(), or(eq(variables['Build.Reason'], 'Manual'), and(in(variables['Build.Reason'], 'IndividualCI', 'BatchedCI'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))))
         jobs:
-          # Parallel jobs keep one runtime's failure from suppressing the other.
+          # The job template's matrix runs both runtimes in parallel.
           - template: /eng/templates/official/jobs/aca-qualify.yml@self
             parameters:
-              runtimeTarget: 'python313'
-              pythonVersion: '3.13'
-              constraintsFile: 'eng/constraints/aca-fixture-py313.txt'
-              appSiteName: $(ACA_DEPLOYED_APP_SITE_NAME_PY313)
-              baseUrl: $(ACA_DEPLOYED_FUNCTION_BASE_URL_PY313)
-              acaServiceConnection: ${{ parameters.acaServiceConnection }}
-              artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
-              poolName: 1es-pool-azfunc
-
-          - template: /eng/templates/official/jobs/aca-qualify.yml@self
-            parameters:
-              runtimeTarget: 'python314'
-              pythonVersion: '3.14'
-              constraintsFile: 'eng/constraints/aca-fixture-py314.txt'
-              appSiteName: $(ACA_DEPLOYED_APP_SITE_NAME_PY314)
-              baseUrl: $(ACA_DEPLOYED_FUNCTION_BASE_URL_PY314)
               acaServiceConnection: ${{ parameters.acaServiceConnection }}
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
               poolName: 1es-pool-azfunc

@@ -1768,6 +1768,8 @@ def _raise_provision_provider_error(
     error: SandboxGroupBindingError | SandboxGroupTransientError | SandboxProvisioningError,
     setup_deadline: SetupDeadline,
 ) -> Never:
+    # Suppress provider exception chaining so only the typed, redacted activation
+    # error crosses this boundary; `from None` removes that implicit context.
     if isinstance(error, SandboxGroupBindingError):
         raise SessionActivationBindingError(str(error)) from None
     if isinstance(error, SandboxGroupTransientError):
