@@ -56,11 +56,11 @@ async def _run_agent(*args: Any, **kwargs: Any) -> Any:
     return await runner_module.run_agent(*args, **kwargs)
 
 
-def _run_agent_stream(*args: Any, **kwargs: Any) -> Any:
+def _run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
     from importlib import import_module
 
     runner_module = import_module("azure_functions_agents.runner")
-    return runner_module.run_agent_stream(*args, **kwargs)
+    return cast(AsyncIterator[str], runner_module.run_agent_stream(*args, **kwargs))
 
 
 # The runner uses the session id as a filename component, so it rejects anything
@@ -198,7 +198,7 @@ def _run_builtin_agent_stream(
     durable_client: Any | None = None,
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
-) -> Any:
+) -> AsyncIterator[str]:
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
     return _run_agent_stream(
@@ -404,19 +404,16 @@ def _register_http_chat_stream(
             session_id = req.headers.get("x-ms-session-id")
 
             def run_stream(durable_client: DurableFunctionsClient | None) -> AsyncIterator[str]:
-                return cast(
-                    AsyncIterator[str],
-                    _run_builtin_agent_stream(
-                        prompt,
-                        resolved=resolved,
-                        capabilities=capabilities,
-                        session_id=session_id,
-                        workflows_enabled=workflows_enabled,
-                        workflow_system_addendum=workflow_system_addendum,
-                        durable_client=durable_client,
-                        catalog=catalog,
-                        workflow_policy=workflow_policy,
-                    ),
+                return _run_builtin_agent_stream(
+                    prompt,
+                    resolved=resolved,
+                    capabilities=capabilities,
+                    session_id=session_id,
+                    workflows_enabled=workflows_enabled,
+                    workflow_system_addendum=workflow_system_addendum,
+                    durable_client=durable_client,
+                    catalog=catalog,
+                    workflow_policy=workflow_policy,
                 )
 
             # A Durable client injected by ``durable_client_input`` is scoped to the

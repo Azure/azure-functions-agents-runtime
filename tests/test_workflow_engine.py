@@ -264,12 +264,23 @@ async def test_sub_agent_activity_sanitizes_leaf_failure(
 
 class _Task:
     def __init__(self, result: Any = None) -> None:
-        self.result = result
-        self.is_completed = True
+        self._result = result
+        self.is_complete = True
         self.cancelled = False
+
+    @property
+    def result(self) -> Any:
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+    @result.setter
+    def result(self, value: Any) -> None:
+        self._result = value
 
     def cancel(self) -> None:
         self.cancelled = True
+        self.is_complete = True
 
 
 class _FakeOrchestrationContext:
@@ -569,7 +580,7 @@ class _DynamicContext(_FakeOrchestrationContext):
 
     def create_timer(self, deadline: datetime) -> _Task:
         timer = _Task()
-        timer.is_completed = False
+        timer.is_complete = False
         self.timers.append(timer)
         return timer
 
