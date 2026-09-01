@@ -662,11 +662,10 @@ async def _activate_existing_session(
     )
     handle: SandboxSessionHandle | None = None
     try:
-        handle = await _attach_or_resume_existing_session(
+        handle = await _resume_existing_session(
             provider,
             persisted,
             expected,
-            session,
             setup_deadline,
         )
         await _within_setup_budget(
@@ -695,9 +694,11 @@ async def _activate_existing_session(
         raise SessionActivationGoneError(
             "Session backing sandbox is unavailable."
         ) from None
-    except SandboxInvalidStateError as exc:
+    except SandboxInvalidStateError:
         await _close_handle_if_open(handle)
-        raise SessionActivationConflictError(str(exc)) from None
+        raise SessionActivationConflictError(
+            "Sandbox lifecycle state prevents session activation."
+        ) from None
     except SandboxProvisioningError:
         await _close_handle_if_open(handle)
         raise SessionActivationConflictError(
@@ -736,35 +737,22 @@ async def _activate_existing_session(
     )
 
 
-async def _attach_or_resume_existing_session(
+async def _resume_existing_session(
     provider: SandboxSessionProvider,
     persisted: PersistedSandboxBinding,
     expected: ExpectedSandboxManifestBinding,
-    session: DurableSessionRecord,
     setup_deadline: SetupDeadline,
 ) -> SandboxSessionHandle:
-    if session.status == "suspended":
-        return await _within_setup_budget(
-            provider.resume(
-                persisted,
-                expected,
-                readiness_timeout_seconds=setup_deadline.remaining_setup_seconds(
-                    phase=SetupPhase.SESSION_RESUME
-                ),
-            ),
-            setup_deadline,
-            phase=SetupPhase.SESSION_RESUME,
-        )
     return await _within_setup_budget(
-        provider.attach(
+        provider.resume(
             persisted,
             expected,
             readiness_timeout_seconds=setup_deadline.remaining_setup_seconds(
-                phase=SetupPhase.SESSION_ATTACH
+                phase=SetupPhase.SESSION_RESUME
             ),
         ),
         setup_deadline,
-        phase=SetupPhase.SESSION_ATTACH,
+        phase=SetupPhase.SESSION_RESUME,
     )
 
 

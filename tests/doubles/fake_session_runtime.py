@@ -152,6 +152,8 @@ class FakeSandboxSessionProvider:
         self.create_errors: list[Exception] = []
         self.attach_error: Exception | None = None
         self.attach_delay = 0.0
+        self.resume_error: Exception | None = None
+        self.resume_delay = 0.0
         self.closed = False
         self.sandboxes: dict[str, FakeSandboxSessionHandle] = {handle.identity.sandbox_id: handle}
         self.snapshots: dict[str, SandboxSnapshot] = {}
@@ -188,8 +190,10 @@ class FakeSandboxSessionProvider:
     async def resume(self, *args: object, **kwargs: object) -> FakeSandboxSessionHandle:
         del args, kwargs
         self.resume_calls += 1
-        if self.attach_error is not None:
-            raise self.attach_error
+        if self.resume_delay:
+            await asyncio.sleep(self.resume_delay)
+        if self.resume_error is not None:
+            raise self.resume_error
         return self.handle
 
     async def list_sandboxes(

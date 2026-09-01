@@ -273,15 +273,20 @@ partial progress when its deadline is reached.
 A capacity-triggered targeted retry may therefore remain capacity-exhausted
 until the timer reclaims unrelated stale resources.
 
-File-plane `409` readiness is lifecycle-aware: the controller resumes only
-when it owns that mutation, honors provider `Retry-After`, and uses capped
-jittered backoff with per-candidate and whole-flow budgets. Absent backing is
-never probed. Group data-plane `401`/`403` responses are authorization failures,
-`404` is a permanent binding failure, and `429`, `5xx`, timeouts, and transport
-failures are transient. A sandbox-scoped `404` means missing backing; only the
-provider's already-running `409` is an idempotent resume, while other `409`
-responses are invalid state. These failures retain sanitized classifications
-instead of surfacing as opaque setup timeouts.
+File-plane `409` readiness is lifecycle-aware: every reusable existing session
+is idempotently resumed before its manifest handshake, even when durable state
+is `ready`; that state is not evidence that ACA compute remains running. An
+incompatible sandbox lifecycle state returns a sanitized `409` from submission,
+status, result, events, or cancel with
+`{"error":"sandbox_invalid_state","reason":"sandbox_invalid_state"}`. The
+controller honors provider `Retry-After` and uses capped jittered backoff with
+per-candidate and whole-flow budgets. Absent backing is never probed. Group
+data-plane `401`/`403` responses are authorization failures, `404` is a permanent
+binding failure, and `429`, every `5xx`, timeouts, and transport failures are
+transient. A sandbox-scoped `404` means missing backing. A resume `409` is
+accepted only when a typed state read confirms the sandbox is running or
+resuming; every other `409` is invalid state. These failures retain sanitized
+classifications instead of surfacing as opaque setup timeouts.
 
 Useful failure signals include:
 

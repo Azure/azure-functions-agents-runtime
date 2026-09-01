@@ -4,7 +4,7 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-08-31
+updated: 2026-09-01
 issues: [166]
 pull_requests: []
 branch: feature/aca-sandboxes
@@ -440,8 +440,9 @@ controlling amendments.
 | 192 | Deployed qualification coverage and matrix | Split phases / one ordered per-runtime suite | In each parallel Python 3.13/3.14 job, run fresh-session acceptance first, then public turn, lifecycle, backing loss, and N=5 with provisioning concurrency 1. N=100 remains human-only. Latency evidence is observe-only and never gates. | Human | 2026-08-28 | #166; current N=5/N=100 policy |
 | 193 | Qualification cleanup and rollback | Post-run cleanup and rollback / pre-run signal only | Run one nonfatal, age-scoped sweep before qualification and no post-run cleanup, so automatic idle-delete/reaping failures remain visible. Provide no retained-package rollback machinery; a later deployment corrects a bad deployment. | Human | 2026-08-28 | #166 |
 | 194 | Required Sandbox Group region and endpoint | ARM discovery/equality check / authored direct endpoint | Require the normalized Sandbox Group `region` beside its resource ID. Construct the regional data-plane client directly, with no ARM lookup or fallback. Function App and Sandbox Group may be in the same or different regions; compare only configured, persisted, and live Sandbox Group identity and region, and fail closed on those mismatches. | Human | 2026-08-28 | Revises #99/#184/#188 |
-| 195 | ACA provider error boundary | Raw SDK propagation / complete typed and redacted boundary | No Azure SDK exception crosses `aca_sdk.py`: group 401/403 is authorization, group 404 is binding, group 429/5xx/timeout is transient, and sandbox 404 is missing backing. Only an already-running resume 409 is idempotent; every other 409 is invalid state. Routes expose only typed, redacted projections. | Human | 2026-08-28 | Refines #159/#184/#187/#188 |
+| 195 | ACA provider error boundary | Raw SDK propagation / complete typed and redacted boundary | No Azure SDK exception crosses `aca_sdk.py`: group 401/403 is authorization, group 404 is binding, group 429/5xx/timeout is transient, and sandbox 404 is missing backing. Only an already-running resume 409 is idempotent; every other 409 is invalid state. Routes expose only typed, redacted projections. | Human | 2026-08-28 | Refines #159/#184/#187/#188; refined by #197 |
 | 196 | Deployed-build attestation scope | Full detached artifact/storage hash chain / lightweight in-package provenance | Keep the embedded `BUILD_INFO.json` check for build ID, commit SHA, and live Python minor. Do not add wheel SHA-256, installed-package-version, deploy-input-manifest, deployment-storage-version, or rollback attestation. This intentionally narrows the original issue #166 request while retaining proof that the responding app contains this pipeline's marker. | Human | 2026-08-31 | Refines #191; narrows #166 |
+| 197 | Reusable existing-session wake-up | Durable-status attach / unconditional typed-state resume | Resume every reusable persisted sandbox before manifest verification because durable `ready` does not prove running compute. Treat a concurrent resume `409` as progress only when typed state is `Running` or `Resuming`; expose every other state as redacted `sandbox_invalid_state`. | Human + Agent | 2026-09-01 | Refines #28/#99/#195; base fix #183 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -1218,6 +1219,7 @@ Canonical stored/wire run states: `accepted`, `running`, `succeeded`, `failed`, 
 | Unknown run | `404`. |
 | Auth/authz | `401`/`403`. |
 | Different submission while active run holds slot | Flat `409 active_run_exists`, naming active run. |
+| Sandbox lifecycle rejects idempotent resume | Sanitized `409 sandbox_invalid_state` from submission, status, result, events, or cancel; body contains only `error` and `reason` set to that value. |
 | Same Idempotency-Key, different payload | `422 idempotency_key_conflict`; never a bare ambiguous `409`. |
 | Result evicted or session tombstoned | Result `410 Gone`; terminal status remains available until terminal row pruning, after which status also returns `410`. |
 

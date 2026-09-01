@@ -996,7 +996,7 @@ async def test_tombstoned_abandoned_run_keeps_status_but_result_is_gone() -> Non
 
 
 # ---------------------------------------------------------------------------
-# Cross-layer regression: an ARM status must reach the caller as an HTTP status.
+# Cross-layer regression: a provider status must reach the caller as an HTTP status.
 #
 # The transport tests prove classification and the handler tests prove response
 # shape, but the defect this guards against lived in the seam between them: the
@@ -1100,45 +1100,35 @@ async def test_permanent_data_plane_binding_failure_is_not_reported_as_retryable
 
 
 @pytest.mark.asyncio
-async def test_invalid_state_resume_409_produces_structured_response_not_untyped_500() -> None:
-    """A sandbox invalid-state error must become a structured 409, not an unparseable 500."""
+@pytest.mark.parametrize("surface", ("submit", "status", "result", "cancel"))
+async def test_invalid_state_returns_a_structured_sanitized_conflict(
+    surface: str,
+) -> None:
     backend = FakeBackend(_status())
-    backend.raise_on_start = SessionActivationConflictError(
-        "sandbox_invalid_state"
-    )
-
-    response = await submit_run(
-        backend,  # type: ignore[arg-type]
-        StartRunRequest(prompt="hello"),
-        agent_slug="main",
-        respond_async=True,
-        budget=_expired_budget(),
-    )
+    error = SessionActivationConflictError("traceId=provider-secret")
+    context = RunContext(run_id="run-1", session_id="session-1")
+    if surface == "submit":
+        backend.raise_on_start = error
+        response = await submit_run(
+            backend,  # type: ignore[arg-type]
+            StartRunRequest(prompt="hello"),
+            agent_slug="main",
+            respond_async=True,
+            budget=_expired_budget(),
+        )
+    elif surface == "status":
+        backend.raise_on_get = error
+        response = await read_status(backend, context)  # type: ignore[arg-type]
+    elif surface == "result":
+        backend.raise_on_get = error
+        response = await read_result(backend, context)  # type: ignore[arg-type]
+    else:
+        backend.raise_on_cancel = error
+        response = await cancel_run(backend, context)  # type: ignore[arg-type]
 
     assert response.status_code == 409
     assert response.body == {
         "error": "sandbox_invalid_state",
         "reason": "sandbox_invalid_state",
     }
-    # No provider payload leaks into the structured response.
-    body_text = str(response.body)
-    assert "traceId" not in body_text
-    assert "requestId" not in body_text
-    assert "sandboxGroups" not in body_text
-
-
-@pytest.mark.asyncio
-async def test_invalid_state_on_get_run_produces_structured_409() -> None:
-    """The get_run path also catches conflict errors as structured 409."""
-    backend = FakeBackend(_status())
-    backend.raise_on_get = SessionActivationConflictError(
-        "sandbox_invalid_state"
-    )
-
-    response = await read_result(backend, RunContext(run_id="run-1", session_id="session-1"))  # type: ignore[arg-type]
-
-    assert response.status_code == 409
-    assert response.body == {
-        "error": "sandbox_invalid_state",
-        "reason": "sandbox_invalid_state",
-    }
+    assert "provider-secret" not in str(response.body)
