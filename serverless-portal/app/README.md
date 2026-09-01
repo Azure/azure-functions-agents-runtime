@@ -41,6 +41,27 @@ subscriptions it scans.
   convention (`agent_<name>_builtin_*`, routes `agents/<name>/…`) — no need to
   invoke the running app. If none can be parsed, the app itself is surfaced.
 
+### Function App lifecycle
+
+The Hosted Skills dashboard shows one **Stop app** action per Function App,
+including apps that host multiple skills. Stop opens a confirmation modal and
+makes every Hosted Skill in that app unavailable. It does not delete data or
+other Azure resources. Starting a stopped app remains an Azure Portal action.
+
+Each Hosted Skill detail page exposes **Delete app** in the app action bar.
+Delete requires a separate modal and typing the exact Function App name. It
+deletes only the `Microsoft.Web/sites` Function App and clears app-keyed portal
+draft/cache state. It deliberately preserves the resource group, storage
+account, App Service plan, Application Insights, Log Analytics, Foundry
+resources, GitHub repositories, Connector Gateways, and Outlook connections.
+Those preserved resources can be reviewed, reused, or deleted separately.
+
+Both operations run as the signed-in ARM identity and validate that the exact
+target is a Function App carrying `AZURE_FUNCTIONS_AGENTS_PROVIDER`. Stop
+requires effective `Microsoft.Web/sites/write`; delete requires
+`Microsoft.Web/sites/delete`. The portal waits up to 30 seconds for Azure state
+convergence and reports an in-progress state when ARM needs longer.
+
 ### Outlook connections
 
 The **New Skill** flow is Model → Instructions → Deployment target → **Tools &
@@ -167,6 +188,22 @@ GitHub token is encrypted inside an HttpOnly cookie bound to the caller's ARM
 object ID, so the connection survives backend revisions and works across
 replicas without storing tokens on container disk.
 
+Production OAuth authorization does not install the GitHub App. Install the App
+on every account that will own repositories. Repository publication requires
+**Contents: read and write**; pull requests require **Pull requests: read and
+write**; creating repositories requires **Administration: read and write**.
+Choose **All repositories** when the portal should create new repositories. If
+the installation is limited to selected repositories, create and select the
+repository in GitHub first, then use the portal's existing-repository flow.
+
+When the GitHub App issues expiring user access tokens, the portal keeps the
+returned expiration and refresh credentials in that encrypted cookie. It
+refreshes the access token five minutes before expiration and persists GitHub's
+rotated access and refresh tokens. A revoked session returns to the explicit
+**Connect** state without signing the user out of Azure. Cookies created before
+refresh support do not contain a refresh token and require one reconnect after
+the upgrade.
+
 ## Run locally
 
 **Backend** (terminal 1):
@@ -201,6 +238,8 @@ npm run build    # emits dist/, which the Node server serves at http://localhost
 | GET | `/api/identity` | Signed-in user + the default subscription |
 | GET | `/api/subscriptions` | Subscriptions visible to the signed-in identity |
 | GET | `/api/live/agents` | Scan a subscription (`?subscription=<id or name>`, defaults to the configured one) and list every serverless agent |
+| POST | `/api/apps/stop` | Validate and stop one agent Function App after explicit confirmation |
+| DELETE | `/api/apps` | Validate and delete only one agent Function App, then clear its portal-local state |
 | GET | `/api/connections` | List the app-scoped Office 365 Outlook connection |
 | POST | `/api/connections` | Create or converge the Outlook connection, access policies, and send-only MCP configuration |
 | GET | `/api/connections/candidates` | List eligible Office 365 Outlook connections in an explicitly selected visible subscription; `planned=true` supports read-only selection before a new app exists |

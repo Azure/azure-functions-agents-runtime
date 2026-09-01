@@ -365,6 +365,7 @@ export function GitHubConnect({
   const [pushing, setPushing] = useState(false)
   const [result, setResult] = useState<GitHubConnectResult | null>(null)
   const [error, setError] = useState('')
+  const [githubSettingsUrl, setGithubSettingsUrl] = useState('')
   const [changingRepo, setChangingRepo] = useState(false)
   const [unlinking, setUnlinking] = useState(false)
   const [changeNote, setChangeNote] = useState('')
@@ -383,6 +384,21 @@ export function GitHubConnect({
     setStatus(s)
     setAppConn(c)
   }, [subscription, resourceGroup, app])
+
+  const handleGitHubError = async (caught: unknown) => {
+    setError((caught as Error).message)
+    const settingsUrl = caught instanceof ApiError ? caught.data.settingsUrl : ''
+    setGithubSettingsUrl(
+      typeof settingsUrl === 'string' &&
+        /^https:\/\/github\.com\/(?:settings\/installations(?:\/\d+)?|apps\/[A-Za-z0-9-]+\/installations\/new)\/?$/.test(settingsUrl)
+        ? settingsUrl
+        : '',
+    )
+    if (caught instanceof ApiError && caught.data.error === 'github_session_expired') {
+      setRepos(null)
+      await refreshStatus()
+    }
+  }
 
   useEffect(() => {
     void refreshStatus()
@@ -480,7 +496,7 @@ export function GitHubConnect({
     try {
       setRepos((await api.githubRepos()).repos)
     } catch (e) {
-      setError((e as Error).message)
+      await handleGitHubError(e)
     }
   }
 
@@ -493,6 +509,7 @@ export function GitHubConnect({
     branch?: string
   }) => {
     setError('')
+    setGithubSettingsUrl('')
     setPushing(true)
     setResult(null)
     try {
@@ -506,7 +523,7 @@ export function GitHubConnect({
       setChangingRepo(false)
       await refreshStatus()
     } catch (e) {
-      setError((e as Error).message)
+      await handleGitHubError(e)
     } finally {
       setPushing(false)
     }
@@ -634,7 +651,7 @@ export function GitHubConnect({
       setProvisionMsg(`✓ GitHub Actions configured — pushes to ${appConn.branch || 'main'} now deploy this app.`)
       setProvisionRuns(r.runsUrl)
     } catch (e) {
-      setError((e as Error).message)
+      await handleGitHubError(e)
     } finally {
       setProvisioning(false)
     }
@@ -1010,7 +1027,16 @@ export function GitHubConnect({
           </>
         )}
 
-        {error && <div className="gh-err">{error}</div>}
+        {error && (
+          <div className="gh-err">
+            <div>{error}</div>
+            {githubSettingsUrl && (
+              <a className="btn sm" href={githubSettingsUrl} target="_blank" rel="noreferrer">
+                Install or review GitHub App access
+              </a>
+            )}
+          </div>
+        )}
         </div>
       )}
     </div>

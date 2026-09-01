@@ -32,6 +32,7 @@ export type IconName =
   | 'globe'
   | 'mail'
   | 'trash'
+  | 'stop'
   | 'book'
   | 'bulb'
 
@@ -152,6 +153,7 @@ const ICONS: Record<IconName, JSX.Element> = {
       <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5" />
     </>
   ),
+  stop: <rect width="14" height="14" x="5" y="5" rx="1" />,
   book: (
     <>
       <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />

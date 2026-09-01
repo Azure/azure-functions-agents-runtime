@@ -1,12 +1,13 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { api } from '../api'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { api, type FunctionAppState, type LiveAgentApp, type LiveDiscovery } from '../api'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
-import { EmptyState, HostedSkillRow, StatTiles, SubscriptionPicker } from '../components/ui'
+import { EmptyState, HostedSkillRow, Icon, StatTiles, SubscriptionPicker } from '../components/ui'
 import { Button } from '@coreai/fluentui-react'
 import { clearDraft } from '../agentDraft'
+import { StopFunctionAppDialog } from '../components/AppLifecycleDialogs'
 
 function formatCachedAt(ms: number): string {
   if (!ms) return ''
@@ -37,6 +38,12 @@ export default function AgentsPage() {
 
   const { subscriptionId } = useParams<{ subscriptionId: string }>()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const [stopTarget, setStopTarget] = useState<LiveAgentApp | null>(null)
+  const [stopBusy, setStopBusy] = useState(false)
+  const [stopError, setStopError] = useState('')
+  const [stopNotice, setStopNotice] = useState('')
+  const legacyStateRefresh = useRef('')
 
   // Deeplink → state: adopt the subscription from the URL so a shared/reloaded
   // `/agents/:subscriptionId` restores the exact view.
@@ -80,6 +87,17 @@ export default function AgentsPage() {
     }
   }, [selected, data, dataUpdatedAt])
 
+  useEffect(() => {
+    if (
+      !data ||
+      isFetching ||
+      legacyStateRefresh.current === selected ||
+      !data.apps.some((app) => !app.state)
+    ) return
+    legacyStateRefresh.current = selected
+    void refetch()
+  }, [data, isFetching, refetch, selected])
+
   const error = queryError ? (queryError as Error).message : null
   const apps = data?.apps ?? []
   const agents = data?.agents ?? []
@@ -88,8 +106,67 @@ export default function AgentsPage() {
   const subName = subscriptions.find((s) => s.id === selected)?.name ?? 'the subscription'
 
   const onPickSubscription = (id: string) => {
+    setStopNotice('')
     setSelected(id)
     navigate(`/agents/${id}`)
+  }
+
+  const updateCachedAppState = (appName: string, state: FunctionAppState) => {
+    const key = queryKeys.liveAgents(selected)
+    const current = queryClient.getQueryData<LiveDiscovery>(key)
+    if (!current) return
+    const next = {
+      ...current,
+      apps: current.apps.map((app) => app.name === appName ? { ...app, state } : app),
+    }
+    queryClient.setQueryData(key, next)
+    writeAgentsSnapshot(selected, next, Date.now())
+  }
+
+  const stopApp = async () => {
+    if (!stopTarget || stopBusy) return
+    setStopBusy(true)
+    setStopError('')
+    try {
+      const result = await api.stopApp({
+        subscription: selected,
+        resourceGroup: stopTarget.resourceGroup,
+        app: stopTarget.name,
+        confirmation: stopTarget.name,
+      })
+      updateCachedAppState(stopTarget.name, result.pending ? 'Stopping' : result.state)
+      setStopNotice(result.pending
+        ? `Azure is stopping ${stopTarget.name}. Refresh to confirm completion.`
+        : `${stopTarget.name} is stopped.`)
+      setStopTarget(null)
+      if (result.pending) {
+        window.setTimeout(() => void refetch(), 4_000)
+      } else {
+        void refetch()
+      }
+    } catch (caught) {
+      setStopError((caught as Error).message)
+    } finally {
+      setStopBusy(false)
+    }
+  }
+
+  const stopAction = (app: LiveAgentApp) => {
+    const state = app.state ?? 'Unknown'
+    const unavailable = state === 'Stopped' || state === 'Stopping'
+    return (
+      <Button
+        size="small"
+        icon={<Icon name="stop" size={14} />}
+        disabled={unavailable}
+        onClick={() => {
+          setStopError('')
+          setStopTarget(app)
+        }}
+      >
+        {state === 'Stopped' ? 'Stopped' : state === 'Stopping' ? 'Stopping…' : 'Stop app'}
+      </Button>
+    )
   }
 
   return (
@@ -98,6 +175,8 @@ export default function AgentsPage() {
       <div className="page-title">
         <h1>Hosted Skills</h1>
       </div>
+
+      {stopNotice && <div className="note ok" role="status">{stopNotice}</div>}
       <p className="page-sub">
         Create and manage apps that host AI skills on Azure Functions in <strong>{subName}</strong>
         {data
@@ -172,11 +251,12 @@ export default function AgentsPage() {
                 <HostedSkillRow
                   key={app.name}
                   app={app}
+                  actions={stopAction(app)}
                 />
               )
             }
 
-            return app.agents.map((agent) => (
+            return app.agents.map((agent, index) => (
               <HostedSkillRow
                 key={`${app.name}/${agent.name}`}
                 app={{ ...app, agents: [agent] }}
@@ -185,10 +265,22 @@ export default function AgentsPage() {
                     {children}
                   </Link>
                 )}
+                actions={index === 0 ? stopAction(app) : undefined}
               />
             ))
           })}
         </div>
+      )}
+
+      {stopTarget && (
+        <StopFunctionAppDialog
+          appName={stopTarget.name}
+          skillCount={stopTarget.agents.length}
+          busy={stopBusy}
+          error={stopError}
+          onClose={() => !stopBusy && setStopTarget(null)}
+          onConfirm={() => void stopApp()}
+        />
       )}
 
     </>

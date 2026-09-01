@@ -11,17 +11,19 @@ export function Modal({
   onClose,
   children,
   width,
+  closeDisabled = false,
 }: {
   title: ReactNode
   onClose: () => void
   children: ReactNode
   width?: number
+  closeDisabled?: boolean
 }) {
   return (
     <Dialog
       open
       onOpenChange={(_, data) => {
-        if (!data.open) onClose()
+        if (!data.open && !closeDisabled) onClose()
       }}
     >
       <DialogSurface style={width ? { maxWidth: `${width}px` } : undefined}>
@@ -33,6 +35,7 @@ export function Modal({
                 size="small"
                 icon={<DismissRegular />}
                 onClick={onClose}
+                disabled={closeDisabled}
                 title="Close"
                 aria-label="Close"
               />

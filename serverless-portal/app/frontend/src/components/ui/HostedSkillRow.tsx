@@ -12,6 +12,7 @@ export interface HostedSkillApp {
   resourceGroup: string
   location: string
   provider: string
+  state?: string
   defaultHostName?: string
   agents: HostedSkillSummary[]
   supportingFunctions?: { name: string; trigger: string }[]
@@ -24,7 +25,7 @@ interface HostedSkillRowProps {
   actions?: ReactNode
 }
 
-export const HostedSkillRow = ({ app, status = 'running', renderAppLink, actions }: HostedSkillRowProps) => {
+export const HostedSkillRow = ({ app, status = app.state || 'Unknown', renderAppLink, actions }: HostedSkillRowProps) => {
   const primarySkill = app.agents[0]
   const skillSummary = primarySkill
     ? `${primarySkill.name}${app.agents.length > 1 ? ` +${app.agents.length - 1}` : ''}`
@@ -45,14 +46,14 @@ export const HostedSkillRow = ({ app, status = 'running', renderAppLink, actions
       </span>
       <span className="hosted-skill-region">{app.location || 'Unknown'}</span>
       <span className="hosted-skill-health"><StatusBadge status={status} /></span>
-      <span className="hosted-skill-open" aria-hidden="true">›</span>
+      <span className="hosted-skill-open" aria-hidden="true">{actions ? null : '›'}</span>
     </>
   )
 
   return (
     <div className="hosted-skill-row">
       {renderAppLink ? renderAppLink(content) : <div className="hosted-skill-row-content">{content}</div>}
-      {actions && <div className="pill-row ai-app-actions">{actions}</div>}
+      {actions && <div className="hosted-skill-actions">{actions}</div>}
     </div>
   )
 }

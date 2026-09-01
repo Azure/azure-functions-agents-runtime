@@ -212,6 +212,7 @@ tbody tr:hover { background: var(--surface-2); }
 .connection-removal-list li + li { margin-top: 6px; }
 .danger-button { background: var(--red) !important; border-color: var(--red) !important; color: white !important; }
 .danger-button:hover { filter: brightness(.92); }
+.danger-button:disabled { opacity: .55; filter: none; cursor: not-allowed; }
 @media (max-width: 700px) {
   .connections-table table, .connections-table tbody, .connections-table tr, .connections-table td { display: block; }
   .connections-table thead { display: none; }
@@ -428,7 +429,7 @@ a.card:hover { text-decoration: none; }
 /* Flat Hosted Skills dashboard table. Each data row has one full-size app link. */
 .hosted-skill-table { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
 .hosted-skill-table-head, .hosted-skill-row > a, .hosted-skill-row-content { display: grid;
-  grid-template-columns: minmax(190px, 1.35fr) minmax(150px, 1fr) minmax(140px, .9fr) minmax(100px, .65fr) minmax(100px, .65fr) 24px;
+  grid-template-columns: minmax(190px, 1.35fr) minmax(150px, 1fr) minmax(140px, .9fr) minmax(100px, .65fr) minmax(100px, .65fr) minmax(100px, auto);
   gap: 16px; align-items: center; }
 .hosted-skill-table-head { padding: 10px 16px; background: var(--surface-2); border-bottom: 1px solid var(--border);
   color: var(--text-faint); font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
@@ -443,7 +444,17 @@ a.card:hover { text-decoration: none; }
 .hosted-skill-app small, .hosted-skill-count small, .hosted-skill-model small { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
 .hosted-skill-region { color: var(--text-muted); font-size: 12.5px; }
 .hosted-skill-open { color: var(--text-faint); font-size: 22px; text-align: right; }
-.ai-app-actions { margin-top: 12px; }
+.hosted-skill-actions { position: absolute; z-index: 2; top: 50%; right: 12px; transform: translateY(-50%); }
+.hosted-skill-actions button { white-space: nowrap; }
+.app-lifecycle-impact { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: start;
+  padding: 14px; border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--border)); border-radius: 8px; background: var(--amber-soft); }
+.app-lifecycle-impact.is-destructive { border-color: color-mix(in srgb, var(--red) 35%, var(--border)); background: var(--red-soft); color: var(--red); }
+.app-lifecycle-impact > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.app-lifecycle-impact span { color: var(--text-muted); line-height: 1.45; }
+.app-lifecycle-copy { margin: 14px 0; line-height: 1.5; }
+.app-lifecycle-preserved { margin: 16px 0; }
+.app-lifecycle-preserved ul { margin: 8px 0 0; padding-left: 20px; color: var(--text-muted); line-height: 1.6; }
+.app-lifecycle-confirmation { margin-top: 18px; }
 
 @media (max-width: 820px) {
   .hosted-skill-table { overflow-x: auto; }
@@ -996,6 +1007,7 @@ textarea.instructions-editor:focus { outline: none; }
 .gh-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .gh-err { color: var(--red); background: var(--red-soft); border: 1px solid var(--red); border-radius: 6px;
   padding: 8px 10px; font-size: 12px; margin-top: 10px; word-break: break-word; }
+.gh-err .btn { margin-top: 8px; }
 .gh-spin { width: 13px; height: 13px; border: 2px solid color-mix(in srgb, currentColor 32%, transparent); border-top-color: currentColor;
   border-radius: 50%; display: inline-block; animation: gh-spin .7s linear infinite; }
 @keyframes gh-spin { to { transform: rotate(360deg); } }

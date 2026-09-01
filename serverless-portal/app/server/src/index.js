@@ -19,6 +19,7 @@ import * as YAML from 'js-yaml'
 
 import * as azure from './azure.js'
 import { validateAgentFiles, validateAgentMarkdown } from './agent-validation.js'
+import { purgePortalAppData, validateAppLifecycleRequest } from './app-lifecycle.js'
 import {
   azureRoleScope,
   customToolPath,
@@ -113,6 +114,44 @@ function githubCookieOptions(req) {
     secure: configuredCallbackIsSecure || !localHost || req.secure || forwardedProtocol === 'https',
     path: '/',
   }
+}
+
+function setGithubSessionCookie(req, res, oid, session) {
+  res.cookie(
+    github.GITHUB_SESSION_COOKIE,
+    github.sealSession(oid, session),
+    { ...githubCookieOptions(req), maxAge: github.GITHUB_SESSION_MAX_AGE_MS },
+  )
+}
+
+async function activeGithubEntry(req, res, oid, { forceValidate = false } = {}) {
+  const stored = githubEntry(req, oid)
+  if (!stored) return null
+  try {
+    const resolved = await github.ensureUserSession(stored, { forceValidate })
+    if (resolved.changed) setGithubSessionCookie(req, res, oid, resolved.session)
+    return resolved.session
+  } catch (error) {
+    if (error?.status === 401) {
+      res.clearCookie(github.GITHUB_SESSION_COOKIE, githubCookieOptions(req))
+      return null
+    }
+    throw new HttpError(error?.status ?? 502, String(error?.message ?? error))
+  }
+}
+
+function expiredGithubSession(req, res) {
+  res.clearCookie(github.GITHUB_SESSION_COOKIE, githubCookieOptions(req))
+  return new HttpError(401, 'Your GitHub session expired. Connect GitHub again.', {
+    error: 'github_session_expired',
+  })
+}
+
+function githubOperationHttpError(req, res, error) {
+  if (Number(error?.status ?? error?.statusCode) === 401) {
+    return expiredGithubSession(req, res)
+  }
+  return new HttpError(error?.status ?? 502, String(error?.message ?? error))
 }
 
 function isLocalDevelopmentRequest(req) {
@@ -1533,6 +1572,63 @@ app.get(
 const APP_SOURCES_DIR = path.join(__dirname, '..', '.data', 'app-sources')
 const SCAFFOLD_DIR = path.join(__dirname, '..', 'scaffold')
 
+const PORTAL_APP_DATA_ROOTS = {
+  agentDrafts: DRAFTS_DIR,
+  sourceDrafts: SOURCE_DRAFTS_DIR,
+  appSources: APP_SOURCES_DIR,
+  deployHistory: DEPLOY_HISTORY_DIR,
+}
+
+function appLifecycleHttpError(error) {
+  return new HttpError(error?.status ?? 502, String(error?.message ?? error), {
+    ...(error?.portalCode ? { error: error.portalCode } : {}),
+  })
+}
+
+app.post(
+  '/api/apps/stop',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    try {
+      const target = validateAppLifecycleRequest(req.body)
+      const result = await azure.stopFunctionApp(token, target)
+      res.status(result.pending ? 202 : 200).json(result)
+    } catch (error) {
+      throw appLifecycleHttpError(error)
+    }
+  }),
+)
+
+app.delete(
+  '/api/apps',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    try {
+      const target = validateAppLifecycleRequest(req.body)
+      const result = await azure.deleteFunctionApp(token, target)
+      if (result.pending) {
+        res.status(202).json(result)
+        return
+      }
+      const cleanupResult = await purgePortalAppData({
+        roots: PORTAL_APP_DATA_ROOTS,
+        subscription: target.subscription,
+        app: target.app,
+      })
+      if (cleanupResult.failures.length) {
+        console.error('[app/delete] portal cleanup incomplete', {
+          subscription: target.subscription,
+          app: target.app,
+          failures: cleanupResult.failures,
+        })
+      }
+      res.status(200).json({ ...result, cleanup: cleanupResult.cleanup })
+    } catch (error) {
+      throw appLifecycleHttpError(error)
+    }
+  }),
+)
+
 // Portal's own authoring skills (a SKILL.md per capability kind), injected into
 // generation prompts so output follows the runtime conventions. Editable under
 // app/server/skills/; read fresh per request (no restart needed).
@@ -2553,7 +2649,7 @@ app.get(
   wrap(async (req, res) => {
     const token = requireToken(req)
     const { oid } = azure.getSignedInIdentity(token)
-    const entry = githubEntry(req, oid)
+    const entry = await activeGithubEntry(req, res, oid)
     res.json({
       configured: github.isConfigured(),
       connected: Boolean(entry),
@@ -2604,11 +2700,7 @@ app.post(
     }
     try {
       const session = await github.getLocalCliSession()
-      res.cookie(
-        github.GITHUB_SESSION_COOKIE,
-        github.sealSession(oid, session),
-        { ...githubCookieOptions(req), maxAge: github.GITHUB_SESSION_MAX_AGE_MS },
-      )
+      setGithubSessionCookie(req, res, oid, session)
       res.json({ configured: true, connected: true, login: session.login, avatarUrl: session.avatarUrl })
     } catch (error) {
       throw new HttpError(error.status ?? 502, String(error?.message ?? error))
@@ -2633,14 +2725,15 @@ app.get(
       return res.status(400).send(github.closePage('GitHub sign-in failed (invalid or expired state).', false))
     }
     try {
-      const accessToken = await github.exchangeCode(code, state.callback)
-      const user = await github.getUser(accessToken)
-      const session = { token: accessToken, login: user.login, avatarUrl: user.avatarUrl }
-      res.cookie(
-        github.GITHUB_SESSION_COOKIE,
-        github.sealSession(state.oid, session),
-        { ...githubCookieOptions(req), maxAge: github.GITHUB_SESSION_MAX_AGE_MS },
-      )
+      const credentials = await github.exchangeCode(code, state.callback)
+      const user = await github.getUser(credentials.token)
+      const session = {
+        ...credentials,
+        login: user.login,
+        avatarUrl: user.avatarUrl,
+        validatedAt: Date.now(),
+      }
+      setGithubSessionCookie(req, res, state.oid, session)
       console.log('[github/callback] connected as', user.login, 'for oid', state.oid)
       res.send(github.closePage(`Connected as ${user.login}. You can close this window.`, true))
     } catch (err) {
@@ -2712,12 +2805,12 @@ app.get(
   wrap(async (req, res) => {
     const token = requireToken(req)
     const { oid } = azure.getSignedInIdentity(token)
-    const entry = githubEntry(req, oid)
-    if (!entry) throw new HttpError(401, 'Not connected to GitHub.')
+    const entry = await activeGithubEntry(req, res, oid, { forceValidate: true })
+    if (!entry) throw expiredGithubSession(req, res)
     try {
       res.json({ repos: await github.listRepos(entry.token) })
     } catch (err) {
-      throw new HttpError(err.status ?? 502, String(err?.message ?? err))
+      throw githubOperationHttpError(req, res, err)
     }
   }),
 )
@@ -2729,8 +2822,8 @@ app.post(
   wrap(async (req, res) => {
     const token = requireToken(req)
     const { oid } = azure.getSignedInIdentity(token)
-    const entry = githubEntry(req, oid)
-    if (!entry) throw new HttpError(401, 'Not connected to GitHub.')
+    const entry = await activeGithubEntry(req, res, oid, { forceValidate: true })
+    if (!entry) throw expiredGithubSession(req, res)
 
     const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
     const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
@@ -2741,6 +2834,13 @@ app.post(
     if (!['pr', 'direct'].includes(publishMode)) {
       throw new HttpError(400, 'publishMode must be "pr" or "direct".')
     }
+    const requiredPermissions = {
+      contents: 'write',
+      ...(publishMode === 'pr' ? { pull_requests: 'write' } : {}),
+      ...(mode === 'new' ? { administration: 'write' } : {}),
+    }
+    let githubOwner = entry.login
+    let githubStep = 'access repository'
 
     // Assemble this app's source: the portal-managed working copy if present,
     // else the app's deployed package — then overlay any saved (unpublished)
@@ -2764,6 +2864,8 @@ app.post(
         const fullName = String(req.body?.repo ?? '').trim()
         const [owner, name] = fullName.split('/')
         if (!owner || !name) throw new HttpError(400, 'An existing repo "owner/name" is required.')
+        githubOwner = owner
+        githubStep = 'access existing repository'
         repo = await github.getRepo(entry.token, owner, name)
         const requestedBranch = String(req.body?.branch ?? '').trim()
         if (requestedBranch) repo.defaultBranch = requestedBranch
@@ -2771,6 +2873,8 @@ app.post(
         const name = safeSegment(String(req.body?.repoName ?? appName).trim() || appName)
         const priv = req.body?.private !== false
         const org = String(req.body?.org ?? '').trim()
+        githubOwner = org || entry.login
+        githubStep = 'create repository'
         let created
         try {
           created = await github.createRepo(entry.token, { name, private: priv, org })
@@ -2801,6 +2905,7 @@ app.post(
       let pr = null
       let commitSha
       if (publishMode === 'direct') {
+        githubStep = 'push repository contents'
         const pushed = await github.pushFiles(entry.token, {
           owner: repo.owner,
           repo: repo.name,
@@ -2810,6 +2915,7 @@ app.post(
         })
         commitSha = pushed.commitSha
       } else {
+        githubStep = 'write a branch and open a pull request'
         // Reuse one rolling PR per app; start a fresh branch after it is merged.
         const seg = (s) =>
           String(s)
@@ -2886,7 +2992,49 @@ app.post(
     } catch (err) {
       if (err instanceof HttpError) throw err
       console.error('[github/connect] FAILED:', err?.status ?? '', String(err?.message ?? err))
-      throw new HttpError(err.status ?? 502, String(err?.message ?? err))
+      if (Number(err?.status ?? err?.statusCode) === 403) {
+        let diagnostic = null
+        let application = null
+        try {
+          diagnostic = await github.inspectAppInstallation(entry.token, {
+            owner: githubOwner,
+            requiredPermissions,
+          })
+          if (!diagnostic.installationFound) {
+            application = await github.inspectAuthorizedApplication(entry.token)
+          }
+        } catch (diagnosticError) {
+          console.error('[github/connect] installation inspection failed:', String(diagnosticError?.message ?? diagnosticError))
+        }
+
+        let detail = `GitHub denied permission to ${githubStep}.`
+        if (diagnostic && !diagnostic.installationFound) {
+          detail += ` Install ${application?.appName || 'the GitHub App'} for ${githubOwner}, then reconnect GitHub.`
+        } else if (diagnostic?.missingPermissions?.length) {
+          detail += ` Approve ${diagnostic.missingPermissions.join(', ')} for the GitHub App installation, then reconnect GitHub.`
+        } else if (mode === 'new' && diagnostic?.repositorySelection === 'selected') {
+          detail += ' The GitHub App is limited to selected repositories. Choose All repositories, or create and select the repository in GitHub first.'
+        } else {
+          detail += ' The installation reports the required permissions; check whether an account or organization policy blocks this operation.'
+        }
+        const metadata = {
+          error: 'github_permission_denied',
+          githubStep,
+          githubOwner,
+          ...(diagnostic
+            ? {
+                installationFound: diagnostic.installationFound,
+                repositorySelection: diagnostic.repositorySelection,
+                missingPermissions: diagnostic.missingPermissions,
+                settingsUrl: application?.installUrl || diagnostic.settingsUrl,
+                ...(application?.appName ? { appName: application.appName } : {}),
+              }
+            : {}),
+        }
+        console.error('[github/connect] access diagnostic:', JSON.stringify(metadata))
+        throw new HttpError(403, detail, metadata)
+      }
+      throw githubOperationHttpError(req, res, err)
     }
   }),
 )
@@ -2900,8 +3048,8 @@ app.post(
   wrap(async (req, res) => {
     const token = requireToken(req)
     const { oid, tenantId } = azure.getSignedInIdentity(token)
-    const entry = githubEntry(req, oid)
-    if (!entry) throw new HttpError(401, 'Not connected to GitHub.')
+    const entry = await activeGithubEntry(req, res, oid, { forceValidate: true })
+    if (!entry) throw expiredGithubSession(req, res)
 
     const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
     const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
@@ -3011,6 +3159,7 @@ app.post(
       if (err instanceof HttpError) throw err
       const at = Object.keys(steps).pop() || 'start'
       console.error('[github/provision] FAILED after', at, ':', err?.status ?? '', String(err?.message ?? err))
+      if (Number(err?.status ?? err?.statusCode) === 401) throw expiredGithubSession(req, res)
       throw new HttpError(err.status ?? 502, `Provisioning failed after ${at}: ${String(err?.message ?? err)}`)
     }
   }),

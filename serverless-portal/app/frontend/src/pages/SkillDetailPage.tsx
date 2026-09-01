@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button } from '@coreai/fluentui-react'
-import { api, type LiveAgent, type LiveAgentApp } from '../api'
+import { api, type LiveAgent, type LiveAgentApp, type LiveDiscovery } from '../api'
+import { DeleteFunctionAppDialog } from '../components/AppLifecycleDialogs'
 import { OutlookConnectionsPanel } from '../components/OutlookConnectionsPanel'
 import { DraftEditor } from '../components/SourceEditor'
 import { TriggerEditor } from '../components/TriggerEditor'
@@ -11,6 +12,7 @@ import { DeploymentStatus, GitHubConnect, useDeployJob } from '../deploy'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
 import { slugify } from '../agentDraft'
+import { Icon } from '../components/ui'
 
 type DetailTab = 'instructions' | 'runs' | 'capabilities' | 'observability' | 'source'
 
@@ -91,6 +93,8 @@ function endpointUrls(agent: LiveAgent): { label: string; value: string }[] {
 }
 
 export default function SkillDetailPage() {
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const { subscriptionId, app: appName, name } = useParams<{
     subscriptionId: string
     app: string
@@ -99,6 +103,10 @@ export default function SkillDetailPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const { selected, setSelected } = useIdentity()
   const deployJob = useDeployJob()
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [deletePending, setDeletePending] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
 
   useEffect(() => {
     if (subscriptionId && subscriptionId !== selected) setSelected(subscriptionId)
@@ -144,6 +152,42 @@ export default function SkillDetailPage() {
     void refetch()
   }, [agent, appName, isFetching, refetch, subForQuery])
   const backTo = `/agents/${subscriptionId ?? selected}`
+
+  const deleteApp = async (confirmation: string) => {
+    if (!agent || deleteBusy || deletePending) return
+    setDeleteBusy(true)
+    setDeleteError('')
+    try {
+      const result = await api.deleteApp({
+        subscription: subForQuery,
+        resourceGroup: agent.resourceGroup,
+        app: agent.app,
+        confirmation,
+      })
+      if (result.pending) {
+        setDeletePending(true)
+        return
+      }
+      const key = queryKeys.liveAgents(subForQuery)
+      const current = queryClient.getQueryData<LiveDiscovery>(key)
+      if (current) {
+        const next = {
+          ...current,
+          apps: current.apps.filter((candidate) => candidate.name !== agent.app),
+          agents: current.agents.filter((candidate) => candidate.app !== agent.app),
+        }
+        queryClient.setQueryData(key, next)
+        writeAgentsSnapshot(subForQuery, next, Date.now())
+      }
+      setDeleteOpen(false)
+      navigate(backTo, { replace: true })
+      void queryClient.invalidateQueries({ queryKey: key, refetchType: 'active' })
+    } catch (caught) {
+      setDeleteError((caught as Error).message)
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
   const error = queryError ? (queryError as Error).message : null
   const scanning = !!subForQuery && !data && !error
   const requestedTab = searchParams.get('tab') as DetailTab | null
@@ -250,6 +294,19 @@ export default function SkillDetailPage() {
               <Button size="small" appearance="primary" disabled={!hasDeployableEdits || deployJob.phase === 'running'} onClick={() => deployJob.redeploy({ subscription: subForQuery, resourceGroup: agent.resourceGroup, app: agent.app })}>
                 {deployJob.phase === 'running' ? 'Deploying…' : 'Deploy'}
               </Button>
+              <Button
+                size="small"
+                className="danger-button"
+                icon={<Icon name="trash" size={14} />}
+                disabled={deployJob.phase === 'running'}
+                onClick={() => {
+                  setDeleteError('')
+                  setDeletePending(false)
+                  setDeleteOpen(true)
+                }}
+              >
+                Delete app
+              </Button>
             </div>
           </div>
 
@@ -291,6 +348,18 @@ export default function SkillDetailPage() {
           </nav>
 
           <DeploymentStatus phase={deployJob.phase} result={deployJob.result} portalUrl={deployJob.portalUrl} message={deployJob.message} />
+
+          {deleteOpen && (
+            <DeleteFunctionAppDialog
+              appName={agent.app}
+              skillCount={hostApp?.agents.length ?? 1}
+              busy={deleteBusy}
+              pending={deletePending}
+              error={deleteError}
+              onClose={() => !deleteBusy && setDeleteOpen(false)}
+              onConfirm={(confirmation) => void deleteApp(confirmation)}
+            />
+          )}
 
           {tab === 'instructions' && (
             <div className="skill-editor-layout">

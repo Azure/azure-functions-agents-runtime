@@ -3,8 +3,12 @@ import test from 'node:test'
 
 import {
   authorizeUrl,
+  ensureUserSession,
   ensureWorkflowCanBeWritten,
+  exchangeCode,
   functionsWorkflowYaml,
+  inspectAppInstallation,
+  inspectAuthorizedApplication,
   pushFiles,
   readSession,
   readState,
@@ -35,16 +39,203 @@ test('seals a GitHub session and binds it to the signed-in portal user', () => {
     token: 'github-secret-token',
     login: 'octocat',
     avatarUrl: 'https://avatars.example/octocat',
+    refreshToken: 'github-refresh-token',
+    expiresAt: 1_800_000_000_000,
+    refreshExpiresAt: 1_900_000_000_000,
+    validatedAt: 1_700_000_000_000,
   })
 
   assert.equal(session.includes('github-secret-token'), false)
+  assert.equal(session.includes('github-refresh-token'), false)
   assert.deepEqual(readSession(session, 'user-oid'), {
     token: 'github-secret-token',
     login: 'octocat',
     avatarUrl: 'https://avatars.example/octocat',
+    refreshToken: 'github-refresh-token',
+    expiresAt: 1_800_000_000_000,
+    refreshExpiresAt: 1_900_000_000_000,
+    validatedAt: 1_700_000_000_000,
   })
   assert.equal(readSession(session, 'other-user'), null)
   assert.equal(readSession(`${session}x`, 'user-oid'), null)
+})
+
+test('OAuth code exchange preserves GitHub App refresh credentials', async () => {
+  const now = Date.parse('2026-09-01T12:00:00Z')
+  const session = await exchangeCode('valid-code', 'https://portal.example/api/github/callback', {
+    now,
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body)
+      assert.equal(body.code, 'valid-code')
+      assert.equal(body.redirect_uri, 'https://portal.example/api/github/callback')
+      return new Response(JSON.stringify({
+        access_token: 'ghu_initial',
+        expires_in: 28_800,
+        refresh_token: 'ghr_initial',
+        refresh_token_expires_in: 15_897_600,
+        token_type: 'bearer',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    },
+  })
+
+  assert.deepEqual(session, {
+    token: 'ghu_initial',
+    expiresAt: now + 28_800_000,
+    refreshToken: 'ghr_initial',
+    refreshExpiresAt: now + 15_897_600_000,
+  })
+})
+
+test('expired GitHub App sessions refresh without another authorization flow', async () => {
+  const now = Date.parse('2026-09-01T12:00:00Z')
+  const requests = []
+  const result = await ensureUserSession({
+    token: 'ghu_expired',
+    refreshToken: 'ghr_initial',
+    expiresAt: now - 1,
+    refreshExpiresAt: now + 60_000,
+    login: 'octocat',
+    avatarUrl: 'https://avatars.example/octocat',
+  }, {
+    now,
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body)
+      requests.push(body)
+      return new Response(JSON.stringify({
+        access_token: 'ghu_rotated',
+        expires_in: 28_800,
+        refresh_token: 'ghr_rotated',
+        refresh_token_expires_in: 15_897_600,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    },
+  })
+
+  assert.deepEqual(requests, [{
+    client_id: '',
+    client_secret: '',
+    grant_type: 'refresh_token',
+    refresh_token: 'ghr_initial',
+  }])
+  assert.equal(result.changed, true)
+  assert.equal(result.session.token, 'ghu_rotated')
+  assert.equal(result.session.refreshToken, 'ghr_rotated')
+  assert.equal(result.session.login, 'octocat')
+})
+
+test('a transient GitHub refresh failure does not expire the user session', async () => {
+  const now = Date.parse('2026-09-01T12:00:00Z')
+  await assert.rejects(
+    ensureUserSession({
+      token: 'ghu_expired',
+      login: 'octocat',
+      refreshToken: 'ghr_current',
+      expiresAt: now - 1,
+      refreshExpiresAt: now + 86_400_000,
+    }, {
+      now,
+      fetchImpl: async () => new Response(JSON.stringify({ error: 'server_error' }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    }),
+    (error) => error.status === 502 && error.portalCode === undefined,
+  )
+})
+
+test('legacy GitHub sessions are validated and rejected when their token is revoked', async () => {
+  await assert.rejects(
+    ensureUserSession({ token: 'revoked', login: 'octocat', avatarUrl: '' }, {
+      now: Date.parse('2026-09-01T12:00:00Z'),
+      fetchImpl: async () => new Response(
+        JSON.stringify({ message: 'Bad credentials' }),
+        { status: 401, headers: { 'Content-Type': 'application/json' } },
+      ),
+    }),
+    (error) => error.status === 401 && error.portalCode === 'github_session_expired',
+  )
+})
+
+test('repository mutations force validation even for recently checked sessions', async () => {
+  const now = Date.parse('2026-09-01T12:00:00Z')
+  let requests = 0
+  const result = await ensureUserSession({
+    token: 'ghu_current',
+    login: 'octocat',
+    avatarUrl: '',
+    validatedAt: now - 1_000,
+  }, {
+    now,
+    forceValidate: true,
+    fetchImpl: async () => {
+      requests += 1
+      return new Response(JSON.stringify({ login: 'octocat', avatar_url: '' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    },
+  })
+
+  assert.equal(requests, 1)
+  assert.equal(result.changed, true)
+  assert.equal(result.session.validatedAt, now)
+})
+
+test('inspects the permissions granted to the current GitHub App installation', async () => {
+  const result = await inspectAppInstallation('ghu_user', {
+    owner: 'swapnil-nagar',
+    requiredPermissions: {
+      administration: 'write',
+      contents: 'write',
+      pull_requests: 'write',
+    },
+    fetchImpl: async (url) => {
+      assert.match(String(url), /\/user\/installations\?per_page=100$/)
+      return new Response(JSON.stringify({
+        installations: [{
+          id: 42,
+          account: { login: 'swapnil-nagar' },
+          repository_selection: 'all',
+          permissions: {
+            administration: 'read',
+            contents: 'write',
+            pull_requests: 'write',
+          },
+          html_url: 'https://github.com/settings/installations/42',
+        }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    },
+  })
+
+  assert.deepEqual(result, {
+    installationFound: true,
+    repositorySelection: 'all',
+    missingPermissions: ['Administration: write'],
+    settingsUrl: 'https://github.com/settings/installations/42',
+  })
+})
+
+test('resolves a safe install URL for the GitHub App that issued the user token', async () => {
+  const result = await inspectAuthorizedApplication('ghu_user', {
+    clientId: 'local-client-id',
+    clientSecret: 'local-client-secret',
+    fetchImpl: async (url, init) => {
+      assert.match(String(url), /\/applications\/local-client-id\/token$/)
+      assert.match(String(init.headers.Authorization), /^Basic /)
+      assert.deepEqual(JSON.parse(init.body), { access_token: 'ghu_user' })
+      return new Response(JSON.stringify({
+        app: {
+          client_id: 'local-client-id',
+          name: 'AI Apps Portal',
+          url: 'https://api.github.com/apps/ai-apps-portal',
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    },
+  })
+
+  assert.deepEqual(result, {
+    appName: 'AI Apps Portal',
+    installUrl: 'https://github.com/apps/ai-apps-portal/installations/new',
+  })
 })
 
 test('pushes a complete file set directly to an existing default branch', async (t) => {

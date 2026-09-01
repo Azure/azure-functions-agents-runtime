@@ -20,6 +20,8 @@ export interface Subscription {
   state: string
 }
 
+export type FunctionAppState = 'Running' | 'Stopped' | 'Stopping' | 'Unknown'
+
 export interface LiveAgent {
   name: string
   app: string
@@ -38,6 +40,7 @@ export interface LiveAgentApp {
   resourceGroup: string
   location: string
   provider: string
+  state?: FunctionAppState
   defaultHostName: string
   agents: {
     name: string
@@ -53,6 +56,26 @@ export interface LiveDiscovery {
   subscriptionId: string
   apps: LiveAgentApp[]
   agents: LiveAgent[]
+}
+
+export interface AppLifecycleTarget {
+  subscription: string
+  resourceGroup: string
+  app: string
+  confirmation: string
+}
+
+export interface StopAppResult {
+  app: string
+  state: FunctionAppState
+  pending: boolean
+}
+
+export interface DeleteAppResult {
+  app: string
+  deleted: boolean
+  pending: boolean
+  cleanup?: Record<string, 'cleared' | 'failed'>
 }
 
 export interface AgentDefinition {
@@ -439,9 +462,14 @@ async function req<T>(
     data = text
   }
   if (!res.ok) {
+    const errorCode =
+      data && typeof data === 'object' && 'error' in data
+        ? String((data as { error: unknown }).error)
+        : ''
     // A pasted ARM token (Option C) that expired/became invalid — drop it so the
-    // app returns to the sign-in gate where a fresh one can be pasted.
-    if (res.status === 401 && getManualToken()) clearManualToken()
+    // app returns to the sign-in gate where a fresh one can be pasted. A GitHub
+    // session 401 is independent and must not sign the user out of Azure.
+    if (res.status === 401 && errorCode !== 'github_session_expired' && getManualToken()) clearManualToken()
     const detail =
       data && typeof data === 'object' && 'detail' in data
         ? (data as { detail: unknown }).detail
@@ -468,6 +496,10 @@ export const api = {
       'GET',
       subscription ? `/api/live/agents?subscription=${enc(subscription)}` : '/api/live/agents',
     ),
+  stopApp: (target: AppLifecycleTarget) =>
+    req<StopAppResult>('POST', '/api/apps/stop', target),
+  deleteApp: (target: AppLifecycleTarget) =>
+    req<DeleteAppResult>('DELETE', '/api/apps', target),
 
   listConnections: (p: { subscription: string; resourceGroup: string; app: string }) =>
     req<{ connections: OutlookConnection[] }>(

@@ -376,6 +376,7 @@ export default function DraftAppPage() {
       resourceGroup: draft.newApp.resourceGroup,
       location: draft.newApp.region,
       provider: draft.provider || 'foundry',
+      state: 'Running',
       defaultHostName: host,
       agents: [skillInApp],
       supportingFunctions: [],

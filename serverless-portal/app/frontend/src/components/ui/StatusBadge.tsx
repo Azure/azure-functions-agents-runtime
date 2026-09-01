@@ -7,6 +7,7 @@ const STATUS_MAP: Record<string, { tone: BadgeTone; label: string }> = {
   running: { tone: 'green', label: 'Running' },
   provisioning: { tone: 'amber', label: 'Provisioning' },
   deploying: { tone: 'amber', label: 'Deploying' },
+  stopping: { tone: 'amber', label: 'Stopping' },
   stopped: { tone: 'gray', label: 'Stopped' },
   draft: { tone: 'amber', label: 'Draft' },
   error: { tone: 'red', label: 'Error' },

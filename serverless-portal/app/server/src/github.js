@@ -46,6 +46,8 @@ export function isConfigured() {
 const STATE_SECRET = process.env.GITHUB_OAUTH_STATE_SECRET || crypto.randomBytes(32).toString('hex')
 const STATE_TTL_MS = 10 * 60 * 1000
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const TOKEN_REFRESH_WINDOW_MS = 5 * 60 * 1000
+const SESSION_VALIDATION_INTERVAL_MS = 5 * 60 * 1000
 const SESSION_KEY = crypto.createHmac('sha256', STATE_SECRET).update('github-session-v1').digest()
 export const GITHUB_SESSION_COOKIE = 'serverless-portal-github'
 export const GITHUB_SESSION_MAX_AGE_MS = SESSION_TTL_MS
@@ -88,10 +90,28 @@ export function readState(state) {
   return obj
 }
 
-export function sealSession(oid, { token, login, avatarUrl = '' }) {
+export function sealSession(oid, {
+  token,
+  login,
+  avatarUrl = '',
+  refreshToken = '',
+  expiresAt = 0,
+  refreshExpiresAt = 0,
+  validatedAt = 0,
+}) {
   const iv = crypto.randomBytes(12)
   const cipher = crypto.createCipheriv('aes-256-gcm', SESSION_KEY, iv)
-  const plaintext = Buffer.from(JSON.stringify({ oid, token, login, avatarUrl, t: Date.now() }), 'utf-8')
+  const plaintext = Buffer.from(JSON.stringify({
+    oid,
+    token,
+    login,
+    avatarUrl,
+    t: Date.now(),
+    ...(refreshToken ? { refreshToken } : {}),
+    ...(expiresAt ? { expiresAt } : {}),
+    ...(refreshExpiresAt ? { refreshExpiresAt } : {}),
+    ...(validatedAt ? { validatedAt } : {}),
+  }), 'utf-8')
   const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()])
   return ['v1', iv.toString('base64url'), encrypted.toString('base64url'), cipher.getAuthTag().toString('base64url')].join('.')
 }
@@ -115,7 +135,15 @@ export function readSession(value, expectedOid) {
     ) {
       return null
     }
-    return { token: session.token, login: session.login, avatarUrl: session.avatarUrl || '' }
+    return {
+      token: session.token,
+      login: session.login,
+      avatarUrl: session.avatarUrl || '',
+      ...(session.refreshToken ? { refreshToken: session.refreshToken } : {}),
+      ...(Number(session.expiresAt) ? { expiresAt: Number(session.expiresAt) } : {}),
+      ...(Number(session.refreshExpiresAt) ? { refreshExpiresAt: Number(session.refreshExpiresAt) } : {}),
+      ...(Number(session.validatedAt) ? { validatedAt: Number(session.validatedAt) } : {}),
+    }
   } catch {
     return null
   }
@@ -140,24 +168,97 @@ export function authorizeUrl(oid, requestedCallback = '') {
   return `${GH_OAUTH}/authorize?${params.toString()}`
 }
 
-export async function exchangeCode(code, callback = '') {
+function githubSessionError(message) {
+  return Object.assign(new Error(message), { status: 401, portalCode: 'github_session_expired' })
+}
+
+function tokenSession(json, now) {
+  if (!json?.access_token) {
+    throw githubSessionError(json?.error_description || json?.error || 'GitHub token exchange failed.')
+  }
+  const expiresIn = Number(json.expires_in ?? 0)
+  const refreshExpiresIn = Number(json.refresh_token_expires_in ?? 0)
+  return {
+    token: String(json.access_token),
+    ...(expiresIn > 0 ? { expiresAt: now + expiresIn * 1000 } : {}),
+    ...(json.refresh_token ? { refreshToken: String(json.refresh_token) } : {}),
+    ...(refreshExpiresIn > 0 ? { refreshExpiresAt: now + refreshExpiresIn * 1000 } : {}),
+  }
+}
+
+async function exchangeToken(payload, { fetchImpl = fetch, now = Date.now() } = {}) {
   const c = githubConfig()
-  const res = await fetch(`${GH_OAUTH}/access_token`, {
+  const res = await fetchImpl(`${GH_OAUTH}/access_token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'User-Agent': UA },
     body: JSON.stringify({
       client_id: c.clientId,
       client_secret: c.clientSecret,
-      code,
-      ...(callback ? { redirect_uri: callback } : {}),
+      ...payload,
     }),
     signal: AbortSignal.timeout(15000),
   })
   const json = await res.json().catch(() => ({}))
-  if (!res.ok || !json.access_token) {
-    throw new Error(json.error_description || json.error || 'GitHub token exchange failed.')
+  if (!res.ok) {
+    const message = json.error_description || json.error || 'GitHub token exchange failed.'
+    if (res.status === 400 || res.status === 401) throw githubSessionError(message)
+    throw Object.assign(new Error(message), { status: res.status >= 500 ? 502 : res.status })
   }
-  return json.access_token
+  return tokenSession(json, now)
+}
+
+export async function exchangeCode(code, callback = '', options = {}) {
+  return exchangeToken({ code, ...(callback ? { redirect_uri: callback } : {}) }, options)
+}
+
+async function refreshUserAccessToken(refreshToken, options = {}) {
+  return exchangeToken({ grant_type: 'refresh_token', refresh_token: refreshToken }, options)
+}
+
+export async function ensureUserSession(
+  session,
+  { fetchImpl = fetch, now = Date.now(), forceValidate = false } = {},
+) {
+  if (!session?.token) throw githubSessionError('GitHub sign-in is required.')
+  const expiresAt = Number(session.expiresAt ?? 0)
+  if (expiresAt && expiresAt <= now + TOKEN_REFRESH_WINDOW_MS) {
+    const refreshToken = String(session.refreshToken ?? '')
+    const refreshExpiresAt = Number(session.refreshExpiresAt ?? 0)
+    if (!refreshToken || (refreshExpiresAt && refreshExpiresAt <= now)) {
+      throw githubSessionError('Your GitHub session expired. Connect GitHub again.')
+    }
+    const refreshed = await refreshUserAccessToken(refreshToken, { fetchImpl, now })
+    return {
+      changed: true,
+      session: {
+        ...session,
+        ...refreshed,
+        validatedAt: now,
+      },
+    }
+  }
+
+  const validatedAt = Number(session.validatedAt ?? 0)
+  if (!forceValidate && validatedAt && now - validatedAt < SESSION_VALIDATION_INTERVAL_MS) {
+    return { changed: false, session }
+  }
+  try {
+    const user = await getUser(session.token, fetchImpl)
+    return {
+      changed: true,
+      session: {
+        ...session,
+        login: user.login,
+        avatarUrl: user.avatarUrl,
+        validatedAt: now,
+      },
+    }
+  } catch (error) {
+    if (Number(error?.status) === 401) {
+      throw githubSessionError('Your GitHub session is no longer valid. Connect GitHub again.')
+    }
+    throw error
+  }
 }
 
 // Minimal HTML returned to the OAuth popup: nudge the opener to refresh, then
@@ -174,8 +275,8 @@ export function closePage(message, ok) {
 
 // --- GitHub REST helpers ---------------------------------------------------
 
-async function gh(token, apiPath, { method = 'GET', body } = {}) {
-  const res = await fetch(`${GH_API}${apiPath}`, {
+async function gh(token, apiPath, { method = 'GET', body, fetchImpl = fetch } = {}) {
+  const res = await fetchImpl(`${GH_API}${apiPath}`, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -212,8 +313,8 @@ async function gh(token, apiPath, { method = 'GET', body } = {}) {
   return json
 }
 
-export async function getUser(token) {
-  const u = await gh(token, '/user')
+export async function getUser(token, fetchImpl = fetch) {
+  const u = await gh(token, '/user', { fetchImpl })
   return { login: u.login, avatarUrl: u.avatar_url, name: u.name || u.login }
 }
 
@@ -227,7 +328,7 @@ export async function getLocalCliSession() {
     const token = stdout.trim()
     if (!token) throw new Error('GitHub CLI returned an empty token.')
     const user = await getUser(token)
-    return { token, login: user.login, avatarUrl: user.avatarUrl }
+    return { token, login: user.login, avatarUrl: user.avatarUrl, validatedAt: Date.now() }
   } catch (cause) {
     const error = new Error('GitHub CLI is not authenticated. Run "gh auth login --hostname github.com", then try again.')
     error.status = 401
@@ -249,6 +350,75 @@ export async function listRepos(token) {
     defaultBranch: r.default_branch || 'main',
     htmlUrl: r.html_url,
   }))
+}
+
+const GITHUB_PERMISSION_LABELS = {
+  administration: 'Administration',
+  contents: 'Contents',
+  pull_requests: 'Pull requests',
+  workflows: 'Workflows',
+}
+
+function permissionIncludes(actual, required) {
+  const levels = { none: 0, read: 1, write: 2, admin: 3 }
+  return (levels[String(actual || 'none')] ?? 0) >= (levels[String(required || 'none')] ?? 0)
+}
+
+export async function inspectAppInstallation(
+  token,
+  { owner = '', requiredPermissions = {}, fetchImpl = fetch } = {},
+) {
+  const payload = await gh(token, '/user/installations?per_page=100', { fetchImpl })
+  const installations = Array.isArray(payload?.installations) ? payload.installations : []
+  const ownerKey = String(owner).toLowerCase()
+  const installation = installations.find(
+    (candidate) => String(candidate?.account?.login || '').toLowerCase() === ownerKey,
+  )
+  const missingPermissions = Object.entries(requiredPermissions)
+    .filter(([permission, access]) => !permissionIncludes(installation?.permissions?.[permission], access))
+    .map(([permission, access]) => `${GITHUB_PERMISSION_LABELS[permission] || permission}: ${access}`)
+
+  return {
+    installationFound: Boolean(installation),
+    repositorySelection: installation?.repository_selection || '',
+    missingPermissions,
+    settingsUrl: installation?.html_url || 'https://github.com/settings/installations',
+  }
+}
+
+export async function inspectAuthorizedApplication(
+  token,
+  {
+    fetchImpl = fetch,
+    clientId = githubConfig().clientId,
+    clientSecret = githubConfig().clientSecret,
+  } = {},
+) {
+  if (!token || !clientId || !clientSecret) return null
+  const res = await fetchImpl(`${GH_API}/applications/${encodeURIComponent(clientId)}/token`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`, 'utf-8').toString('base64')}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': UA,
+    },
+    body: JSON.stringify({ access_token: token }),
+    signal: AbortSignal.timeout(15000),
+  })
+  if (!res.ok) return null
+  const payload = await res.json().catch(() => ({}))
+  const appName = String(payload?.app?.name || '').trim()
+  let installUrl = ''
+  try {
+    const apiUrl = new URL(String(payload?.app?.url || ''))
+    const match = apiUrl.hostname === 'api.github.com' ? /^\/apps\/([A-Za-z0-9-]+)$/.exec(apiUrl.pathname) : null
+    if (match) installUrl = `https://github.com/apps/${match[1]}/installations/new`
+  } catch {
+    /* leave the install URL empty */
+  }
+  return { appName, installUrl }
 }
 
 export async function createRepo(token, { name, private: priv = true, org = '' }) {

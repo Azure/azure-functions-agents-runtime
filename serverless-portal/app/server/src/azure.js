@@ -39,6 +39,7 @@ import { WebSiteManagementClient } from '@azure/arm-appservice'
 import { ContainerClient, StorageSharedKeyCredential } from '@azure/storage-blob'
 import yauzl from 'yauzl'
 import { createHash, randomUUID } from 'node:crypto'
+import * as appLifecycle from './app-lifecycle.js'
 import { resolveConfiguredModelSettings } from './custom-tools.js'
 
 const AGENT_PROVIDER_SETTING = 'AZURE_FUNCTIONS_AGENTS_PROVIDER'
@@ -1374,6 +1375,16 @@ export async function getSite(accessToken, subscriptionId, resourceGroup, appNam
   }
 }
 
+export async function stopFunctionApp(accessToken, target, options = {}) {
+  const client = webClient(accessToken, target.subscription)
+  return appLifecycle.stopAgentFunctionApp(client.webApps, target, options)
+}
+
+export async function deleteFunctionApp(accessToken, target, options = {}) {
+  const client = webClient(accessToken, target.subscription)
+  return appLifecycle.deleteAgentFunctionApp(client.webApps, target, options)
+}
+
 // Merge a patch into a site's application settings (read-modify-write, since the
 // ARM update replaces the whole dictionary). Returns the merged properties.
 export async function setAppSettings(accessToken, subscriptionId, resourceGroup, appName, patch) {
@@ -2367,6 +2378,7 @@ const ENRICH_CONCURRENCY = 8
  *     resourceGroup: string,
  *     location: string,
  *     provider: string,
+ *     state: string,
  *     defaultHostName: string,
  *     agents: Array<{name: string, trigger: string, builtinEndpoints: boolean, routes: string[], supportingFunctions: string[]}>,
  *     supportingFunctions: Array<{name: string, trigger: string}>,
@@ -2449,6 +2461,7 @@ export async function discoverAgentApps(accessToken, subscriptionId) {
         resourceGroup,
         location: site.location ?? '',
         provider,
+        state: appLifecycle.normalizeFunctionAppState(site.state),
         defaultHostName: site.defaultHostName ?? '',
         agents,
         supportingFunctions: appSupportingFunctions,
