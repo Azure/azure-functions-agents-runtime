@@ -285,6 +285,7 @@ class _FakeOrchestrationContext:
         self.last_wave = _Task([])
         self.cancel_task = _Task()
         self.statuses: list[str] = []
+        self.selections = 0
 
     def get_input(self) -> dict[str, Any]:
         return self._input
@@ -302,6 +303,7 @@ class _FakeOrchestrationContext:
         return self.last_wave
 
     def task_any(self, tasks: list[_Task]) -> _Task:
+        self.selections += 1
         selection = _Task()
         selection.candidates = list(tasks)
         self.last_wave = selection
@@ -679,6 +681,7 @@ def test_dynamic_activity_failure_cancels_pending_wave_timer() -> None:
 
     assert len(context.timers) == 1
     assert context.timers[0].cancelled is True
+    assert context.selections == 2
 
 
 # --- Static-path preservation ---------------------------------------------

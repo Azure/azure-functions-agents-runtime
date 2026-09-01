@@ -164,16 +164,11 @@ def _await_wave(
         if completed is None:
             raise RuntimeError("workflow task selection returned an unknown task")
         pending.remove(completed)
-        outcomes[completed] = _completed_task_outcome(wave_tasks[completed])
-    return [outcomes[index] for index in range(len(wave_tasks))]
-
-
-def _first_wave_failure(wave_results: list[Any]) -> BaseException | None:
-    """Return the first failure in wave order, matching ``task_all`` semantics."""
-    for outcome in wave_results:
+        outcome = _completed_task_outcome(wave_tasks[completed])
         if isinstance(outcome, BaseException):
             return outcome
-    return None
+        outcomes[completed] = outcome
+    return [outcomes[index] for index in range(len(wave_tasks))]
 
 
 def _plan_is_dynamic(tasks: list[WorkflowTaskInput]) -> bool:
@@ -319,12 +314,11 @@ def _run_static_workflow(
                 "total_count": total,
             }
 
-        failure = _first_wave_failure(wave_results)
-        if failure is not None:
+        if isinstance(wave_results, BaseException):
             for spec, t in zip(wave_specs, wave_tasks, strict=True):
                 if spec["type"] == WAIT_TASK_TYPE and not t.is_completed:
                     t.cancel()
-            raise failure
+            raise wave_results
         for spec, raw in zip(wave_specs, wave_results, strict=True):
             tid = spec["id"]
             if spec["type"] in {TOOL_TASK_TYPE, SUB_AGENT_TASK_TYPE}:
@@ -988,10 +982,9 @@ def _run_dynamic_workflow(
                 "total_count": len(state.by_id),
             }
 
-        wave_failure = _first_wave_failure(wave_results)
-        if wave_failure is not None:
+        if isinstance(wave_results, BaseException):
             _cancel_dynamic_wave_timers(wave, wave_tasks)
-            raise wave_failure
+            raise wave_results
         _apply_dynamic_wave_results(state, wave, wave_results)
         _publish_dynamic_status(context, state)
 
