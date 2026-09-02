@@ -7,7 +7,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import azure.functions as func
 from azure.durable_functions import DurableFunctionsClient
@@ -50,17 +50,15 @@ def _format_exception_message(exc: Exception) -> str:
 
 
 async def _run_agent(*args: Any, **kwargs: Any) -> Any:
-    from importlib import import_module
+    from ..runner import run_agent
 
-    runner_module = import_module("azure_functions_agents.runner")
-    return await runner_module.run_agent(*args, **kwargs)
+    return await run_agent(*args, **kwargs)
 
 
 def _run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
-    from importlib import import_module
+    from ..runner import run_agent_stream
 
-    runner_module = import_module("azure_functions_agents.runner")
-    return cast(AsyncIterator[str], runner_module.run_agent_stream(*args, **kwargs))
+    return run_agent_stream(*args, **kwargs)
 
 
 # The runner uses the session id as a filename component, so it rejects anything
