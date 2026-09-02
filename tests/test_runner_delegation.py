@@ -479,6 +479,11 @@ def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and
     import agent_framework
 
     monkeypatch.setattr(agent_framework, "create_harness_agent", fake_create_harness_agent)
+    monkeypatch.setattr(
+        agent_framework.SkillsProvider,
+        "from_paths",
+        lambda skill_paths, **_kwargs: SimpleNamespace(skill_paths=skill_paths),
+    )
 
     coordinator_only_tool = tool(lambda: "ignored", name="coordinator_only_tool")
     billing_only_tool = tool(lambda: "ignored", name="billing_only_tool")
@@ -516,8 +521,8 @@ def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and
     assert billing_options["agent_instructions"] == "handle billing precisely"
     assert {item.name for item in coordinator_options["tools"]} == {"coordinator_only_tool"}
     assert {item.name for item in billing_options["tools"]} == {"billing_only_tool"}
-    assert coordinator_options["skills_paths"] == [coordinator_skill_path]
-    assert billing_options["skills_paths"] == [billing_skill_path]
+    assert coordinator_options["skills_provider"].skill_paths == [coordinator_skill_path]
+    assert billing_options["skills_provider"].skill_paths == [billing_skill_path]
 
 
 @pytest.mark.asyncio
