@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deployed ACA qualification tooling (FRD 0008 §14, issue #166).
 
-Five commands, each doing one thing a deployed qualification run needs. They are
+Six commands, each doing one thing a deployed qualification run needs. They are
 runnable by hand and carry no pipeline wiring of their own:
 
 ``install-tooling``
@@ -27,6 +27,9 @@ runnable by hand and carry no pipeline wiring of their own:
     be changed without deploying anything, which is where a service reporting
     its own version stops being evidence.
 
+``sweep``
+    Report and delete sandboxes left by earlier runs. Never fatal.
+
 Each command fails closed on its own contract. ``check-build`` specifically
 prevents qualification evidence from being attributed to the wrong deployment.
 """
@@ -35,7 +38,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -44,11 +49,18 @@ import time
 import zipfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 _MARKER_FILENAME = "BUILD_INFO.json"
 _MARKER_SCHEMA = 1
+
+_DEDICATED_GROUP_SCOPE_ACKNOWLEDGMENT = "exclusive-ci-qualification"
+_GROUP_RESOURCE_ID_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"
+_GROUP_REGION_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION"
+_SWEEP_MAX_AGE_HOURS = 6
+_SWEEP_INSPECTION_TIMEOUT_SECONDS = 30.0
 
 _DEPLOY_PREFLIGHT_TIMEOUT_SECONDS = 30.0
 _DEPLOY_CONFIGURATION_TIMEOUT_SECONDS = 300.0
@@ -268,6 +280,91 @@ def content_report(reported: Mapping[str, Any]) -> str:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class SweepSelection:
+    """Sandboxes selected for deletion and those deliberately retained."""
+
+    stale_ids: tuple[str, ...]
+    unknown_age_ids: tuple[str, ...]
+    recent_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class SweepOutcome:
+    """Complete or explicitly incomplete result of one advisory sweep."""
+
+    selection: SweepSelection | None
+    deleted_count: int
+    delete_failure_count: int
+    inspection_failure_count: int
+    close_failure_count: int = 0
+
+    @property
+    def incomplete_count(self) -> int:
+        unknown_age_count = (
+            len(self.selection.unknown_age_ids) if self.selection is not None else 0
+        )
+        return (
+            unknown_age_count
+            + self.delete_failure_count
+            + self.inspection_failure_count
+            + self.close_failure_count
+        )
+
+
+def parse_created_at(value: str | None) -> datetime | None:
+    """Parse a provider timestamp, treating anything unparseable as unknown."""
+    if not value:
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def select_stale_sandboxes(
+    summaries: Iterable[Any],
+    *,
+    now: datetime,
+) -> SweepSelection:
+    """Select only sandboxes strictly older than the six-hour safety floor."""
+    cutoff = now - timedelta(hours=_SWEEP_MAX_AGE_HOURS)
+    stale: list[str] = []
+    unknown: list[str] = []
+    recent = 0
+    for summary in summaries:
+        sandbox_id = getattr(summary, "sandbox_id", "")
+        created = parse_created_at(getattr(summary, "created_at", None))
+        if created is None:
+            unknown.append(sandbox_id)
+        elif created < cutoff:
+            stale.append(sandbox_id)
+        else:
+            recent += 1
+    return SweepSelection(tuple(stale), tuple(unknown), recent)
+
+
+def render_sweep_report(outcome: SweepOutcome) -> str:
+    """Render counts without presenting an incomplete inspection as clean."""
+    selection = outcome.selection
+    if selection is None:
+        stale = unknown_age = recent = "unavailable"
+    else:
+        stale = str(len(selection.stale_ids))
+        unknown_age = str(len(selection.unknown_age_ids))
+        recent = str(selection.recent_count)
+    return (
+        f"ACA pre-run sweep: stale={stale} deleted={outcome.deleted_count} "
+        f"unknown_age={unknown_age} recent={recent} "
+        f"delete_failures={outcome.delete_failure_count} "
+        f"inspection_failures={outcome.inspection_failure_count} "
+        f"incomplete={outcome.incomplete_count} "
+        f"age_threshold={_SWEEP_MAX_AGE_HOURS}h"
+    )
+
+
 _MAX_REASON_CHARS = 400
 _SECRETISH = re.compile(
     r"(?i)(bearer\s+\S+|[?&](sig|sv|se|st|skoid|sig)=[^&\s]+|eyJ[A-Za-z0-9_\-.]{20,})"
@@ -282,6 +379,157 @@ def _redacted_reason(error: BaseException) -> str:
     if len(text) > _MAX_REASON_CHARS:
         text = text[:_MAX_REASON_CHARS] + "…"
     return text
+
+
+def _emit_ado_warning(message: str) -> None:
+    print(f"##vso[task.logissue type=warning]{message}")
+
+
+def _sandbox_reference(sandbox_id: str) -> str:
+    if not sandbox_id:
+        return "missing"
+    digest = hashlib.sha256(sandbox_id.encode("utf-8")).hexdigest()
+    return f"sha256:{digest[:12]}"
+
+
+def _require_dedicated_group_acknowledgment(dedicated_group_scope: str) -> None:
+    if dedicated_group_scope != _DEDICATED_GROUP_SCOPE_ACKNOWLEDGMENT:
+        raise QualificationPipelineError(
+            "sweep_dedicated_group_acknowledgment_required"
+        )
+
+
+async def sweep_with_adapter(
+    adapter: Any,
+    *,
+    now: datetime,
+    dedicated_group_scope: str,
+) -> SweepOutcome:
+    """Inspect and delete stale resources through an already-open adapter."""
+    selection: SweepSelection | None = None
+    deleted_count = 0
+    delete_failure_count = 0
+    inspection_failure_count = 0
+    close_failure_count = 0
+    try:
+        _require_dedicated_group_acknowledgment(dedicated_group_scope)
+        try:
+            async with asyncio.timeout(_SWEEP_INSPECTION_TIMEOUT_SECONDS):
+                summaries = await adapter.list_sandboxes(labels={})
+        except Exception as error:
+            inspection_failure_count = 1
+            _emit_ado_warning(
+                "ACA pre-run sweep inspection failed "
+                f"({type(error).__name__}: {_redacted_reason(error)}); "
+                "the group was not reported as clean."
+            )
+        else:
+            selection = select_stale_sandboxes(summaries, now=now)
+            for sandbox_id in selection.unknown_age_ids:
+                _emit_ado_warning(
+                    "ACA pre-run sweep could not determine resource age "
+                    f"(resource_ref={_sandbox_reference(sandbox_id)}); "
+                    "the resource was not deleted."
+                )
+            for sandbox_id in selection.stale_ids:
+                try:
+                    await adapter.delete_sandbox(sandbox_id)
+                    deleted_count += 1
+                except Exception as error:
+                    delete_failure_count += 1
+                    _emit_ado_warning(
+                        "ACA pre-run sweep delete failed "
+                        f"(resource_ref={_sandbox_reference(sandbox_id)}, "
+                        f"{type(error).__name__}: {_redacted_reason(error)})."
+                    )
+    finally:
+        try:
+            await adapter.close()
+        except Exception as error:
+            close_failure_count = 1
+            _emit_ado_warning(
+                "ACA pre-run sweep client cleanup failed "
+                f"({type(error).__name__}: {_redacted_reason(error)})."
+            )
+    return SweepOutcome(
+        selection=selection,
+        deleted_count=deleted_count,
+        delete_failure_count=delete_failure_count,
+        inspection_failure_count=inspection_failure_count,
+        close_failure_count=close_failure_count,
+    )
+
+
+async def _sweep(
+    group_resource_id: str,
+    region: str,
+    *,
+    dedicated_group_scope: str,
+) -> SweepOutcome:
+    from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
+
+    adapter = await AcaSandboxAdapter.open(group_resource_id, region=region)
+    return await sweep_with_adapter(
+        adapter,
+        now=datetime.now(UTC),
+        dedicated_group_scope=dedicated_group_scope,
+    )
+
+
+def run_sweep(
+    environment: Mapping[str, str],
+    *,
+    region: str,
+    dedicated_group_scope: str,
+) -> int:
+    """Report and clear stale sandboxes without blocking qualification."""
+    unavailable = SweepOutcome(
+        selection=None,
+        deleted_count=0,
+        delete_failure_count=0,
+        inspection_failure_count=1,
+    )
+    try:
+        _require_dedicated_group_acknowledgment(dedicated_group_scope)
+    except QualificationPipelineError as error:
+        _emit_ado_warning(str(error))
+        print(render_sweep_report(unavailable))
+        return 0
+
+    group_resource_id = environment.get(_GROUP_RESOURCE_ID_ENV, "").strip()
+    if not group_resource_id:
+        _emit_ado_warning(f"ACA pre-run sweep skipped: {_GROUP_RESOURCE_ID_ENV} unset.")
+        print(render_sweep_report(unavailable))
+        return 0
+    configured_region = region.strip()
+    if not configured_region:
+        _emit_ado_warning(f"ACA pre-run sweep skipped: {_GROUP_REGION_ENV} unset.")
+        print(render_sweep_report(unavailable))
+        return 0
+
+    try:
+        outcome = asyncio.run(
+            _sweep(
+                group_resource_id,
+                configured_region,
+                dedicated_group_scope=dedicated_group_scope,
+            )
+        )
+    except Exception as error:
+        _emit_ado_warning(
+            "ACA pre-run sweep inspection did not start "
+            f"({type(error).__name__}: {_redacted_reason(error)}); "
+            "the group was not reported as clean."
+        )
+        outcome = unavailable
+
+    print(render_sweep_report(outcome))
+    if outcome.selection is not None and outcome.selection.stale_ids:
+        _emit_ado_warning(
+            "Stale ACA resources were found. Automatic cleanup through ACA "
+            "idle-delete or controller reconciliation may have stopped working."
+        )
+    return 0
 
 
 def deploy_preflight_failure_message(
@@ -497,6 +745,14 @@ def _parser() -> argparse.ArgumentParser:
     check.add_argument("--commit-sha", required=True)
     check.add_argument("--python-version", required=True)
 
+    sweep = subcommands.add_parser("sweep", help="report and clear stale sandboxes")
+    sweep.add_argument("--region", required=True)
+    sweep.add_argument(
+        "--dedicated-group-scope",
+        required=True,
+        choices=(_DEDICATED_GROUP_SCOPE_ACKNOWLEDGMENT,),
+    )
+
     return parser
 
 
@@ -600,7 +856,13 @@ def main(arguments: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "deploy":
             return run_deploy(args)
-        return run_check_build(args)
+        if args.command == "check-build":
+            return run_check_build(args)
+        return run_sweep(
+            os.environ,
+            region=args.region,
+            dedicated_group_scope=args.dedicated_group_scope,
+        )
     except QualificationPipelineError as error:
         print(f"ACA qualification pipeline failed: {error}", file=sys.stderr)
         return 1
