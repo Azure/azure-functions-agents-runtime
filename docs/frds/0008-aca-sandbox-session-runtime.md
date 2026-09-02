@@ -439,6 +439,7 @@ controlling amendments.
 | 191 | Result availability hold | Session expiry only / result-aware floor | Every terminal success adoption and rearm path preserves at least 300 seconds of result availability before reclaim; paged reconciliation exact-reads off-page run rows and backing before reclaim. | Human | 2026-09-02 | Replacement stack layer 2 |
 | 192 | Deployed ACA qualification fixture and coverage | Reuse an E2E app / dedicated deployable fixture | Add `tests/live/apps/aca-qualification/` plus live suites for fresh-session acceptance, authenticated public turn, lifecycle suspend/resume/reuse/reclaim, active backing loss, and N=5 concurrent admission; the fixture stays outside `tests/endtoend/apps/` because that suite auto-`func start`s every app it finds. | Human | 2026-09-02 | Replacement stack layer 3 |
 | 193 | Lightweight in-package build provenance | No provenance / marker file / content-addressed chain | Ship a `BUILD_INFO.json` inside the deployed package and check build ID, commit SHA, and live Python minor after cold-start timing; a mismatch fails and suppresses metrics. Explicitly excludes wheel digest, installed package version, deploy-input manifest, deployment-storage chain, and rollback. | Human | 2026-09-02 | Replacement stack layer 3 |
+| 194 | Qualification CI policy | Main CI only / trusted manual runs / PR or Schedule | Add one nonblocking post-Build stage using basic pipeline variables and parallel Python 3.13/3.14 jobs (provisioning 1 each, aggregate 2); restricted queue permissions authorize branch-controlled manual deployment, and the dedicated group retains headroom. | Human | 2026-09-02 | Replacement stack layer 4 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -1814,13 +1815,31 @@ tooling described in §14 are now committed and runnable by hand. Pipeline
 wiring for them, external attestation, and rollback remain owned by issue #166;
 there is intentionally no rollback machinery.
 
-## 14. Deployed ACA qualification assets — issue #166
+## 14. Deployed ACA qualification — issue #166
 
-**Status: Finalized for the committed assets.** Decisions #192 and #193 are the
-qualification contract implemented here. This section describes committed test,
-fixture, and tooling assets only. **No pipeline wiring exists in this
-repository for them**; scheduling, gating, promotion criteria, and group sweep
-remain open under issue #166.
+**Status: Finalized for the committed assets and qualification stage.**
+Decisions #192–#194 are the qualification contract implemented here. Group-wide
+sweep and post-run cleanup remain outside this layer.
+
+The deployed qualification lives in `eng/ci/e2e-tests.yml`. One
+`AcaQualification` stage depends only on `Build` and expands independent Python
+3.13 and Python 3.14 jobs with `maxParallel: 2`. Each job assembles and deploys
+its own fixture, then invokes one ordered suite with provisioning concurrency 1;
+aggregate provisioning concurrency is therefore 2. The dedicated Sandbox Group
+must retain quota and headroom for both jobs plus retained sessions.
+
+Automatic execution is limited to `IndividualCI` and `BatchedCI` builds of
+`refs/heads/main`; manual runs are allowed from any branch. Pull request and
+scheduled builds are excluded. Qualification remains `continueOnError` and
+non-required until a separate promotion decision.
+
+ACA settings are ordinary/basic variables configured directly on Azure DevOps
+pipeline 1777, not variable-group dependencies. Existing `- template:` entries
+under `variables:` import unrelated build-infrastructure variable templates.
+A manual run executes branch-controlled code under the deployment service
+connection, so queue permission is restricted to trusted operators. Protected
+branch or environment checks are intentionally not used because they would
+prevent approved feature-branch validation.
 
 `tests/live/apps/aca-qualification/` is the deployable qualification fixture: an
 agent app that selects the ACA Sandbox backend, authors its Sandbox Group region,
