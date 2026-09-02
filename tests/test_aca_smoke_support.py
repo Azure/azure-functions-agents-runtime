@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import io
 import zipfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,7 @@ from azure_functions_agents.controller.package import (
     FUNCS_ZIP_DIGEST_KIND,
     CapturedContentPackage,
 )
+from azure_functions_agents.controller.sandbox_config import build_sandbox_environment
 from azure_functions_agents.harness.delegation import rebuild_agent_catalog
 from tests.live import aca_smoke_support
 
@@ -266,6 +268,22 @@ def test_real_turn_fixture_rebuilds_a_no_tools_catalog(
     assert entry.capabilities.filtered_user_tools == []
     assert entry.capabilities.filtered_mcp_tools == []
     assert entry.capabilities.web_request_tools == []
+
+
+def test_deployed_fixture_rebuilds_with_the_forwarded_group_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_environment = {
+        "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION": "westus2",
+        "AZURE_OPENAI_DEPLOYMENT": "u3-gpt-5-6-luna-20260709",
+    }
+    for name, value in build_sandbox_environment(source_environment).items():
+        monkeypatch.setenv(name, value)
+    fixture_root = Path(__file__).parent / "live" / "apps" / "aca-qualification"
+
+    catalog = rebuild_agent_catalog(fixture_root)
+
+    assert set(catalog) == {"deployed_load", "deployed_turn"}
 
 
 @pytest.mark.asyncio

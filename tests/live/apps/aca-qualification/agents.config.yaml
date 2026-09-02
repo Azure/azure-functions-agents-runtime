@@ -1,0 +1,18 @@
+session_runtime:
+  aca_sandbox:
+    sandbox_group_resource_id: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID
+    region: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION
+    retention:
+      auto_suspend_idle: 60
+      reclaim_idle: 120
+
+model: $AZURE_OPENAI_DEPLOYMENT
+timeout: 300
+http_auth:
+  mode: entra
+  entra:
+    tenant_id: $AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_ENTRA_TENANT_ID
+    allowed_audiences:
+      - $AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE
+    allowed_client_ids:
+      - $AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TEST_INVOKER_CLIENT_ID

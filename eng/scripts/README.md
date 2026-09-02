@@ -68,3 +68,33 @@ role-assignment attestation.
 
 The retained `aca_deployed_qualification.py` and deployed suite helpers are
 manual/local assets only pending the separate post-main qualification work.
+
+### `aca_qualification_pipeline.py`
+
+Packages, deploys, and verifies the deployed ACA qualification fixture
+(`tests/live/apps/aca-qualification/`). Every command is run by hand; this
+repository contains no pipeline wiring for it.
+
+| Command | Purpose |
+| --- | --- |
+| `install-tooling` | Install the shared Python dependencies used by qualification runs |
+| `stamp` | Write `BUILD_INFO.json` into the fixture app before packaging |
+| `assemble` | Build the deployable upload: fixture source, the runtime wheel, the marker, and pinned requirements |
+| `deploy` | Preflight deployment rights, configure the authored region, package and deploy the staged fixture, and add best-effort portal metadata |
+| `check-build` | Verify lightweight in-package build ID, commit SHA, and Python-minor provenance |
+
+`assemble` requires exactly one runtime wheel in the build output; ambiguity is
+a hard error rather than a silent "newest wins", because deploying the wrong
+wheel is precisely the failure `check-build` exists to catch. Fixture
+dependencies are pinned by `eng/constraints/aca-fixture-py313.txt` and
+`eng/constraints/aca-fixture-py314.txt` so the deployed closure is reproducible
+per interpreter minor.
+
+`check-build` is meaningful only because the marker is a *file inside the
+deployed package*: a file can be served only if that package is genuinely on
+disk, so a stale app cannot claim a build it is not running. An app setting or
+resource tag could be changed without deploying anything.
+
+The provenance is deliberately narrow. It does not cover the wheel digest, the
+installed package version, a deploy-input manifest, the deployment-storage
+chain, or rollback; those remain open under issue #166.
