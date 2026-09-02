@@ -1,4 +1,8 @@
-"""Install E2E dependencies into each Function app's customer dependency path."""
+"""Install E2E dependencies into each Function app's customer dependency path.
+
+This script runs in Linux CI. It installs one shared package tree and symlinks it
+into each app to avoid repeatedly installing the same dependencies.
+"""
 
 from __future__ import annotations
 
@@ -29,7 +33,6 @@ def main() -> None:
             "pip",
             "install",
             f"--target={shared_packages}",
-            "-e",
             str(repo_root),
         ],
         check=True,
