@@ -274,7 +274,7 @@ class TestStaleSelection:
         assert selection.stale_ids == ("old",)
         assert selection.recent_count == 2
 
-    @pytest.mark.parametrize("created_at", [None, "", "not-a-date"])
+    @pytest.mark.parametrize("created_at", [None, "", "not-a-date", "2026-08-19"])
     def test_unknown_age_is_never_selected(self, created_at: str | None) -> None:
         selection = select_stale_sandboxes(
             [_Summary("unknown", created_at)],
