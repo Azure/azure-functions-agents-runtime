@@ -15,7 +15,7 @@ a first-class cooperative-cancel terminal state); the tool-facing
 envelope (see :mod:`.tools`) translates that to ``runtime_status="Canceled"``
 when the orchestrator's output indicates cancellation.
 
-What is intentionally still *not* here: retries and per-task timeouts.
+What is intentionally still *not* here: per-task timeouts.
 """
 
 from __future__ import annotations
@@ -36,6 +36,14 @@ from azure_functions_agents.registration.catalog import AgentCatalog
 from azure_functions_agents.runner import run_leaf_agent_task
 
 from . import registry
+from .activity import (
+    authorization_outcome,
+    handler_contract_outcome,
+    invoke_policy_handler,
+    validate_activity_result,
+    validate_policy_activity_input,
+)
+from .native_retry import create_durable_retry_policy, decode_durable_retry_failure
 from .schema import (
     ECHO_TOOL_NAME,
     MAX_NODES,
@@ -44,10 +52,12 @@ from .schema import (
     SUB_AGENT_TASK_TYPE,
     TOOL_TASK_TYPE,
     WAIT_TASK_TYPE,
+    EffectiveWorkflowTaskExecution,
     TemplateResolutionError,
     WorkflowCondition,
     WorkflowPayload,
     WorkflowPlanPolicy,
+    WorkflowRetryableError,
     WorkflowTaskInput,
     evaluate_condition,
     parse_iso8601_datetime,
@@ -67,6 +77,11 @@ class _ActivityInputBase(TypedDict):
     id: str
     workflow_agent_slug: str
     workflow_id: str
+    # Present only when a retry policy was frozen at submission time. Its
+    # absence is what keeps histories written by earlier runtime versions on the
+    # legacy dispatch and legacy result envelope during replay.
+    task_id: NotRequired[str]
+    execution: NotRequired[EffectiveWorkflowTaskExecution]
 
 
 class _ToolActivityInput(_ActivityInputBase):
@@ -128,6 +143,78 @@ def _wait_deadline(context: OrchestrationContext, task: Mapping[str, Any]) -> An
             f"maximum of {MAX_WAIT_DURATION}"
         )
     return deadline
+
+
+def _persisted_execution(
+    task: Mapping[str, Any],
+) -> EffectiveWorkflowTaskExecution | None:
+    """Return the retry policy frozen into the orchestration input, if any.
+
+    Replay safety depends on reading this only from the persisted payload: a
+    later deployment must never change how an already-started orchestration
+    dispatches its Activities.
+    """
+    execution = task.get("execution")
+    if not isinstance(execution, dict) or "durable_retry_policy" not in execution:
+        return None
+    return cast(EffectiveWorkflowTaskExecution, execution)
+
+
+def _policy_activity_fields(
+    task: Mapping[str, Any],
+    *,
+    logical_id: str,
+) -> dict[str, Any]:
+    """Return the extra Activity input keys a policy-aware task carries."""
+    execution = _persisted_execution(task)
+    if execution is None:
+        return {}
+    return {"task_id": logical_id, "execution": execution}
+
+
+def _call_task_activity(
+    context: OrchestrationContext,
+    name: str,
+    *,
+    input: dict[str, Any],
+    tags: dict[str, str],
+) -> Task[Any]:
+    """Dispatch through the retry driver frozen into the orchestration input."""
+    execution = _persisted_execution(input)
+    if execution is None:
+        return context.call_activity(name, input=input, tags=tags)
+    return context.call_activity(
+        name,
+        input=input,
+        retry_policy=create_durable_retry_policy(execution["durable_retry_policy"]),
+        tags=tags,
+    )
+
+
+def _unwrap_activity_result(node_id: str, *, policy_aware: bool, raw: Any) -> Any:
+    """Return a task result, raising the sanitized failure for policy-aware tasks."""
+    if not policy_aware:
+        return raw["result"]
+    succeeded, outcome = validate_activity_result(node_id, raw)
+    if succeeded:
+        return outcome
+    raise RuntimeError(f"task {node_id!r}: {outcome['error']} ({outcome['error_code']})")
+
+
+def _decode_wave_failure(node_ids: list[str], error: BaseException) -> BaseException:
+    """Replace an exhausted native-retry failure with its sanitized cause.
+
+    Durable reports one failure for the whole wave, so the sanitized payload is
+    matched back to its node by id. Node order is deterministic, and the decode
+    is a pure function of persisted data, so replay is unaffected.
+    """
+    for node_id in node_ids:
+        failure = decode_durable_retry_failure(node_id, error)
+        if failure is not None:
+            return RuntimeError(
+                f"task {node_id!r}: {failure['error']} ({failure['error_code']})"
+            )
+    return error
 
 
 def _await_wave(
@@ -231,7 +318,8 @@ def _run_static_workflow(
                         f"task {tid!r}: template resolution failed: {exc}"
                     ) from exc
                 wave_tasks.append(
-                    context.call_activity(
+                    _call_task_activity(
+                        context,
                         _ACTIVITY_NAME,
                         input={
                             "id": tid,
@@ -239,11 +327,16 @@ def _run_static_workflow(
                             "args": resolved_args,
                             "workflow_agent_slug": workflow_agent_slug,
                             "workflow_id": context.instance_id,
+                            **_policy_activity_fields(task, logical_id=tid),
                         },
                         tags={"durabletask.displayName": task["tool"]},
                     )
                 )
-                wave_specs.append({"id": tid, "type": TOOL_TASK_TYPE})
+                wave_specs.append({
+                    "id": tid,
+                    "type": TOOL_TASK_TYPE,
+                    "policy_aware": _persisted_execution(task) is not None,
+                })
             elif task["type"] == SUB_AGENT_TASK_TYPE:
                 try:
                     resolved_task = resolve_template_value(task["task"], results)
@@ -256,7 +349,8 @@ def _run_static_workflow(
                         f"task {tid!r}: resolved Sub Agent task must be a string"
                     )
                 wave_tasks.append(
-                    context.call_activity(
+                    _call_task_activity(
+                        context,
                         SUB_AGENT_ACTIVITY_NAME,
                         input={
                             "id": tid,
@@ -264,11 +358,16 @@ def _run_static_workflow(
                             "task": resolved_task,
                             "workflow_id": context.instance_id,
                             "workflow_agent_slug": workflow_agent_slug,
+                            **_policy_activity_fields(task, logical_id=tid),
                         },
                         tags={"durabletask.displayName": task["agent"]},
                     )
                 )
-                wave_specs.append({"id": tid, "type": SUB_AGENT_TASK_TYPE})
+                wave_specs.append({
+                    "id": tid,
+                    "type": SUB_AGENT_TASK_TYPE,
+                    "policy_aware": _persisted_execution(task) is not None,
+                })
             elif task["type"] == WAIT_TASK_TYPE:
                 deadline = _wait_deadline(context, task)
                 wave_tasks.append(context.create_timer(deadline))
@@ -289,11 +388,17 @@ def _run_static_workflow(
         )
         try:
             wave_results = yield from _await_wave(context, cancel_task, wave_tasks)
-        except Exception:
+        except Exception as exc:
             for spec, wave_task in zip(wave_specs, wave_tasks, strict=True):
                 if spec["type"] == WAIT_TASK_TYPE:
                     _cancel_timer_task(wave_task)
-            raise
+            decoded = _decode_wave_failure(
+                [spec["id"] for spec in wave_specs if spec.get("policy_aware")],
+                exc,
+            )
+            if decoded is exc:
+                raise
+            raise decoded from exc
         if wave_results is None:
             reason = cancel_task.result
             for spec, wave_task in zip(wave_specs, wave_tasks, strict=True):
@@ -319,7 +424,11 @@ def _run_static_workflow(
         for spec, raw in zip(wave_specs, wave_results, strict=True):
             tid = spec["id"]
             if spec["type"] in {TOOL_TASK_TYPE, SUB_AGENT_TASK_TYPE}:
-                results[tid] = raw["result"]
+                results[tid] = _unwrap_activity_result(
+                    tid,
+                    policy_aware=bool(spec.get("policy_aware")),
+                    raw=raw,
+                )
             else:
                 results[tid] = {"waited_until": spec["deadline"]}
             remaining.discard(tid)
@@ -841,7 +950,8 @@ def _dispatch_dynamic_wave(
                     "outside the persisted workflow owner policy"
                 )
             wave_tasks.append(
-                context.call_activity(
+                _call_task_activity(
+                    context,
                     _ACTIVITY_NAME,
                     input={
                         "id": instance["instance_id"],
@@ -849,6 +959,7 @@ def _dispatch_dynamic_wave(
                         "args": instance["resolved"],
                         "workflow_agent_slug": state.workflow_agent_slug,
                         "workflow_id": context.instance_id,
+                        **_policy_activity_fields(task, logical_id=logical_id),
                     },
                     tags={"durabletask.displayName": task["tool"]},
                 )
@@ -861,7 +972,8 @@ def _dispatch_dynamic_wave(
                     f"{task['agent']!r} is outside the persisted workflow owner policy"
                 )
             wave_tasks.append(
-                context.call_activity(
+                _call_task_activity(
+                    context,
                     SUB_AGENT_ACTIVITY_NAME,
                     input={
                         "id": instance["instance_id"],
@@ -869,6 +981,7 @@ def _dispatch_dynamic_wave(
                         "task": instance["resolved"],
                         "workflow_id": context.instance_id,
                         "workflow_agent_slug": state.workflow_agent_slug,
+                        **_policy_activity_fields(task, logical_id=logical_id),
                     },
                     tags={"durabletask.displayName": task["agent"]},
                 )
@@ -923,7 +1036,12 @@ def _apply_dynamic_wave_results(
         if instance.get("kind") == "timer":
             instance["result"] = {"waited_until": instance["deadline"]}
         else:
-            instance["result"] = raw["result"]
+            instance["result"] = _unwrap_activity_result(
+                instance["instance_id"],
+                policy_aware=_persisted_execution(state.by_id[instance["logical_id"]])
+                is not None,
+                raw=raw,
+            )
         instance["state"] = "completed"
         if instance["index"] is None:
             logical_id = instance["logical_id"]
@@ -964,9 +1082,19 @@ def _run_dynamic_workflow(
         _publish_dynamic_status(context, state)
         try:
             wave_results = yield from _await_wave(context, cancel_task, wave_tasks)
-        except Exception:
+        except Exception as exc:
             _cancel_dynamic_wave_timers(wave, wave_tasks)
-            raise
+            decoded = _decode_wave_failure(
+                [
+                    instance["instance_id"]
+                    for instance in wave
+                    if _persisted_execution(state.by_id[instance["logical_id"]]) is not None
+                ],
+                exc,
+            )
+            if decoded is exc:
+                raise
+            raise decoded from exc
         if wave_results is None:
             reason = cancel_task.result
             _restore_canceled_dynamic_wave(state, wave, wave_tasks)
@@ -985,7 +1113,11 @@ def _run_dynamic_workflow(
                 "total_count": len(state.by_id),
             }
 
-        _apply_dynamic_wave_results(state, wave, wave_results)
+        try:
+            _apply_dynamic_wave_results(state, wave, wave_results)
+        except BaseException:
+            _cancel_dynamic_wave_timers(wave, wave_tasks)
+            raise
         _publish_dynamic_status(context, state)
 
     _publish_dynamic_status(context, state)
@@ -1030,11 +1162,21 @@ def register_workflows(
         return workflow_agent_slug, policy
 
     @bp.activity_trigger(input_name="task")
-    def agents_workflow_run_tool(task: _ToolActivityInput) -> dict[str, Any]:
+    async def agents_workflow_run_tool(task: _ToolActivityInput) -> dict[str, Any]:
+        policy_aware = "execution" in task
+        if policy_aware:
+            invalid = validate_policy_activity_input(task, target_type="tool")
+            if invalid is not None:
+                return dict(invalid)
         task_id = task["id"]
         tool_name = task["tool"]
         args = task["args"]
-        workflow_agent_slug, policy = require_workflow_agent_policy(task)
+        try:
+            workflow_agent_slug, policy = require_workflow_agent_policy(task)
+        except RuntimeError:
+            if policy_aware:
+                return dict(authorization_outcome(task_id))
+            raise
         workflow_id = task["workflow_id"]
         if tool_name not in policy.allowed_tools:
             logger.error(
@@ -1045,6 +1187,8 @@ def register_workflows(
                 workflow_agent_slug,
                 tool_name,
             )
+            if policy_aware:
+                return dict(authorization_outcome(task_id))
             raise RuntimeError(
                 f"task {task_id!r}: workflow tool {tool_name!r} is not authorized"
             )
@@ -1054,6 +1198,8 @@ def register_workflows(
             else registry.get_entry(tool_name)
         )
         if entry is None:
+            if policy_aware:
+                return dict(handler_contract_outcome(task_id))
             raise ValueError(
                 f"task {task_id!r}: tool {tool_name!r} is not registered "
                 "in the workflow-safe tool registry"
@@ -1066,8 +1212,19 @@ def register_workflows(
             task_id,
             tool_name,
         )
+        if policy_aware:
+            return dict(
+                await invoke_policy_handler(
+                    entry.handler,
+                    args,
+                    task=task,
+                    target=tool_name,
+                )
+            )
         try:
             result = entry.handler(args)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.exception(
                 "workflow activity failed: "
@@ -1091,10 +1248,20 @@ def register_workflows(
     async def agents_workflow_run_sub_agent(
         task: _SubAgentActivityInput,
     ) -> dict[str, Any]:
+        policy_aware = "execution" in task
+        if policy_aware:
+            invalid = validate_policy_activity_input(task, target_type="sub_agent")
+            if invalid is not None:
+                return dict(invalid)
         task_id = task["id"]
         agent_slug = task["agent"]
         workflow_id = task["workflow_id"]
-        workflow_agent_slug, policy = require_workflow_agent_policy(task)
+        try:
+            workflow_agent_slug, policy = require_workflow_agent_policy(task)
+        except RuntimeError:
+            if policy_aware:
+                return dict(authorization_outcome(task_id))
+            raise
         if agent_slug not in policy.allowed_subagents:
             logger.error(
                 "workflow sub-agent authorization denied: "
@@ -1104,6 +1271,8 @@ def register_workflows(
                 workflow_agent_slug,
                 agent_slug,
             )
+            if policy_aware:
+                return dict(authorization_outcome(task_id))
             raise RuntimeError(
                 f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} is not authorized"
             )
@@ -1116,6 +1285,8 @@ def register_workflows(
                 workflow_agent_slug,
                 agent_slug,
             )
+            if policy_aware:
+                return dict(authorization_outcome(task_id))
             raise RuntimeError(
                 f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} is not available"
             )
@@ -1129,6 +1300,39 @@ def register_workflows(
             workflow_agent_slug,
             agent_slug,
         )
+        if policy_aware:
+
+            async def run_policy_sub_agent(_: dict[str, Any]) -> dict[str, Any]:
+                try:
+                    text = await run_leaf_agent_task(
+                        entry.resolved,
+                        entry.capabilities,
+                        task["task"],
+                        timeout=entry.resolved.timeout,
+                        execution_role="workflow_subagent",
+                    )
+                except TimeoutError:
+                    logger.exception(
+                        "workflow sub-agent activity timed out: "
+                        "workflow_id=%s node_id=%s agent=%s",
+                        workflow_id,
+                        task_id,
+                        agent_slug,
+                    )
+                    raise WorkflowRetryableError(
+                        "subagent_timeout",
+                        "Workflow Sub Agent timed out.",
+                    ) from None
+                return {"agent": agent_slug, "text": text}
+
+            return dict(
+                await invoke_policy_handler(
+                    run_policy_sub_agent,
+                    {},
+                    task=task,
+                    target=agent_slug,
+                )
+            )
         try:
             text = await run_leaf_agent_task(
                 entry.resolved,
