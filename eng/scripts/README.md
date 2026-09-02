@@ -84,6 +84,7 @@ deployed suite. Operators can invoke the same commands by hand.
 | `assemble` | Build the deployable upload: fixture source, the runtime wheel, the marker, and pinned requirements |
 | `deploy` | Preflight deployment rights, configure the authored region, package and deploy the staged fixture, and add best-effort portal metadata |
 | `check-build` | Verify lightweight in-package build ID, commit SHA, and Python-minor provenance |
+| `sweep` | Report and delete resources older than six hours from the CI-dedicated Sandbox Group; never blocks qualification |
 
 `assemble` requires exactly one runtime wheel in the build output; ambiguity is
 a hard error rather than a silent "newest wins", because deploying the wrong
@@ -107,3 +108,18 @@ and provisioning values 1, 2, or 4; their operator owns shared-group quota and
 cost. `aca_deployed_qualification.py` rejects N=100 before authentication or
 provider work with `formal_n100_unsupported_by_qualification_fixture`. Formal
 N=100 remains future human-only acceptance requiring a purpose-built workflow.
+
+`sweep` uses the configured group resource ID and authored region, lists the
+whole group, and requires
+`--dedicated-group-scope exclusive-ci-qualification`. That literal acknowledges
+an external infrastructure invariant; the data-plane API cannot verify that the
+group is exclusive to CI, so using a shared group is unsafe. Unknown-age and
+recent resources are retained. Inspection, unknown-age, and delete failures
+emit Azure DevOps warnings, and the summary exposes incomplete and
+delete-failure counts while remaining nonblocking.
+
+The sweep is pre-run rather than a destructive post-run reaper. Current-run
+qualification suites already assert their own cleanup; deleting immediately
+afterward would mask idle-delete or controller-reconciliation failures. The next
+run reports accumulated leftovers. A final report-only group audit is also
+omitted because intentionally retained sessions could create false positives.

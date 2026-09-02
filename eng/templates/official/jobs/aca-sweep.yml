@@ -1,0 +1,51 @@
+parameters:
+  - name: acaServiceConnection
+    type: string
+  - name: artifactFeed
+    type: string
+  - name: poolName
+    type: string
+
+jobs:
+  - job: AcaSweep
+    displayName: 'ACA pre-run leak sweep'
+    continueOnError: true
+    timeoutInMinutes: 15
+
+    pool:
+      name: ${{ parameters.poolName }}
+      image: 1es-ubuntu-22.04
+      os: linux
+
+    steps:
+      - checkout: self
+
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: '3.13'
+        displayName: 'Use Python for pipeline tooling'
+
+      - task: PipAuthenticate@1
+        displayName: 'Pip Authenticate'
+        inputs:
+          artifactFeeds: ${{ parameters.artifactFeed }}
+
+      - bash: |
+          set -euo pipefail
+          python eng/scripts/aca_qualification_pipeline.py install-tooling
+        displayName: 'Install pipeline tooling'
+
+      - task: AzureCLI@2
+        displayName: 'Report and clear stale sandboxes'
+        inputs:
+          azureSubscription: ${{ parameters.acaServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            python eng/scripts/aca_qualification_pipeline.py sweep \
+              --region "$(ACA_SANDBOX_REGION)" \
+              --dedicated-group-scope exclusive-ci-qualification
+        env:
+          AZURE_TOKEN_CREDENTIALS: 'dev'
+          AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
+          AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION: $(ACA_SANDBOX_REGION)
