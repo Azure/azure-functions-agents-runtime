@@ -39,6 +39,9 @@ bug fixes.
    (discover → translate → register → execute) and name the modules touched.
 4. Seed the **Decisions log** with the initial choices and who made them
    (Human vs Agent).
+5. If the implementation is too large or risky for one reviewable PR, read
+   [`references/split-rules.md`](references/split-rules.md). Add the proposed PR
+   sequence and dependencies to the FRD before architecture review.
 
 ## Phase 2 — Architecture review (planning mode)  *(gate: human sign-off → `status: Finalized`)*
 
@@ -54,11 +57,16 @@ bug fixes.
 
 ## Phase 3 — Implementation  *(gate: `ruff` + `mypy` clean)*
 
+For multi-PR delivery, repeat phases 3–5 for every approved slice. Give each
+slice its own branch and worktree as described in `AGENTS.md`.
+
 1. Implement **product changes only**, per the finalized FRD. Keep diffs surgical;
    no unrelated refactors.
-2. Follow `AGENTS.md` §5 conventions (PEP 695 type aliases, strict typing,
+2. When the FRD defines multiple PRs, implement only the approved delivery slice
+   and keep its dependency and review scope explicit.
+3. Follow `AGENTS.md` §5 conventions (PEP 695 type aliases, strict typing,
    Pydantic v2 base-class fields, MAF-only, shared `_logger`).
-3. Run and pass:
+4. Run and pass:
    ```bash
    python -m ruff check src tests
    python -m mypy src
@@ -66,7 +74,7 @@ bug fixes.
 
 ## Phase 4 — Testing  *(gate: full gate green)*
 
-1. Design coverage for the new behavior — prefer a separate testing review pass
+1. Design coverage for the current slice's behavior — prefer a separate testing review pass
    (sub-agent or fresh checklist) so gaps are caught independently.
 2. Add tests under `tests/`, mirroring source modules. For config/authoring
    changes, add a scenario folder under `tests/fixtures/config_scenarios/`.
@@ -78,8 +86,9 @@ bug fixes.
 
 ## Phase 5 — Docs  *(gate: DoD met)*
 
-1. Update `docs/architecture.md` (module map / pipeline) — it is the design source
-   of truth and must stay accurate.
+1. Update documentation made inaccurate by the current slice.
+   `docs/architecture.md` (module map / pipeline) is the design source of truth
+   and must stay accurate.
 2. **If schema.py changed:**
    - Run `python eng/scripts/generate_config_reference.py` to regenerate the reference
    - Use the **`update-schema-docs` skill** to add examples to `docs/front-matter-spec.md`
@@ -91,8 +100,8 @@ bug fixes.
 4. Update `README.md` if user-facing behavior changed.
 5. Update the FRD index in `docs/frds/README.md`.
 6. Verify the `AGENTS.md` §8 Definition of Done, then open the PR.
-7. After merge, remove the worktree (`git worktree remove <path>`) and set the FRD
-   `status: Implemented`.
+7. After each PR merges, remove its worktree (`git worktree remove <path>`).
+   Set the FRD `status: Implemented` only after the final planned PR merges.
 
 ## Guardrails
 
