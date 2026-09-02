@@ -450,36 +450,25 @@ def fetch_logs(args: dict[str, Any]) -> dict[str, Any]:
 ```
 
 Use both `@tool` and `@workflow_tool` when the same callable should be
-available both directly in chat and inside workflows.
+available both directly in chat and inside workflows. A workflow plan can ask
+Durable to retry a transient-safe tool task:
 
-A workflow tool whose failures are transient can ask Durable to retry it:
-
-```python
-from azure_functions_agents import (
-    WorkflowRetryBackoff,
-    WorkflowRetryPolicy,
-    WorkflowRetryableError,
-    workflow_tool,
-)
-
-
-@workflow_tool(
-    description="Reserve inventory for an order.",
-    retry=WorkflowRetryPolicy(
-        max_attempts=3,
-        backoff=WorkflowRetryBackoff(initial="PT1S", multiplier=2.0, max="PT4S"),
-    ),
-)
-def reserve_inventory(args: dict[str, Any]) -> dict[str, Any]:
-    if _inventory_unavailable():
-        raise WorkflowRetryableError(
-            "inventory_temporarily_unavailable",
-            "Inventory reservation is temporarily unavailable.",
-        )
-    return {"reserved": True}
+```json
+{
+  "id": "reserve_inventory",
+  "type": "tool",
+  "tool": "reserve_inventory",
+  "execution": {
+    "retry": {
+      "max_attempts": 3,
+      "backoff": {"initial": "PT1S", "multiplier": 2.0, "max": "PT4S"}
+    }
+  }
+}
 ```
 
-Only `WorkflowRetryableError` is retried; every other failure is terminal. See
+The tool raises `WorkflowRetryableError` when a failure is safe to retry; every
+other tool failure is terminal. See
 [`docs/workflows.md`](docs/workflows.md) for the Activity handler
 contract, `workflows.exclude`, and the full retry contract. Any agent can enable
 workflows; triggers and built-in endpoints independently determine how that agent
