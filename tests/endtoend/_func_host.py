@@ -266,9 +266,18 @@ def _spawn(
     if port is not None:
         cmd += ["--port", str(port)]
 
-    proc_env: dict[str, str] | None = None
-    if env is not None:
-        proc_env = {**os.environ, **env}
+    proc_env = {**os.environ, **(env or {})}
+    # Mirror what a deployed app looks like: dependencies installed under
+    # .python_packages must be importable ahead of the worker's own bundled
+    # copies, otherwise a duplicated native extension (grpcio, via durabletask)
+    # can crash the worker during app import.
+    dependency_path = app_dir / ".python_packages" / "lib" / "site-packages"
+    if dependency_path.is_dir():
+        proc_env["PYTHONPATH"] = os.pathsep.join(
+            part
+            for part in (str(dependency_path), proc_env.get("PYTHONPATH"))
+            if part
+        )
 
     proc = subprocess.Popen(
         cmd,

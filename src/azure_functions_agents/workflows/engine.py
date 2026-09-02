@@ -22,12 +22,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
 import azure.durable_functions as df
 import azure.functions as func
+from durabletask.task import CancellableTask, Task
 
 from azure_functions_agents._logger import logger
 from azure_functions_agents.registration.catalog import AgentCatalog
@@ -126,6 +127,41 @@ def _wait_deadline(context: df.DurableOrchestrationContext, task: Mapping[str, A
     return deadline
 
 
+def _await_wave(
+    context: df.DurableOrchestrationContext,
+    cancel_task: Task[Any],
+    wave_tasks: list[Task[Any]],
+) -> Generator[Task[Any], Task[Any], list[Any] | None]:
+    """Await leaf tasks until cancellation wins or the whole wave completes.
+
+    Durable 2.x composite tasks do not notify their own composite parent, so
+    racing ``task_all(wave_tasks)`` against cancellation would never resume.
+    """
+    outcomes: dict[int, Any] = {}
+    pending = list(range(len(wave_tasks)))
+    while pending:
+        winner = yield context.task_any(
+            [cancel_task, *(wave_tasks[index] for index in pending)]
+        )
+        if winner is cancel_task:
+            return None
+        completed = next(
+            (index for index in pending if wave_tasks[index] is winner),
+            None,
+        )
+        if completed is None:
+            raise RuntimeError("workflow task selection returned an unknown task")
+        pending.remove(completed)
+        outcomes[completed] = wave_tasks[completed].result
+    return [outcomes[index] for index in range(len(wave_tasks))]
+
+
+def _cancel_timer_task(task: Task[Any]) -> None:
+    timer_task = cast(CancellableTask[Any], task)
+    if not timer_task.is_complete:
+        timer_task.cancel()
+
+
 def _plan_is_dynamic(tasks: list[WorkflowTaskInput]) -> bool:
     """Return whether any task opts into data-driven control flow.
 
@@ -179,7 +215,7 @@ def _run_static_workflow(
 
         wave = ready[:MAX_PARALLELISM]
         wave_specs: list[dict[str, Any]] = []
-        wave_tasks: list[Any] = []
+        wave_tasks: list[Task[Any]] = []
         for tid in wave:
             task = by_id[tid]
             if task["type"] == TOOL_TASK_TYPE:
@@ -246,13 +282,18 @@ def _run_static_workflow(
         context.set_custom_status(
             f"{len(results)}/{total} tasks done, running={','.join(wave)}"
         )
-        wave_task = context.task_all(wave_tasks)
-        winner = yield context.task_any([cancel_task, wave_task])
-        if winner is cancel_task:
+        try:
+            wave_results = yield from _await_wave(context, cancel_task, wave_tasks)
+        except Exception:
+            for spec, wave_task in zip(wave_specs, wave_tasks, strict=True):
+                if spec["type"] == WAIT_TASK_TYPE:
+                    _cancel_timer_task(wave_task)
+            raise
+        if wave_results is None:
             reason = cancel_task.result
-            for spec, t in zip(wave_specs, wave_tasks, strict=True):
-                if spec["type"] == WAIT_TASK_TYPE and not t.is_completed:
-                    t.cancel()
+            for spec, wave_task in zip(wave_specs, wave_tasks, strict=True):
+                if spec["type"] == WAIT_TASK_TYPE:
+                    _cancel_timer_task(wave_task)
             context.set_custom_status(
                 f"canceled at {len(results)}/{total} tasks done"
             )
@@ -270,12 +311,6 @@ def _run_static_workflow(
                 "total_count": total,
             }
 
-        wave_results = wave_task.result
-        if isinstance(wave_results, BaseException):
-            for spec, t in zip(wave_specs, wave_tasks, strict=True):
-                if spec["type"] == WAIT_TASK_TYPE and not t.is_completed:
-                    t.cancel()
-            raise wave_results
         for spec, raw in zip(wave_specs, wave_results, strict=True):
             tid = spec["id"]
             if spec["type"] in {TOOL_TASK_TYPE, SUB_AGENT_TASK_TYPE}:
@@ -789,8 +824,8 @@ def _dispatch_dynamic_wave(
     context: df.DurableOrchestrationContext,
     state: _DynamicWorkflowState,
     wave: list[_MaterializedInstance],
-) -> list[Any]:
-    wave_tasks: list[Any] = []
+) -> list[Task[Any]]:
+    wave_tasks: list[Task[Any]] = []
     for instance in wave:
         logical_id = instance["logical_id"]
         task = state.by_id[logical_id]
@@ -849,17 +884,17 @@ def _dispatch_dynamic_wave(
 
 def _cancel_dynamic_wave_timers(
     wave: list[_MaterializedInstance],
-    wave_tasks: list[Any],
+    wave_tasks: list[Task[Any]],
 ) -> None:
     for instance, task in zip(wave, wave_tasks, strict=True):
-        if instance.get("kind") == "timer" and not task.is_completed:
-            task.cancel()
+        if instance.get("kind") == "timer":
+            _cancel_timer_task(task)
 
 
 def _restore_canceled_dynamic_wave(
     state: _DynamicWorkflowState,
     wave: list[_MaterializedInstance],
-    wave_tasks: list[Any],
+    wave_tasks: list[Task[Any]],
 ) -> None:
     _cancel_dynamic_wave_timers(wave, wave_tasks)
     for instance in wave:
@@ -920,9 +955,12 @@ def _run_dynamic_workflow(
 
         wave_tasks = _dispatch_dynamic_wave(context, state, wave)
         _publish_dynamic_status(context, state)
-        wave_task = context.task_all(wave_tasks)
-        winner = yield context.task_any([cancel_task, wave_task])
-        if winner is cancel_task:
+        try:
+            wave_results = yield from _await_wave(context, cancel_task, wave_tasks)
+        except Exception:
+            _cancel_dynamic_wave_timers(wave, wave_tasks)
+            raise
+        if wave_results is None:
             reason = cancel_task.result
             _restore_canceled_dynamic_wave(state, wave, wave_tasks)
             _publish_dynamic_status(context, state)
@@ -940,10 +978,6 @@ def _run_dynamic_workflow(
                 "total_count": len(state.by_id),
             }
 
-        wave_results = wave_task.result
-        if isinstance(wave_results, BaseException):
-            _cancel_dynamic_wave_timers(wave, wave_tasks)
-            raise wave_results
         _apply_dynamic_wave_results(state, wave, wave_results)
         _publish_dynamic_status(context, state)
 
@@ -988,7 +1022,7 @@ def register_workflows(
             )
         return workflow_agent_slug, policy
 
-    @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
+    @bp.activity_trigger(input_name="task")
     def agents_workflow_run_tool(task: _ToolActivityInput) -> dict[str, Any]:
         task_id = task["id"]
         tool_name = task["tool"]
@@ -1046,7 +1080,7 @@ def register_workflows(
         json.dumps(result)
         return {"id": task_id, "result": result}
 
-    @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
+    @bp.activity_trigger(input_name="task")
     async def agents_workflow_run_sub_agent(
         task: _SubAgentActivityInput,
     ) -> dict[str, Any]:
@@ -1130,7 +1164,7 @@ def register_workflows(
         json.dumps(result)
         return result
 
-    @bp.orchestration_trigger(context_name="context")  # type: ignore[untyped-decorator]
+    @bp.orchestration_trigger(context_name="context")  # type: ignore[arg-type]
     def agents_workflow_orchestrator(context: df.DurableOrchestrationContext) -> Any:
         """Execute a workflow plan, selecting the static or dynamic scheduler.
 
