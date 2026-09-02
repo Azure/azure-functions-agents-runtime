@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import azure.functions as func
+from azure.durable_functions import DurableFunctionsClient
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
 from .._logger import logger
@@ -49,17 +50,15 @@ def _format_exception_message(exc: Exception) -> str:
 
 
 async def _run_agent(*args: Any, **kwargs: Any) -> Any:
-    from importlib import import_module
+    from ..runner import run_agent
 
-    runner_module = import_module("azure_functions_agents.runner")
-    return await runner_module.run_agent(*args, **kwargs)
+    return await run_agent(*args, **kwargs)
 
 
-def _run_agent_stream(*args: Any, **kwargs: Any) -> Any:
-    from importlib import import_module
+def _run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
+    from ..runner import run_agent_stream
 
-    runner_module = import_module("azure_functions_agents.runner")
-    return runner_module.run_agent_stream(*args, **kwargs)
+    return run_agent_stream(*args, **kwargs)
 
 
 # The runner uses the session id as a filename component, so it rejects anything
@@ -95,8 +94,10 @@ def _resolve_builtin_endpoints_session_id(session_id: str | None) -> str:
     return session_id or uuid.uuid4().hex
 
 
-def _chat_handler_with_client(handle_chat: ChatHandler) -> Callable[[Request, str], Awaitable[Response]]:
-    async def chat(req: Request, client: str) -> Response:
+def _chat_handler_with_client(
+    handle_chat: ChatHandler,
+) -> Callable[[Request, DurableFunctionsClient], Awaitable[Response]]:
+    async def chat(req: Request, client: DurableFunctionsClient) -> Response:
         return await handle_chat(req, client)
 
     return chat
@@ -112,6 +113,8 @@ def _chat_handler_without_client(handle_chat: ChatHandler) -> Callable[[Request]
 def _chat_stream_handler_with_client(
     handle_chat_stream: ChatStreamHandler,
 ) -> Callable[[Request, str], Awaitable[StreamingResponse]]:
+    """Bind the raw ``durableClient`` binding config so the stream can own its client."""
+
     async def chat_stream(req: Request, client: str) -> StreamingResponse:
         return await handle_chat_stream(req, client)
 
@@ -129,8 +132,8 @@ def _chat_stream_handler_without_client(
 
 def _mcp_agent_chat_handler_with_client(
     handle_mcp_agent_chat: McpAgentChatHandler,
-) -> Callable[[str, str], Awaitable[str]]:
-    async def mcp_agent_chat(context: str, client: str) -> str:
+) -> Callable[[str, DurableFunctionsClient], Awaitable[str]]:
+    async def mcp_agent_chat(context: str, client: DurableFunctionsClient) -> str:
         return await handle_mcp_agent_chat(context, client)
 
     return mcp_agent_chat
@@ -193,7 +196,7 @@ def _run_builtin_agent_stream(
     durable_client: Any | None = None,
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
-) -> Any:
+) -> AsyncIterator[str]:
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
     return _run_agent_stream(
@@ -388,7 +391,7 @@ def _register_http_chat_stream(
 ) -> None:
     async def handle_chat_stream(
         req: Request,
-        durable_client: Any | None,
+        durable_client_config: str | None,
     ) -> StreamingResponse:
         try:
             auth_error = authorize_entra_request(req.headers.get, auth)
@@ -397,8 +400,9 @@ def _register_http_chat_stream(
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
             session_id = req.headers.get("x-ms-session-id")
-            return StreamingResponse(
-                _run_builtin_agent_stream(
+
+            def run_stream(durable_client: DurableFunctionsClient | None) -> AsyncIterator[str]:
+                return _run_builtin_agent_stream(
                     prompt,
                     resolved=resolved,
                     capabilities=capabilities,
@@ -408,6 +412,24 @@ def _register_http_chat_stream(
                     durable_client=durable_client,
                     catalog=catalog,
                     workflow_policy=workflow_policy,
+                )
+
+            # A Durable client injected by ``durable_client_input`` is scoped to the
+            # invocation, but this generator is consumed after the invocation returns.
+            # Own a client for exactly as long as the stream is consumed instead.
+            async def stream_with_owned_client(client_config: str) -> AsyncIterator[str]:
+                durable_client = DurableFunctionsClient(client_config)
+                try:
+                    async for event in run_stream(durable_client):
+                        yield event
+                finally:
+                    await durable_client.close()
+
+            return StreamingResponse(
+                (
+                    run_stream(None)
+                    if durable_client_config is None
+                    else stream_with_owned_client(durable_client_config)
                 ),
                 media_type="text/event-stream",
             )
@@ -425,7 +447,7 @@ def _register_http_chat_stream(
     decorated: Any
     if workflows_enabled:
         decorated = _chat_stream_handler_with_client(handle_chat_stream)
-        decorated = app.durable_client_input(client_name="client")(decorated)
+        decorated = app.generic_input_binding(arg_name="client", type="durableClient")(decorated)
     else:
         decorated = _chat_stream_handler_without_client(handle_chat_stream)
 
@@ -546,7 +568,7 @@ def _register_workflow_status_endpoints(
 
     auth_level = resolve_endpoint_auth_level(auth)
 
-    async def list_session_workflows(req: Request, client: str) -> Response:
+    async def list_session_workflows(req: Request, client: DurableFunctionsClient) -> Response:
         auth_error = authorize_entra_request(req.headers.get, auth)
         if auth_error is not None:
             return _json_error(auth_error.message, status_code=auth_error.status_code)
@@ -583,7 +605,9 @@ def _register_workflow_status_endpoints(
         decorated_list
     )
 
-    async def get_session_workflow_status(req: Request, client: str) -> Response:
+    async def get_session_workflow_status(
+        req: Request, client: DurableFunctionsClient
+    ) -> Response:
         auth_error = authorize_entra_request(req.headers.get, auth)
         if auth_error is not None:
             return _json_error(auth_error.message, status_code=auth_error.status_code)

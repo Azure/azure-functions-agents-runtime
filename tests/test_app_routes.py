@@ -4,6 +4,7 @@ from typing import get_type_hints
 
 import azure.durable_functions as df
 import pytest
+from azure.durable_functions import DurableFunctionsClient
 
 from azure_functions_agents import app as app_module
 from azure_functions_agents.workflows import context as workflow_context
@@ -146,15 +147,19 @@ def test_workflow_routes_register_durable_client_binding(tmp_path: Path):
 
     function_app = app_module.create_function_app(app_root=tmp_path)
 
-    for function_name in [
-        "chat",
-        "chat_stream",
-        "mcp_agent_chat",
-        "list_session_workflows",
-        "get_session_workflow_status",
-    ]:
+    expected_client_types = {
+        "chat": DurableFunctionsClient,
+        "chat_stream": str,
+        "mcp_agent_chat": DurableFunctionsClient,
+        "list_session_workflows": DurableFunctionsClient,
+        "get_session_workflow_status": DurableFunctionsClient,
+    }
+    for function_name, expected_client_type in expected_client_types.items():
         assert "durableClient" in _binding_types(function_app, function_name)
-        assert get_type_hints(_registered_function(function_app, function_name))["client"] is str
+        assert (
+            get_type_hints(_registered_function(function_app, function_name))["client"]
+            is expected_client_type
+        )
 
 
 def test_workflow_timer_trigger_registers_durable_client_binding(tmp_path: Path):
