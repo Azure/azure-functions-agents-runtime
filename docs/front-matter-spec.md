@@ -231,9 +231,8 @@ bounds only the message context sent to the model. Specialist runs remain fresh,
 executions with no nested delegation or persistent history. Harness instructions are empty, and the
 runtime disables todo, plan/execute mode, file memory, web search, and automatic tool approval;
 these controls are intentionally not author-configurable. For configured skills, the runtime allows
-the read-only `load_skill` and `read_skill_resource` operations without approval so autonomous turns
-can continue. `run_skill_script` remains approval-required and cannot execute until the runtime
-provides an approval surface.
+`load_skill`, `read_skill_resource`, and `run_skill_script` without approval so autonomous turns can
+continue.
 
 `max_context_window_tokens` is the budget used by compaction and may be lower than the model's
 physical context window. The default strategy begins truncating older non-system message groups at

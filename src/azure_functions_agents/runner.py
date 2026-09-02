@@ -459,6 +459,7 @@ def _build_role_agent(
             skill_paths,
             disable_load_skill_approval=True,
             disable_read_skill_resource_approval=True,
+            disable_run_skill_script_approval=True,
         )
         if skill_paths
         else None

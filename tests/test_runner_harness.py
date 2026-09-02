@@ -189,10 +189,10 @@ def test_build_agent_session_forwards_system_instructions(monkeypatch: Any) -> N
     assert captured[0]["default_options"] == {"store": False}
 
 
-def test_build_role_agent_only_skips_approval_for_read_only_skill_tools(
+def test_build_role_agent_skips_approval_for_all_skill_tools(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
-    """Role agents can load trusted skill content without enabling script execution."""
+    """Role agents can use every configured skill tool without an approval surface."""
     captured: dict[str, Any] = {}
     skill_dir = tmp_path / "test-skill"
     (skill_dir / "references").mkdir(parents=True)
@@ -240,7 +240,7 @@ def test_build_role_agent_only_skips_approval_for_read_only_skill_tools(
     assert approval_modes == {
         "load_skill": "never_require",
         "read_skill_resource": "never_require",
-        "run_skill_script": "always_require",
+        "run_skill_script": "never_require",
     }
     assert "skills_paths" not in captured
 
