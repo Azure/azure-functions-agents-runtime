@@ -319,6 +319,8 @@ def parse_created_at(value: str | None) -> datetime | None:
     if not value:
         return None
     text = value.strip().replace("Z", "+00:00")
+    if re.match(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}", text) is None:
+        return None
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
