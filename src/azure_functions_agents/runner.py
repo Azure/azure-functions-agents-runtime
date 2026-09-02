@@ -451,8 +451,19 @@ def _build_role_agent(
     """Build one conservatively configured MAF harness agent for any role."""
     import warnings
 
-    from agent_framework import create_harness_agent
+    from agent_framework import SkillsProvider, create_harness_agent
     from agent_framework._feature_stage import ExperimentalWarning
+
+    skills_provider = (
+        SkillsProvider.from_paths(
+            skill_paths,
+            disable_load_skill_approval=True,
+            disable_read_skill_resource_approval=True,
+            disable_run_skill_script_approval=True,
+        )
+        if skill_paths
+        else None
+    )
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=ExperimentalWarning)
@@ -463,7 +474,7 @@ def _build_role_agent(
             agent_instructions=agent_instructions,
             tools=tools,
             history_provider=history_provider,
-            skills_paths=skill_paths or None,
+            skills_provider=skills_provider,
             disable_tool_auto_approval=True,
             disable_web_search=True,
             disable_todo=True,

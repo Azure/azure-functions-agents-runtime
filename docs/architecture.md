@@ -333,7 +333,9 @@ By the time a handler calls `runner.run_agent()` or `runner.run_agent_stream()`,
 - `WorkflowIntegrationResult` supplies agent-scoped management tools and separate
   chat/trigger addenda; handlers also receive the policy and bound Durable client.
 - `AgentCapabilities.filtered_mcp_tools` becomes the concrete MCP-tool list.
-- `AgentCapabilities.enabled_skill_paths` becomes the list of skill directories handed to MAF's `SkillsProvider`.
+- `AgentCapabilities.enabled_skill_paths` becomes the list of skill directories used to construct
+  MAF's `SkillsProvider`. Project skills are trusted application code, so its load, resource-read,
+  and script-run tools are registered without approval requirements.
 - `AgentCapabilities.web_request_tools` becomes the concrete `web_request` tool list, passed to the runner via its own `web_request_tools` parameter.
 - `build_sandbox_tools_for_session()` optionally adds per-session ACA dynamic session tools just before the call.
 - `ResolvedAgent.subagents` (when non-empty) plus the frozen `AgentCatalog` are passed through so `runner.build_subagent_tools()` can build one `delegate_<slug>` tool per reference for this request; each tool's handler builds its own fresh specialist `Agent` per call (see "Multi-agent delegation" below).
@@ -498,7 +500,7 @@ This design keeps global config declarative: shared config says what exists, whi
 
 ### Other notable boundaries
 
-- **Skills:** project skills are discovered as `SKILL.md` directories, filtered into cataloged `AgentCapabilities`, and handed to MAF's `SkillsProvider`. The provider exposes `load_skill` / `read_skill_resource` tools to the agent and scopes file access to the skill directory by design — no runtime-wide file tools required. The packaged `data-driven-workflows` skill is the one runtime-owned exception: it is added only to a workflow-enabled agent's direct trigger/endpoint capability copy, independently of project `skills` filtering, and never to catalog-backed delegated roles.
+- **Skills:** project skills are discovered as `SKILL.md` directories, filtered into cataloged `AgentCapabilities`, and handed to MAF's `SkillsProvider`. The provider exposes `load_skill`, `read_skill_resource`, and `run_skill_script` tools without approval requirements and scopes file and script access to the skill directory by design — no runtime-wide file tools required. The packaged `data-driven-workflows` skill is the one runtime-owned exception: it is added only to a workflow-enabled agent's direct trigger/endpoint capability copy, independently of project `skills` filtering, and never to catalog-backed delegated roles.
 - **Connectors:** connector actions are exposed to agents through MCP servers in `mcp.json`; connector-triggered agents use `trigger.type: connector_trigger`.
 - **Built-in endpoints:** endpoint registration is a separate module so the trigger-registration path stays focused on Azure Function bindings rather than UI and chat surface concerns.
 - **Multi-agent delegation:** `subagents:` is itself an extension point of sorts — it lets an agent's own front matter opt other, already-registered agents into its tool set without any code changes. See Section 5.

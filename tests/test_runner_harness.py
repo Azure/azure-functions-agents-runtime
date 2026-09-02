@@ -186,6 +186,59 @@ def test_build_agent_session_forwards_system_instructions(monkeypatch: Any) -> N
     assert captured[0]["default_options"] == {"store": False}
 
 
+def test_build_role_agent_disables_skill_tool_approvals(monkeypatch: Any) -> None:
+    """Trusted project skill tools run without MAF approval requests."""
+    captured_provider_options: list[tuple[list[Any], dict[str, Any]]] = []
+    captured_agent_options: list[dict[str, Any]] = []
+    skills_provider = object()
+    skill_paths = [SimpleNamespace()]
+
+    def fake_from_paths(
+        _cls: type[Any], paths: list[Any], **kwargs: Any
+    ) -> object:
+        captured_provider_options.append((paths, kwargs))
+        return skills_provider
+
+    def fake_create_harness_agent(_client: Any, **kwargs: Any) -> _FakeAgent:
+        captured_agent_options.append(kwargs)
+        return _FakeAgent()
+
+    import agent_framework
+
+    monkeypatch.setattr(
+        agent_framework.SkillsProvider,
+        "from_paths",
+        classmethod(fake_from_paths),
+    )
+    monkeypatch.setattr(
+        agent_framework,
+        "create_harness_agent",
+        fake_create_harness_agent,
+    )
+
+    runner._build_role_agent(
+        object(),
+        agent_instructions=None,
+        tools=[],
+        skill_paths=skill_paths,
+        agent_name=None,
+        history_provider=None,
+        agent_configuration=AgentConfiguration(),
+    )
+
+    assert captured_provider_options == [
+        (
+            skill_paths,
+            {
+                "disable_load_skill_approval": True,
+                "disable_read_skill_resource_approval": True,
+                "disable_run_skill_script_approval": True,
+            },
+        )
+    ]
+    assert captured_agent_options[0]["skills_provider"] is skills_provider
+
+
 def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
     """Harness agents receive all shared tools and return their delegation error tracker."""
     captured_agent_options: list[dict[str, Any]] = []

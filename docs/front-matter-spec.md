@@ -229,8 +229,9 @@ Harness execution applies whenever an agent runs directly, as a chat-time delega
 as a Workflow Sub Agent. Direct runs retain authoritative full Blob/File history while compaction
 bounds only the message context sent to the model. Specialist runs remain fresh, single-task leaf
 executions with no nested delegation or persistent history. Harness instructions are empty, and the
-runtime disables todo, plan/execute mode, file memory, web search, and automatic tool approval;
-these controls are intentionally not author-configurable.
+runtime disables todo, plan/execute mode, file memory, web search, and automatic tool approval.
+The runtime instead registers trusted project skill operations, including `run_skill_script`, as
+not requiring approval; these controls are intentionally not author-configurable.
 
 `max_context_window_tokens` is the budget used by compaction and may be lower than the model's
 physical context window. The default strategy begins truncating older non-system message groups at
@@ -776,7 +777,7 @@ mcp: false
 #### `skills`
 - **Type:** `object` or `boolean`
 - **Location:** Agent (front matter) for filtering only
-- **Description:** Skill filtering configuration. Skills follow MAF's file-based skill format: each skill lives in its own subdirectory under `skills/` with a `SKILL.md` file. At runtime the discovered skills are exposed through MAF's `SkillsProvider`, which gives the agent `load_skill` / `read_skill_resource` tools that operate scoped to the skill directory. See the [MAF file-based skills docs](https://learn.microsoft.com/en-us/agent-framework/agents/skills?pivots=programming-language-python#file-based-skills-1) for the authoritative `SKILL.md` format, naming rules, and resource conventions.
+- **Description:** Skill filtering configuration. Skills follow MAF's file-based skill format: each skill lives in its own subdirectory under `skills/` with a `SKILL.md` file. At runtime the discovered skills are exposed through MAF's `SkillsProvider`, which gives the agent `load_skill`, `read_skill_resource`, and `run_skill_script` tools that operate without approval and are scoped to the skill directory. See the [MAF file-based skills docs](https://learn.microsoft.com/en-us/agent-framework/agents/skills?pivots=programming-language-python#file-based-skills-1) for the authoritative `SKILL.md` format, naming rules, and resource conventions.
 
 **Minimal `SKILL.md` example (refer to MAF docs for the full specification):**
 ```markdown
