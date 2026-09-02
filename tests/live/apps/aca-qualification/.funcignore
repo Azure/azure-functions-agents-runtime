@@ -1,0 +1,4 @@
+.venv/
+local.settings.json
+__pycache__/
+*.py[cod]

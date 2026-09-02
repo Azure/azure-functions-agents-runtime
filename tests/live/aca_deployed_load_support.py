@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import math
 import os
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from itertools import pairwise
 from typing import Protocol
 
 import pytest
 from tests.aca_smoke_diagnostics import AcaSmokeEnvironmentError
+from tests.live.aca_deployed_agent_support import (
+    optional_retry_after_seconds,
+)
 
 _LOAD_CONCURRENCY_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY"
 _MIN_CONCURRENCY = 1
@@ -18,6 +23,40 @@ _PROVISION_CONCURRENCY_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY"
 _DEFAULT_PROVISION_CONCURRENCY = 4
 _MIN_PROVISION_CONCURRENCY = 1
 _MAX_PROVISION_CONCURRENCY = 4
+THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS = 10.0
+
+
+def throttle_retry_after_seconds(headers: Mapping[str, str]) -> float | None:
+    """Return Retry-After if present and within bounds, else None."""
+    return optional_retry_after_seconds(
+        headers, maximum_seconds=THROTTLE_RETRY_AFTER_MAXIMUM_SECONDS
+    )
+
+
+THROTTLED_ADMISSION_STATUSES = frozenset({429, 503})
+
+
+def throttled_admission_retry_delay(
+    status: int,
+    headers: Mapping[str, str],
+    *,
+    is_final_attempt: bool,
+) -> float | None:
+    """Return the delay before retrying a throttled admission, or None to give up.
+
+    Honoring the server's backpressure is what a correct client does, but the
+    caller must still fail when admissions never recover, so the final attempt
+    always declines to retry.
+    """
+    if status not in THROTTLED_ADMISSION_STATUSES:
+        return None
+    if is_final_attempt:
+        return None
+    return throttle_retry_after_seconds(headers)
+
+
+# Bound one poll burst without allowing adjacent events to chain indefinitely.
+_BATCH_WINDOW_SECONDS = 0.05
 
 
 class _PytestConfig(Protocol):
@@ -34,11 +73,28 @@ class CommonActiveInterval:
 
 @dataclass(frozen=True, slots=True)
 class LoadLatencyMetrics:
-    """Redacted latency quantiles in milliseconds."""
+    """Redacted latency and client-observed streaming quantiles in milliseconds."""
 
     submission_ms: tuple[float, float, float]
     first_event_ms: tuple[float, float, float]
     terminal_ms: tuple[float, float, float]
+    visibility_gap_ms: tuple[float, float, float] | None
+    visibility_gap_all_ms: tuple[float, float, float] | None
+    observed_poll_cadence_ms: tuple[float, float, float] | None
+    events_per_batch: tuple[tuple[int, int], ...]
+    visibility_gap_sample_count: int
+    visibility_gap_all_sample_count: int
+    observed_poll_cadence_sample_count: int
+    event_batch_count: int
+    observed_event_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedEventBatch:
+    """Client-side arrival burst summary."""
+
+    observed_at: float
+    event_count: int
 
 
 def load_concurrency_from_option_or_environment(config: _PytestConfig) -> int | None:
@@ -105,13 +161,111 @@ def latency_metrics(
     submission_seconds: list[float],
     first_event_seconds: list[float],
     terminal_seconds: list[float],
+    observed_event_timestamp_sequences: Sequence[Sequence[float]] = (),
 ) -> LoadLatencyMetrics:
     """Calculate nearest-rank p50/p95/p99 latencies without retaining request data."""
+    primary_visibility_gaps = [
+        gap
+        for timestamps in observed_event_timestamp_sequences
+        for gap in visibility_gap_seconds(timestamps, waiting_only=True)
+    ]
+    all_visibility_gaps = [
+        gap
+        for timestamps in observed_event_timestamp_sequences
+        for gap in visibility_gap_seconds(timestamps, waiting_only=False)
+    ]
+    observed_poll_cadences = [
+        cadence
+        for timestamps in observed_event_timestamp_sequences
+        for cadence in observed_poll_cadence_seconds(timestamps)
+    ]
+    batch_counts: dict[int, int] = {}
+    event_batch_count = 0
+    observed_event_count = 0
+    for timestamps in observed_event_timestamp_sequences:
+        batches = observed_event_batches(timestamps)
+        event_batch_count += len(batches)
+        observed_event_count += sum(batch.event_count for batch in batches)
+        for batch in batches:
+            batch_counts[batch.event_count] = batch_counts.get(batch.event_count, 0) + 1
     return LoadLatencyMetrics(
         submission_ms=_percentiles(submission_seconds),
         first_event_ms=_percentiles(first_event_seconds),
         terminal_ms=_percentiles(terminal_seconds),
+        visibility_gap_ms=_optional_percentiles(primary_visibility_gaps),
+        visibility_gap_all_ms=_optional_percentiles(all_visibility_gaps),
+        observed_poll_cadence_ms=_optional_percentiles(observed_poll_cadences),
+        events_per_batch=tuple(sorted(batch_counts.items())),
+        visibility_gap_sample_count=len(primary_visibility_gaps),
+        visibility_gap_all_sample_count=len(all_visibility_gaps),
+        observed_poll_cadence_sample_count=len(observed_poll_cadences),
+        event_batch_count=event_batch_count,
+        observed_event_count=observed_event_count,
     )
+
+
+def observed_event_batches(
+    observed_event_timestamps: Sequence[float],
+    *,
+    batch_window_seconds: float = _BATCH_WINDOW_SECONDS,
+) -> tuple[ObservedEventBatch, ...]:
+    """Group client-side event observation timestamps into arrival bursts.
+
+    Events delivered by one poll are read from the stream microseconds apart, so
+    they share an arrival *window* rather than an identical timestamp. Grouping
+    on exact equality would put every event in its own batch, which silently
+    empties the waiting-only series and collapses the measured cadence to the
+    cost of parsing two adjacent events -- numbers that look plausible and mean
+    nothing. The window is what makes a burst detectable in real data.
+    """
+    ordered = sorted(observed_event_timestamps)
+    if not ordered:
+        return ()
+    batches: list[ObservedEventBatch] = []
+    batch_start = ordered[0]
+    current_count = 1
+    for timestamp in ordered[1:]:
+        if timestamp - batch_start <= batch_window_seconds:
+            current_count += 1
+            continue
+        batches.append(ObservedEventBatch(batch_start, current_count))
+        batch_start = timestamp
+        current_count = 1
+    batches.append(ObservedEventBatch(batch_start, current_count))
+    return tuple(batches)
+
+
+def visibility_gap_seconds(
+    observed_event_timestamps: Sequence[float],
+    *,
+    waiting_only: bool,
+) -> tuple[float, ...]:
+    """Return client-observed streaming gaps, optionally requiring waiting-event evidence."""
+    batches = observed_event_batches(observed_event_timestamps)
+    if waiting_only:
+        return tuple(
+            current.observed_at - previous.observed_at
+            for previous, current in pairwise(batches)
+            if current.event_count >= 2
+        )
+    ordered = sorted(observed_event_timestamps)
+    return tuple(current - previous for previous, current in pairwise(ordered))
+
+
+def observed_poll_cadence_seconds(
+    observed_event_timestamps: Sequence[float],
+) -> tuple[float, ...]:
+    """Return inter-batch client arrival spacing measured from observed bursts."""
+    batches = observed_event_batches(observed_event_timestamps)
+    return tuple(
+        current.observed_at - previous.observed_at
+        for previous, current in pairwise(batches)
+    )
+
+
+def events_per_batch(observed_event_timestamps: Sequence[float]) -> tuple[int, ...]:
+    """Return the number of events in each client-observed arrival burst."""
+    return tuple(batch.event_count for batch in observed_event_batches(observed_event_timestamps))
 
 
 def _percentiles(values: list[float]) -> tuple[float, float, float]:
@@ -122,6 +276,10 @@ def _percentiles(values: list[float]) -> tuple[float, float, float]:
         ordered[math.ceil(percentile * len(ordered) / 100) - 1] for percentile in (50, 95, 99)
     )
     return p50, p95, p99
+
+
+def _optional_percentiles(values: list[float]) -> tuple[float, float, float] | None:
+    return _percentiles(values) if values else None
 
 
 def render_load_report(
@@ -156,7 +314,18 @@ def render_load_report(
         metric_text = (
             f"submission_ms={_format_quantiles(metrics.submission_ms)} "
             f"first_event_ms={_format_quantiles(metrics.first_event_ms)} "
-            f"terminal_ms={_format_quantiles(metrics.terminal_ms)}"
+            f"terminal_ms={_format_quantiles(metrics.terminal_ms)} "
+            f"visibility_gap_ms={_format_optional_quantiles(metrics.visibility_gap_ms)} "
+            f"visibility_gap_samples={metrics.visibility_gap_sample_count} "
+            f"visibility_gap_all_ms={_format_optional_quantiles(metrics.visibility_gap_all_ms)} "
+            f"visibility_gap_all_samples={metrics.visibility_gap_all_sample_count} "
+            f"observed_poll_cadence_ms="
+            f"{_format_optional_quantiles(metrics.observed_poll_cadence_ms)} "
+            f"observed_poll_cadence_samples={metrics.observed_poll_cadence_sample_count} "
+            f"events_per_batch={_format_batch_distribution(metrics.events_per_batch)} "
+            f"event_batches={metrics.event_batch_count} observed_events={metrics.observed_event_count} "
+            f"visibility_attribution={_visibility_attribution(metrics)} "
+            f"{_visibility_warning(metrics)}"
         )
     failure_categories = (
         ",".join(f"{category}={count}" for category, count in admission_failure_categories)
@@ -184,6 +353,9 @@ def render_load_report(
         f"unresolved_idempotencies={unresolved_idempotency_count} "
         f"admission_failure_categories={failure_categories} "
         f"cleanup={'complete' if cleanup_complete else 'incomplete'}"
+        " visibility_proxy_note=client-only observed arrival gaps; does not capture true "
+        "sandbox-write-to-client-observe delta because sandbox and CI clocks are not on a "
+        "common basis and clock-skew correction would add error comparable to the 2s budget."
     )
 
 
@@ -194,3 +366,34 @@ def utc_now() -> datetime:
 
 def _format_quantiles(values: tuple[float, float, float]) -> str:
     return f"p50={values[0]:.1f},p95={values[1]:.1f},p99={values[2]:.1f}"
+
+
+def _format_optional_quantiles(values: tuple[float, float, float] | None) -> str:
+    return _format_quantiles(values) if values is not None else "not-available"
+
+
+def _format_batch_distribution(events_per_batch_distribution: tuple[tuple[int, int], ...]) -> str:
+    if not events_per_batch_distribution:
+        return "not-available"
+    return ",".join(
+        f"{event_count}x{batch_count}"
+        for event_count, batch_count in events_per_batch_distribution
+    )
+
+
+def _visibility_warning(metrics: LoadLatencyMetrics) -> str:
+    if metrics.visibility_gap_ms is not None and metrics.visibility_gap_ms[1] > 2000:
+        return "visibility_warning=p95_exceeds_2s"
+    return "visibility_warning=none"
+
+
+def _visibility_attribution(metrics: LoadLatencyMetrics) -> str:
+    if metrics.visibility_gap_ms is None or metrics.observed_poll_cadence_ms is None:
+        return "not-available"
+    gap_p95 = metrics.visibility_gap_ms[1]
+    cadence_p95 = metrics.observed_poll_cadence_ms[1]
+    if abs(gap_p95 - cadence_p95) <= max(250.0, cadence_p95 * 0.25):
+        return "poll_timing_dominates"
+    if gap_p95 > cadence_p95:
+        return "transport_exceeds_cadence"
+    return "below_observed_cadence"

@@ -10,6 +10,9 @@ from typing import Protocol
 from tests.aca_smoke_diagnostics import AcaSmokeEnvironmentError
 
 _SAMPLES_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_COLD_START_SAMPLES"
+_EXPECTED_BUILD_ID_ENV = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_BUILD_ID"
+_EXPECTED_COMMIT_SHA_ENV = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_COMMIT_SHA"
+_EXPECTED_PYTHON_ENV = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_PYTHON_VERSION"
 _DEFAULT_SAMPLES = 3
 _MIN_SAMPLES = 1
 _MAX_SAMPLES = 5
@@ -36,6 +39,31 @@ class ColdStartMetrics:
     total_acceptance_ms: tuple[float, float, float]
     first_event_ms: tuple[float, float, float]
     terminal_ms: tuple[float, float, float]
+
+
+@dataclass(frozen=True, slots=True)
+class ExpectedBuildIdentity:
+    """Expected deployed identity supplied by the qualification job."""
+
+    build_id: str
+    commit_sha: str
+    python_version: str
+
+
+def expected_build_identity_from_environment() -> ExpectedBuildIdentity:
+    """Read expected identity without including its values in failures."""
+
+    def required(name: str) -> str:
+        value = os.environ.get(name, "").strip()
+        if not value or "$(" in value:
+            raise AcaSmokeEnvironmentError(f"{name} is required.")
+        return value
+
+    return ExpectedBuildIdentity(
+        build_id=required(_EXPECTED_BUILD_ID_ENV),
+        commit_sha=required(_EXPECTED_COMMIT_SHA_ENV),
+        python_version=required(_EXPECTED_PYTHON_ENV),
+    )
 
 
 def cold_start_samples_from_option_or_environment(config: _PytestConfig) -> int:
@@ -98,10 +126,11 @@ def render_cold_start_report(
     retries: int,
     metrics: ColdStartMetrics | None,
     cleanup_complete: bool,
+    provenance_verified: bool = True,
 ) -> str:
     """Render aggregate-only evidence; never include IDs, prompts, or model output."""
     metric_text = "not-available"
-    if metrics is not None:
+    if metrics is not None and provenance_verified:
         metric_text = (
             f"first_attempt_acceptance_ms={_format(metrics.first_attempt_acceptance_ms)} "
             f"total_acceptance_ms={_format(metrics.total_acceptance_ms)} "
@@ -111,6 +140,7 @@ def render_cold_start_report(
     return (
         "ACA deployed cold-start qualification: "
         f"samples={sample_count} retries={retries} {metric_text} "
+        f"provenance={'verified' if provenance_verified else 'unverified'} "
         f"cleanup={'complete' if cleanup_complete else 'incomplete'}"
     )
 

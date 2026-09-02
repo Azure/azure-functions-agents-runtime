@@ -40,7 +40,9 @@ from tests.doubles.fake_session_runtime import (
 from tests.live import aca_deployed_agent_support as support
 from tests.live import aca_deployed_lifecycle_support as lifecycle_support
 
-_DEPLOYABLE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "live_aca_deployed_agent_turn"
+_DEPLOYABLE_FIXTURE = (
+    Path(__file__).resolve().parent / "live" / "apps" / "aca-qualification"
+)
 _TIMEOUT_RECOVERY_FIXTURE = (
     Path(__file__).resolve().parent / "fixtures" / "live_aca_setup_timeout_recovery"
 )

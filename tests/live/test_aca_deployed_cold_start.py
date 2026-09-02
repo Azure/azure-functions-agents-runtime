@@ -10,6 +10,10 @@ from dataclasses import dataclass, replace
 
 import pytest
 from aiohttp import ClientSession, ClientTimeout
+from eng.scripts.aca_qualification_pipeline import (
+    compare_marker,
+    fetch_build_info,
+)
 from tests.aca_smoke_diagnostics import AcaSmokeEnvironmentError
 from tests.live.aca_deployed_agent_support import (
     AcceptedRun,
@@ -29,6 +33,7 @@ from tests.live.aca_deployed_cold_start_support import (
     SSE_TERMINAL_WINDOW_SECONDS,
     cold_start_metrics,
     cold_start_samples_from_option_or_environment,
+    expected_build_identity_from_environment,
     first_attempt_slo_failure,
     render_cold_start_report,
 )
@@ -125,6 +130,7 @@ async def test_deployed_aca_cold_start_acceptance_is_bounded_and_cleaned(
     attempted_keys: list[str] = []
     progress = _Progress(samples=[])
     cleanup_complete = False
+    provenance_verified = False
     primary_error: BaseException | None = None
     try:
         resources = await open_deployed_aca_lifecycle_resources(config)
@@ -146,6 +152,11 @@ async def test_deployed_aca_cold_start_acceptance_is_bounded_and_cleaned(
                 attempted_keys,
                 progress,
             )
+            await _verify_deployed_build(
+                config.deployed.base_url,
+                config.deployed.token_scope,
+            )
+            provenance_verified = True
         _require(
             len({sample.candidate.accepted.session_id for sample in progress.samples}) == sample_count,
             "distinct_fresh_sessions_required",
@@ -174,14 +185,33 @@ async def test_deployed_aca_cold_start_acceptance_is_bounded_and_cleaned(
                     [sample.first_event_seconds for sample in progress.samples],
                     [sample.terminal_seconds for sample in progress.samples],
                 )
-                if progress.samples
+                if progress.samples and provenance_verified
                 else None
             ),
             cleanup_complete=cleanup_complete,
+            provenance_verified=provenance_verified,
         )
     )
     if primary_error is not None:
         raise primary_error
+
+
+async def _verify_deployed_build(base_url: str, token_scope: str) -> None:
+    expected = expected_build_identity_from_environment()
+    try:
+        reported = await fetch_build_info(base_url, token_scope)
+    except Exception:
+        raise AssertionError("cold_start_provenance_unavailable") from None
+    comparison = compare_marker(
+        reported,
+        expected_build_id=expected.build_id,
+        expected_commit_sha=expected.commit_sha,
+        expected_python=expected.python_version,
+    )
+    if not comparison.matches:
+        raise AssertionError(
+            f"cold_start_provenance_mismatch:{','.join(comparison.mismatches)}"
+        )
 
 
 def _cold_start_config(config: DeployedAcaLifecycleConfig) -> DeployedAcaLifecycleConfig:
