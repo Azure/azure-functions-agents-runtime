@@ -63,65 +63,16 @@ class SandboxInvalidStateError(SandboxProvisioningError):
     """Raised when a sandbox lifecycle operation is rejected due to an incompatible state."""
 
 
+class SandboxNotFoundError(SandboxProvisioningError):
+    """Raised when a sandbox-scoped operation finds no backing sandbox."""
+
+
 class SandboxGroupBindingError(SandboxTransportError):
-    """Raised when a configured, persisted, ARM, or live group binding disagrees."""
+    """Raised when a configured, persisted, or live group binding disagrees."""
 
 
-class SandboxGroupArmAuthorizationError(SandboxGroupBindingError):
-    """Raised when ARM denies resolving the configured Sandbox Group."""
-
-    def __init__(
-        self,
-        *,
-        status_code: int | None = None,
-        error_code: str | None = None,
-        correlation_id: str | None = None,
-        retry_after_seconds: float | None = None,
-    ) -> None:
-        self.status_code = status_code
-        self.error_code = error_code
-        self.correlation_id = correlation_id
-        self.retry_after_seconds = retry_after_seconds
-        self.retryable = False
-        super().__init__("Configured Sandbox Group ARM authorization failed.")
-
-
-class SandboxGroupArmNotFoundError(SandboxGroupBindingError):
-    """Raised when ARM cannot find the configured Sandbox Group."""
-
-    def __init__(
-        self,
-        *,
-        status_code: int | None = None,
-        error_code: str | None = None,
-        correlation_id: str | None = None,
-        retry_after_seconds: float | None = None,
-    ) -> None:
-        self.status_code = status_code
-        self.error_code = error_code
-        self.correlation_id = correlation_id
-        self.retry_after_seconds = retry_after_seconds
-        self.retryable = False
-        super().__init__("Configured Sandbox Group was not found.")
-
-
-class SandboxGroupArmUnavailableError(SandboxGroupBindingError):
-    """Raised when ARM cannot currently resolve the configured Sandbox Group."""
-
-    def __init__(
-        self,
-        *,
-        status_code: int | None = None,
-        error_code: str | None = None,
-        correlation_id: str | None = None,
-        retry_after_seconds: float | None = None,
-    ) -> None:
-        self.status_code = status_code
-        self.error_code = error_code
-        self.correlation_id = correlation_id
-        self.retry_after_seconds = retry_after_seconds
-        self.retryable = True
-        super().__init__("Configured Sandbox Group ARM lookup is temporarily unavailable.")
+class SandboxGroupTransientError(SandboxTransportError):
+    """Raised when the Sandbox Group data plane fails transiently (retryable)."""
 
 
 class AcaSandboxDependencyError(SandboxTransportError):
@@ -840,7 +791,12 @@ def source_to_provider_kwargs(source: SandboxCreateSource) -> dict[str, str]:
 
 def _normalize_region(value: str) -> str:
     _require_nonempty_string(value, "region")
-    return value.strip().casefold()
+    normalized = value.strip().casefold()
+    if not normalized.isascii() or not normalized.isalnum():
+        raise SandboxProvisioningError(
+            "Sandbox region must contain only ASCII letters and digits."
+        )
+    return normalized
 
 
 def _require_nonempty_string(value: object, field_name: str) -> str:

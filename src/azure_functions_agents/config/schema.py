@@ -239,7 +239,7 @@ def _reject_explicit_null_aca_sandbox(value: Any) -> Any:
         raise ValueError(
             "session_runtime.aca_sandbox: must not be explicitly `null`. Omit "
             "the `aca_sandbox` key entirely to use the in-process default, or "
-            "provide a block with `sandbox_group_resource_id` to select the "
+            "provide a block with `sandbox_group_resource_id` and `region` to select the "
             "ACA Sandbox backend. See docs/frds/0008-aca-sandbox-session-runtime.md."
         )
     return value
@@ -264,7 +264,8 @@ class AcaSandboxConfig(BaseModel):
     """Reference to a pre-provisioned, customer-owned ACA Sandbox Group.
 
     The runtime never creates a Sandbox Group on the customer's behalf;
-    ``sandbox_group_resource_id`` must point at one that already exists.
+    ``sandbox_group_resource_id`` must point at one that already exists and
+    ``region`` names the group's Azure region for direct data-plane access.
     Configuring this block is itself what selects the ACA Sandbox execution
     backend for all agent sessions (FRD 0008); the block's presence is the
     discriminant.
@@ -273,6 +274,7 @@ class AcaSandboxConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     sandbox_group_resource_id: str
+    region: str
     retention: RetentionConfig | None = None
 
     @field_validator("sandbox_group_resource_id")
@@ -282,6 +284,16 @@ class AcaSandboxConfig(BaseModel):
         if not trimmed:
             raise ValueError("sandbox_group_resource_id must be non-empty")
         return trimmed
+
+    @field_validator("region")
+    @classmethod
+    def _validate_region(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if not normalized:
+            raise ValueError("region must be non-empty")
+        if not normalized.isascii() or not normalized.isalnum():
+            raise ValueError("region must contain only ASCII letters and digits")
+        return normalized
 
 
 class SessionRuntimeConfig(BaseModel):
@@ -502,6 +514,12 @@ ACA_SANDBOX_DESCRIPTIONS: dict[str, str] = {
     "sandbox_group_resource_id": (
         "Azure resource ID of a pre-provisioned Sandbox Group. The runtime never "
         "creates one; this must reference an existing, customer-owned Sandbox Group."
+    ),
+    "region": (
+        "Required authored Azure region that identifies and selects the Sandbox "
+        "Group's regional data-plane endpoint directly. The Function App and "
+        "Sandbox Group may be in the same or different regions; the runtime does "
+        "not use ARM discovery or fallback."
     ),
     "retention": (
         "Idle/reclaim retention policy for ACA Sandbox sessions. "

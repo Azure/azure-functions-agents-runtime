@@ -4,7 +4,7 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-08-25
+updated: 2026-09-02
 issues: []
 pull_requests: []
 branch: feature/aca-sandboxes
@@ -434,6 +434,8 @@ controlling amendments.
 | 186 | Capacity-failure reconciliation ownership (narrows #58/#61) | Bounded app-wide request sweep / session-targeted repair / timer-only | Keep session-targeted repair and one retry; unrelated global reclamation stays timer-owned, so capacity may remain exhausted. | Human | 2026-08-27 | Bug-fix correction |
 | 187 | Authorization replay and settlement origin (revises #159/#185) | Generic replay / status-preserving replay; any HTTPS / same origin | Preserve sanitized `401`/`403` across exact replay, while keeping the public reason generic; reject cross-origin status URLs before attaching Function credentials or session metadata. | Human + Agent | 2026-08-27 | Review correction |
 | 188 | Bounded recovery closure (refines #183/#184) | Broad/implicit / targeted and explicit | Use session-filtered request repair; retain accepted-create lookup failures as indeterminate; report deferred timer work as partial; apply the declared ARM retry set and hard delay caps after jitter. | Human + Agent | 2026-08-27 | Review correction |
+| 189 | Required Sandbox Group region and endpoint (revises #99/#184/#188) | ARM discovery/equality check / authored direct endpoint | Require normalized `region` beside the group resource ID and construct its regional data-plane client directly. Use no ARM lookup or fallback, and permit Function App and Sandbox Group regions to differ. | Human | 2026-09-02 | Replacement stack layer 1 |
+| 190 | ACA provider error boundary (refines #159/#184/#187/#188) | Raw SDK propagation / typed redacted boundary | Translate all SDK failures: group 401/403 authorization, group 404 binding, 429/5xx/timeout/transport transient, sandbox 404 missing backing, and 409 invalid state unless typed state is `Running` or `Resuming`. | Human | 2026-09-02 | Replacement stack layer 1 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -657,6 +659,23 @@ risk is API churn, not the absence of the capabilities below.
   `get_egress_decisions() -> EgressDecisions` are the first-class resource and
   egress audit signals. The controller must use them rather than inventing
   equivalents.
+
+### Regional binding and provider exception boundary
+
+The Sandbox Group resource ID and normalized authored `region` select the
+regional ACA data-plane endpoint directly. The adapter performs no ARM lookup
+or compatibility fallback. It compares the configured, persisted, and live
+Sandbox Group identity and region and fails closed on mismatch. It does not
+compare the Function App location with the Sandbox Group region; same-region
+and cross-region placement are both supported.
+
+`transport/aca_sdk.py` contains the complete preview-SDK exception boundary.
+Group-scoped `401`/`403` becomes authorization, group-scoped `404` becomes a
+permanent binding failure, and `429`/5xx/timeout or transport failure becomes
+transient. Sandbox-scoped `404` means missing session backing. Resume treats a
+`409` as safe progress only when a typed state read reports `Running` or
+`Resuming`; every other `409` is invalid state. No raw SDK exception, provider
+payload, identifier, or credential crosses into a controller route.
 
 ### Fail-closed creation and egress defaults
 
@@ -1082,15 +1101,16 @@ session_runtime:
   harness: maf                          # default and only v1 value
   aca_sandbox:                          # presence of this block selects the ACA backend
     sandbox_group_resource_id: $ACA_SANDBOX_GROUP_RESOURCE_ID
+    region: $ACA_SANDBOX_REGION         # required Sandbox Group region
     retention:                          # optional; app-scoped only
       auto_suspend_idle: 300            # seconds; int
       reclaim_idle: 3600                # seconds; int, must exceed auto_suspend_idle
 ```
 
-* Keys are locked: `session_runtime`, `harness`, `aca_sandbox`, `sandbox_group_resource_id`, and `retention` (nested under `aca_sandbox`). The remaining SDK spike is only the accepted identifier value format and its Pydantic validation.
+* Keys are locked: `session_runtime`, `harness`, `aca_sandbox`, `sandbox_group_resource_id`, `region`, and `retention` (nested under `aca_sandbox`).
 * This is global application configuration in `agents.config.yaml`, never per-agent front matter. Per-agent harness/group/retention is deferred; future retention precedence is per-agent > app-level > group default.
-* The resource ID is non-secret and uses existing environment substitution. Its region is derived from the resolved group; it is not authored.
-* No `max_run_seconds`, `region`, `disk`, or `content_package` field exists; reject dropped fields. Existing per-agent `timeout` is the sole run-duration knob. For a shared session sandbox, the entry/coordinator timeout controls the whole run; subagents are bounded by `min(subagent timeout, coordinator remaining)`.
+* The resource ID and region are non-secret and use existing environment substitution. Both are authored; the runtime performs no ARM discovery or Function App placement-equality validation. The normalized region is forwarded as non-secret guest configuration because the delivered `agents.config.yaml` reconstructs the catalog; the Sandbox Group resource ID and controller credentials remain host-only.
+* No `max_run_seconds`, `disk`, or `content_package` field exists; reject dropped fields. Existing per-agent `timeout` is the sole run-duration knob. For a shared session sandbox, the entry/coordinator timeout controls the whole run; subagents are bounded by `min(subagent timeout, coordinator remaining)`.
 * The watchdog equals authored `timeout`; synchronous wait is `min(timeout, 180s)`. The in-lang-worker backend imposes no additional synchronous-wait cap of its own, but remains subject to the Azure Functions platform's own ~230-second HTTP timeout for synchronous responses regardless of backend ([service limits](https://learn.microsoft.com/azure/azure-functions/functions-scale#service-limits)); long-running work should use the existing async-accepted (`202`) pattern.
 * Disk defaults to public `python-3.<minor>` with an optional customer disk
   name or immutable-ID override. Content is controller-captured from script
@@ -1110,7 +1130,7 @@ session_runtime:
 | 2 | `workflows.enabled: true` | Fail startup; Dynamic Workflows are incompatible in v1. | 0008.7 #36 |
 | 3 | Dynamic Sessions code-interpreter configured | Fail startup; unsupported with ACA in v1. | 0008.7 #36 |
 | 4 | Agent is bound to a non-HTTP trigger | Fail startup; ACA is HTTP-only in v1. | Parent / FRD 0009 |
-| 5 | Missing/empty `sandbox_group_resource_id` | Fail startup. | 0008.10 |
+| 5 | Missing/empty `sandbox_group_resource_id` or missing/invalid `region` | Fail startup. | 0008.10 + Decision #189 |
 | 6 | ~~State account permits Shared Key or RBAC is not scoped~~ — **superseded** (Decision 87): the Shared-Key-disallowed check is dropped entirely, matching core Azure Functions' own `AzureWebJobsStorage` posture (Shared Key accepted by default). | N/A — condition is no longer checked; row retained for numbering stability. | 0008.3 (superseded by #87) |
 | 7 | ~~Production uses `AzureWebJobsStorage` rather than dedicated `AzureFunctionsAgentsStateStorage`~~ — **superseded** (Decision 86): there is no dedicated state-storage account at all; `AzureWebJobsStorage` is always reused for session state, in every environment, so this condition is structurally unrepresentable. | N/A — condition cannot occur; row retained for numbering stability. | 0008.3 #31 (superseded by #86) |
 | 8 | Neither function-key nor Easy Auth/Entra Functions authentication is configured | Fail startup; some valid Functions auth is mandatory, but Entra-only is not. | 0008.2 (method-agnostic) |
@@ -1187,6 +1207,8 @@ Canonical stored/wire run states: `accepted`, `running`, `succeeded`, `failed`, 
 | Unavailable async result | `410 Gone` after result eviction, missing result content, or session tombstone; status remains readable. |
 | Unknown run | `404`. |
 | Auth/authz | `401`/`403`. |
+| Sandbox Group binding missing/invalid | Sanitized non-retryable `503 sandbox_group_binding_failed`. |
+| Sandbox Group transient failure | Sanitized `503 sandbox_group_transient` with `Retry-After: 2`. |
 | Different submission while active run holds slot | Flat `409 active_run_exists`, naming active run. |
 | Sandbox lifecycle rejects idempotent resume | Sanitized `409 sandbox_invalid_state` from submission, status, result, events, or cancel; body contains only `error` and `reason` set to that value. |
 | Same Idempotency-Key, different payload | `422 idempotency_key_conflict`; never a bare ambiguous `409`. |

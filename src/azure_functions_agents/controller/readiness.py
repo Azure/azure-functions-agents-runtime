@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Never, Protocol
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -88,12 +88,15 @@ from ..transport.transport_models import (
     SandboxCreateSource,
     SandboxFileNotFoundError,
     SandboxFileOperationError,
-    SandboxGroupArmAuthorizationError,
     SandboxGroupAuthorizationError,
     SandboxGroupAuthorizationFailureReason,
     SandboxGroupBinding,
+    SandboxGroupBindingError,
+    SandboxGroupTransientError,
     SandboxInvalidStateError,
     SandboxLifecyclePolicy,
+    SandboxNotFoundError,
+    SandboxProvisioningError,
     SandboxProvisioningLabels,
 )
 from .bootstrap_delivery import deliver_content_and_bootstrap
@@ -130,7 +133,9 @@ QUARANTINE_REASONS: frozenset[str] = frozenset(
     }
 )
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.25
-_RESUMABLE_FILE_OPERATION_STATUS_CODES = frozenset({409, 423, 425, 429, 500, 502, 503, 504})
+_RESUMABLE_FILE_OPERATION_STATUS_CODES = frozenset(
+    {409, 423, 425, 429, *range(500, 600)}
+)
 _FILE_RETRY_MAX_DELAY_SECONDS = 4.0
 _ADMISSION_CONFIRMATION_TIMEOUT_SECONDS = 1.0
 _BOUNDED_TASK_DRAIN_TIMEOUT_SECONDS = 0.05
@@ -158,8 +163,7 @@ _ADMISSION_POSSIBLY_COMMITTED: AdmissionDisposition = "possibly_committed"
 
 type _SessionLockKey = tuple[str, str]
 type TargetedReconciler = Callable[
-    [OwnerPartition, str, "SetupDeadline | None"],
-    Awaitable[None],
+    [OwnerPartition, str, "SetupDeadline | None"], Awaitable[None]
 ]
 type BoundedReconciler = Callable[..., Awaitable[None]]
 
@@ -208,8 +212,16 @@ class SessionActivationAuthorizationError(SessionActivationError):
         super().__init__(message)
 
 
+class SessionActivationBindingError(SessionActivationError):
+    """The configured Sandbox Group binding is permanently invalid."""
+
+
+class SessionActivationTransientError(SessionActivationError):
+    """A transient infrastructure failure prevents activation right now (retryable)."""
+
+
 class SessionActivationConflictError(SessionActivationError):
-    """The sandbox state does not permit the requested lifecycle operation."""
+    """The sandbox is in a state that does not permit the requested lifecycle operation."""
 
 
 class SessionCreationUnavailableError(SessionActivationError):
@@ -419,11 +431,12 @@ class SessionRuntimeBinding:
         """Return the one lazily opened provider for this app's Sandbox Group."""
         try:
             return await self._provider.get()
-        except SandboxGroupArmAuthorizationError as exc:
-            raise SessionActivationAuthorizationError(
-                "Configured Sandbox Group ARM authorization failed.",
-                status_code=exc.status_code or 403,
-            ) from None
+        except (
+            SandboxGroupAuthorizationError,
+            SandboxGroupBindingError,
+            SandboxGroupTransientError,
+        ) as exc:
+            _raise_activation_provider_error(exc)
 
     async def get_state_store(self) -> StateStoreBinding:
         """Return the one lazily resolved state-store binding for this app."""
@@ -439,11 +452,12 @@ class SessionRuntimeBinding:
         if self._targeted_reconciler is not None:
             try:
                 await self._targeted_reconciler(partition, session_id, setup_deadline)
-            except SandboxGroupAuthorizationError as exc:
-                raise SessionActivationAuthorizationError(
-                    SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
-                    status_code=exc.status_code,
-                ) from None
+            except (
+                SandboxGroupAuthorizationError,
+                SandboxGroupBindingError,
+                SandboxGroupTransientError,
+            ) as exc:
+                _raise_activation_provider_error(exc)
 
     async def reconcile_after_create(
         self,
@@ -452,14 +466,21 @@ class SessionRuntimeBinding:
     ) -> None:
         """Run targeted post-create reconciliation when configured."""
         if self._post_create_reconciler is not None:
-            if (
-                partition is None
-                or session_id is None
-                or len(inspect.signature(self._post_create_reconciler).parameters) == 0
-            ):
-                await self._post_create_reconciler()
-            else:
-                await self._post_create_reconciler(partition, session_id)
+            try:
+                if (
+                    partition is None
+                    or session_id is None
+                    or len(inspect.signature(self._post_create_reconciler).parameters) == 0
+                ):
+                    await self._post_create_reconciler()
+                else:
+                    await self._post_create_reconciler(partition, session_id)
+            except (
+                SandboxGroupAuthorizationError,
+                SandboxGroupBindingError,
+                SandboxGroupTransientError,
+            ) as exc:
+                _raise_activation_provider_error(exc)
 
     async def reap_for_capacity(
         self,
@@ -468,14 +489,21 @@ class SessionRuntimeBinding:
     ) -> None:
         """Run targeted capacity reconciliation when configured."""
         if self._capacity_reaper is not None:
-            if (
-                partition is None
-                or session_id is None
-                or len(inspect.signature(self._capacity_reaper).parameters) == 0
-            ):
-                await self._capacity_reaper()
-            else:
-                await self._capacity_reaper(partition, session_id)
+            try:
+                if (
+                    partition is None
+                    or session_id is None
+                    or len(inspect.signature(self._capacity_reaper).parameters) == 0
+                ):
+                    await self._capacity_reaper()
+                else:
+                    await self._capacity_reaper(partition, session_id)
+            except (
+                SandboxGroupAuthorizationError,
+                SandboxGroupBindingError,
+                SandboxGroupTransientError,
+            ) as exc:
+                _raise_activation_provider_error(exc)
 
     @asynccontextmanager
     async def hold_session(
@@ -522,6 +550,21 @@ class ActivatedSession:
             partition=partition,
             store=store,
         )
+
+
+def _raise_activation_provider_error(
+    error: SandboxGroupAuthorizationError
+    | SandboxGroupBindingError
+    | SandboxGroupTransientError,
+) -> Never:
+    if isinstance(error, SandboxGroupAuthorizationError):
+        raise SessionActivationAuthorizationError(
+            SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+            status_code=error.status_code,
+        ) from None
+    if isinstance(error, SandboxGroupBindingError):
+        raise SessionActivationBindingError(str(error)) from None
+    raise SessionActivationTransientError(str(error)) from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -667,10 +710,26 @@ async def _activate_existing_session(
             SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
             status_code=exc.status_code,
         ) from None
+    except SandboxGroupBindingError as exc:
+        await _close_handle_if_open(handle)
+        raise SessionActivationBindingError(str(exc)) from None
+    except SandboxGroupTransientError as exc:
+        await _close_handle_if_open(handle)
+        raise SessionActivationTransientError(str(exc)) from None
+    except SandboxNotFoundError:
+        await _close_handle_if_open(handle)
+        raise SessionActivationGoneError(
+            "Session backing sandbox is unavailable."
+        ) from None
     except SandboxInvalidStateError:
         await _close_handle_if_open(handle)
         raise SessionActivationConflictError(
             "Sandbox lifecycle state prevents session activation."
+        ) from None
+    except SandboxProvisioningError:
+        await _close_handle_if_open(handle)
+        raise SessionActivationConflictError(
+            "Sandbox provider rejected the lifecycle operation."
         ) from None
     except SandboxManifestMismatchError:
         await _quarantine_detected_binding(
@@ -1696,6 +1755,12 @@ async def _provision_reserved_session(
             SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
             status_code=exc.status_code,
         ) from None
+    except (
+        SandboxGroupBindingError,
+        SandboxGroupTransientError,
+        SandboxProvisioningError,
+    ) as exc:
+        _raise_provision_provider_error(exc, setup_deadline)
     except SandboxFileNotFoundError:
         raise _setup_timeout_error(setup_deadline, SetupPhase.CONTENT) from None
     except SandboxFileOperationError as exc:
@@ -1707,6 +1772,25 @@ async def _provision_reserved_session(
         if exc.status_code is None or exc.status_code in _RESUMABLE_FILE_OPERATION_STATUS_CODES:
             raise _setup_timeout_error(setup_deadline, SetupPhase.CONTENT) from None
         raise
+
+
+def _raise_provision_provider_error(
+    error: SandboxGroupBindingError | SandboxGroupTransientError | SandboxProvisioningError,
+    setup_deadline: SetupDeadline,
+) -> Never:
+    if isinstance(error, SandboxGroupBindingError):
+        raise SessionActivationBindingError(str(error)) from None
+    if isinstance(error, SandboxGroupTransientError):
+        raise SessionActivationTransientError(str(error)) from None
+    if isinstance(error, SandboxCapacityError):
+        raise SessionActivationTransientError(str(error)) from None
+    if isinstance(error, SandboxInvalidStateError):
+        raise SessionActivationConflictError(str(error)) from None
+    if isinstance(error, SandboxNotFoundError):
+        raise _setup_timeout_error(setup_deadline, SetupPhase.PROVISION_CREATE) from None
+    raise SessionActivationBindingError(
+        "Sandbox provider rejected the provisioning request."
+    ) from None
 
 
 async def _preserve_indeterminate_provision(

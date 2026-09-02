@@ -69,6 +69,7 @@ def test_guest_identity_rejects_system_missing_or_ambiguous_uami(
 @pytest.mark.parametrize(
     "name",
     [
+        "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION",
         "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_ENDPOINT",
         "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_DEPLOYMENT",
     ],
@@ -107,6 +108,7 @@ def test_preflight_reads_only_the_sandbox_group_identity(
     smoke_module.preflight(
         {
             "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID": "/sandbox-group",
+            "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION": "westus2",
             "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK": "python-3.13",
             "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_ENDPOINT": "https://model.example.net",
             "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_DEPLOYMENT": "smoke-model",

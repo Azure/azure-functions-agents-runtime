@@ -123,7 +123,10 @@ async def _open_delayed_provider(app_root: Path) -> SandboxSessionProvider:
     session_runtime = global_config.session_runtime
     if session_runtime is None or session_runtime.aca_sandbox is None:
         raise RuntimeError("The controlled timeout fixture requires ACA Sandbox configuration.")
-    inner = await AcaSandboxAdapter.open(session_runtime.aca_sandbox.sandbox_group_resource_id)
+    inner = await AcaSandboxAdapter.open(
+        session_runtime.aca_sandbox.sandbox_group_resource_id,
+        region=session_runtime.aca_sandbox.region,
+    )
     return _DelayedCreateSandboxProvider(inner)
 
 
