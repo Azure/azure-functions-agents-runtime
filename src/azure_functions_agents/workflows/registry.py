@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
+from .schema import WorkflowRetryPolicy
+
 
 @dataclass(frozen=True)
 class WorkflowToolEntry:
@@ -40,12 +42,16 @@ class WorkflowToolEntry:
     registration time — supporting them needs a wrapper that doesn't
     exist yet, and silently returning a coroutine to the activity would
     surface as a confusing serialization error later.
+
+    ``retry`` is the optional ``@workflow_tool`` retry declaration. It is
+    authoritative at submission time and overrides a plan-authored policy.
     """
 
     name: str
     description: str
     handler: Callable[[dict[str, Any]], Any]
     public: bool
+    retry: WorkflowRetryPolicy | None = None
 
 
 type WorkflowHandlerCatalog = Mapping[str, WorkflowToolEntry]
@@ -75,6 +81,7 @@ def make_workflow_tool_entry(
     handler: Callable[[dict[str, Any]], Any],
     *,
     public: bool = True,
+    retry: WorkflowRetryPolicy | None = None,
 ) -> WorkflowToolEntry:
     """Validate and construct one workflow handler-catalog entry."""
     if not isinstance(name, str) or not name:
@@ -94,11 +101,14 @@ def make_workflow_tool_entry(
             f"workflow tool {name!r}: async handlers are not supported; "
             "register a synchronous wrapper instead"
         )
+    if retry is not None and not isinstance(retry, WorkflowRetryPolicy):
+        raise ValueError(f"workflow tool {name!r}: retry must be a WorkflowRetryPolicy")
     return WorkflowToolEntry(
         name=name,
         description=description,
         handler=handler,
         public=public,
+        retry=retry,
     )
 
 
@@ -115,6 +125,7 @@ def register_workflow_tool(
     handler: Callable[[dict[str, Any]], Any],
     *,
     public: bool = True,
+    retry: WorkflowRetryPolicy | None = None,
 ) -> None:
     """Register a workflow-safe tool.
 
@@ -130,6 +141,7 @@ def register_workflow_tool(
         description,
         handler,
         public=public,
+        retry=retry,
     )
 
 

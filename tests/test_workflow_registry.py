@@ -13,6 +13,7 @@ Exercises:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -610,14 +611,16 @@ def test_workflow_activity_logs_tool_exceptions_without_raising_raw_details(capl
     )
 
     with pytest.raises(RuntimeError) as excinfo:
-        activity(
-            {
-                "id": "explode",
-                "tool": "exploding",
-                "args": {},
-                "workflow_agent_slug": "test-agent",
-                "workflow_id": "workflow-1",
-            }
+        asyncio.run(
+            activity(
+                {
+                    "id": "explode",
+                    "tool": "exploding",
+                    "args": {},
+                    "workflow_agent_slug": "test-agent",
+                    "workflow_id": "workflow-1",
+                }
+            )
         )
 
     assert str(excinfo.value) == "task 'explode': workflow-safe tool failed"

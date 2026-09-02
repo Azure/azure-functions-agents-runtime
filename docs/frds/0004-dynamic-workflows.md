@@ -1007,6 +1007,14 @@ The Dynamic Workflow sample for this extension must demonstrate:
 | 63 | Built-in skill packaging | Generate content in code / external public file / packaged workflow asset | Store `SKILL.md` under `workflows/skills/data-driven-workflows`, resolve relative to `integration.py`, add `workflows/skills/**` package data, and verify a built wheel | Agent, architecture review | 2026-08-19 |
 | 64 | Legacy Durable payload decoding | Require all new keys / revalidate via Pydantic / optional typed keys with one compatibility boundary | Mark dynamic keys `NotRequired`, apply defaults once at the persisted JSON boundary, and trust the previously validated payload internally | Agent, architecture review | 2026-08-19 |
 | 65 | Progressive-disclosure selection pointer | Keep a qualified shared-addendum pointer / rely on public docs / use only MAF skill metadata | Keep the narrow load condition in the Skill description and remove the shared-addendum pointer after E2E showed that mentioning the Skill there caused fixed DAGs to load it speculatively | Agent, E2E evidence | 2026-08-19 |
+| 66 | Task execution policy delivery | Ship timeout, retry, continue-on-error, and status/observability together / decompose into stacked changes | Land Durable native retry first as an independently mergeable change, then stack per-attempt timeout with continue-on-error, then retry/timeout observability and the structured status contract | Human (TsuyoshiUshio) | 2026-08-29 |
+| 67 | Retry driver | Orchestrator-managed retry timers / Durable native Activity retry / both with a selector | Use Durable native Activity retry only. An orchestrator-managed retry loop would duplicate scheduling Durable already owns and would need its own timers, attempt state, and status vocabulary | Human (TsuyoshiUshio) | 2026-08-29 |
+| 68 | Durable SDK version | Keep `azure-functions-durable` 1.x / adopt 2.0.0b2 | Adopt 2.0.0b2: 1.x `RetryOptions` can only express a first interval and an attempt count, so an authored exponential backoff cannot be honored. Carry only the collateral the bump forces, including a Durable client whose lifetime spans SSE stream consumption | Agent, architecture review | 2026-08-29 |
+| 69 | Retryable-versus-terminal signaling | Retry every Activity exception / a retry predicate / raise for retryable and return for terminal | Durable's `RetryPolicy` has no exception predicate, so the Activity raises a private versioned marker for retryable failures and returns a structured outcome for terminal ones. Retryability is derived from the failure classification, never trusted from the worker payload | Agent, architecture review | 2026-08-29 |
+| 70 | Per-attempt task timeout | Required by native retry / independent follow-up | Not required: Durable retries on Activity failure, and an unbounded attempt is already bounded by an internal one-hour `retry_timeout`. Keep that ceiling internal and defer the authored `execution.timeout` surface | Agent, architecture review | 2026-08-29 |
+| 71 | Replay of pre-retry histories | Re-resolve policy from the deployed tool registration / dispatch from the persisted payload only | Select the retry driver and the result envelope from the persisted orchestration input alone, so deploying a new retry declaration cannot change how an in-flight workflow replays | Agent, architecture review | 2026-08-29 |
+| 72 | Persisted policy forward compatibility | Strict `extra="forbid"` on the replayed shape / ignore unknown keys | Ignore unknown keys on every model read back from Durable history, and require keys added by a later runtime to be optional, so a history written on either side of an upgrade still validates | Agent, architecture review | 2026-08-29 |
+| 73 | Attempt number in the task context | Expose the current attempt / expose only a stable idempotency key | Expose only the idempotency key. Durable owns the attempt budget and a replayed orchestration cannot observe the attempt, so publishing one would be a value handlers could not trust | Agent | 2026-08-29 |
 
 ## 6. Test plan
 
@@ -1218,3 +1226,15 @@ The Dynamic Workflow sample for this extension must demonstrate:
 - **Dynamic control flow human sign-off:** TsuyoshiUshio, 2026-08-14. Approved
   Decisions 43-53 as proposed and authorized implementation and testing. FRD
   status returned to `Finalized`.
+- **Task execution policy decomposition:** TsuyoshiUshio, 2026-08-29. Approved
+  splitting the task execution policy work into three stacked changes and
+  landing Durable native retry (Decisions 66-73) first as an independently
+  mergeable slice. Per-attempt timeout with continue-on-error, and then
+  retry/timeout observability with the structured status contract, follow.
+- **Native retry architecture review:** An independent rubber-duck review on
+  2026-08-29 evaluated the proposed slice against `main`. It confirmed the
+  Durable 2.x adoption and the raise-versus-return failure split, and raised two
+  blocking findings — forward compatibility of the persisted policy shape and
+  replay safety when switching a task between `call_activity` and
+  `call_activity_with_retry`. Both are resolved by Decisions 71 and 72 and are
+  covered by tests. FRD status remains `Finalized`.
