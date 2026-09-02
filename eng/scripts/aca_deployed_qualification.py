@@ -22,6 +22,9 @@ _DEPLOYED_ENVIRONMENT = (
     "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_NAME",
     "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID",
     "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME",
+    "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_BUILD_ID",
+    "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_COMMIT_SHA",
+    "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_PYTHON_VERSION",
     "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID",
     "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION",
 )
@@ -154,7 +157,7 @@ def run_deployed_suite(
     load_concurrency: str,
     provision_concurrency: str,
 ) -> int:
-    """Run the protected deployed turn, lifecycle, loss, and N=5 smoke suite."""
+    """Run cold start first, then turn, lifecycle, loss, and N=5."""
     load, provision = validate_deployed_environment(
         environment,
         runtime_target=runtime_target,
@@ -165,9 +168,13 @@ def run_deployed_suite(
     inherited = dict(environment)
     inherited["AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY"] = str(load)
     inherited["AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY"] = str(provision)
+    samples = validate_cold_start_samples(inherited)
+    if samples is not None:
+        inherited["AZURE_FUNCTIONS_AGENTS_ACA_COLD_START_SAMPLES"] = str(samples)
     preflight_auth(inherited)
     return _run_pytest(
         (
+            "tests/live/test_aca_deployed_cold_start.py",
             "tests/live/test_aca_deployed_agent_turn.py",
             "tests/live/test_aca_deployed_lifecycle.py",
             "tests/live/test_aca_deployed_loss.py",
