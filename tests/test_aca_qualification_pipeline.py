@@ -294,6 +294,98 @@ class TestQualificationEnvironmentContract:
         )
 
 
+class TestQualificationPipelineWiring:
+    def _root(self) -> Path:
+        return Path(__file__).resolve().parents[1]
+
+    def _pipeline(self) -> str:
+        return (self._root() / "eng" / "ci" / "e2e-tests.yml").read_text(encoding="utf-8")
+
+    def _template(self) -> str:
+        return (
+            self._root() / "eng" / "templates" / "official" / "jobs" / "aca-qualify.yml"
+        ).read_text(encoding="utf-8")
+
+    def _qualification_stage(self) -> str:
+        pipeline = self._pipeline()
+        marker = "      - stage: AcaQualification"
+        assert pipeline.count(marker) == 1
+        return pipeline.split(marker, 1)[1]
+
+    def test_only_the_qualification_stage_is_added(self) -> None:
+        pipeline = self._pipeline()
+        assert pipeline.count("- stage: AcaQualification") == 1
+        assert "AcaSweep" not in pipeline
+        assert not (
+            self._root() / "eng" / "templates" / "official" / "jobs" / "aca-sweep.yml"
+        ).exists()
+
+    def test_qualification_depends_only_on_build(self) -> None:
+        stage = self._qualification_stage()
+        assert "dependsOn: Build" in stage
+        assert "dependsOn:\n" not in stage
+
+    def test_condition_allows_manual_or_main_ci_only(self) -> None:
+        condition = next(
+            line.strip()
+            for line in self._qualification_stage().splitlines()
+            if line.strip().startswith("condition:")
+        )
+        assert "'Manual'" in condition
+        assert "'IndividualCI', 'BatchedCI'" in condition
+        assert "'refs/heads/main'" in condition
+        assert "PullRequest" not in condition
+        assert "Schedule" not in condition
+
+    def test_matrix_runs_both_python_versions_in_parallel(self) -> None:
+        template = self._template()
+        assert "maxParallel: 2" in template
+        assert template.count("runtimeTarget: 'python313'") == 1
+        assert template.count("runtimeTarget: 'python314'") == 1
+        assert template.count("pythonVersion: '3.13'") == 1
+        assert template.count("pythonVersion: '3.14'") == 1
+
+    def test_each_leg_runs_the_combined_suite_with_provisioning_concurrency_one(
+        self,
+    ) -> None:
+        template = self._template()
+        assert template.count(" deployed-suite ") == 1
+        assert template.count("--load-concurrency 5") == 1
+        assert template.count("--provision-concurrency 1") == 1
+        assert "continueOnError: true" in template
+
+    def test_aca_settings_are_basic_variables_not_variable_groups(self) -> None:
+        source = self._pipeline() + "\n" + self._template()
+        assert not re.search(r"(?m)^\s*-\s*group\s*:", source)
+        for name in (
+            "ACA_DEPLOYED_APP_SUBSCRIPTION_ID",
+            "ACA_DEPLOYED_RESOURCE_GROUP",
+            "ACA_DEPLOYED_APP_SITE_NAME_PY313",
+            "ACA_DEPLOYED_APP_SITE_NAME_PY314",
+            "ACA_DEPLOYED_FUNCTION_BASE_URL_PY313",
+            "ACA_DEPLOYED_FUNCTION_BASE_URL_PY314",
+            "ACA_DEPLOYED_AGENT_SLUG",
+            "ACA_DEPLOYED_EASY_AUTH_TOKEN_SCOPE",
+            "ACA_DEPLOYED_EASY_AUTH_AUDIENCE",
+            "ACA_DEPLOYED_TABLE_SERVICE_URI",
+            "ACA_DEPLOYED_TABLE_NAME",
+            "ACA_SANDBOX_GROUP_RESOURCE_ID",
+            "ACA_SANDBOX_REGION",
+        ):
+            assert f"$({name})" in source
+
+    def test_template_keeps_lightweight_marker_attestation(self) -> None:
+        template = self._template()
+        for name in (
+            "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_BUILD_ID",
+            "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_COMMIT_SHA",
+            "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_PYTHON_VERSION",
+        ):
+            assert f"{name}:" in template
+        assert "wheel digest" not in template.lower()
+        assert "deployment storage" not in template.lower()
+
+
 class TestCombinedDeployedSuite:
     def test_n100_is_rejected_before_environment_or_auth_preflight(
         self,
