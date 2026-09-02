@@ -39,6 +39,7 @@ from . import registry
 from .activity import (
     authorization_outcome,
     handler_contract_outcome,
+    invoke_handler,
     invoke_policy_handler,
     validate_activity_result,
     validate_policy_activity_input,
@@ -1222,7 +1223,7 @@ def register_workflows(
                 )
             )
         try:
-            result = entry.handler(args)
+            result = await invoke_handler(entry.handler, args)
         except asyncio.CancelledError:
             raise
         except Exception:

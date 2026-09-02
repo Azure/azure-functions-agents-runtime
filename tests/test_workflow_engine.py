@@ -193,6 +193,51 @@ async def test_policy_aware_sub_agent_timeout_is_retryable(
 
 
 @pytest.mark.asyncio
+async def test_policy_aware_sub_agent_success_uses_the_retry_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run_leaf(*args: Any, **kwargs: Any) -> str:
+        return "PR is ready."
+
+    monkeypatch.setattr(engine, "run_leaf_agent_task", run_leaf)
+    activity = _registered_function(
+        engine.SUB_AGENT_ACTIVITY_NAME,
+        catalog=_catalog("pr_status_analyst"),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(
+                allowed_tools=frozenset(),
+                allowed_subagents=frozenset({"pr_status_analyst"}),
+            )
+        },
+    )
+
+    outcome = await activity({
+        "id": "analyze_pr",
+        "agent": "pr_status_analyst",
+        "task": "Analyze PR 117.",
+        "workflow_id": "workflow-1",
+        "workflow_agent_slug": "coordinator",
+        "task_id": "analyze_pr",
+        "execution": {
+            "max_attempts": 3,
+            "durable_retry_policy": {
+                "first_retry_interval_ms": 1_000,
+                "max_number_of_attempts": 3,
+                "backoff_coefficient": 2.0,
+                "max_retry_interval_ms": 4_000,
+                "retry_timeout_ms": 3_600_000,
+            },
+        },
+    })
+
+    assert outcome == {
+        "id": "analyze_pr",
+        "ok": True,
+        "result": {"agent": "pr_status_analyst", "text": "PR is ready."},
+    }
+
+
+@pytest.mark.asyncio
 async def test_policy_aware_sub_agent_unknown_failure_is_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

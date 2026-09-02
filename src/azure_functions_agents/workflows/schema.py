@@ -89,7 +89,7 @@ def _normalize_execution_error_message(message: str) -> str:
     normalized = _WHITESPACE_RE.sub(" ", normalized).strip()
     if not normalized:
         return _DEFAULT_EXECUTION_ERROR_MESSAGE
-    return normalized[:256]
+    return normalized[:256].strip() or _DEFAULT_EXECUTION_ERROR_MESSAGE
 
 
 class _WorkflowExecutionError(Exception):

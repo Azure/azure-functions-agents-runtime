@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
@@ -13,7 +14,11 @@ from durabletask.task import TaskFailedError
 
 from azure_functions_agents._function_tool import WorkflowTool
 from azure_functions_agents.workflows import engine, integration, registry
-from azure_functions_agents.workflows.activity import invoke_policy_handler
+from azure_functions_agents.workflows.activity import (
+    handler_contract_failure,
+    invoke_policy_handler,
+    validate_activity_result,
+)
 from azure_functions_agents.workflows.context import (
     current_workflow_task_context,
     workflow_task_idempotency_key,
@@ -321,6 +326,27 @@ async def test_exhaustion_round_trips_only_this_runtimes_private_payload() -> No
     assert decode_durable_retry_failure("work", RuntimeError("boom")) is None
 
 
+@pytest.mark.asyncio
+async def test_truncated_retry_message_keeps_its_application_error_code() -> None:
+    from azure_functions_agents import WorkflowRetryableError
+
+    message = "x" * 255 + " " + "private suffix"
+
+    def handler(args: dict[str, Any]) -> None:
+        raise WorkflowRetryableError("service_busy", message)
+
+    with pytest.raises(DurableRetryableActivityError) as raised:
+        await invoke_policy_handler(handler, {}, task=_native_task(), target="publish")
+
+    decoded = decode_durable_retry_failure(
+        "work",
+        TaskFailedError("Activity failed.", raised.value),
+    )
+    assert decoded is not None
+    assert decoded["error_code"] == "service_busy"
+    assert decoded["error"] == "x" * 255
+
+
 def _private_failure_payload(outcome: Any, *, version: int = 1, **extra: Any) -> str:
     """Serialize a private exhaustion payload the way ``raise_for_durable_retry`` does."""
     return json.dumps(
@@ -401,6 +427,46 @@ def test_decoder_accepts_its_own_retryable_payload() -> None:
     failure = _durable_failure(_private_failure_payload(_RETRYABLE_OUTCOME))
 
     assert decode_durable_retry_failure("work", failure) == _RETRYABLE_OUTCOME["failure"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {
+            "id": "work",
+            "ok": False,
+            "failure": {
+                "error_code": "service_busy",
+                "error": "Try again.",
+                "kind": "handler_terminal",
+                "retryable": True,
+            },
+        },
+        {
+            "id": "work",
+            "ok": False,
+            "failure": {
+                "error_code": "Bad-Code",
+                "error": "Try again.",
+                "kind": "handler_transient",
+                "retryable": True,
+            },
+        },
+        {
+            "id": "work",
+            "ok": False,
+            "failure": {
+                "error_code": "service_busy",
+                "error": " has leading whitespace",
+                "kind": "handler_transient",
+                "retryable": True,
+            },
+        },
+        {"id": "work", "ok": True, "result": {}, "extra": True},
+    ],
+)
+def test_activity_result_rejects_untrusted_worker_claims(raw: dict[str, Any]) -> None:
+    assert validate_activity_result("work", raw) == (False, handler_contract_failure())
 
 
 @pytest.mark.asyncio
@@ -647,11 +713,11 @@ def _orchestrate(context: _RecordingContext) -> dict[str, Any]:
         },
     )
     orchestrator = app.function(engine.ORCHESTRATOR_NAME).__closure__[0].cell_contents
-    generator = orchestrator(context)
+    generator = orchestrator(context, context._input)
     try:
         selection = next(generator)
         while True:
-            candidates = getattr(selection, "candidates", None)
+            candidates = getattr(selection, "_tasks", None)
             winner = (
                 next(task for task in candidates if task is not context.cancel_task)
                 if candidates is not None
@@ -710,6 +776,46 @@ def test_history_without_a_persisted_policy_keeps_the_legacy_dispatch() -> None:
     ]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy_aware", [False, True])
+async def test_sync_tool_handlers_run_off_the_activity_event_loop(
+    policy_aware: bool,
+) -> None:
+    event_loop_thread = threading.get_ident()
+    handler_threads: list[int] = []
+
+    def publish(args: dict[str, Any]) -> dict[str, bool]:
+        handler_threads.append(threading.get_ident())
+        return {"published": True}
+
+    catalog = integration.build_workflow_handler_catalog(
+        [WorkflowTool("publish", "Publish", publish)]
+    )
+    app = _Blueprints()
+    engine.register_workflows(
+        app,
+        handler_catalog=catalog,
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(allowed_tools=frozenset({"publish"}))
+        },
+    )
+    activity = app.function("agents_workflow_run_tool")
+    task = {
+        "id": "work",
+        "workflow_id": "workflow-1",
+        "workflow_agent_slug": "coordinator",
+        "tool": "publish",
+        "args": {},
+    }
+    if policy_aware:
+        task.update(_native_task())
+
+    await activity(task)
+
+    assert handler_threads
+    assert handler_threads[0] != event_loop_thread
+
+
 def test_data_driven_plans_use_the_same_retry_driver() -> None:
     """A ``when``/``for_each`` plan runs on the dynamic scheduler; retry still applies."""
     execution = {"max_attempts": 3, "durable_retry_policy": dict(_DURABLE_POLICY)}
@@ -742,6 +848,44 @@ def test_data_driven_plans_use_the_same_retry_driver() -> None:
     assert payload["id"] == "work"
     assert payload["execution"] == execution
     assert retry_policy.max_number_of_attempts == 3
+    assert context.activity_tags == [
+        (engine._ACTIVITY_NAME, {"durabletask.displayName": "publish"}),
+        (engine._ACTIVITY_NAME, {"durabletask.displayName": "publish"}),
+    ]
+
+
+def test_for_each_instances_each_use_the_persisted_retry_driver() -> None:
+    execution = {"max_attempts": 3, "durable_retry_policy": dict(_DURABLE_POLICY)}
+    expanded = _tool_node("work", execution)
+    expanded["depends_on"] = ["discover"]
+    expanded["for_each"] = "${discover.result.items}"
+    expanded["args"] = {"item": "${item}"}
+    context = _RecordingContext(
+        [_tool_node("discover"), expanded],
+        {
+            "discover": {"id": "discover", "result": {"items": ["a", "b"]}},
+            "work[0]": {"id": "work[0]", "ok": True, "result": {"item": "a"}},
+            "work[1]": {"id": "work[1]", "ok": True, "result": {"item": "b"}},
+        },
+    )
+    context._input["policy"] = {
+        "allowed_tools": ["publish"],
+        "allowed_subagents": [],
+    }
+
+    result = _orchestrate(context)
+
+    assert [payload["id"] for payload, _ in context.retried] == ["work[0]", "work[1]"]
+    assert [payload["task_id"] for payload, _ in context.retried] == ["work", "work"]
+    assert context.activity_tags == [
+        (engine._ACTIVITY_NAME, {"durabletask.displayName": "publish"}),
+        (engine._ACTIVITY_NAME, {"durabletask.displayName": "publish"}),
+        (engine._ACTIVITY_NAME, {"durabletask.displayName": "publish"}),
+    ]
+    assert result["results"]["work"] == [
+        {"index": 0, "status": "completed", "result": {"item": "a"}},
+        {"index": 1, "status": "completed", "result": {"item": "b"}},
+    ]
 
 
 def test_terminal_outcome_fails_the_workflow_with_the_application_error_code() -> None:
@@ -856,18 +1000,30 @@ async def test_start_workflow_persists_only_plan_authored_retry() -> None:
                         "args": {},
                         "depends_on": ["work"],
                     },
+                    {
+                        "id": "analyze",
+                        "type": "sub_agent",
+                        "agent": "analyst",
+                        "task": "Analyze the reservation.",
+                        "depends_on": ["work"],
+                        "execution": {"retry": _RETRY.model_dump()},
+                    },
                 ]
             }
         ),
         session,
-        policy=WorkflowPlanPolicy(allowed_tools=frozenset({"publish"})),
+        policy=WorkflowPlanPolicy(
+            allowed_tools=frozenset({"publish"}),
+            allowed_subagents=frozenset({"analyst"}),
+        ),
     )
 
     assert "workflow_id" in json.loads(response)
-    retried, plain = started["tasks"]
+    retried, plain, subagent = started["tasks"]
     assert retried["execution"] == {
         "max_attempts": 3,
         "durable_retry_policy": _DURABLE_POLICY,
     }
     assert "execution" not in plain
     assert started["tags"] == {"durabletask.displayName": "main-orchestration"}
+    assert subagent["execution"] == retried["execution"]

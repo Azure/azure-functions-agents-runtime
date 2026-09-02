@@ -33,7 +33,6 @@ from .schema import (
     MAX_BACKOFF_MS,
     MAX_POLICY_ATTEMPTS,
     MAX_POLICY_ELAPSED_MS,
-    EffectiveWorkflowTaskExecution,
     WorkflowRetryableError,
     WorkflowTerminalError,
 )
@@ -120,11 +119,6 @@ class EffectiveExecutionModel(BaseModel):
             if durable.max_retry_interval_ms < durable.first_retry_interval_ms:
                 raise ValueError("Durable maximum retry interval is below the first interval")
         return self
-
-    def to_wire(self) -> EffectiveWorkflowTaskExecution:
-        """Return the original JSON-safe TypedDict contract."""
-        return cast(EffectiveWorkflowTaskExecution, self.model_dump())
-
 
 class PolicyActivityInputModel(BaseModel):
     """Strict policy fields from a tool or Sub Agent Activity input."""
