@@ -20,13 +20,12 @@ access. Its controller identity owns all ACA create, list, and cleanup actions.
 coverage. `test_aca_real_agent_turn.py` exercises only the production execution
 backend.
 
-Deployed cold-start, lifecycle, loss, load, and one-shot recovery suites remain
-direct/manual test assets pending issue #166. They have no pipeline wiring,
-target metadata, or queue-time parameters in this repository. Drive them with
-`eng/scripts/aca_deployed_qualification.py`, after packaging and deploying
-`tests/live/apps/aca-qualification/` with
-`eng/scripts/aca_qualification_pipeline.py`. They still skip unless
-`AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1` is set explicitly.
+Deployed cold-start, lifecycle, loss, and load suites are wired into the
+post-main `AcaQualification` stage of `eng/ci/e2e-tests.yml`. See the
+[ACA qualification CI guide](../../eng/ci/docs/aca-qualification.md) for
+targets and triage. The one-shot recovery suite remains direct/manual. All
+suites still skip unless `AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1` is
+set explicitly.
 
 ## Controlled deployed one-shot recovery
 
@@ -79,4 +78,5 @@ minor version against the expected values in the environment. A mismatch fails
 the run and suppresses the cold-start metrics, so timings from a stale build are
 never reported as if they described the build under test.
 
-There is no pipeline wiring for any of this; every step is run by hand.
+The Python 3.13 and 3.14 deployed suites are wired into `AcaQualification`.
+They remain runnable by hand.
