@@ -6,8 +6,9 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Final, TypeIs
+from typing import TYPE_CHECKING, Final, Never, TypeIs
 
+from .._logger import logger
 from ..config import DEFAULT_TIMEOUT
 from ..controller.idempotency import (
     IdempotencyAttempt,
@@ -44,6 +45,7 @@ from ..controller.readiness import (
     session_with_admitted_run,
     terminal_run,
 )
+from ..sandbox_runtime_limits import RESULT_HOLD_SECONDS
 from ..session_state import (
     TERMINAL_RUN_STATUSES,
     ActiveRunConflictError,
@@ -70,10 +72,21 @@ from ..session_state import (
     owner_idempotency_expiry,
     owner_partition,
 )
-from ..transport.transport_models import SandboxFileNotFoundError, SandboxFileOperationError
+from ..transport.transport_models import (
+    SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+    SandboxFileNotFoundError,
+    SandboxFileOperationError,
+    SandboxGroupAuthorizationError,
+    SandboxGroupBindingError,
+    SandboxGroupTransientError,
+    SandboxInvalidStateError,
+    SandboxNotFoundError,
+    SandboxTransportError,
+)
 from .backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
     AgentExecutionBackend,
+    DurableAdmissionIndeterminateError,
     DurableAdmissionOutcome,
     DurableAdmissionSetupTimeoutError,
     LinkedActiveRunConflictError,
@@ -89,9 +102,11 @@ from .backend import (
 from .binding import AgentBinding
 from .run_control import (
     EVENT_POLL_INTERVAL_SECONDS,
+    RunControlTimeoutError,
     RunEnvelope,
     RunJournalProtocolError,
     RunSubmissionDefinitiveFailureError,
+    RunSubmissionIndeterminateError,
     SandboxRunControl,
 )
 from .setup_budget import (
@@ -534,9 +549,22 @@ class AcaSandboxExecutionBackend:
                 request,
                 setup_budget,
             )
-        except RunSubmissionDefinitiveFailureError:
+        except RunSubmissionDefinitiveFailureError as exc:
             await _adopt_failed_submission(self._runtime, activated, run)
+            if isinstance(exc.__cause__, SandboxFileOperationError):
+                _raise_file_operation_activation_error(exc.__cause__)
             raise
+        except RunSubmissionIndeterminateError as exc:
+            if isinstance(exc.__cause__, SandboxFileOperationError):
+                _raise_file_operation_activation_error(exc.__cause__)
+            logger.warning(
+                "Indeterminate journal acceptance after committed admission; "
+                "deferring to reconciliation (stage=submit_admission, "
+                "reason=launch_indeterminate)",
+            )
+            raise DurableAdmissionIndeterminateError(
+                handle=_run_handle(run, phase="executing"),
+            ) from exc
         await _adopt_if_terminal(
             self._runtime,
             activated,
@@ -642,6 +670,15 @@ class AcaSandboxExecutionBackend:
                 ) from None
             except SandboxFileNotFoundError:
                 return _durable_status(durable.run, phase=_public_phase(durable))
+            except SandboxFileOperationError as exc:
+                if exc.status_code in {401, 403}:
+                    raise SessionActivationAuthorizationError(
+                        SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+                        status_code=exc.status_code,
+                    ) from None
+                raise RunSubmissionIndeterminateError(
+                    "Existing run state could not be confirmed after journal claim."
+                ) from exc
         try:
             return await _within_setup_budget(
                 self._run_control.submit(
@@ -742,8 +779,12 @@ class AcaSandboxExecutionBackend:
         except RunJournalProtocolError:
             corrupted = await self._handle_runtime_journal_corruption(activated, context)
             return journal_corruption_status(corrupted)
-        except (SandboxFileNotFoundError, SandboxFileOperationError):
+        except SandboxFileNotFoundError:
             return _durable_status(durable.run, phase=phase)
+        except SandboxFileOperationError as exc:
+            if _is_launching_submission(durable):
+                return _durable_status(durable.run, phase=phase)
+            _raise_file_operation_activation_error(exc)
         finally:
             await activated.handle.close()
 
@@ -844,12 +885,9 @@ class AcaSandboxExecutionBackend:
             except (
                 SessionActivationAuthorizationError,
                 SessionActivationBindingError,
+                SessionActivationConflictError,
                 SessionActivationTransientError,
             ):
-                # Let event preflight surface the same management authorization
-                # response rather than silently ending through the fallback below.
-                raise
-            except SessionActivationConflictError:
                 raise
             except (
                 SessionActivationError,
@@ -869,8 +907,12 @@ class AcaSandboxExecutionBackend:
             except RunJournalProtocolError:
                 await self._handle_runtime_journal_corruption(activated, context)
                 return
-            except (SandboxFileNotFoundError, SandboxFileOperationError):
+            except SandboxFileNotFoundError:
                 return
+            except SandboxFileOperationError as exc:
+                if _is_launching_submission(durable):
+                    return
+                _raise_file_operation_activation_error(exc)
             finally:
                 await activated.handle.close()
 
@@ -960,13 +1002,15 @@ class AcaSandboxExecutionBackend:
                 SessionActivationAuthorizationError,
                 SessionActivationBindingError,
                 SessionActivationConflictError,
+                SessionActivationNotFoundError,
                 SessionActivationTransientError,
             ):
                 raise
-            except (SandboxFileNotFoundError, SandboxFileOperationError):
-                durable, fallback_status = await self._cancel_file_error_status(
+            except (RunControlTimeoutError, SandboxTransportError) as exc:
+                durable, fallback_status = await self._cancel_transport_error_status(
                     context,
                     setup_budget,
+                    exc,
                 )
                 if fallback_status is not None:
                     return fallback_status
@@ -1057,6 +1101,69 @@ class AcaSandboxExecutionBackend:
         except (SessionActivationError, SetupBudgetExpiredError):
             return durable, _durable_status(durable.run, phase=_public_phase(durable))
         return durable, None
+
+    async def _cancel_transport_error_status(
+        self,
+        context: RunContext,
+        setup_budget: SetupBudget,
+        error: RunControlTimeoutError | SandboxTransportError,
+    ) -> tuple[_DurableManagementState, RunStatus | None]:
+        if isinstance(error, SandboxFileOperationError) and error.status_code in {401, 403}:
+            raise SessionActivationAuthorizationError(
+                SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+                status_code=error.status_code,
+            ) from None
+        if isinstance(error, SandboxGroupAuthorizationError):
+            raise SessionActivationAuthorizationError(
+                SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+                status_code=error.status_code,
+            ) from None
+        if isinstance(error, SandboxGroupBindingError):
+            raise SessionActivationBindingError(str(error)) from None
+        if isinstance(error, SandboxGroupTransientError):
+            raise SessionActivationTransientError(str(error)) from None
+        if isinstance(error, SandboxInvalidStateError):
+            raise SessionActivationConflictError(str(error)) from None
+        if isinstance(error, SandboxNotFoundError):
+            raise SessionActivationGoneError(
+                "Session backing sandbox is unavailable."
+            ) from None
+        if isinstance(error, SandboxFileOperationError):
+            durable = await self._read_durable_management_state(context)
+            if (
+                durable.run.status not in TERMINAL_RUN_STATUSES
+                and not _is_launching_submission(durable)
+            ):
+                _raise_file_operation_activation_error(error)
+            return await self._cancel_file_error_status(context, setup_budget)
+        if isinstance(error, SandboxFileNotFoundError):
+            return await self._cancel_file_error_status(context, setup_budget)
+        refreshed = await self._read_durable_management_state(context)
+        return refreshed, _durable_status(refreshed.run, phase=_public_phase(refreshed))
+
+
+def _raise_file_operation_activation_error(error: SandboxFileOperationError) -> Never:
+    """Project a live journal transport failure into the controller's typed boundary."""
+    if error.status_code in {401, 403}:
+        raise SessionActivationAuthorizationError(
+            SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+            status_code=error.status_code,
+        ) from None
+    if error.status_code == 409:
+        raise SessionActivationConflictError(
+            "Sandbox journal state does not permit this operation."
+        ) from None
+    if (
+        error.status_code is None
+        or error.status_code in {408, 423, 425, 429}
+        or 500 <= error.status_code < 600
+    ):
+        raise SessionActivationTransientError(
+            "Sandbox journal transport is temporarily unavailable."
+        ) from None
+    raise SessionActivationBindingError(
+        "Sandbox journal transport request was rejected."
+    ) from None
 
 
 async def _cancel_prelaunch_submit(
@@ -1464,7 +1571,14 @@ async def _adopt_if_terminal(
     terminal = _terminal_record(run, status)
     if terminal is None:
         return None
-    outcome = await activated.store.adopt_terminal_run(terminal)
+    outcome = await activated.store.adopt_terminal_run(
+        terminal,
+        minimum_session_expires_at=(
+            terminal.updated_at + timedelta(seconds=RESULT_HOLD_SECONDS)
+            if terminal.result_available
+            else None
+        ),
+    )
     await finalize_submit_operation(
         runtime,
         activated,

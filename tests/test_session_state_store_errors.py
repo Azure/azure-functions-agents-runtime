@@ -1003,18 +1003,36 @@ async def test_admit_run_run_row_collision_maps_to_already_exists() -> None:
 async def test_adopt_terminal_run_releases_slot_and_is_idempotent() -> None:
     fake = _FakeTableClient()
     store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
-    await store.create_session(_session(status="ready", active_run_id=None))
+    short_expiry = _NOW + timedelta(seconds=60)
+    await store.create_session(
+        replace(
+            _session(status="ready", active_run_id=None),
+            expires_at=short_expiry,
+        )
+    )
     await store.admit_run(
-        AdmissionRecords.create(_session(status="running", active_run_id="run-1"), _run(), None)
+        AdmissionRecords.create(
+            replace(
+                _session(status="running", active_run_id="run-1"),
+                expires_at=short_expiry,
+            ),
+            _run(),
+            None,
+        )
     )
 
     terminal = _run(status="succeeded", result_available=True)
-    first = await store.adopt_terminal_run(terminal)
+    result_hold_expires_at = _NOW + timedelta(minutes=5)
+    first = await store.adopt_terminal_run(
+        terminal,
+        minimum_session_expires_at=result_hold_expires_at,
+    )
     assert first.slot_released is True
 
     stored = await store.get_session(_partition(), "session-1")
     assert stored.record.active_run_id is None
     assert stored.record.status == "ready"
+    assert stored.record.expires_at == result_hold_expires_at
 
     second = await store.adopt_terminal_run(terminal)
     assert second.slot_released is False  # idempotent no-op

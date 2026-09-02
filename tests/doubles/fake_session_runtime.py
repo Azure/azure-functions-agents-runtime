@@ -1017,7 +1017,12 @@ class FakeSessionStateStore:
             run_etag=None if terminal_run is None else "run-etag",
         )
 
-    async def adopt_terminal_run(self, terminal_run: DurableRunRecord) -> AdoptionOutcome:
+    async def adopt_terminal_run(
+        self,
+        terminal_run: DurableRunRecord,
+        *,
+        minimum_session_expires_at: datetime | None = None,
+    ) -> AdoptionOutcome:
         assert self.session is not None
         existing = self.runs.get(terminal_run.run_id)
         if existing is not None and existing.status in TERMINAL_RUN_STATUSES:
@@ -1029,6 +1034,14 @@ class FakeSessionStateStore:
                     self.session,
                     status="ready",
                     active_run_id=None,
+                    expires_at=(
+                        self.session.expires_at
+                        if minimum_session_expires_at is None
+                        else max(
+                            self.session.expires_at,
+                            minimum_session_expires_at,
+                        )
+                    ),
                     updated_at=existing.updated_at,
                 )
                 self.etag = "etag-released"
@@ -1043,6 +1056,11 @@ class FakeSessionStateStore:
             self.session,
             status="ready",
             active_run_id=None,
+            expires_at=(
+                self.session.expires_at
+                if minimum_session_expires_at is None
+                else max(self.session.expires_at, minimum_session_expires_at)
+            ),
             updated_at=terminal_run.updated_at,
         )
         self.etag = "etag-released"

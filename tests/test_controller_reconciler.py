@@ -840,6 +840,78 @@ async def test_reconciler_adopts_reachable_terminal_before_loss_processing() -> 
 
 
 @pytest.mark.asyncio
+async def test_reconciler_terminal_adoption_extends_session_result_hold() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = replace(
+        _session(now, status="running", active_run_id="run-1"),
+        expires_at=now + timedelta(seconds=120),
+    )
+    run = _run(session, now)
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+
+    async def terminal_reader(
+        _: DurableSessionRecord,
+        __: DurableRunRecord,
+    ) -> RunStatus:
+        return RunStatus(
+            run_id=run.run_id,
+            session_id=session.session_id,
+            state="succeeded",
+            last_sequence=1,
+            result_available=True,
+            result=RunResult(
+                content="done",
+                content_intermediate=[],
+                tool_calls=[],
+                reasoning=None,
+                delegate_error_count=0,
+            ),
+        )
+
+    await SessionReconciler(
+        store=store,
+        provider=InventoryProvider(sandboxes=(_sandbox(now),)),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(result_hold_seconds=300),
+        terminal_reader=terminal_reader,
+        now=lambda: now,
+    ).run_once()
+
+    assert store.session is not None
+    assert store.session.status == "ready"
+    assert store.session.expires_at == now + timedelta(seconds=300)
+    assert store.runs[run.run_id].result_available
+
+
+@pytest.mark.asyncio
+async def test_reconciler_existing_terminal_run_extends_session_result_hold() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = replace(
+        _session(now, status="running", active_run_id="run-1"),
+        expires_at=now + timedelta(seconds=120),
+    )
+    run = replace(
+        _run(session, now, status="succeeded"),
+        result_available=True,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+
+    await SessionReconciler(
+        store=store,
+        provider=InventoryProvider(sandboxes=(_sandbox(now),)),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(result_hold_seconds=300),
+        now=lambda: now,
+    ).run_once()
+
+    assert store.session is not None
+    assert store.session.status == "ready"
+    assert store.session.expires_at == run.updated_at + timedelta(seconds=300)
+
+
+@pytest.mark.asyncio
 async def test_reconciler_validates_terminal_success_before_adoption() -> None:
     now = datetime(2026, 8, 5, tzinfo=UTC)
     session = _session(now, status="running", active_run_id="run-1")
@@ -1009,6 +1081,76 @@ async def test_page_size_one_hydrates_terminal_run_for_result_eviction() -> None
 
     assert report.evicted_results == 1
     assert store.runs[run.run_id].result_available is False
+
+
+@pytest.mark.asyncio
+async def test_result_hold_blocks_idle_reclaim_independently_of_safety_grace() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(
+        now - timedelta(minutes=10),
+        status="suspended",
+        expires_at=now - timedelta(minutes=5),
+    )
+    run = replace(
+        _run(session, now - timedelta(minutes=2), status="succeeded"),
+        result_available=True,
+    )
+    store = PairPageStore(
+        session,
+        run,
+        (session.to_table_entity(), run.to_table_entity()),
+    )
+    provider = InventoryProvider(sandboxes=(_sandbox(now, state="Suspended"),))
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(
+            safety_grace_seconds=1,
+            result_hold_seconds=300,
+        ),
+        now=lambda: now,
+    ).run_once()
+
+    assert report.evicted_results == 0
+    assert report.deleted_sandboxes == 0
+    assert provider.deleted_sandboxes == []
+    assert store.runs[run.run_id].result_available
+
+
+@pytest.mark.asyncio
+async def test_targeted_idle_reconciliation_loads_runs_before_result_hold_reclaim() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(
+        now - timedelta(minutes=10),
+        status="suspended",
+        expires_at=now - timedelta(minutes=5),
+    )
+    run = replace(
+        _run(session, now - timedelta(minutes=2), status="succeeded"),
+        result_available=True,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    provider = InventoryProvider(sandboxes=(_sandbox(now, state="Suspended"),))
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(
+            safety_grace_seconds=1,
+            result_hold_seconds=300,
+        ),
+        now=lambda: now,
+    ).reconcile_session(session.owner_partition, session.session_id)
+
+    assert report.deleted_sandboxes == 0
+    assert provider.deleted_sandboxes == []
+    assert store.session is not None
+    assert store.session.status == "suspended"
+    assert store.runs[run.run_id].result_available
 
 
 @pytest.mark.asyncio
@@ -2837,6 +2979,68 @@ async def test_targeted_reconciliation_resumes_a_persisted_reclaim_operation() -
 
 
 @pytest.mark.asyncio
+async def test_paged_reclaim_resume_exact_reads_off_page_backing_before_tombstone() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    base, run = _expired_active_session(now)
+    operation = _reclaim_operation(
+        base,
+        run,
+        now,
+        lease_expires_at=now - timedelta(seconds=1),
+    )
+    session = replace(
+        base,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    provider = InventoryProvider(
+        sandboxes=(
+            _sandbox(now, "other-sandbox", session_id="other-session"),
+            _sandbox(now),
+        ),
+        sandbox_page_size=1,
+    )
+
+    async def terminal_reader(
+        _: DurableSessionRecord,
+        __: DurableRunRecord,
+    ) -> RunStatus:
+        return RunStatus(
+            run_id=run.run_id,
+            session_id=run.session_id,
+            state="succeeded",
+            last_sequence=1,
+            result_available=False,
+        )
+
+    async def apply_idle_lifecycle(_: SessionOperationFence) -> bool:
+        return True
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(
+            inventory_page_size=1,
+            max_inventory_pages=1,
+        ),
+        terminal_reader=terminal_reader,
+        idle_lifecycle_applier=apply_idle_lifecycle,
+        now=lambda: now,
+    ).run_once()
+
+    assert provider.exact_sandbox_reads == ["sandbox-1"]
+    assert "sandbox-1" not in provider.deleted_sandboxes
+    assert report.adopted_terminal_runs == 1
+    assert store.session is not None
+    assert store.session.status == "ready"
+    assert store.runs[run.run_id].status == "succeeded"
+
+
+@pytest.mark.asyncio
 async def test_targeted_reconciliation_defers_transient_per_session_failure() -> None:
     now = datetime(2026, 8, 5, tzinfo=UTC)
     session, run = _expired_active_session(now)
@@ -3433,8 +3637,13 @@ async def test_expired_submit_operation_freshly_finds_stale_inventory_backing(ki
 @pytest.mark.asyncio
 async def test_reconciler_rearms_terminal_submit_before_completion() -> None:
     now = datetime(2026, 8, 5, tzinfo=UTC)
-    base = _session(now, status="running", active_run_id="run-1")
-    run = _run(base, now, status="succeeded")
+    base = _session(
+        now,
+        status="running",
+        active_run_id="run-1",
+        expires_at=now + timedelta(seconds=60),
+    )
+    run = replace(_run(base, now, status="succeeded"), result_available=True)
     operation = _submit_operation(base, run, now)
     session = replace(
         base,
@@ -3458,7 +3667,9 @@ async def test_reconciler_rearms_terminal_submit_before_completion() -> None:
         store=store,
         provider=InventoryProvider(sandboxes=(_sandbox(now),)),  # type: ignore[arg-type]
         app_hash=_app_hash(),
+        config=ReconcilerConfig(result_hold_seconds=300),
         idle_lifecycle_applier=apply_idle_lifecycle,
+        reclaim_idle_seconds=120,
         now=lambda: now,
     ).run_once()
 
@@ -3466,6 +3677,7 @@ async def test_reconciler_rearms_terminal_submit_before_completion() -> None:
     assert len(lifecycle_fences) == 1
     assert store.session is not None
     assert store.session.idle_policy_armed
+    assert store.session.expires_at == now + timedelta(seconds=300)
     assert store.operations[-4:-2] == ["advance_operation", "completed_operation"]
     assert store.operations[-2:] == ["advance_cursor", "advance_cursor"]
 
