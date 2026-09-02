@@ -72,8 +72,8 @@ manual/local assets only pending the separate post-main qualification work.
 ### `aca_qualification_pipeline.py`
 
 Packages, deploys, and verifies the deployed ACA qualification fixture
-(`tests/live/apps/aca-qualification/`). Every command is run by hand; this
-repository contains no pipeline wiring for it.
+(`tests/live/apps/aca-qualification/`). The official E2E pipeline invokes these
+commands, and they remain runnable by hand.
 
 | Command | Purpose |
 | --- | --- |
@@ -82,6 +82,7 @@ repository contains no pipeline wiring for it.
 | `assemble` | Build the deployable upload: fixture source, the runtime wheel, the marker, and pinned requirements |
 | `deploy` | Preflight deployment rights, configure the authored region, package and deploy the staged fixture, and add best-effort portal metadata |
 | `check-build` | Verify lightweight in-package build ID, commit SHA, and Python-minor provenance |
+| `sweep` | Report and delete resources older than six hours from the CI-dedicated Sandbox Group; never blocks qualification |
 
 `assemble` requires exactly one runtime wheel in the build output; ambiguity is
 a hard error rather than a silent "newest wins", because deploying the wrong
@@ -98,3 +99,18 @@ resource tag could be changed without deploying anything.
 The provenance is deliberately narrow. It does not cover the wheel digest, the
 installed package version, a deploy-input manifest, the deployment-storage
 chain, or rollback; those remain open under issue #166.
+
+`sweep` uses the configured group resource ID and authored region, lists the
+whole group, and requires
+`--dedicated-group-scope exclusive-ci-qualification`. That literal acknowledges
+an external infrastructure invariant; the data-plane API cannot verify that the
+group is exclusive to CI, so using a shared group is unsafe. Unknown-age and
+recent resources are retained. Inspection, unknown-age, and delete failures
+emit Azure DevOps warnings, and the summary exposes incomplete and
+delete-failure counts while remaining nonblocking.
+
+The sweep is pre-run rather than a destructive post-run reaper. Current-run
+qualification suites already assert their own cleanup; deleting immediately
+afterward would mask idle-delete or controller-reconciliation failures. The next
+run reports accumulated leftovers. A final report-only group audit is also
+omitted because intentionally retained sessions could create false positives.
