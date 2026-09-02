@@ -175,10 +175,10 @@ surfaces its bounded application error code without leaking exception text.
 
 The retry schedule is bounded at submission. `max_attempts`,
 `first_interval`, `backoff_coefficient`, and `max_interval` have fixed limits,
-and the ceiling of all native retry delays must fit the internal one-hour retry
-window. This window bounds whether another attempt can be scheduled; it does not
-cancel an in-flight Activity. Individual attempt timeout remains a later slice
-and is bounded only by the Functions host until then.
+and the ceiling of all native retry delays must fit a one-hour admission cap.
+Durable's finite `retry_timeout` remains unset because the SDK evaluates it
+against real wall-clock time while replaying history. Individual attempt timeout
+remains a later slice and is bounded only by the Functions host until then.
 
 ### Delivery plan
 
@@ -1121,6 +1121,7 @@ results remain unchanged.
 | 77 | Attempt number in task context | Expose the current attempt / expose only a stable idempotency key | Expose only the idempotency key. Durable owns the attempt budget and a replayed orchestration cannot observe the attempt, so publishing one would be a value handlers could not trust | Agent | 2026-08-29 |
 | 78 | Retry authoring surface in the first slice | Ship decorator and plan together / plan-authored first / decorator only | Ship plan-authored `execution.retry` only. It is complete through validate, persist, dispatch, and exhaust without discovery or registration changes; retain `@workflow_tool(retry=...)` and decorator-over-plan precedence for the rebased remainder of PR #185 | Human (TsuyoshiUshio) | 2026-09-02 |
 | 79 | Workflow Sub Agent retry classification | Retry every leaf failure / reject Sub Agent retry / retry only a closed transient set | Treat a leaf `TimeoutError` as transient and retryable; classify all other leaf exceptions as terminal unless a future reviewed mapping proves they are safe to replay | Agent, architecture review | 2026-09-02 |
+| 80 | Retry schedule time bound | Set Durable `retry_timeout` / validate an authored delay-sum cap only | Validate the one-hour delay-sum cap before start and leave Durable `retry_timeout` unset. The SDK compares that timeout to real wall-clock time while replaying old failure events, so a finite value can change historical scheduling after enough time passes | Agent, final review | 2026-09-02 |
 
 ## 6. Test plan
 
@@ -1387,3 +1388,7 @@ results remain unchanged.
   decorator integration, and a closed transient classification for Workflow Sub
   Agent timeouts; Decisions 74, 78, and 79 and the design above resolve those
   findings. FRD status remains `Finalized`.
+- **Execution-foundation final review:** A read-only branch review on 2026-09-02
+  identified Durable's wall-clock evaluation of finite `retry_timeout` during
+  history replay. Decision 80 removes that nondeterministic input while retaining
+  the submission-time retry-delay bound. FRD status remains `Finalized`.

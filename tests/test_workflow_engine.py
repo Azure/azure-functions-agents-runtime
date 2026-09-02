@@ -186,7 +186,6 @@ async def test_policy_aware_sub_agent_timeout_is_retryable(
                     "max_number_of_attempts": 3,
                     "backoff_coefficient": 2.0,
                     "max_retry_interval_ms": 4_000,
-                    "retry_timeout_ms": 3_600_000,
                 },
             },
         })
@@ -225,7 +224,6 @@ async def test_policy_aware_sub_agent_success_uses_the_retry_envelope(
                 "max_number_of_attempts": 3,
                 "backoff_coefficient": 2.0,
                 "max_retry_interval_ms": 4_000,
-                "retry_timeout_ms": 3_600_000,
             },
         },
     })
@@ -270,7 +268,6 @@ async def test_policy_aware_sub_agent_unknown_failure_is_terminal(
                 "max_number_of_attempts": 3,
                 "backoff_coefficient": 2.0,
                 "max_retry_interval_ms": 4_000,
-                "retry_timeout_ms": 3_600_000,
             },
         },
     })

@@ -49,7 +49,6 @@ _DURABLE_POLICY = {
     "max_number_of_attempts": 3,
     "backoff_coefficient": 2.0,
     "max_retry_interval_ms": 4_000,
-    "retry_timeout_ms": 3_600_000,
 }
 
 
@@ -153,7 +152,7 @@ def test_the_widest_retry_declaration_stays_inside_the_execution_ceiling() -> No
 
     assert effective is not None
     assert sum(native_retry_delays_ceiling_ms(_widest_retry())) < 3_600_000
-    assert effective["durable_retry_policy"]["retry_timeout_ms"] == 3_600_000
+    assert "retry_timeout_ms" not in effective["durable_retry_policy"]
 
 
 def _widest_retry() -> WorkflowRetryPolicy:
@@ -216,7 +215,8 @@ def test_durable_policy_mapping_preserves_the_authored_shape() -> None:
     assert policy.max_number_of_attempts == 3
     assert policy.backoff_coefficient == 2.0
     assert policy.max_retry_interval == timedelta(seconds=4)
-    assert policy.retry_timeout == timedelta(hours=1)
+    # A finite Durable timeout reads wall-clock time during history replay.
+    assert policy.retry_timeout is None
 
 
 @pytest.mark.asyncio
@@ -537,9 +537,6 @@ async def test_malformed_persisted_policy_is_a_terminal_contract_failure() -> No
 @pytest.mark.parametrize(
     ("case", "policy_overrides", "execution_overrides"),
     [
-        # The ceiling is the runtime's own bounded-execution guard, so a history
-        # claiming a different one was not written by this contract.
-        ("retry timeout is not the runtime ceiling", {"retry_timeout_ms": 60_000}, {}),
         (
             "multi-attempt policy has no first interval",
             {"first_retry_interval_ms": 0},
@@ -580,6 +577,7 @@ async def test_inconsistent_persisted_schedule_is_a_terminal_contract_failure(
 async def test_persisted_policy_tolerates_keys_from_a_later_runtime() -> None:
     task = _native_task()
     task["execution"]["timeout_ms"] = 5_000
+    task["execution"]["durable_retry_policy"]["retry_timeout_ms"] = 60_000
     activity = _tool_activity({"publish"})
 
     outcome = await activity({**task, "tool": "publish", "args": {}, **_AGENT})

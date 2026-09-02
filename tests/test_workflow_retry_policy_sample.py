@@ -82,7 +82,6 @@ def test_sample_plan_freezes_its_authored_retry() -> None:
             "max_number_of_attempts": 3,
             "backoff_coefficient": 2.0,
             "max_retry_interval_ms": 4_000,
-            "retry_timeout_ms": 3_600_000,
         },
     }
 

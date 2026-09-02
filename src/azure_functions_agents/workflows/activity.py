@@ -32,7 +32,6 @@ from .context import (
 from .schema import (
     MAX_BACKOFF_MS,
     MAX_POLICY_ATTEMPTS,
-    MAX_POLICY_ELAPSED_MS,
     WorkflowRetryableError,
     WorkflowTerminalError,
 )
@@ -84,7 +83,6 @@ class DurableRetryPolicyModel(BaseModel):
     max_number_of_attempts: int = Field(ge=1, le=MAX_POLICY_ATTEMPTS)
     backoff_coefficient: float = Field(ge=1.0, le=10.0, allow_inf_nan=False)
     max_retry_interval_ms: int = Field(ge=0, le=MAX_BACKOFF_MS)
-    retry_timeout_ms: int = Field(ge=1, le=MAX_POLICY_ELAPSED_MS)
 
 
 class EffectiveExecutionModel(BaseModel):
@@ -108,8 +106,6 @@ class EffectiveExecutionModel(BaseModel):
         durable = self.durable_retry_policy
         if durable.max_number_of_attempts != self.max_attempts:
             raise ValueError("Durable maximum attempts must match execution policy")
-        if durable.retry_timeout_ms != MAX_POLICY_ELAPSED_MS:
-            raise ValueError("Durable retry timeout must match the runtime elapsed limit")
         if self.max_attempts == 1:
             if durable.first_retry_interval_ms != 0 or durable.max_retry_interval_ms != 0:
                 raise ValueError("single-attempt Durable policy must not configure backoff")

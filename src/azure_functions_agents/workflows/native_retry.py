@@ -39,7 +39,6 @@ def create_durable_retry_policy(spec: DurableRetryPolicyInput) -> RetryPolicy:
         max_number_of_attempts=spec["max_number_of_attempts"],
         backoff_coefficient=spec["backoff_coefficient"],
         max_retry_interval=timedelta(milliseconds=spec["max_retry_interval_ms"]),
-        retry_timeout=timedelta(milliseconds=spec["retry_timeout_ms"]),
     )
 
 

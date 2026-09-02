@@ -578,9 +578,11 @@ if context is not None:
 The attempt number is deliberately not exposed: Durable owns the attempt
 budget, and a replayed orchestration cannot observe it.
 
-An internal one-hour `retry_timeout` bounds whether Durable can schedule another
-attempt. It does not cancel an in-flight Activity. Per-attempt timeouts and
-continuing a workflow past a failed task are not part of this release.
+The sum of authored retry delays is capped at one hour during submission.
+Durable's finite `retry_timeout` is deliberately left unset because the SDK
+evaluates that timeout against wall-clock time while replaying history.
+Per-attempt timeouts and continuing a workflow past a failed task are not part
+of this release.
 
 Only tasks whose policy was frozen at submission time are dispatched with
 retry. Histories without persisted execution data keep the legacy Activity call

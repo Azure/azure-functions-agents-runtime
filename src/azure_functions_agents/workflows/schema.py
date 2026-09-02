@@ -150,9 +150,9 @@ type JsonScalar = str | int | float | bool | None
 MAX_POLICY_ATTEMPTS = 5
 MAX_INITIAL_BACKOFF_MS = 5 * 60 * 1_000
 MAX_BACKOFF_MS = 15 * 60 * 1_000
-# Internal retry-schedule ceiling handed to Durable as ``retry_timeout``. This
-# controls whether Durable schedules another attempt; it does not cancel an
-# in-flight Activity. Per-attempt ``execution.timeout`` is a follow-up change.
+# Submission-time ceiling for the sum of authored retry delays. Durable's own
+# finite ``retry_timeout`` is intentionally unset because the SDK evaluates it
+# against wall-clock time while replaying history.
 MAX_POLICY_ELAPSED_MS = 60 * 60 * 1_000
 
 
@@ -247,7 +247,6 @@ class DurableRetryPolicyInput(TypedDict):
     max_number_of_attempts: int
     backoff_coefficient: float
     max_retry_interval_ms: int
-    retry_timeout_ms: int
 
 
 class EffectiveWorkflowTaskExecution(TypedDict):
@@ -283,7 +282,6 @@ def durable_retry_policy_input(retry: WorkflowRetryPolicy) -> DurableRetryPolicy
         "max_number_of_attempts": retry.max_attempts,
         "backoff_coefficient": coefficient,
         "max_retry_interval_ms": maximum_ms,
-        "retry_timeout_ms": MAX_POLICY_ELAPSED_MS,
     }
 
 
