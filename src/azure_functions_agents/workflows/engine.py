@@ -384,10 +384,13 @@ def _run_static_workflow(
             for spec, wave_task in zip(wave_specs, wave_tasks, strict=True):
                 if spec["type"] == WAIT_TASK_TYPE:
                     _cancel_timer_task(wave_task)
-            raise _decode_wave_failure(
+            decoded = _decode_wave_failure(
                 [spec["id"] for spec in wave_specs if spec.get("policy_aware")],
                 exc,
             )
+            if decoded is exc:
+                raise
+            raise decoded from exc
         if wave_results is None:
             reason = cancel_task.result
             for spec, wave_task in zip(wave_specs, wave_tasks, strict=True):
@@ -1071,7 +1074,7 @@ def _run_dynamic_workflow(
             wave_results = yield from _await_wave(context, cancel_task, wave_tasks)
         except Exception as exc:
             _cancel_dynamic_wave_timers(wave, wave_tasks)
-            raise _decode_wave_failure(
+            decoded = _decode_wave_failure(
                 [
                     instance["instance_id"]
                     for instance in wave
@@ -1079,6 +1082,9 @@ def _run_dynamic_workflow(
                 ],
                 exc,
             )
+            if decoded is exc:
+                raise
+            raise decoded from exc
         if wave_results is None:
             reason = cancel_task.result
             _restore_canceled_dynamic_wave(state, wave, wave_tasks)

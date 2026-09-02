@@ -603,8 +603,14 @@ class _Blueprints:
 
 class _RecordingTask:
     def __init__(self, result: Any = None) -> None:
-        self.result = result
-        self.is_completed = True
+        self._result = result
+        self.is_complete = True
+
+    @property
+    def result(self) -> Any:
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
 
     def cancel(self) -> None:
         return None
@@ -638,12 +644,11 @@ class _RecordingContext:
         self.retried.append((payload, retry_policy))
         return _RecordingTask(self._results.get(payload["id"]))
 
-    def task_all(self, tasks: list[_RecordingTask]) -> _RecordingTask:
-        self.last_wave = _RecordingTask([task.result for task in tasks])
-        return self.last_wave
-
     def task_any(self, tasks: list[_RecordingTask]) -> _RecordingTask:
-        return _RecordingTask()
+        selection = _RecordingTask()
+        selection.candidates = list(tasks)
+        self.last_wave = selection
+        return selection
 
     def set_custom_status(self, status: str) -> None:
         return None
@@ -660,9 +665,15 @@ def _orchestrate(context: _RecordingContext) -> dict[str, Any]:
     orchestrator = app.function(engine.ORCHESTRATOR_NAME).__closure__[0].cell_contents
     generator = orchestrator(context)
     try:
-        next(generator)
+        selection = next(generator)
         while True:
-            generator.send(context.last_wave)
+            candidates = getattr(selection, "candidates", None)
+            winner = (
+                next(task for task in candidates if task is not context.cancel_task)
+                if candidates is not None
+                else selection
+            )
+            selection = generator.send(winner)
     except StopIteration as stop:
         return stop.value
 
@@ -783,11 +794,11 @@ def test_exhausted_native_retry_reports_the_sanitized_application_failure() -> N
         )
 
     class _ExhaustedContext(_RecordingContext):
-        def task_all(self, tasks: list[_RecordingTask]) -> _RecordingTask:
-            self.last_wave = _RecordingTask(
-                TaskFailedError("Activity failed.", raised.value)
-            )
-            return self.last_wave
+        def call_activity_with_retry(
+            self, name: str, retry_policy: Any, payload: dict[str, Any]
+        ) -> _RecordingTask:
+            self.retried.append((payload, retry_policy))
+            return _RecordingTask(TaskFailedError("Activity failed.", raised.value))
 
     context = _ExhaustedContext(
         [
