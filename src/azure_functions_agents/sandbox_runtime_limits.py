@@ -5,6 +5,7 @@ from __future__ import annotations
 DEFAULT_RECONCILER_CADENCE_SECONDS = 3600
 MAX_RECONCILER_CADENCE_SECONDS = 3600
 RECLAIM_SAFETY_GRACE_SECONDS = 300
+RESULT_HOLD_SECONDS = 300
 
 
 def lifecycle_auto_delete_seconds(reclaim_idle_seconds: int) -> int:

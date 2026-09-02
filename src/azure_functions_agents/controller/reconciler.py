@@ -22,6 +22,7 @@ from ..sandbox_runtime_limits import (
     DEFAULT_RECONCILER_CADENCE_SECONDS,
     MAX_RECONCILER_CADENCE_SECONDS,
     RECLAIM_SAFETY_GRACE_SECONDS,
+    RESULT_HOLD_SECONDS,
 )
 from ..session_state import (
     OWNER_CANONICALIZERS,
@@ -122,7 +123,7 @@ class ReconcilerConfig:
     cadence_seconds: int = DEFAULT_RECONCILER_CADENCE_SECONDS
     safety_grace_seconds: int = RECLAIM_SAFETY_GRACE_SECONDS
     heartbeat_stale_seconds: int = 90
-    result_hold_seconds: int = 300
+    result_hold_seconds: int = RESULT_HOLD_SECONDS
     terminal_retention_seconds: int = 86_400
     tombstone_retention_seconds: int = 86_400
     page_size: int = 100
@@ -545,7 +546,14 @@ class SessionReconciler:
                 report,
             )
         if run.status in TERMINAL_RUN_STATUSES:
-            outcome = await self._store.adopt_terminal_run(run)
+            outcome = await self._store.adopt_terminal_run(
+                run,
+                minimum_session_expires_at=(
+                    run.updated_at + timedelta(seconds=self._config.result_hold_seconds)
+                    if run.result_available
+                    else None
+                ),
+            )
             return _replace_report(
                 report,
                 adopted_terminal_runs=report.adopted_terminal_runs + int(outcome.slot_released),
@@ -555,14 +563,21 @@ class SessionReconciler:
 
         terminal = await self._read_terminal(session, run)
         if terminal is not None and terminal.state in TERMINAL_RUN_STATUSES:
+            adopted_run = terminal_run(
+                run,
+                status=terminal.state,
+                result_available=terminal.result_available,
+                reason=_terminal_reason(terminal),
+                updated_at=now,
+            )
             outcome = await self._store.adopt_terminal_run(
-                terminal_run(
-                    run,
-                    status=terminal.state,
-                    result_available=terminal.result_available,
-                    reason=_terminal_reason(terminal),
-                    updated_at=now,
-                )
+                adopted_run,
+                minimum_session_expires_at=(
+                    adopted_run.updated_at
+                    + timedelta(seconds=self._config.result_hold_seconds)
+                    if adopted_run.result_available
+                    else None
+                ),
             )
             return _replace_report(
                 report,
@@ -696,11 +711,17 @@ class SessionReconciler:
             )
         if fence.kind != "reclaim_backing" or fence.target.run_id != run.run_id:
             return report
+        backing_present = fence.target.sandbox_id in inventory
+        if not backing_present and fence.target.sandbox_id is not None:
+            backing_present = (
+                await self._provider.get_sandbox_summary(fence.target.sandbox_id)
+                is not None
+            )
         return await self._continue_reclaim_operation(
             session,
             run,
             fence,
-            backing_present=fence.target.sandbox_id in inventory,
+            backing_present=backing_present,
             now=now,
             report=report,
         )
@@ -1223,6 +1244,11 @@ class SessionReconciler:
         armed = _armed_operation_session(
             current.record,
             reclaim_idle_seconds=self._reclaim_idle_seconds,
+            minimum_retention_seconds=(
+                self._config.result_hold_seconds
+                if terminal is not None and terminal.result_available
+                else 0
+            ),
             updated_at=now,
         )
         try:
@@ -1379,9 +1405,69 @@ class SessionReconciler:
                 return report
             session = suspended
 
+        return await self._reclaim_idle_if_due(
+            session,
+            runs,
+            inventory,
+            snapshots,
+            now,
+            report,
+        )
+
+    async def _reclaim_idle_if_due(
+        self,
+        session: DurableSessionRecord,
+        runs: tuple[DurableRunRecord, ...],
+        inventory: dict[str, SandboxSummary],
+        snapshots: dict[str, SandboxSnapshot],
+        now: datetime,
+        report: ReconcileReport,
+    ) -> ReconcileReport:
+        report = await self._evict_expired_results(
+            session,
+            runs,
+            now,
+            report,
+        )
+        due_at = now - timedelta(seconds=self._config.safety_grace_seconds)
+        if session.status not in _RECLAIMABLE_SESSION_STATUSES or session.expires_at > due_at:
+            return report
+        exact_runs, complete = await self._load_session_runs(session)
+        report = await self._evict_expired_results(
+            session,
+            exact_runs,
+            now,
+            report,
+            skip_run_ids=frozenset(run.run_id for run in runs),
+        )
+        if not complete:
+            return _replace_report(report, partial=True)
+        reclaim_after = max(
+            (
+                run.updated_at + timedelta(seconds=self._config.result_hold_seconds)
+                for run in exact_runs
+                if run.status in TERMINAL_RUN_STATUSES and run.result_available
+            ),
+            default=session.expires_at,
+        )
+        reclaim_after = max(reclaim_after, session.expires_at)
+        if reclaim_after > due_at:
+            return report
+        return await self._begin_reclaim(session, inventory, snapshots, now, report)
+
+    async def _evict_expired_results(
+        self,
+        session: DurableSessionRecord,
+        runs: tuple[DurableRunRecord, ...],
+        now: datetime,
+        report: ReconcileReport,
+        *,
+        skip_run_ids: frozenset[str] = frozenset(),
+    ) -> ReconcileReport:
         for run in runs:
             if (
-                run.status in TERMINAL_RUN_STATUSES
+                run.run_id not in skip_run_ids
+                and run.status in TERMINAL_RUN_STATUSES
                 and run.result_available
                 and now >= max(
                     run.updated_at + timedelta(seconds=self._config.result_hold_seconds),
@@ -1395,11 +1481,36 @@ class SessionReconciler:
                     updated_at=now,
                 )
                 report = _replace_report(report, evicted_results=report.evicted_results + 1)
-
-        due = session.expires_at <= now - timedelta(seconds=self._config.safety_grace_seconds)
-        if session.status in _RECLAIMABLE_SESSION_STATUSES and due:
-            return await self._begin_reclaim(session, inventory, snapshots, now, report)
         return report
+
+    async def _load_session_runs(
+        self,
+        session: DurableSessionRecord,
+    ) -> tuple[tuple[DurableRunRecord, ...], bool]:
+        runs: list[DurableRunRecord] = []
+        continuation: str | None = None
+        seen_tokens: set[str] = set()
+        for _ in range(self._config.max_pages):
+            page = await self._store.query_entities(
+                filter_expression=_session_runs_filter(session),
+                top=self._config.page_size,
+                continuation_token=continuation,
+            )
+            for entity in page.entities:
+                record = _working_set_record(entity)
+                if (
+                    isinstance(record, DurableRunRecord)
+                    and record.owner_partition == session.owner_partition
+                    and record.session_id == session.session_id
+                ):
+                    runs.append(record)
+            continuation = page.continuation_token
+            if continuation is None:
+                return tuple(runs), True
+            if continuation in seen_tokens:
+                return tuple(runs), False
+            seen_tokens.add(continuation)
+        return tuple(runs), False
 
     async def _mark_suspended_if_unchanged(
         self,
@@ -2638,6 +2749,17 @@ def _session_reference_filter(session: DurableSessionRecord) -> str:
     )
 
 
+def _session_runs_filter(session: DurableSessionRecord) -> str:
+    partition = _odata_literal(session.owner_partition.partition_key)
+    run_prefix = f"run:{session.session_id}:"
+    run_upper_bound = run_prefix + "~"
+    return (
+        f"PartitionKey eq {partition} and "
+        f"RowKey ge {_odata_literal(run_prefix)} and "
+        f"RowKey lt {_odata_literal(run_upper_bound)}"
+    )
+
+
 def _active_run(
     session: DurableSessionRecord,
     runs: tuple[DurableRunRecord, ...],
@@ -2768,6 +2890,7 @@ def _armed_operation_session(
     record: DurableSessionRecord,
     *,
     reclaim_idle_seconds: int,
+    minimum_retention_seconds: int = 0,
     updated_at: datetime,
 ) -> DurableSessionRecord:
     return DurableSessionRecord.create(
@@ -2780,7 +2903,8 @@ def _armed_operation_session(
         protocol=record.protocol,
         status="quarantined" if record.status == "quarantined" else "ready",
         last_activity_at=updated_at,
-        expires_at=updated_at + timedelta(seconds=reclaim_idle_seconds),
+        expires_at=updated_at
+        + timedelta(seconds=max(reclaim_idle_seconds, minimum_retention_seconds)),
         idle_policy_armed=True,
         active_run_id=None,
         snapshot_ids=record.snapshot_ids,
