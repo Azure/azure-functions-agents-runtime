@@ -43,8 +43,8 @@ def _authorization_failure_message(group_resource_id: str, *, slow: bool = False
         else ""
     )
     return (
-        "ACA data-plane authorization failed: this identity can reach the Sandbox Group "
-        "over ARM but is denied on the data plane. Assign the "
+        "ACA data-plane authorization failed: this identity was denied by the "
+        "Sandbox Group data plane. Assign the "
         f"'{_DATA_OWNER_ROLE}' role (id {_DATA_OWNER_ROLE_ID}), scoped to the Sandbox Group "
         f"{group_resource_id}.{identity_sentence}{slow_sentence}"
     )

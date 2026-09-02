@@ -13,7 +13,12 @@ from typing import Any
 
 import pytest
 from azure.core.async_paging import AsyncItemPaged
-from azure.core.exceptions import HttpResponseError, ResourceNotFoundError, ServiceRequestError
+from azure.core.exceptions import (
+    HttpResponseError,
+    ResourceNotFoundError,
+    ServiceRequestError,
+    ServiceResponseError,
+)
 
 from azure_functions_agents.transport import aca_sdk
 from azure_functions_agents.transport.manifest import (
@@ -339,6 +344,48 @@ async def test_create_passes_explicit_safe_values_and_returns_only_session_handl
 
 
 @pytest.mark.asyncio
+async def test_resume_time_counts_against_the_manifest_readiness_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+    observed_times = iter((10.0, 10.2))
+    captured_timeout: list[float] = []
+
+    async def resume() -> None:
+        return None
+
+    async def verify(
+        *_: object,
+        readiness_timeout_seconds: float,
+        **__: object,
+    ) -> None:
+        captured_timeout.append(readiness_timeout_seconds)
+
+    monkeypatch.setattr(sandbox, "resume", resume)
+    monkeypatch.setattr(aca_sdk, "_monotonic", lambda: next(observed_times))
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    monkeypatch.setattr(adapter, "_verify_manifest_handshake", verify)
+
+    handle = await adapter.resume(
+        PersistedSandboxBinding.create(
+            sandbox_id=sandbox.sandbox_id,
+            group=_binding(),
+        ),
+        expected,
+        readiness_timeout_seconds=1.0,
+    )
+
+    assert captured_timeout == [pytest.approx(0.8)]
+    await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
 async def test_create_reuses_a_stable_operation_label_after_ambiguous_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -367,6 +414,29 @@ async def test_create_reuses_a_stable_operation_label_after_ambiguous_recovery(
     )
     await first.close()
     await second.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_group_response_transport_failure_is_transient_and_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+
+    def rejected_list(**_: Any) -> None:
+        raise ServiceResponseError("sensitive response transport detail")
+
+    monkeypatch.setattr(environment.group_client, "list_sandboxes", rejected_list)
+
+    with pytest.raises(SandboxGroupTransientError) as caught:
+        await adapter.list_sandboxes(labels={})
+
+    assert "sensitive response transport detail" not in str(caught.value)
+    assert caught.value.__suppress_context__
     await adapter.close()
 
 
@@ -423,6 +493,35 @@ async def test_reconcile_only_create_waits_for_a_temporarily_invisible_stable_la
     assert len(environment.group_client.create_calls) == 1
     await first.close()
     await reconciled.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_create_cleanup_treats_generic_404_as_already_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    missing = HttpResponseError("sandbox is already gone")
+    missing.status_code = 404
+
+    async def found_sandbox(_: str) -> list[str]:
+        return ["created-1"]
+
+    async def missing_delete(*_: object, **__: object) -> None:
+        raise missing
+
+    monkeypatch.setattr(adapter, "_find_failed_create_sandboxes", found_sandbox)
+    monkeypatch.setattr(
+        environment.group_client,
+        "begin_delete_sandbox",
+        missing_delete,
+    )
+
+    await adapter._cleanup_failed_create("attempt-1")
     await adapter.close()
 
 

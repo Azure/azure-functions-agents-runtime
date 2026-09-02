@@ -24,6 +24,7 @@ from azure.core.exceptions import (
     HttpResponseError,
     ResourceNotFoundError,
     ServiceRequestError,
+    ServiceResponseError,
 )
 from azure.core.polling import AsyncLROPoller
 from azure.core.rest import AsyncHttpResponse, HttpResponse
@@ -122,6 +123,7 @@ _PRESERVED_CLEANUP_ERRORS = (
 # A module-level indirection so tests can patch just this adapter's retry
 # delays instead of monkeypatching the process-wide ``asyncio`` module.
 _sleep = asyncio.sleep
+_monotonic = time.monotonic
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,12 +497,16 @@ class AcaSandboxAdapter:
             readiness_timeout_seconds,
             "readiness_timeout_seconds",
         )
+        readiness_deadline = _monotonic() + readiness_timeout_seconds
         handle = await self._attach_handle(persisted, expected)
         try:
             await self._verify_manifest_handshake(
                 handle,
                 expected,
-                readiness_timeout_seconds=readiness_timeout_seconds,
+                readiness_timeout_seconds=max(
+                    0.0,
+                    readiness_deadline - _monotonic(),
+                ),
             )
         except SandboxFileOperationError as exc:
             if exc.status_code in _AUTHORIZATION_STATUS_CODES:
@@ -521,6 +527,7 @@ class AcaSandboxAdapter:
             readiness_timeout_seconds,
             "readiness_timeout_seconds",
         )
+        readiness_deadline = _monotonic() + readiness_timeout_seconds
         handle = await self._attach_handle(persisted, expected)
         resumed = False
         try:
@@ -533,7 +540,10 @@ class AcaSandboxAdapter:
             await self._verify_manifest_handshake(
                 handle,
                 expected,
-                readiness_timeout_seconds=readiness_timeout_seconds,
+                readiness_timeout_seconds=max(
+                    0.0,
+                    readiness_deadline - _monotonic(),
+                ),
             )
         except SandboxFileOperationError as exc:
             if exc.status_code in _AUTHORIZATION_STATUS_CODES:
@@ -877,6 +887,12 @@ class AcaSandboxAdapter:
                 await poller.result()
             except ResourceNotFoundError:
                 continue
+            except HttpResponseError as exc:
+                if exc.status_code == 404:
+                    continue
+                raise _translate_group_boundary_error(
+                    exc, sandbox_scoped=False
+                ) from None
             except (AzureError, TimeoutError) as exc:
                 raise _translate_group_boundary_error(
                     exc, sandbox_scoped=False
@@ -1250,7 +1266,7 @@ def _translate_group_boundary_error(
                 "ACA Sandbox data plane is temporarily unavailable."
             )
         return SandboxProvisioningError("ACA Sandbox data-plane request was rejected.")
-    if isinstance(error, (ServiceRequestError, TimeoutError)):
+    if isinstance(error, (ServiceRequestError, ServiceResponseError, TimeoutError)):
         return SandboxGroupTransientError(
             "ACA Sandbox data plane is temporarily unavailable."
         )
