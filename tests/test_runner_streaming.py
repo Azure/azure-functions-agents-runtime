@@ -5,9 +5,20 @@ import contextlib
 import json
 import textwrap
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+import pytest
+from agent_framework import (
+    BaseChatClient,
+    ChatResponse,
+    ChatResponseUpdate,
+    Content,
+    FunctionInvocationLayer,
+    Message,
+    ResponseStream,
+)
 
 from azure_functions_agents import runner
 from azure_functions_agents.client_manager import InferenceTarget
@@ -256,6 +267,86 @@ def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> No
             "result": "ok",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_stream_continues_after_loading_skill(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A read-only skill load executes and returns control to the model."""
+
+    class LoadSkillChatClient(FunctionInvocationLayer[Any], BaseChatClient[Any]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.call_count = 0
+
+        def _inner_get_response(
+            self,
+            *,
+            messages: Sequence[Message],
+            stream: bool,
+            options: Mapping[str, Any],
+            **kwargs: Any,
+        ) -> Any:
+            assert stream
+            self.call_count += 1
+            is_tool_turn = self.call_count == 1
+            content = (
+                Content.from_function_call(
+                    "load-skill-1",
+                    "load_skill",
+                    arguments={"skill_name": "test-skill"},
+                )
+                if is_tool_turn
+                else Content.from_text("Skill loaded.")
+            )
+
+            async def updates() -> AsyncIterator[ChatResponseUpdate]:
+                yield ChatResponseUpdate(
+                    contents=[content],
+                    role="assistant",
+                    finish_reason="tool_calls" if is_tool_turn else "stop",
+                )
+
+            return ResponseStream(updates(), finalizer=ChatResponse.from_updates)
+
+    skill_dir = tmp_path / "test-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: test-skill\ndescription: Test skill\n---\n\n# Test skill\n",
+        encoding="utf-8",
+    )
+    chat_client = LoadSkillChatClient()
+    monkeypatch.setattr(
+        runner.get_client_manager(),
+        "build_chat_client_with_target",
+        lambda _model: (chat_client, InferenceTarget()),
+    )
+    monkeypatch.setattr(runner, "_build_history_provider", lambda: None)
+
+    events = _events_from_sse(
+        [
+            chunk
+            async for chunk in runner.run_agent_stream(
+                "Load the test skill.",
+                mcp_tools=[],
+                skill_paths=[skill_dir],
+                session_id="skill-session",
+            )
+        ]
+    )
+
+    assert [event["type"] for event in events] == [
+        "session",
+        "tool_start",
+        "tool_end",
+        "delta",
+        "done",
+    ]
+    assert events[1]["tool_name"] == "load_skill"
+    assert events[2]["tool_call_id"] == "load-skill-1"
+    assert events[3]["content"] == "Skill loaded."
+    assert chat_client.call_count == 2
 
 
 def test_run_agent_stream_bounds_stalled_generator_by_coordinator_deadline(
