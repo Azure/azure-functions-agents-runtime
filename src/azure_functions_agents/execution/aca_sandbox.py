@@ -23,11 +23,13 @@ from ..controller.journal_integrity import (
 from ..controller.readiness import (
     ActivatedSession,
     SessionActivationAuthorizationError,
+    SessionActivationBindingError,
     SessionActivationConflictError,
     SessionActivationError,
     SessionActivationGoneError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
+    SessionActivationTransientError,
     SessionRuntimeBinding,
     _await_admission_with_setup_timeout,
     _bounded_admission_confirmation,
@@ -766,9 +768,12 @@ class AcaSandboxExecutionBackend:
             await self._runtime.reconcile_session(durable.partition, context.session_id)
             refreshed = await self._read_durable_management_state(context)
             return None, _tombstoned_status(refreshed.run, phase=_public_phase(refreshed))
-        except SessionActivationAuthorizationError:
-            raise
-        except SessionActivationConflictError:
+        except (
+            SessionActivationAuthorizationError,
+            SessionActivationBindingError,
+            SessionActivationConflictError,
+            SessionActivationTransientError,
+        ):
             raise
         except (
             SessionActivationError,
@@ -836,7 +841,11 @@ class AcaSandboxExecutionBackend:
                     SetupBudget.start(),
                     allow_create=False,
                 )
-            except SessionActivationAuthorizationError:
+            except (
+                SessionActivationAuthorizationError,
+                SessionActivationBindingError,
+                SessionActivationTransientError,
+            ):
                 # Let event preflight surface the same management authorization
                 # response rather than silently ending through the fallback below.
                 raise
@@ -947,9 +956,12 @@ class AcaSandboxExecutionBackend:
                 return await self._cancel_live_run_once(context, durable, setup_budget)
             except SessionActivationGoneError:
                 raise
-            except SessionActivationAuthorizationError:
-                raise
-            except SessionActivationConflictError:
+            except (
+                SessionActivationAuthorizationError,
+                SessionActivationBindingError,
+                SessionActivationConflictError,
+                SessionActivationTransientError,
+            ):
                 raise
             except (SandboxFileNotFoundError, SandboxFileOperationError):
                 durable, fallback_status = await self._cancel_file_error_status(

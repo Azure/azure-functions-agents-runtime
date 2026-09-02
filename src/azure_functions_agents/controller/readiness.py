@@ -137,6 +137,7 @@ _RESUMABLE_FILE_OPERATION_STATUS_CODES = frozenset(
     {409, 423, 425, 429, *range(500, 600)}
 )
 _FILE_RETRY_MAX_DELAY_SECONDS = 4.0
+_PROVIDER_READINESS_DEADLINE_MARGIN_SECONDS = 0.1
 _ADMISSION_CONFIRMATION_TIMEOUT_SECONDS = 1.0
 _BOUNDED_TASK_DRAIN_TIMEOUT_SECONDS = 0.05
 _INDETERMINATE_PROVISION_RECOVERY_TIMEOUT_SECONDS = 1.0
@@ -728,8 +729,8 @@ async def _activate_existing_session(
         ) from None
     except SandboxProvisioningError:
         await _close_handle_if_open(handle)
-        raise SessionActivationConflictError(
-            "Sandbox provider rejected the lifecycle operation."
+        raise SessionActivationBindingError(
+            "Sandbox provider rejected the activation request."
         ) from None
     except SandboxManifestMismatchError:
         await _quarantine_detected_binding(
@@ -770,13 +771,18 @@ async def _resume_existing_session(
     expected: ExpectedSandboxManifestBinding,
     setup_deadline: SetupDeadline,
 ) -> SandboxSessionHandle:
+    remaining = setup_deadline.remaining_setup_seconds(
+        phase=SetupPhase.SESSION_RESUME
+    )
+    readiness_margin = min(
+        _PROVIDER_READINESS_DEADLINE_MARGIN_SECONDS,
+        remaining / 2,
+    )
     return await _within_setup_budget(
         provider.resume(
             persisted,
             expected,
-            readiness_timeout_seconds=setup_deadline.remaining_setup_seconds(
-                phase=SetupPhase.SESSION_RESUME
-            ),
+            readiness_timeout_seconds=remaining - readiness_margin,
         ),
         setup_deadline,
         phase=SetupPhase.SESSION_RESUME,

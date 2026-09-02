@@ -1551,6 +1551,32 @@ async def test_resume_transport_failures_become_typed_activation_errors(
 
 
 @pytest.mark.asyncio
+async def test_provider_readiness_deadline_precedes_the_activation_deadline(
+    tmp_path: Path,
+) -> None:
+    class DeadlineCapturingProvider(_FakeProvider):
+        readiness_timeout_seconds: float | None = None
+
+        async def resume(self, *args: object, **kwargs: object) -> _FakeHandle:
+            self.readiness_timeout_seconds = kwargs["readiness_timeout_seconds"]  # type: ignore[assignment]
+            return await super().resume(*args, **kwargs)
+
+    script_root = _script_root(tmp_path)
+    provider = DeadlineCapturingProvider(_FakeHandle())
+    session = _session(script_root)
+    activated = await activate_session(
+        _runtime(script_root, provider, _FakeStore(session)),
+        _owner(),
+        session.session_id,
+        SetupBudget.start(setup_seconds=10.0, clock=lambda: 0.0),
+        allow_create=False,
+    )
+
+    assert provider.readiness_timeout_seconds == pytest.approx(9.9)
+    await activated.handle.close()
+
+
+@pytest.mark.asyncio
 async def test_corrupt_optional_harness_protocol_quarantines_before_admission(tmp_path: Path) -> None:
     script_root = _script_root(tmp_path)
     handle = _FakeHandle("new-sandbox")

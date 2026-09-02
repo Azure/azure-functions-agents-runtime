@@ -928,9 +928,99 @@ async def test_create_raises_reconciliation_error_when_cleanup_list_itself_fails
     monkeypatch.setattr(environment.group_client, "begin_create_sandbox", unreachable_create)
     monkeypatch.setattr(environment.group_client, "list_sandboxes", failing_list_sandboxes)
 
-    with pytest.raises(SandboxProvisioningError, match="could not be reconciled"):
+    with pytest.raises(SandboxGroupTransientError):
         await adapter.create(_request(), persisted_group=_binding())
 
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cleanup_stage", "status_code", "expected_error"),
+    [
+        ("inventory", 401, SandboxGroupAuthorizationError),
+        ("inventory", 403, SandboxGroupAuthorizationError),
+        ("inventory", 404, SandboxGroupBindingError),
+        ("inventory", 409, SandboxProvisioningError),
+        ("inventory", 429, SandboxGroupTransientError),
+        ("inventory", 503, SandboxGroupTransientError),
+        ("delete", 401, SandboxGroupAuthorizationError),
+        ("delete", 403, SandboxGroupAuthorizationError),
+        ("delete", 409, SandboxProvisioningError),
+        ("delete", 429, SandboxGroupTransientError),
+        ("delete", 503, SandboxGroupTransientError),
+    ],
+)
+async def test_failed_create_cleanup_preserves_typed_provider_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_stage: str,
+    status_code: int,
+    expected_error: type[Exception],
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    rejection = HttpResponseError("sensitive cleanup response")
+    rejection.status_code = status_code
+
+    if cleanup_stage == "inventory":
+        def failing_list_sandboxes(**_: Any) -> None:
+            raise rejection
+
+        monkeypatch.setattr(
+            environment.group_client,
+            "list_sandboxes",
+            failing_list_sandboxes,
+        )
+    else:
+        async def found_sandbox(_: str) -> list[str]:
+            return ["created-1"]
+
+        async def failing_delete(*_: object, **__: object) -> None:
+            raise rejection
+
+        monkeypatch.setattr(adapter, "_find_failed_create_sandboxes", found_sandbox)
+        monkeypatch.setattr(
+            environment.group_client,
+            "begin_delete_sandbox",
+            failing_delete,
+        )
+
+    with pytest.raises(expected_error) as caught:
+        await adapter._cleanup_failed_create("attempt-1")
+
+    assert type(caught.value) is expected_error
+    assert "sensitive cleanup response" not in str(caught.value)
+    assert caught.value.__suppress_context__
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_create_cleanup_treats_missing_sandbox_as_already_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+
+    async def found_sandbox(_: str) -> list[str]:
+        return ["created-1"]
+
+    async def missing_delete(*_: object, **__: object) -> None:
+        raise ResourceNotFoundError("sandbox is already gone")
+
+    monkeypatch.setattr(adapter, "_find_failed_create_sandboxes", found_sandbox)
+    monkeypatch.setattr(
+        environment.group_client,
+        "begin_delete_sandbox",
+        missing_delete,
+    )
+
+    await adapter._cleanup_failed_create("attempt-1")
     await adapter.close()
 
 
@@ -1840,6 +1930,32 @@ async def test_resume_retries_direct_manifest_until_nonblocking_resume_is_ready(
         "read_file",
     ]
     await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_manifest_readiness_timeout_remains_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+
+    with pytest.raises(SandboxGroupTransientError, match="manifest is not ready"):
+        await adapter.attach(
+            PersistedSandboxBinding.create(
+                sandbox_id=sandbox.sandbox_id,
+                group=_binding(),
+            ),
+            expected,
+            readiness_timeout_seconds=1e-9,
+        )
+
+    assert sandbox.closed
     await adapter.close()
 
 

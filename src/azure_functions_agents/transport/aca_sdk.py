@@ -112,7 +112,11 @@ _RECONCILIATION_ERRORS = (
     TimeoutError,
     RuntimeError,
     ValueError,
-    SandboxTransportError,
+)
+_PRESERVED_CLEANUP_ERRORS = (
+    SandboxGroupAuthorizationError,
+    SandboxGroupBindingError,
+    SandboxGroupTransientError,
 )
 
 # A module-level indirection so tests can patch just this adapter's retry
@@ -471,7 +475,7 @@ class AcaSandboxAdapter:
 
         try:
             await asyncio.shield(self._cleanup_failed_create(provisioning_attempt_id))
-        except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
+        except (AzureError, TimeoutError, RuntimeError, SandboxTransportError):
             logger.exception(
                 "ACA sandbox create was cancelled before cleanup could be confirmed; "
                 "provisioning attempt %s requires reconciliation.",
@@ -798,10 +802,16 @@ class AcaSandboxAdapter:
 
         try:
             sandbox_ids = await self._find_failed_create_sandboxes(provisioning_attempt_id)
-        except _RECONCILIATION_ERRORS as exc:
+        except _PRESERVED_CLEANUP_ERRORS:
+            raise
+        except SandboxTransportError:
             raise SandboxProvisioningError(
                 "Failed sandbox creation could not be reconciled for cleanup."
-            ) from exc
+            ) from None
+        except _RECONCILIATION_ERRORS:
+            raise SandboxProvisioningError(
+                "Failed sandbox creation could not be reconciled for cleanup."
+            ) from None
 
         if not sandbox_ids:
             logger.info(
@@ -813,10 +823,16 @@ class AcaSandboxAdapter:
 
         try:
             await self._delete_reconciled_sandboxes(sandbox_ids)
-        except _RECONCILIATION_ERRORS as exc:
+        except _PRESERVED_CLEANUP_ERRORS:
+            raise
+        except SandboxTransportError:
             raise SandboxProvisioningError(
                 "Failed sandbox creation could not be reconciled for cleanup."
-            ) from exc
+            ) from None
+        except _RECONCILIATION_ERRORS:
+            raise SandboxProvisioningError(
+                "Failed sandbox creation could not be reconciled for cleanup."
+            ) from None
 
     async def _find_failed_create_sandboxes(
         self,
@@ -852,12 +868,19 @@ class AcaSandboxAdapter:
 
     async def _delete_reconciled_sandboxes(self, sandbox_ids: list[str]) -> None:
         for sandbox_id in sandbox_ids:
-            poller = await self._group_client.begin_delete_sandbox(
-                sandbox_id,
-                polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
-                polling_interval=_CONTROL_OPERATION_POLL_INTERVAL_SECONDS,
-            )
-            await poller.result()
+            try:
+                poller = await self._group_client.begin_delete_sandbox(
+                    sandbox_id,
+                    polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
+                    polling_interval=_CONTROL_OPERATION_POLL_INTERVAL_SECONDS,
+                )
+                await poller.result()
+            except ResourceNotFoundError:
+                continue
+            except (AzureError, TimeoutError) as exc:
+                raise _translate_group_boundary_error(
+                    exc, sandbox_scoped=False
+                ) from None
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -1375,14 +1398,14 @@ async def _read_manifest_when_ready(
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise SandboxProvisioningError("Sandbox manifest readiness timed out.")
+            raise SandboxGroupTransientError("Sandbox manifest is not ready.")
         manifest_bytes = await _try_read_manifest(handle, remaining)
         if manifest_bytes is not None:
             return manifest_bytes
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise SandboxProvisioningError("Sandbox manifest readiness timed out.")
+            raise SandboxGroupTransientError("Sandbox manifest is not ready.")
         await _sleep(min(_MANIFEST_RETRY_INTERVAL_SECONDS, remaining))
 
 
@@ -1399,7 +1422,7 @@ async def _try_read_manifest(handle: AcaSandboxHandle, timeout_seconds: float) -
             raise
         return None
     except TimeoutError:
-        raise SandboxProvisioningError("Sandbox manifest readiness timed out.") from None
+        raise SandboxGroupTransientError("Sandbox manifest is not ready.") from None
 
 
 def _validate_positive_finite_seconds(value: float, field_name: str) -> None:
