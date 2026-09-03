@@ -617,7 +617,7 @@ def _provision_operation(
 
 def _reclaim_operation(
     session: DurableSessionRecord,
-    run: DurableRunRecord,
+    run: DurableRunRecord | None,
     now: datetime,
     *,
     lease_expires_at: datetime | None = None,
@@ -630,7 +630,7 @@ def _reclaim_operation(
             generation=session.generation,
             digest_kind=session.digest_kind,
             digest=session.digest,
-            run_id=run.run_id,
+            run_id=None if run is None else run.run_id,
         ),
         sequence=1,
         kind="reclaim_backing",
@@ -1089,7 +1089,7 @@ async def test_result_hold_blocks_idle_reclaim_independently_of_safety_grace() -
     session = _session(
         now - timedelta(minutes=10),
         status="suspended",
-        expires_at=now - timedelta(minutes=5),
+        expires_at=now + timedelta(minutes=3),
     )
     run = replace(
         _run(session, now - timedelta(minutes=2), status="succeeded"),
@@ -1120,12 +1120,12 @@ async def test_result_hold_blocks_idle_reclaim_independently_of_safety_grace() -
 
 
 @pytest.mark.asyncio
-async def test_targeted_idle_reconciliation_loads_runs_before_result_hold_reclaim() -> None:
+async def test_targeted_idle_reconciliation_honors_authoritative_result_hold_expiry() -> None:
     now = datetime(2026, 8, 5, tzinfo=UTC)
     session = _session(
         now - timedelta(minutes=10),
         status="suspended",
-        expires_at=now - timedelta(minutes=5),
+        expires_at=now + timedelta(minutes=3),
     )
     run = replace(
         _run(session, now - timedelta(minutes=2), status="succeeded"),
@@ -1151,6 +1151,54 @@ async def test_targeted_idle_reconciliation_loads_runs_before_result_hold_reclai
     assert store.session is not None
     assert store.session.status == "suspended"
     assert store.runs[run.run_id].result_available
+
+
+@pytest.mark.asyncio
+async def test_oversized_run_history_does_not_block_due_idle_reclaim() -> None:
+    now = datetime(2026, 9, 3, tzinfo=UTC)
+    session = _session(
+        now - timedelta(days=2),
+        status="suspended",
+        expires_at=now - timedelta(minutes=10),
+    )
+    runs = tuple(
+        replace(
+            _run(session, now - timedelta(hours=2), status="failed"),
+            run_id=f"run-{index:04d}",
+        )
+        for index in range(1001)
+    )
+    store = PairPageStore(
+        session,
+        runs[0],
+        tuple(run.to_table_entity() for run in runs),
+    )
+    store.runs.update({run.run_id: run for run in runs})
+    idempotency = DurableOwnerIdempotencyRecord.create(
+        owner_partition=session.owner_partition,
+        idempotency_hash="a" * 64,
+        request_hash="b" * 64,
+        session_id=session.session_id,
+        run_id=runs[-1].run_id,
+        expires_at=now + timedelta(hours=1),
+        created_at=now - timedelta(hours=2),
+    )
+    store.owner_idempotency[idempotency.idempotency_hash] = idempotency
+    provider = InventoryProvider(sandboxes=(_sandbox(now, state="Suspended"),))
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(page_size=100, max_pages=10),
+        now=lambda: now,
+    ).reconcile_session(session.owner_partition, session.session_id)
+
+    assert report.deleted_sandboxes == 1
+    assert report.tombstoned_sessions == 1
+    assert store.session is not None
+    assert store.session.status == "tombstoned"
+    assert store.owner_idempotency == {idempotency.idempotency_hash: idempotency}
 
 
 @pytest.mark.asyncio
@@ -2932,7 +2980,7 @@ async def test_reclaim_operation_blocks_successor_until_terminal_adoption_is_res
     assert store.session.active_run_id is None
     assert store.session.idle_policy_armed
     assert store.session.last_activity_at == now
-    assert store.session.expires_at == now + timedelta(seconds=120)
+    assert store.session.expires_at == session.expires_at
     assert store.operations[-4:-2] == ["advance_operation", "completed_operation"]
     assert store.operations[-2:] == ["advance_cursor", "advance_cursor"]
 
@@ -2973,7 +3021,7 @@ async def test_targeted_reconciliation_resumes_a_persisted_reclaim_operation() -
 
     assert report.abandoned_runs == 1
     assert report.tombstoned_sessions == 1
-    assert provider.deleted_sandboxes == ["sandbox-1"]
+    assert "sandbox-1" in provider.deleted_sandboxes
     assert store.session is not None
     assert store.session.status == "tombstoned"
 
@@ -3038,6 +3086,104 @@ async def test_paged_reclaim_resume_exact_reads_off_page_backing_before_tombston
     assert store.session is not None
     assert store.session.status == "ready"
     assert store.runs[run.run_id].status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_idle_reclaim_exact_reads_off_page_backing_before_tombstone() -> None:
+    now = datetime(2026, 9, 3, tzinfo=UTC)
+    base = _session(
+        now - timedelta(days=2),
+        status="suspended",
+        expires_at=now - timedelta(minutes=10),
+    )
+    operation = _reclaim_operation(
+        base,
+        None,
+        now,
+        lease_expires_at=now - timedelta(seconds=1),
+    )
+    session = replace(
+        base,
+        idle_policy_armed=False,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.durable_operations[operation.operation_id] = operation
+    provider = InventoryProvider(
+        sandboxes=(
+            _sandbox(now, "other-sandbox", session_id="other-session"),
+            _sandbox(now),
+        ),
+        sandbox_page_size=1,
+    )
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(
+            inventory_page_size=1,
+            max_inventory_pages=1,
+        ),
+        now=lambda: now,
+    ).run_once()
+
+    assert provider.exact_sandbox_reads == ["sandbox-1"]
+    assert "sandbox-1" in provider.deleted_sandboxes
+    assert report.tombstoned_sessions == 1
+    assert store.session is not None
+    assert store.session.status == "tombstoned"
+
+
+@pytest.mark.asyncio
+async def test_idle_reclaim_defers_when_exact_backing_read_is_transient() -> None:
+    now = datetime(2026, 9, 3, tzinfo=UTC)
+    base = _session(
+        now - timedelta(days=2),
+        status="suspended",
+        expires_at=now - timedelta(minutes=10),
+    )
+    operation = _reclaim_operation(
+        base,
+        None,
+        now,
+        lease_expires_at=now - timedelta(seconds=1),
+    )
+    session = replace(
+        base,
+        idle_policy_armed=False,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.durable_operations[operation.operation_id] = operation
+    provider = ExactReadFailureProvider(
+        sandboxes=(
+            _sandbox(now, "other-sandbox", session_id="other-session"),
+            _sandbox(now),
+        ),
+        failing_sandbox_ids=frozenset({"sandbox-1"}),
+    )
+    provider.sandbox_page_size = 1
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        config=ReconcilerConfig(
+            inventory_page_size=1,
+            max_inventory_pages=1,
+        ),
+        now=lambda: now,
+    ).run_once()
+
+    assert report.partial
+    assert provider.exact_sandbox_reads == ["sandbox-1"]
+    assert "sandbox-1" not in provider.deleted_sandboxes
+    assert store.session is not None
+    assert store.session.status == "suspended"
+    assert store.session.active_operation_id == operation.operation_id
 
 
 @pytest.mark.asyncio
@@ -3682,6 +3828,20 @@ async def test_reconciler_rearms_terminal_submit_before_completion() -> None:
     assert store.operations[-2:] == ["advance_cursor", "advance_cursor"]
 
 
+def test_reclaim_rearm_cannot_shorten_an_existing_result_hold() -> None:
+    now = datetime(2026, 9, 3, tzinfo=UTC)
+    existing_expiry = now + timedelta(minutes=10)
+    session = _session(now, expires_at=existing_expiry)
+
+    rearmed = reconciler_module._armed_operation_session(
+        session,
+        reclaim_idle_seconds=120,
+        updated_at=now,
+    )
+
+    assert rearmed.expires_at == existing_expiry
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("created_sandbox", [False, True])
 @pytest.mark.parametrize("targeted", [False, True])
@@ -3851,7 +4011,7 @@ async def test_targeted_reconcile_aborts_expired_missing_submit_run() -> None:
     assert store.session.active_run_id is None
     assert store.session.idle_policy_armed
     assert store.session.last_activity_at == now
-    assert store.session.expires_at == now + timedelta(seconds=120)
+    assert store.session.expires_at == session.expires_at
     assert store.durable_operations[operation.operation_id].state == "aborted"
     assert store.operations[-2:] == ["advance_operation", "aborted_operation"]
 

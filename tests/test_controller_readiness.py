@@ -1340,6 +1340,52 @@ async def test_management_touch_only_renews_live_session_retention(
 
 
 @pytest.mark.asyncio
+async def test_management_touch_cannot_shorten_an_existing_result_hold(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    existing_expiry = datetime.now(UTC) + timedelta(minutes=10)
+    session = replace(_session(script_root), expires_at=existing_expiry)
+    store = _FakeStore(session)
+    runtime = _runtime(
+        script_root,
+        _FakeProvider(_FakeHandle()),
+        store,
+        auto_suspend_seconds=60,
+        reclaim_idle_seconds=120,
+    )
+
+    await touch_session_activity(runtime, _owner(), session.session_id)
+
+    assert store.session is not None
+    assert store.session.expires_at == existing_expiry
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [
+        readiness_module._session_after_submit_rearm,
+        readiness_module._session_after_missing_submit_run,
+    ],
+)
+def test_no_result_submit_rearm_cannot_shorten_an_existing_result_hold(
+    builder: Callable[..., DurableSessionRecord],
+) -> None:
+    session = _session(Path("."))
+    now = session.updated_at + timedelta(seconds=1)
+    existing_expiry = now + timedelta(minutes=10)
+    session = replace(session, expires_at=existing_expiry)
+
+    rearmed = builder(
+        session,
+        reclaim_idle_seconds=120,
+        updated_at=now,
+    )
+
+    assert rearmed.expires_at == existing_expiry
+
+
+@pytest.mark.asyncio
 async def test_rearm_rejects_an_orphan_disarmed_idle_marker(tmp_path: Path) -> None:
     script_root = _script_root(tmp_path)
     session = replace(_session(script_root), idle_policy_armed=False)
@@ -2138,7 +2184,10 @@ async def test_pre_submit_change_releases_slot_before_quarantine(tmp_path: Path)
 @pytest.mark.asyncio
 async def test_terminal_submit_fences_admission_before_lifecycle_write(tmp_path: Path) -> None:
     script_root = _script_root(tmp_path)
-    session = _session(script_root)
+    session = replace(
+        _session(script_root),
+        expires_at=datetime.now(UTC) + timedelta(seconds=60),
+    )
     store = _FakeStore(session)
     admission_blocked = False
 

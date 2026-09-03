@@ -107,6 +107,7 @@ from .run_control import (
     RunJournalProtocolError,
     RunSubmissionDefinitiveFailureError,
     RunSubmissionIndeterminateError,
+    RunSubmissionPreLaunchStatusError,
     SandboxRunControl,
 )
 from .setup_budget import (
@@ -554,9 +555,11 @@ class AcaSandboxExecutionBackend:
             if isinstance(exc.__cause__, SandboxFileOperationError):
                 _raise_file_operation_activation_error(exc.__cause__)
             raise
-        except RunSubmissionIndeterminateError as exc:
+        except RunSubmissionPreLaunchStatusError as exc:
             if isinstance(exc.__cause__, SandboxFileOperationError):
                 _raise_file_operation_activation_error(exc.__cause__)
+            raise
+        except RunSubmissionIndeterminateError as exc:
             logger.warning(
                 "Indeterminate journal acceptance after committed admission; "
                 "deferring to reconciliation (stage=submit_admission, "

@@ -985,7 +985,10 @@ def _session_with_touched_activity(
         protocol=session.protocol,
         status=session.status,
         last_activity_at=updated_at,
-        expires_at=updated_at + timedelta(seconds=reclaim_idle_seconds),
+        expires_at=max(
+            session.expires_at,
+            updated_at + timedelta(seconds=reclaim_idle_seconds),
+        ),
         idle_policy_armed=session.idle_policy_armed,
         active_run_id=session.active_run_id,
         snapshot_ids=session.snapshot_ids,
@@ -1335,8 +1338,11 @@ def _session_after_submit_rearm(
         protocol=session.protocol,
         status=session.status,
         last_activity_at=updated_at,
-        expires_at=updated_at
-        + timedelta(seconds=max(reclaim_idle_seconds, minimum_retention_seconds)),
+        expires_at=max(
+            session.expires_at,
+            updated_at
+            + timedelta(seconds=max(reclaim_idle_seconds, minimum_retention_seconds)),
+        ),
         idle_policy_armed=True,
         active_run_id=session.active_run_id,
         snapshot_ids=session.snapshot_ids,
@@ -1367,7 +1373,10 @@ def _session_after_missing_submit_run(
         protocol=session.protocol,
         status="quarantined" if session.status == "quarantined" else "ready",
         last_activity_at=updated_at,
-        expires_at=updated_at + timedelta(seconds=reclaim_idle_seconds),
+        expires_at=max(
+            session.expires_at,
+            updated_at + timedelta(seconds=reclaim_idle_seconds),
+        ),
         idle_policy_armed=True,
         active_run_id=None,
         snapshot_ids=session.snapshot_ids,

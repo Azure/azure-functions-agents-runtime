@@ -1432,27 +1432,6 @@ class SessionReconciler:
         due_at = now - timedelta(seconds=self._config.safety_grace_seconds)
         if session.status not in _RECLAIMABLE_SESSION_STATUSES or session.expires_at > due_at:
             return report
-        exact_runs, complete = await self._load_session_runs(session)
-        report = await self._evict_expired_results(
-            session,
-            exact_runs,
-            now,
-            report,
-            skip_run_ids=frozenset(run.run_id for run in runs),
-        )
-        if not complete:
-            return _replace_report(report, partial=True)
-        reclaim_after = max(
-            (
-                run.updated_at + timedelta(seconds=self._config.result_hold_seconds)
-                for run in exact_runs
-                if run.status in TERMINAL_RUN_STATUSES and run.result_available
-            ),
-            default=session.expires_at,
-        )
-        reclaim_after = max(reclaim_after, session.expires_at)
-        if reclaim_after > due_at:
-            return report
         return await self._begin_reclaim(session, inventory, snapshots, now, report)
 
     async def _evict_expired_results(
@@ -1482,35 +1461,6 @@ class SessionReconciler:
                 )
                 report = _replace_report(report, evicted_results=report.evicted_results + 1)
         return report
-
-    async def _load_session_runs(
-        self,
-        session: DurableSessionRecord,
-    ) -> tuple[tuple[DurableRunRecord, ...], bool]:
-        runs: list[DurableRunRecord] = []
-        continuation: str | None = None
-        seen_tokens: set[str] = set()
-        for _ in range(self._config.max_pages):
-            page = await self._store.query_entities(
-                filter_expression=_session_runs_filter(session),
-                top=self._config.page_size,
-                continuation_token=continuation,
-            )
-            for entity in page.entities:
-                record = _working_set_record(entity)
-                if (
-                    isinstance(record, DurableRunRecord)
-                    and record.owner_partition == session.owner_partition
-                    and record.session_id == session.session_id
-                ):
-                    runs.append(record)
-            continuation = page.continuation_token
-            if continuation is None:
-                return tuple(runs), True
-            if continuation in seen_tokens:
-                return tuple(runs), False
-            seen_tokens.add(continuation)
-        return tuple(runs), False
 
     async def _mark_suspended_if_unchanged(
         self,
@@ -1710,9 +1660,13 @@ class SessionReconciler:
         target_sandbox_id = fence.target.sandbox_id
         backing_deleted = False
         deleted_snapshot_count = 0
-        if target_sandbox_id is not None and target_sandbox_id in inventory:
+        summary = None if target_sandbox_id is None else inventory.get(target_sandbox_id)
+        if summary is None and target_sandbox_id is not None:
+            summary = await self._provider.get_sandbox_summary(target_sandbox_id)
+        if summary is not None:
+            assert target_sandbox_id is not None
             if not _matches_reclaim_target_label(
-                inventory[target_sandbox_id],
+                summary,
                 current.record,
             ):
                 return report
@@ -2749,17 +2703,6 @@ def _session_reference_filter(session: DurableSessionRecord) -> str:
     )
 
 
-def _session_runs_filter(session: DurableSessionRecord) -> str:
-    partition = _odata_literal(session.owner_partition.partition_key)
-    run_prefix = f"run:{session.session_id}:"
-    run_upper_bound = run_prefix + "~"
-    return (
-        f"PartitionKey eq {partition} and "
-        f"RowKey ge {_odata_literal(run_prefix)} and "
-        f"RowKey lt {_odata_literal(run_upper_bound)}"
-    )
-
-
 def _active_run(
     session: DurableSessionRecord,
     runs: tuple[DurableRunRecord, ...],
@@ -2903,8 +2846,11 @@ def _armed_operation_session(
         protocol=record.protocol,
         status="quarantined" if record.status == "quarantined" else "ready",
         last_activity_at=updated_at,
-        expires_at=updated_at
-        + timedelta(seconds=max(reclaim_idle_seconds, minimum_retention_seconds)),
+        expires_at=max(
+            record.expires_at,
+            updated_at
+            + timedelta(seconds=max(reclaim_idle_seconds, minimum_retention_seconds)),
+        ),
         idle_policy_armed=True,
         active_run_id=None,
         snapshot_ids=record.snapshot_ids,

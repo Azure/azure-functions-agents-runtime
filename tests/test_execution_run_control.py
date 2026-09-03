@@ -18,6 +18,7 @@ from azure_functions_agents.execution.run_control import (
     RunJournalProtocolError,
     RunSubmissionDefinitiveFailureError,
     RunSubmissionIndeterminateError,
+    RunSubmissionPreLaunchStatusError,
     SandboxRunControl,
     _launch_command,
 )
@@ -26,7 +27,10 @@ from azure_functions_agents.journal_paths import (
     inbox_path,
     launch_stderr_path,
 )
-from azure_functions_agents.transport.transport_models import SandboxExecResult
+from azure_functions_agents.transport.transport_models import (
+    SandboxExecResult,
+    SandboxFileOperationError,
+)
 from tests.doubles.fake_sandbox_transport import FakeSandboxTransport
 
 
@@ -125,6 +129,25 @@ async def test_submit_reuses_existing_run_status_without_a_second_launch() -> No
 
 
 @pytest.mark.asyncio
+async def test_submit_types_status_failure_as_prelaunch() -> None:
+    transport = FakeSandboxTransport()
+    transport.read_errors.append(
+        SandboxFileOperationError("provider unavailable", status_code=503)
+    )
+
+    with pytest.raises(RunSubmissionPreLaunchStatusError) as caught:
+        await SandboxRunControl().submit(
+            transport,
+            "run-1",
+            _envelope(),
+            timeout_seconds=1.0,
+        )
+
+    assert isinstance(caught.value.__cause__, SandboxFileOperationError)
+    assert [call.operation for call in transport.calls] == ["read_file"]
+
+
+@pytest.mark.asyncio
 async def test_submit_keeps_launch_indeterminate_when_acceptance_times_out() -> None:
     transport = FakeSandboxTransport()
     control = SandboxRunControl(event_poll_interval_seconds=0.001)
@@ -137,6 +160,35 @@ async def test_submit_keeps_launch_indeterminate_when_acceptance_times_out() -> 
         "write_file",
         "write_file",
         "exec",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_submit_keeps_postlaunch_file_failure_indeterminate() -> None:
+    transport = FakeSandboxTransport()
+
+    async def fail_acceptance(_command: str) -> None:
+        transport.read_errors.append(
+            SandboxFileOperationError("provider unavailable", status_code=503)
+        )
+
+    transport.exec_hook = fail_acceptance
+
+    with pytest.raises(RunSubmissionIndeterminateError) as caught:
+        await SandboxRunControl().submit(
+            transport,
+            "run-1",
+            _envelope(),
+            timeout_seconds=1.0,
+        )
+
+    assert isinstance(caught.value.__cause__, SandboxFileOperationError)
+    assert [call.operation for call in transport.calls[:5]] == [
+        "read_file",
+        "write_file",
+        "write_file",
+        "exec",
+        "read_file",
     ]
 
 

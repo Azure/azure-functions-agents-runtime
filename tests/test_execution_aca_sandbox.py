@@ -62,6 +62,7 @@ from azure_functions_agents.execution.run_control import (
     RunControlTimeoutError,
     RunSubmissionDefinitiveFailureError,
     RunSubmissionIndeterminateError,
+    RunSubmissionPreLaunchStatusError,
     SandboxRunControl,
 )
 from azure_functions_agents.execution.setup_budget import (
@@ -782,7 +783,11 @@ async def test_duplicate_submit_reuses_run_after_launch_response_loss(
             status = await super().submit(*args, **kwargs)
             if self.lose_once:
                 self.lose_once = False
-                raise RunSubmissionIndeterminateError("launch response was lost")
+                cause = SandboxFileOperationError(
+                    "sensitive post-launch provider response",
+                    status_code=503,
+                )
+                raise RunSubmissionIndeterminateError("launch response was lost") from cause
             return status
 
     async def accept(command: str) -> None:
@@ -830,17 +835,32 @@ async def test_duplicate_submit_reuses_run_after_launch_response_loss(
 
 
 @pytest.mark.asyncio
-async def test_submit_preserves_typed_authorization_from_journal_preflight(
+@pytest.mark.parametrize(
+    ("status_code", "expected_error"),
+    [
+        (401, SessionActivationAuthorizationError),
+        (403, SessionActivationAuthorizationError),
+        (409, SessionActivationConflictError),
+        (423, SessionActivationTransientError),
+        (425, SessionActivationTransientError),
+        (429, SessionActivationTransientError),
+        (503, SessionActivationTransientError),
+        (400, SessionActivationBindingError),
+    ],
+)
+async def test_submit_projects_prelaunch_status_file_errors(
     tmp_path: Path,
+    status_code: int,
+    expected_error: type[Exception],
 ) -> None:
-    class AuthorizationFailureRunControl(SandboxRunControl):
+    class PreLaunchFailureRunControl(SandboxRunControl):
         async def submit(self, *args, **kwargs):  # type: ignore[no-untyped-def]
             del args, kwargs
             cause = SandboxFileOperationError(
                 "sensitive provider response",
-                status_code=401,
+                status_code=status_code,
             )
-            raise RunSubmissionIndeterminateError(
+            raise RunSubmissionPreLaunchStatusError(
                 "Existing run state could not be confirmed before launch."
             ) from cause
 
@@ -855,15 +875,16 @@ async def test_submit_preserves_typed_authorization_from_journal_preflight(
             store,
         ),
         owner=_owner(),
-        run_control=AuthorizationFailureRunControl(),
+        run_control=PreLaunchFailureRunControl(),
     )
 
-    with pytest.raises(SessionActivationAuthorizationError) as caught:
+    with pytest.raises(expected_error) as caught:
         await backend.start_run(
             StartRunRequest(prompt="hello", session_id=session.session_id)
         )
 
-    assert caught.value.status_code == 401
+    if isinstance(caught.value, SessionActivationAuthorizationError):
+        assert caught.value.status_code == status_code
     assert "sensitive provider response" not in str(caught.value)
 
 

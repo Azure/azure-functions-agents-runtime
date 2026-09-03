@@ -28,6 +28,7 @@ from .run_control import (
     RunEnvelope,
     RunSubmissionDefinitiveFailureError,
     RunSubmissionIndeterminateError,
+    RunSubmissionPreLaunchStatusError,
     SandboxRunControl,
 )
 from .setup_budget import SetupBudget, SetupBudgetExpiredError
@@ -55,6 +56,7 @@ __all__ = [
     "RunStatus",
     "RunSubmissionDefinitiveFailureError",
     "RunSubmissionIndeterminateError",
+    "RunSubmissionPreLaunchStatusError",
     "SandboxRunControl",
     "SetupBudget",
     "SetupBudgetExpiredError",

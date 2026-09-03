@@ -224,8 +224,10 @@ replay a POST merely to discover its identifiers.
 If admission committed but journal launch acknowledgement is indeterminate, the
 runtime returns the committed management handle as `202` with
 `phase=executing`; it does not discard the handle, report a raw transport
-failure, or launch the prompt again. Status, result, events, and cancel preserve
-the same typed, redacted activation and provider failures as submission.
+failure, or launch the prompt again. Provider failures from the status probe
+before any launch attempt retain their typed, redacted projection; provider
+failures after launch may have committed preserve the durable handle instead.
+Status, result, events, and cancel preserve the same typed boundary.
 
 The public `phase` explains where work is without adding new run states:
 
@@ -243,10 +245,12 @@ management URLs.
 A terminal success whose result is not yet materialized remains retryable with
 `503` and `Retry-After`. Once the result is available, every terminal adoption
 and lifecycle-rearm path preserves at least 300 seconds before the session can
-be reclaimed. Before reclaiming a due idle session, reconciliation loads its
-session-scoped run pages and defers reclaim if that bounded scan is incomplete.
-It also point-reads a persisted sandbox that is absent from the current
-inventory page before treating its backing as missing.
+be reclaimed. Session expiry is monotonic and authoritative: management touch
+and later submit/reclaim rearm can extend but never shorten an existing result
+hold. Bounded pages may evict observed expired results but do not indefinitely
+block due reclaim for long histories. Reconciliation point-reads persisted
+active and idle operation backing omitted from the current inventory page
+before treating it as missing.
 
 Canceling during `provisioning` atomically prevents prompt launch for either a
 new-session provision or an existing-session submission and returns a terminal
