@@ -15,13 +15,11 @@ jobs:
         python313:
           runtimeTarget: 'python313'
           pythonVersion: '3.13'
-          constraintsFile: 'eng/constraints/aca-fixture-py313.txt'
           appSiteName: $(ACA_DEPLOYED_APP_SITE_NAME_PY313)
           baseUrl: $(ACA_DEPLOYED_FUNCTION_BASE_URL_PY313)
         python314:
           runtimeTarget: 'python314'
           pythonVersion: '3.14'
-          constraintsFile: 'eng/constraints/aca-fixture-py314.txt'
           appSiteName: $(ACA_DEPLOYED_APP_SITE_NAME_PY314)
           baseUrl: $(ACA_DEPLOYED_FUNCTION_BASE_URL_PY314)
     continueOnError: true
@@ -61,7 +59,7 @@ jobs:
           python eng/scripts/aca_qualification_pipeline.py assemble \
             --artifact-root "$(Pipeline.Workspace)/azurefunctions-agents-runtime" \
             --staging-root "$(Build.ArtifactStagingDirectory)/aca-fixture" \
-            --constraints-file "$(constraintsFile)" \
+            --requirements-export eng/constraints/aca-fixture-requirements.txt \
             --commit-sha "$(Build.SourceVersion)" \
             --build-id "$(Build.BuildId)" \
             --branch "$(Build.SourceBranch)" \

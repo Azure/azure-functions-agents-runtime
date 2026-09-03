@@ -344,6 +344,14 @@ class TestQualificationPipelineWiring:
         assert template.count("runtimeTarget: 'python314'") == 1
         assert template.count("pythonVersion: '3.13'") == 1
         assert template.count("pythonVersion: '3.14'") == 1
+        assert "constraintsFile:" not in template
+        assert "--constraints-file" not in template
+        assert (
+            template.count(
+                "--requirements-export eng/constraints/aca-fixture-requirements.txt"
+            )
+            == 1
+        )
 
     def test_each_leg_runs_the_combined_suite_with_provisioning_concurrency_one(
         self,
