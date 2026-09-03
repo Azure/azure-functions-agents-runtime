@@ -75,9 +75,9 @@ No resources have been provisioned by this child session yet.
 | Attempted AIServices | `aishybspk0902w2` | West US 2 | APIM MI granted model user | Account exists; deployments entitlement-blocked |
 | Azure OpenAI | `larohra-openai-project-resource` in `larohra-operations-agent-3p-rg` | West US | APIM `Cognitive Services OpenAI User` | Existing account selected after entitlement failure |
 | Model deployment | `gpt-4.1-mini` version `2025-04-14`, capacity 250 | West US | N/A | Existing deployment selected |
-| Positive MI test resource | Pending | Pending | Sandbox UAMI narrow role | Not provisioned |
-| Negative MI test resource | Pending | Pending | No Sandbox UAMI role | Not provisioned |
-| Read-only MCP backend | Pending | Pending | APIM-facing only | Not provisioned |
+| Positive MI test resource | `aishybspk0902w2` AIServices account | West US 2 | Sandbox UAMI Reader on this resource only | ARM GET returned 200 from sandbox |
+| Negative MI test resource | `sthybspk0902w2` storage account | West US 2 | No Sandbox UAMI grant | ARM GET returned 403 from sandbox |
+| Read-only MCP backend | Microsoft Learn MCP (`https://learn.microsoft.com/api/mcp`) | Global | APIM-facing only | Discovery returned three documentation tools |
 
 ## Authentication and policy record
 
@@ -115,6 +115,10 @@ No resources have been provisioned by this child session yet.
 | 2026-09-02 22:22 | Completed the isolated APIM MCP lane. | MCP initialize protocol `2025-06-18` returned HTTP 200 `text/event-stream`, a session ID, and tools/resources capability in 820.4 ms. Policy rate-limits 120/min, forwards unbuffered, and logs W3C telemetry with zero body bytes. | Configure `AZURE_FUNCTIONS_AGENTS_APIM_MCP_URL=https://larohra-ai-gateway.azure-api.net/hybrid-sandbox-spike-mcp` and the same isolated subscription key. |
 | 2026-09-02 22:25 | Proved Sandbox Group workload managed identity end to end. | The default Ubuntu disk exposed the identity endpoint/header. Raw endpoint token acquisition worked under Deny+Full with only `management.azure.com` allowed; no runtime package install was needed. Granted AIServices ARM GET returned 200 and ungranted storage ARM GET returned 403. | Vendor dependencies with the app package; use raw identity endpoint for this focused test and never install packages at runtime. |
 | 2026-09-02 22:27 | Ran preliminary paired direct/APIM model control. | After one warmup, five direct calls had p50 1203.9 ms/p95 1298.5; isolated APIM calls had p50 1174.9 ms/p95 1241.3. The -28.9 ms p50 delta is noise-dominated, not evidence of negative overhead. | Mark preliminary; final report needs more paired samples plus APIM `TotalTime`/`BackendTime`. |
+| 2026-09-02 22:31 | Probed the selected public `python-3.13` sandbox disk. | Running in 2989.5 ms; Python 3.13.15 at `/opt/python/3/bin/python`, Linux x86_64/glibc 2.36; verified deletion in 5895.9 ms. | Use this disk for the executor and compare full package/readiness latency. |
+| 2026-09-02 22:34 | Reproduced MAF MCP discovery using the branch dependency shape. | MAF core 1.3.0 plus MCP 1.29.1 connected through APIM in 3260.7 ms and returned three Learn tools when both authenticated `http_client` and `header_provider` were supplied. Header-provider-only initialization returned 401. | Preserve the repository discovery wiring; do not downgrade MCP based on the earlier unconstrained environment. |
+| 2026-09-02 22:36 | Generated correlated APIM model and MCP traffic. | Operation `4b0136a316734401b40ecb411296231d` completed both lanes. Temporary service diagnostic exports only GatewayLogs and AllMetrics; LLM/MCP content logs remain disabled. | Use this operation only to validate body-blind gateway correlation and the later TotalTime/BackendTime join. |
+| 2026-09-02 22:41 | Assembled the exact Flex remote-build input from commit `fa101f3`. | Existing qualification assembly produced the local runtime wheel plus pinned Python 3.13 dependency closure; wheel inspection confirmed the hybrid controller and executor modules are present. | Deploy the staged fixture, then run bounded qualification. |
 
 ## Measurement record
 
@@ -132,9 +136,11 @@ request/tool content.
 | Direct Sandbox Group baseline | 1 | create 3524.7 ms | N/A | N/A | N/A | 0 | Complete; delete 5085.3 ms |
 | Sandbox MI positive/negative | 1 | create 2318.9 ms | N/A | N/A | N/A | N/A | Complete; delete 6851.4 ms, no leak |
 | Sandbox identity-env probe | 1 | create 2881.6 ms | N/A | N/A | N/A | N/A | Complete; delete 5772.5 ms |
+| Python 3.13 disk probe | 1 | create 2989.5 ms | N/A | N/A | N/A | 0 | Complete; delete 5895.9 ms |
 | APIM nonstream baseline | 1 | 1966.7 ms | N/A | N/A | N/A | 0 | N/A |
 | APIM stream baseline | 1 | first event 794.1 ms | N/A | N/A | total 1730.8 ms | 0 | N/A |
 | APIM MCP initialize baseline | 1 | 820.4 ms | N/A | N/A | N/A | 0 | N/A |
+| MAF 1.3.0 + MCP 1.29.1 through APIM | 1 | connect 3260.7 ms | N/A | N/A | N/A | 0 | Session close returned nonfatal 404 |
 | Direct-model control, preliminary paired n=5 | 1 | 1203.9 ms | 1298.5 ms | Not meaningful | N/A | 0 | N/A |
 | APIM-model control, preliminary paired n=5 | 1 | 1174.9 ms | 1241.3 ms | Not meaningful | N/A | 0 | N/A |
 
@@ -160,20 +166,24 @@ the final run.
   `SpecialFeatureOrQuotaIdRequired` even though catalog and quota APIs showed
   capacity. The spike uses an existing gpt-4.1-mini deployment through its own
   APIM API instead.
+- The initial separate MCP environment suggested MCP 1.24.0 was necessary.
+  Reproduction against this branch showed the actual requirement was to pass
+  both the authenticated HTTP client and header provider; MCP 1.29.1 then
+  discovered all three Learn tools. Learn MCP still returns a nonfatal 404 when
+  MAF attempts session termination after successful discovery.
 
 ## Cleanup
 
-Exact generated names will be substituted after provisioning. The final
-operator sequence will first disable/stop the Function App, run the sandbox
-reaper and verify no spike-labeled sandboxes remain, then delete the isolated
-resource group:
+The operator sequence first disables the Function App, runs the bounded
+spike-label reaper and verifies no spike-labeled sandboxes remain, then removes
+only the isolated shared-APIM surfaces before deleting the spike resource group:
 
 ```powershell
-az functionapp stop --resource-group larohra-test-adc-tools-hosted-skill --name <function-app>
-uv run python eng\scripts\reap_hybrid_spike_sandboxes.py --resource-group larohra-test-adc-tools-hosted-skill --sandbox-group <sandbox-group> --confirm
-az apim api delete --resource-group larohra-operations-agent-3p-rg --service-name larohra-ai-gateway --api-id <hybrid-model-api-id> --yes
-az apim api delete --resource-group larohra-operations-agent-3p-rg --service-name larohra-ai-gateway --api-id <hybrid-mcp-api-id> --yes
-az apim product delete --resource-group larohra-operations-agent-3p-rg --service-name larohra-ai-gateway --product-id <hybrid-product-id> --delete-subscriptions true --yes
+az functionapp stop --resource-group larohra-test-adc-tools-hosted-skill --name func-hybrid-sbx-0902
+uv run python eng\scripts\reap_hybrid_spike_sandboxes.py --sandbox-group-resource-id "/subscriptions/2ac40cf6-193e-4a44-a55b-d7a17bdd5aee/resourceGroups/larohra-test-adc-tools-hosted-skill/providers/Microsoft.App/sandboxGroups/sbg-hybrid-tools-0902" --region westus2 --minimum-age-seconds 1 --confirm delete-hybrid-spike-sandboxes
+az apim api delete --resource-group larohra-operations-agent-3p-rg --service-name larohra-ai-gateway --api-id hybrid-sandbox-spike-model --yes
+az apim api delete --resource-group larohra-operations-agent-3p-rg --service-name larohra-ai-gateway --api-id hybrid-sandbox-spike-mcp --yes
+az apim product delete --resource-group larohra-operations-agent-3p-rg --service-name larohra-ai-gateway --product-id hybrid-sandbox-spike --delete-subscriptions true --yes
 az group delete --name larohra-test-adc-tools-hosted-skill --subscription 2ac40cf6-193e-4a44-a55b-d7a17bdd5aee --yes --no-wait
 ```
 

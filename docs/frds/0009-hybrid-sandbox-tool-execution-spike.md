@@ -269,18 +269,18 @@ be removed or redesigned without deprecation.
 
 ## 6. Test plan
 
-- [ ] Unit: strict config, manifest, request/result, duplicate-key, deadline,
+- [x] Unit: strict config, manifest, request/result, duplicate-key, deadline,
   envelope cap, idempotency, and path-boundary validation.
-- [ ] Unit: worker discovery never imports customer modules while hybrid mode
+- [x] Unit: worker discovery never imports customer modules while hybrid mode
   is enabled; normal mode remains unchanged.
-- [ ] Unit: middleware routes exact local provenance, calls next for remote MCP,
+- [x] Unit: middleware routes exact local provenance, calls next for remote MCP,
   rejects unknown local executable tools, and stubs fail without middleware.
 - [ ] Unit: one lease per top-level nonstreaming/streaming invocation, shared
   sequential and queued parallel local calls, with cleanup on success, timeout,
   cancellation, disconnect, discovery/start failure, and delete failure.
-- [ ] Unit: orphan selection/reaping uses bounded age and non-sensitive labels.
+- [x] Unit: orphan selection/reaping uses bounded age and non-sensitive labels.
 - [ ] Unit: low-cardinality metric attributes and complete timing projection.
-- [ ] Local integration: sandbox executor custom Python plus shell/file/search,
+- [x] Local integration: sandbox executor custom Python plus shell/file/search,
   idempotency, caps, timeout, and queue serialization against a fake transport.
 - [ ] Live: custom tool; sequential shared sandbox; parallel queued calls;
   shell/file/search; allowed/blocked egress; workload MI allowed/denied; MCP
@@ -293,15 +293,15 @@ be removed or redesigned without deprecation.
 
 ## 7. Docs impact
 
-- [ ] `docs/architecture.md` - mark the private hybrid execution path, module
+- [x] `docs/architecture.md` - mark the private hybrid execution path, module
   boundaries, lifecycle, provenance, and telemetry.
-- [ ] `docs/decisions/0009-hybrid-sandbox-tool-execution-spike.md` - durable
+- [x] `docs/decisions/0009-hybrid-sandbox-tool-execution-spike.md` - durable
   experiment/resource/auth/failure/measurement/cleanup record.
-- [ ] `docs/frds/README.md` - index FRD 0009.
-- [ ] `samples/hybrid-sandbox-apim-spike/README.md` - deploy, operate,
+- [x] `docs/frds/README.md` - index FRD 0009.
+- [x] `samples/hybrid-sandbox-apim-spike/README.md` - deploy, operate,
   benchmark, inspect telemetry, and clean up the sample.
-- [ ] `README.md` - no public quickstart change; the surface remains private.
-- [ ] `docs/front-matter-spec.md`, `docs/triggers.md` - no change; no public
+- [x] `README.md` - no public quickstart change; the surface remains private.
+- [x] `docs/front-matter-spec.md`, `docs/triggers.md` - no change; no public
   schema or trigger surface changes.
 
 ## 8. Status & sign-off

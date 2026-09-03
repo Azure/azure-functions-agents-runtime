@@ -25,6 +25,8 @@ flowchart LR
     J["client_manager.py<br/>ClientManager"] -.->|"chat client"| K["runner.py<br/>run_agent<br/>run_agent_stream<br/>build_subagent_tools"]
     H -.->|"handler closures + AgentCatalog"| K
     K -.->|"prompt + tools + session"| L["Microsoft Agent Framework"]
+    K -.->|"private hybrid gate: one invocation lease"| M["experimental/hybrid_tools.py<br/>ACA Sandbox local tools"]
+    L -.->|"model + remote MCP only"| N["APIM"]
 ```
 
 Read left to right: files on disk become typed config, typed config becomes a `ResolvedAgent`, the app-wide session runtime is validated before registration, and each resolved agent is registered as Azure Functions bindings plus optional built-in endpoints. The identity-index and catalog nodes exist for multi-agent delegation (FRD 0007, Section 5 below): every agent's slug and capabilities are indexed and frozen *before* `H` mutates the `FunctionApp`, so chat-time and workflow subagent grants can resolve any specialist regardless of file order.
@@ -48,6 +50,14 @@ A few boundaries are worth calling out explicitly:
   It is separate from the controller identity and should be dedicated and least-privileged.
   Protected IaC or operations verifies model-only, no-state/no-group RBAC; the CI smoke verifies
   one attached UAMI and positive model access, not absence of every role assignment.
+- **Hybrid tool execution is a private spike.** When its explicit environment gate is present,
+  `execution/aca_composition.py` skips worker-side customer-tool and executable-skill discovery.
+  At request time `experimental/hybrid_tools.py` creates one fresh ACA Sandbox, packages the
+  application without importing customer code, discovers tools in the sandbox, and gives MAF
+  fail-closed worker stubs. Exact stub identities route through middleware to the sandbox; lazy
+  MCP functions call next and remain in the worker. The lease drains and deletes at the end of
+  both streaming and non-streaming top-level runs. This path is distinct from the conversation-
+  scoped `AcaSandboxExecutionBackend` and adds no public authoring surface.
 
 ## 3. Module map
 
@@ -95,6 +105,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/conformance/*` | Defines trace schema, normalization, semantic comparison, and capability coverage for runtime-produced harness traces. | `parse_trace()`, `semantic_diff()`, `validate_capability_coverage()` |
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming; builds per-request `delegate_<slug>` tools and fresh stateless workflow leaf agents. Its shared structured event stream is rendered as HTTP SSE or written by the sandbox journal, and each actual MAF invocation attempts one internal token-usage record through the shared runtime logger. | `run_agent()`, `run_agent_stream()`, `run_agent_events()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
+| `azure_functions_agents/experimental/hybrid_{config,tools,protocol,executor,apim,observability,reaper}.py` | Private FRD 0009 spike: validates the opt-in boundary, acquires one fresh ACA Sandbox per top-level run, delivers the deterministic package and stdlib executor, discovers customer tools only in the sandbox, routes exact runtime-owned MAF stubs through strict file journals, sends model traffic through APIM, and reaps crash orphans. Generic shell/file/search uses the same protocol; remote MCP remains worker-side. | `open_hybrid_invocation()`, `InvocationSandboxLease`, `HybridToolMiddleware`, `run_executor()`, `build_hybrid_chat_client()`, `reap_hybrid_orphans()` |
 | `azure_functions_agents/workflows/*` | Experimental Dynamic Workflow runtime: Durable orchestration registration, workflow tool and Sub Agent execution, immutable owner policy, plan validation/schema, session ownership, and workflow-management tools. | `register_workflows()`, `build_workflow_integration()`, `WorkflowPlanPolicy` |
 | `azure_functions_agents/_function_tool.py` | Thin local shim around MAF `FunctionTool` creation so project tools can use `@tool`, plus `@workflow_tool` metadata for Dynamic Workflow Activity targets. | `tool()`, `workflow_tool()` |
 | `azure_functions_agents/_logger.py` | Shared package logger used across discovery, registration, and runtime code. | `logger` |
@@ -111,6 +122,7 @@ A few boundaries are worth calling out explicitly:
 - `transport/` answers **"how can the ACA execution backend operate one live sandbox safely?"** — it exposes exactly six direct file operations plus separate process control, validates the customer-owned group and a live manifest binding, and keeps the optional preview SDK confined to `transport/aca_sdk.py`. It is not an execution backend.
 - `controller/` answers **"how does the controller get this session's code onto that sandbox, and how does it know the harness is really running it?"** — it captures a deterministic content archive, delivers it plus bootstrap material through `transport/`'s file port, and reads back the harness-published live manifest. It is invoked lazily at ACA request/lifecycle time, never during registration.
 - `runner.py` and `client_manager.py` answer **"once invoked, how does an agent call the model and its tools — including any specialist it delegates to?"**
+- `experimental/hybrid_*` answers the private spike question **"how can the worker keep the MAF loop while every local executable tool runs in one fresh invocation sandbox and model/MCP traffic stays behind APIM?"**
 - `_observability.py` (cross-cutting) answers **"what did the run do, and is a failure the app's, runtime's, platform's, or a delegated specialist's fault?"**
 
 ### Typical startup trace
@@ -487,7 +499,7 @@ This design keeps global config declarative: shared config says what exists, whi
 - **Built-in endpoints:** endpoint registration is a separate module so the trigger-registration path stays focused on Azure Function bindings rather than UI and chat surface concerns.
 - **Multi-agent delegation:** `subagents:` is itself an extension point of sorts — it lets an agent's own front matter opt other, already-registered agents into its tool set without any code changes. See Section 5.
 - **Internal token usage log:** `runner.py` writes a best-effort `Agent token usage: {json}` INFO record with exactly `event_name`, `agent_name`, `execution_role`, `provider`, `model`, `model_publisher`, `input_tokens`, and `output_tokens`; unavailable values are null, and logging does not affect agent responses or configuration.
-- **Observability:** telemetry is a cross-cutting concern rather than a pipeline stage. `_observability.py` is bootstrapped once from `create_function_app()`, and spans are emitted where the work happens — `registration/_handlers.py` (the `agent.run` parent span), `system_tools/sandbox.py` (the `dynamic_session.execute` span), `system_tools/web_request.py` (the `web_request` span, attributed by host only — never the full URL with query string or secrets), and `runner.py`'s delegate adapter (the `af.delegate.*` attributes layered onto MAF's own nested `execute_tool delegate_<slug>` / `invoke_agent` spans). It intentionally holds the only Azure-Monitor/ACA-aware calls outside registration, because exporting telemetry and correlating an execution are *observing* the pipeline, not wiring agents into it. Attributes use the `af.` prefix, and content is gated behind `ENABLE_SENSITIVE_DATA` (default off).
+- **Observability:** telemetry is a cross-cutting concern rather than a pipeline stage. `_observability.py` is bootstrapped once from `create_function_app()`, and spans are emitted where the work happens — `registration/_handlers.py` (the `agent.run` parent span), `system_tools/sandbox.py` (the `dynamic_session.execute` span), `system_tools/web_request.py` (the `web_request` span, attributed by host only — never the full URL with query string or secrets), `runner.py`'s delegate adapter (the `af.delegate.*` attributes layered onto MAF's own nested `execute_tool delegate_<slug>` / `invoke_agent` spans), and the private `experimental/hybrid_*` path (low-cardinality sandbox/model/tool timing and cleanup metrics). It intentionally holds the only Azure-Monitor/ACA-aware calls outside registration, because exporting telemetry and correlating an execution are *observing* the pipeline, not wiring agents into it. Attributes use the `af.` prefix, and content is gated behind `ENABLE_SENSITIVE_DATA` (default off).
 
 ## 8. Related docs
 
