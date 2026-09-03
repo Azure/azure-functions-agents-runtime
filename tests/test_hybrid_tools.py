@@ -25,9 +25,15 @@ from azure_functions_agents.experimental.hybrid_protocol import (
 )
 from azure_functions_agents.experimental.hybrid_reaper import hybrid_app_hash
 from azure_functions_agents.experimental.hybrid_tools import (
+    _POST_RUN_DELETE_TIMEOUT_SECONDS,
+    _ROLLBACK_DELETE_ATTEMPTS,
+    _ROLLBACK_DELETE_TIMEOUT_SECONDS,
     HybridPreparedInvocation,
     HybridToolMiddleware,
     InvocationSandboxLease,
+    _best_effort_delete,
+    _delete_attempt_seconds,
+    _post_run_delete_seconds,
     _provisioning_labels,
     open_hybrid_invocation,
 )
@@ -519,6 +525,108 @@ async def test_delete_failure_uses_provider_fallback_without_raising() -> None:
     assert provider.closed == 1
 
 
+@pytest.mark.asyncio
+async def test_hung_handle_delete_leaves_budget_for_provider_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _HangingDeleteHandle(_Handle):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delete_cancelled = False
+
+        async def delete(self) -> None:
+            self.deleted += 1
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.delete_cancelled = True
+                raise
+
+    recorded: list[HybridMetric] = []
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.record_hybrid_count",
+        lambda metric: recorded.append(metric),
+    )
+    handle = _HangingDeleteHandle()
+    provider = _Provider()
+    lease = InvocationSandboxLease(
+        settings=replace(
+            _settings(),
+            create_timeout_seconds=90,
+            drain_timeout_seconds=0.3,
+        ),
+        operation_id="operation",
+        provider=provider,  # type: ignore[arg-type]
+        handle=handle,  # type: ignore[arg-type]
+        manifest=_manifest(),
+    )
+    started = asyncio.get_running_loop().time()
+
+    await lease.close()
+
+    elapsed = asyncio.get_running_loop().time() - started
+    assert handle.deleted == 1
+    assert handle.delete_cancelled is True
+    assert provider.deleted == ["sandbox"]
+    assert handle.closed == 1
+    assert provider.closed == 1
+    assert HybridMetric.SANDBOX_DELETE_FAILURES not in recorded
+    assert elapsed < _POST_RUN_DELETE_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_rollback_hung_handle_delete_falls_back_within_bounded_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _HangingDeleteHandle(_Handle):
+        async def delete(self) -> None:
+            self.deleted += 1
+            await asyncio.Event().wait()
+
+    recorded: list[HybridMetric] = []
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.record_hybrid_count",
+        lambda metric: recorded.append(metric),
+    )
+    handle = _HangingDeleteHandle()
+    provider = _Provider()
+    started = asyncio.get_running_loop().time()
+
+    await _best_effort_delete(
+        handle,  # type: ignore[arg-type]
+        provider,  # type: ignore[arg-type]
+        timeout_seconds=0.3,
+    )
+
+    elapsed = asyncio.get_running_loop().time() - started
+    assert handle.deleted == 1
+    assert provider.deleted == ["sandbox"]
+    assert HybridMetric.SANDBOX_DELETE_FAILURES not in recorded
+    assert elapsed < 0.3 * _ROLLBACK_DELETE_ATTEMPTS
+
+
+def test_delete_attempt_budget_reserves_a_slice_for_each_remaining_seam() -> None:
+    assert _delete_attempt_seconds(90.0, _ROLLBACK_DELETE_ATTEMPTS) == 30.0
+    assert _delete_attempt_seconds(60.0, 2) == 30.0
+    assert _delete_attempt_seconds(30.0, 1) == 30.0
+    assert (
+        _delete_attempt_seconds(_ROLLBACK_DELETE_TIMEOUT_SECONDS, _ROLLBACK_DELETE_ATTEMPTS)
+        < _ROLLBACK_DELETE_TIMEOUT_SECONDS
+    )
+    assert _delete_attempt_seconds(0.003, _ROLLBACK_DELETE_ATTEMPTS) == pytest.approx(0.05)
+
+
+def test_post_run_delete_budget_follows_drain_window_not_create_timeout() -> None:
+    long_drain = replace(_settings(), create_timeout_seconds=90, drain_timeout_seconds=10)
+    short_drain = replace(_settings(), create_timeout_seconds=90, drain_timeout_seconds=1)
+    tiny_drain = replace(_settings(), create_timeout_seconds=90, drain_timeout_seconds=0.01)
+
+    assert _post_run_delete_seconds(long_drain) == _POST_RUN_DELETE_TIMEOUT_SECONDS
+    assert _post_run_delete_seconds(short_drain) == 1.0
+    assert _post_run_delete_seconds(tiny_drain) == pytest.approx(0.15)
+    assert _post_run_delete_seconds(long_drain) < _ROLLBACK_DELETE_TIMEOUT_SECONDS
+
+
 def test_provisioning_labels_use_stable_app_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -646,6 +754,7 @@ async def test_tool_deadline_failure_increments_failure_metric(
             deadline=asyncio.get_running_loop().time() - 1,
         )
 
+    assert recorded.count(HybridMetric.TOOL_CALLS) == 1
     assert recorded.count(HybridMetric.TOOL_FAILURES) == 1
     await lease.close()
 
@@ -755,7 +864,11 @@ def _exhausted_cleanup_lease() -> tuple[
     handle = _ExhaustedDeleteHandle()
     provider = _ExhaustedDeleteProvider()
     lease = InvocationSandboxLease(
-        settings=replace(_settings(), create_timeout_seconds=0.01),
+        settings=replace(
+            _settings(),
+            create_timeout_seconds=0.01,
+            drain_timeout_seconds=0.05,
+        ),
         operation_id="operation",
         provider=provider,  # type: ignore[arg-type]
         handle=handle,  # type: ignore[arg-type]

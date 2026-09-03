@@ -53,6 +53,13 @@ def _settings() -> HybridSandboxSettings:
     )
 
 
+_APP_HASH = f"a1-{'a' * 52}"
+
+
+def _owned_labels() -> MappingProxyType[str, str]:
+    return MappingProxyType({"owner_kind": "hybrid_spike", "app_hash": _APP_HASH})
+
+
 @pytest.mark.asyncio
 async def test_reaper_deletes_only_expired_labeled_inventory() -> None:
     now = datetime(2026, 9, 2, 22, tzinfo=UTC)
@@ -60,12 +67,12 @@ async def test_reaper_deletes_only_expired_labeled_inventory() -> None:
         (
             SandboxSummary(
                 sandbox_id="old",
-                labels=MappingProxyType({}),
+                labels=_owned_labels(),
                 created_at=(now - timedelta(seconds=1201)).isoformat(),
             ),
             SandboxSummary(
                 sandbox_id="live",
-                labels=MappingProxyType({}),
+                labels=_owned_labels(),
                 created_at=(now - timedelta(seconds=100)).isoformat(),
             ),
         )
@@ -78,12 +85,90 @@ async def test_reaper_deletes_only_expired_labeled_inventory() -> None:
         settings=_settings(),
         provider_factory=provider_factory,
         now=now,
-        app_hash=f"a1-{'a' * 52}",
+        app_hash=_APP_HASH,
     )
 
     assert deleted == 1
     assert provider.deleted == ["old"]
     assert provider.closed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "labels",
+    [
+        MappingProxyType({}),
+        MappingProxyType({"owner_kind": "hybrid_spike"}),
+        MappingProxyType({"app_hash": _APP_HASH}),
+        MappingProxyType({"owner_kind": "other_kind", "app_hash": _APP_HASH}),
+        MappingProxyType({"owner_kind": "hybrid_spike", "app_hash": f"a1-{'b' * 52}"}),
+        MappingProxyType(
+            {"owner_kind": "hybrid_spike ", "app_hash": _APP_HASH}
+        ),
+    ],
+)
+async def test_reaper_skips_expired_inventory_whose_labels_do_not_match(
+    labels: MappingProxyType[str, str],
+) -> None:
+    now = datetime(2026, 9, 2, 22, tzinfo=UTC)
+    provider = _Provider(
+        (
+            SandboxSummary(
+                sandbox_id="unowned",
+                labels=labels,
+                created_at=(now - timedelta(seconds=1201)).isoformat(),
+            ),
+        )
+    )
+
+    async def provider_factory() -> _Provider:
+        return provider
+
+    deleted = await reap_hybrid_orphans(
+        settings=_settings(),
+        provider_factory=provider_factory,
+        now=now,
+        app_hash=_APP_HASH,
+    )
+
+    assert deleted == 0
+    assert provider.deleted == []
+    assert provider.closed is True
+
+
+@pytest.mark.asyncio
+async def test_reaper_deletes_owned_inventory_beside_a_mismatched_neighbor() -> None:
+    now = datetime(2026, 9, 2, 22, tzinfo=UTC)
+    expired = (now - timedelta(seconds=1201)).isoformat()
+    provider = _Provider(
+        (
+            SandboxSummary(
+                sandbox_id="other-app",
+                labels=MappingProxyType(
+                    {"owner_kind": "hybrid_spike", "app_hash": f"a1-{'c' * 52}"}
+                ),
+                created_at=expired,
+            ),
+            SandboxSummary(
+                sandbox_id="owned",
+                labels=_owned_labels(),
+                created_at=expired,
+            ),
+        )
+    )
+
+    async def provider_factory() -> _Provider:
+        return provider
+
+    deleted = await reap_hybrid_orphans(
+        settings=_settings(),
+        provider_factory=provider_factory,
+        now=now,
+        app_hash=_APP_HASH,
+    )
+
+    assert deleted == 1
+    assert provider.deleted == ["owned"]
 
 
 @pytest.mark.asyncio

@@ -50,6 +50,11 @@ async def reap_hybrid_orphans(
             max_items=_MAX_REAPER_ITEMS,
         )
         for sandbox in sandboxes:
+            if not _is_owned(sandbox, resolved_app_hash):
+                logger.warning(
+                    "Hybrid orphan inventory returned an unowned sandbox; skipping it."
+                )
+                continue
             if not _is_expired(sandbox, observed_now, resolved.orphan_age_seconds):
                 continue
             try:
@@ -91,6 +96,14 @@ def _provider_factory(
         return await AcaSandboxAdapter.open(group_resource_id, region=region)
 
     return open_provider
+
+
+def _is_owned(sandbox: SandboxSummary, app_hash: str) -> bool:
+    """Re-check ownership locally instead of trusting the server-side filter."""
+    return (
+        sandbox.labels.get("owner_kind") == HYBRID_OWNER_KIND
+        and sandbox.labels.get("app_hash") == app_hash
+    )
 
 
 def _is_expired(

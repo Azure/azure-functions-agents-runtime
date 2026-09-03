@@ -43,6 +43,9 @@ tool inputs, or tool outputs.
 | 2026-09-02 | Reaper ownership | Label and select with the canonical platform `AppIdentity` hash plus `owner_kind`; never select all hybrid sandboxes in a shared group. |
 | 2026-09-02 | Admission failure | A broken customer tool module rejects the whole invocation. This differs from legacy partial discovery because the sandbox manifest is the executable admission boundary; bounded readiness diagnostics report the terminal exception class without log content. |
 | 2026-09-02 | Package verification | Retain full archive readback for this measured spike. Its weighted package-upload cost was 5.51 s; replace the duplicate transfer with in-sandbox SHA-256 before productionizing. |
+| 2026-09-03 | Deletion budget slicing | Give each bounded deletion attempt only a slice of the remaining budget instead of the whole window, so a hung `handle.delete` cannot starve the independent provider seam. Failed-acquire rollback keeps the 90 s total; completed-run cleanup is bounded by the drain window capped at 5 s so a successful response is never held for rollback-length cleanup. Auto-delete plus the bounded reaper remain the backstop. |
+| 2026-09-03 | Reaper label re-check | Re-verify exact `owner_kind` and `app_hash` on every returned `SandboxSummary` locally and skip mismatches, rather than trusting the server-side list filter as the only ownership gate in a shared Sandbox Group. |
+| 2026-09-03 | Tool call accounting | Count `TOOL_CALLS` before the deadline rejection so every `TOOL_FAILURES` increment has a matching attempted call and the failure ratio stays interpretable. |
 
 ## Architecture review
 
@@ -148,6 +151,7 @@ No resources have been provisioned by this child session yet.
 | 2026-09-03 00:20 | Verified the final deployed state. | Temporary debug and worker OTel settings were absent; six expected Functions were indexed; isolated APIM model and MCP APIs remained active and subscription-protected; typed Sandbox Group inventory was zero. | Spike qualification complete; retain resources until teardown is explicitly requested. |
 | 2026-09-03 00:22 | Removed the temporary service-wide APIM diagnostic after final capture. | Historical GatewayLogs remain in `log-hybrid-sbx-0902`. API-scoped model/MCP Application Insights diagnostics remain active with request and response body capture disabled. | Shared APIM no longer exports unrelated service-wide traffic for this spike. |
 | 2026-09-03 00:42 | Applied final independent-review remediations without Azure load. | Hardened completed-run cleanup, app-scoped reaping, production model fallback, tool failure counts, and streaming benchmark terminal validation. Accepted strict broken-module admission and measured archive readback as spike tradeoffs. | Focused tests cover every remediation; deployed benchmark numbers remain unchanged and resources were not modified. |
+| 2026-09-03 04:55 | Applied three post-qualification re-review fixes without Azure load. | Sliced the bounded deletion budget per attempt so a hung handle seam still leaves budget for the provider seam, bounded completed-run cleanup by the drain window (capped at 5 s) instead of the 90 s rollback window, re-checked exact `owner_kind`/`app_hash` labels locally before every reaper delete, and counted `TOOL_CALLS` before deadline rejection. | Targeted pytest, ruff, and mypy passed locally. No benchmark, deployment, or Azure call was rerun, so the canonical live metrics and results JSON are unchanged. |
 
 ## Measurement record
 
@@ -157,9 +161,11 @@ It contains no prompt, completion, tool payload, credential, key, or customer
 content.
 
 Every live measurement below describes deployed commit `77ef399`. The later
-independent-review remediations were validated only by local gates; no
-benchmark, deployment, or Azure load was rerun, so these canonical numbers are
-unchanged and must not be read as measurements of the remediated source.
+independent-review remediations, including the post-qualification re-review
+fixes to deletion budget slicing, reaper label re-checking, and tool-call
+accounting, were validated only by local gates; no benchmark, deployment, or
+Azure load was rerun, so these canonical numbers are unchanged and must not be
+read as measurements of the remediated source.
 
 | Scenario | N | p50 | p95 | p99 | Throughput | Errors | Cleanup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |

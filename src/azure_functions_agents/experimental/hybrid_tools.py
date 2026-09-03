@@ -86,6 +86,8 @@ _MAX_TOOL_SECONDS = 30.0
 _AUTO_SUSPEND_SECONDS = 900
 _ROLLBACK_DELETE_TIMEOUT_SECONDS = 90.0
 _ROLLBACK_DELETE_ATTEMPTS = 3
+_POST_RUN_DELETE_TIMEOUT_SECONDS = 5.0
+_MIN_DELETE_ATTEMPT_SECONDS = 0.05
 _EXECUTOR_EXCEPTION_TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,127}$")
 
 
@@ -266,8 +268,8 @@ class InvocationSandboxLease(ToolExecutionBackend):
         try:
             async with self._queue_lock:
                 queue_seconds = time.perf_counter() - queued_at
-                remaining = _remaining_tool_seconds(deadline)
                 record_hybrid_count(HybridMetric.TOOL_CALLS)
+                remaining = _remaining_tool_seconds(deadline)
                 transfer_started = time.perf_counter()
                 request = HybridToolInvocationRequest(
                     protocol_version=HYBRID_TOOL_PROTOCOL_VERSION,
@@ -340,7 +342,7 @@ class InvocationSandboxLease(ToolExecutionBackend):
             await _best_effort_delete(
                 self._handle,
                 self._provider,
-                timeout_seconds=self._settings.create_timeout_seconds,
+                timeout_seconds=_post_run_delete_seconds(self._settings),
             )
         except Exception:
             record_hybrid_count(HybridMetric.SANDBOX_DELETE_FAILURES)
@@ -637,10 +639,16 @@ async def _best_effort_delete(
     *,
     timeout_seconds: float = _ROLLBACK_DELETE_TIMEOUT_SECONDS,
 ) -> None:
-    """Boundedly retry deletion through independent handle and provider seams."""
+    """Boundedly retry deletion through independent handle and provider seams.
+
+    Each attempt receives only a slice of the remaining budget so one hung seam
+    cannot consume the whole window. Exhausted retries stay observable and rely
+    on the sandbox auto-delete policy plus the bounded reaper as the backstop.
+    """
     started = time.perf_counter()
     record_hybrid_count(HybridMetric.SANDBOX_DELETES)
-    deadline = asyncio.get_running_loop().time() + min(
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + min(
         timeout_seconds,
         _ROLLBACK_DELETE_TIMEOUT_SECONDS,
     )
@@ -648,16 +656,20 @@ async def _best_effort_delete(
     try:
         sandbox_id = handle.identity.sandbox_id
         for attempt in range(_ROLLBACK_DELETE_ATTEMPTS):
-            remaining = deadline - asyncio.get_running_loop().time()
+            remaining = deadline - loop.time()
             if remaining <= 0:
                 break
+            attempt_seconds = _delete_attempt_seconds(
+                remaining,
+                _ROLLBACK_DELETE_ATTEMPTS - attempt,
+            )
             try:
                 if attempt == 0:
-                    await asyncio.wait_for(handle.delete(), timeout=remaining)
+                    await asyncio.wait_for(handle.delete(), timeout=attempt_seconds)
                 else:
                     await asyncio.wait_for(
                         provider.delete_sandbox(sandbox_id),
-                        timeout=remaining,
+                        timeout=attempt_seconds,
                     )
                 return
             except SandboxNotFoundError:
@@ -665,7 +677,8 @@ async def _best_effort_delete(
             except Exception as exc:
                 error = exc
                 if attempt > 0 and attempt + 1 < _ROLLBACK_DELETE_ATTEMPTS:
-                    await asyncio.sleep(min(0.5 * (attempt + 1), max(0.0, remaining)))
+                    backoff = deadline - loop.time()
+                    await asyncio.sleep(min(0.5 * (attempt + 1), max(0.0, backoff)))
         record_hybrid_count(HybridMetric.SANDBOX_DELETE_FAILURES)
         logger.error(
             "Hybrid sandbox deletion exhausted its bounded retries "
@@ -678,6 +691,21 @@ async def _best_effort_delete(
             await handle.close()
         except Exception:
             logger.warning("Hybrid sandbox handle close failed.", exc_info=True)
+
+
+def _delete_attempt_seconds(remaining: float, attempts_remaining: int) -> float:
+    """Return one bounded slice of the remaining deletion budget."""
+    if attempts_remaining <= 1:
+        return remaining
+    return max(_MIN_DELETE_ATTEMPT_SECONDS, remaining / attempts_remaining)
+
+
+def _post_run_delete_seconds(settings: HybridSandboxSettings) -> float:
+    """Bound completed-run cleanup by the drain window, never the create timeout."""
+    return max(
+        _MIN_DELETE_ATTEMPT_SECONDS * _ROLLBACK_DELETE_ATTEMPTS,
+        min(settings.drain_timeout_seconds, _POST_RUN_DELETE_TIMEOUT_SECONDS),
+    )
 
 
 def _remaining_tool_seconds(deadline: float) -> float:
