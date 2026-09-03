@@ -299,7 +299,14 @@ def get_client_manager() -> ClientManager:
     """
     global _INSTANCE
     if _INSTANCE is None:
-        _INSTANCE = MAFClientManager()
+        from .experimental.hybrid_config import hybrid_enabled
+
+        if hybrid_enabled():
+            from .experimental.hybrid_apim import HybridApimClientManager
+
+            _INSTANCE = HybridApimClientManager.from_environment()
+        else:
+            _INSTANCE = MAFClientManager()
         logger.info("ClientManager initialized: %s", _INSTANCE.name)
     return _INSTANCE
 

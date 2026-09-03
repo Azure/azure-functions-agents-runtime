@@ -1,0 +1,431 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-03T06:27:00Z",
+  "deployment": {
+    "commit": "77ef399c7984db4532999f48230ca8ab9673affe",
+    "function_app": "func-hybrid-sbx-0902",
+    "model": "gpt-4.1-mini",
+    "region": "westus2",
+    "sandbox_disk": "python-3.13",
+    "sandbox_group": "sbg-hybrid-tools-0902"
+  },
+  "end_to_end": {
+    "concurrency_1": {
+      "cleanup_inventory": 0,
+      "concurrency": 1,
+      "error_count": 0,
+      "first_event_ms": {
+        "p50": 19720.69,
+        "p95": 32037.24,
+        "p99": 32037.24
+      },
+      "request_count": 10,
+      "throughput_requests_per_second": 0.047903,
+      "total_ms": {
+        "p50": 19720.69,
+        "p95": 32037.24,
+        "p99": 32037.24
+      },
+      "workload_seconds": 208.7549
+    },
+    "concurrency_10": {
+      "cleanup_inventory": 0,
+      "concurrency": 10,
+      "error_count": 0,
+      "first_event_ms": {
+        "p50": 27559.73,
+        "p95": 32555.02,
+        "p99": 32555.02
+      },
+      "request_count": 10,
+      "throughput_requests_per_second": 0.307089,
+      "total_ms": {
+        "p50": 27559.73,
+        "p95": 32555.02,
+        "p99": 32555.02
+      },
+      "workload_seconds": 32.5638
+    },
+    "throughput_scale_from_c1": 6.41,
+    "p50_latency_increase_percent": 39.7
+  },
+  "benchmark_cold_request": {
+    "http_status": 200,
+    "total_ms": 27705.7
+  },
+  "supplemental_concurrency_1": {
+    "concurrency": 1,
+    "error_count": 0,
+    "request_count": 10,
+    "throughput_requests_per_second": 0.0495695,
+    "total_ms": {
+      "p50": 19233.3,
+      "p95": 28450.5,
+      "p99": 28450.5
+    },
+    "workload_seconds": 201.737
+  },
+  "runtime_metrics_clean_window": {
+    "window_start": "2026-09-03T06:16:56.659Z",
+    "counts": {
+      "model_calls": 42,
+      "requests": 21,
+      "sandbox_creates": 21,
+      "sandbox_deletes": 21,
+      "tool_calls": 21
+    },
+    "duration_ms": {
+      "discovery": {
+        "average": 24.5,
+        "maximum": 58.6,
+        "minimum": 15.4,
+        "p50_approximate": 20,
+        "p95_approximate": 58.6
+      },
+      "executor_ready": {
+        "average": 2145,
+        "maximum": 2323,
+        "minimum": 1914,
+        "p50_approximate": 2122,
+        "p95_approximate": 2323
+      },
+      "model_per_call": {
+        "average": 2182,
+        "maximum": 5879,
+        "minimum": 1316,
+        "p50_approximate": 2141,
+        "p95_approximate": 2589
+      },
+      "package_upload": {
+        "average": 5510,
+        "maximum": 9500,
+        "minimum": 3183,
+        "p50_approximate": 5616,
+        "p95_approximate": 9500
+      },
+      "request": {
+        "average": 20493,
+        "maximum": 24647,
+        "minimum": 17999,
+        "p50_approximate": 20225,
+        "p95_approximate": 24486
+      },
+      "sandbox_create": {
+        "average": 2926,
+        "maximum": 3458,
+        "minimum": 2798,
+        "p50_approximate": 2894,
+        "p95_approximate": 3458
+      },
+      "sandbox_delete": {
+        "average": 3793,
+        "maximum": 6929,
+        "minimum": 924,
+        "p50_approximate": 1792,
+        "p95_approximate": 6655
+      },
+      "tool_execution": {
+        "average": 0.78,
+        "maximum": 1.165,
+        "minimum": 0.595,
+        "p50_approximate": 0.755,
+        "p95_approximate": 1.165
+      },
+      "tool_queue": {
+        "average": 26.4,
+        "maximum": 45,
+        "minimum": 3.62,
+        "p50_approximate": 29.3,
+        "p95_approximate": 45
+      },
+      "tool_transfer": {
+        "average": 191.3,
+        "maximum": 341.2,
+        "minimum": 39.2,
+        "p50_approximate": 183.8,
+        "p95_approximate": 341.2
+      }
+    },
+    "histogram_percentile_note": "OTel percentiles are bucket-average approximations; client and Function request percentiles are authoritative.",
+    "request_failures": 0,
+    "tokens": {
+      "completion_average": 32.21,
+      "completion_total": 1353,
+      "prompt_average": 1119.95,
+      "prompt_cached_average": 1002.67,
+      "prompt_cached_total": 42112,
+      "prompt_total": 47038,
+      "total_average": 1152.17,
+      "total_tokens": 48391
+    }
+  },
+  "function_requests_clean_window": {
+    "error_count": 0,
+    "maximum_ms": 28972.6,
+    "minimum_ms": 18005.4,
+    "p50_ms": 22982.3,
+    "p95_ms": 28607.9,
+    "p99_ms": 28972.6,
+    "request_count": 21
+  },
+  "apim_gateway_clean_window": {
+    "model": {
+      "backend_ms": {
+        "p50": 1745,
+        "p95": 2286,
+        "p99": 5846
+      },
+      "error_count": 0,
+      "gateway_overhead_ms": {
+        "p50": 2,
+        "p95": 3,
+        "p99": 3
+      },
+      "request_count": 42,
+      "total_ms": {
+        "p50": 1746,
+        "p95": 2288,
+        "p99": 5848
+      }
+    },
+    "window_start": "2026-09-03T06:16:56.659Z"
+  },
+  "diagnostic_runtime_metrics_since_2026_09_03_06_00_utc": {
+    "counts": {
+      "model_calls": 64,
+      "requests": 32,
+      "sandbox_creates": 32,
+      "sandbox_deletes": 32,
+      "tool_calls": 33
+    },
+    "duration_ms": {
+      "discovery": {
+        "p50": 20,
+        "p95": 89,
+        "p99": 485
+      },
+      "executor_ready": {
+        "p50": 2195,
+        "p95": 6873,
+        "p99": 8857
+      },
+      "model": {
+        "p50": 5235,
+        "p95": 12577,
+        "p99": 13954
+      },
+      "package_upload": {
+        "p50": 8649,
+        "p95": 16056,
+        "p99": 20157
+      },
+      "request": {
+        "p50": 23569,
+        "p95": 58075,
+        "p99": 75171
+      },
+      "sandbox_create": {
+        "p50": 3079,
+        "p95": 11948,
+        "p99": 11948
+      },
+      "sandbox_delete": {
+        "p50": 1316,
+        "p95": 14381,
+        "p99": 15280
+      },
+      "tool_execution": {
+        "p50": 1.25,
+        "p95": 3.75,
+        "p99": 4042
+      },
+      "tool_queue": {
+        "p50": 42,
+        "p95": 120,
+        "p99": 2121
+      },
+      "tool_transfer": {
+        "p50": 391,
+        "p95": 925,
+        "p99": 4249
+      }
+    },
+    "failure_count_emitted": 0,
+    "tokens": {
+      "completion_average": 31,
+      "completion_total": 1982,
+      "prompt_average": 1118.9,
+      "prompt_cached_average": 984,
+      "prompt_cached_total": 62976,
+      "prompt_total": 71608,
+      "total_average": 1149.8,
+      "total_tokens": 73590
+    }
+  },
+  "diagnostic_apim_gateway_since_2026_09_03_06_00_utc": {
+    "mcp": {
+      "backend_ms": {
+        "p50": 33,
+        "p95": 80,
+        "p99": 236
+      },
+      "gateway_overhead_ms": {
+        "p50": 1,
+        "p95": 2,
+        "p99": 3
+      },
+      "protocol_error_responses": 28,
+      "request_count": 84,
+      "total_ms": {
+        "p50": 34,
+        "p95": 81,
+        "p99": 238
+      }
+    },
+    "model": {
+      "backend_ms": {
+        "p50": 1803,
+        "p95": 3882,
+        "p99": 5326
+      },
+      "error_count": 0,
+      "gateway_overhead_ms": {
+        "p50": 2,
+        "p95": 2,
+        "p99": 7
+      },
+      "request_count": 64,
+      "total_ms": {
+        "p50": 1804,
+        "p95": 3884,
+        "p99": 5328
+      }
+    }
+  },
+  "qualification": {
+    "custom_tool": {
+      "cleanup_inventory": 0,
+      "http_status": 200,
+      "total_ms": 20947.4
+    },
+    "egress_positive_negative": {
+      "allowed_status": 200,
+      "blocked_status": 403,
+      "cleanup_inventory": 0,
+      "http_status": 200,
+      "total_ms": 30841.3
+    },
+    "managed_identity_positive_negative": {
+      "allowed_status": 200,
+      "blocked_status": 403,
+      "http_status": 200,
+      "total_ms": 22459.9
+    },
+    "mcp_through_apim": {
+      "cleanup_inventory": 0,
+      "http_status": 200,
+      "total_ms": 28020.5
+    },
+    "orphan_reaper": {
+      "created": 1,
+      "create_ms": 6306,
+      "deleted": 1,
+      "final_inventory": 0,
+      "reaper_ms": 8475
+    },
+    "parallel_same_sandbox_tools": {
+      "http_status": 200,
+      "tool_call_count": 2,
+      "total_ms": 31103
+    },
+    "sequential_same_sandbox_tools": {
+      "cleanup_inventory": 0,
+      "http_status": 200,
+      "total_ms": 18399.4
+    },
+    "shell_environment": {
+      "exit_code": 0,
+      "http_status": 200,
+      "python_version": "3.13.15",
+      "total_ms": 30499.8
+    },
+    "stream_disconnect": {
+      "cleanup_inventory_after_seconds": 45,
+      "client_disconnect_ms": 21337.8,
+      "final_inventory": 0,
+      "observed_tool_start": true
+    },
+    "stream_normal": {
+      "first_event_ms": 10072.2,
+      "http_status": 200,
+      "total_ms": 20104
+    },
+    "tool_timeout": {
+      "cleanup_inventory": 0,
+      "fail_closed": true,
+      "http_status": 200,
+      "total_ms": 30326.7
+    }
+  },
+  "preliminary_direct_vs_apim_control": {
+    "apim_ms": [
+      1226.2,
+      1241.3,
+      665.7,
+      1174.9,
+      1137.5
+    ],
+    "apim_p50_ms": 1174.9,
+    "apim_p95_ms": 1241.3,
+    "direct_ms": [
+      1298.5,
+      1203.9,
+      1123.3,
+      1216.7,
+      1168.6
+    ],
+    "direct_p50_ms": 1203.9,
+    "direct_p95_ms": 1298.5,
+    "interpretation": "noise-dominated; no measurable APIM penalty at n=5",
+    "p50_delta_ms": -28.9
+  },
+  "post_qualification_review": {
+    "accepted_spike_tradeoffs": {
+      "archive_readback": {
+        "future_optimization": "in-sandbox SHA-256 verification",
+        "measured_package_upload_average_ms": 5510,
+        "status": "retained measured integrity and latency cost"
+      },
+      "broken_customer_module": {
+        "behavior": "reject entire invocation before exact manifest admission",
+        "status": "intentional isolation behavior"
+      }
+    },
+    "azure_load_rerun": false,
+    "cleanup_command_requires_app_hash": true,
+    "deletion_budget_basis": {
+      "clean_window_sandbox_delete_average_ms": 3793,
+      "clean_window_sandbox_delete_maximum_ms": 6929,
+      "diagnostic_sandbox_delete_maximum_ms": 15280,
+      "diagnostic_sandbox_delete_p95_ms": 14381,
+      "live_reaper_delete_ms": 8475,
+      "post_run_attempts": 3,
+      "post_run_first_attempt_seconds": 8,
+      "post_run_minimum_attempt_seconds": 4,
+      "post_run_total_seconds": 24,
+      "rollback_total_seconds": 90,
+      "source": "runtime_metrics_clean_window and diagnostic_runtime_metrics_since_2026_09_03_06_00_utc; no new measurement was taken",
+      "transport_poll_interval_seconds": 3
+    },
+    "metrics_describe_deployed_commit": "77ef399c7984db4532999f48230ca8ab9673affe",
+    "remediations": [
+      "completed-run deletion is bounded best effort and cannot replace completed output",
+      "completed-run deletion budget is 24 s across three seam attempts (8 s first slice) sized from the recorded sandbox_delete range, not the drain window",
+      "reaper provisioning and selection use stable app identity plus owner kind",
+      "production APIM model resolution honors AZURE_FUNCTIONS_AGENTS_MODEL",
+      "tool deadline, transport, protocol, and returned errors increment failure metrics",
+      "stream benchmark requires a done event and rejects error or missing terminals"
+    ]
+  },
+  "resources_retained": true
+}
