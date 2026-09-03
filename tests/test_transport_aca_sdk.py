@@ -1186,6 +1186,26 @@ async def test_adapter_projects_complete_lifecycle_policy_without_group_readback
 
 
 @pytest.mark.asyncio
+async def test_handle_request_delete_starts_lro_without_awaiting_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(
+        _GROUP_ID, region="westus2", persisted_group=_binding()
+    )
+    handle = await adapter.create(_request(), persisted_group=_binding())
+    sdk_handle = environment.sandboxes[handle.identity.sandbox_id]
+
+    await handle.request_delete()
+
+    assert [call.operation for call in sdk_handle.calls][-1] == "delete"
+    assert sdk_handle.deleted is False
+    await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("enabled", "delete_interval_seconds"),
     ((False, 90_300), (True, None)),

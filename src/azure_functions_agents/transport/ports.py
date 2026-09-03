@@ -77,6 +77,9 @@ class SandboxSessionHandle(SandboxFileTransport, SandboxProcessTransport, Protoc
     async def delete(self) -> None:
         """Delete this individual sandbox."""
 
+    async def request_delete(self) -> None:
+        """Request deletion without waiting for provider-side completion."""
+
     async def get_lifecycle_policy(self) -> SandboxLifecyclePolicy:
         """Read the complete per-sandbox lifecycle policy."""
 

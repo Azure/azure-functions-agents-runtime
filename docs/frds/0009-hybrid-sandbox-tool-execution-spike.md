@@ -4,7 +4,7 @@ title: Hybrid ACA Sandbox tool execution spike
 status: Finalized
 author: larohra
 created: 2026-09-02
-updated: 2026-09-02
+updated: 2026-09-03
 issues: []
 pull_requests: []
 branch: larohra/hybrid-sandbox-apim-spike
@@ -51,7 +51,8 @@ normal, timeout, cancellation, disconnect, and worker-crash cases.
 - Acquire exactly one fresh ACA Sandbox per top-level MAF invocation and share
   it across that invocation's local tool calls only.
 - Package application content deterministically with `controller/package.py`,
-  then discover/import customer tools only inside the sandbox.
+  verify its existing SHA-256 digest inside the sandbox without archive
+  readback, then discover/import customer tools only inside the sandbox.
 - Build worker-side inert executable stubs from the exact sandbox manifest and
   route them through MAF `FunctionMiddleware` to a narrow
   `ToolExecutionBackend`.
@@ -60,10 +61,12 @@ normal, timeout, cancellation, disconnect, and worker-crash cases.
 - Enforce bounded request/result envelopes, idempotent `call_id`, deadlines,
   output/size caps, serialized initial calls with measured queue wait, and
   explicit stdout/stderr/exit-code/timing results.
-- Delete the sandbox after admissions stop and active calls boundedly drain;
-  reap invocation-labeled orphans after worker failure.
+- Hand normal cleanup to a terminal ACA lifecycle policy after admissions stop,
+  active calls boundedly drain, and executor shutdown is marked; explicitly
+  delete when acquisition or lifecycle handoff fails and reap crash orphans.
 - Produce one correlated trace waterfall plus low-cardinality counters and
-  latency histograms, and a machine-readable benchmark report.
+  latency histograms, bounded content-free progress span events for the demo,
+  and a machine-readable benchmark report.
 - Deploy and qualify the sample at concurrency 1 and 10; attempt 25 only after
   stable 10-way evidence and quota review.
 
@@ -78,6 +81,8 @@ normal, timeout, cancellation, disconnect, and worker-crash cases.
   the sandbox.
 - Public sandbox ingress, unrestricted package installation, semantic caching,
   policy retries, or prompt/completion body logging.
+- Functions always-ready configuration; the optimization keeps the existing
+  hosting configuration so measurements isolate runtime changes.
 - General connector authorization when the selected connector requires an
   interactive grant; a harmless read-only remote MCP endpoint is sufficient.
 
@@ -98,7 +103,8 @@ The spike is enabled only when
 `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_SANDBOX_GROUP_RESOURCE_ID`
 contains one existing Sandbox Group ARM resource ID. Related private settings
 configure the APIM model endpoint/model/audience or subscription-key fallback, the
-remote MCP APIM endpoint, bounded timeouts/caps, and the orphan grace period.
+remote MCP APIM endpoint, bounded timeouts/caps, the orphan grace period, and an
+optional app-root-relative hybrid tool bundle directory.
 No `schema.py` or front-matter key changes.
 
 Hybrid startup rejects incompatible surfaces instead of partially enabling
@@ -124,26 +130,62 @@ MAF `Agent` construction:
    Build worker-side `FunctionTool` stubs and a provenance registry from it,
    then construct the MAF `Agent` with `HybridToolMiddleware`.
 
-The lease admits tool calls while the run is live. Closure stops admissions,
-waits a bounded interval for active calls, then performs bounded best-effort
-deletion through the handle and provider seams. Each attempt takes an even
-slice of the time actually remaining, so a hung seam neither starves the other
-seam nor extends the deadline. Completed-run cleanup is sized from recorded
-deletion latency rather than the drain window (24 s across three attempts, an
-8 s first slice) so every attempt outlasts one transport polling cycle, while
-failed-acquire rollback keeps its 90 s window. `NotFound` is success; exhausted
-cleanup is counted and logged but never replaces completed output or appends an
-error after stream completion. Nonstreaming execution wraps agent build plus
-`agent.run` in the lease. Streaming enters the lease before agent construction
-and releases it from the outermost generator
+The lease admits tool calls while the run is live. Creation uses a 3600-second
+auto-suspend interval, beyond the 90-second create bound and 900-second maximum
+invocation. Acquisition must then successfully disable auto-suspend and arm a
+600-second auto-delete backstop before package, model, or tool work begins; a
+failed policy write fails acquisition and triggers bounded explicit deletion.
+This ordering prevents a long model or MCP pause from suspending an admitted
+invocation.
+
+Closure stops admissions, waits a bounded interval for active calls, writes the
+executor shutdown marker, and applies a terminal policy: suspend to Disk after
+300 idle seconds with a 600-second auto-delete backstop. It then requests
+server-side deletion and waits only for initial request acceptance, never for
+the deletion LRO result, before closing the handle and provider. A drain
+timeout, shutdown-marker failure, or lifecycle-policy failure falls back to
+bounded confirmed deletion through the handle and provider seams because the
+backstop is not trustworthy. If delete initiation fails or times out after the
+terminal policy succeeds, the policy remains armed and the lease closes without
+paying the old multi-second deletion wait. Each confirmed-delete attempt takes
+an even slice of the time actually
+remaining, so a hung seam neither starves the other seam nor extends the
+deadline. The fallback uses the measured 24-second completed-run budget;
+failed-acquire rollback keeps its 90-second window because lifecycle setup may
+not be trustworthy yet. `NotFound` is success; exhausted cleanup is counted and
+logged but never replaces completed output or appends an error after stream
+completion. Nonstreaming execution wraps agent build plus `agent.run` in the
+lease. Streaming enters the lease before agent construction and releases it
+from the outermost generator
 `finally`/`__aexit__`, outside `_drive_stream`, so disconnect/`aclose()` and
-`GeneratorExit` reach the same cleanup path. Auto-delete and a timer-based
-label reaper cover worker death. Provisioning and reaping use the same
-platform-derived `AppIdentity` hash plus the hybrid owner kind, so a shared
-Sandbox Group cannot cause one Function App to reap another's sandboxes. Its
-minimum orphan age is strictly greater than the maximum configured top-level
-run timeout plus bounded drain/delete allowance, so it cannot reclaim a live
-invocation by age alone.
+`GeneratorExit` reach the same handoff path. An accepted delete request should
+make normal inventory converge to zero without putting deletion polling on the
+request path, but immediate zero is not the close-time contract. If initiation
+fails, customer code and Disk state remain until lifecycle/reaper cleanup.
+Lifecycle-policy handoff, delete-request acceptance/failure, and confirmed
+deletion have distinct low-cardinality telemetry; initiation is never reported
+as completed deletion. Auto-delete and a timer-based label reaper cover worker
+death. Provisioning and reaping use
+the same platform-derived `AppIdentity` hash plus the hybrid owner kind, so a
+shared Sandbox Group cannot cause one Function App to reap another's sandboxes.
+Its minimum orphan age is strictly greater than the maximum configured
+top-level run timeout plus bounded drain/delete allowance, so it cannot reclaim
+a live invocation by age alone. If the worker dies before terminal handoff, the
+app-scoped reaper remains the primary independent backstop.
+
+Architecture review found the deployed Sandbox Group's original hard
+`maxSandboxCount=25`; retained objects were conservatively treated as consuming
+that capacity, making a lifecycle-only 900-second window bound sustained rate
+near 25/900 = 0.0278 requests/s. The user later approved raising the group to
+100, verified `Succeeded` with its 1800-second default timeout unchanged.
+Headroom is not a substitute for prompt cleanup, and no sustained-load capacity
+claim is made. Any optimized live qualification must start from typed inventory
+zero, account for every cold/smoke/benchmark sandbox within the current group
+bound, wait for eventual zero before another scenario, and retain
+reaper/preflight protection. Before deployment, determine from official API
+documentation or bounded evidence whether stopped objects consume capacity and
+how the 300/600 timers compose; record any remaining ambiguity rather than
+inferring sequential timing.
 
 The lease is acquired only by the two top-level run paths. Nested delegate,
 workflow, and leaf paths never acquire one and are rejected by hybrid startup.
@@ -173,6 +215,29 @@ non-finite numbers, path escape, oversized envelopes, expired calls, and
 unknown tools. Existing result files make duplicate `call_id` retries
 idempotent. Initial execution is serialized by a lease lock; queue wait remains
 observable.
+
+The compatibility packaging path continues to capture the complete app root so
+arbitrary customer imports, local helpers, dependency folders, dynamic imports,
+and package data remain available. The worker writes the archive once and passes
+the existing `CapturedContentPackage` SHA-256 digest to the executor. Before
+extraction, readiness, or manifest publication, the executor hashes `app.zip`
+locally and fails closed on a mismatch. It never transfers the archive back to
+the worker. A smaller artifact is permitted only through an explicit private
+bundle contract that defines dependency and package-data ownership; implicit
+sample-only `tools/` filtering is forbidden.
+
+That private contract is
+`AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_BUNDLE_ROOT`. When absent,
+capture remains rooted at the full Function app. When present, its non-empty
+value must be a relative path with no `..`, must resolve beneath the app root,
+and must name an existing directory; invalid configuration fails closed without
+falling back to full capture. The selected directory becomes the archive root
+and must contain `tools/`, every local helper/module/package and package-data
+resource those tools need, plus any vendored dependency tree such as
+`.python_packages/lib/site-packages`. Existing deterministic capture,
+symlink/path safety, and process caching remain authoritative. The sample opts
+into a deploy-visible `sandbox_bundle/` directory and does not use inclusion
+globs or an opaque prebuilt archive.
 
 Generic tools use a sandbox workspace root. `run_shell` uses a bounded child
 process with captured/capped stdout/stderr. File operations remain beneath the
@@ -228,16 +293,28 @@ key placeholders, or add model/telemetry egress rules.
 
 ### 4.6 Observability and evidence
 
-One trace links request/session, sandbox create, package upload, executor
-startup/readiness, discovery, APIM model calls, tool queue/invoke/transfer, MCP,
-and sandbox delete. W3C context crosses APIM and the file protocol.
+One trace links request/session, sandbox create, package upload and verification,
+executor startup/readiness, discovery, APIM model calls, tool
+queue/invoke/transfer, MCP, and lifecycle handoff or fallback deletion. W3C
+context crosses APIM and the file protocol.
 
 Histograms cover total request, Functions cold start, model/APIM call,
 streaming time-to-first-token, create-to-running, package upload, executor
 readiness, discovery, tool queue/execution/transfer, and deletion. Counters
 cover requests, model calls, tokens, tool calls, MCP calls, sandbox
-creates/deletes/reaped/failures. Metric dimensions are bounded enums only;
-session, operation, call, and sandbox IDs appear only in spans/logs.
+creates/deletes/reaped/failures and lifecycle handoff. Metric dimensions are
+bounded enums only; session, operation, call, and sandbox IDs appear only in
+spans/logs.
+
+The private spike also emits content-free `hybrid.progress` span events for
+`sandbox_create`, `package_upload`, `package_verify`, `executor_ready`,
+`discovery`, `tool_execution`, `cleanup_handoff`, and `cleanup_complete`.
+Attributes are limited to phase, `started|completed|failed|cancelled` status,
+and optional duration milliseconds. They never contain arguments, output,
+manifest bytes, content, credentials, or operation/session/sandbox IDs. The
+existing public chat SSE vocabulary and non-hybrid paths do not change; the
+leadership demo renders these trace events as an Application Insights Workbook
+waterfall.
 
 The stdlib executor does not export spans. Worker-side controller spans project
 its returned monotonic queue/execution/serialization timings into the active
@@ -281,6 +358,14 @@ be removed or redesigned without deprecation.
 | 21 | Broken customer module | Partial discovery / whole-invocation rejection / omit module | Reject the entire invocation when any customer tool module fails sandbox import; exact manifest admission takes priority over legacy partial discovery. | Human + Agent | 2026-09-02 |
 | 22 | Package readback | Length readback / in-sandbox SHA-256 / no verification | Keep full readback for the measured spike despite its 5.51 s weighted upload cost; evaluate in-sandbox SHA-256 before productionizing. | Human + Agent | 2026-09-02 |
 | 23 | Deletion budget sizing | Derive from the drain window / fixed data-backed budget / rollback-length budget | Size completed-run cleanup from recorded delete latency: 24 s total across three seam attempts (8 s first slice, 4 s minimum slice floor) so every seam outlasts the 3 s transport LRO poll interval and covers the recorded 3.793 s average / 6.929 s maximum (diagnostic p95 14.381 s). Failed-acquire rollback keeps 90 s; slices divide only the remaining time and never extend the deadline. | Agent | 2026-09-03 |
+| 24 | Terminal lifecycle handoff | Synchronous delete / platform lifecycle / leak-prone close | After drain and executor shutdown, hand off to Disk suspend at 300 idle seconds plus delete at 600 stopped seconds; disable active auto-suspend and fall back to bounded delete if handoff fails. This removes measured delete latency from successful requests while retaining code/disk for about 15 minutes. | Human | 2026-09-03 |
+| 25 | Archive integrity | Full readback / in-sandbox SHA-256 / no verification | Pass the deterministic package digest to the executor and verify locally before extraction/readiness. Remove full archive readback, expected to save 2.5-3.0 seconds without weakening fail-closed integrity. | Human | 2026-09-03 |
+| 26 | Artifact boundary | Implicit tools-only filter / full compatibility capture / explicit bundle contract | Preserve full app-root capture by default so arbitrary imports, dependencies, and package data work. Only an explicit private bundle contract may opt into a thinner artifact; never infer one from the sample layout. | Human | 2026-09-03 |
+| 27 | Demo lifecycle progress | Public SSE events / content-free span events / logs only | Emit bounded `hybrid.progress` span events and visualize them in App Insights; do not extend public stream types or change non-hybrid behavior. | Human | 2026-09-03 |
+| 28 | Hosting optimization scope | Always ready / runtime-only changes | Explicitly exclude Functions always-ready so later latency comparison isolates hybrid runtime optimizations. | Human | 2026-09-03 |
+| 29 | Private bundle contract | Include globs / opaque ZIP / relative bundle root | Add an optional validated app-root-relative bundle root. Absence preserves full capture; invalid configuration fails closed. The bundle owns tools, helpers, data, and vendored dependencies and reuses deterministic capture safety. | Human | 2026-09-03 |
+| 30 | Capacity-safe terminal cleanup | Lifecycle-only / await delete / initiate delete plus backstops | Refine #24 after live `maxSandboxCount=25` evidence: apply terminal 300/600 policy, request server-side delete without awaiting LRO completion, then close clients. Initiation failure leaves lifecycle/reaper armed; untrusted policy setup still uses confirmed deletion. | Human | 2026-09-03 |
+| 31 | Sandbox Group headroom | Keep 25 / raise to 100 / rely on retention | Raise `maxSandboxCount` from 25 to 100 for bounded optimized qualification, while retaining nonblocking delete plus lifecycle/reaper cleanup and inventory-zero gates. Capacity is headroom, not a cleanup substitute. | Human | 2026-09-03 |
 
 ## 6. Test plan
 
@@ -290,20 +375,26 @@ be removed or redesigned without deprecation.
   is enabled; normal mode remains unchanged.
 - [x] Unit: middleware routes exact local provenance, calls next for remote MCP,
   rejects unknown local executable tools, and stubs fail without middleware.
-- [ ] Unit: one lease per top-level nonstreaming/streaming invocation, shared
-  sequential and queued parallel local calls, with cleanup on success, timeout,
-  cancellation, disconnect, discovery/start failure, and delete failure.
+- [x] Unit: one lease per top-level nonstreaming/streaming invocation, shared
+  sequential and queued parallel local calls, with ordered active/terminal
+  lifecycle policy, nonblocking delete initiation on
+  success/cancellation/disconnect, idempotent close, and confirmed delete
+  fallback on acquisition or untrusted handoff.
 - [x] Unit: orphan selection/reaping uses bounded age and non-sensitive labels.
-- [ ] Unit: low-cardinality metric attributes and complete timing projection.
+- [x] Unit: low-cardinality metric attributes, bounded progress events, and
+  complete timing projection.
 - [x] Local integration: sandbox executor custom Python plus shell/file/search,
   idempotency, caps, timeout, and queue serialization against a fake transport.
+- [ ] Unit/integration: full-root fallback, validated opt-in bundle isolation,
+  hidden/package-data and nested helper imports, app ZIP no-readback, digest
+  success, and mismatch rejection before extraction/readiness/manifest.
 - [ ] Live: custom tool; sequential shared sandbox; parallel queued calls;
   shell/file/search; allowed/blocked egress; workload MI allowed/denied; MCP
   through APIM; streaming disconnect; timeout; cleanup; janitor.
 - [ ] Live benchmark: Functions+sandbox cold, warm Functions+fresh sandbox,
   concurrency 1 and 10, optional 25, direct-model control, APIM timing, and
   machine-readable JSON report.
-- [ ] Gate: targeted tests, `ruff`, `mypy`, then the CI-equivalent pytest gate
+- [x] Gate: targeted tests, `ruff`, `mypy`, then the CI-equivalent pytest gate
   without resource-heavy parallelism.
 
 ## 7. Docs impact
@@ -329,3 +420,15 @@ be removed or redesigned without deprecation.
   boundary, security constraints, E2E matrix, and Azure work on 2026-09-02.
   After the independent review was resolved, this records that direction as
   sign-off for the experimental implementation.
+- **Optimization amendment sign-off:** On 2026-09-03 the user approved terminal
+  lifecycle handoff, in-sandbox package digest verification, a compatibility-safe
+  thin-package investigation, content-free lifecycle progress, and explicit
+  exclusion of Functions always-ready. This records Human sign-off before
+  implementing those slices.
+- **Optimization architecture review:** Independent review completed on
+  2026-09-03. It required capacity-safe nonblocking delete initiation,
+  acquisition-time active-policy ordering, explicit bundle completeness,
+  executor early-failure signaling, distinct upload/verify and cleanup metrics,
+  mechanically bounded progress attributes, and conservative live inventory
+  gates. Decisions 29-30 and sections 4.2-4.6 incorporate the findings; the
+  user's forwarded direction records Human sign-off for the refinements.

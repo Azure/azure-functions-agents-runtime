@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import re
 import shlex
 import time
@@ -51,18 +52,23 @@ from .hybrid_config import (
 )
 from .hybrid_observability import (
     HybridMetric,
+    HybridProgressPhase,
+    HybridProgressStatus,
     record_hybrid_count,
     record_hybrid_duration,
+    record_hybrid_progress,
     record_hybrid_value,
 )
 from .hybrid_protocol import (
     HYBRID_TOOL_MANIFEST_FILENAME,
+    HYBRID_TOOL_PACKAGE_VERIFICATION_FILENAME,
     HYBRID_TOOL_PID_FILENAME,
     HYBRID_TOOL_PROTOCOL_VERSION,
     HYBRID_TOOL_READINESS_FILENAME,
     HYBRID_TOOL_REQUEST_DIRECTORY,
     HYBRID_TOOL_RESULT_DIRECTORY,
     HYBRID_TOOL_SHUTDOWN_FILENAME,
+    HYBRID_TOOL_STARTUP_FAILURE_FILENAME,
     HybridInvocationStatus,
     HybridToolDescriptor,
     HybridToolInvocationRequest,
@@ -83,7 +89,11 @@ _WORKSPACE_PATH = f"{_HYBRID_ROOT}/workspace"
 _EXECUTOR_LOG_PATH = f"{_HYBRID_ROOT}/executor.log"
 _POLL_INTERVAL_SECONDS = 0.1
 _MAX_TOOL_SECONDS = 30.0
-_AUTO_SUSPEND_SECONDS = 900
+_ACTIVE_CREATE_AUTO_SUSPEND_SECONDS = 3600
+_ACTIVE_AUTO_DELETE_SECONDS = 600
+_TERMINAL_AUTO_SUSPEND_SECONDS = 300
+_TERMINAL_AUTO_DELETE_SECONDS = 600
+_DELETE_REQUEST_TIMEOUT_SECONDS = 5.0
 _ROLLBACK_DELETE_TIMEOUT_SECONDS = 90.0
 _ROLLBACK_DELETE_ATTEMPTS = 3
 # Mirrors ``_CONTROL_OPERATION_POLL_INTERVAL_SECONDS`` in ``transport/aca_sdk``;
@@ -197,11 +207,16 @@ class InvocationSandboxLease(ToolExecutionBackend):
         cls,
         settings: HybridSandboxSettings,
         *,
+        maximum_run_seconds: float | None = None,
         provider_factory: Callable[[], Awaitable[SandboxSessionProvider]] | None = None,
         package_factory: Callable[[Path], Awaitable[CapturedContentPackage]] = get_content_package,
     ) -> InvocationSandboxLease:
         """Create, package, start, and discover one invocation sandbox."""
         operation_id = current_operation_id() or uuid.uuid4().hex
+        _validate_active_lifecycle_bound(
+            settings,
+            maximum_run_seconds=maximum_run_seconds,
+        )
         factory = provider_factory or _provider_factory(
             settings.group_resource_id,
             settings.region,
@@ -211,6 +226,10 @@ class InvocationSandboxLease(ToolExecutionBackend):
         try:
             create_started = time.perf_counter()
             record_hybrid_count(HybridMetric.SANDBOX_CREATES)
+            record_hybrid_progress(
+                HybridProgressPhase.SANDBOX_CREATE,
+                HybridProgressStatus.STARTED,
+            )
             labels = _provisioning_labels(operation_id)
             request = _create_request(settings, labels)
             persisted_group = SandboxGroupBinding.create(
@@ -222,9 +241,26 @@ class InvocationSandboxLease(ToolExecutionBackend):
                     provider.create(request, persisted_group=persisted_group),
                     timeout=settings.create_timeout_seconds,
                 )
-            except BaseException:
+            except asyncio.CancelledError:
+                record_hybrid_progress(
+                    HybridProgressPhase.SANDBOX_CREATE,
+                    HybridProgressStatus.CANCELLED,
+                )
                 record_hybrid_count(HybridMetric.SANDBOX_CREATE_FAILURES)
                 raise
+            except BaseException:
+                record_hybrid_progress(
+                    HybridProgressPhase.SANDBOX_CREATE,
+                    HybridProgressStatus.FAILED,
+                )
+                record_hybrid_count(HybridMetric.SANDBOX_CREATE_FAILURES)
+                raise
+            else:
+                record_hybrid_progress(
+                    HybridProgressPhase.SANDBOX_CREATE,
+                    HybridProgressStatus.COMPLETED,
+                    duration_seconds=time.perf_counter() - create_started,
+                )
             finally:
                 record_hybrid_duration(
                     HybridMetric.SANDBOX_CREATE_DURATION,
@@ -232,13 +268,17 @@ class InvocationSandboxLease(ToolExecutionBackend):
                 )
             await handle.set_lifecycle_policy(
                 SandboxLifecyclePolicy.create(
-                    auto_suspend_seconds=_AUTO_SUSPEND_SECONDS,
-                    auto_delete_seconds=settings.auto_delete_seconds,
+                    auto_suspend_seconds=None,
+                    auto_delete_seconds=_ACTIVE_AUTO_DELETE_SECONDS,
                 )
             )
-            package = await package_factory(get_app_root())
+            package = await package_factory(_hybrid_package_root(settings))
             await _deliver_executor(handle, package)
-            manifest = await _start_and_discover(handle, settings.ready_timeout_seconds)
+            manifest = await _start_and_discover(
+                handle,
+                settings.ready_timeout_seconds,
+                package.digest,
+            )
             return cls(
                 settings=settings,
                 operation_id=operation_id,
@@ -271,6 +311,11 @@ class InvocationSandboxLease(ToolExecutionBackend):
                 raise RuntimeError("Hybrid invocation is no longer accepting tool calls.")
             self._active_calls += 1
         queued_at = time.perf_counter()
+        tool_started = queued_at
+        record_hybrid_progress(
+            HybridProgressPhase.TOOL_EXECUTION,
+            HybridProgressStatus.STARTED,
+        )
         try:
             async with self._queue_lock:
                 queue_seconds = time.perf_counter() - queued_at
@@ -313,8 +358,31 @@ class InvocationSandboxLease(ToolExecutionBackend):
                 )
                 if result.status is HybridInvocationStatus.ERROR:
                     record_hybrid_count(HybridMetric.TOOL_FAILURES)
+                    record_hybrid_progress(
+                        HybridProgressPhase.TOOL_EXECUTION,
+                        HybridProgressStatus.FAILED,
+                        duration_seconds=time.perf_counter() - tool_started,
+                    )
+                else:
+                    record_hybrid_progress(
+                        HybridProgressPhase.TOOL_EXECUTION,
+                        HybridProgressStatus.COMPLETED,
+                        duration_seconds=time.perf_counter() - tool_started,
+                    )
                 return result
+        except asyncio.CancelledError:
+            record_hybrid_progress(
+                HybridProgressPhase.TOOL_EXECUTION,
+                HybridProgressStatus.CANCELLED,
+                duration_seconds=time.perf_counter() - tool_started,
+            )
+            raise
         except Exception:
+            record_hybrid_progress(
+                HybridProgressPhase.TOOL_EXECUTION,
+                HybridProgressStatus.FAILED,
+                duration_seconds=time.perf_counter() - tool_started,
+            )
             record_hybrid_count(HybridMetric.TOOL_FAILURES)
             raise
         finally:
@@ -322,11 +390,43 @@ class InvocationSandboxLease(ToolExecutionBackend):
                 self._active_calls -= 1
                 self._active_condition.notify_all()
 
-    async def close(self) -> None:
-        """Stop admissions, boundedly drain, and delete this sandbox."""
+    async def close(self, *, cancelled: bool = False) -> None:
+        """Stop admissions and hand terminal cleanup to ACA without polling delete."""
         if self._closed:
             return
         self._closed = True
+        progress_started = time.perf_counter()
+        record_hybrid_progress(
+            HybridProgressPhase.CLEANUP_HANDOFF,
+            HybridProgressStatus.STARTED,
+        )
+        cleanup_status = (
+            HybridProgressStatus.CANCELLED
+            if cancelled
+            else HybridProgressStatus.COMPLETED
+        )
+        try:
+            handoff_ready = await self._prepare_terminal_handoff()
+            if handoff_ready:
+                handoff_ready = await self._apply_terminal_lifecycle()
+            await self._finish_terminal_cleanup(
+                confirmed_delete_required=not handoff_ready,
+                progress_started=progress_started,
+            )
+        except asyncio.CancelledError:
+            cleanup_status = HybridProgressStatus.CANCELLED
+            raise
+        finally:
+            try:
+                await self._provider.close()
+            except Exception:
+                logger.warning("Hybrid sandbox provider close failed.", exc_info=True)
+            record_hybrid_progress(
+                HybridProgressPhase.CLEANUP_COMPLETE,
+                cleanup_status,
+            )
+
+    async def _prepare_terminal_handoff(self) -> bool:
         async with self._active_condition:
             self._admitting = False
             try:
@@ -335,7 +435,11 @@ class InvocationSandboxLease(ToolExecutionBackend):
                     timeout=self._settings.drain_timeout_seconds,
                 )
             except TimeoutError:
-                logger.warning("Hybrid sandbox drain timed out; deletion is continuing.")
+                record_hybrid_count(HybridMetric.SANDBOX_LIFECYCLE_HANDOFF_FAILURES)
+                logger.warning(
+                    "Hybrid sandbox drain timed out; falling back to confirmed deletion."
+                )
+                return False
         try:
             await self._handle.write_file(
                 f"{_JOURNAL_PATH}/{HYBRID_TOOL_SHUTDOWN_FILENAME}",
@@ -343,7 +447,80 @@ class InvocationSandboxLease(ToolExecutionBackend):
                 create_dirs=True,
             )
         except Exception:
+            record_hybrid_count(HybridMetric.SANDBOX_LIFECYCLE_HANDOFF_FAILURES)
             logger.warning("Hybrid executor shutdown signal failed.", exc_info=True)
+            return False
+        return True
+
+    async def _apply_terminal_lifecycle(self) -> bool:
+        policy_started = time.perf_counter()
+        try:
+            await self._handle.set_lifecycle_policy(_terminal_lifecycle_policy())
+        except SandboxNotFoundError:
+            record_hybrid_count(HybridMetric.SANDBOX_LIFECYCLE_HANDOFFS)
+            return True
+        except Exception:
+            record_hybrid_count(HybridMetric.SANDBOX_LIFECYCLE_HANDOFF_FAILURES)
+            logger.warning(
+                "Hybrid sandbox terminal lifecycle handoff failed; "
+                "falling back to confirmed deletion.",
+                exc_info=True,
+            )
+            return False
+        else:
+            record_hybrid_count(HybridMetric.SANDBOX_LIFECYCLE_HANDOFFS)
+            return True
+        finally:
+            record_hybrid_duration(
+                HybridMetric.SANDBOX_LIFECYCLE_HANDOFF_DURATION,
+                policy_started,
+            )
+
+    async def _finish_terminal_cleanup(
+        self,
+        *,
+        confirmed_delete_required: bool,
+        progress_started: float,
+    ) -> None:
+        status = (
+            HybridProgressStatus.FAILED
+            if confirmed_delete_required
+            else HybridProgressStatus.COMPLETED
+        )
+        record_hybrid_progress(
+            HybridProgressPhase.CLEANUP_HANDOFF,
+            status,
+            duration_seconds=time.perf_counter() - progress_started,
+        )
+        if confirmed_delete_required:
+            await self._confirmed_post_run_delete()
+        else:
+            await self._request_terminal_delete()
+
+    async def _request_terminal_delete(self) -> None:
+        try:
+            await asyncio.wait_for(
+                self._handle.request_delete(),
+                timeout=_DELETE_REQUEST_TIMEOUT_SECONDS,
+            )
+        except SandboxNotFoundError:
+            record_hybrid_count(HybridMetric.SANDBOX_DELETE_REQUESTS_ACCEPTED)
+        except Exception:
+            record_hybrid_count(HybridMetric.SANDBOX_DELETE_REQUEST_FAILURES)
+            logger.warning(
+                "Hybrid sandbox delete request was not accepted; "
+                "terminal lifecycle and reaper backstops remain armed.",
+                exc_info=True,
+            )
+        else:
+            record_hybrid_count(HybridMetric.SANDBOX_DELETE_REQUESTS_ACCEPTED)
+        finally:
+            try:
+                await self._handle.close()
+            except Exception:
+                logger.warning("Hybrid sandbox handle close failed.", exc_info=True)
+
+    async def _confirmed_post_run_delete(self) -> None:
         try:
             await _best_effort_delete(
                 self._handle,
@@ -356,11 +533,6 @@ class InvocationSandboxLease(ToolExecutionBackend):
                 "Hybrid sandbox cleanup failed after the run completed.",
                 exc_info=True,
             )
-        finally:
-            try:
-                await self._provider.close()
-            except Exception:
-                logger.warning("Hybrid sandbox provider close failed.", exc_info=True)
 
 
 @asynccontextmanager
@@ -394,15 +566,25 @@ async def open_hybrid_invocation(
     record_hybrid_count(HybridMetric.REQUESTS)
     with start_span("hybrid.invocation"):
         try:
-            lease = await InvocationSandboxLease.acquire(settings)
+            lease = await InvocationSandboxLease.acquire(
+                settings,
+                maximum_run_seconds=timeout_seconds,
+            )
             local_tools, middleware = lease.build_tools(deadline=deadline)
+            invocation_cancelled = False
             try:
                 yield HybridPreparedInvocation(
                     tools=list(local_tools),
                     middleware=[middleware],
                 )
+            except asyncio.CancelledError:
+                invocation_cancelled = True
+                raise
             finally:
-                await lease.close()
+                await lease.close(cancelled=invocation_cancelled)
+        except asyncio.CancelledError:
+            record_hybrid_count(HybridMetric.REQUEST_FAILURES)
+            raise
         except BaseException:
             record_hybrid_count(HybridMetric.REQUEST_FAILURES)
             raise
@@ -420,6 +602,10 @@ def _provider_factory(
         return await AcaSandboxAdapter.open(group_resource_id, region=region)
 
     return open_provider
+
+
+def _hybrid_package_root(settings: HybridSandboxSettings) -> Path:
+    return settings.tool_bundle_root or get_app_root()
 
 
 def _create_request(
@@ -440,11 +626,34 @@ def _create_request(
         source=DiskSource.create(settings.sandbox_disk),
         labels=labels,
         remaining_setup_budget_seconds=settings.create_timeout_seconds,
-        auto_suspend_seconds=_AUTO_SUSPEND_SECONDS,
+        auto_suspend_seconds=_ACTIVE_CREATE_AUTO_SUSPEND_SECONDS,
         environment={SANDBOX_MARKER_ENV_VAR: "1"},
         egress_policy=egress,
         ports=(),
         skip_egress_proxy=False,
+    )
+
+
+def _terminal_lifecycle_policy() -> SandboxLifecyclePolicy:
+    return SandboxLifecyclePolicy.create(
+        auto_suspend_seconds=_TERMINAL_AUTO_SUSPEND_SECONDS,
+        auto_suspend_mode="Disk",
+        auto_delete_seconds=_TERMINAL_AUTO_DELETE_SECONDS,
+    )
+
+
+def _validate_active_lifecycle_bound(
+    settings: HybridSandboxSettings,
+    *,
+    maximum_run_seconds: float | None,
+) -> None:
+    if maximum_run_seconds is None:
+        return
+    required_seconds = maximum_run_seconds + settings.create_timeout_seconds
+    if required_seconds < _ACTIVE_CREATE_AUTO_SUSPEND_SECONDS:
+        return
+    raise RuntimeError(
+        "Hybrid active sandbox policy does not cover the create and run bound."
     )
 
 
@@ -465,22 +674,51 @@ async def _deliver_executor(
     package: CapturedContentPackage,
 ) -> None:
     started = time.perf_counter()
+    record_hybrid_progress(
+        HybridProgressPhase.PACKAGE_UPLOAD,
+        HybridProgressStatus.STARTED,
+    )
     source_path = Path(hybrid_executor.__file__ or "")
     source = source_path.read_bytes()
-    await handle.write_file(_APP_ZIP_PATH, package.archive_bytes, create_dirs=True)
-    await handle.write_file(_EXECUTOR_PATH, source, create_dirs=True)
-    if len(await handle.read_file(_APP_ZIP_PATH)) != package.size:
-        raise RuntimeError("Hybrid application package verification failed.")
-    if await handle.read_file(_EXECUTOR_PATH) != source:
-        raise RuntimeError("Hybrid executor verification failed.")
+    try:
+        await handle.write_file(_APP_ZIP_PATH, package.archive_bytes, create_dirs=True)
+        await handle.write_file(_EXECUTOR_PATH, source, create_dirs=True)
+        _validate_executor_delivery(await handle.read_file(_EXECUTOR_PATH), source)
+    except asyncio.CancelledError:
+        record_hybrid_progress(
+            HybridProgressPhase.PACKAGE_UPLOAD,
+            HybridProgressStatus.CANCELLED,
+        )
+        raise
+    except Exception:
+        record_hybrid_progress(
+            HybridProgressPhase.PACKAGE_UPLOAD,
+            HybridProgressStatus.FAILED,
+        )
+        raise
+    record_hybrid_progress(
+        HybridProgressPhase.PACKAGE_UPLOAD,
+        HybridProgressStatus.COMPLETED,
+        duration_seconds=time.perf_counter() - started,
+    )
     record_hybrid_duration(HybridMetric.PACKAGE_UPLOAD_DURATION, started)
+
+
+def _validate_executor_delivery(observed: bytes, expected: bytes) -> None:
+    if observed != expected:
+        raise RuntimeError("Hybrid executor verification failed.")
 
 
 async def _start_and_discover(
     handle: SandboxSessionHandle,
     timeout_seconds: float,
+    app_digest: str,
 ) -> HybridToolManifest:
     started = time.perf_counter()
+    record_hybrid_progress(
+        HybridProgressPhase.PACKAGE_VERIFY,
+        HybridProgressStatus.STARTED,
+    )
     command = " ".join(
         (
             "nohup",
@@ -490,6 +728,8 @@ async def _start_and_discover(
             shlex.quote(_EXECUTOR_PATH),
             "--app-zip",
             shlex.quote(_APP_ZIP_PATH),
+            "--app-digest",
+            shlex.quote(app_digest),
             "--extraction-root",
             shlex.quote(_EXTRACTION_PATH),
             "--journal-root",
@@ -511,25 +751,158 @@ async def _start_and_discover(
     if not executor_pid.isascii() or not executor_pid.isdigit():
         raise RuntimeError("Hybrid executor launch returned invalid process metadata.")
     readiness_path = f"{_JOURNAL_PATH}/{HYBRID_TOOL_READINESS_FILENAME}"
+    verification_path = (
+        f"{_JOURNAL_PATH}/{HYBRID_TOOL_PACKAGE_VERIFICATION_FILENAME}"
+    )
+    failure_path = f"{_JOURNAL_PATH}/{HYBRID_TOOL_STARTUP_FAILURE_FILENAME}"
     manifest_path = f"{_JOURNAL_PATH}/{HYBRID_TOOL_MANIFEST_FILENAME}"
     pid_path = f"{_JOURNAL_PATH}/{HYBRID_TOOL_PID_FILENAME}"
     deadline = asyncio.get_running_loop().time() + timeout_seconds
+    verification_complete = False
     try:
-        readiness = await _poll_file(handle, readiness_path, deadline)
-        pid = await _poll_file(handle, pid_path, deadline)
+        verification = await _poll_startup_file(
+            handle,
+            verification_path,
+            failure_path,
+            deadline,
+        )
+        verification_seconds = _parse_package_verification_seconds(verification)
+        record_hybrid_value(HybridMetric.PACKAGE_VERIFY_DURATION, verification_seconds)
+        record_hybrid_progress(
+            HybridProgressPhase.PACKAGE_VERIFY,
+            HybridProgressStatus.COMPLETED,
+            duration_seconds=verification_seconds,
+        )
+        verification_complete = True
+        record_hybrid_progress(
+            HybridProgressPhase.EXECUTOR_READY,
+            HybridProgressStatus.STARTED,
+        )
+        readiness = await _poll_startup_file(
+            handle,
+            readiness_path,
+            failure_path,
+            deadline,
+        )
+        pid = await _poll_startup_file(handle, pid_path, failure_path, deadline)
+    except asyncio.CancelledError:
+        record_hybrid_progress(
+            (
+                HybridProgressPhase.EXECUTOR_READY
+                if verification_complete
+                else HybridProgressPhase.PACKAGE_VERIFY
+            ),
+            HybridProgressStatus.CANCELLED,
+        )
+        raise
     except TimeoutError as exc:
+        record_hybrid_progress(
+            (
+                HybridProgressPhase.EXECUTOR_READY
+                if verification_complete
+                else HybridProgressPhase.PACKAGE_VERIFY
+            ),
+            HybridProgressStatus.FAILED,
+        )
         diagnostic = await _executor_startup_diagnostic(handle, executor_pid)
         raise RuntimeError(
             f"Hybrid executor readiness timed out ({diagnostic})."
         ) from exc
     _validate_readiness(readiness, pid)
+    record_hybrid_progress(
+        HybridProgressPhase.EXECUTOR_READY,
+        HybridProgressStatus.COMPLETED,
+        duration_seconds=time.perf_counter() - started,
+    )
     record_hybrid_duration(HybridMetric.EXECUTOR_READY_DURATION, started)
     discovery_started = time.perf_counter()
+    record_hybrid_progress(
+        HybridProgressPhase.DISCOVERY,
+        HybridProgressStatus.STARTED,
+    )
     manifest = parse_hybrid_tool_manifest(
         await _poll_file(handle, manifest_path, deadline)
     )
+    record_hybrid_progress(
+        HybridProgressPhase.DISCOVERY,
+        HybridProgressStatus.COMPLETED,
+        duration_seconds=time.perf_counter() - discovery_started,
+    )
     record_hybrid_duration(HybridMetric.DISCOVERY_DURATION, discovery_started)
     return manifest
+
+
+async def _poll_startup_file(
+    handle: SandboxSessionHandle,
+    path: str,
+    failure_path: str,
+    deadline: float,
+) -> bytes:
+    while True:
+        try:
+            return await handle.read_file(path)
+        except SandboxFileNotFoundError:
+            try:
+                failure = await handle.read_file(failure_path)
+            except SandboxFileNotFoundError:
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise TimeoutError("Hybrid sandbox file wait timed out.") from None
+                await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+                continue
+            phase, exception_type = _parse_startup_failure(failure)
+            if phase == "package_verify":
+                record_hybrid_count(HybridMetric.PACKAGE_VERIFY_FAILURES)
+                record_hybrid_progress(
+                    HybridProgressPhase.PACKAGE_VERIFY,
+                    HybridProgressStatus.FAILED,
+                )
+            else:
+                record_hybrid_progress(
+                    HybridProgressPhase.EXECUTOR_READY,
+                    HybridProgressStatus.FAILED,
+                )
+            raise RuntimeError(
+                "Hybrid executor startup failed "
+                f"(phase={phase}, terminal_exception={exception_type})."
+            ) from None
+
+
+def _parse_package_verification_seconds(payload: bytes) -> float:
+    try:
+        value = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Hybrid package verification metadata is invalid.") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"duration_ms", "protocol_version", "verified"}
+        or value.get("protocol_version") != HYBRID_TOOL_PROTOCOL_VERSION
+        or value.get("verified") is not True
+        or not isinstance(value.get("duration_ms"), (int, float))
+        or isinstance(value.get("duration_ms"), bool)
+        or not math.isfinite(value["duration_ms"])
+        or value["duration_ms"] < 0
+    ):
+        raise RuntimeError("Hybrid package verification metadata is invalid.")
+    return float(value["duration_ms"]) / 1000.0
+
+
+def _parse_startup_failure(payload: bytes) -> tuple[str, str]:
+    try:
+        value = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Hybrid executor failure metadata is invalid.") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {"exception_type", "phase", "protocol_version", "startup_failed"}
+        or value.get("protocol_version") != HYBRID_TOOL_PROTOCOL_VERSION
+        or value.get("startup_failed") is not True
+        or value.get("phase") not in {"package_verify", "startup"}
+        or not isinstance(value.get("exception_type"), str)
+        or not _EXECUTOR_EXCEPTION_TYPE.fullmatch(value["exception_type"])
+    ):
+        raise RuntimeError("Hybrid executor failure metadata is invalid.")
+    return str(value["phase"]), str(value["exception_type"])
 
 
 async def _executor_startup_diagnostic(
@@ -654,7 +1027,6 @@ async def _best_effort_delete(
     auto-delete policy plus the bounded reaper as the backstop.
     """
     started = time.perf_counter()
-    record_hybrid_count(HybridMetric.SANDBOX_DELETES)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + min(
         timeout_seconds,
@@ -679,8 +1051,10 @@ async def _best_effort_delete(
                         provider.delete_sandbox(sandbox_id),
                         timeout=attempt_seconds,
                     )
+                record_hybrid_count(HybridMetric.SANDBOX_DELETES)
                 return
             except SandboxNotFoundError:
+                record_hybrid_count(HybridMetric.SANDBOX_DELETES)
                 return
             except Exception as exc:
                 error = exc

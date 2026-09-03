@@ -7,6 +7,8 @@ import asyncio
 import contextlib
 import dataclasses
 import enum
+import hashlib
+import hmac
 import importlib
 import importlib.util
 import inspect
@@ -34,6 +36,8 @@ from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 PROTOCOL_VERSION = "1"
 MANIFEST_FILENAME = "manifest.json"
 READINESS_FILENAME = "ready.json"
+PACKAGE_VERIFICATION_FILENAME = "package-verified.json"
+STARTUP_FAILURE_FILENAME = "startup-failure.json"
 PID_FILENAME = "pid.json"
 REQUEST_DIRECTORY = "requests"
 RESULT_DIRECTORY = "results"
@@ -61,6 +65,7 @@ MAX_CALL_SECONDS = 30.0
 POLL_INTERVAL_SECONDS = 0.05
 
 _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
+_APP_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CALL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _TRACEPARENT = re.compile(
     r"^(?!ff)[0-9a-f]{2}-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}$"
@@ -75,6 +80,10 @@ _KILLPG: Any = os.__dict__.get("killpg")
 
 class ExecutorProtocolError(ValueError):
     """A sandbox executor input violates its private protocol."""
+
+
+class PackageDigestMismatchError(ExecutorProtocolError):
+    """The delivered application archive does not match its controller digest."""
 
 
 class ExecutorDeadlineError(TimeoutError):
@@ -1163,8 +1172,26 @@ def _manifest_payload(tools: list[_SandboxTool]) -> bytes:
     return payload
 
 
+def _verify_application_archive_digest(app_zip: Path, expected_digest: str) -> None:
+    if not _APP_DIGEST.fullmatch(expected_digest):
+        raise PackageDigestMismatchError("application package digest is invalid")
+    digest = hashlib.sha256()
+    try:
+        with app_zip.open("rb") as archive:
+            for chunk in iter(lambda: archive.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        raise PackageDigestMismatchError(
+            "application package could not be hashed"
+        ) from None
+    observed = f"sha256:{digest.hexdigest()}"
+    if not hmac.compare_digest(observed, expected_digest):
+        raise PackageDigestMismatchError("application package digest does not match")
+
+
 def run_executor(
     app_zip: Path,
+    app_digest: str,
     extraction_root: Path,
     journal_root: Path,
     workspace_root: Path,
@@ -1178,10 +1205,22 @@ def run_executor(
         or poll_interval_seconds > 5.0
     ):
         raise ExecutorProtocolError("poll interval is outside the supported range")
+    journal_root.mkdir(parents=True, exist_ok=True)
+    verify_started = time.perf_counter()
+    _verify_application_archive_digest(app_zip, app_digest)
+    _atomic_write(
+        journal_root / PACKAGE_VERIFICATION_FILENAME,
+        _canonical_json_bytes(
+            {
+                "duration_ms": (time.perf_counter() - verify_started) * 1000.0,
+                "protocol_version": PROTOCOL_VERSION,
+                "verified": True,
+            }
+        ),
+    )
     securely_extract_application_archive(app_zip, extraction_root)
     workspace_root.mkdir(parents=True, exist_ok=True)
     workspace_root = workspace_root.resolve(strict=True)
-    journal_root.mkdir(parents=True, exist_ok=True)
     requests = journal_root / REQUEST_DIRECTORY
     results = journal_root / RESULT_DIRECTORY
     requests.mkdir(parents=True, exist_ok=True)
@@ -1245,6 +1284,7 @@ def run_executor(
 def _argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--app-zip", required=True, type=Path)
+    parser.add_argument("--app-digest", required=True)
     parser.add_argument("--extraction-root", required=True, type=Path)
     parser.add_argument("--journal-root", required=True, type=Path)
     parser.add_argument("--workspace-root", required=True, type=Path)
@@ -1255,13 +1295,34 @@ def _argument_parser() -> argparse.ArgumentParser:
 def main(arguments: list[str] | None = None) -> int:
     """Run the standalone sandbox executor."""
     options = _argument_parser().parse_args(arguments)
-    run_executor(
-        options.app_zip,
-        options.extraction_root,
-        options.journal_root,
-        options.workspace_root,
-        poll_interval_seconds=options.poll_interval,
-    )
+    try:
+        run_executor(
+            options.app_zip,
+            options.app_digest,
+            options.extraction_root,
+            options.journal_root,
+            options.workspace_root,
+            poll_interval_seconds=options.poll_interval,
+        )
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            options.journal_root.mkdir(parents=True, exist_ok=True)
+            _atomic_write(
+                options.journal_root / STARTUP_FAILURE_FILENAME,
+                _canonical_json_bytes(
+                    {
+                        "exception_type": type(exc).__name__,
+                        "phase": (
+                            "package_verify"
+                            if isinstance(exc, PackageDigestMismatchError)
+                            else "startup"
+                        ),
+                        "protocol_version": PROTOCOL_VERSION,
+                        "startup_failed": True,
+                    }
+                ),
+            )
+        raise
     return 0
 
 

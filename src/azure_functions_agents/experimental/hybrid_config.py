@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from ..config.paths import get_app_root
 from ..config.schema import GlobalConfig, ResolvedAgent
 
 HYBRID_SANDBOX_GROUP_ENV = (
@@ -20,8 +21,10 @@ HYBRID_SANDBOX_DISK_ENV = "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_SANDBOX_DI
 HYBRID_CREATE_TIMEOUT_ENV = "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_CREATE_TIMEOUT_SECONDS"
 HYBRID_READY_TIMEOUT_ENV = "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_READY_TIMEOUT_SECONDS"
 HYBRID_DRAIN_TIMEOUT_ENV = "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_DRAIN_TIMEOUT_SECONDS"
-HYBRID_AUTO_DELETE_ENV = "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_AUTO_DELETE_SECONDS"
 HYBRID_ORPHAN_AGE_ENV = "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_ORPHAN_AGE_SECONDS"
+HYBRID_TOOL_BUNDLE_ROOT_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_BUNDLE_ROOT"
+)
 HYBRID_APIM_BASE_URL_ENV = "AZURE_FUNCTIONS_AGENTS_APIM_MODEL_BASE_URL"
 HYBRID_APIM_AUDIENCE_ENV = "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_APIM_AUDIENCE"
 HYBRID_APIM_KEY_ENV = "AZURE_FUNCTIONS_AGENTS_APIM_SUBSCRIPTION_KEY"
@@ -31,9 +34,7 @@ HYBRID_APIM_KEY_HEADER = "api-key"
 _DEFAULT_CREATE_TIMEOUT_SECONDS = 90.0
 _DEFAULT_READY_TIMEOUT_SECONDS = 45.0
 _DEFAULT_DRAIN_TIMEOUT_SECONDS = 10.0
-_DEFAULT_AUTO_DELETE_SECONDS = 1800
 _DEFAULT_ORPHAN_AGE_SECONDS = 1200
-_MIN_AUTO_DELETE_SECONDS = 60
 
 
 class HybridConfigurationError(RuntimeError):
@@ -51,8 +52,8 @@ class HybridSandboxSettings:
     create_timeout_seconds: float
     ready_timeout_seconds: float
     drain_timeout_seconds: float
-    auto_delete_seconds: int
     orphan_age_seconds: int
+    tool_bundle_root: Path | None = None
 
     @classmethod
     def from_environment(
@@ -80,12 +81,6 @@ class HybridSandboxSettings:
             HYBRID_DRAIN_TIMEOUT_ENV,
             _DEFAULT_DRAIN_TIMEOUT_SECONDS,
         )
-        auto_delete = _bounded_integer(
-            source,
-            HYBRID_AUTO_DELETE_ENV,
-            _DEFAULT_AUTO_DELETE_SECONDS,
-            minimum=_MIN_AUTO_DELETE_SECONDS,
-        )
         orphan_age = _bounded_integer(
             source,
             HYBRID_ORPHAN_AGE_ENV,
@@ -100,8 +95,8 @@ class HybridSandboxSettings:
             create_timeout_seconds=create_timeout,
             ready_timeout_seconds=ready_timeout,
             drain_timeout_seconds=drain_timeout,
-            auto_delete_seconds=auto_delete,
             orphan_age_seconds=orphan_age,
+            tool_bundle_root=resolve_hybrid_tool_bundle_root(source),
         )
 
     def validate_reaper_bound(self, maximum_run_seconds: float) -> None:
@@ -118,6 +113,41 @@ def hybrid_enabled(environment: Mapping[str, str] | None = None) -> bool:
     """Return whether the private hybrid spike gate is configured."""
     source = os.environ if environment is None else environment
     return bool(_optional_text(source, HYBRID_SANDBOX_GROUP_ENV))
+
+
+def resolve_hybrid_tool_bundle_root(
+    environment: Mapping[str, str],
+    *,
+    app_root: Path | None = None,
+) -> Path | None:
+    """Resolve the optional private bundle beneath the Function app root."""
+    raw = _optional_text(environment, HYBRID_TOOL_BUNDLE_ROOT_ENV)
+    if not raw:
+        return None
+    relative = Path(raw)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise HybridConfigurationError(
+            f"{HYBRID_TOOL_BUNDLE_ROOT_ENV} must be a relative path without '..'."
+        )
+    try:
+        resolved_app_root = (app_root or get_app_root()).resolve(strict=True)
+        resolved_bundle = (resolved_app_root / relative).resolve(strict=True)
+    except OSError:
+        raise HybridConfigurationError(
+            f"{HYBRID_TOOL_BUNDLE_ROOT_ENV} must identify an existing directory."
+        ) from None
+    if not resolved_bundle.is_relative_to(resolved_app_root) or not resolved_bundle.is_dir():
+        raise HybridConfigurationError(
+            f"{HYBRID_TOOL_BUNDLE_ROOT_ENV} must resolve to a directory beneath the app root."
+        )
+    tools_root = resolved_bundle / "tools"
+    if not tools_root.is_dir() or not any(
+        candidate.is_file() for candidate in tools_root.glob("*.py")
+    ):
+        raise HybridConfigurationError(
+            f"{HYBRID_TOOL_BUNDLE_ROOT_ENV} must contain a non-empty tools directory."
+        )
+    return resolved_bundle
 
 
 def validate_hybrid_application(

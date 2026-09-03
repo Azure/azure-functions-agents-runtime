@@ -48,7 +48,6 @@ def _settings() -> HybridSandboxSettings:
         create_timeout_seconds=90,
         ready_timeout_seconds=45,
         drain_timeout_seconds=10,
-        auto_delete_seconds=1800,
         orphan_age_seconds=1200,
     )
 

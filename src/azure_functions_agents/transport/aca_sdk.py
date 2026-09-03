@@ -1062,6 +1062,22 @@ class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
         except (AzureError, TimeoutError) as exc:
             raise _translate_group_boundary_error(exc, sandbox_scoped=True) from None
 
+    async def request_delete(self) -> None:
+        """Request deletion without waiting for the service LRO to complete."""
+
+        self._ensure_open()
+        try:
+            await self._sdk_client.begin_delete(
+                polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
+                polling_interval=_CONTROL_OPERATION_POLL_INTERVAL_SECONDS,
+            )
+        except ResourceNotFoundError:
+            raise SandboxNotFoundError(
+                "Session backing sandbox was not found."
+            ) from None
+        except (AzureError, TimeoutError) as exc:
+            raise _translate_group_boundary_error(exc, sandbox_scoped=True) from None
+
     async def get_lifecycle_policy(self) -> SandboxLifecyclePolicy:
         """Read the complete lifecycle projection from the individual sandbox."""
         self._ensure_open()

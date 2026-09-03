@@ -2,18 +2,24 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from agent_framework import FunctionInvocationContext, FunctionTool
 
 import azure_functions_agents.runner as runner
+from azure_functions_agents.controller.package import CapturedContentPackage
 from azure_functions_agents.experimental.hybrid_config import (
     HYBRID_SANDBOX_GROUP_ENV,
     HYBRID_SANDBOX_REGION_ENV,
     HybridSandboxSettings,
 )
-from azure_functions_agents.experimental.hybrid_observability import HybridMetric
+from azure_functions_agents.experimental.hybrid_observability import (
+    HybridMetric,
+    HybridProgressPhase,
+    HybridProgressStatus,
+)
 from azure_functions_agents.experimental.hybrid_protocol import (
     HybridInvocationStatus,
     HybridToolDescriptor,
@@ -25,6 +31,8 @@ from azure_functions_agents.experimental.hybrid_protocol import (
 )
 from azure_functions_agents.experimental.hybrid_reaper import hybrid_app_hash
 from azure_functions_agents.experimental.hybrid_tools import (
+    _APP_ZIP_PATH,
+    _EXECUTOR_PATH,
     _MIN_DELETE_ATTEMPT_SECONDS,
     _POST_RUN_DELETE_TIMEOUT_SECONDS,
     _ROLLBACK_DELETE_ATTEMPTS,
@@ -35,12 +43,19 @@ from azure_functions_agents.experimental.hybrid_tools import (
     InvocationSandboxLease,
     _best_effort_delete,
     _delete_attempt_seconds,
+    _deliver_executor,
+    _hybrid_package_root,
+    _poll_startup_file,
     _post_run_delete_seconds,
     _provisioning_labels,
     open_hybrid_invocation,
 )
 from azure_functions_agents.session_state import AppIdentityResolutionError
-from azure_functions_agents.transport.transport_models import SandboxFileNotFoundError
+from azure_functions_agents.transport.transport_models import (
+    SandboxCreateRequest,
+    SandboxFileNotFoundError,
+    SandboxLifecyclePolicy,
+)
 
 _GROUP_ID = (
     "/subscriptions/00000000-0000-0000-0000-000000000000/"
@@ -134,13 +149,18 @@ class _Handle:
         self.results: dict[str, bytes] = {}
         self.requests: list[dict[str, object]] = []
         self.deleted = 0
+        self.delete_requests = 0
         self.closed = 0
+        self.lifecycle_policies: list[SandboxLifecyclePolicy] = []
+        self.shutdown_written = False
 
     async def write_file(
         self, path: str, content: bytes, *, create_dirs: bool = False
     ) -> None:
         assert create_dirs
         if "/requests/" not in path:
+            if path.endswith("/shutdown"):
+                self.shutdown_written = True
             return
         request = json.loads(content)
         self.requests.append(request)
@@ -174,6 +194,12 @@ class _Handle:
     async def delete(self) -> None:
         self.deleted += 1
 
+    async def request_delete(self) -> None:
+        self.delete_requests += 1
+
+    async def set_lifecycle_policy(self, policy: SandboxLifecyclePolicy) -> None:
+        self.lifecycle_policies.append(policy)
+
     async def close(self) -> None:
         self.closed += 1
 
@@ -191,12 +217,7 @@ class _Provider:
 
 
 class _AcquireHandle(_Handle):
-    def __init__(self) -> None:
-        super().__init__()
-        self.lifecycle_calls = 0
-
-    async def set_lifecycle_policy(self, _policy: object) -> None:
-        self.lifecycle_calls += 1
+    pass
 
 
 class _AcquireProvider(_Provider):
@@ -205,10 +226,17 @@ class _AcquireProvider(_Provider):
         self.group = SimpleNamespace(resource_id=_GROUP_ID, region="westus2")
         self.handle = handle
         self.create_calls = 0
+        self.requests: list[SandboxCreateRequest] = []
 
-    async def create(self, _request: object, *, persisted_group: object) -> _AcquireHandle:
+    async def create(
+        self,
+        request: SandboxCreateRequest,
+        *,
+        persisted_group: object,
+    ) -> _AcquireHandle:
         assert persisted_group is not None
         self.create_calls += 1
+        self.requests.append(request)
         return self.handle
 
 
@@ -221,7 +249,6 @@ def _settings() -> HybridSandboxSettings:
         create_timeout_seconds=5,
         ready_timeout_seconds=5,
         drain_timeout_seconds=1,
-        auto_delete_seconds=60,
         orphan_age_seconds=1200,
     )
 
@@ -245,16 +272,33 @@ def _manifest() -> HybridToolManifest:
     )
 
 
+def test_hybrid_package_root_defaults_to_function_app(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.get_app_root",
+        lambda: tmp_path,
+    )
+
+    assert _hybrid_package_root(_settings()) == tmp_path
+
+
 @pytest.mark.asyncio
-async def test_lease_shares_one_handle_for_sequential_calls_and_deletes_once(
+async def test_lease_shares_one_handle_and_hands_off_cleanup_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     handle = _Handle()
     provider = _Provider()
     recorded_values: list[tuple[HybridMetric, float]] = []
+    progress: list[tuple[HybridProgressPhase, HybridProgressStatus]] = []
     monkeypatch.setattr(
         "azure_functions_agents.experimental.hybrid_tools.record_hybrid_value",
         lambda metric, value: recorded_values.append((metric, value)),
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.record_hybrid_progress",
+        lambda phase, status, **_kwargs: progress.append((phase, status)),
     )
     lease = InvocationSandboxLease(
         settings=_settings(),
@@ -287,9 +331,27 @@ async def test_lease_shares_one_handle_for_sequential_calls_and_deletes_once(
     assert first.value == {"sequence": 1}
     assert second.value == {"sequence": 2}
     assert [request["call_id"] for request in handle.requests] == ["first", "second"]
-    assert handle.deleted == 1
+    assert handle.deleted == 0
+    assert handle.delete_requests == 1
+    assert handle.shutdown_written
+    assert handle.lifecycle_policies == [
+        SandboxLifecyclePolicy.create(
+            auto_suspend_seconds=300,
+            auto_suspend_mode="Disk",
+            auto_delete_seconds=600,
+        )
+    ]
     assert handle.closed == 1
     assert provider.closed == 1
+    assert progress == [
+        (HybridProgressPhase.TOOL_EXECUTION, HybridProgressStatus.STARTED),
+        (HybridProgressPhase.TOOL_EXECUTION, HybridProgressStatus.COMPLETED),
+        (HybridProgressPhase.TOOL_EXECUTION, HybridProgressStatus.STARTED),
+        (HybridProgressPhase.TOOL_EXECUTION, HybridProgressStatus.COMPLETED),
+        (HybridProgressPhase.CLEANUP_HANDOFF, HybridProgressStatus.STARTED),
+        (HybridProgressPhase.CLEANUP_HANDOFF, HybridProgressStatus.COMPLETED),
+        (HybridProgressPhase.CLEANUP_COMPLETE, HybridProgressStatus.COMPLETED),
+    ]
     assert (
         len(
             [
@@ -389,16 +451,18 @@ async def test_hybrid_context_closes_lease_on_cancellation(
             tool = _tool("local")
             return [tool], HybridToolMiddleware(backend, [tool], deadline=deadline)
 
-        async def close(self) -> None:
+        async def close(self, *, cancelled: bool = False) -> None:
+            assert cancelled
             self.closed = True
 
     lease = _Lease()
 
     async def acquire(
         settings: HybridSandboxSettings,
-        **_kwargs: object,
+        **kwargs: object,
     ) -> _Lease:
         assert settings.region == "westus2"
+        assert kwargs["maximum_run_seconds"] == 30
         return lease
 
     monkeypatch.setenv(HYBRID_SANDBOX_GROUP_ENV, "group")
@@ -418,6 +482,230 @@ async def test_hybrid_context_closes_lease_on_cancellation(
             raise asyncio.CancelledError
 
     assert lease.closed
+
+
+@pytest.mark.asyncio
+async def test_cancellation_hands_off_terminal_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    progress: list[tuple[HybridProgressPhase, HybridProgressStatus]] = []
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.record_hybrid_progress",
+        lambda phase, status, **_kwargs: progress.append((phase, status)),
+    )
+    handle = _Handle()
+    provider = _Provider()
+    lease = InvocationSandboxLease(
+        settings=_settings(),
+        operation_id="operation",
+        provider=provider,  # type: ignore[arg-type]
+        handle=handle,  # type: ignore[arg-type]
+        manifest=_manifest(),
+    )
+
+    async def acquire(
+        _settings: HybridSandboxSettings,
+        **_kwargs: object,
+    ) -> InvocationSandboxLease:
+        return lease
+
+    monkeypatch.setenv(HYBRID_SANDBOX_GROUP_ENV, "group")
+    monkeypatch.setenv(HYBRID_SANDBOX_REGION_ENV, "westus2")
+    monkeypatch.setattr(InvocationSandboxLease, "acquire", acquire)
+
+    with pytest.raises(asyncio.CancelledError):
+        async with open_hybrid_invocation(
+            timeout_seconds=30,
+            tools=[],
+            sandbox_tools=None,
+            skill_paths=None,
+            web_request_tools=None,
+            workflow_enabled=False,
+            subagents=None,
+        ):
+            raise asyncio.CancelledError
+
+    assert handle.delete_requests == 1
+    assert handle.deleted == 0
+    assert handle.lifecycle_policies[-1].auto_suspend_seconds == 300
+    assert handle.closed == 1
+    assert provider.closed == 1
+    assert progress[-1] == (
+        HybridProgressPhase.CLEANUP_COMPLETE,
+        HybridProgressStatus.CANCELLED,
+    )
+
+
+@pytest.mark.asyncio
+async def test_acquire_disables_suspend_before_package_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+    deterministic_content_package: CapturedContentPackage,
+) -> None:
+    events: list[str] = []
+    package_roots: list[object] = []
+
+    class _OrderingHandle(_AcquireHandle):
+        async def set_lifecycle_policy(self, policy: SandboxLifecyclePolicy) -> None:
+            events.append("policy")
+            await super().set_lifecycle_policy(policy)
+
+    handle = _OrderingHandle()
+    provider = _AcquireProvider(handle)
+
+    async def provider_factory() -> _AcquireProvider:
+        return provider
+
+    async def package_factory(root: object) -> CapturedContentPackage:
+        events.append("package_capture")
+        package_roots.append(root)
+        return deterministic_content_package
+
+    async def deliver(_handle: object, _package: object) -> None:
+        events.append("package_delivery")
+
+    async def discover(
+        _handle: object,
+        _timeout: float,
+        _digest: str,
+    ) -> HybridToolManifest:
+        events.append("discovery")
+        return _manifest()
+
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools._deliver_executor",
+        deliver,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools._start_and_discover",
+        discover,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.hybrid_app_hash",
+        lambda: f"a1-{'a' * 52}",
+    )
+
+    bundle_root = Path("resolved-bundle")
+    lease = await InvocationSandboxLease.acquire(
+        replace(_settings(), tool_bundle_root=bundle_root),
+        maximum_run_seconds=900,
+        provider_factory=provider_factory,  # type: ignore[arg-type]
+        package_factory=package_factory,  # type: ignore[arg-type]
+    )
+
+    assert provider.requests[0].auto_suspend_seconds == 3600
+    assert package_roots == [bundle_root]
+    assert events == ["policy", "package_capture", "package_delivery", "discovery"]
+    assert handle.lifecycle_policies[0] == SandboxLifecyclePolicy.create(
+        auto_suspend_seconds=None,
+        auto_delete_seconds=600,
+    )
+    await lease.close()
+
+
+@pytest.mark.asyncio
+async def test_package_delivery_does_not_read_application_archive_back(
+    deterministic_content_package: CapturedContentPackage,
+) -> None:
+    class _DeliveryHandle(_Handle):
+        def __init__(self) -> None:
+            super().__init__()
+            self.files: dict[str, bytes] = {}
+            self.read_paths: list[str] = []
+
+        async def write_file(
+            self,
+            path: str,
+            content: bytes,
+            *,
+            create_dirs: bool = False,
+        ) -> None:
+            assert create_dirs
+            self.files[path] = content
+
+        async def read_file(self, path: str) -> bytes:
+            self.read_paths.append(path)
+            return self.files[path]
+
+    handle = _DeliveryHandle()
+
+    await _deliver_executor(
+        handle,  # type: ignore[arg-type]
+        deterministic_content_package,
+    )
+
+    assert _APP_ZIP_PATH in handle.files
+    assert handle.read_paths == [_EXECUTOR_PATH]
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_marker_fails_fast_without_waiting_for_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handle = _Handle()
+    handle.results["/startup-failure"] = json.dumps(
+        {
+            "exception_type": "PackageDigestMismatchError",
+            "phase": "package_verify",
+            "protocol_version": "1",
+            "startup_failed": True,
+        }
+    ).encode()
+    recorded: list[HybridMetric] = []
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.record_hybrid_count",
+        lambda metric: recorded.append(metric),
+    )
+    started = asyncio.get_running_loop().time()
+
+    with pytest.raises(RuntimeError, match="PackageDigestMismatchError"):
+        await _poll_startup_file(
+            handle,  # type: ignore[arg-type]
+            "/ready",
+            "/startup-failure",
+            started + 30,
+        )
+
+    assert asyncio.get_running_loop().time() - started < 0.5
+    assert HybridMetric.PACKAGE_VERIFY_FAILURES in recorded
+
+
+@pytest.mark.asyncio
+async def test_acquire_policy_failure_deletes_before_package_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _PolicyFailureHandle(_AcquireHandle):
+        async def set_lifecycle_policy(self, _policy: SandboxLifecyclePolicy) -> None:
+            raise RuntimeError("policy failed")
+
+    package_called = False
+    handle = _PolicyFailureHandle()
+    provider = _AcquireProvider(handle)
+
+    async def provider_factory() -> _AcquireProvider:
+        return provider
+
+    async def package_factory(_root: object) -> object:
+        nonlocal package_called
+        package_called = True
+        return object()
+
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.hybrid_app_hash",
+        lambda: f"a1-{'a' * 52}",
+    )
+
+    with pytest.raises(RuntimeError, match="policy failed"):
+        await InvocationSandboxLease.acquire(
+            _settings(),
+            maximum_run_seconds=900,
+            provider_factory=provider_factory,  # type: ignore[arg-type]
+            package_factory=package_factory,  # type: ignore[arg-type]
+        )
+
+    assert package_called is False
+    assert handle.deleted == 1
+    assert handle.closed == 1
+    assert provider.closed == 1
 
 
 @pytest.mark.asyncio
@@ -453,7 +741,7 @@ async def test_acquire_rolls_back_sandbox_when_package_delivery_fails(
         )
 
     assert provider.create_calls == 1
-    assert handle.lifecycle_calls == 1
+    assert len(handle.lifecycle_policies) == 1
     assert handle.deleted == 1
     assert handle.closed == 1
     assert provider.closed == 1
@@ -505,6 +793,9 @@ async def test_acquire_rollback_uses_provider_delete_after_handle_failure(
 @pytest.mark.asyncio
 async def test_delete_failure_uses_provider_fallback_without_raising() -> None:
     class _FailingDeleteHandle(_Handle):
+        async def set_lifecycle_policy(self, _policy: SandboxLifecyclePolicy) -> None:
+            raise RuntimeError("terminal policy failed")
+
         async def delete(self) -> None:
             self.deleted += 1
             raise RuntimeError("delete failed")
@@ -528,6 +819,71 @@ async def test_delete_failure_uses_provider_fallback_without_raising() -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_request_failure_leaves_terminal_policy_backstop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _RequestFailureHandle(_Handle):
+        async def request_delete(self) -> None:
+            self.delete_requests += 1
+            raise RuntimeError("request failed")
+
+    recorded: list[HybridMetric] = []
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.record_hybrid_count",
+        lambda metric: recorded.append(metric),
+    )
+    handle = _RequestFailureHandle()
+    provider = _Provider()
+    lease = InvocationSandboxLease(
+        settings=_settings(),
+        operation_id="operation",
+        provider=provider,  # type: ignore[arg-type]
+        handle=handle,  # type: ignore[arg-type]
+        manifest=_manifest(),
+    )
+
+    await lease.close()
+
+    assert handle.delete_requests == 1
+    assert handle.deleted == 0
+    assert handle.lifecycle_policies[-1] == SandboxLifecyclePolicy.create(
+        auto_suspend_seconds=300,
+        auto_suspend_mode="Disk",
+        auto_delete_seconds=600,
+    )
+    assert HybridMetric.SANDBOX_DELETE_REQUEST_FAILURES in recorded
+    assert HybridMetric.SANDBOX_DELETES not in recorded
+    assert handle.closed == 1
+    assert provider.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_successful_delete_request_is_not_reported_as_completed_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: list[HybridMetric] = []
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.record_hybrid_count",
+        lambda metric: recorded.append(metric),
+    )
+    handle = _Handle()
+    provider = _Provider()
+    lease = InvocationSandboxLease(
+        settings=_settings(),
+        operation_id="operation",
+        provider=provider,  # type: ignore[arg-type]
+        handle=handle,  # type: ignore[arg-type]
+        manifest=_manifest(),
+    )
+
+    await lease.close()
+
+    assert HybridMetric.SANDBOX_LIFECYCLE_HANDOFFS in recorded
+    assert HybridMetric.SANDBOX_DELETE_REQUESTS_ACCEPTED in recorded
+    assert HybridMetric.SANDBOX_DELETES not in recorded
+
+
+@pytest.mark.asyncio
 async def test_hung_handle_delete_leaves_budget_for_provider_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -543,6 +899,9 @@ async def test_hung_handle_delete_leaves_budget_for_provider_fallback(
             except asyncio.CancelledError:
                 self.delete_cancelled = True
                 raise
+
+        async def set_lifecycle_policy(self, _policy: SandboxLifecyclePolicy) -> None:
+            raise RuntimeError("terminal policy failed")
 
     recorded: list[HybridMetric] = []
     monkeypatch.setattr(
@@ -669,12 +1028,16 @@ async def test_post_run_delete_budget_is_independent_of_the_drain_window(
         "azure_functions_agents.experimental.hybrid_tools._best_effort_delete",
         _capture,
     )
+    class _FailedHandoffHandle(_Handle):
+        async def set_lifecycle_policy(self, _policy: SandboxLifecyclePolicy) -> None:
+            raise RuntimeError("terminal policy failed")
+
     provider = _Provider()
     lease = InvocationSandboxLease(
         settings=replace(_settings(), create_timeout_seconds=90, drain_timeout_seconds=0.01),
         operation_id="operation",
         provider=provider,  # type: ignore[arg-type]
-        handle=_Handle(),  # type: ignore[arg-type]
+        handle=_FailedHandoffHandle(),  # type: ignore[arg-type]
         manifest=_manifest(),
     )
 
@@ -734,12 +1097,16 @@ async def test_unexpected_cleanup_failure_is_recorded_without_propagating(
         "azure_functions_agents.experimental.hybrid_tools.record_hybrid_count",
         lambda metric: recorded.append(metric),
     )
+    class _FailedHandoffHandle(_Handle):
+        async def set_lifecycle_policy(self, _policy: SandboxLifecyclePolicy) -> None:
+            raise RuntimeError("terminal policy failed")
+
     provider = _Provider()
     lease = InvocationSandboxLease(
         settings=_settings(),
         operation_id="operation",
         provider=provider,  # type: ignore[arg-type]
-        handle=_Handle(),  # type: ignore[arg-type]
+        handle=_FailedHandoffHandle(),  # type: ignore[arg-type]
         manifest=_manifest(),
     )
 
@@ -902,6 +1269,9 @@ async def test_tool_cancellation_does_not_increment_failure_metric(
 
 
 class _ExhaustedDeleteHandle(_Handle):
+    async def set_lifecycle_policy(self, _policy: SandboxLifecyclePolicy) -> None:
+        raise RuntimeError("terminal policy failed")
+
     async def delete(self) -> None:
         self.deleted += 1
         raise RuntimeError("handle delete failed")
@@ -1051,3 +1421,50 @@ async def test_stream_disconnect_exits_outer_hybrid_lease(
 
     assert inner_exited
     assert lease_exited
+
+
+@pytest.mark.asyncio
+async def test_stream_disconnect_requests_terminal_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handle = _Handle()
+    provider = _Provider()
+    lease = InvocationSandboxLease(
+        settings=_settings(),
+        operation_id="operation",
+        provider=provider,  # type: ignore[arg-type]
+        handle=handle,  # type: ignore[arg-type]
+        manifest=_manifest(),
+    )
+
+    async def acquire(
+        _settings: HybridSandboxSettings,
+        **_kwargs: object,
+    ) -> InvocationSandboxLease:
+        return lease
+
+    async def fake_inner_stream(
+        _prompt: str,
+        **_kwargs: object,
+    ) -> object:
+        yield {"type": "text", "content": "first"}
+        await asyncio.Event().wait()
+
+    monkeypatch.setenv(HYBRID_SANDBOX_GROUP_ENV, "group")
+    monkeypatch.setenv(HYBRID_SANDBOX_REGION_ENV, "westus2")
+    monkeypatch.setattr(InvocationSandboxLease, "acquire", acquire)
+    monkeypatch.setattr(
+        runner,
+        "_run_agent_event_stream_in_invocation",
+        fake_inner_stream,
+    )
+    stream = runner.run_agent_events("prompt", timeout=30, tools=[], mcp_tools=[])
+
+    assert await anext(stream) == {"type": "text", "content": "first"}
+    await stream.aclose()
+
+    assert handle.delete_requests == 1
+    assert handle.deleted == 0
+    assert handle.lifecycle_policies[-1].auto_suspend_seconds == 300
+    assert handle.closed == 1
+    assert provider.closed == 1

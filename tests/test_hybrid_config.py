@@ -7,9 +7,11 @@ from azure_functions_agents.execution.aca_composition import compose_aca_applica
 from azure_functions_agents.experimental.hybrid_config import (
     HYBRID_SANDBOX_GROUP_ENV,
     HYBRID_SANDBOX_REGION_ENV,
+    HYBRID_TOOL_BUNDLE_ROOT_ENV,
     HybridConfigurationError,
     HybridSandboxSettings,
     resolve_hybrid_apim_settings,
+    resolve_hybrid_tool_bundle_root,
     validate_hybrid_application,
 )
 from azure_functions_agents.harness import SANDBOX_MARKER_ENV_VAR
@@ -17,6 +19,66 @@ from azure_functions_agents.harness import SANDBOX_MARKER_ENV_VAR
 
 def test_hybrid_settings_are_absent_without_private_gate() -> None:
     assert HybridSandboxSettings.from_environment({}) is None
+
+
+def test_hybrid_bundle_root_is_optional_and_resolves_under_app_root(
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "sandbox_bundle"
+    tools = bundle / "tools"
+    tools.mkdir(parents=True)
+    (tools / "probe.py").write_text("def probe(): return True\n", encoding="utf-8")
+
+    assert resolve_hybrid_tool_bundle_root({}, app_root=tmp_path) is None
+    assert resolve_hybrid_tool_bundle_root(
+        {HYBRID_TOOL_BUNDLE_ROOT_ENV: "sandbox_bundle"},
+        app_root=tmp_path,
+    ) == bundle.resolve()
+
+
+@pytest.mark.parametrize(
+    "configured",
+    ("../outside", "missing", "empty", "file.txt"),
+)
+def test_hybrid_bundle_root_rejects_invalid_or_incomplete_directory(
+    configured: str,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "empty").mkdir()
+    (tmp_path / "file.txt").write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(HybridConfigurationError):
+        resolve_hybrid_tool_bundle_root(
+            {HYBRID_TOOL_BUNDLE_ROOT_ENV: configured},
+            app_root=tmp_path,
+        )
+
+
+def test_hybrid_bundle_root_rejects_absolute_path(tmp_path: Path) -> None:
+    with pytest.raises(HybridConfigurationError, match="relative path"):
+        resolve_hybrid_tool_bundle_root(
+            {HYBRID_TOOL_BUNDLE_ROOT_ENV: str(tmp_path.resolve())},
+            app_root=tmp_path,
+        )
+
+
+def test_hybrid_bundle_root_rejects_symlink_outside_app_root(tmp_path: Path) -> None:
+    app_root = tmp_path / "app"
+    app_root.mkdir()
+    outside = tmp_path / "outside"
+    tools = outside / "tools"
+    tools.mkdir(parents=True)
+    (tools / "probe.py").write_text("def probe(): return True\n", encoding="utf-8")
+    try:
+        (app_root / "bundle").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    with pytest.raises(HybridConfigurationError, match="beneath the app root"):
+        resolve_hybrid_tool_bundle_root(
+            {HYBRID_TOOL_BUNDLE_ROOT_ENV: "bundle"},
+            app_root=app_root,
+        )
 
 
 def test_hybrid_settings_require_reaper_outside_live_bound() -> None:
@@ -93,6 +155,7 @@ def test_hybrid_sample_guard_uses_canonical_sandbox_marker() -> None:
         / "samples"
         / "hybrid-sandbox-apim-spike"
         / "src"
+        / "sandbox_bundle"
         / "tools"
         / "customer_probe.py"
     ).read_text(encoding="utf-8")

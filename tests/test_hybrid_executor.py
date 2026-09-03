@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -14,11 +15,13 @@ from azure_functions_agents.controller import package as controller_package
 from azure_functions_agents.experimental import hybrid_executor
 from azure_functions_agents.experimental.hybrid_protocol import (
     HYBRID_TOOL_MANIFEST_FILENAME,
+    HYBRID_TOOL_PACKAGE_VERIFICATION_FILENAME,
     HYBRID_TOOL_PID_FILENAME,
     HYBRID_TOOL_READINESS_FILENAME,
     HYBRID_TOOL_REQUEST_DIRECTORY,
     HYBRID_TOOL_RESULT_DIRECTORY,
     HYBRID_TOOL_SHUTDOWN_FILENAME,
+    HYBRID_TOOL_STARTUP_FAILURE_FILENAME,
     HybridToolInvocationResult,
     parse_hybrid_tool_manifest,
     parse_hybrid_tool_result,
@@ -150,6 +153,8 @@ def running_executor(tmp_path: Path) -> Iterator[_RunningExecutor]:
             str(_EXECUTOR_SOURCE),
             "--app-zip",
             str(archive),
+            "--app-digest",
+            f"sha256:{hashlib.sha256(archive.read_bytes()).hexdigest()}",
             "--extraction-root",
             str(tmp_path / "app"),
             "--journal-root",
@@ -172,6 +177,105 @@ def running_executor(tmp_path: Path) -> Iterator[_RunningExecutor]:
         assert int(imported_pid) == pid_metadata["pid"]
         assert import_count == "1"
         yield executor
+    finally:
+        if process.poll() is None:
+            executor.stop()
+
+
+def test_executor_digest_mismatch_fails_before_extraction_and_manifest(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "app.zip"
+    _write_archive(archive, {"tools/probe.py": "def probe(): return True\n"})
+    journal = tmp_path / "journal"
+    extraction = tmp_path / "app"
+
+    process = subprocess.run(
+        [
+            sys.executable,
+            str(_EXECUTOR_SOURCE),
+            "--app-zip",
+            str(archive),
+            "--app-digest",
+            f"sha256:{'0' * 64}",
+            "--extraction-root",
+            str(extraction),
+            "--journal-root",
+            str(journal),
+            "--workspace-root",
+            str(tmp_path / "workspace"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert process.returncode != 0
+    failure = json.loads(
+        (journal / HYBRID_TOOL_STARTUP_FAILURE_FILENAME).read_text(encoding="utf-8")
+    )
+    assert failure == {
+        "exception_type": "PackageDigestMismatchError",
+        "phase": "package_verify",
+        "protocol_version": "1",
+        "startup_failed": True,
+    }
+    assert not extraction.exists()
+    assert not (journal / HYBRID_TOOL_READINESS_FILENAME).exists()
+    assert not (journal / HYBRID_TOOL_MANIFEST_FILENAME).exists()
+    assert not (journal / HYBRID_TOOL_PACKAGE_VERIFICATION_FILENAME).exists()
+
+
+def test_thin_bundle_keeps_nested_helpers_and_package_data(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "bundle.zip"
+    _write_archive(
+        archive,
+        {
+            "helpers/__init__.py": "",
+            "helpers/nested.py": (
+                "from pathlib import Path\n"
+                "def read_data():\n"
+                "    return (Path(__file__).parent / '.data' / 'value.txt').read_text()\n"
+            ),
+            "helpers/.data/value.txt": "bundle-data",
+            "tools/probe.py": (
+                "from helpers.nested import read_data\n"
+                "def bundled_probe() -> str:\n"
+                "    return read_data()\n"
+            ),
+        },
+    )
+    journal = tmp_path / "journal"
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(_EXECUTOR_SOURCE),
+            "--app-zip",
+            str(archive),
+            "--app-digest",
+            f"sha256:{hashlib.sha256(archive.read_bytes()).hexdigest()}",
+            "--extraction-root",
+            str(tmp_path / "app"),
+            "--journal-root",
+            str(journal),
+            "--workspace-root",
+            str(tmp_path / "workspace"),
+            "--poll-interval",
+            "0.01",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    executor = _RunningExecutor(process, journal)
+    try:
+        _wait_for(journal / HYBRID_TOOL_READINESS_FILENAME)
+        _payload, result = executor.invoke("bundle", "bundled_probe", {})
+        assert result.value == "bundle-data"
+        assert (journal / HYBRID_TOOL_PACKAGE_VERIFICATION_FILENAME).exists()
     finally:
         if process.poll() is None:
             executor.stop()
@@ -337,7 +441,7 @@ def test_timeout_error_and_json_safe_results(running_executor: _RunningExecutor)
         "slow-1",
         "slow_tool",
         {"seconds": 0.5},
-        deadline_seconds=0.05,
+        deadline_seconds=0.2,
     )
     _, failed = running_executor.invoke("fail-1", "fail_tool", {})
     _, safe = running_executor.invoke("json-1", "json_value", {})

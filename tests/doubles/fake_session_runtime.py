@@ -118,6 +118,9 @@ class FakeSandboxSessionHandle(FakeSandboxTransport):
     async def delete(self) -> None:
         self.delete_calls += 1
 
+    async def request_delete(self) -> None:
+        self.delete_calls += 1
+
     async def get_lifecycle_policy(self) -> SandboxLifecyclePolicy:
         return self.lifecycle_policy
 

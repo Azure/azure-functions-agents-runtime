@@ -13,14 +13,22 @@ the top-level MAF invocation.
 | `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_SANDBOX_GROUP_RESOURCE_ID` | Enables the private spike and identifies the customer Sandbox Group. |
 | `AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION` | Authored ACA Sandbox Group region (`westus2` for this spike). |
 | `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_ALLOWED_HOSTS` | Comma-separated sandbox egress allowlist. Model and MCP hosts do not belong here. |
+| `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_BUNDLE_ROOT` | Optional app-root-relative bundle directory. The sample uses `sandbox_bundle`; invalid paths fail closed. |
 | `AZURE_FUNCTIONS_AGENTS_APIM_MODEL_BASE_URL` | Azure OpenAI-compatible APIM base ending in `/openai/v1`. |
 | `AZURE_FUNCTIONS_AGENTS_APIM_SUBSCRIPTION_KEY` | Spike-only APIM caller key sent as the API's custom `api-key` header. |
 | `AZURE_FUNCTIONS_AGENTS_APIM_MODEL` | APIM-routed deployment name. |
 | `AZURE_FUNCTIONS_AGENTS_APIM_MCP_URL` | Separate read-only remote MCP APIM endpoint. |
 
-`tools/customer_probe.py` intentionally raises if imported outside ACA
+`sandbox_bundle/tools/customer_probe.py` intentionally raises if imported outside ACA
 Sandbox. A successful Function host startup therefore proves worker discovery
 did not import customer code.
+
+When the bundle setting is absent, the compatibility path captures the complete
+Function app. When present, the bundle is the archive root and must contain
+`tools/`, every helper/module/package and package-data file those tools need,
+and any vendored `.python_packages/lib/site-packages` dependencies. The runtime
+does not infer include globs. It uploads the deterministic archive once and the
+sandbox verifies its SHA-256 before extraction or manifest publication.
 
 Do not set `PYTHON_ENABLE_OPENTELEMETRY` for this fixture. The runtime's
 `[monitor]` dependency configures export from
@@ -39,9 +47,19 @@ separate OTel hook as well can create an incompatible duplicate bootstrap.
 8. `Use Microsoft Learn MCP through APIM to find Azure Functions documentation.`
 
 Also close an active SSE request during a long tool call and run a request with
-a deliberately short timeout. After every scenario, verify no invocation
-sandbox remains after bounded cleanup; create one labeled orphan for the timer
-reaper scenario.
+a deliberately short timeout. Start every optimized scenario from typed
+inventory zero, account for every request against the group's hard
+`maxSandboxCount`, and wait for eventual zero before continuing. Normal close
+arms the 300-second Disk suspend/600-second delete lifecycle backstop and asks
+the service to delete immediately, but it does not await deletion completion.
+Create one labeled orphan for the timer reaper scenario.
+
+The demo lifecycle is exposed as content-free `hybrid.progress` events on the
+`hybrid.invocation` trace. Phase and status are fixed enums with optional
+duration only; no prompt, tool arguments/results, manifest, credential, or
+operation/session/sandbox identifier is attached. Render the events as an
+Application Insights Workbook waterfall. The public chat SSE vocabulary and
+non-hybrid behavior are unchanged.
 
 ## Telemetry queries
 
@@ -60,6 +78,11 @@ customMetrics
 | summarize count(), avg(value), percentiles(value, 50, 95, 99) by name
 | order by name asc
 ```
+
+`sandbox_delete_requests_accepted` means the service accepted a delete request;
+it does not assert LRO completion. `sandbox_deletes` is reserved for explicit
+deletion whose completion was observed. Lifecycle handoff counts, duration, and
+failures are reported separately.
 
 ```kusto
 AzureDiagnostics

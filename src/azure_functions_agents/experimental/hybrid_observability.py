@@ -2,9 +2,34 @@
 
 from __future__ import annotations
 
+import math
 import time
 from enum import StrEnum
 from typing import Any
+
+from .._observability import current_span
+
+
+class HybridProgressPhase(StrEnum):
+    """Fixed, content-free phases exposed to the demo trace."""
+
+    SANDBOX_CREATE = "sandbox_create"
+    PACKAGE_UPLOAD = "package_upload"
+    PACKAGE_VERIFY = "package_verify"
+    EXECUTOR_READY = "executor_ready"
+    DISCOVERY = "discovery"
+    TOOL_EXECUTION = "tool_execution"
+    CLEANUP_HANDOFF = "cleanup_handoff"
+    CLEANUP_COMPLETE = "cleanup_complete"
+
+
+class HybridProgressStatus(StrEnum):
+    """Fixed status vocabulary for hybrid progress events."""
+
+    STARTED = "started"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class HybridMetric(StrEnum):
@@ -22,6 +47,8 @@ class HybridMetric(StrEnum):
     SANDBOX_CREATE_FAILURES = "sandbox_create_failures"
     SANDBOX_CREATE_DURATION = "sandbox_create_duration"
     PACKAGE_UPLOAD_DURATION = "package_upload_duration"
+    PACKAGE_VERIFY_DURATION = "package_verify_duration"
+    PACKAGE_VERIFY_FAILURES = "package_verify_failures"
     EXECUTOR_READY_DURATION = "executor_ready_duration"
     DISCOVERY_DURATION = "discovery_duration"
     TOOL_CALLS = "tool_calls"
@@ -32,6 +59,11 @@ class HybridMetric(StrEnum):
     SANDBOX_DELETES = "sandbox_deletes"
     SANDBOX_DELETE_FAILURES = "sandbox_delete_failures"
     SANDBOX_DELETE_DURATION = "sandbox_delete_duration"
+    SANDBOX_DELETE_REQUESTS_ACCEPTED = "sandbox_delete_requests_accepted"
+    SANDBOX_DELETE_REQUEST_FAILURES = "sandbox_delete_request_failures"
+    SANDBOX_LIFECYCLE_HANDOFFS = "sandbox_lifecycle_handoffs"
+    SANDBOX_LIFECYCLE_HANDOFF_FAILURES = "sandbox_lifecycle_handoff_failures"
+    SANDBOX_LIFECYCLE_HANDOFF_DURATION = "sandbox_lifecycle_handoff_duration"
     SANDBOX_REAPED = "sandbox_reaped"
 
 
@@ -43,12 +75,14 @@ _DURATION_METRICS = frozenset(
         HybridMetric.STREAM_TTFT,
         HybridMetric.SANDBOX_CREATE_DURATION,
         HybridMetric.PACKAGE_UPLOAD_DURATION,
+        HybridMetric.PACKAGE_VERIFY_DURATION,
         HybridMetric.EXECUTOR_READY_DURATION,
         HybridMetric.DISCOVERY_DURATION,
         HybridMetric.TOOL_QUEUE_DURATION,
         HybridMetric.TOOL_EXECUTION_DURATION,
         HybridMetric.TOOL_TRANSFER_DURATION,
         HybridMetric.SANDBOX_DELETE_DURATION,
+        HybridMetric.SANDBOX_LIFECYCLE_HANDOFF_DURATION,
     }
 )
 _COUNT_METRICS = frozenset(set(HybridMetric) - set(_DURATION_METRICS))
@@ -86,6 +120,24 @@ def record_hybrid_count(metric: HybridMetric) -> None:
     instrument = _counters.get(metric)
     if instrument is not None:
         instrument.add(1)
+
+
+def record_hybrid_progress(
+    phase: HybridProgressPhase,
+    status: HybridProgressStatus,
+    *,
+    duration_seconds: float | None = None,
+) -> None:
+    """Add one bounded, content-free progress event to the current span."""
+    attributes: dict[str, str | float] = {
+        "phase": phase.value,
+        "status": status.value,
+    }
+    if duration_seconds is not None:
+        if not math.isfinite(duration_seconds) or duration_seconds < 0:
+            raise ValueError("Hybrid progress duration must be non-negative and finite.")
+        attributes["duration_ms"] = duration_seconds * 1000.0
+    current_span().add_event("hybrid.progress", attributes)
 
 
 def _ensure_instruments() -> None:

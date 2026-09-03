@@ -9,6 +9,35 @@
     "sandbox_disk": "python-3.13",
     "sandbox_group": "sbg-hybrid-tools-0902"
   },
+  "measurement_scope": {
+    "implementation": "pre-optimization synchronous-delete baseline",
+    "measured_commit": "77ef399c7984db4532999f48230ca8ab9673affe",
+    "measured_normal_cleanup": "awaited confirmed sandbox deletion",
+    "unmeasured_source_optimizations": [
+      "terminal lifecycle handoff plus nonblocking delete initiation",
+      "single-transfer package upload with in-sandbox SHA-256 verification",
+      "optional explicit private tool bundle root",
+      "content-free hybrid progress span events"
+    ],
+    "expected_request_path_savings_ms": {
+      "confirmed_delete_average": 3793,
+      "confirmed_delete_maximum": 6929,
+      "archive_readback_estimate_low": 2500,
+      "archive_readback_estimate_high": 3000
+    },
+    "note": "No Azure deployment or load was run for these source optimizations; all measured values below remain the canonical baseline."
+  },
+  "post_measurement_resource_updates": [
+    {
+      "resource": "sbg-hybrid-tools-0902",
+      "api_version": "2026-02-01-preview",
+      "change": "maxSandboxCount raised from 25 to 100",
+      "provisioning_state": "Succeeded",
+      "default_timeout_seconds": 1800,
+      "measurement_effect": "none; update occurred after canonical measurements",
+      "qualification_guard": "start from typed inventory zero and verify eventual zero"
+    }
+  ],
   "end_to_end": {
     "concurrency_1": {
       "cleanup_inventory": 0,

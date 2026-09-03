@@ -6,6 +6,7 @@
     "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_SANDBOX_GROUP_RESOURCE_ID": "/subscriptions/<subscription>/resourceGroups/<group>/providers/Microsoft.App/sandboxGroups/<sandbox-group>",
     "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION": "westus2",
     "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_ALLOWED_HOSTS": "management.azure.com,www.example.com",
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_BUNDLE_ROOT": "sandbox_bundle",
     "AZURE_FUNCTIONS_AGENTS_APIM_MODEL_BASE_URL": "https://<apim>.azure-api.net/<api>/openai/v1",
     "AZURE_FUNCTIONS_AGENTS_APIM_SUBSCRIPTION_KEY": "",
     "AZURE_FUNCTIONS_AGENTS_APIM_MODEL": "gpt-4.1-mini",
