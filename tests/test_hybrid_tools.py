@@ -1,9 +1,12 @@
 import asyncio
 import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 from agent_framework import FunctionInvocationContext, FunctionTool
 
+import azure_functions_agents.runner as runner
 from azure_functions_agents.experimental.hybrid_config import (
     HYBRID_SANDBOX_GROUP_ENV,
     HYBRID_SANDBOX_REGION_ENV,
@@ -20,11 +23,17 @@ from azure_functions_agents.experimental.hybrid_protocol import (
     canonical_hybrid_json_bytes,
 )
 from azure_functions_agents.experimental.hybrid_tools import (
+    HybridPreparedInvocation,
     HybridToolMiddleware,
     InvocationSandboxLease,
     open_hybrid_invocation,
 )
 from azure_functions_agents.transport.transport_models import SandboxFileNotFoundError
+
+_GROUP_ID = (
+    "/subscriptions/00000000-0000-0000-0000-000000000000/"
+    "resourceGroups/rg/providers/Microsoft.App/sandboxGroups/group"
+)
 
 
 class _Backend:
@@ -164,9 +173,31 @@ class _Provider:
         self.closed += 1
 
 
+class _AcquireHandle(_Handle):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lifecycle_calls = 0
+
+    async def set_lifecycle_policy(self, _policy: object) -> None:
+        self.lifecycle_calls += 1
+
+
+class _AcquireProvider(_Provider):
+    def __init__(self, handle: _AcquireHandle) -> None:
+        super().__init__()
+        self.group = SimpleNamespace(resource_id=_GROUP_ID, region="westus2")
+        self.handle = handle
+        self.create_calls = 0
+
+    async def create(self, _request: object, *, persisted_group: object) -> _AcquireHandle:
+        assert persisted_group is not None
+        self.create_calls += 1
+        return self.handle
+
+
 def _settings() -> HybridSandboxSettings:
     return HybridSandboxSettings(
-        group_resource_id="group",
+        group_resource_id=_GROUP_ID,
         region="westus2",
         allowed_hosts=(),
         sandbox_disk="python-3.13",
@@ -294,3 +325,109 @@ async def test_hybrid_context_closes_lease_on_cancellation(
             raise asyncio.CancelledError
 
     assert lease.closed
+
+
+@pytest.mark.asyncio
+async def test_acquire_rolls_back_sandbox_when_package_delivery_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handle = _AcquireHandle()
+    provider = _AcquireProvider(handle)
+
+    async def provider_factory() -> _AcquireProvider:
+        return provider
+
+    async def package_factory(_root: object) -> object:
+        return object()
+
+    async def fail_delivery(_handle: object, _package: object) -> None:
+        raise RuntimeError("delivery failed")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools._deliver_executor",
+        fail_delivery,
+    )
+
+    with pytest.raises(RuntimeError, match="delivery failed"):
+        await InvocationSandboxLease.acquire(
+            _settings(),
+            provider_factory=provider_factory,  # type: ignore[arg-type]
+            package_factory=package_factory,  # type: ignore[arg-type]
+        )
+
+    assert provider.create_calls == 1
+    assert handle.lifecycle_calls == 1
+    assert handle.deleted == 1
+    assert handle.closed == 1
+    assert provider.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_failure_still_closes_handle_and_provider() -> None:
+    class _FailingDeleteHandle(_Handle):
+        async def delete(self) -> None:
+            self.deleted += 1
+            raise RuntimeError("delete failed")
+
+    handle = _FailingDeleteHandle()
+    provider = _Provider()
+    lease = InvocationSandboxLease(
+        settings=_settings(),
+        operation_id="operation",
+        provider=provider,  # type: ignore[arg-type]
+        handle=handle,  # type: ignore[arg-type]
+        manifest=_manifest(),
+    )
+
+    with pytest.raises(RuntimeError, match="delete failed"):
+        await lease.close()
+
+    assert handle.deleted == 1
+    assert handle.closed == 1
+    assert provider.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_disconnect_exits_outer_hybrid_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease_exited = False
+    inner_exited = False
+
+    @asynccontextmanager
+    async def fake_open_hybrid_invocation(
+        **_kwargs: object,
+    ) -> object:
+        nonlocal lease_exited
+        try:
+            yield HybridPreparedInvocation(tools=[], middleware=[])
+        finally:
+            lease_exited = True
+
+    async def fake_inner_stream(
+        _prompt: str,
+        **_kwargs: object,
+    ) -> object:
+        nonlocal inner_exited
+        try:
+            yield {"type": "text", "content": "first"}
+            await asyncio.Event().wait()
+        finally:
+            inner_exited = True
+
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.open_hybrid_invocation",
+        fake_open_hybrid_invocation,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run_agent_event_stream_in_invocation",
+        fake_inner_stream,
+    )
+    stream = runner.run_agent_events("prompt", tools=[])
+
+    assert await anext(stream) == {"type": "text", "content": "first"}
+    await stream.aclose()
+
+    assert inner_exited
+    assert lease_exited
