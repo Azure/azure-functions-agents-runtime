@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hybrid ACA Sandbox leadership demo</title>
+  <style>
+    :root {
+      --bg: #06111f;
+      --panel: #0c1d31;
+      --panel2: #102944;
+      --ink: #f5f9ff;
+      --muted: #9eb4ca;
+      --azure: #53b7ff;
+      --cyan: #53e0cf;
+      --orange: #ffb454;
+      --green: #65d28e;
+      --red: #ff7b7b;
+      --line: rgba(153, 191, 221, .2);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+    body {
+      font-family: "Segoe UI", Arial, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 82% 15%, rgba(35, 125, 199, .22), transparent 32%),
+        linear-gradient(135deg, #071321 0%, #06111f 54%, #081a2b 100%);
+    }
+    .scene { display: none; width: 100vw; height: 100vh; padding: 64px 78px 58px; position: relative; }
+    .scene.active { display: flex; flex-direction: column; }
+    .eyebrow { color: var(--cyan); font-weight: 700; letter-spacing: .16em; text-transform: uppercase; font-size: 20px; }
+    h1 { font-size: 68px; line-height: 1.02; margin: 18px 0 18px; max-width: 1500px; letter-spacing: -.035em; }
+    h2 { font-size: 46px; margin: 8px 0 24px; letter-spacing: -.025em; }
+    h3 { font-size: 25px; margin: 0 0 10px; }
+    p { color: var(--muted); font-size: 24px; line-height: 1.45; margin: 0; }
+    .lead { font-size: 30px; max-width: 1370px; }
+    .grid { display: grid; gap: 22px; flex: 1; align-items: stretch; }
+    .grid-2 { grid-template-columns: 1fr 1fr; }
+    .grid-3 { grid-template-columns: repeat(3, 1fr); }
+    .grid-5 { grid-template-columns: repeat(5, 1fr); }
+    .card {
+      background: linear-gradient(145deg, rgba(18, 45, 74, .96), rgba(10, 28, 47, .96));
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 28px 30px;
+      box-shadow: 0 18px 55px rgba(0,0,0,.18);
+      position: relative;
+      overflow: hidden;
+    }
+    .card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--azure); }
+    .card.cyan::before { background: var(--cyan); }
+    .card.orange::before { background: var(--orange); }
+    .card.green::before { background: var(--green); }
+    .metric { font-size: 54px; font-weight: 750; letter-spacing: -.04em; margin: 8px 0 2px; }
+    .metric.small { font-size: 42px; }
+    .label { color: var(--muted); font-size: 18px; text-transform: uppercase; letter-spacing: .12em; font-weight: 650; }
+    .status { display: inline-flex; align-items: center; gap: 10px; border-radius: 999px; padding: 9px 15px; background: rgba(101,210,142,.12); color: var(--green); font-size: 20px; font-weight: 700; border: 1px solid rgba(101,210,142,.32); }
+    .dot { width: 11px; height: 11px; border-radius: 50%; background: currentColor; box-shadow: 0 0 14px currentColor; }
+    .chip { display: inline-block; border-radius: 999px; padding: 8px 14px; background: rgba(83,183,255,.11); border: 1px solid rgba(83,183,255,.25); color: #bfe4ff; font-size: 19px; margin: 4px 6px 4px 0; }
+    .flow { display: grid; grid-template-columns: 1.08fr 80px 1fr 80px 1fr 80px 1.05fr; align-items: center; gap: 10px; margin-top: 36px; flex: 1; }
+    .flowbox { min-height: 265px; display: flex; flex-direction: column; justify-content: center; text-align: center; }
+    .icon { width: 76px; height: 76px; margin: 0 auto 18px; border-radius: 22px; display: grid; place-items: center; background: rgba(83,183,255,.13); color: var(--azure); font-size: 38px; }
+    .arrow { font-size: 52px; color: var(--cyan); text-align: center; animation: pulse 2.6s ease-in-out infinite; }
+    @keyframes pulse { 50% { transform: translateX(8px); opacity: .6; } }
+    .toprow { display: flex; justify-content: space-between; align-items: center; gap: 24px; }
+    .run-id { font-family: Consolas, monospace; color: #d8eaff; font-size: 22px; background: rgba(3,10,18,.42); padding: 12px 16px; border-radius: 10px; }
+    .timeline { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin-top: 24px; }
+    .state { padding: 22px; border-radius: 16px; background: rgba(3,10,18,.32); border: 1px solid var(--line); }
+    .state strong { display: block; font-size: 33px; margin: 8px 0; }
+    .waterfall { display: grid; grid-template-columns: 220px 1fr 125px; gap: 13px 18px; align-items: center; margin-top: 18px; }
+    .bartrack { height: 31px; background: rgba(255,255,255,.055); border-radius: 10px; overflow: hidden; }
+    .bar { height: 100%; min-width: 7px; border-radius: 10px; background: linear-gradient(90deg, var(--azure), var(--cyan)); transform-origin: left; animation: grow 1.7s ease-out both; }
+    @keyframes grow { from { transform: scaleX(.05); opacity: .2; } to { transform: scaleX(1); opacity: 1; } }
+    .bar.orange { background: linear-gradient(90deg, #ff9e46, #ffd279); }
+    .value { font-family: Consolas, monospace; color: #dcefff; font-size: 22px; text-align: right; }
+    .caption { position: absolute; left: 78px; right: 78px; bottom: 22px; padding: 12px 20px; border-radius: 12px; background: rgba(2, 8, 15, .82); border: 1px solid rgba(255,255,255,.12); color: #e7f1fb; font-size: 21px; text-align: center; }
+    .footer { position: absolute; top: 23px; right: 78px; color: #7290aa; font-size: 17px; }
+    .source { position: absolute; left: 78px; bottom: 18px; color: #66829d; font-size: 15px; }
+    .caption + .source { display: none; }
+    .hero { justify-content: center; padding-bottom: 110px; }
+    .hero h1 { font-size: 80px; max-width: 1650px; }
+    .hero .accent { color: var(--azure); }
+    .hero-grid { display: grid; grid-template-columns: 1.5fr 1fr; gap: 60px; align-items: center; }
+    .ring { width: 440px; height: 440px; border: 2px solid rgba(83,183,255,.3); border-radius: 50%; display: grid; place-items: center; position: relative; }
+    .ring::before, .ring::after { content: ""; position: absolute; border-radius: 50%; border: 1px solid rgba(83,224,207,.22); }
+    .ring::before { inset: 36px; }
+    .ring::after { inset: 84px; }
+    .ring-core { width: 205px; height: 205px; border-radius: 50%; background: linear-gradient(135deg, #1178bd, #1d4f86); display: grid; place-items: center; font-weight: 800; text-align: center; font-size: 28px; box-shadow: 0 0 70px rgba(83,183,255,.28); }
+    .check { color: var(--green); font-weight: 800; }
+    .bigline { font-size: 32px; color: var(--ink); margin: 12px 0; }
+    .comparison { display: flex; align-items: flex-end; gap: 26px; height: 300px; padding: 20px 16px 0; }
+    .column { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 10px; }
+    .columnbar { width: 82%; border-radius: 16px 16px 4px 4px; background: linear-gradient(180deg, #5681a8, #274766); }
+    .columnbar.after { background: linear-gradient(180deg, var(--cyan), #177f78); }
+    .quote { font-size: 43px; line-height: 1.28; letter-spacing: -.02em; max-width: 1450px; color: #dcecff; }
+    .fadein { animation: fade .9s ease-out both; }
+    .delay1 { animation-delay: .25s; } .delay2 { animation-delay: .55s; } .delay3 { animation-delay: .85s; }
+    @keyframes fade { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+    .tiny { font-size: 17px; color: #7691aa; }
+  </style>
+</head>
+<body>
+  <section class="scene hero" data-scene="1">
+    <div class="footer">LIVE LEADERSHIP DEMO · 03 SEP 2026</div>
+    <div class="hero-grid">
+      <div>
+        <div class="eyebrow fadein">Azure Functions serverless agents</div>
+        <h1 class="fadein delay1">Hosted Skills with <span class="accent">isolated tool execution</span></h1>
+        <p class="lead fadein delay2">Functions keeps orchestration. APIM governs Foundry model and MCP traffic. Every local tool runs in a fresh customer-owned ACA Sandbox.</p>
+        <div style="margin-top:28px" class="fadein delay3">
+          <span class="chip">Real retained Azure deployment</span><span class="chip">One bounded live invocation</span><span class="chip">Zero body logging</span>
+        </div>
+      </div>
+      <div class="ring fadein delay2"><div class="ring-core">HYBRID<br>CONTROL PLANE</div></div>
+    </div>
+    <div class="caption">A serverless agent architecture that separates orchestration, governance, and untrusted execution.</div>
+  </section>
+
+  <section class="scene" data-scene="2">
+    <div class="footer">01 · DEPLOYED TOPOLOGY</div>
+    <div class="eyebrow">One request · four governed surfaces</div>
+    <h2>Hosted Skills stays serverless while tools cross an isolation boundary</h2>
+    <div class="flow">
+      <div class="card flowbox"><div class="icon">ƒ</div><h3>Azure Functions</h3><p>MAF agent loop<br>Hosted Skill endpoints</p></div>
+      <div class="arrow">→</div>
+      <div class="card flowbox cyan"><div class="icon">◇</div><h3>API Management</h3><p>Foundry model API<br>Read-only MCP API</p></div>
+      <div class="arrow">→</div>
+      <div class="card flowbox orange"><div class="icon">▣</div><h3>ACA Sandbox</h3><p>Fresh per invocation<br>No ingress, deny egress</p></div>
+      <div class="arrow">→</div>
+      <div class="card flowbox green"><div class="icon">⌁</div><h3>Application Insights</h3><p>Correlated spans<br>Content-free metrics</p></div>
+    </div>
+    <div class="caption">The model loop and MCP client never enter the sandbox; only local executable tools do.</div>
+  </section>
+
+  <section class="scene" data-scene="3">
+    <div class="footer">02 · FUNCTION HOSTED SKILL</div>
+    <div class="toprow"><div><div class="eyebrow">Live Function invocation</div><h2>Hosted Skill completed a streaming agent turn</h2></div><div class="status"><span class="dot"></span>HTTP 200 · DONE</div></div>
+    <div class="grid grid-2" style="margin-bottom:62px">
+      <div class="card">
+        <div class="label">Function App</div><div class="metric small">func-hybrid-sbx-0902</div>
+        <p>Route: <span class="run-id">/agents/main/chatstream</span></p>
+        <div style="height:24px"></div>
+        <div class="label">Host operation</div><div class="run-id">c9cfb8d52497c15862277558e1a96a9c</div>
+        <p style="margin-top:18px">Body content intentionally not persisted.</p>
+      </div>
+      <div class="grid grid-2">
+        <div class="card green"><div class="label">Client-observed total</div><div class="metric">23.64s</div><p>Network + streaming</p></div>
+        <div class="card cyan"><div class="label">First event</div><div class="metric">10.70s</div><p>Client-observed</p></div>
+        <div class="card"><div class="label">Function duration</div><div class="metric">20.32s</div><p>Server request</p></div>
+        <div class="card orange"><div class="label">Local tool calls</div><div class="metric">1</div><p>ACA-executed</p></div>
+      </div>
+    </div>
+    <div class="caption">The public stream completed normally while telemetry retained only status, timing, and correlation.</div>
+  </section>
+
+  <section class="scene" data-scene="4">
+    <div class="footer">03 · APIM GOVERNANCE</div>
+    <div class="eyebrow">Live APIM telemetry · same request window</div>
+    <h2>Foundry model and Microsoft Learn MCP traffic used isolated APIs</h2>
+    <div class="grid grid-2" style="margin-bottom:62px">
+      <div class="card">
+        <div class="toprow"><h3>Foundry model lane</h3><span class="status"><span class="dot"></span>2 / 2 successful</span></div>
+        <div class="metric">2.34s</div><div class="label">P50 gateway request</div>
+        <p style="margin-top:20px">API: <strong>hybrid-sandbox-spike-model</strong><br>Backend: gpt-4.1-mini via managed identity</p>
+        <div style="margin-top:22px"><span class="chip">Subscription protected</span><span class="chip">Unbuffered</span></div>
+      </div>
+      <div class="card cyan">
+        <div class="toprow"><h3>Read-only MCP lane</h3><span class="status"><span class="dot"></span>4 / 4 POST successful</span></div>
+        <div class="metric">80ms</div><div class="label">P50 gateway request</div>
+        <p style="margin-top:20px">API: <strong>hybrid-sandbox-spike-mcp</strong><br>Backend: Microsoft Learn MCP</p>
+        <div style="margin-top:22px"><span class="chip">W3C correlation</span><span class="chip">0-byte body capture</span></div>
+      </div>
+    </div>
+    <div class="caption">APIM recorded two model calls and four successful MCP protocol calls in the exact bounded window.</div>
+  </section>
+
+  <section class="scene" data-scene="5">
+    <div class="footer">04 · ACA SANDBOX LIFECYCLE</div>
+    <div class="eyebrow">Typed Sandbox Group inventory</div>
+    <h2>Fresh isolation was observable—and the group returned to zero</h2>
+    <div class="card" style="margin-bottom:62px">
+      <div class="toprow"><div><div class="label">Sandbox Group</div><div class="metric small">sbg-hybrid-tools-0902</div></div><span class="chip">West US 2 · max 100</span></div>
+      <div class="timeline">
+        <div class="state"><div class="label">Before request</div><strong class="check">0 sandboxes</strong><p>Admission preflight</p></div>
+        <div class="state"><div class="label">22:38:32 UTC</div><strong style="color:var(--orange)">1 Running</strong><p>Invocation-created object retained after a failed delete initiation</p></div>
+        <div class="state"><div class="label">23:00:08 UTC</div><strong class="check">0 sandboxes</strong><p>Scheduled app-scoped reaper after the 20-minute orphan threshold</p></div>
+      </div>
+      <p style="margin-top:28px">No resource settings were changed. No operator cleanup was used.</p>
+    </div>
+    <div class="caption">Deletion initiation failed once; the existing ownership-scoped reaper converged inventory to zero without operator cleanup.</div>
+  </section>
+
+  <section class="scene" data-scene="6">
+    <div class="footer">05 · APPLICATION INSIGHTS</div>
+    <div class="toprow"><div><div class="eyebrow">Live content-free runtime telemetry</div><h2>Lifecycle waterfall for trace fc2ce69d…</h2></div><span class="status"><span class="dot"></span>hybrid.invocation · success</span></div>
+    <div class="card" style="margin-bottom:62px">
+      <div class="waterfall">
+        <div>Sandbox create</div><div class="bartrack"><div class="bar" style="width:100%"></div></div><div class="value">2.859s</div>
+        <div>Package upload</div><div class="bartrack"><div class="bar" style="width:27%"></div></div><div class="value">82.0ms</div>
+        <div>Executor ready</div><div class="bartrack"><div class="bar" style="width:45%"></div></div><div class="value">304.7ms</div>
+        <div>Package verify</div><div class="bartrack"><div class="bar orange" style="width:4%"></div></div><div class="value">0.150ms</div>
+        <div>Tool transfer</div><div class="bartrack"><div class="bar" style="width:42%"></div></div><div class="value">285.7ms</div>
+        <div>Tool execution</div><div class="bartrack"><div class="bar orange" style="width:4%"></div></div><div class="value">0.231ms</div>
+        <div>Cleanup handoff</div><div class="bartrack"><div class="bar" style="width:22%"></div></div><div class="value">47.1ms</div>
+      </div>
+      <p class="tiny" style="margin-top:18px">Bars use a presentation scale; numeric durations are the live custom metric values.</p>
+    </div>
+    <div class="caption">Application Insights captured the lifecycle without prompt, arguments, tool output, credentials, or sandbox identifiers.</div>
+  </section>
+
+  <section class="scene" data-scene="7">
+    <div class="footer">06 · ENTERPRISE BOUNDARIES</div>
+    <div class="eyebrow">Security and governance by construction</div>
+    <h2>Each plane owns one identity and one responsibility</h2>
+    <div class="grid grid-3" style="margin-bottom:62px">
+      <div class="card"><div class="icon">ƒ</div><h3>Functions identity</h3><p>Sandbox Group data-plane access and spike storage only.</p><div class="bigline check">✓ Orchestrates</div></div>
+      <div class="card cyan"><div class="icon">◇</div><h3>APIM identity</h3><p>Calls the model backend; Functions never holds a model key.</p><div class="bigline check">✓ Governs</div></div>
+      <div class="card orange"><div class="icon">▣</div><h3>Sandbox identity</h3><p>Reader on one positive-control resource; other resources denied.</p><div class="bigline check">✓ Isolates</div></div>
+    </div>
+    <div class="caption">No anonymous ingress, deny-by-default egress, narrow RBAC, and zero request or response body logging.</div>
+  </section>
+
+  <section class="scene" data-scene="8">
+    <div class="footer">07 · MEASURED QUALIFICATION</div>
+    <div class="eyebrow">Optimized clean window · n=21</div>
+    <h2>The architecture removed nearly half of runtime request latency</h2>
+    <div class="grid grid-2" style="margin-bottom:62px">
+      <div class="card">
+        <div class="toprow"><div><div class="label">Runtime average</div><div class="metric">48.03% lower</div></div><span class="status"><span class="dot"></span>0 request errors</span></div>
+        <div class="comparison">
+          <div class="column"><strong>20.49s</strong><div class="columnbar" style="height:230px"></div><span class="label">Baseline</span></div>
+          <div class="column"><strong>10.65s</strong><div class="columnbar after" style="height:120px"></div><span class="label">Optimized</span></div>
+        </div>
+      </div>
+      <div class="grid grid-2">
+        <div class="card"><div class="label">Create</div><div class="metric small">3.01s</div></div>
+        <div class="card cyan"><div class="label">Upload</div><div class="metric small">135ms</div></div>
+        <div class="card orange"><div class="label">Executor ready</div><div class="metric small">333ms</div></div>
+        <div class="card green"><div class="label">Tool execution</div><div class="metric small">0.30ms</div></div>
+        <div class="card"><div class="label">Cleanup handoff</div><div class="metric small">49.9ms</div></div>
+        <div class="card cyan"><div class="label">Final inventory</div><div class="metric small">0</div></div>
+      </div>
+    </div>
+    <div class="caption">Measured create, upload, readiness, tool, and handoff stages explain where the optimized path spends time.</div>
+  </section>
+
+  <section class="scene" data-scene="9">
+    <div class="footer">08 · LEADERSHIP TAKEAWAY</div>
+    <div class="eyebrow">What this spike proves</div>
+    <h2>Serverless orchestration and customer isolation can coexist</h2>
+    <div class="grid grid-3" style="margin-bottom:62px">
+      <div class="card green"><div class="metric">01</div><h3>Keep authoring simple</h3><p>Hosted Skills remains a normal Functions programming model.</p></div>
+      <div class="card cyan"><div class="metric">02</div><h3>Centralize governance</h3><p>APIM controls model and MCP routes with managed identity.</p></div>
+      <div class="card orange"><div class="metric">03</div><h3>Move trust boundaries</h3><p>Only executable customer tools enter the sandbox.</p></div>
+    </div>
+    <div class="caption">The production question is no longer feasibility; it is productizing lifecycle, capacity, and operator experience.</div>
+  </section>
+
+  <section class="scene hero" data-scene="10">
+    <div class="footer">LIVE EVIDENCE PACKAGE</div>
+    <div class="eyebrow">Hybrid ACA Sandbox / APIM spike</div>
+    <div class="quote" style="margin-top:36px">“Functions orchestrates. APIM governs. ACA Sandbox isolates. Application Insights proves the path.”</div>
+    <div class="grid grid-3" style="flex:0 0 210px; margin-top:55px">
+      <div class="card"><div class="label">Function</div><div class="metric small">200 / done</div></div>
+      <div class="card cyan"><div class="label">APIM model + MCP</div><div class="metric small">6 successful calls</div></div>
+      <div class="card green"><div class="label">Sandbox final inventory</div><div class="metric small">0</div></div>
+    </div>
+    <p style="margin-top:32px">Every claim maps to a timestamped live query or the durable n=21 qualification report.</p>
+    <div class="caption">Retained resources, bounded live evidence, no secrets, and no teardown.</div>
+  </section>
+
+  <script>
+    const scene = new URLSearchParams(location.search).get("scene") || "1";
+    document.querySelector(`[data-scene="${scene}"]`).classList.add("active");
+  </script>
+</body>
+</html>

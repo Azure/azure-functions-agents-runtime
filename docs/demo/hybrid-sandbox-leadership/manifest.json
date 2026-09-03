@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "title": "Hybrid ACA Sandbox/APIM leadership demo",
+  "recorded_at": "2026-09-03",
+  "live_request": {
+    "window_start": "2026-09-03T22:31:54.6749887Z",
+    "window_end": "2026-09-03T22:32:28.5140488Z",
+    "telemetry_window_start": "2026-09-03T22:31:50Z",
+    "telemetry_window_end": "2026-09-03T22:33:30Z",
+    "function_app": "func-hybrid-sbx-0902",
+    "route": "/agents/main/chatstream",
+    "prompt_id": "customer-probe-leadership-demo-repeat-3",
+    "http_status": 200,
+    "terminal_event": "done",
+    "client_first_event_ms": 10696.811,
+    "client_total_ms": 23642.241,
+    "function_duration_ms": 20317.2874,
+    "function_operation_id": "c9cfb8d52497c15862277558e1a96a9c",
+    "runtime_trace_id": "fc2ce69d3b9c95984da4c48e15b8d48f"
+  },
+  "live_apim": {
+    "model": {
+      "api_id": "hybrid-sandbox-spike-model",
+      "post_requests": 2,
+      "errors": 0,
+      "p50_ms": 2344.0438,
+      "p95_ms": 2853.5343
+    },
+    "mcp": {
+      "api_id": "hybrid-sandbox-spike-mcp",
+      "post_requests": 4,
+      "post_errors": 0,
+      "p50_ms": 80.4918,
+      "p95_ms": 128.1154,
+      "expected_nonfatal_close_405": 2
+    },
+    "diagnostics": {
+      "logger_type": "applicationInsights",
+      "http_correlation_protocol": "W3C",
+      "request_body_bytes": 0,
+      "response_body_bytes": 0
+    }
+  },
+  "live_runtime_metrics": {
+    "sandbox_create_ms": 2858.681183,
+    "package_upload_ms": 82.005902,
+    "package_verify_ms": 0.149715,
+    "executor_ready_ms": 304.723439,
+    "tool_execution_ms": 0.230681,
+    "tool_transfer_ms": 285.701713,
+    "cleanup_handoff_ms": 47.130153,
+    "request_ms": 16478.87676,
+    "delete_request_failures": 1
+  },
+  "sandbox_inventory": {
+    "pre_run": 0,
+    "active_observation": {
+      "observed_at": "2026-09-03T22:38:32.4454776Z",
+      "count": 1,
+      "states": {
+        "Running": 1
+      }
+    },
+    "final_observation": {
+      "observed_at": "2026-09-03T23:00:08.9225485Z",
+      "count": 0,
+      "states": {}
+    },
+    "operator_cleanup_used": false,
+    "observed_cleanup_path": "scheduled ownership-scoped reaper after the configured 1200-second orphan threshold"
+  },
+  "qualification_reference": {
+    "optimized_commit": "cb53d513964cb4ab225144f12c8018c49b25cd84",
+    "request_count": 21,
+    "error_count": 0,
+    "runtime_average_ms": 10649.358,
+    "runtime_reduction_percent": 48.03,
+    "sandbox_create_average_ms": 3010.806,
+    "package_upload_average_ms": 135.085,
+    "executor_ready_average_ms": 333.192,
+    "tool_execution_average_ms": 0.299,
+    "cleanup_handoff_average_ms": 49.914
+  },
+  "assets": {
+    "storyboard": "storyboard.md",
+    "screenshots": [
+      "evidence/function-hosted-skill.png",
+      "evidence/apim-foundry-mcp.png",
+      "evidence/aca-sandbox-lifecycle.png",
+      "evidence/appinsights-waterfall.png"
+    ],
+    "silent_master": "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-silent.mp4",
+    "enhanced_video": "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-demo.mp4",
+    "contact_sheet": "session-artifact:hybrid-sandbox-leadership-video/contact-sheet.png"
+  },
+  "asset_metadata": {
+    "evidence/function-hosted-skill.png": {
+      "bytes": 787901,
+      "sha256": "7764ac18f3aee83ef484c7b1ed420a21848701206320dc331c53a3dea7f80664",
+      "dimensions": "1920x1080"
+    },
+    "evidence/apim-foundry-mcp.png": {
+      "bytes": 624556,
+      "sha256": "9bc5a3f58df1b02941de3af92c2c2ce6129950cc7def3c0ec2143b86fc80dab0",
+      "dimensions": "1920x1080"
+    },
+    "evidence/aca-sandbox-lifecycle.png": {
+      "bytes": 613138,
+      "sha256": "2bd158e01cada3bfa0623cc4007c7ed51440043fa366904042721218aa54e734",
+      "dimensions": "1920x1080"
+    },
+    "evidence/appinsights-waterfall.png": {
+      "bytes": 604240,
+      "sha256": "dd4411c3194e0030731a1de8ab8197247dde56b9ce72f87bf2c8b1b746735f75",
+      "dimensions": "1920x1080"
+    },
+    "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-silent.mp4": {
+      "bytes": 16093393,
+      "sha256": "58ace724cc47b8bba351e9c1f8a61e01e79f5960bb1452aec1e28164641a87b7",
+      "duration_seconds": 307.667,
+      "video": "H.264 1920x1080 30fps",
+      "audio": null
+    },
+    "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-demo.mp4": {
+      "bytes": 22638417,
+      "sha256": "6224f86719ea93a2c154a93270043c2f8222a945152821b96408fd576a0c7324",
+      "duration_seconds": 307.667,
+      "video": "H.264 1920x1080 30fps",
+      "audio": "AAC 48kHz stereo; mean -23.5 dB, max -2.2 dB"
+    },
+    "session-artifact:hybrid-sandbox-leadership-video/contact-sheet.png": {
+      "bytes": 553858,
+      "sha256": "5684d9e61524872fd73d953a01003e25a299a5b5688a5b1e2faace7dbbf666e8",
+      "dimensions": "1440x1080"
+    }
+  }
+}
