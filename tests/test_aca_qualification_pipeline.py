@@ -15,6 +15,7 @@ import inspect
 import json
 import re
 import subprocess
+import tomllib
 import zipfile
 from argparse import Namespace
 from pathlib import Path
@@ -41,6 +42,9 @@ from eng.scripts.aca_qualification_pipeline import (
     select_runtime_wheel,
     stamp_marker,
 )
+from packaging.markers import default_environment
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 _BUILD_ID = "12345"
 _COMMIT = "2415708287d1ce719e8380208d0ba52a8df9c080"
@@ -766,11 +770,14 @@ class TestPackageAssemblyHelpers:
             select_runtime_wheel(["a.whl", "b.whl"])
 
     def test_render_requirements_installs_actual_wheel_and_pinned_deps(self, tmp_path: Path) -> None:
-        constraints = tmp_path / "aca-fixture-py313.txt"
-        constraints.write_text("azure-functions==1.23.0\npydantic==2.11.0\n", encoding="utf-8")
+        requirements_export = tmp_path / "aca-fixture-requirements.txt"
+        requirements_export.write_text(
+            "azure-functions==1.23.0\npydantic==2.11.0\n",
+            encoding="utf-8",
+        )
         rendered = render_requirements(
             wheel_filename="azure_functions_agents-1.2.3-py3-none-any.whl",
-            constraints_path=constraints,
+            requirements_export_path=requirements_export,
         )
         assert rendered.splitlines() == [
             "./azure_functions_agents-1.2.3-py3-none-any.whl",
@@ -780,21 +787,21 @@ class TestPackageAssemblyHelpers:
         ]
 
     def test_render_requirements_uses_template_placeholder_once(self, tmp_path: Path) -> None:
-        constraints = tmp_path / "aca-fixture-py314.txt"
-        constraints.write_text("azure-functions==1.24.0\n", encoding="utf-8")
+        requirements_export = tmp_path / "aca-fixture-requirements.txt"
+        requirements_export.write_text("azure-functions==1.24.0\n", encoding="utf-8")
         template = tmp_path / "requirements.txt"
         template.write_text("{{RUNTIME_WHEEL}}\n", encoding="utf-8")
         rendered = render_requirements(
             wheel_filename="runtime-1.0.0-py3-none-any.whl",
-            constraints_path=constraints,
+            requirements_export_path=requirements_export,
             template_path=template,
         )
         assert rendered.splitlines().count("./runtime-1.0.0-py3-none-any.whl") == 1
         assert "azure-functions==1.24.0" in rendered
 
     def test_render_requirements_replaces_generated_template_placeholder(self, tmp_path: Path) -> None:
-        constraints = tmp_path / "aca-fixture-py313.txt"
-        constraints.write_text("azure-functions==1.23.0\n", encoding="utf-8")
+        requirements_export = tmp_path / "aca-fixture-requirements.txt"
+        requirements_export.write_text("azure-functions==1.23.0\n", encoding="utf-8")
         template = tmp_path / "requirements.txt"
         template.write_text(
             "# generated template\n"
@@ -805,7 +812,7 @@ class TestPackageAssemblyHelpers:
         )
         rendered = render_requirements(
             wheel_filename="azurefunctions_agents_runtime-1.0.0-py3-none-any.whl",
-            constraints_path=constraints,
+            requirements_export_path=requirements_export,
             template_path=template,
         )
         assert "BUILD_WHEEL_PLACEHOLDER" not in rendered
@@ -813,11 +820,11 @@ class TestPackageAssemblyHelpers:
         assert "stale-pin==0.0.1" not in rendered
         assert "azure-functions==1.23.0" in rendered
 
-    def test_render_requirements_rejects_missing_constraints_file(self, tmp_path: Path) -> None:
-        with pytest.raises(QualificationPipelineError, match="constraints_file_missing"):
+    def test_render_requirements_rejects_missing_export(self, tmp_path: Path) -> None:
+        with pytest.raises(QualificationPipelineError, match="requirements_export_missing"):
             render_requirements(
                 wheel_filename="runtime-1.0.0-py3-none-any.whl",
-                constraints_path=tmp_path / "missing.txt",
+                requirements_export_path=tmp_path / "missing.txt",
             )
 
     def test_assemble_upload_materializes_fixture_wheel_marker_and_requirements(
@@ -839,8 +846,8 @@ class TestPackageAssemblyHelpers:
         ignored = fixture_root / "__pycache__"
         ignored.mkdir()
         (ignored / "fixture.pyc").write_bytes(b"ignored")
-        constraints = tmp_path / "constraints.txt"
-        constraints.write_text("azure-functions==1.24.0\n", encoding="utf-8")
+        requirements_export = tmp_path / "aca-fixture-requirements.txt"
+        requirements_export.write_text("azure-functions==1.24.0\n", encoding="utf-8")
         staging_root = tmp_path / "staging"
 
         result = assemble_upload_directory(
@@ -849,7 +856,7 @@ class TestPackageAssemblyHelpers:
                 fixture_root=str(fixture_root),
                 staging_root=str(staging_root),
                 requirements_template=None,
-                constraints_file=str(constraints),
+                requirements_export=str(requirements_export),
                 commit_sha=_COMMIT,
                 build_id=_BUILD_ID,
                 branch="refs/heads/main",
@@ -888,40 +895,111 @@ class TestDeployPreflightHelpers:
         assert "grant Website Contributor on aca-app" in rendered
 
 
-class TestMonitorDependencyContract:
-    """Prevent silent removal of the monitor extra from the ACA fixture."""
+class TestFixtureRequirementsExport:
+    """Keep the Oryx export synchronized with the selected uv.lock closure."""
 
     def _repo_root(self) -> Path:
         return Path(__file__).resolve().parents[1]
 
-    def test_fixture_requirements_input_requests_monitor_extra(self) -> None:
-        source = (
-            self._repo_root() / "eng" / "constraints" / "aca-fixture-requirements.in"
-        ).read_text(encoding="utf-8")
-        requirements = {
-            line.strip()
-            for line in source.splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
+    def _export_path(self) -> Path:
+        return self._repo_root() / "eng" / "constraints" / "aca-fixture-requirements.txt"
+
+    def _requirements(self) -> tuple[Requirement, ...]:
+        lines = self._export_path().read_text(encoding="utf-8").splitlines()
+        assert all(
+            line and not line.startswith(("-", ".", "git+")) and " @ " not in line
+            for line in lines
+        )
+        requirements = tuple(Requirement(line) for line in lines)
+        assert all(requirement.url is None for requirement in requirements)
+        return requirements
+
+    def _locked_closure(self) -> dict[str, str]:
+        lock = tomllib.loads((self._repo_root() / "uv.lock").read_text(encoding="utf-8"))
+        packages = {
+            canonicalize_name(package["name"]): package
+            for package in lock["package"]
         }
-        assert requirements == {".[aca_sandbox,monitor]"}
+        project_name = canonicalize_name("azurefunctions-agents-runtime")
+        project = packages[project_name]
+        pending = [
+            *project["dependencies"],
+            *project["optional-dependencies"]["aca-sandbox"],
+            *project["optional-dependencies"]["monitor"],
+        ]
+        closure: dict[str, str] = {}
+        processed_extras: dict[str, set[str]] = {}
+        while pending:
+            dependency = pending.pop()
+            name = canonicalize_name(dependency["name"])
+            package = packages[name]
+            requested_extras = set(dependency.get("extra", ()))
+            new_extras = requested_extras - processed_extras.get(name, set())
+            if name not in closure:
+                closure[name] = package["version"]
+                pending.extend(package.get("dependencies", ()))
+            for extra in new_extras:
+                pending.extend(package.get("optional-dependencies", {}).get(extra, ()))
+            processed_extras.setdefault(name, set()).update(requested_extras)
+        return closure
 
-    def test_compiled_constraints_contain_azure_monitor_opentelemetry(self) -> None:
-        constraints_dir = self._repo_root() / "eng" / "constraints"
-        for lock_name in ("aca-fixture-py313.txt", "aca-fixture-py314.txt"):
-            content = (constraints_dir / lock_name).read_text(encoding="utf-8")
-            assert "azure-monitor-opentelemetry==" in content, (
-                f"{lock_name} must pin azure-monitor-opentelemetry"
+    def test_export_exactly_matches_the_selected_uv_lock_closure(self) -> None:
+        actual: dict[str, str] = {}
+        for requirement in self._requirements():
+            specifiers = list(requirement.specifier)
+            assert len(specifiers) == 1
+            specifier = specifiers[0]
+            assert specifier.operator == "=="
+            actual[canonicalize_name(requirement.name)] = specifier.version
+
+        assert actual == self._locked_closure()
+        assert "azurefunctions-agents-runtime" not in actual
+        assert not {
+            "azure-storage-queue",
+            "jmespath",
+            "mypy",
+            "pytest",
+            "pytest-asyncio",
+            "pytest-cov",
+            "ruff",
+            "types-jsonschema",
+        } & actual.keys()
+
+    def test_export_has_the_same_active_linux_closure_for_both_python_minors(self) -> None:
+        requirements = self._requirements()
+
+        def active_names(python_version: str) -> set[str]:
+            environment = default_environment()
+            environment.update(
+                python_version=python_version,
+                python_full_version=f"{python_version}.0",
+                sys_platform="linux",
+                platform_system="Linux",
+                implementation_name="cpython",
+                platform_python_implementation="CPython",
             )
+            return {
+                canonicalize_name(requirement.name)
+                for requirement in requirements
+                if requirement.marker is None or requirement.marker.evaluate(environment)
+            }
 
-    @pytest.mark.parametrize("python_minor", ["313", "314"])
-    def test_assembled_requirements_include_the_monitor_distribution(
-        self, python_minor: str
-    ) -> None:
+        python313 = active_names("3.13")
+        python314 = active_names("3.14")
+        assert python313 == python314
+        assert {
+            "azure-containerapps-sandbox",
+            "azure-data-tables",
+            "azure-monitor-opentelemetry",
+        } <= python313
+        assert {"colorama", "pywin32"}.isdisjoint(python313)
+
+    def test_assembled_requirements_include_the_monitor_distribution(self) -> None:
         root = self._repo_root()
         rendered = render_requirements(
             wheel_filename="azurefunctions_agents_runtime-test.whl",
-            constraints_path=(
-                root / "eng" / "constraints" / f"aca-fixture-py{python_minor}.txt"
+            requirements_export_path=(
+                root / "eng" / "constraints" / "aca-fixture-requirements.txt"
             ),
             template_path=(
                 root / "tests" / "live" / "apps" / "aca-qualification" / "requirements.txt"

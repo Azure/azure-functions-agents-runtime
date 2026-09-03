@@ -108,7 +108,7 @@ def _render_requirements_text(
     *,
     wheel_filename: str,
     template_text: str,
-    constraints_text: str,
+    requirements_export_text: str,
 ) -> str:
     """Render remote-build requirements from the wheel name and pinned deps."""
     wheel_requirement = f"./{wheel_filename}"
@@ -136,7 +136,7 @@ def _render_requirements_text(
             sections.append(template)
     elif rendered_template:
         sections.append("\n".join(rendered_template).strip())
-    pinned = constraints_text.strip()
+    pinned = requirements_export_text.strip()
     if pinned:
         sections.append(pinned)
     return "\n\n".join(sections) + "\n"
@@ -145,12 +145,14 @@ def _render_requirements_text(
 def render_requirements(
     *,
     wheel_filename: str,
-    constraints_path: Path,
+    requirements_export_path: Path,
     template_path: Path | None = None,
 ) -> str:
     """Render the final fixture requirements from checked-in dependency inputs."""
-    if not constraints_path.is_file():
-        raise QualificationPipelineError(f"constraints_file_missing:{constraints_path}")
+    if not requirements_export_path.is_file():
+        raise QualificationPipelineError(
+            f"requirements_export_missing:{requirements_export_path}"
+        )
     template_text = ""
     if template_path is not None:
         if not template_path.is_file():
@@ -159,7 +161,7 @@ def render_requirements(
     return _render_requirements_text(
         wheel_filename=wheel_filename,
         template_text=template_text,
-        constraints_text=constraints_path.read_text(encoding="utf-8"),
+        requirements_export_text=requirements_export_path.read_text(encoding="utf-8"),
     )
 
 
@@ -195,7 +197,7 @@ def assemble_upload_directory(args: argparse.Namespace) -> Path:
     template_path = Path(args.requirements_template) if args.requirements_template else fixture_root / "requirements.txt"
     requirements = render_requirements(
         wheel_filename=wheel_name,
-        constraints_path=Path(args.constraints_file),
+        requirements_export_path=Path(args.requirements_export),
         template_path=template_path,
     )
     (staging_root / "requirements.txt").write_text(requirements, encoding="utf-8")
@@ -471,7 +473,7 @@ def _parser() -> argparse.ArgumentParser:
     assemble.add_argument("--artifact-root", required=True)
     assemble.add_argument("--staging-root", required=True)
     assemble.add_argument("--fixture-root", default=str(_DEFAULT_FIXTURE_ROOT))
-    assemble.add_argument("--constraints-file", required=True)
+    assemble.add_argument("--requirements-export", required=True)
     assemble.add_argument("--requirements-template")
     assemble.add_argument("--commit-sha", required=True)
     assemble.add_argument("--build-id", required=True)

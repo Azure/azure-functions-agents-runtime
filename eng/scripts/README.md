@@ -86,9 +86,9 @@ repository contains no pipeline wiring for it.
 `assemble` requires exactly one runtime wheel in the build output; ambiguity is
 a hard error rather than a silent "newest wins", because deploying the wrong
 wheel is precisely the failure `check-build` exists to catch. Fixture
-dependencies are pinned by `eng/constraints/aca-fixture-py313.txt` and
-`eng/constraints/aca-fixture-py314.txt` so the deployed closure is reproducible
-per interpreter minor.
+dependencies come from the single Oryx-compatible
+`eng/constraints/aca-fixture-requirements.txt` export of `uv.lock`, valid for
+both supported interpreter minors.
 
 `check-build` is meaningful only because the marker is a *file inside the
 deployed package*: a file can be served only if that package is genuinely on

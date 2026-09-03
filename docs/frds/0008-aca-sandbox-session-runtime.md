@@ -1833,8 +1833,8 @@ fail on an app that requires real Azure.
 
 `eng/scripts/aca_qualification_pipeline.py` packages, deploys, and verifies that
 fixture by hand: it installs tooling, stamps `BUILD_INFO.json`, assembles an
-upload from exactly one runtime wheel plus a pinned `requirements.txt`
-(`eng/constraints/aca-fixture-py313.txt` and `-py314.txt`), preflights
+upload from exactly one runtime wheel plus a pinned, Oryx-compatible
+`eng/constraints/aca-fixture-requirements.txt` export of `uv.lock`, preflights
 deployment rights, configures the authored region, deploys through the normal
 Flex Consumption ZIP remote-build path, adds best-effort redacted portal metadata,
 and fetches and compares the deployed build info. Ambiguous wheel selection is a
