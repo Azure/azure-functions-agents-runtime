@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -43,7 +44,24 @@ def test_cold_start_report_is_aggregate_and_redacted() -> None:
     assert "samples=3" in report
     assert "p50=2000.0,p95=3000.0,max=3000.0" in report
     assert "cleanup=complete" in report
+    assert "provenance=verified" in report
     assert all(forbidden not in report for forbidden in ("session", "run_id", "prompt", "result"))
+
+
+def test_unverified_provenance_suppresses_latency_metrics() -> None:
+    metrics = support.cold_start_metrics([1], [2], [3], [4])
+
+    report = support.render_cold_start_report(
+        sample_count=1,
+        retries=0,
+        metrics=metrics,
+        cleanup_complete=True,
+        provenance_verified=False,
+    )
+
+    assert "not-available" in report
+    assert "p50=" not in report
+    assert "provenance=unverified" in report
 
 
 @pytest.mark.parametrize(
@@ -152,6 +170,56 @@ async def test_typed_setup_retry_reuses_one_idempotency_key_and_keeps_first_atte
     assert sample.retries == 1
     assert sample.first_attempt_failure == "typed_setup_deadline_exceeded"
     assert len(candidates) == 1
+
+
+@pytest.mark.asyncio
+async def test_provenance_is_checked_after_measured_turn_without_value_leakage(
+    monkeypatch: pytest.MonkeyPatch,
+    cold_start_module: object,
+) -> None:
+    module = cold_start_module
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_BUILD_ID", "expected-build")
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_COMMIT_SHA", "expected-commit"
+    )
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_PYTHON_VERSION", "3.13")
+
+    async def mismatched(*_: object) -> dict[str, object]:
+        return {
+            "build": {
+                "marker": "present",
+                "schema": 1,
+                "build_id": "wrong-build",
+                "commit_sha": "wrong-commit",
+            },
+            "runtime": {"python_version": "3.14"},
+        }
+
+    monkeypatch.setattr(module, "fetch_build_info", mismatched)
+    with pytest.raises(AssertionError, match="cold_start_provenance_mismatch") as error:
+        await module._verify_deployed_build("https://example.invalid", "scope/.default")
+
+    rendered = str(error.value)
+    assert "build_id,commit_sha,python_version" in rendered
+    assert all(
+        value not in rendered
+        for value in ("expected-build", "expected-commit", "wrong-build", "wrong-commit", "3.14")
+    )
+
+
+def test_cold_test_calls_attestation_only_after_timing_collection() -> None:
+    source = (
+        Path(__file__).resolve().parent / "live" / "test_aca_deployed_cold_start.py"
+    ).read_text(encoding="utf-8")
+    test_body = source[
+        source.index("async def test_deployed_aca_cold_start_acceptance_is_bounded_and_cleaned")
+        : source.index("\n\nasync def _verify_deployed_build")
+    ]
+
+    assert test_body.index("await _run_samples_sequentially(") < test_body.index(
+        "await _verify_deployed_build("
+    )
+    assert "fetch_build_info(" not in test_body
 
 
 @pytest.mark.asyncio

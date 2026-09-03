@@ -20,9 +20,12 @@ access. Its controller identity owns all ACA create, list, and cleanup actions.
 coverage. `test_aca_real_agent_turn.py` exercises only the production execution
 backend.
 
-Deployed cold-start, lifecycle, loss, load, and one-shot recovery suites remain
-direct/manual test assets pending issue #166. They have no pipeline wiring,
-target metadata, or queue-time parameters in this repository.
+Deployed cold-start, lifecycle, loss, and load suites are wired into the
+post-main `AcaQualification` stage of `eng/ci/e2e-tests.yml`. See the
+[ACA qualification CI guide](../../eng/ci/docs/aca-qualification.md) for
+targets and triage. The one-shot recovery suite remains direct/manual. All
+suites still skip unless `AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1` is
+set explicitly.
 
 ## Controlled deployed one-shot recovery
 
@@ -62,3 +65,18 @@ cancel and poll for a terminal outcome. A cancellation `202` honors
 `Retry-After` before status polling. The terminal polling window is five
 minutes: it covers the 120-second operation lease plus a 60-second dedicated
 fixture reconciler cadence and scheduling jitter.
+
+## Deployed ACA qualification fixture
+
+`tests/live/apps/aca-qualification/` is the deployable fixture app that the
+deployed cold-start, agent-turn, lifecycle, loss, and load suites target. It is
+packaged and deployed by `eng/scripts/aca_qualification_pipeline.py`, which
+stamps an in-package `BUILD_INFO.json` marker. The cold-start module runs first
+in `eng/scripts/aca_deployed_qualification.py` and, once its timing assertions
+complete, checks that marker's build ID and commit SHA plus the live Python
+minor version against the expected values in the environment. A mismatch fails
+the run and suppresses the cold-start metrics, so timings from a stale build are
+never reported as if they described the build under test.
+
+The Python 3.13 and 3.14 deployed suites are wired into `AcaQualification`.
+They remain runnable by hand.

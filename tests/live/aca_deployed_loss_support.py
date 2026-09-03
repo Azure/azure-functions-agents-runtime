@@ -99,7 +99,10 @@ def assert_public_backing_loss_contract(
 ) -> None:
     """Verify public terminal status stays readable while the unavailable result is gone."""
     assert status_code == 200
-    assert status.get("state") == "abandoned"
+    assert status.get("state") == "abandoned", (
+        f"public state was {status.get('state')!r}; the durable record is abandoned, "
+        "so the public projection disagrees with the authoritative store."
+    )
     error = status.get("error")
     if error is not None:
         assert isinstance(error, dict)

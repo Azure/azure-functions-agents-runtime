@@ -26,6 +26,25 @@ and `Prefer: respond-async` opts into the durable run-management URLs.
 The sandbox has no public inbound port. The Functions app remains the
 authenticated entry point and controller.
 
+## Sandbox Group configuration
+
+Author the existing Sandbox Group resource ID and its region together in
+`agents.config.yaml`:
+
+```yaml
+session_runtime:
+  aca_sandbox:
+    sandbox_group_resource_id: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID
+    region: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION
+```
+
+Both fields are required. `region` is normalized to lowercase and must contain
+only ASCII letters and digits (for example, `westus2`). The authored value
+identifies and selects the Sandbox Group's regional ACA data-plane endpoint
+directly. The Function App and Sandbox Group may be in the same or different
+regions. The runtime does not read the Sandbox Group through ARM or fall back
+to discovery.
+
 ## Disk selection and content
 
 By default, `SandboxCreateProfile` selects the public disk named for the
@@ -51,6 +70,7 @@ verifies its digest and ABI. A disk override does not disable integrity checks.
 The runtime forwards only this built-in non-secret profile:
 
 ```text
+AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION
 AZURE_FUNCTIONS_AGENTS_PROVIDER
 AZURE_FUNCTIONS_AGENTS_MODEL
 AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS
@@ -62,6 +82,10 @@ AZURE_OPENAI_API_VERSION
 FOUNDRY_PROJECT_ENDPOINT
 FOUNDRY_MODEL
 ```
+
+The non-secret Sandbox Group region is forwarded so the harness can reconstruct
+the delivered `agents.config.yaml` inside the sandbox. The group resource ID and
+controller credentials are not forwarded.
 
 Forward customer configuration with the runtime-owned prefix:
 
@@ -197,6 +221,12 @@ A committed synchronous timeout includes the same identifiers, URLs,
 `Location`, `Retry-After`, and `x-ms-session-id` as the async ticket. Do not
 replay a POST merely to discover its identifiers.
 
+If admission committed but journal launch acknowledgement is indeterminate, the
+runtime returns the committed management handle as `202` with
+`phase=executing`; it does not discard the handle, report a raw transport
+failure, or launch the prompt again. Status, result, events, and cancel preserve
+the same typed, redacted activation and provider failures as submission.
+
 The public `phase` explains where work is without adding new run states:
 
 - `provisioning`: the sandbox is being prepared and the prompt has not launched;
@@ -209,6 +239,14 @@ projection throughout setup. Events emit heartbeats until journal launch rather
 than inventing run events. A distinct key targeting the same busy session
 receives a linked `409 active_run_exists` with the existing run's phase and
 management URLs.
+
+A terminal success whose result is not yet materialized remains retryable with
+`503` and `Retry-After`. Once the result is available, every terminal adoption
+and lifecycle-rearm path preserves at least 300 seconds before the session can
+be reclaimed. Before reclaiming a due idle session, reconciliation loads its
+session-scoped run pages and defers reclaim if that bounded scan is incomplete.
+It also point-reads a persisted sandbox that is absent from the current
+inventory page before treating its backing as missing.
 
 Canceling during `provisioning` atomically prevents prompt launch for either a
 new-session provision or an existing-session submission and returns a terminal
@@ -256,10 +294,13 @@ incompatible sandbox lifecycle state returns a sanitized `409` from submission,
 status, result, events, or cancel with
 `{"error":"sandbox_invalid_state","reason":"sandbox_invalid_state"}`. The
 controller honors provider `Retry-After` and uses capped jittered backoff with
-per-candidate and whole-flow budgets. Absent backing is never probed. ARM binding retries are limited to
-`408/409/425/429/500/502/503/504`; authorization and permanent responses retain
-their sanitized classification. Authorization failures surface as
-`sandbox_group_authorization_failed` rather than an opaque setup timeout.
+per-candidate and whole-flow budgets. Absent backing is never probed. Group
+data-plane `401`/`403` responses are authorization failures, `404` is a permanent
+binding failure, and `429`, every `5xx`, timeouts, and transport failures are
+transient. A sandbox-scoped `404` means missing backing. A resume `409` is
+accepted only when a typed state read confirms the sandbox is running or
+resuming; every other `409` is invalid state. These failures retain sanitized
+classifications instead of surfacing as opaque setup timeouts.
 
 Useful failure signals include:
 

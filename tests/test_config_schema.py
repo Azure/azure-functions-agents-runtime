@@ -263,15 +263,19 @@ def test_session_runtime_config_extra_forbidden() -> None:
 
 def test_aca_sandbox_config_parses() -> None:
     config = AcaSandboxConfig.model_validate(
-        {"sandbox_group_resource_id": "/subscriptions/.../sandboxGroups/my-group"}
+        {
+            "sandbox_group_resource_id": "/subscriptions/.../sandboxGroups/my-group",
+            "region": " WestUS2 ",
+        }
     )
     assert config.sandbox_group_resource_id == "/subscriptions/.../sandboxGroups/my-group"
+    assert config.region == "westus2"
     assert config.retention is None
 
 
 def test_aca_sandbox_config_rejects_empty_sandbox_group_resource_id() -> None:
     with pytest.raises(ValidationError):
-        AcaSandboxConfig(sandbox_group_resource_id="   ")
+        AcaSandboxConfig(sandbox_group_resource_id="   ", region="westus2")
 
 
 def test_aca_sandbox_config_rejects_missing_sandbox_group_resource_id() -> None:
@@ -280,13 +284,31 @@ def test_aca_sandbox_config_rejects_missing_sandbox_group_resource_id() -> None:
     selection, so an ``aca_sandbox`` block that omits it entirely (not just a
     blank string) must still fail at the schema level."""
     with pytest.raises(ValidationError, match="sandbox_group_resource_id"):
-        AcaSandboxConfig.model_validate({})
+        AcaSandboxConfig.model_validate({"region": "westus2"})
+
+
+def test_aca_sandbox_config_rejects_missing_or_invalid_region() -> None:
+    resource_id = "/subscriptions/.../sandboxGroups/my-group"
+    with pytest.raises(ValidationError, match="region"):
+        AcaSandboxConfig.model_validate({"sandbox_group_resource_id": resource_id})
+    for region in ("", "   ", "west us 2", "west-us-2", "wéstus2"):
+        with pytest.raises(ValidationError, match="region"):
+            AcaSandboxConfig.model_validate(
+                {
+                    "sandbox_group_resource_id": resource_id,
+                    "region": region,
+                }
+            )
 
 
 def test_aca_sandbox_config_extra_forbidden() -> None:
     with pytest.raises(ValidationError):
         AcaSandboxConfig.model_validate(
-            {"sandbox_group_resource_id": "x", "extra_field": 1}
+            {
+                "sandbox_group_resource_id": "x",
+                "region": "westus2",
+                "extra_field": 1,
+            }
         )
 
 
@@ -320,6 +342,7 @@ def test_aca_sandbox_config_retention_nests_inside_aca_sandbox() -> None:
     config = AcaSandboxConfig.model_validate(
         {
             "sandbox_group_resource_id": "/subscriptions/.../sandboxGroups/my-group",
+            "region": "westus2",
             "retention": {"auto_suspend_idle": 300, "reclaim_idle": 3600},
         }
     )
@@ -337,6 +360,7 @@ def test_global_config_session_runtime_aca_sandbox_parses() -> None:
                         "/subscriptions/sub-1/resourceGroups/rg-1/providers/"
                         "Microsoft.App/sandboxGroups/my-group"
                     ),
+                    "region": "westus2",
                     "retention": {"auto_suspend_idle": 300, "reclaim_idle": 3600},
                 },
             }
@@ -401,7 +425,10 @@ def test_session_runtime_config_rejects_retention_as_sibling_of_aca_sandbox() ->
     with pytest.raises(ValidationError):
         SessionRuntimeConfig.model_validate(
             {
-                "aca_sandbox": {"sandbox_group_resource_id": "/subscriptions/.../x"},
+                "aca_sandbox": {
+                    "sandbox_group_resource_id": "/subscriptions/.../x",
+                    "region": "westus2",
+                },
                 "retention": {"auto_suspend_idle": 300, "reclaim_idle": 3600},
             }
         )
@@ -421,12 +448,16 @@ def test_session_runtime_rejects_dropped_field(dropped_field: str) -> None:
 
 @pytest.mark.parametrize(
     "dropped_field",
-    ["max_run_seconds", "region", "disk", "content_package"],
+    ["max_run_seconds", "disk", "content_package"],
 )
 def test_aca_sandbox_config_rejects_dropped_field(dropped_field: str) -> None:
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         AcaSandboxConfig.model_validate(
-            {"sandbox_group_resource_id": "x", dropped_field: "anything"}
+            {
+                "sandbox_group_resource_id": "x",
+                "region": "westus2",
+                dropped_field: "anything",
+            }
         )
 
 
@@ -443,7 +474,13 @@ def test_session_runtime_dropped_field_error_names_scope_and_field() -> None:
 
 def test_aca_sandbox_dropped_field_error_names_scope_and_field() -> None:
     with pytest.raises(ValidationError) as exc_info:
-        AcaSandboxConfig.model_validate({"sandbox_group_resource_id": "x", "disk": "10Gi"})
+        AcaSandboxConfig.model_validate(
+            {
+                "sandbox_group_resource_id": "x",
+                "region": "westus2",
+                "disk": "10Gi",
+            }
+        )
     errors = exc_info.value.errors()
     assert len(errors) == 1
     assert errors[0]["type"] == "extra_forbidden"

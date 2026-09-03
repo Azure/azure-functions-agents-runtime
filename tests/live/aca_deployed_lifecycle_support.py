@@ -40,6 +40,7 @@ from azure_functions_agents.transport.transport_models import (
 _TABLE_SERVICE_URI_ENV = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_SERVICE_URI"
 _TABLE_NAME_ENV = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_NAME"
 _GROUP_RESOURCE_ID_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"
+_GROUP_REGION_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION"
 _APP_SUBSCRIPTION_ID_ENV = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID"
 _APP_SITE_NAME_ENV = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME"
 _APP_SLOT_NAME_ENV = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SLOT_NAME"
@@ -62,6 +63,7 @@ class DeployedAcaLifecycleConfig:
     table_service_uri: str
     table_name: str
     sandbox_group_resource_id: str
+    sandbox_group_region: str
     app_identity: AppIdentity
 
     @property
@@ -95,6 +97,7 @@ def deployed_aca_lifecycle_config_from_environment() -> DeployedAcaLifecycleConf
     table_service_uri = _table_service_uri(_required_value(_TABLE_SERVICE_URI_ENV))
     table_name = _required_value(_TABLE_NAME_ENV)
     sandbox_group_resource_id = _required_value(_GROUP_RESOURCE_ID_ENV)
+    sandbox_group_region = _required_value(_GROUP_REGION_ENV)
     try:
         app_identity = AppIdentity.create(
             _required_value(_APP_SUBSCRIPTION_ID_ENV),
@@ -110,6 +113,7 @@ def deployed_aca_lifecycle_config_from_environment() -> DeployedAcaLifecycleConf
         table_service_uri=table_service_uri,
         table_name=table_name,
         sandbox_group_resource_id=sandbox_group_resource_id,
+        sandbox_group_region=sandbox_group_region,
         app_identity=app_identity,
     )
 
@@ -124,7 +128,10 @@ async def open_deployed_aca_lifecycle_resources(
     credential = DefaultAzureCredential()
     service_client = TableServiceClient(endpoint=config.table_service_uri, credential=credential)
     try:
-        adapter = await AcaSandboxAdapter.open(config.sandbox_group_resource_id)
+        adapter = await AcaSandboxAdapter.open(
+            config.sandbox_group_resource_id,
+            region=config.sandbox_group_region,
+        )
     except (AzureError, SandboxTransportError) as exc:
         await service_client.close()
         await credential.close()

@@ -467,6 +467,20 @@ for setup, identity, egress, lifecycle, and live qualification guidance; see
 [architecture.md](docs/architecture.md) and
 [FRD 0008](docs/frds/0008-aca-sandbox-session-runtime.md) for internal design.
 
+Configure both the customer-owned group ID and its region:
+
+```yaml
+session_runtime:
+  aca_sandbox:
+    sandbox_group_resource_id: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID
+    region: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION
+```
+
+The required authored region identifies and selects the Sandbox Group's
+regional ACA data-plane endpoint directly. The Function App and Sandbox Group
+may be in the same or different regions. The runtime does not use ARM discovery
+or fallback.
+
 When enabled, ordinary chat calls remain synchronous. Send
 `Prefer: respond-async` on either built-in chat surface or a custom
 `http_trigger` to receive `202 Accepted`, `Location`, `Retry-After: 2`, and:

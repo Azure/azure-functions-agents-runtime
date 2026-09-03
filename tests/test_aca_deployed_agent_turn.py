@@ -40,7 +40,9 @@ from tests.doubles.fake_session_runtime import (
 from tests.live import aca_deployed_agent_support as support
 from tests.live import aca_deployed_lifecycle_support as lifecycle_support
 
-_DEPLOYABLE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "live_aca_deployed_agent_turn"
+_DEPLOYABLE_FIXTURE = (
+    Path(__file__).resolve().parent / "live" / "apps" / "aca-qualification"
+)
 _TIMEOUT_RECOVERY_FIXTURE = (
     Path(__file__).resolve().parent / "fixtures" / "live_aca_setup_timeout_recovery"
 )
@@ -312,6 +314,7 @@ def _set_deployed_lifecycle_environment(monkeypatch: pytest.MonkeyPatch) -> None
         "/subscriptions/00000000-0000-0000-0000-000000000000/"
         "resourceGroups/rg/providers/Microsoft.App/sandboxGroups/group",
     )
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION", "westus2")
     monkeypatch.setenv(
         "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID",
         "00000000-0000-0000-0000-000000000000",
@@ -325,6 +328,7 @@ def _set_deployable_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> None
         "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID",
         "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/sandboxGroups/group",
     )
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION", "westus2")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_ENTRA_TENANT_ID", "tenant-id")
     monkeypatch.setenv(
         "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE",

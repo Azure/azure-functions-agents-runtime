@@ -10,6 +10,7 @@ from .._logger import logger
 from ..execution.backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
     AgentExecutionBackend,
+    DurableAdmissionIndeterminateError,
     DurableAdmissionOutcome,
     DurableAdmissionSetupTimeoutError,
     LinkedActiveRunConflictError,
@@ -39,10 +40,12 @@ from .budget import RequestBudget, RunDeadlineExceededError
 from .idempotency import IdempotencyResultUnavailableError
 from .readiness import (
     SessionActivationAuthorizationError,
+    SessionActivationBindingError,
     SessionActivationConflictError,
     SessionActivationGoneError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
+    SessionActivationTransientError,
 )
 
 _RESPOND_ASYNC_PREFERENCE = "respond-async"
@@ -168,6 +171,14 @@ async def _start_run_or_response(
 ) -> RunHandle | ControllerResponse:
     try:
         return await backend.start_run(request)
+    except DurableAdmissionIndeterminateError as exc:
+        return _accepted_response(
+            agent_slug,
+            exc.handle,
+            RunContext(run_id=exc.handle.run_id, session_id=exc.handle.session_id),
+            admission="committed",
+            phase="executing",
+        )
     except DurableAdmissionSetupTimeoutError as exc:
         return _durable_admission_timeout_response(
             agent_slug,
@@ -184,6 +195,8 @@ async def _start_run_or_response(
         )
     except SessionActivationAuthorizationError as exc:
         return _sandbox_group_authorization_response(exc)
+    except (SessionActivationBindingError, SessionActivationTransientError) as exc:
+        return _sandbox_group_availability_response(exc)
     except SessionActivationConflictError:
         return _sandbox_invalid_state_response()
     except LinkedActiveRunConflictError as exc:
@@ -247,6 +260,8 @@ async def read_status(
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
     except SessionActivationAuthorizationError as exc:
         return _sandbox_group_authorization_response(exc)
+    except (SessionActivationBindingError, SessionActivationTransientError) as exc:
+        return _sandbox_group_availability_response(exc)
     except SessionActivationConflictError:
         return _sandbox_invalid_state_response()
 
@@ -270,6 +285,8 @@ async def read_result(
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
     except SessionActivationAuthorizationError as exc:
         return _sandbox_group_authorization_response(exc)
+    except (SessionActivationBindingError, SessionActivationTransientError) as exc:
+        return _sandbox_group_availability_response(exc)
     except SessionActivationConflictError:
         return _sandbox_invalid_state_response()
     if (
@@ -320,6 +337,8 @@ async def cancel_run(
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
     except SessionActivationAuthorizationError as exc:
         return _sandbox_group_authorization_response(exc)
+    except (SessionActivationBindingError, SessionActivationTransientError) as exc:
+        return _sandbox_group_availability_response(exc)
     except SessionActivationConflictError:
         return _sandbox_invalid_state_response()
 
@@ -455,6 +474,42 @@ def _sandbox_group_authorization_response(
             "reason": public_reason,
             "message": SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
         },
+    )
+
+
+_SANDBOX_GROUP_TRANSIENT_ERROR_CODE = "sandbox_group_transient"
+_SANDBOX_GROUP_TRANSIENT_RETRY_AFTER_SECONDS = 2
+
+
+_SANDBOX_GROUP_BINDING_ERROR_CODE = "sandbox_group_binding_failed"
+
+
+def _sandbox_group_binding_response() -> ControllerResponse:
+    return ControllerResponse(
+        status_code=503,
+        body={
+            "error": _SANDBOX_GROUP_BINDING_ERROR_CODE,
+            "reason": _SANDBOX_GROUP_BINDING_ERROR_CODE,
+        },
+    )
+
+
+def _sandbox_group_availability_response(
+    error: SessionActivationBindingError | SessionActivationTransientError,
+) -> ControllerResponse:
+    if isinstance(error, SessionActivationBindingError):
+        return _sandbox_group_binding_response()
+    return _sandbox_group_transient_response()
+
+
+def _sandbox_group_transient_response() -> ControllerResponse:
+    return ControllerResponse(
+        status_code=503,
+        body={
+            "error": _SANDBOX_GROUP_TRANSIENT_ERROR_CODE,
+            "reason": _SANDBOX_GROUP_TRANSIENT_ERROR_CODE,
+        },
+        headers={"Retry-After": str(_SANDBOX_GROUP_TRANSIENT_RETRY_AFTER_SECONDS)},
     )
 
 

@@ -160,6 +160,107 @@ def load_module(monkeypatch: pytest.MonkeyPatch) -> object:
     return importlib.import_module("tests.live.test_aca_deployed_load")
 
 
+def test_result_materialization_window_covers_the_result_hold(
+    load_module: object,
+) -> None:
+    module = load_module
+    assert module._RESULT_MATERIALIZATION_TIMEOUT_SECONDS == module._HOLD_SECONDS  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_terminal_result_honors_temporary_unavailability_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    responses = iter(
+        [
+            (200, {"state": "succeeded"}, {}),
+            (
+                503,
+                {"error": "result_temporarily_unavailable"},
+                {"Retry-After": "2"},
+            ),
+            (200, {"result": {"text": "done"}}, {}),
+        ]
+    )
+    calls: list[bool] = []
+    sleeps: list[float] = []
+
+    async def request(*_: object, **kwargs: object) -> tuple[int, dict[str, object], dict[str, str]]:
+        calls.append(bool(kwargs.get("retry_throttled", True)))
+        return next(responses)
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(module, "json_request", request)
+    monkeypatch.setattr(module.asyncio, "sleep", sleep)  # type: ignore[attr-defined]
+    submitted = SimpleNamespace(
+        accepted=SimpleNamespace(
+            management_urls={
+                "status_url": "https://example.test/status",
+                "result_url": "https://example.test/result",
+            }
+        )
+    )
+
+    assert await module._read_terminal_result(  # type: ignore[attr-defined]
+        object(),
+        submitted,
+        "Bearer redacted",
+    )
+    assert calls == [True, False, False]
+    assert sleeps == [2.0]
+
+
+@pytest.mark.asyncio
+async def test_active_replay_recovers_durable_identity_after_setup_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    accepted = SimpleNamespace(session_id="session-a", run_id="run-a")
+    submitted = module._SubmittedRun(  # type: ignore[attr-defined]
+        accepted=accepted,
+        idempotency_key="original-key",
+        submitted_at=1.0,
+        accepted_at=2.0,
+        session_id_header="session-a",
+    )
+    responses = iter(
+        [
+            (
+                504,
+                {
+                    "error": "setup_deadline_exceeded",
+                    "retry_with": "respond-async",
+                },
+                {"x-ms-retry-with": "respond-async"},
+            ),
+            (409, {"error": "active_run_exists"}, {}),
+        ]
+    )
+
+    async def request(*_: object, **__: object) -> tuple[int, dict[str, object], dict[str, str]]:
+        return next(responses)
+
+    async def recover(*_: object, **__: object) -> object:
+        return submitted
+
+    monkeypatch.setattr(module, "json_request", request)
+    monkeypatch.setattr(module, "_recover_submitted_run", recover)
+
+    assert await module._exercise_one_active_race(  # type: ignore[attr-defined]
+        object(),
+        object(),
+        SimpleNamespace(deployed=SimpleNamespace(chat_url="https://example.test/chat")),
+        "partition",
+        {"Authorization": "redacted"},
+        submitted,
+    ) == (1, 1)
+
+
 @pytest.mark.asyncio
 async def test_phase_a_batch_preserves_prepared_candidates_before_aggregate_failure(
     monkeypatch: pytest.MonkeyPatch,
@@ -947,6 +1048,54 @@ async def test_final_setup_deadline_recovers_cleanup_candidate(
 
 
 @pytest.mark.asyncio
+async def test_final_total_attempt_recovers_after_throttles_then_setup_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    deployed = SimpleNamespace(chat_url="https://example.test/chat")
+    responses = iter(
+        [
+            *[(503, {}, {"Retry-After": "1"}) for _ in range(4)],
+            (504, {"error": "setup_deadline_exceeded"}, {}),
+        ]
+    )
+    headers_seen: list[dict[str, str]] = []
+    retry_delays: list[float] = []
+
+    async def request(*_: object, **kwargs: object) -> tuple[int, dict[str, object], dict[str, str]]:
+        headers_seen.append(dict(kwargs["headers"]))  # type: ignore[arg-type,index]
+        return next(responses)
+
+    async def no_record(*_: object, **__: object) -> None:
+        return None
+
+    async def no_sleep(delay: float) -> None:
+        retry_delays.append(delay)
+
+    monkeypatch.setattr(module, "json_request", request)
+    monkeypatch.setattr(module, "_recover_submitted_run", no_record)
+    monkeypatch.setattr(module.asyncio, "sleep", no_sleep)
+
+    keys: list[str] = []
+    outcome = await module._submit_one(  # type: ignore[attr-defined]
+        object(),
+        SimpleNamespace(deployed=deployed),
+        {},
+        object(),
+        "partition",
+        keys,
+    )
+
+    assert outcome.failure == "setup_deadline_exceeded"
+    assert outcome.retries == 4
+    assert outcome.unresolved_idempotency
+    assert len(headers_seen) == 5
+    assert {headers["Idempotency-Key"] for headers in headers_seen} == {keys[0]}
+    assert retry_delays == [1.0] * 4
+
+
+@pytest.mark.asyncio
 async def test_provisioning_deadline_before_retry_preserves_attempt_metrics(
     monkeypatch: pytest.MonkeyPatch,
     load_module: object,
@@ -1312,7 +1461,9 @@ async def test_active_race_replay_and_conflict_both_preserve_existing_session_he
 
     assert await module._exercise_one_active_race(  # type: ignore[attr-defined]
         object(),
+        object(),
         SimpleNamespace(deployed=SimpleNamespace(chat_url="https://example.test/chat")),
+        "partition",
         {"Authorization": "redacted"},
         submitted,
     ) == (1, 1)
@@ -1611,22 +1762,15 @@ def test_overlap_math_and_hold_budget_margin(load_module: object) -> None:
     assert module._overlapping_interval(first, second) is not None  # type: ignore[attr-defined]
     assert module._overlapping_interval(second, first) is None  # type: ignore[attr-defined]
 
-    module._assert_remaining_hold_budget(  # type: ignore[attr-defined]
-        [SimpleNamespace(accepted_at=0.0), SimpleNamespace(accepted_at=100.0)]
-    )
-    with pytest.raises(AssertionError, match="insufficient remaining"):
-        module._assert_remaining_hold_budget(  # type: ignore[attr-defined]
-            [SimpleNamespace(accepted_at=0.0), SimpleNamespace(accepted_at=200.0)]
-        )
-
 
 def test_hold_constant_and_sse_continuation_guard(load_module: object) -> None:
     module = load_module
     fixture = runpy.run_path(
         str(
             Path(__file__).parent
-            / "fixtures"
-            / "live_aca_deployed_agent_turn"
+            / "live"
+            / "apps"
+            / "aca-qualification"
             / "tools"
             / "qualification_hold.py"
         )

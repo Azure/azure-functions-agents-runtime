@@ -323,7 +323,7 @@ async def test_targeted_reconciliation_does_not_use_timer_pass_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[OwnerPartition, str]] = []
+    calls: list[tuple[OwnerPartition, str, object]] = []
     app_identity = AppIdentity.create(
         subscription_id="11111111-2222-3333-4444-555555555555",
         site_name="agent-app",
@@ -344,9 +344,9 @@ async def test_targeted_reconciliation_does_not_use_timer_pass_deadline(
     async def targeted_reconciler(
         target: OwnerPartition,
         session_id: str,
-        _setup_deadline: object | None,
+        setup_deadline: object | None,
     ) -> None:
-        calls.append((target, session_id))
+        calls.append((target, session_id, setup_deadline))
 
     async def deadline_should_not_run(*_: object, **__: object) -> ReconcileReport:
         pytest.fail("targeted reconciliation must not use the timer pass deadline")
@@ -363,7 +363,7 @@ async def test_targeted_reconciliation_does_not_use_timer_pass_deadline(
 
     await runtime.reconcile_session(partition, "targeted-session")
 
-    assert calls == [(partition, "targeted-session")]
+    assert calls == [(partition, "targeted-session", None)]
 
 
 def test_composition_builds_a_lazy_app_scoped_session_runtime_binding(
@@ -380,7 +380,8 @@ def test_composition_builds_a_lazy_app_scoped_session_runtime_binding(
                 sandbox_group_resource_id=(
                     "/subscriptions/sub/resourceGroups/rg/providers/"
                     "Microsoft.App/sandboxGroups/group"
-                )
+                ),
+                region="westus2",
             )
         )
     )
@@ -391,6 +392,61 @@ def test_composition_builds_a_lazy_app_scoped_session_runtime_binding(
     assert runtime is not None
     assert runtime.app_identity == app_identity
     assert runtime.sandbox_group_resource_id.endswith("/sandboxGroups/group")
+
+
+@pytest.mark.asyncio
+async def test_default_provider_factory_passes_the_authored_group_region(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from azure_functions_agents.transport import aca_sdk
+
+    captured: dict[str, object] = {}
+    provider = SimpleNamespace()
+
+    class _Adapter:
+        @classmethod
+        async def open(
+            cls,
+            resource_id: str,
+            *,
+            region: str,
+        ) -> object:
+            captured.update(resource_id=resource_id, region=region)
+            return provider
+
+    monkeypatch.setattr(aca_sdk, "AcaSandboxAdapter", _Adapter)
+    monkeypatch.setattr(aca_sdk, "validate_aca_sandbox_dependency", lambda: None)
+
+    config = GlobalConfig(
+        session_runtime=SessionRuntimeConfig(
+            aca_sandbox=AcaSandboxConfig(
+                sandbox_group_resource_id=(
+                    "/subscriptions/sub/resourceGroups/rg/providers/"
+                    "Microsoft.App/sandboxGroups/group"
+                ),
+                region="westus2",
+            )
+        )
+    )
+    runtime = app_module._build_session_runtime_binding(
+        config,
+        tmp_path,
+        app_identity=AppIdentity.create(
+            subscription_id="11111111-2222-3333-4444-555555555555",
+            site_name="agent-app",
+        ),
+    )
+    assert runtime is not None
+
+    assert await runtime.get_provider() is provider
+    assert captured == {
+        "resource_id": (
+            "/subscriptions/sub/resourceGroups/rg/providers/"
+            "Microsoft.App/sandboxGroups/group"
+        ),
+        "region": "westus2",
+    }
 
 
 @pytest.mark.asyncio
@@ -408,7 +464,8 @@ async def test_composed_request_reconciler_uses_only_the_targeted_inventory_path
                 sandbox_group_resource_id=(
                     "/subscriptions/sub/resourceGroups/rg/providers/"
                     "Microsoft.App/sandboxGroups/group"
-                )
+                ),
+                region="westus2",
             )
         )
     )
@@ -481,7 +538,8 @@ def test_sandbox_profile_egress_includes_only_reachable_mcp_servers() -> None:
                 sandbox_group_resource_id=(
                     "/subscriptions/sub/resourceGroups/rg/providers/"
                     "Microsoft.App/sandboxGroups/group"
-                )
+                ),
+                region="westus2",
             )
         )
     )
@@ -526,7 +584,8 @@ def test_sandbox_profile_preserves_native_mcp_authorization_precedence(
                 sandbox_group_resource_id=(
                     "/subscriptions/sub/resourceGroups/rg/providers/"
                     "Microsoft.App/sandboxGroups/group"
-                )
+                ),
+                region="westus2",
             )
         )
     )

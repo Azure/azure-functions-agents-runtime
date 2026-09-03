@@ -46,7 +46,9 @@ python eng/scripts/reap_aca_smoke_sandboxes.py
 ```
 
 The Sandbox Group is read from the
-`AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID` environment variable.
+`AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID` environment variable,
+and its required data-plane region is read from
+`AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION`.
 
 **When to run:**
 - As an `always()` cleanup step after the ACA smoke job
@@ -66,3 +68,49 @@ role-assignment attestation.
 
 The retained `aca_deployed_qualification.py` and deployed suite helpers are
 manual/local assets only pending the separate post-main qualification work.
+
+### `aca_qualification_pipeline.py`
+
+Packages, deploys, and verifies the deployed ACA qualification fixture
+(`tests/live/apps/aca-qualification/`). The official E2E pipeline invokes these
+commands, and they remain runnable by hand.
+
+| Command | Purpose |
+| --- | --- |
+| `install-tooling` | Install the shared Python dependencies used by qualification runs |
+| `stamp` | Write `BUILD_INFO.json` into the fixture app before packaging |
+| `assemble` | Build the deployable upload: fixture source, the runtime wheel, the marker, and pinned requirements |
+| `deploy` | Preflight deployment rights, configure the authored region, package and deploy the staged fixture, and add best-effort portal metadata |
+| `check-build` | Verify lightweight in-package build ID, commit SHA, and Python-minor provenance |
+| `sweep` | Report and delete resources older than six hours from the CI-dedicated Sandbox Group; never blocks qualification |
+
+`assemble` requires exactly one runtime wheel in the build output; ambiguity is
+a hard error rather than a silent "newest wins", because deploying the wrong
+wheel is precisely the failure `check-build` exists to catch. Fixture
+dependencies are pinned by `eng/constraints/aca-fixture-py313.txt` and
+`eng/constraints/aca-fixture-py314.txt` so the deployed closure is reproducible
+per interpreter minor.
+
+`check-build` is meaningful only because the marker is a *file inside the
+deployed package*: a file can be served only if that package is genuinely on
+disk, so a stale app cannot claim a build it is not running. An app setting or
+resource tag could be changed without deploying anything.
+
+The provenance is deliberately narrow. It does not cover the wheel digest, the
+installed package version, a deploy-input manifest, the deployment-storage
+chain, or rollback; those remain open under issue #166.
+
+`sweep` uses the configured group resource ID and authored region, lists the
+whole group, and requires
+`--dedicated-group-scope exclusive-ci-qualification`. That literal acknowledges
+an external infrastructure invariant; the data-plane API cannot verify that the
+group is exclusive to CI, so using a shared group is unsafe. Unknown-age and
+recent resources are retained. Inspection, unknown-age, and delete failures
+emit Azure DevOps warnings, and the summary exposes incomplete and
+delete-failure counts while remaining nonblocking.
+
+The sweep is pre-run rather than a destructive post-run reaper. Current-run
+qualification suites already assert their own cleanup; deleting immediately
+afterward would mask idle-delete or controller-reconciliation failures. The next
+run reports accumulated leftovers. A final report-only group audit is also
+omitted because intentionally retained sessions could create false positives.

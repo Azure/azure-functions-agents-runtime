@@ -22,7 +22,11 @@ _DEPLOYED_ENVIRONMENT = (
     "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_NAME",
     "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID",
     "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME",
+    "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_BUILD_ID",
+    "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_COMMIT_SHA",
+    "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_PYTHON_VERSION",
     "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID",
+    "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION",
 )
 _PROVISION_CONCURRENCIES = frozenset({1, 2, 4})
 _SMOKE_RUN_ID = "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_RUN_ID"
@@ -153,7 +157,7 @@ def run_deployed_suite(
     load_concurrency: str,
     provision_concurrency: str,
 ) -> int:
-    """Run the protected deployed turn, lifecycle, loss, and N=5 smoke suite."""
+    """Run cold start first, then turn, lifecycle, loss, and N=5."""
     load, provision = validate_deployed_environment(
         environment,
         runtime_target=runtime_target,
@@ -164,9 +168,13 @@ def run_deployed_suite(
     inherited = dict(environment)
     inherited["AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY"] = str(load)
     inherited["AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY"] = str(provision)
+    samples = validate_cold_start_samples(inherited)
+    if samples is not None:
+        inherited["AZURE_FUNCTIONS_AGENTS_ACA_COLD_START_SAMPLES"] = str(samples)
     preflight_auth(inherited)
     return _run_pytest(
         (
+            "tests/live/test_aca_deployed_cold_start.py",
             "tests/live/test_aca_deployed_agent_turn.py",
             "tests/live/test_aca_deployed_lifecycle.py",
             "tests/live/test_aca_deployed_loss.py",
@@ -191,12 +199,12 @@ def run_cold_start(
     return _run_pytest(("tests/live/test_aca_deployed_cold_start.py",), inherited)
 
 
-async def _probe_harness_group(group_resource_id: str) -> None:
+async def _probe_harness_group(group_resource_id: str, region: str) -> None:
     from tests.live.aca_smoke_support import ci_smoke_reaper_labels
 
     from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
 
-    adapter = await AcaSandboxAdapter.open(group_resource_id)
+    adapter = await AcaSandboxAdapter.open(group_resource_id, region=region)
     try:
         async with asyncio.timeout(30):
             await adapter.list_sandboxes(labels=ci_smoke_reaper_labels())
@@ -209,6 +217,7 @@ def preflight_harness(environment: Mapping[str, str]) -> None:
     group_resource_id = _required(
         environment, "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"
     )
+    region = _required(environment, "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION")
     _required(environment, "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK")
     if not re.fullmatch(
         r"/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.App/sandboxGroups/[^/]+",
@@ -216,7 +225,7 @@ def preflight_harness(environment: Mapping[str, str]) -> None:
     ):
         raise QualificationError("invalid_sandbox_group_resource_id")
     try:
-        asyncio.run(_probe_harness_group(group_resource_id))
+        asyncio.run(_probe_harness_group(group_resource_id, region))
     except QualificationError:
         raise
     except Exception:
@@ -242,7 +251,8 @@ async def _reap_harness_smoke(environment: Mapping[str, str]) -> None:
     from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
 
     adapter = await AcaSandboxAdapter.open(
-        _required(environment, "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID")
+        _required(environment, "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"),
+        region=_required(environment, "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION"),
     )
     try:
         run_id = _required(environment, _SMOKE_RUN_ID)

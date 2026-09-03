@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import io
 import zipfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,7 @@ from azure_functions_agents.controller.package import (
     FUNCS_ZIP_DIGEST_KIND,
     CapturedContentPackage,
 )
+from azure_functions_agents.controller.sandbox_config import build_sandbox_environment
 from azure_functions_agents.harness.delegation import rebuild_agent_catalog
 from tests.live import aca_smoke_support
 
@@ -90,6 +92,20 @@ def _set_model_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _set_group_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID",
+        "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/sandboxGroups/group",
+    )
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION", "westus2")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK", "python-3.13")
+    monkeypatch.setattr(
+        aca_smoke_support,
+        "require_sandbox_compatible_host",
+        lambda _: None,
+    )
+
+
 def _archive(entries: dict[str, bytes]) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
@@ -105,6 +121,29 @@ def _captured_content_package(entries: dict[str, bytes]) -> CapturedContentPacka
         digest_kind=FUNCS_ZIP_DIGEST_KIND,
         digest=f"sha256:{hashlib.sha256(archive).hexdigest()}",
     )
+
+
+def test_aca_smoke_config_requires_and_preserves_the_group_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_group_environment(monkeypatch)
+
+    config = aca_smoke_support.aca_smoke_config_from_environment()
+
+    assert config.region == "westus2"
+
+
+def test_aca_smoke_config_rejects_a_missing_group_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_group_environment(monkeypatch)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION")
+
+    with pytest.raises(
+        aca_smoke_support.AcaSmokeEnvironmentError,
+        match="AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION",
+    ):
+        aca_smoke_support.aca_smoke_config_from_environment()
 
 
 def test_composite_real_agent_package_contains_catalog_and_delivered_dependencies() -> None:
@@ -229,6 +268,22 @@ def test_real_turn_fixture_rebuilds_a_no_tools_catalog(
     assert entry.capabilities.filtered_user_tools == []
     assert entry.capabilities.filtered_mcp_tools == []
     assert entry.capabilities.web_request_tools == []
+
+
+def test_deployed_fixture_rebuilds_with_the_forwarded_group_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_environment = {
+        "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION": "westus2",
+        "AZURE_OPENAI_DEPLOYMENT": "u3-gpt-5-6-luna-20260709",
+    }
+    for name, value in build_sandbox_environment(source_environment).items():
+        monkeypatch.setenv(name, value)
+    fixture_root = Path(__file__).parent / "live" / "apps" / "aca-qualification"
+
+    catalog = rebuild_agent_catalog(fixture_root)
+
+    assert set(catalog) == {"deployed_load", "deployed_turn"}
 
 
 @pytest.mark.asyncio
