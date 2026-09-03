@@ -17,7 +17,7 @@ the deployed qualification suites (`tests/live/test_aca_deployed_*.py`).
 
 | File | Purpose |
 | --- | --- |
-| `agents.config.yaml` | Selects the ACA Sandbox backend, Entra HTTP auth, model, timeout, and 120-second reclaim retention; successful results extend durable expiry to the 300-second result-hold floor |
+| `agents.config.yaml` | Selects the ACA Sandbox backend, Entra HTTP auth, model, timeout, and 120-second reclaim retention; successful results preserve expiry for 300 seconds from terminal run update |
 | `deployed_turn.agent.md` | No-tools built-in-endpoint agent, slug `deployed_turn` |
 | `deployed_load.agent.md` | Load/loss built-in-endpoint agent, slug `deployed_load` |
 | `tools/qualification_hold.py` | Fixture-only tool that holds an active run for load and backing-loss suites |

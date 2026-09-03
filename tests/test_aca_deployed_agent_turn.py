@@ -152,6 +152,87 @@ async def test_lifecycle_submission_honors_the_setup_retry_after_contract(
     assert sleeps == [120.0]
 
 
+def _load_lifecycle_test_module(
+    monkeypatch: pytest.MonkeyPatch,
+    module_name: str,
+) -> Any:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE", "1")
+    module_path = Path(__file__).parent / "live" / "test_aca_deployed_lifecycle.py"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_retention_uses_session_and_terminal_run_clocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_lifecycle_test_module(monkeypatch, "_lifecycle_retention_regression")
+    accepted = SimpleNamespace(session_id="session-1", run_id="run-1")
+    terminal_updated_at = _NOW
+    session = SimpleNamespace(
+        last_activity_at=terminal_updated_at + timedelta(milliseconds=660),
+        expires_at=terminal_updated_at + timedelta(seconds=300),
+    )
+    terminal_run = SimpleNamespace(
+        session_id="session-1",
+        run_id="run-1",
+        status="succeeded",
+        result_available=True,
+        updated_at=terminal_updated_at,
+    )
+
+    async def read_run(*_args: object, **_kwargs: object) -> object:
+        return terminal_run
+
+    monkeypatch.setattr(module, "read_authoritative_run", read_run)
+
+    await module._assert_terminal_retention(
+        object(),
+        session=session,
+        accepted=accepted,
+    )
+
+
+@pytest.mark.parametrize(
+    "terminal_run",
+    [
+        SimpleNamespace(
+            session_id="different-session",
+            run_id="run-1",
+            status="succeeded",
+            result_available=True,
+        ),
+        SimpleNamespace(
+            session_id="session-1",
+            run_id="different-run",
+            status="succeeded",
+            result_available=True,
+        ),
+        SimpleNamespace(
+            session_id="session-1",
+            run_id="run-1",
+            status="failed",
+            result_available=False,
+        ),
+    ],
+)
+def test_lifecycle_retention_rejects_wrong_or_unsuccessful_run(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_run: object,
+) -> None:
+    module = _load_lifecycle_test_module(monkeypatch, "_lifecycle_retention_fail_closed")
+
+    with pytest.raises(AssertionError):
+        module._assert_matching_successful_run(
+            terminal_run,
+            SimpleNamespace(session_id="session-1", run_id="run-1"),
+        )
+
+
 @pytest.mark.asyncio
 async def test_timeout_recovery_cancel_honors_retry_after_then_polls_terminal_status(
     monkeypatch: pytest.MonkeyPatch,

@@ -79,9 +79,11 @@ minor version against the expected values in the environment. A mismatch fails
 the run and suppresses the cold-start metrics, so timings from a stale build are
 never reported as if they described the build under test.
 
-The lifecycle suite derives terminal session expiry from the greater of the
-fixture's 120-second reclaim idle and the runtime's 300-second successful-result
-hold. It does not assume reclaim idle can shorten an existing result hold.
+The lifecycle suite verifies terminal session expiry on both authoritative
+clocks: at least 120 seconds after session activity for reclaim, and at least
+300 seconds after the matching terminal run update for successful-result
+availability. It does not compare the result hold to the later rearm activity
+timestamp.
 
 The same 120-second fixture supports N=5 diagnostics only. The operator wrapper
 and direct live-test entry point reject N=100 before authentication or provider
