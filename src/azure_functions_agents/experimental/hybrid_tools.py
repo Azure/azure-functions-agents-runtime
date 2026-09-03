@@ -86,8 +86,14 @@ _MAX_TOOL_SECONDS = 30.0
 _AUTO_SUSPEND_SECONDS = 900
 _ROLLBACK_DELETE_TIMEOUT_SECONDS = 90.0
 _ROLLBACK_DELETE_ATTEMPTS = 3
-_POST_RUN_DELETE_TIMEOUT_SECONDS = 5.0
-_MIN_DELETE_ATTEMPT_SECONDS = 0.05
+# Mirrors ``_CONTROL_OPERATION_POLL_INTERVAL_SECONDS`` in ``transport/aca_sdk``;
+# a delete attempt shorter than one poll cycle can never observe a terminal state.
+_TRANSPORT_POLL_INTERVAL_SECONDS = 3.0
+# Every seam must clear one poll cycle with headroom over the recorded delete
+# range (clean-window average 3.793 s, maximum 6.929 s; diagnostic p95 14.381 s,
+# maximum 15.280 s; live reaper delete 8.475 s).
+_MIN_DELETE_ATTEMPT_SECONDS = 4.0
+_POST_RUN_DELETE_TIMEOUT_SECONDS = 24.0
 _EXECUTOR_EXCEPTION_TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,127}$")
 
 
@@ -342,7 +348,7 @@ class InvocationSandboxLease(ToolExecutionBackend):
             await _best_effort_delete(
                 self._handle,
                 self._provider,
-                timeout_seconds=_post_run_delete_seconds(self._settings),
+                timeout_seconds=_post_run_delete_seconds(),
             )
         except Exception:
             record_hybrid_count(HybridMetric.SANDBOX_DELETE_FAILURES)
@@ -641,9 +647,11 @@ async def _best_effort_delete(
 ) -> None:
     """Boundedly retry deletion through independent handle and provider seams.
 
-    Each attempt receives only a slice of the remaining budget so one hung seam
-    cannot consume the whole window. Exhausted retries stay observable and rely
-    on the sandbox auto-delete policy plus the bounded reaper as the backstop.
+    Each attempt receives an even slice of the time that is still left, so one
+    hung seam cannot consume the whole window and no attempt runs past the
+    deadline. Callers pass a budget that funds at least one transport poll cycle
+    per seam. Exhausted retries stay observable and rely on the sandbox
+    auto-delete policy plus the bounded reaper as the backstop.
     """
     started = time.perf_counter()
     record_hybrid_count(HybridMetric.SANDBOX_DELETES)
@@ -694,17 +702,32 @@ async def _best_effort_delete(
 
 
 def _delete_attempt_seconds(remaining: float, attempts_remaining: int) -> float:
-    """Return one bounded slice of the remaining deletion budget."""
+    """Return one slice of the remaining budget without extending the deadline.
+
+    The slice is an even division of the time that is actually left, so a hung
+    seam can never consume another seam's share and no attempt outlives the
+    caller's deadline. The "at least one transport poll cycle per seam"
+    guarantee is enforced where the budget is chosen (see
+    ``_post_run_delete_seconds``), not by inflating a slice past the deadline.
+    """
     if attempts_remaining <= 1:
-        return remaining
-    return max(_MIN_DELETE_ATTEMPT_SECONDS, remaining / attempts_remaining)
+        return max(0.0, remaining)
+    return max(0.0, remaining) / attempts_remaining
 
 
-def _post_run_delete_seconds(settings: HybridSandboxSettings) -> float:
-    """Bound completed-run cleanup by the drain window, never the create timeout."""
+def _post_run_delete_seconds() -> float:
+    """Bound completed-run cleanup by observed delete latency, not the drain window.
+
+    The drain window covers in-flight tool calls and is unrelated to control
+    plane deletion, so deriving cleanup from it capped the first attempt at
+    1.67 s: below the 3 s transport polling interval and below every recorded
+    deletion. The budget instead funds ``_ROLLBACK_DELETE_ATTEMPTS`` slices of
+    at least ``_MIN_DELETE_ATTEMPT_SECONDS`` and covers the recorded range while
+    staying far under the failed-acquire rollback window.
+    """
     return max(
+        _POST_RUN_DELETE_TIMEOUT_SECONDS,
         _MIN_DELETE_ATTEMPT_SECONDS * _ROLLBACK_DELETE_ATTEMPTS,
-        min(settings.drain_timeout_seconds, _POST_RUN_DELETE_TIMEOUT_SECONDS),
     )
 
 

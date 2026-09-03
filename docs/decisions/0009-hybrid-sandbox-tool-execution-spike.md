@@ -43,7 +43,8 @@ tool inputs, or tool outputs.
 | 2026-09-02 | Reaper ownership | Label and select with the canonical platform `AppIdentity` hash plus `owner_kind`; never select all hybrid sandboxes in a shared group. |
 | 2026-09-02 | Admission failure | A broken customer tool module rejects the whole invocation. This differs from legacy partial discovery because the sandbox manifest is the executable admission boundary; bounded readiness diagnostics report the terminal exception class without log content. |
 | 2026-09-02 | Package verification | Retain full archive readback for this measured spike. Its weighted package-upload cost was 5.51 s; replace the duplicate transfer with in-sandbox SHA-256 before productionizing. |
-| 2026-09-03 | Deletion budget slicing | Give each bounded deletion attempt only a slice of the remaining budget instead of the whole window, so a hung `handle.delete` cannot starve the independent provider seam. Failed-acquire rollback keeps the 90 s total; completed-run cleanup is bounded by the drain window capped at 5 s so a successful response is never held for rollback-length cleanup. Auto-delete plus the bounded reaper remain the backstop. |
+| 2026-09-03 | Deletion budget slicing | Give each bounded deletion attempt only a slice of the remaining budget instead of the whole window, so a hung `handle.delete` cannot starve the independent provider seam. Failed-acquire rollback keeps the 90 s total; completed-run cleanup is bounded separately so a successful response is never held for rollback-length cleanup. Auto-delete plus the bounded reaper remain the backstop. |
+| 2026-09-03 | Deletion budget sizing | Size the completed-run budget from measured deletion latency instead of the drain window. The drain window covers in-flight tool calls, and deriving cleanup from it capped the total at 5 s and the first attempt at 1.67 s, below the 3 s transport LRO polling interval and below every recorded delete, so routine deletions were being cancelled. Use a 24 s total across three seam attempts (8 s each, minimum slice floor 4 s) which clears one poll cycle per seam and covers the recorded range (clean-window average 3.793 s, maximum 6.929 s; diagnostic p95 14.381 s, maximum 15.280 s; live reaper delete 8.475 s). Slices are an even division of the time actually remaining, so no attempt extends the deadline. |
 | 2026-09-03 | Reaper label re-check | Re-verify exact `owner_kind` and `app_hash` on every returned `SandboxSummary` locally and skip mismatches, rather than trusting the server-side list filter as the only ownership gate in a shared Sandbox Group. |
 | 2026-09-03 | Tool call accounting | Count `TOOL_CALLS` before the deadline rejection so every `TOOL_FAILURES` increment has a matching attempted call and the failure ratio stays interpretable. |
 
@@ -152,6 +153,7 @@ No resources have been provisioned by this child session yet.
 | 2026-09-03 00:22 | Removed the temporary service-wide APIM diagnostic after final capture. | Historical GatewayLogs remain in `log-hybrid-sbx-0902`. API-scoped model/MCP Application Insights diagnostics remain active with request and response body capture disabled. | Shared APIM no longer exports unrelated service-wide traffic for this spike. |
 | 2026-09-03 00:42 | Applied final independent-review remediations without Azure load. | Hardened completed-run cleanup, app-scoped reaping, production model fallback, tool failure counts, and streaming benchmark terminal validation. Accepted strict broken-module admission and measured archive readback as spike tradeoffs. | Focused tests cover every remediation; deployed benchmark numbers remain unchanged and resources were not modified. |
 | 2026-09-03 04:55 | Applied three post-qualification re-review fixes without Azure load. | Sliced the bounded deletion budget per attempt so a hung handle seam still leaves budget for the provider seam, bounded completed-run cleanup by the drain window (capped at 5 s) instead of the 90 s rollback window, re-checked exact `owner_kind`/`app_hash` labels locally before every reaper delete, and counted `TOOL_CALLS` before deadline rejection. | Targeted pytest, ruff, and mypy passed locally. No benchmark, deployment, or Azure call was rerun, so the canonical live metrics and results JSON are unchanged. |
+| 2026-09-03 05:20 | Resized the completed-run deletion budget from recorded latency without Azure load. | The drain-derived 5 s cap sliced the first attempt to 1.67 s, under the 3 s transport LRO polling interval and under every recorded delete, so routine deletions were cancelled. Completed-run cleanup now uses a 24 s total across three seam attempts (8 s first slice, 4 s minimum slice floor); failed-acquire rollback still uses 90 s, and slices divide only the time actually remaining. | Budget covers the recorded range (average 3.793 s, maximum 6.929 s; diagnostic p95 14.381 s, maximum 15.280 s; reaper delete 8.475 s). Targeted pytest, ruff, and mypy passed locally; no benchmark, deployment, or Azure call was rerun, so canonical metrics and the results JSON latency data are unchanged. |
 
 ## Measurement record
 
@@ -162,10 +164,12 @@ content.
 
 Every live measurement below describes deployed commit `77ef399`. The later
 independent-review remediations, including the post-qualification re-review
-fixes to deletion budget slicing, reaper label re-checking, and tool-call
-accounting, were validated only by local gates; no benchmark, deployment, or
-Azure load was rerun, so these canonical numbers are unchanged and must not be
-read as measurements of the remediated source.
+fixes to deletion budget slicing and sizing, reaper label re-checking, and
+tool-call accounting, were validated only by local gates; no benchmark,
+deployment, or Azure load was rerun, so these canonical numbers are unchanged
+and must not be read as measurements of the remediated source. The recorded
+`sandbox_delete` latencies below are the data the completed-run deletion budget
+was sized against.
 
 | Scenario | N | p50 | p95 | p99 | Throughput | Errors | Cleanup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |

@@ -126,7 +126,12 @@ MAF `Agent` construction:
 
 The lease admits tool calls while the run is live. Closure stops admissions,
 waits a bounded interval for active calls, then performs bounded best-effort
-deletion through the handle and provider seams. `NotFound` is success; exhausted
+deletion through the handle and provider seams. Each attempt takes an even
+slice of the time actually remaining, so a hung seam neither starves the other
+seam nor extends the deadline. Completed-run cleanup is sized from recorded
+deletion latency rather than the drain window (24 s across three attempts, an
+8 s first slice) so every attempt outlasts one transport polling cycle, while
+failed-acquire rollback keeps its 90 s window. `NotFound` is success; exhausted
 cleanup is counted and logged but never replaces completed output or appends an
 error after stream completion. Nonstreaming execution wraps agent build plus
 `agent.run` in the lease. Streaming enters the lease before agent construction
@@ -275,6 +280,7 @@ be removed or redesigned without deprecation.
 | 20 | Reaper ownership | Owner kind only / shared root hash / stable app hash plus owner kind | Compute the existing canonical `AppIdentity` hash for both provisioning and reaper selection, preventing cross-app deletion in a shared group. | Agent | 2026-09-02 |
 | 21 | Broken customer module | Partial discovery / whole-invocation rejection / omit module | Reject the entire invocation when any customer tool module fails sandbox import; exact manifest admission takes priority over legacy partial discovery. | Human + Agent | 2026-09-02 |
 | 22 | Package readback | Length readback / in-sandbox SHA-256 / no verification | Keep full readback for the measured spike despite its 5.51 s weighted upload cost; evaluate in-sandbox SHA-256 before productionizing. | Human + Agent | 2026-09-02 |
+| 23 | Deletion budget sizing | Derive from the drain window / fixed data-backed budget / rollback-length budget | Size completed-run cleanup from recorded delete latency: 24 s total across three seam attempts (8 s first slice, 4 s minimum slice floor) so every seam outlasts the 3 s transport LRO poll interval and covers the recorded 3.793 s average / 6.929 s maximum (diagnostic p95 14.381 s). Failed-acquire rollback keeps 90 s; slices divide only the remaining time and never extend the deadline. | Agent | 2026-09-03 |
 
 ## 6. Test plan
 

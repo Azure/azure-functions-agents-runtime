@@ -25,9 +25,11 @@ from azure_functions_agents.experimental.hybrid_protocol import (
 )
 from azure_functions_agents.experimental.hybrid_reaper import hybrid_app_hash
 from azure_functions_agents.experimental.hybrid_tools import (
+    _MIN_DELETE_ATTEMPT_SECONDS,
     _POST_RUN_DELETE_TIMEOUT_SECONDS,
     _ROLLBACK_DELETE_ATTEMPTS,
     _ROLLBACK_DELETE_TIMEOUT_SECONDS,
+    _TRANSPORT_POLL_INTERVAL_SECONDS,
     HybridPreparedInvocation,
     HybridToolMiddleware,
     InvocationSandboxLease,
@@ -547,6 +549,14 @@ async def test_hung_handle_delete_leaves_budget_for_provider_fallback(
         "azure_functions_agents.experimental.hybrid_tools.record_hybrid_count",
         lambda metric: recorded.append(metric),
     )
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools._POST_RUN_DELETE_TIMEOUT_SECONDS",
+        0.3,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools._MIN_DELETE_ATTEMPT_SECONDS",
+        0.05,
+    )
     handle = _HangingDeleteHandle()
     provider = _Provider()
     lease = InvocationSandboxLease(
@@ -571,7 +581,7 @@ async def test_hung_handle_delete_leaves_budget_for_provider_fallback(
     assert handle.closed == 1
     assert provider.closed == 1
     assert HybridMetric.SANDBOX_DELETE_FAILURES not in recorded
-    assert elapsed < _POST_RUN_DELETE_TIMEOUT_SECONDS
+    assert elapsed < 0.3 * _ROLLBACK_DELETE_ATTEMPTS
 
 
 @pytest.mark.asyncio
@@ -613,18 +623,65 @@ def test_delete_attempt_budget_reserves_a_slice_for_each_remaining_seam() -> Non
         _delete_attempt_seconds(_ROLLBACK_DELETE_TIMEOUT_SECONDS, _ROLLBACK_DELETE_ATTEMPTS)
         < _ROLLBACK_DELETE_TIMEOUT_SECONDS
     )
-    assert _delete_attempt_seconds(0.003, _ROLLBACK_DELETE_ATTEMPTS) == pytest.approx(0.05)
 
 
-def test_post_run_delete_budget_follows_drain_window_not_create_timeout() -> None:
-    long_drain = replace(_settings(), create_timeout_seconds=90, drain_timeout_seconds=10)
-    short_drain = replace(_settings(), create_timeout_seconds=90, drain_timeout_seconds=1)
-    tiny_drain = replace(_settings(), create_timeout_seconds=90, drain_timeout_seconds=0.01)
+def test_delete_attempt_budget_never_extends_past_the_remaining_time() -> None:
+    for remaining in (0.003, 1.0, _MIN_DELETE_ATTEMPT_SECONDS, 11.0):
+        for attempts_remaining in range(1, _ROLLBACK_DELETE_ATTEMPTS + 1):
+            assert _delete_attempt_seconds(remaining, attempts_remaining) <= remaining
+    assert _delete_attempt_seconds(0.003, _ROLLBACK_DELETE_ATTEMPTS) == pytest.approx(0.001)
+    assert _delete_attempt_seconds(-5.0, _ROLLBACK_DELETE_ATTEMPTS) == 0.0
+    assert _delete_attempt_seconds(-5.0, 1) == 0.0
 
-    assert _post_run_delete_seconds(long_drain) == _POST_RUN_DELETE_TIMEOUT_SECONDS
-    assert _post_run_delete_seconds(short_drain) == 1.0
-    assert _post_run_delete_seconds(tiny_drain) == pytest.approx(0.15)
-    assert _post_run_delete_seconds(long_drain) < _ROLLBACK_DELETE_TIMEOUT_SECONDS
+
+def test_post_run_delete_budget_covers_observed_deletion_latency() -> None:
+    budget = _post_run_delete_seconds()
+    first_slice = _delete_attempt_seconds(budget, _ROLLBACK_DELETE_ATTEMPTS)
+
+    assert budget == _POST_RUN_DELETE_TIMEOUT_SECONDS
+    assert budget >= _MIN_DELETE_ATTEMPT_SECONDS * _ROLLBACK_DELETE_ATTEMPTS
+    # Every seam must outlast one transport long-running-operation poll cycle.
+    assert first_slice > _TRANSPORT_POLL_INTERVAL_SECONDS
+    assert first_slice >= _MIN_DELETE_ATTEMPT_SECONDS
+    # First slice covers the recorded clean-window maximum delete of 6.929 s,
+    # and the whole budget covers the diagnostic maximum of 15.280 s.
+    assert first_slice >= 6.929
+    assert budget >= 15.280
+    # Completed-run cleanup still stays far inside the failed-acquire rollback window.
+    assert budget < _ROLLBACK_DELETE_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_post_run_delete_budget_is_independent_of_the_drain_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    budgets: list[float] = []
+
+    async def _capture(
+        handle: object,
+        provider: object,
+        *,
+        timeout_seconds: float = 0.0,
+    ) -> None:
+        budgets.append(timeout_seconds)
+
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools._best_effort_delete",
+        _capture,
+    )
+    provider = _Provider()
+    lease = InvocationSandboxLease(
+        settings=replace(_settings(), create_timeout_seconds=90, drain_timeout_seconds=0.01),
+        operation_id="operation",
+        provider=provider,  # type: ignore[arg-type]
+        handle=_Handle(),  # type: ignore[arg-type]
+        manifest=_manifest(),
+    )
+
+    await lease.close()
+
+    assert budgets == [_POST_RUN_DELETE_TIMEOUT_SECONDS]
+    assert provider.closed == 1
 
 
 def test_provisioning_labels_use_stable_app_identity(
@@ -901,7 +958,7 @@ async def test_post_run_delete_failure_does_not_replace_nonstream_result(
 
     assert result == "completed"
     assert handle.deleted == 1
-    assert provider.deleted == ["sandbox"]
+    assert provider.deleted == ["sandbox"] * (_ROLLBACK_DELETE_ATTEMPTS - 1)
     assert handle.closed == 1
     assert provider.closed == 1
 
@@ -945,7 +1002,7 @@ async def test_post_run_delete_failure_does_not_append_error_after_stream_done(
 
     assert events == [{"type": "done"}]
     assert handle.deleted == 1
-    assert provider.deleted == ["sandbox"]
+    assert provider.deleted == ["sandbox"] * (_ROLLBACK_DELETE_ATTEMPTS - 1)
     assert handle.closed == 1
     assert provider.closed == 1
 
