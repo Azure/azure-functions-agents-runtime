@@ -40,7 +40,9 @@ RESULT_DIRECTORY = "results"
 SHUTDOWN_FILENAME = "shutdown"
 
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
-MAX_ARCHIVE_MEMBERS = 4096
+# The controller emits a standard, non-ZIP64 archive and permits every entry
+# representable by that format. Keep this standalone executor bound aligned.
+MAX_ARCHIVE_MEMBERS = 0xFFFF
 MAX_EXTRACTED_MEMBER_BYTES = 32 * 1024 * 1024
 MAX_EXTRACTED_TOTAL_BYTES = 256 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 200

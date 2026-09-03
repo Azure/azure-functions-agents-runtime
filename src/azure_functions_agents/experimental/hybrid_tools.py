@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import shlex
 import time
 import uuid
@@ -82,6 +83,7 @@ _EXECUTOR_LOG_PATH = f"{_HYBRID_ROOT}/executor.log"
 _POLL_INTERVAL_SECONDS = 0.1
 _MAX_TOOL_SECONDS = 30.0
 _AUTO_SUSPEND_SECONDS = 900
+_EXECUTOR_EXCEPTION_TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,127}$")
 
 
 class ToolExecutionBackend(Protocol):
@@ -491,12 +493,21 @@ async def _start_and_discover(
     result = await handle.exec(command, timeout_seconds=min(timeout_seconds, 10.0))
     if result.exit_code != 0:
         raise RuntimeError("Hybrid executor launch failed.")
+    executor_pid = result.stdout.strip()
+    if not executor_pid.isascii() or not executor_pid.isdigit():
+        raise RuntimeError("Hybrid executor launch returned invalid process metadata.")
     readiness_path = f"{_JOURNAL_PATH}/{HYBRID_TOOL_READINESS_FILENAME}"
     manifest_path = f"{_JOURNAL_PATH}/{HYBRID_TOOL_MANIFEST_FILENAME}"
     pid_path = f"{_JOURNAL_PATH}/{HYBRID_TOOL_PID_FILENAME}"
     deadline = asyncio.get_running_loop().time() + timeout_seconds
-    readiness = await _poll_file(handle, readiness_path, deadline)
-    pid = await _poll_file(handle, pid_path, deadline)
+    try:
+        readiness = await _poll_file(handle, readiness_path, deadline)
+        pid = await _poll_file(handle, pid_path, deadline)
+    except TimeoutError as exc:
+        diagnostic = await _executor_startup_diagnostic(handle, executor_pid)
+        raise RuntimeError(
+            f"Hybrid executor readiness timed out ({diagnostic})."
+        ) from exc
     _validate_readiness(readiness, pid)
     record_hybrid_duration(HybridMetric.EXECUTOR_READY_DURATION, started)
     discovery_started = time.perf_counter()
@@ -505,6 +516,40 @@ async def _start_and_discover(
     )
     record_hybrid_duration(HybridMetric.DISCOVERY_DURATION, discovery_started)
     return manifest
+
+
+async def _executor_startup_diagnostic(
+    handle: SandboxSessionHandle,
+    executor_pid: str,
+) -> str:
+    """Return bounded, content-blind process/log metadata for startup failure."""
+    command = (
+        f"if kill -0 {executor_pid} 2>/dev/null; then state=running; else state=exited; fi; "
+        f"printf 'state=%s\\n' \"$state\"; "
+        f"if [ -f {shlex.quote(_EXECUTOR_LOG_PATH)} ]; then "
+        f"wc -c < {shlex.quote(_EXECUTOR_LOG_PATH)}; "
+        f"tail -c 8192 {shlex.quote(_EXECUTOR_LOG_PATH)}; fi"
+    )
+    try:
+        result = await handle.exec(command, timeout_seconds=5.0)
+    except Exception:
+        return "process=unknown, log=unavailable"
+    lines = result.stdout.splitlines()
+    state = (
+        lines[0].removeprefix("state=")
+        if lines and lines[0] in {"state=running", "state=exited"}
+        else "unknown"
+    )
+    log_bytes = lines[1] if len(lines) > 1 and lines[1].isdigit() else "unknown"
+    exception_type = "unknown"
+    if len(lines) > 2:
+        candidate = lines[-1].partition(":")[0].strip()
+        if _EXECUTOR_EXCEPTION_TYPE.fullmatch(candidate):
+            exception_type = candidate
+    return (
+        f"process={state}, log_bytes={log_bytes}, "
+        f"terminal_exception={exception_type}"
+    )
 
 
 def _validate_readiness(readiness_payload: bytes, pid_payload: bytes) -> None:

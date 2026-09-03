@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from azure_functions_agents.controller import package as controller_package
 from azure_functions_agents.experimental import hybrid_executor
 from azure_functions_agents.experimental.hybrid_protocol import (
     HYBRID_TOOL_MANIFEST_FILENAME,
@@ -200,6 +201,24 @@ def test_secure_archive_extraction_rejects_traversal_links_and_bounds(
     monkeypatch.setattr(hybrid_executor, "MAX_EXTRACTED_MEMBER_BYTES", 3)
     with pytest.raises(hybrid_executor.ExecutorProtocolError):
         hybrid_executor.securely_extract_application_archive(bounded, tmp_path / "bounded")
+
+
+def test_archive_member_limit_matches_controller_and_accepts_large_dependency_closure(
+    tmp_path: Path,
+) -> None:
+    assert (
+        hybrid_executor.MAX_ARCHIVE_MEMBERS
+        == controller_package._MAX_STANDARD_ZIP_ENTRIES
+    )
+    archive_path = tmp_path / "large-member-count.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for index in range(4097):
+            archive.writestr(f"packages/module_{index}.py", b"")
+
+    hybrid_executor.securely_extract_application_archive(
+        archive_path,
+        tmp_path / "large-member-count",
+    )
 
 
 def test_subprocess_discovers_exact_manifest_and_async_customer_tool(
