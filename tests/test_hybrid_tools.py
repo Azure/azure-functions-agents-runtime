@@ -247,6 +247,10 @@ async def test_lease_shares_one_handle_for_sequential_calls_and_deletes_once(
         manifest=_manifest(),
     )
     deadline = asyncio.get_running_loop().time() + 5
+    tools, _middleware = lease.build_tools(deadline=deadline)
+
+    with pytest.raises(RuntimeError, match="did not intercept"):
+        await tools[0].invoke(message="not-routed")
 
     first = await lease.invoke(
         call_id="first",
@@ -279,6 +283,78 @@ async def test_lease_shares_one_handle_for_sequential_calls_and_deletes_once(
         )
         == 2
     )
+
+
+@pytest.mark.asyncio
+async def test_parallel_calls_queue_before_writing_second_request() -> None:
+    class _BlockingHandle(_Handle):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first_written = asyncio.Event()
+            self.release_first = asyncio.Event()
+
+        async def write_file(
+            self, path: str, content: bytes, *, create_dirs: bool = False
+        ) -> None:
+            await super().write_file(path, content, create_dirs=create_dirs)
+            if "/requests/" in path and len(self.requests) == 1:
+                self.first_written.set()
+                await self.release_first.wait()
+
+    handle = _BlockingHandle()
+    provider = _Provider()
+    lease = InvocationSandboxLease(
+        settings=_settings(),
+        operation_id="operation",
+        provider=provider,  # type: ignore[arg-type]
+        handle=handle,  # type: ignore[arg-type]
+        manifest=_manifest(),
+    )
+    deadline = asyncio.get_running_loop().time() + 5
+    first = asyncio.create_task(
+        lease.invoke(
+            call_id="first",
+            tool_name="customer_probe",
+            arguments={"message": "a"},
+            deadline=deadline,
+        )
+    )
+    await handle.first_written.wait()
+    second = asyncio.create_task(
+        lease.invoke(
+            call_id="second",
+            tool_name="customer_probe",
+            arguments={"message": "b"},
+            deadline=deadline,
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert [request["call_id"] for request in handle.requests] == ["first"]
+    handle.release_first.set()
+    await asyncio.gather(first, second)
+    assert [request["call_id"] for request in handle.requests] == ["first", "second"]
+    await lease.close()
+
+
+@pytest.mark.asyncio
+async def test_hybrid_context_passes_tools_through_when_gate_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(HYBRID_SANDBOX_GROUP_ENV, raising=False)
+    tools = [_tool("worker")]
+
+    async with open_hybrid_invocation(
+        timeout_seconds=30,
+        tools=tools,
+        sandbox_tools=None,
+        skill_paths=None,
+        web_request_tools=None,
+        workflow_enabled=False,
+        subagents=None,
+    ) as invocation:
+        assert invocation.tools is tools
+        assert invocation.middleware is None
 
 
 @pytest.mark.asyncio
