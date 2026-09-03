@@ -40,6 +40,7 @@ from ..transport.transport_models import (
     SandboxFileNotFoundError,
     SandboxGroupBinding,
     SandboxLifecyclePolicy,
+    SandboxNotFoundError,
     SandboxProvisioningLabels,
 )
 from . import hybrid_executor
@@ -83,6 +84,8 @@ _EXECUTOR_LOG_PATH = f"{_HYBRID_ROOT}/executor.log"
 _POLL_INTERVAL_SECONDS = 0.1
 _MAX_TOOL_SECONDS = 30.0
 _AUTO_SUSPEND_SECONDS = 900
+_ROLLBACK_DELETE_TIMEOUT_SECONDS = 90.0
+_ROLLBACK_DELETE_ATTEMPTS = 3
 _EXECUTOR_EXCEPTION_TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,127}$")
 
 
@@ -237,7 +240,7 @@ class InvocationSandboxLease(ToolExecutionBackend):
             )
         except BaseException:
             if handle is not None:
-                await _best_effort_delete(handle)
+                await _best_effort_delete(handle, provider)
             await provider.close()
             raise
 
@@ -624,10 +627,42 @@ def _current_traceparent() -> str | None:
         return None
 
 
-async def _best_effort_delete(handle: SandboxSessionHandle) -> None:
+async def _best_effort_delete(
+    handle: SandboxSessionHandle,
+    provider: SandboxSessionProvider,
+) -> None:
+    """Boundedly retry failed-acquire deletion through two independent seams."""
+    started = time.perf_counter()
+    record_hybrid_count(HybridMetric.SANDBOX_DELETES)
+    deadline = asyncio.get_running_loop().time() + _ROLLBACK_DELETE_TIMEOUT_SECONDS
+    sandbox_id = handle.identity.sandbox_id
+    error: Exception | None = None
     try:
-        await handle.delete()
-    except Exception:
-        logger.warning("Hybrid sandbox rollback deletion failed.", exc_info=True)
+        for attempt in range(_ROLLBACK_DELETE_ATTEMPTS):
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                if attempt == 0:
+                    await asyncio.wait_for(handle.delete(), timeout=remaining)
+                else:
+                    await asyncio.wait_for(
+                        provider.delete_sandbox(sandbox_id),
+                        timeout=remaining,
+                    )
+                return
+            except SandboxNotFoundError:
+                return
+            except Exception as exc:
+                error = exc
+                if attempt + 1 < _ROLLBACK_DELETE_ATTEMPTS:
+                    await asyncio.sleep(min(0.5 * (attempt + 1), max(0.0, remaining)))
+        record_hybrid_count(HybridMetric.SANDBOX_DELETE_FAILURES)
+        logger.error(
+            "Hybrid sandbox rollback deletion exhausted its bounded retries "
+            "(last_error_type=%s).",
+            type(error).__name__ if error is not None else "timeout",
+        )
     finally:
+        record_hybrid_duration(HybridMetric.SANDBOX_DELETE_DURATION, started)
         await handle.close()

@@ -118,6 +118,7 @@ async def test_hybrid_middleware_routes_only_exact_local_stub() -> None:
 
 class _Handle:
     def __init__(self) -> None:
+        self.identity = SimpleNamespace(sandbox_id="sandbox")
         self.results: dict[str, bytes] = {}
         self.requests: list[dict[str, object]] = []
         self.deleted = 0
@@ -168,9 +169,13 @@ class _Handle:
 class _Provider:
     def __init__(self) -> None:
         self.closed = 0
+        self.deleted: list[str] = []
 
     async def close(self) -> None:
         self.closed += 1
+
+    async def delete_sandbox(self, sandbox_id: str) -> None:
+        self.deleted.append(sandbox_id)
 
 
 class _AcquireHandle(_Handle):
@@ -434,6 +439,45 @@ async def test_acquire_rolls_back_sandbox_when_package_delivery_fails(
     assert provider.create_calls == 1
     assert handle.lifecycle_calls == 1
     assert handle.deleted == 1
+    assert handle.closed == 1
+    assert provider.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_acquire_rollback_uses_provider_delete_after_handle_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailingHandle(_AcquireHandle):
+        async def delete(self) -> None:
+            self.deleted += 1
+            raise RuntimeError("transient handle delete")
+
+    handle = _FailingHandle()
+    provider = _AcquireProvider(handle)
+
+    async def provider_factory() -> _AcquireProvider:
+        return provider
+
+    async def package_factory(_root: object) -> object:
+        return object()
+
+    async def fail_delivery(_handle: object, _package: object) -> None:
+        raise RuntimeError("delivery failed")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools._deliver_executor",
+        fail_delivery,
+    )
+
+    with pytest.raises(RuntimeError, match="delivery failed"):
+        await InvocationSandboxLease.acquire(
+            _settings(),
+            provider_factory=provider_factory,  # type: ignore[arg-type]
+            package_factory=package_factory,  # type: ignore[arg-type]
+        )
+
+    assert handle.deleted == 1
+    assert provider.deleted == ["sandbox"]
     assert handle.closed == 1
     assert provider.closed == 1
 

@@ -12,6 +12,7 @@ from azure_functions_agents.experimental.hybrid_config import (
     resolve_hybrid_apim_settings,
     validate_hybrid_application,
 )
+from azure_functions_agents.harness import SANDBOX_MARKER_ENV_VAR
 
 
 def test_hybrid_settings_are_absent_without_private_gate() -> None:
@@ -84,3 +85,17 @@ def test_hybrid_composition_never_imports_customer_tools(
     composition = compose_aca_application(tmp_path)
 
     assert composition.tool_result.user_tools == []
+
+
+def test_hybrid_sample_guard_uses_canonical_sandbox_marker() -> None:
+    source = (
+        Path(__file__).parents[1]
+        / "samples"
+        / "hybrid-sandbox-apim-spike"
+        / "src"
+        / "tools"
+        / "customer_probe.py"
+    ).read_text(encoding="utf-8")
+
+    assert f'os.environ.get("{SANDBOX_MARKER_ENV_VAR}")' in source
+    assert "AZURE_FUNCTIONS_AGENTS_IN_ACA_SANDBOX" not in source

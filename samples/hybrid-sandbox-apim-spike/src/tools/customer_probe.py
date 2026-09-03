@@ -1,6 +1,6 @@
 import os
 
-if os.environ.get("AZURE_FUNCTIONS_AGENTS_IN_ACA_SANDBOX") != "1":
+if os.environ.get("AZURE_FUNCTIONS_AGENTS_SANDBOX") != "1":
     raise RuntimeError("customer_probe.py must only be imported inside ACA Sandbox")
 
 
