@@ -17,7 +17,7 @@ the deployed qualification suites (`tests/live/test_aca_deployed_*.py`).
 
 | File | Purpose |
 | --- | --- |
-| `agents.config.yaml` | Selects the ACA Sandbox backend, Entra HTTP auth, model, timeout, and 120-second reclaim retention |
+| `agents.config.yaml` | Selects the ACA Sandbox backend, Entra HTTP auth, model, timeout, and 120-second reclaim retention; successful results extend durable expiry to the 300-second result-hold floor |
 | `deployed_turn.agent.md` | No-tools built-in-endpoint agent, slug `deployed_turn` |
 | `deployed_load.agent.md` | Load/loss built-in-endpoint agent, slug `deployed_load` |
 | `tools/qualification_hold.py` | Fixture-only tool that holds an active run for load and backing-loss suites |
@@ -37,6 +37,10 @@ App before deployment. The deploy command sets only the required Sandbox Group
 region; the group resource ID, model deployment, storage, and Entra values must
 already be configured. This layer adds no pipeline wiring — the deploy is
 driven by `eng/scripts/aca_qualification_pipeline.py` by hand.
+
+The fixed 120-second reclaim policy supports the lifecycle suite and N=5 load
+diagnostics only. N=100 is rejected before authentication or provider work; it
+remains future human-only formal acceptance requiring a purpose-built workflow.
 
 ## `/__buildinfo`
 

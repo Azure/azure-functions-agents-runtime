@@ -79,4 +79,13 @@ minor version against the expected values in the environment. A mismatch fails
 the run and suppresses the cold-start metrics, so timings from a stale build are
 never reported as if they described the build under test.
 
+The lifecycle suite derives terminal session expiry from the greater of the
+fixture's 120-second reclaim idle and the runtime's 300-second successful-result
+hold. It does not assume reclaim idle can shorten an existing result hold.
+
+The same 120-second fixture supports N=5 diagnostics only. The operator wrapper
+and direct live-test entry point reject N=100 before authentication or provider
+work. Formal N=100 remains future human-only acceptance and requires a
+purpose-built workflow; this fixture does not discharge Decision #29.
+
 There is no pipeline wiring for any of this; every step is run by hand.

@@ -22,6 +22,7 @@ from tests.live.aca_deployed_agent_support import (
     submission_payload,
 )
 from tests.live.aca_deployed_lifecycle_support import (
+    LIFECYCLE_RECLAIM_IDLE_SECONDS,
     DeployedAcaLifecycleConfig,
     DeployedAcaLifecycleResources,
     assert_session_belongs_to_deployment,
@@ -37,9 +38,14 @@ from tests.live.aca_deployed_lifecycle_support import (
     wait_until_reclaim_due,
 )
 
+from azure_functions_agents.sandbox_runtime_limits import RESULT_HOLD_SECONDS
 from azure_functions_agents.session_state import DurableSessionRecord
 
 _SETUP_RETRY_ATTEMPTS = 4
+_EXPECTED_TERMINAL_RETENTION_SECONDS = max(
+    LIFECYCLE_RECLAIM_IDLE_SECONDS,
+    RESULT_HOLD_SECONDS,
+)
 
 if not deployed_aca_smoke_enabled():
     pytest.skip(
@@ -107,7 +113,9 @@ async def _qualify_first_run_and_suspend(
     assert_session_belongs_to_deployment(first_session, config)
     assert first_session.generation >= 1
     assert first_session.sandbox_id is not None
-    assert first_session.expires_at - first_session.last_activity_at == timedelta(seconds=120)
+    assert first_session.expires_at - first_session.last_activity_at >= timedelta(
+        seconds=_EXPECTED_TERMINAL_RETENTION_SECONDS
+    )
     first_sandbox_id = first_session.sandbox_id
     first_generation = first_session.generation
 
@@ -136,7 +144,9 @@ async def _qualify_resume_and_reclaim(
     progress.cleanup_session = resumed_session
     assert resumed_session.sandbox_id == first.sandbox_id
     assert resumed_session.generation == first.generation
-    assert resumed_session.expires_at - resumed_session.last_activity_at == timedelta(seconds=120)
+    assert resumed_session.expires_at - resumed_session.last_activity_at >= timedelta(
+        seconds=_EXPECTED_TERMINAL_RETENTION_SECONDS
+    )
 
     resumed_suspended = await wait_for_suspended_sandbox(
         resources, resumed_session, timeout_seconds=105.0

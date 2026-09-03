@@ -11,6 +11,7 @@ from itertools import pairwise
 from typing import Protocol
 
 import pytest
+from eng.scripts.aca_deployed_qualification import FORMAL_N100_UNSUPPORTED_ERROR
 from tests.aca_smoke_diagnostics import AcaSmokeEnvironmentError
 from tests.live.aca_deployed_agent_support import (
     optional_retry_after_seconds,
@@ -117,6 +118,8 @@ def load_concurrency_from_option_or_environment(config: _PytestConfig) -> int | 
         raise AcaSmokeEnvironmentError(
             f"{source} must be between {_MIN_CONCURRENCY} and {_MAX_CONCURRENCY}."
         )
+    if value == _MAX_CONCURRENCY:
+        raise AcaSmokeEnvironmentError(FORMAL_N100_UNSUPPORTED_ERROR)
     return value
 
 

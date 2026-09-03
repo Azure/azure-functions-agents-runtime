@@ -32,11 +32,30 @@ def test_load_concurrency_rejects_invalid_explicit_values(value: str) -> None:
 
 
 def test_load_concurrency_uses_environment_and_omission_skips(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY", "100")
-    assert support.load_concurrency_from_option_or_environment(_config(None)) == 100
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY", "5")
+    assert support.load_concurrency_from_option_or_environment(_config(None)) == 5
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY")
     with pytest.raises(pytest.skip.Exception):
         support.require_load_concurrency(_config(None))
+
+
+@pytest.mark.parametrize(
+    ("option_value", "environment_value"),
+    [("100", None), (None, "100")],
+)
+def test_formal_n100_is_rejected_by_direct_live_entrypoints(
+    monkeypatch: pytest.MonkeyPatch,
+    option_value: str | None,
+    environment_value: str | None,
+) -> None:
+    if environment_value is not None:
+        monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY", environment_value)
+
+    with pytest.raises(
+        AcaSmokeEnvironmentError,
+        match=support.FORMAL_N100_UNSUPPORTED_ERROR,
+    ):
+        support.load_concurrency_from_option_or_environment(_config(option_value))
 
 
 def test_load_concurrency_rejects_invalid_environment(monkeypatch: pytest.MonkeyPatch) -> None:

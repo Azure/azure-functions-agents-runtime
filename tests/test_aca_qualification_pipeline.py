@@ -291,6 +291,67 @@ class TestQualificationEnvironmentContract:
 
 
 class TestCombinedDeployedSuite:
+    def test_n100_is_rejected_before_environment_or_auth_preflight(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        auth_called = False
+
+        def unexpected_auth(_: object) -> None:
+            nonlocal auth_called
+            auth_called = True
+
+        monkeypatch.setattr(aca_deployed_qualification, "preflight_auth", unexpected_auth)
+
+        with pytest.raises(
+            aca_deployed_qualification.QualificationError,
+            match=aca_deployed_qualification.FORMAL_N100_UNSUPPORTED_ERROR,
+        ):
+            aca_deployed_qualification.run_deployed_suite(
+                {},
+                runtime_target="python313",
+                load_concurrency="100",
+                provision_concurrency="4",
+            )
+
+        assert not auth_called
+
+    def test_n5_remains_an_accepted_diagnostic(self) -> None:
+        environment = {
+            name: "configured"
+            for name in aca_deployed_qualification._DEPLOYED_ENVIRONMENT
+        }
+
+        assert aca_deployed_qualification.validate_deployed_environment(
+            environment,
+            runtime_target="python313",
+            load_concurrency="5",
+            provision_concurrency="1",
+        ) == (5, 1)
+
+    def test_n100_command_failure_is_stable_and_redacted(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        result = aca_deployed_qualification.main(
+            [
+                "deployed-suite",
+                "--runtime-target",
+                "python313",
+                "--load-concurrency",
+                "100",
+                "--provision-concurrency",
+                "4",
+            ],
+            environment={},
+        )
+
+        assert result == 1
+        assert capsys.readouterr().err.strip() == (
+            "ACA qualification failed: "
+            f"{aca_deployed_qualification.FORMAL_N100_UNSUPPORTED_ERROR}"
+        )
+
     def test_cold_start_is_the_first_module_in_the_single_suite(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

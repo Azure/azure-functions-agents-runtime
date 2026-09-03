@@ -30,6 +30,7 @@ _DEPLOYED_ENVIRONMENT = (
 )
 _PROVISION_CONCURRENCIES = frozenset({1, 2, 4})
 _SMOKE_RUN_ID = "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_RUN_ID"
+FORMAL_N100_UNSUPPORTED_ERROR = "formal_n100_unsupported_by_qualification_fixture"
 
 
 class QualificationError(Exception):
@@ -69,29 +70,28 @@ def validate_deployed_environment(
     provision_concurrency: str | None = None,
 ) -> tuple[int | None, int | None]:
     """Validate redacted deployed-suite inputs and shared-group limits."""
-    for name in _DEPLOYED_ENVIRONMENT:
-        _required(environment, name)
-    if runtime_target not in {"both", "python313", "python314"}:
-        raise QualificationError("invalid_runtime_target")
-
     load = (
         _integer(load_concurrency, name="acaLoadConcurrency", minimum=1, maximum=100)
         if load_concurrency is not None
         else None
     )
+    if load == 100:
+        raise QualificationError(FORMAL_N100_UNSUPPORTED_ERROR)
     provision = (
         _integer(provision_concurrency, name="acaProvisionConcurrency", minimum=1, maximum=4)
         if provision_concurrency is not None
         else None
     )
+    for name in _DEPLOYED_ENVIRONMENT:
+        _required(environment, name)
+    if runtime_target not in {"both", "python313", "python314"}:
+        raise QualificationError("invalid_runtime_target")
     if provision is not None and provision not in _PROVISION_CONCURRENCIES:
         raise QualificationError("invalid_provision_concurrency")
     if runtime_target == "both" and load is not None and load > 5:
         raise QualificationError("dual_runtime_load_concurrency_requires_single_runtime")
     if runtime_target == "both" and provision is not None and provision > 1:
         raise QualificationError("provision_concurrency_requires_single_runtime")
-    if load == 100 and environment.get("BUILD_REASON", "").strip() != "Manual":
-        raise QualificationError("formal_n100_requires_manual_build")
     return load, provision
 
 
