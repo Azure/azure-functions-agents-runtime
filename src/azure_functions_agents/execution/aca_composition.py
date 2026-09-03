@@ -19,8 +19,9 @@ from ..config.validation import (
 from ..controller.readiness import SessionRuntimeBinding
 from ..controller.sandbox_config import SandboxCreateProfile
 from ..discovery.mcp import discover_mcp_servers
-from ..discovery.skills import discover_skills
-from ..discovery.tools import discover_project_tools
+from ..discovery.skills import SkillDiscoveryResult, discover_skills
+from ..discovery.tools import ProjectTools, discover_project_tools
+from ..experimental.hybrid_config import hybrid_enabled, validate_hybrid_application
 from ..harness.delegation import validate_delegation_graph
 from ..registration._handlers import build_output_validator
 from ..registration.capabilities import build_capabilities, validate_subagent_tool_names
@@ -124,9 +125,18 @@ def compose_aca_application(
 
     global_config = load_global_config(app_root)
     agent_specs = load_agent_specs(app_root)
-    tool_result = discover_project_tools(app_root)
+    private_hybrid_enabled = hybrid_enabled()
+    tool_result = (
+        ProjectTools(user_tools=[], workflow_tools=[], failed_loads=[])
+        if private_hybrid_enabled
+        else discover_project_tools(app_root)
+    )
     mcp_result = discover_mcp_servers(app_root)
-    skill_result = discover_skills(app_root)
+    skill_result = (
+        SkillDiscoveryResult(skills={}, failed_loads=[])
+        if private_hybrid_enabled
+        else discover_skills(app_root)
+    )
     mcp_names = list(mcp_result.servers)
     skill_names = list(skill_result.skills)
     resolved_agents = [
@@ -138,6 +148,7 @@ def compose_aca_application(
         )
         for spec in agent_specs
     ]
+    validate_hybrid_application(global_config, resolved_agents)
     validate_session_runtime(global_config, resolved_agents)
     from ..app import _fail_on_duplicate_slugs
 

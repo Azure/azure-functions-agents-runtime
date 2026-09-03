@@ -68,10 +68,10 @@ No resources have been provisioned by this child session yet.
 | Function App / plan | `func-hybrid-sbx-0902`, Flex Consumption Python 3.13, max 10 | West US 2 | `id-hybrid-func-0902` | Provisioned |
 | Functions UAMI | `id-hybrid-func-0902` | West US 2 | Client `f6f0d9b7-ea3c-4490-9619-f5e305dfb236` | Provisioned; sandbox/storage roles pending confirmation |
 | Sandbox Group | `sbg-hybrid-tools-0902` | West US 2 | `id-hybrid-sandbox-0902` | Provisioned; 1 CPU/2 GiB/20 GiB, max 25, timeout 1800 |
-| Sandbox workload UAMI | `id-hybrid-sandbox-0902` | West US 2 | Client `ede205e9-fd0d-4ead-b1f6-5b9ba0856493` | Provisioned; RG-wide Reader grant must be narrowed |
+| Sandbox workload UAMI | `id-hybrid-sandbox-0902` | West US 2 | Client `ede205e9-fd0d-4ead-b1f6-5b9ba0856493` | Reader only on `aishybspk0902w2`; all other spike resources ungranted |
 | APIM | `larohra-ai-gateway` in `larohra-operations-agent-3p-rg` | West US | System MI `90504d46-790c-47dd-bdda-66b4a64f5386` | Reused; BasicV2 capacity 1; empty global policy/diagnostics |
-| APIM model API/product | Existing `larohra-openai-project-resource` API/product; subscription `hybrid-sandbox-spike-model` | West US | APIM system MI | Responses path proven live; isolated subscription |
-| APIM MCP API/product | `hybrid-sandbox-spike-*` | West US | APIM system MI | Pending; isolated API scope only |
+| APIM model API/product | API `hybrid-sandbox-spike-model`, product `hybrid-sandbox-spike`, subscription `hybrid-sandbox-spike-model` | West US | APIM system MI | Isolated API live; backend `larohra-openai-project-resource` |
+| APIM MCP API/product | API `hybrid-sandbox-spike-mcp`, product `hybrid-sandbox-spike` | West US | APIM system MI | Read-only Microsoft Learn MCP route live |
 | Attempted AIServices | `aishybspk0902w2` | West US 2 | APIM MI granted model user | Account exists; deployments entitlement-blocked |
 | Azure OpenAI | `larohra-openai-project-resource` in `larohra-operations-agent-3p-rg` | West US | APIM `Cognitive Services OpenAI User` | Existing account selected after entitlement failure |
 | Model deployment | `gpt-4.1-mini` version `2025-04-14`, capacity 250 | West US | N/A | Existing deployment selected |
@@ -109,6 +109,12 @@ No resources have been provisioned by this child session yet.
 | 2026-09-02 22:08 | Provisioned base workload resources and Sandbox Group. | Storage, LAW, App Insights, separate Function/sandbox UAMIs, AIServices account, and `sbg-hybrid-tools-0902` are provisioned. Initial Sandbox Group call returned `UnsupportedMediaType`; retry with explicit `Content-Type` succeeded. | Confirm narrow RBAC, create Function App/APIM APIs, then deploy. |
 | 2026-09-02 22:12 | Proved APIM Responses traffic against the existing deployment. | POST to `https://larohra-ai-gateway.azure-api.net/larohra-openai-project-resource/openai/v1/responses` completed with model `gpt-4.1-mini`. The existing API uses subscription header `api-key`. | Functions reads `AZURE_FUNCTIONS_AGENTS_APIM_SUBSCRIPTION_KEY` and sends it only as `api-key`; APIM MI remains backend auth. |
 | 2026-09-02 22:13 | Provisioned Python 3.13 Flex Function App. | `func-hybrid-sbx-0902` is bound to the dedicated Function UAMI and capped at 10 instances. | Deploy only after local implementation/gates and ACA stack integration. |
+| 2026-09-02 22:15 | Ran a direct Sandbox Group data-plane baseline. | Public Ubuntu disk with Deny+Full egress reached Running in 3524.7 ms, process exec succeeded, verified deletion took 5085.3 ms, and no sandbox leaked. | Preserve as pre-code create/delete evidence and compare with packaged executor readiness. |
+| 2026-09-02 22:18 | Completed the isolated APIM model API and diagnostics. | Responses nonstream completed in 1966.7 ms. Streaming first event was 794.1 ms, total 1730.8 ms, 19 events. API policy uses token limit 100000, token metric namespace `HybridSandboxSpike`, managed-identity backend, timeout 180, and unbuffered response. | Use base `https://larohra-ai-gateway.azure-api.net/hybrid-sandbox-spike-model/openai/v1`; keep body capture at zero and W3C 100% sampling for bounded spike runs. |
+| 2026-09-02 22:20 | Narrowed Sandbox Group workload identity. | Removed RG-wide Reader and granted Reader only on `aishybspk0902w2`; every other spike resource is an ungranted negative control. Function UAMI has SandboxGroup Data Owner only at the new group and required storage data roles only at the spike storage account. | Run positive AIServices ARM GET and negative ARM GET against another resource from inside the sandbox. |
+| 2026-09-02 22:22 | Completed the isolated APIM MCP lane. | MCP initialize protocol `2025-06-18` returned HTTP 200 `text/event-stream`, a session ID, and tools/resources capability in 820.4 ms. Policy rate-limits 120/min, forwards unbuffered, and logs W3C telemetry with zero body bytes. | Configure `AZURE_FUNCTIONS_AGENTS_APIM_MCP_URL=https://larohra-ai-gateway.azure-api.net/hybrid-sandbox-spike-mcp` and the same isolated subscription key. |
+| 2026-09-02 22:25 | Proved Sandbox Group workload managed identity end to end. | The default Ubuntu disk exposed the identity endpoint/header. Raw endpoint token acquisition worked under Deny+Full with only `management.azure.com` allowed; no runtime package install was needed. Granted AIServices ARM GET returned 200 and ungranted storage ARM GET returned 403. | Vendor dependencies with the app package; use raw identity endpoint for this focused test and never install packages at runtime. |
+| 2026-09-02 22:27 | Ran preliminary paired direct/APIM model control. | After one warmup, five direct calls had p50 1203.9 ms/p95 1298.5; isolated APIM calls had p50 1174.9 ms/p95 1241.3. The -28.9 ms p50 delta is noise-dominated, not evidence of negative overhead. | Mark preliminary; final report needs more paired samples plus APIM `TotalTime`/`BackendTime`. |
 
 ## Measurement record
 
@@ -123,7 +129,14 @@ request/tool content.
 | Concurrency 1 | 1 | Pending | Pending | Pending | Pending | Pending | Pending |
 | Concurrency 10 | 10 | Pending | Pending | Pending | Pending | Pending | Pending |
 | Concurrency 25 | 25 | Conditional | Conditional | Conditional | Conditional | Conditional | Conditional |
-| Direct-model control | 1 | Pending | Pending | Pending | N/A | Pending | N/A |
+| Direct Sandbox Group baseline | 1 | create 3524.7 ms | N/A | N/A | N/A | 0 | Complete; delete 5085.3 ms |
+| Sandbox MI positive/negative | 1 | create 2318.9 ms | N/A | N/A | N/A | N/A | Complete; delete 6851.4 ms, no leak |
+| Sandbox identity-env probe | 1 | create 2881.6 ms | N/A | N/A | N/A | N/A | Complete; delete 5772.5 ms |
+| APIM nonstream baseline | 1 | 1966.7 ms | N/A | N/A | N/A | 0 | N/A |
+| APIM stream baseline | 1 | first event 794.1 ms | N/A | N/A | total 1730.8 ms | 0 | N/A |
+| APIM MCP initialize baseline | 1 | 820.4 ms | N/A | N/A | N/A | 0 | N/A |
+| Direct-model control, preliminary paired n=5 | 1 | 1203.9 ms | 1298.5 ms | Not meaningful | N/A | 0 | N/A |
+| APIM-model control, preliminary paired n=5 | 1 | 1174.9 ms | 1241.3 ms | Not meaningful | N/A | 0 | N/A |
 
 Cold-start decomposition, token counts, APIM `TotalTime`, APIM `BackendTime`,
 derived APIM overhead, MCP timing, tool queue/execution/transfer, sandbox

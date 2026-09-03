@@ -1,0 +1,5 @@
+model: $AZURE_FUNCTIONS_AGENTS_APIM_MODEL
+timeout: 900
+
+system_tools:
+  web_request: false

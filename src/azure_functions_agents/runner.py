@@ -168,7 +168,7 @@ def _response_usage_details(response: Any) -> Any:
 
 
 def _model_publisher(provider: str | None) -> str | None:
-    return "openai" if provider in {"openai", "azure_openai"} else None
+    return "openai" if provider in {"openai", "azure_openai", "azure_openai_apim"} else None
 
 
 async def _stream_usage_details(stream: Any, *, remaining_timeout: float) -> Any:
@@ -397,6 +397,7 @@ def _build_role_agent(
     history_provider: ContextProvider | None,
     delegate_tools: list[FunctionTool] | None,
     workflow_policy: WorkflowPlanPolicy | None = None,
+    middleware: list[Any] | None = None,
 ) -> Agent[Any]:
     """Assemble the final tool list + context providers and build the MAF ``Agent``.
 
@@ -463,6 +464,7 @@ def _build_role_agent(
         instructions=effective_instructions,
         tools=resolved_tools,
         context_providers=context_providers,
+        middleware=middleware,
     )
 
 
@@ -497,6 +499,7 @@ def _build_delegated_agent(
         resolved_id=None,
         history_provider=None,
         delegate_tools=None,
+        middleware=None,
     )
     return agent, inference_target
 
@@ -767,6 +770,7 @@ async def _build_agent_session_history(
     catalog: AgentCatalog | None = None,
     coordinator_deadline: float | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
+    middleware: list[Any] | None = None,
 ) -> tuple[Any, Any, str, _DelegateErrorTracker | None, InferenceTarget]:
     """Construct the chat client, agent, AgentSession, and history provider.
 
@@ -824,6 +828,7 @@ async def _build_agent_session_history(
         history_provider=history_provider,
         delegate_tools=delegate_tools,
         workflow_policy=workflow_policy,
+        middleware=middleware,
     )
 
     return agent, session, resolved_id, delegate_error_tracker, inference_target
@@ -952,6 +957,62 @@ async def run_agent(
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> AgentResult:
+    """Execute one top-level run, optionally within a fresh hybrid sandbox lease."""
+    resolved_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
+    from .experimental.hybrid_tools import open_hybrid_invocation
+
+    async with open_hybrid_invocation(
+        timeout_seconds=resolved_timeout,
+        tools=tools,
+        sandbox_tools=sandbox_tools,
+        skill_paths=skill_paths,
+        web_request_tools=web_request_tools,
+        workflow_enabled=workflow_enabled,
+        subagents=subagents,
+    ) as invocation:
+        return await _run_agent_in_invocation(
+            prompt,
+            instructions=instructions,
+            timeout=resolved_timeout,
+            tools=invocation.tools,
+            mcp_tools=mcp_tools,
+            skill_paths=skill_paths,
+            model=model,
+            session_id=session_id,
+            sandbox_tools=sandbox_tools,
+            system_addendum=system_addendum,
+            workflow_enabled=workflow_enabled,
+            workflow_durable_client=workflow_durable_client,
+            agent_name=agent_name,
+            web_request_tools=web_request_tools,
+            subagents=subagents,
+            catalog=catalog,
+            workflow_policy=workflow_policy,
+            middleware=invocation.middleware,
+        )
+
+
+async def _run_agent_in_invocation(
+    prompt: str,
+    *,
+    instructions: str | None = None,
+    timeout: float | None = None,
+    tools: list[Any] | None = None,
+    mcp_tools: list[Any] | None = None,
+    skill_paths: list[Path] | None = None,
+    model: str | None = None,
+    session_id: str | None = None,
+    sandbox_tools: list[Any] | None = None,
+    system_addendum: str | None = None,
+    workflow_enabled: bool = False,
+    workflow_durable_client: Any | None = None,
+    agent_name: str | None = None,
+    web_request_tools: list[Any] | None = None,
+    subagents: list[SubagentRef] | None = None,
+    catalog: AgentCatalog | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
+    middleware: list[Any] | None = None,
+) -> AgentResult:
     """Execute a single prompt against the configured agent backend.
 
     Parameters
@@ -1036,6 +1097,7 @@ async def run_agent(
             catalog=catalog,
             coordinator_deadline=coordinator_deadline,
             workflow_policy=workflow_policy,
+            middleware=middleware,
         )
     )
 
@@ -1347,6 +1409,74 @@ async def _run_agent_event_stream(
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> AsyncGenerator[dict[str, object]]:
+    """Drive one top-level stream inside its complete hybrid lease lifetime."""
+    resolved_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
+    from .experimental.hybrid_tools import open_hybrid_invocation
+
+    try:
+        async with (
+            open_hybrid_invocation(
+                timeout_seconds=resolved_timeout,
+                tools=tools,
+                sandbox_tools=sandbox_tools,
+                skill_paths=skill_paths,
+                web_request_tools=web_request_tools,
+                workflow_enabled=workflow_enabled,
+                subagents=subagents,
+            ) as invocation,
+            contextlib.aclosing(
+                _run_agent_event_stream_in_invocation(
+                    prompt,
+                    instructions=instructions,
+                    timeout=resolved_timeout,
+                    tools=invocation.tools,
+                    mcp_tools=mcp_tools,
+                    skill_paths=skill_paths,
+                    model=model,
+                    session_id=session_id,
+                    sandbox_tools=sandbox_tools,
+                    system_addendum=system_addendum,
+                    workflow_enabled=workflow_enabled,
+                    workflow_durable_client=workflow_durable_client,
+                    agent_name=agent_name,
+                    display_name=display_name,
+                    web_request_tools=web_request_tools,
+                    subagents=subagents,
+                    catalog=catalog,
+                    workflow_policy=workflow_policy,
+                    middleware=invocation.middleware,
+                )
+            ) as events,
+        ):
+            async for event in events:
+                yield event
+    except Exception as exc:
+        logger.error("Hybrid agent stream failed: %s", exc, exc_info=True)
+        yield {"type": "error", "content": str(exc)}
+
+
+async def _run_agent_event_stream_in_invocation(
+    prompt: str,
+    *,
+    instructions: str | None = None,
+    timeout: float | None = None,
+    tools: list[Any] | None = None,
+    mcp_tools: list[Any] | None = None,
+    skill_paths: list[Path] | None = None,
+    model: str | None = None,
+    session_id: str | None = None,
+    sandbox_tools: list[Any] | None = None,
+    system_addendum: str | None = None,
+    workflow_enabled: bool = False,
+    workflow_durable_client: Any | None = None,
+    agent_name: str | None = None,
+    display_name: str | None = None,
+    web_request_tools: list[Any] | None = None,
+    subagents: list[SubagentRef] | None = None,
+    catalog: AgentCatalog | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
+    middleware: list[Any] | None = None,
+) -> AsyncGenerator[dict[str, object]]:
     """Yield the stable runner event vocabulary as structured documents.
 
     Tool-selection semantics match :func:`run_agent`:
@@ -1412,6 +1542,7 @@ async def _run_agent_event_stream(
                 catalog=catalog,
                 coordinator_deadline=deadline,
                 workflow_policy=workflow_policy,
+                middleware=middleware,
             )
         )
     except Exception as exc:

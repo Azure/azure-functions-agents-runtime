@@ -844,6 +844,27 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         )(reconcile_sandbox_sessions)
         app.function_name(name="azure_functions_agents_reconciler")(reconciler_function)
 
+    from .experimental.hybrid_config import HybridSandboxSettings
+
+    hybrid_settings = HybridSandboxSettings.from_environment()
+    if hybrid_settings is not None:
+        from .experimental.hybrid_reaper import (
+            HYBRID_REAPER_SCHEDULE,
+            reap_hybrid_orphans,
+        )
+
+        async def reap_hybrid_tool_sandboxes(timer: func.TimerRequest) -> None:
+            del timer
+            await reap_hybrid_orphans(settings=hybrid_settings)
+
+        hybrid_reaper_function = app.timer_trigger(
+            schedule=HYBRID_REAPER_SCHEDULE,
+            arg_name="timer",
+        )(reap_hybrid_tool_sandboxes)
+        app.function_name(name="azure_functions_agents_hybrid_reaper")(
+            hybrid_reaper_function
+        )
+
     # Emit structured indexing summary log
     indexing_summary = {
         "event": "agent_runtime_indexed",

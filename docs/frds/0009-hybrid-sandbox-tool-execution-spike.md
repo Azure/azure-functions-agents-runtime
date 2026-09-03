@@ -97,7 +97,7 @@ normal, timeout, cancellation, disconnect, and worker-crash cases.
 The spike is enabled only when
 `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_SANDBOX_GROUP_RESOURCE_ID`
 contains one existing Sandbox Group ARM resource ID. Related private settings
-configure the APIM model endpoint/audience or subscription-key fallback, the
+configure the APIM model endpoint/model/audience or subscription-key fallback, the
 remote MCP APIM endpoint, bounded timeouts/caps, and the orphan grace period.
 No `schema.py` or front-matter key changes.
 
