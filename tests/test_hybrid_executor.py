@@ -210,6 +210,11 @@ def test_archive_member_limit_matches_controller_and_accepts_large_dependency_cl
         hybrid_executor.MAX_ARCHIVE_MEMBERS
         == controller_package._MAX_STANDARD_ZIP_ENTRIES
     )
+    assert (
+        hybrid_executor.MAX_EXTRACTED_TOTAL_BYTES
+        == hybrid_executor.MAX_EXTRACTED_MEMBER_BYTES
+        == controller_package._MAX_ARCHIVE_OPERATIONAL_SIZE
+    )
     archive_path = tmp_path / "large-member-count.zip"
     with zipfile.ZipFile(archive_path, "w") as archive:
         for index in range(4097):

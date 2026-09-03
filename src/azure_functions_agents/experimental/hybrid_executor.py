@@ -43,8 +43,8 @@ MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 # The controller emits a standard, non-ZIP64 archive and permits every entry
 # representable by that format. Keep this standalone executor bound aligned.
 MAX_ARCHIVE_MEMBERS = 0xFFFF
-MAX_EXTRACTED_MEMBER_BYTES = 32 * 1024 * 1024
 MAX_EXTRACTED_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_EXTRACTED_MEMBER_BYTES = MAX_EXTRACTED_TOTAL_BYTES
 MAX_COMPRESSION_RATIO = 200
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_REQUEST_BYTES = 1024 * 1024
