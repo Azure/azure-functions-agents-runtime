@@ -29,6 +29,7 @@ from azure_functions_agents.workflows.native_retry import (
     decode_durable_retry_failure,
 )
 from azure_functions_agents.workflows.schema import (
+    SUB_AGENT_TASK_TYPE,
     TOOL_TASK_TYPE,
     PlanValidationError,
     WorkflowPlanPolicy,
@@ -739,6 +740,17 @@ def _tool_node(task_id: str, execution: dict[str, Any] | None = None) -> dict[st
     return node
 
 
+def _subagent_node(task_id: str, execution: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": task_id,
+        "type": SUB_AGENT_TASK_TYPE,
+        "agent": "analyst",
+        "task": "Analyze the result.",
+        "depends_on": [],
+        "execution": execution,
+    }
+
+
 def test_persisted_policy_selects_the_durable_retry_driver() -> None:
     execution = {"max_attempts": 3, "durable_retry_policy": dict(_DURABLE_POLICY)}
     context = _RecordingContext(
@@ -754,6 +766,33 @@ def test_persisted_policy_selects_the_durable_retry_driver() -> None:
     assert retry_policy.max_number_of_attempts == 3
     assert context.activity_tags == [
         (engine._ACTIVITY_NAME, {"durabletask.displayName": "publish"})
+    ]
+
+
+def test_retried_sub_agent_activity_keeps_its_display_tag() -> None:
+    execution = {"max_attempts": 3, "durable_retry_policy": dict(_DURABLE_POLICY)}
+    context = _RecordingContext(
+        [_subagent_node("analyze", execution)],
+        {
+            "analyze": {
+                "id": "analyze",
+                "ok": True,
+                "result": {"agent": "analyst", "text": "Ready."},
+            }
+        },
+    )
+
+    assert _orchestrate(context) == {
+        "results": {"analyze": {"agent": "analyst", "text": "Ready."}}
+    }
+    [(payload, retry_policy)] = context.retried
+    assert payload["execution"] == execution
+    assert retry_policy.max_number_of_attempts == 3
+    assert context.activity_tags == [
+        (
+            engine.SUB_AGENT_ACTIVITY_NAME,
+            {"durabletask.displayName": "analyst"},
+        )
     ]
 
 
