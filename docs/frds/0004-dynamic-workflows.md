@@ -4,7 +4,7 @@ title: Dynamic workflows
 status: Finalized
 author: TsuyoshiUshio
 created: 2026-07-06
-updated: 2026-08-14
+updated: 2026-09-03
 issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108, https://github.com/Azure/azure-functions-agents-runtime/issues/109, https://github.com/Azure/azure-functions-bucees-planning/issues/1274, https://github.com/Azure/azure-functions-bucees-planning/issues/1275, https://github.com/Azure/azure-functions-bucees-planning/issues/1276]
 pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117, https://github.com/Azure/azure-functions-agents-runtime/pull/151, https://github.com/Azure/azure-functions-agents-runtime/pull/163]
 ---
@@ -38,6 +38,12 @@ workflow-enabled agent with agent/session isolation. The
 [multi-agent addendum](#multi-agent-workflow-isolation-addendum-pr-151)
 records only that extension's behavioral and architectural delta instead of
 repeating the base workflow design.
+
+The next operational evolution adds human-readable DTS dashboard labels without
+changing workflow plans or registered Azure Function names. Orchestrations use
+the existing workflow session `agent_name` plus the fixed `-orchestration`
+suffix; tool and Sub Agent Activities use their concrete tool name or agent
+slug.
 
 ## 2. Motivation / problem
 
@@ -938,6 +944,39 @@ The Dynamic Workflow sample for this extension must demonstrate:
 4. status output showing expanded, running, skipped, and aggregated states; and
 5. deterministic completion on both Azure Storage and DTS Durable backends.
 
+### Durable Task Scheduler display names
+
+The runtime attaches the well-known `durabletask.displayName` tag when it starts
+an orchestration and schedules a tool or Workflow Sub Agent Activity. DTS uses
+that tag as the primary label in orchestration lists, sequence/flow views, and
+detail panels while retaining the registered function name in metadata.
+
+The orchestration label is derived deterministically as
+`<agent_name>-orchestration`. Here, `agent_name` is the existing workflow
+session value currently populated from the resolved agent slug on production
+invocation paths. The runtime does not ask the LLM to invent a workflow title
+and does not add a field to `start_workflow`.
+
+Tool Activities use the workflow tool name. Workflow Sub Agent Activities use
+the authorized agent slug. Expanded `for_each` instances intentionally share
+the same display name; their distinct runtime task IDs remain in the Activity
+input and details. Timer tasks are unchanged.
+
+The pinned Durable Functions client exposes orchestration tags through
+`schedule_new_orchestration`, so workflow startup moves from deprecated
+`start_new(..., client_input=...)` to
+`schedule_new_orchestration(..., input=..., tags=...)`.
+
+The Azure Functions one-argument compatibility orchestration context does not
+expose Activity tags. The engine therefore registers its orchestrator using the
+supported native two-argument Durable Task contract. The orchestration payload
+becomes the second argument; native `call_activity(..., input=..., tags=...)`
+and module-level task combinators replace compatibility-only helpers. The
+engine explicitly normalizes the native replay-safe UTC timestamp before
+comparing it with timezone-aware absolute wait deadlines. Activity names,
+inputs, authorization, scheduling order, status payloads, workflow IDs, and
+results remain unchanged.
+
 ## 5. Decisions log
 
 | # | Decision | Options considered | Choice | Decided by | Date |
@@ -1007,6 +1046,10 @@ The Dynamic Workflow sample for this extension must demonstrate:
 | 63 | Built-in skill packaging | Generate content in code / external public file / packaged workflow asset | Store `SKILL.md` under `workflows/skills/data-driven-workflows`, resolve relative to `integration.py`, add `workflows/skills/**` package data, and verify a built wheel | Agent, architecture review | 2026-08-19 |
 | 64 | Legacy Durable payload decoding | Require all new keys / revalidate via Pydantic / optional typed keys with one compatibility boundary | Mark dynamic keys `NotRequired`, apply defaults once at the persisted JSON boundary, and trust the previously validated payload internally | Agent, architecture review | 2026-08-19 |
 | 65 | Progressive-disclosure selection pointer | Keep a qualified shared-addendum pointer / rely on public docs / use only MAF skill metadata | Keep the narrow load condition in the Skill description and remove the shared-addendum pointer after E2E showed that mentioning the Skill there caused fixed DAGs to load it speculatively | Agent, E2E evidence | 2026-08-19 |
+| 66 | Record DTS display names | Create a new FRD / evolve FRD 0004 | Evolve FRD 0004 because display tags are a small operational improvement to the existing Dynamic Workflows engine with no new authoring contract | Human (TsuyoshiUshio) | 2026-09-03 |
+| 67 | Orchestration display label | LLM-authored title / agent display name / existing workflow session `agent_name` | Use `<agent_name>-orchestration` so labels are deterministic and require no LLM-facing schema change | Human (TsuyoshiUshio) | 2026-09-03 |
+| 68 | Activity display label | Runtime Activity name / task id / execution target | Use the workflow tool name for tool Activities and the authorized agent slug for Workflow Sub Agent Activities | Human + Agent | 2026-09-03 |
+| 69 | Durable Activity-tag integration | Access compatibility-context internals / wait for wrapper support / native two-argument orchestrator | Use the public native Durable Task orchestrator contract exposed by the pinned package; preserve existing execution semantics and cover the context migration in regression tests | Human + Agent | 2026-09-03 |
 
 ## 6. Test plan
 
@@ -1140,6 +1183,17 @@ The Dynamic Workflow sample for this extension must demonstrate:
   - a sample discovers a collection, dynamically fans out, skips one item, and
     aggregates results;
   - the scenario completes with deterministic output on Azure Storage and DTS.
+- [ ] Evolution #DTS display names:
+  - `tests/test_workflow_registry.py` verifies
+    `schedule_new_orchestration(..., input=..., tags=...)` and the deterministic
+    `<agent_name>-orchestration` label;
+  - `tests/test_workflow_engine.py` drives the native two-argument orchestrator
+    contract and verifies tool/Sub Agent tags on static, dynamic, and expanded
+    Activities;
+  - cancellation, timers, custom status, authorization, deterministic ordering,
+    and absolute/relative wait deadlines retain their existing behavior;
+  - emulator and Azure DTS runs show display tags in place of shared registered
+    function names.
 
 ## 7. Docs impact
 
@@ -1172,6 +1226,9 @@ The Dynamic Workflow sample for this extension must demonstrate:
   project-discovered skills, and direct/delegated capability paths.
 - [ ] Evolution #1276: update the selected workflow sample and its README with a
   collection-driven fan-out/fan-in scenario.
+- [ ] Evolution #DTS display names: update `docs/workflows.md` and
+  `docs/architecture.md` with derived orchestration/Activity labels and the
+  native orchestrator execution contract.
 
 ## 8. Status & sign-off
 

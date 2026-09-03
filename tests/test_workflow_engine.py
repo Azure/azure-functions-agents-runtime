@@ -267,6 +267,7 @@ class _Task:
         self._result = result
         self.is_complete = True
         self.cancelled = False
+        self._parent = None
 
     @property
     def result(self) -> Any:
@@ -293,41 +294,36 @@ class _FakeOrchestrationContext:
         self._input = {"workflow_agent_slug": "coordinator", "tasks": tasks}
         self._result_for = result_for
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.activity_tags: list[tuple[str, dict[str, str]]] = []
         self.last_wave = _Task([])
         self.cancel_task = _Task()
         self.statuses: list[str] = []
         self.selections = 0
 
-    def get_input(self) -> dict[str, Any]:
-        return self._input
-
     def wait_for_external_event(self, name: str) -> _Task:
         assert name == engine.CANCEL_EVENT_NAME
         return self.cancel_task
 
-    def call_activity(self, name: str, payload: dict[str, Any]) -> _Task:
-        self.calls.append((name, payload))
-        return _Task(self._result_for(name, payload))
-
-    def task_all(self, tasks: list[_Task]) -> _Task:
-        self.last_wave = _Task([task.result for task in tasks])
-        return self.last_wave
-
-    def task_any(self, tasks: list[_Task]) -> _Task:
-        self.selections += 1
-        selection = _Task()
-        selection.candidates = list(tasks)
-        self.last_wave = selection
-        return selection
+    def call_activity(
+        self,
+        name: str,
+        *,
+        input: dict[str, Any],
+        tags: dict[str, str],
+    ) -> _Task:
+        self.calls.append((name, input))
+        self.activity_tags.append((name, tags))
+        return _Task(self._result_for(name, input))
 
     def set_custom_status(self, status: str) -> None:
         self.statuses.append(status)
 
 
 def _drive(context: _FakeOrchestrationContext, selection: Any) -> Any:
-    candidates = getattr(selection, "candidates", None)
+    candidates = getattr(selection, "_tasks", None)
     if candidates is None:
         return selection
+    context.selections += 1
     if getattr(context, "cancel_next", False):
         context.cancel_next = False
         return context.cancel_task
@@ -338,10 +334,10 @@ def _drive(context: _FakeOrchestrationContext, selection: Any) -> Any:
 
 
 def _run_orchestrator(
-    orchestrator: Callable[[Any], Any],
+    orchestrator: Callable[[Any, Any], Any],
     context: _FakeOrchestrationContext,
 ) -> dict[str, Any]:
-    generator = orchestrator(context)
+    generator = orchestrator(context, context._input)
     try:
         selection = next(generator)
         while True:
@@ -351,10 +347,10 @@ def _run_orchestrator(
 
 
 def _drive_one_wave(generator: Any, context: _FakeOrchestrationContext, selection: Any) -> Any:
-    remaining = [task for task in selection.candidates if task is not context.cancel_task]
+    remaining = [task for task in selection._tasks if task is not context.cancel_task]
     while remaining:
         selection = generator.send(remaining.pop(0))
-        candidates = getattr(selection, "candidates", [])
+        candidates = getattr(selection, "_tasks", [])
         remaining = [task for task in remaining if task in candidates]
     return selection
 
@@ -448,6 +444,20 @@ def test_orchestrator_fans_out_sub_agents_and_reduces_templated_results() -> Non
         payload["workflow_agent_slug"] == "coordinator"
         for _, payload in context.calls
     )
+    assert context.activity_tags == [
+        (
+            engine.SUB_AGENT_ACTIVITY_NAME,
+            {"durabletask.displayName": "pr_status_analyst"},
+        ),
+        (
+            engine.SUB_AGENT_ACTIVITY_NAME,
+            {"durabletask.displayName": "pr_status_analyst"},
+        ),
+        (
+            engine.SUB_AGENT_ACTIVITY_NAME,
+            {"durabletask.displayName": "report_writer"},
+        ),
+    ]
     assert context.statuses == [
         "0/3 tasks done, running=analyze_117,analyze_118",
         "2/3 tasks done, next=report",
@@ -484,6 +494,12 @@ def test_orchestrator_threads_workflow_agent_slug_to_tool_activity() -> None:
                 "workflow_agent_slug": "coordinator",
                 "workflow_id": "workflow-parent",
             },
+        )
+    ]
+    assert context.activity_tags == [
+        (
+            "agents_workflow_run_tool",
+            {"durabletask.displayName": "publish"},
         )
     ]
 
@@ -640,12 +656,19 @@ def test_dynamic_activity_failure_cancels_pending_wave_timer() -> None:
             super().__init__(*args, **kwargs)
             self.activity_calls = 0
 
-        def call_activity(self, name: str, payload: dict[str, Any]) -> _Task:
+        def call_activity(
+            self,
+            name: str,
+            *,
+            input: dict[str, Any],
+            tags: dict[str, str],
+        ) -> _Task:
             self.activity_calls += 1
             if self.activity_calls == 2:
-                self.calls.append((name, payload))
+                self.calls.append((name, input))
+                self.activity_tags.append((name, tags))
                 return _Task(RuntimeError("dynamic activity failed"))
-            return super().call_activity(name, payload)
+            return super().call_activity(name, input=input, tags=tags)
 
     tasks = [
         {
@@ -1000,6 +1023,11 @@ def test_expanded_mixed_run_skip_aggregate_source_order() -> None:
         "disc",
         "analyze[0]",
         "analyze[2]",
+    ]
+    assert context.activity_tags == [
+        (engine._ACTIVITY_NAME, {"durabletask.displayName": "collect"}),
+        (engine._ACTIVITY_NAME, {"durabletask.displayName": "at"}),
+        (engine._ACTIVITY_NAME, {"durabletask.displayName": "at"}),
     ]
 
 
@@ -1643,7 +1671,7 @@ def test_dynamic_cancellation_cancels_timer_and_returns_partial() -> None:
     context.cancel_task.result = "user-request"
     orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
 
-    gen = orchestrator(context)
+    gen = orchestrator(context, context._input)
     selection = next(gen)  # yields the t1 wave
     _drive_one_wave(gen, context, selection)  # completes t1, expands w1, dispatches its timer
     result: dict[str, Any] = {}
@@ -1701,7 +1729,7 @@ def test_dynamic_cancellation_preserves_completed_iteration_instances() -> None:
     context.cancel_task.result = "user-request"
     orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
 
-    gen = orchestrator(context)
+    gen = orchestrator(context, context._input)
     selection = next(gen)  # discover
     selection = _drive_one_wave(gen, context, selection)  # first inspect wave
     _drive_one_wave(gen, context, selection)  # final inspect instance
