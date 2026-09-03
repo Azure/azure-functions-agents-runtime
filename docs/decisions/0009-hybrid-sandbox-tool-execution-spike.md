@@ -142,6 +142,7 @@ No resources have been provisioned by this child session yet.
 | 2026-09-03 00:16 | Joined final debug-off runtime and APIM telemetry. | Function requests were 21/21 successful; runtime emitted 21 creates, deletes, and tool calls plus 42 model calls. APIM model n=42 had total/backend/gateway p50 1746/1745/2 ms and zero errors. Inventory was zero after 60 seconds. | Final telemetry passed. OTel percentile estimates are histogram-bucket approximations; client and Function percentiles are authoritative. |
 | 2026-09-03 00:18 | Re-ran the canonical local gate on final source. | Ruff passed, mypy checked 106 files, and pytest completed with 2513 passed and 70 skipped. | Local Definition of Done gate passed. |
 | 2026-09-03 00:20 | Verified the final deployed state. | Temporary debug and worker OTel settings were absent; six expected Functions were indexed; isolated APIM model and MCP APIs remained active and subscription-protected; typed Sandbox Group inventory was zero. | Spike qualification complete; retain resources until teardown is explicitly requested. |
+| 2026-09-03 00:22 | Removed the temporary service-wide APIM diagnostic after final capture. | Historical GatewayLogs remain in `log-hybrid-sbx-0902`. API-scoped model/MCP Application Insights diagnostics remain active with request and response body capture disabled. | Shared APIM no longer exports unrelated service-wide traffic for this spike. |
 
 ## Measurement record
 
@@ -221,6 +222,10 @@ diagnostics, token totals, and scenario records are in the JSON report.
 The operator sequence first disables the Function App, runs the bounded
 spike-label reaper and verifies no spike-labeled sandboxes remain, then removes
 only the isolated shared-APIM surfaces before deleting the spike resource group:
+
+The temporary service-wide APIM diagnostic
+`hybrid-sandbox-spike-temporary` was already removed after final measurement.
+The API-scoped body-free diagnostics remain until the isolated APIs are deleted.
 
 ```powershell
 az functionapp stop --resource-group larohra-test-adc-tools-hosted-skill --name func-hybrid-sbx-0902
