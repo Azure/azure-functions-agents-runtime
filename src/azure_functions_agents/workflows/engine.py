@@ -8,7 +8,7 @@ Wave-based DAG scheduler with two task primitives:
   refs see something useful.
 
 Cooperative cancel is implemented as a single ``wait_for_external_event``
-("cancel") task that races the wave via ``context.task_any``. When the
+("cancel") task that races the wave via ``when_any``. When the
 event fires we return a ``canceled=True`` envelope and stop scheduling.
 The Durable runtime_status remains ``Completed`` (Durable doesn't have
 a first-class cooperative-cancel terminal state); the tool-facing
@@ -24,11 +24,12 @@ import asyncio
 import json
 from collections.abc import Generator, Mapping
 from dataclasses import dataclass
+from datetime import UTC
 from typing import Any, Literal, NotRequired, TypedDict, cast
 
 import azure.durable_functions as df
 import azure.functions as func
-from durabletask.task import CancellableTask, Task
+from durabletask.task import CancellableTask, OrchestrationContext, Task, when_any
 
 from azure_functions_agents._logger import logger
 from azure_functions_agents.registration.catalog import AgentCatalog
@@ -103,7 +104,7 @@ if registry.get_entry(ECHO_TOOL_NAME) is None:
     )
 
 
-def _wait_deadline(context: df.DurableOrchestrationContext, task: Mapping[str, Any]) -> Any:
+def _wait_deadline(context: OrchestrationContext, task: Mapping[str, Any]) -> Any:
     """Compute the absolute UTC deadline for a wait task.
 
     Validation already enforced exactly one of ``duration`` / ``until``
@@ -114,6 +115,8 @@ def _wait_deadline(context: df.DurableOrchestrationContext, task: Mapping[str, A
     clock at submit time, which can drift between submit and execution.
     """
     now = context.current_utc_datetime
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
     if task.get("duration") is not None:
         delta = parse_iso8601_duration(task["duration"])
         deadline = now + delta
@@ -128,7 +131,7 @@ def _wait_deadline(context: df.DurableOrchestrationContext, task: Mapping[str, A
 
 
 def _await_wave(
-    context: df.DurableOrchestrationContext,
+    context: OrchestrationContext,
     cancel_task: Task[Any],
     wave_tasks: list[Task[Any]],
 ) -> Generator[Task[Any], Task[Any], list[Any] | None]:
@@ -140,7 +143,7 @@ def _await_wave(
     outcomes: dict[int, Any] = {}
     pending = list(range(len(wave_tasks)))
     while pending:
-        winner = yield context.task_any(
+        winner = yield when_any(
             [cancel_task, *(wave_tasks[index] for index in pending)]
         )
         if winner is cancel_task:
@@ -177,7 +180,7 @@ def _plan_is_dynamic(tasks: list[WorkflowTaskInput]) -> bool:
 
 
 def _run_static_workflow(
-    context: df.DurableOrchestrationContext,
+    context: OrchestrationContext,
     payload: WorkflowPayload,
     tasks: list[WorkflowTaskInput],
 ) -> Any:
@@ -230,13 +233,14 @@ def _run_static_workflow(
                 wave_tasks.append(
                     context.call_activity(
                         _ACTIVITY_NAME,
-                        {
+                        input={
                             "id": tid,
                             "tool": task["tool"],
                             "args": resolved_args,
                             "workflow_agent_slug": workflow_agent_slug,
                             "workflow_id": context.instance_id,
                         },
+                        tags={"durabletask.displayName": task["tool"]},
                     )
                 )
                 wave_specs.append({"id": tid, "type": TOOL_TASK_TYPE})
@@ -254,13 +258,14 @@ def _run_static_workflow(
                 wave_tasks.append(
                     context.call_activity(
                         SUB_AGENT_ACTIVITY_NAME,
-                        {
+                        input={
                             "id": tid,
                             "agent": task["agent"],
                             "task": resolved_task,
                             "workflow_id": context.instance_id,
                             "workflow_agent_slug": workflow_agent_slug,
                         },
+                        tags={"durabletask.displayName": task["agent"]},
                     )
                 )
                 wave_specs.append({"id": tid, "type": SUB_AGENT_TASK_TYPE})
@@ -516,14 +521,14 @@ def _resolve_dynamic_args(
 
 
 def _publish_dynamic_status(
-    context: df.DurableOrchestrationContext,
+    context: OrchestrationContext,
     state: _DynamicWorkflowState,
 ) -> None:
     context.set_custom_status(_dynamic_status(state))
 
 
 def _dynamic_failure(
-    context: df.DurableOrchestrationContext,
+    context: OrchestrationContext,
     state: _DynamicWorkflowState,
     *,
     error: str,
@@ -566,7 +571,7 @@ def _aggregate_dynamic_node(state: _DynamicWorkflowState, logical_id: str) -> No
 
 
 def _materialize_for_each_node(
-    context: df.DurableOrchestrationContext,
+    context: OrchestrationContext,
     state: _DynamicWorkflowState,
     logical_id: str,
     task: WorkflowTaskInput,
@@ -684,7 +689,7 @@ def _materialize_for_each_node(
 
 
 def _materialize_normal_node(
-    context: df.DurableOrchestrationContext,
+    context: OrchestrationContext,
     state: _DynamicWorkflowState,
     logical_id: str,
     task: WorkflowTaskInput,
@@ -744,7 +749,7 @@ def _materialize_normal_node(
 
 
 def _materialize_ready_nodes(
-    context: df.DurableOrchestrationContext,
+    context: OrchestrationContext,
     state: _DynamicWorkflowState,
 ) -> dict[str, Any] | None:
     progressed = True
@@ -821,7 +826,7 @@ def _collect_runnable_instances(
 
 
 def _dispatch_dynamic_wave(
-    context: df.DurableOrchestrationContext,
+    context: OrchestrationContext,
     state: _DynamicWorkflowState,
     wave: list[_MaterializedInstance],
 ) -> list[Task[Any]]:
@@ -838,13 +843,14 @@ def _dispatch_dynamic_wave(
             wave_tasks.append(
                 context.call_activity(
                     _ACTIVITY_NAME,
-                    {
+                    input={
                         "id": instance["instance_id"],
                         "tool": task["tool"],
                         "args": instance["resolved"],
                         "workflow_agent_slug": state.workflow_agent_slug,
                         "workflow_id": context.instance_id,
                     },
+                    tags={"durabletask.displayName": task["tool"]},
                 )
             )
             instance["kind"] = "activity"
@@ -857,13 +863,14 @@ def _dispatch_dynamic_wave(
             wave_tasks.append(
                 context.call_activity(
                     SUB_AGENT_ACTIVITY_NAME,
-                    {
+                    input={
                         "id": instance["instance_id"],
                         "agent": task["agent"],
                         "task": instance["resolved"],
                         "workflow_id": context.instance_id,
                         "workflow_agent_slug": state.workflow_agent_slug,
                     },
+                    tags={"durabletask.displayName": task["agent"]},
                 )
             )
             instance["kind"] = "activity"
@@ -925,7 +932,7 @@ def _apply_dynamic_wave_results(
 
 
 def _run_dynamic_workflow(
-    context: df.DurableOrchestrationContext,
+    context: OrchestrationContext,
     payload: WorkflowPayload,
     tasks: list[WorkflowTaskInput],
 ) -> Any:
@@ -1164,8 +1171,11 @@ def register_workflows(
         json.dumps(result)
         return result
 
-    @bp.orchestration_trigger(context_name="context")  # type: ignore[arg-type]
-    def agents_workflow_orchestrator(context: df.DurableOrchestrationContext) -> Any:
+    @bp.orchestration_trigger(context_name="context")
+    def agents_workflow_orchestrator(
+        context: OrchestrationContext,
+        raw_payload: WorkflowPayload | None,
+    ) -> Any:
         """Execute a workflow plan, selecting the static or dynamic scheduler.
 
         A plan is *static* when no task carries a ``when`` predicate or a
@@ -1182,7 +1192,6 @@ def register_workflows(
         - No I/O outside ``call_activity`` / ``create_timer`` /
           ``wait_for_external_event``.
         """
-        raw_payload: Any = context.get_input()
         if raw_payload is None:
             payload: WorkflowPayload = {
                 "tasks": [],

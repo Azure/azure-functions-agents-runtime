@@ -802,7 +802,10 @@ agent-wide throttle.
 - **Durable Task Scheduler portal** — when the app's
   `host.json` is configured with the DTS `storageProvider`, each
   workflow appears as a queryable instance with per-task state and retry
-  history.
+  history. The runtime labels each orchestration
+  `<agent_name>-orchestration`, each tool Activity with its workflow tool name,
+  and each Workflow Sub Agent Activity with its agent slug. DTS retains the
+  shared registered Function name in the item's details.
 - **`custom_status`** — the orchestration emits a low-cost polling summary.
   Static plans return a concise string (`"3/7 tasks done, current=summarize"`);
   dynamically controlled plans return the structured `schema_version: 2`

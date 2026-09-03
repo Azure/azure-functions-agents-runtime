@@ -73,7 +73,7 @@ class _FakeStatus:
 class _FailingDurableClient:
     secret = "durable storage account internal details"
 
-    async def start_new(self, *args, **kwargs):
+    async def schedule_new_orchestration(self, *args, **kwargs):
         raise RuntimeError(self.secret)
 
     async def get_status(self, *args, **kwargs):
@@ -98,7 +98,7 @@ class _CappedDurableClient:
     async def get_status_all(self, *args, **kwargs):
         return self.statuses
 
-    async def start_new(self, *args, **kwargs):
+    async def schedule_new_orchestration(self, *args, **kwargs):
         self.started = True
         self.start_kwargs = kwargs
         return kwargs["instance_id"]
@@ -801,11 +801,14 @@ async def test_start_workflow_threads_workflow_agent_slug_into_durable_input() -
     )
 
     assert "workflow_id" in json.loads(result)
-    assert client.start_kwargs["client_input"]["workflow_agent_slug"] == "incident"
-    assert client.start_kwargs["client_input"]["workflow_agent"] == {
+    assert client.start_kwargs["input"]["workflow_agent_slug"] == "incident"
+    assert client.start_kwargs["input"]["workflow_agent"] == {
         "workflow_agent_slug": "incident",
         "session_id": "session-1",
         "agent_name": "Incident",
+    }
+    assert client.start_kwargs["tags"] == {
+        "durabletask.displayName": "Incident-orchestration"
     }
 
 
@@ -1017,8 +1020,8 @@ class _CapturingDurableClient:
     async def get_status_all(self, *args, **kwargs):
         return []
 
-    async def start_new(self, *args, **kwargs):
-        self.client_input = kwargs["client_input"]
+    async def schedule_new_orchestration(self, *args, **kwargs):
+        self.client_input = kwargs["input"]
         return kwargs["instance_id"]
 
 

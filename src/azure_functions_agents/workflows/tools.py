@@ -457,10 +457,10 @@ async def start_workflow(
         )
 
     try:
-        returned_id = await session.durable_client.start_new(
+        returned_id = await session.durable_client.schedule_new_orchestration(
             ORCHESTRATOR_NAME,
             instance_id=instance_id,
-            client_input={
+            input={
                 "tasks": plan_to_activity_inputs(plan),
                 "workflow_agent_slug": session.workflow_agent_slug,
                 "workflow_agent": workflow_agent,
@@ -469,10 +469,14 @@ async def start_workflow(
                     "allowed_subagents": sorted(policy.allowed_subagents),
                 },
             },
+            tags={
+                "durabletask.displayName": f"{session.agent_name}-orchestration"
+            },
         )
     except Exception:
         logger.exception(
-            "start_workflow: client.start_new failed workflow_agent=%s session=%s",
+            "start_workflow: client.schedule_new_orchestration failed "
+            "workflow_agent=%s session=%s",
             session.workflow_agent_slug,
             session.session_id,
         )
