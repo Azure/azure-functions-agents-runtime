@@ -119,6 +119,7 @@ No resources have been provisioned by this child session yet.
 | 2026-09-02 22:34 | Reproduced MAF MCP discovery using the branch dependency shape. | MAF core 1.3.0 plus MCP 1.29.1 connected through APIM in 3260.7 ms and returned three Learn tools when both authenticated `http_client` and `header_provider` were supplied. Header-provider-only initialization returned 401. | Preserve the repository discovery wiring; do not downgrade MCP based on the earlier unconstrained environment. |
 | 2026-09-02 22:36 | Generated correlated APIM model and MCP traffic. | Operation `4b0136a316734401b40ecb411296231d` completed both lanes. Temporary service diagnostic exports only GatewayLogs and AllMetrics; LLM/MCP content logs remain disabled. | Use this operation only to validate body-blind gateway correlation and the later TotalTime/BackendTime join. |
 | 2026-09-02 22:41 | Assembled the exact Flex remote-build input from commit `fa101f3`. | Existing qualification assembly produced the local runtime wheel plus pinned Python 3.13 dependency closure; wheel inspection confirmed the hybrid controller and executor modules are present. | Deploy the staged fixture, then run bounded qualification. |
+| 2026-09-02 22:47 | Deployed the first Function package and invoked cold/warm chat. | Deployment and six-function indexing succeeded, but both requests failed before user code: the Functions Python worker's OTel hook received a null propagator while `PYTHON_ENABLE_OPENTELEMETRY` was set. No sandbox was created or leaked. | Remove that non-contract setting; retain `APPLICATIONINSIGHTS_CONNECTION_STRING` so the runtime's monitor bootstrap owns worker telemetry. |
 
 ## Measurement record
 
@@ -171,6 +172,11 @@ the final run.
   both the authenticated HTTP client and header provider; MCP 1.29.1 then
   discovered all three Learn tools. Learn MCP still returns a nonfatal 404 when
   MAF attempts session termination after successful discovery.
+- The first deployed requests failed before entering the Function because the
+  worker-level `PYTHON_ENABLE_OPENTELEMETRY` setting produced a null trace
+  propagator with the deployed app's OTel closure. The sample never required
+  that setting; removing it avoids duplicate worker/runtime bootstrap while
+  retaining runtime export through `APPLICATIONINSIGHTS_CONNECTION_STRING`.
 
 ## Cleanup
 

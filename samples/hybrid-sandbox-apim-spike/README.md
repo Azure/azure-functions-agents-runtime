@@ -22,6 +22,11 @@ the top-level MAF invocation.
 Sandbox. A successful Function host startup therefore proves worker discovery
 did not import customer code.
 
+Do not set `PYTHON_ENABLE_OPENTELEMETRY` for this fixture. The runtime's
+`[monitor]` dependency configures export from
+`APPLICATIONINSIGHTS_CONNECTION_STRING`; enabling the Functions worker's
+separate OTel hook as well can create an incompatible duplicate bootstrap.
+
 ## Qualification prompts
 
 1. `Call customer_probe with message alpha and repeat 3. Return its JSON.`

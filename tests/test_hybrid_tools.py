@@ -28,7 +28,7 @@ from azure_functions_agents.transport.transport_models import SandboxFileNotFoun
 
 class _Backend:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.calls: list[tuple[str, str, dict[str, object]]] = []
 
     async def invoke(
         self,
@@ -39,7 +39,7 @@ class _Backend:
         deadline: float,
     ) -> HybridToolInvocationResult:
         assert deadline > asyncio.get_running_loop().time()
-        self.calls.append((tool_name, arguments))
+        self.calls.append((call_id, tool_name, arguments))
         return HybridToolInvocationResult(
             protocol_version="1",
             call_id=call_id,
@@ -79,7 +79,11 @@ async def test_hybrid_middleware_routes_only_exact_local_stub() -> None:
         [local],
         deadline=asyncio.get_running_loop().time() + 30,
     )
-    local_context = FunctionInvocationContext(local, {"value": "x"})
+    local_context = FunctionInvocationContext(
+        local,
+        {"value": "x"},
+        metadata={"call_id": "maf-call-1"},
+    )
     remote_context = FunctionInvocationContext(remote, {"value": "y"})
     next_calls = 0
 
@@ -91,7 +95,7 @@ async def test_hybrid_middleware_routes_only_exact_local_stub() -> None:
     await middleware.process(local_context, call_next)
     await middleware.process(remote_context, call_next)
 
-    assert backend.calls == [("local", {"value": "x"})]
+    assert backend.calls == [("maf-call-1", "local", {"value": "x"})]
     assert local_context.result == {
         "value": {"ok": True},
         "stdout": "out",

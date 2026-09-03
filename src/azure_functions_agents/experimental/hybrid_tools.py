@@ -128,7 +128,7 @@ class HybridToolMiddleware(FunctionMiddleware):
         if id(context.function) not in self._local_tool_ids:
             await call_next()
             return
-        call_id_value = context.metadata.get("tool_call_id")
+        call_id_value = context.metadata.get("call_id")
         call_id = (
             call_id_value
             if isinstance(call_id_value, str) and call_id_value
