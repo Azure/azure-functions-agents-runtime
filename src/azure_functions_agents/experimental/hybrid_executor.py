@@ -687,7 +687,7 @@ def _run_shell(workspace_root: Path, arguments: dict[str, object]) -> dict[str, 
     ):
         raise ExecutorProtocolError("shell timeout is invalid")
     process = subprocess.Popen(
-        ["/bin/sh", "-lc", command],
+        ["/bin/sh", "-c", command],
         cwd=workspace_root,
         start_new_session=True,
         stdin=subprocess.DEVNULL,

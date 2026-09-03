@@ -303,6 +303,15 @@ def test_generic_shell_captures_process_fields(running_executor: _RunningExecuto
     assert result.stdout == "out"
     assert result.stderr == "err"
 
+    _, path_result = running_executor.invoke(
+        "shell-path",
+        "run_shell",
+        {"command": "command -v python3"},
+    )
+    assert path_result.status == "success"
+    assert path_result.exit_code == 0
+    assert path_result.stdout.strip()
+
 
 def test_duplicate_call_id_preserves_first_result(running_executor: _RunningExecutor) -> None:
     first_payload, first = running_executor.invoke(
