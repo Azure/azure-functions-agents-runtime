@@ -366,6 +366,7 @@ be removed or redesigned without deprecation.
 | 29 | Private bundle contract | Include globs / opaque ZIP / relative bundle root | Add an optional validated app-root-relative bundle root. Absence preserves full capture; invalid configuration fails closed. The bundle owns tools, helpers, data, and vendored dependencies and reuses deterministic capture safety. | Human | 2026-09-03 |
 | 30 | Capacity-safe terminal cleanup | Lifecycle-only / await delete / initiate delete plus backstops | Refine #24 after live `maxSandboxCount=25` evidence: apply terminal 300/600 policy, request server-side delete without awaiting LRO completion, then close clients. Initiation failure leaves lifecycle/reaper armed; untrusted policy setup still uses confirmed deletion. | Human | 2026-09-03 |
 | 31 | Sandbox Group headroom | Keep 25 / raise to 100 / rely on retention | Raise `maxSandboxCount` from 25 to 100 for bounded optimized qualification, while retaining nonblocking delete plus lifecycle/reaper cleanup and inventory-zero gates. Capacity is headroom, not a cleanup substitute. | Human | 2026-09-03 |
+| 32 | Lifecycle timer semantics | From policy set / from stop / unspecified | Live no-delete evidence remained present past 600 seconds, stopped by 340 seconds, and disappeared by 1,071 seconds. Treat delete as post-stop plus reconciliation delay; keep prompt nonblocking delete primary. | Live evidence + Agent | 2026-09-03 |
 
 ## 6. Test plan
 
@@ -385,13 +386,13 @@ be removed or redesigned without deprecation.
   complete timing projection.
 - [x] Local integration: sandbox executor custom Python plus shell/file/search,
   idempotency, caps, timeout, and queue serialization against a fake transport.
-- [ ] Unit/integration: full-root fallback, validated opt-in bundle isolation,
+- [x] Unit/integration: full-root fallback, validated opt-in bundle isolation,
   hidden/package-data and nested helper imports, app ZIP no-readback, digest
   success, and mismatch rejection before extraction/readiness/manifest.
-- [ ] Live: custom tool; sequential shared sandbox; parallel queued calls;
+- [x] Live: custom tool; sequential shared sandbox; parallel queued calls;
   shell/file/search; allowed/blocked egress; workload MI allowed/denied; MCP
   through APIM; streaming disconnect; timeout; cleanup; janitor.
-- [ ] Live benchmark: Functions+sandbox cold, warm Functions+fresh sandbox,
+- [x] Live benchmark: Functions+sandbox cold, warm Functions+fresh sandbox,
   concurrency 1 and 10, optional 25, direct-model control, APIM timing, and
   machine-readable JSON report.
 - [x] Gate: targeted tests, `ruff`, `mypy`, then the CI-equivalent pytest gate

@@ -38,6 +38,348 @@
       "qualification_guard": "start from typed inventory zero and verify eventual zero"
     }
   ],
+  "optimized_qualification": {
+    "generated_at": "2026-09-03T19:02:41.374398+00:00",
+    "measurement_scope": {
+      "baseline_commit": "77ef399c7984db4532999f48230ca8ab9673affe",
+      "optimized_commit": "cb53d513964cb4ab225144f12c8018c49b25cd84",
+      "benchmark_prompt_id": "customer-probe-alpha-repeat-3",
+      "benchmark_window_start": "2026-09-03T18:39:21.1055256Z",
+      "benchmark_window_end": "2026-09-03T18:43:23.654819+00:00",
+      "telemetry_query_window_start": "2026-09-03T18:39:00Z",
+      "telemetry_query_window_end": "2026-09-03T18:44:30Z",
+      "duplicate_load_runs": 0
+    },
+    "deployment": {
+      "build_id": "hybrid-cb53d51",
+      "bundle_root": "sandbox_bundle",
+      "commit": "cb53d513964cb4ab225144f12c8018c49b25cd84",
+      "function_app": "func-hybrid-sbx-0902",
+      "function_count": 6,
+      "model": "gpt-4.1-mini",
+      "region": "westus2",
+      "sandbox_disk": "python-3.13",
+      "sandbox_group": "sbg-hybrid-tools-0902",
+      "sandbox_group_default_timeout_seconds": 1800,
+      "sandbox_group_max_count": 100,
+      "sandbox_group_provisioning_state": "Succeeded",
+      "functions_always_ready_configured": false,
+      "worker_opentelemetry_setting_present": false,
+      "debug_settings_present": false
+    },
+    "cold_smoke": {
+      "started_at": "2026-09-03T18:39:21.1055256Z",
+      "http_status": 200,
+      "total_ms": 17742.909,
+      "tool_call_count": 1,
+      "exact_call_id_round_trip": true,
+      "result_contract_valid": true,
+      "repeat_match": true,
+      "sandbox_marker": true,
+      "thin_bundle_discovery": true,
+      "digest_verification_started": true,
+      "digest_verification_completed": true,
+      "digest_verification_failed": false,
+      "delete_request_accepted": true,
+      "delete_request_trace_ms": 1240,
+      "first_post_completion_inventory": 0,
+      "first_inventory_check_seconds_after_completion": 15.175
+    },
+    "end_to_end": {
+      "concurrency_1": {
+        "cleanup_inventory": 0,
+        "concurrency": 1,
+        "error_count": 0,
+        "first_event_ms": {
+          "p50": 9108.216000022367,
+          "p95": 18339.27620004397,
+          "p99": 18339.27620004397
+        },
+        "request_count": 10,
+        "throughput_requests_per_second": 0.09022663810884159,
+        "total_ms": {
+          "p50": 9108.227399992757,
+          "p95": 18339.288000017405,
+          "p99": 18339.288000017405
+        },
+        "workload_seconds": 110.83201379992533
+      },
+      "concurrency_10": {
+        "cleanup_inventory": 0,
+        "concurrency": 10,
+        "error_count": 0,
+        "first_event_ms": {
+          "p50": 18468.40000001248,
+          "p95": 25833.996000001207,
+          "p99": 25833.996000001207
+        },
+        "request_count": 10,
+        "throughput_requests_per_second": 0.38694802188706395,
+        "total_ms": {
+          "p50": 18468.40809995774,
+          "p95": 25834.004700067453,
+          "p99": 25834.004700067453
+        },
+        "workload_seconds": 25.84326430002693
+      },
+      "throughput_scale_from_c1": 4.29,
+      "p50_latency_increase_percent": 102.8
+    },
+    "baseline_comparison": {
+      "cold": {
+        "baseline_ms": 27705.7,
+        "optimized_ms": 17742.909,
+        "saved_ms": 9962.791,
+        "reduction_percent": 35.96
+      },
+      "concurrency_1": {
+        "p50_saved_ms": 10612.463,
+        "p50_reduction_percent": 53.81,
+        "p95_saved_ms": 13697.952,
+        "p95_reduction_percent": 42.76,
+        "throughput_increase_percent": 88.35
+      },
+      "concurrency_10": {
+        "p50_saved_ms": 9091.322,
+        "p50_reduction_percent": 32.99,
+        "p95_saved_ms": 6721.015,
+        "p95_reduction_percent": 20.65,
+        "throughput_increase_percent": 26.01
+      },
+      "runtime_request_average": {
+        "baseline_ms": 20493,
+        "optimized_ms": 10649.358,
+        "saved_ms": 9843.642,
+        "reduction_percent": 48.03
+      },
+      "expected_savings_ms": {
+        "low": 6300,
+        "high": 6800
+      },
+      "expected_savings_materialized": true,
+      "interpretation": "The measured 9843.642 ms runtime-average saving exceeded the 6.3-6.8 second estimate by 3.044-3.544 seconds. Thin-bundle upload and executor-readiness gains were larger than the conservative archive-readback estimate."
+    },
+    "runtime_metrics_clean_window": {
+      "counts": {
+        "model_calls": 42,
+        "package_verifications": 21,
+        "requests": 21,
+        "sandbox_creates": 21,
+        "sandbox_delete_requests_accepted": 21,
+        "sandbox_deletes_confirmed": 0,
+        "sandbox_lifecycle_handoffs": 21,
+        "tool_calls": 21
+      },
+      "failures": {
+        "model": 0,
+        "package_verify": 0,
+        "request": 0,
+        "sandbox_create": 0,
+        "sandbox_delete_request": 0,
+        "sandbox_lifecycle_handoff": 0,
+        "tool": 0
+      },
+      "duration_ms": {
+        "discovery": {
+          "average": 31.723,
+          "maximum": 165.329,
+          "minimum": 15.247,
+          "p50_approximate": 21.99,
+          "p95_approximate": 59.972
+        },
+        "executor_ready": {
+          "average": 333.192,
+          "maximum": 638.658,
+          "minimum": 228.327,
+          "p50_approximate": 323.088,
+          "p95_approximate": 472.666
+        },
+        "model_per_call": {
+          "average": 2457.363,
+          "maximum": 7676.321,
+          "minimum": 1105.062,
+          "p50_approximate": 2146.606,
+          "p95_approximate": 2836.199
+        },
+        "package_upload": {
+          "average": 135.085,
+          "maximum": 657.006,
+          "minimum": 58.012,
+          "p50_approximate": 91.315,
+          "p95_approximate": 288.183
+        },
+        "package_verify": {
+          "average": 0.157,
+          "maximum": 0.237,
+          "minimum": 0.133,
+          "p50_approximate": 0.153,
+          "p95_approximate": 0.196
+        },
+        "request": {
+          "average": 10649.358,
+          "maximum": 18366.68,
+          "minimum": 7662.16,
+          "p50_approximate": 10273.983,
+          "p95_approximate": 11350.973
+        },
+        "sandbox_create": {
+          "average": 3010.806,
+          "maximum": 3985.636,
+          "minimum": 2758.913,
+          "p50_approximate": 3008.965,
+          "p95_approximate": 3251.827
+        },
+        "sandbox_lifecycle_handoff": {
+          "average": 49.914,
+          "maximum": 75.619,
+          "minimum": 39.201,
+          "p50_approximate": 48.451,
+          "p95_approximate": 57.813
+        },
+        "tool_execution": {
+          "average": 0.299,
+          "maximum": 1.067,
+          "minimum": 0.22,
+          "p50_approximate": 0.274,
+          "p95_approximate": 0.414
+        },
+        "tool_queue": {
+          "average": 23.571,
+          "maximum": 51.728,
+          "minimum": 3.86,
+          "p50_approximate": 22.503,
+          "p95_approximate": 47.099
+        },
+        "tool_transfer": {
+          "average": 128.072,
+          "maximum": 301.397,
+          "minimum": 40.02,
+          "p50_approximate": 153.92,
+          "p95_approximate": 176.341
+        }
+      },
+      "delete_request_trace_subset": {
+        "average_ms": 1140.25,
+        "error_count": 0,
+        "maximum_ms": 1297,
+        "minimum_ms": 944,
+        "p50_ms": 1154,
+        "p95_ms": 1297,
+        "p99_ms": 1297,
+        "sample_count": 12,
+        "note": "Dependency spans are an observed subset; the metric counter is authoritative for 21 accepted requests."
+      },
+      "histogram_percentile_note": "OTel percentiles are weighted bucket-average approximations; client and Function request percentiles are authoritative.",
+      "package_bytes": {
+        "emitted": false,
+        "value": null
+      }
+    },
+    "function_requests_clean_window": {
+      "error_count": 0,
+      "maximum_ms": 22230.9837,
+      "minimum_ms": 7672.0526,
+      "p50_ms": 14190.905,
+      "p95_ms": 15436.5231,
+      "p99_ms": 22230.9837,
+      "request_count": 21
+    },
+    "apim_gateway_clean_window": {
+      "model": {
+        "backend_ms": {
+          "p50": 1733.237,
+          "p95": 6777.3342,
+          "p99": 6989.2452
+        },
+        "error_count": 0,
+        "gateway_overhead_ms": {
+          "p50": 1.3244,
+          "p95": 1.4429,
+          "p99": 1.5279
+        },
+        "request_count": 42,
+        "total_ms": {
+          "p50": 1734.4954,
+          "p95": 6778.6995,
+          "p99": 6990.5097
+        }
+      },
+      "mcp": {
+        "backend_ms": {
+          "p50": 50.8108,
+          "p95": 119.4049,
+          "p99": 230.3428
+        },
+        "gateway_overhead_ms": {
+          "p50": 0.2918,
+          "p95": 1.0188,
+          "p99": 1.1819
+        },
+        "post_error_count": 0,
+        "post_request_count": 48,
+        "protocol_close_405_count": 24,
+        "request_count": 72,
+        "total_ms": {
+          "p50": 51.1823,
+          "p95": 119.6932,
+          "p99": 231.0921
+        }
+      },
+      "tokens": {
+        "completion_average": 38.095,
+        "completion_total": 1600,
+        "prompt_average": 1111,
+        "prompt_cached_average": 926.476,
+        "prompt_cached_total": 38912,
+        "prompt_total": 46662,
+        "total_average": 1149.095,
+        "total_tokens": 48262
+      }
+    },
+    "progress_events": {
+      "benchmark_trace_counts": {
+        "cleanup_complete_completed": 21,
+        "cleanup_handoff_completed": 21,
+        "cleanup_handoff_started": 21,
+        "discovery_completed": 21,
+        "discovery_started": 21,
+        "executor_ready_completed": 21,
+        "executor_ready_started": 21,
+        "package_upload_completed": 21,
+        "package_upload_started": 21,
+        "package_verify_completed": 21,
+        "package_verify_started": 21,
+        "sandbox_create_completed": 21,
+        "sandbox_create_started": 21
+      },
+      "cold_trace_has_ordered_core_phases": true,
+      "content_fields_emitted": false
+    },
+    "lifecycle_fallback_probe": {
+      "create_ms": 4616.558,
+      "explicit_delete_requested": false,
+      "final_inventory": 0,
+      "first_absent_seconds_after_policy": 1071.15,
+      "first_stopped_seconds_after_policy": 340.441,
+      "last_running_seconds_after_policy": 309.543,
+      "last_stopped_seconds_after_policy": 1040.775,
+      "policy": {
+        "auto_delete_seconds": 600,
+        "auto_suspend_mode": "Disk",
+        "auto_suspend_seconds": 300
+      },
+      "policy_set_ms": 364.069,
+      "reaper_required": false,
+      "timer_interpretation": "The object remained present past 600 seconds from policy application and disappeared only after entering Stopped. This proves auto-delete is not measured from policy application and is consistent with a post-stop interval plus platform reconciliation delay.",
+      "transition_observation_interval_seconds": 30
+    },
+    "final_state": {
+      "apim_mcp_api_active_and_subscription_required": true,
+      "apim_model_api_active_and_subscription_required": true,
+      "function_count": 6,
+      "sandbox_inventory": 0
+    }
+  },
   "end_to_end": {
     "concurrency_1": {
       "cleanup_inventory": 0,
@@ -447,6 +789,10 @@
       "transport_poll_interval_seconds": 3
     },
     "metrics_describe_deployed_commit": "77ef399c7984db4532999f48230ca8ab9673affe",
+    "optimization_resolution": {
+      "archive_readback": "Removed in cb53d51. The baseline 5510 ms upload cost remains preserved above; optimized in-sandbox SHA-256 verification averaged 0.157 ms.",
+      "broken_customer_module": "Whole-invocation rejection remains intentional isolation and admission behavior."
+    },
     "remediations": [
       "completed-run deletion is bounded best effort and cannot replace completed output",
       "completed-run deletion budget is 24 s across three seam attempts (8 s first slice) sized from the recorded sandbox_delete range, not the drain window",

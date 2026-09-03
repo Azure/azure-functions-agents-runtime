@@ -54,6 +54,33 @@ arms the 300-second Disk suspend/600-second delete lifecycle backstop and asks
 the service to delete immediately, but it does not await deletion completion.
 Create one labeled orphan for the timer reaper scenario.
 
+## Optimized live qualification
+
+Exact commit `cb53d51` was deployed with `sandbox_bundle`, no Functions
+always-ready configuration, and no debug or worker-level OTel setting. The
+single cold/c1/c10 sequence started each stage at typed inventory zero:
+
+| Scenario | N | p50 | p95 | Throughput | Errors |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Cold | 1 | 17,742.909 ms | N/A | N/A | 0 |
+| c1 | 10 | 9,108.227 ms | 18,339.288 ms | 0.090227 req/s | 0 |
+| c10 | 10 | 18,468.408 ms | 25,834.005 ms | 0.386948 req/s | 0 |
+
+All 21 requests emitted create, package-upload, SHA-256 verification,
+lifecycle-handoff, delete-request-accepted, and tool-call metrics with no
+hybrid failure counter. The first post-run inventory checks were already zero.
+Compared with the `77ef399` baseline, runtime-average request latency fell by
+9,843.642 ms (48.03%), exceeding the expected 6.3-6.8-second saving.
+
+The lifecycle backstop is not prompt cleanup. In an isolated probe with no
+explicit delete, the sandbox was first observed `Stopped` 340.441 seconds after
+policy application and absent at 1,071.150 seconds. The 600-second delete timer
+does not run from policy application; evidence is consistent with a post-stop
+timer plus platform reconciliation delay. Until absence, customer code and Disk
+state remain retained and the object must be treated as consuming group
+capacity. Nonblocking delete initiation remains the normal primary path; the
+300/600 policy and app-scoped reaper are backstops.
+
 The demo lifecycle is exposed as content-free `hybrid.progress` events on the
 `hybrid.invocation` trace. Phase and status are fixed enums with optional
 duration only; no prompt, tool arguments/results, manifest, credential, or
@@ -75,7 +102,10 @@ dependencies
 customMetrics
 | where timestamp > ago(2h)
 | where name startswith "azure_functions_agents.hybrid."
-| summarize count(), avg(value), percentiles(value, 50, 95, 99) by name
+| extend bucket_average = valueSum / valueCount
+| summarize samples=sum(valueCount), average=sum(valueSum) / sum(valueCount),
+    percentilesw(bucket_average, valueCount, 50, 95, 99),
+    minimum=min(valueMin), maximum=max(valueMax) by name
 | order by name asc
 ```
 

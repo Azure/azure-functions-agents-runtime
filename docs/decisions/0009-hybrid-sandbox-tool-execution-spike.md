@@ -167,6 +167,12 @@ No resources have been provisioned by this child session yet.
 | 2026-09-03 18:00 | Implemented the optimization amendment without Azure calls. | Normal cleanup now arms terminal lifecycle and initiates delete without polling completion; active suspend is disabled before packaging. Package upload no longer reads back `app.zip`; the executor verifies SHA-256 and publishes bounded failure metadata. Added the explicit bundle-root contract and content-free progress span events. | Focused lifecycle, package, executor, config, observability, and ACA adapter tests passed with ruff and mypy. Live behavior and savings remain unmeasured. |
 | 2026-09-03 18:10 | Raised Sandbox Group capacity with user approval. | Updated `sbg-hybrid-tools-0902` through `Microsoft.App/sandboxGroups@2026-02-01-preview`; `maxSandboxCount` is 100, provisioning state is `Succeeded`, and `defaultTimeoutSeconds` remains 1800. | The higher cap is bounded benchmark headroom only. Optimized runs still require typed inventory zero before start and eventual zero afterward. |
 | 2026-09-03 18:20 | Completed the optimization source gate. | Focused optimization coverage passed (199 tests, 2 skipped), independent code review found no significant issues, ruff passed, mypy checked 106 source files, and the sequential CI-equivalent suite completed with 2568 passed, 71 skipped, and 85 deselected. | Source is ready for review/deployment; no optimized Azure load has been run. |
+| 2026-09-03 11:39 | Deployed and cold-qualified optimized commit `cb53d51`. | Rebuilt and Flex ZIP-deployed the exact commit with bundle root `sandbox_bundle`, no debug/worker OTel, and no always-ready configuration. Six functions indexed. Cold `customer_probe` returned HTTP 200 in 17,742.909 ms with exact call-result correlation, `alpha\|alpha\|alpha`, and `sandbox_marker=true`; digest and delete-request traces completed. | Pass. Typed inventory was zero before the request and at the first check 15.175 seconds after completion. |
+| 2026-09-03 11:40 | Ran the sole optimized c1 batch. | Ten deterministic nonstream requests completed 10/10: p50 9,108.227 ms, p95/p99 18,339.288 ms, throughput 0.090227 req/s. | Pass. No duplicate batch was run; typed inventory was zero before c1 and at the first post-batch check. |
+| 2026-09-03 11:43 | Ran the sole optimized c10 batch. | Ten deterministic concurrent requests completed 10/10: p50 18,468.408 ms, p95/p99 25,834.005 ms, throughput 0.386948 req/s. | Pass. Typed inventory was zero before c10 and at the first post-batch check. |
+| 2026-09-03 11:44 | Joined the optimized clean telemetry window. | Exactly 21 requests/creates/uploads/verifications/handoffs/delete acceptances/tool calls and 42 model calls were emitted with no hybrid failure counters. Runtime request average was 10,649.358 ms; upload 135.085 ms, verify 0.157 ms, ready 333.192 ms, lifecycle handoff 49.914 ms. APIM model n=42 had zero errors. | The 9,843.642 ms average saving exceeded the expected 6.3-6.8 seconds. OTel percentiles are weighted bucket-average approximations; client and Function request percentiles are authoritative. |
+| 2026-09-03 11:44-12:02 | Ran one isolated lifecycle-only 300/600 probe. | No explicit delete was requested. `Running` lasted through 309.543 seconds, `Stopped` was first observed at 340.441 seconds, and the object was absent at 1,071.150 seconds. | Auto-delete is not measured from policy application; it follows stop with additional reconciliation delay. No reaper was needed and final typed inventory was zero. |
+| 2026-09-03 12:03 | Verified final optimized retained state. | Exact deployed tag is `cb53d513964cb4ab225144f12c8018c49b25cd84`; six functions remain indexed; model and MCP APIM APIs remain active and subscription-required; group capacity is 100/`Succeeded`; debug/worker OTel remain absent; typed inventory is zero. | Qualification complete. Retain resources and API-scoped body-free diagnostics until explicit teardown. |
 
 ## Measurement record
 
@@ -175,22 +181,23 @@ The complete machine-readable report is
 It contains no prompt, completion, tool payload, credential, key, or customer
 content.
 
-Every live measurement below describes deployed commit `77ef399`. The later
-independent-review remediations, including the post-qualification re-review
-fixes to deletion budget slicing and sizing, reaper label re-checking, and
-tool-call accounting, were validated only by local gates; no benchmark,
-deployment, or Azure load was rerun, so these canonical numbers are unchanged
-and must not be read as measurements of the remediated source. The recorded `sandbox_delete` latencies below are the pre-optimization cost now
-removed from the normal request path; they continue to size confirmed deletion
-when acquisition or terminal-policy setup is not trustworthy. Removing the full
-archive readback is expected to save another 2.5-3.0 seconds on average. Neither
-optimization has been deployed or remeasured.
+The original canonical baseline rows below describe deployed commit `77ef399`.
+The optimized rows describe exact commit
+`cb53d513964cb4ab225144f12c8018c49b25cd84` with the private
+`sandbox_bundle` boundary, in-sandbox digest verification, terminal lifecycle
+handoff, and nonblocking delete initiation. Both runs used the same deterministic
+prompt. The recorded baseline `sandbox_delete` latencies remain the sizing basis
+for confirmed deletion when acquisition or terminal-policy setup is not
+trustworthy.
 
 | Scenario | N | p50 | p95 | p99 | Throughput | Errors | Cleanup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | Functions cold + sandbox cold, final settings | 1 | 27,705.7 ms total | N/A | N/A | N/A | 0 | Complete; final inventory 0 |
 | Concurrency 1, canonical | 10 | 19,720.69 ms | 32,037.24 ms | 32,037.24 ms | 0.047903 req/s | 0 | Complete; final inventory 0 |
 | Concurrency 10, canonical | 10 | 27,559.73 ms | 32,555.02 ms | 32,555.02 ms | 0.307089 req/s | 0 | Complete; final inventory 0 |
+| Functions cold + sandbox cold, optimized | 1 | 17,742.909 ms total | N/A | N/A | N/A | 0 | Complete; delete accepted, final inventory 0 |
+| Concurrency 1, optimized | 10 | 9,108.227 ms | 18,339.288 ms | 18,339.288 ms | 0.090227 req/s | 0 | Complete; final inventory 0 |
+| Concurrency 10, optimized | 10 | 18,468.408 ms | 25,834.005 ms | 25,834.005 ms | 0.386948 req/s | 0 | Complete; final inventory 0 |
 | Concurrency 1, diagnostic duplicate | 10 | 19,233.3 ms | 28,450.5 ms | 28,450.5 ms | 0.04957 req/s | 0 | Complete |
 | Concurrency 25 | 25 | Not run | Not run | Not run | Not run | N/A | Capped at 10 after sufficient stable evidence |
 | Direct Sandbox Group baseline | 1 | create 3524.7 ms | N/A | N/A | N/A | 0 | Complete; delete 5085.3 ms |
@@ -218,6 +225,16 @@ The final clean window contained 48,391 model tokens. APIM model requests
 p95 of 2288/2286/3 ms, and p99 of 5848/5846/3 ms. Function request p50/p95/p99
 was 22,982.3/28,607.9/28,972.6 ms. Complete runtime stage histograms, MCP
 diagnostics, token totals, and scenario records are in the JSON report.
+
+The optimized clean window contained 48,262 model tokens. APIM model requests
+(n=42, zero errors) had total/backend/gateway-overhead p50 of
+1734.495/1733.237/1.324 ms, p95 of 6778.700/6777.334/1.443 ms, and p99 of
+6990.510/6989.245/1.528 ms. Function request p50/p95/p99 was
+14,190.905/15,436.523/22,230.984 ms. Compared with the baseline, cold improved
+9,962.791 ms (35.96%), c1 p50 improved 10,612.463 ms (53.81%), and c10 p50
+improved 9,091.322 ms (32.99%). The runtime-average request saving was
+9,843.642 ms, so the expected 6.3-6.8-second saving materialized and was
+exceeded by 3.044-3.544 seconds.
 
 ## Failed experiments and deviations
 
@@ -254,10 +271,11 @@ diagnostics, token totals, and scenario records are in the JSON report.
 - A customer module import error rejects the complete hybrid invocation rather
   than preserving tools from other modules. This is intentional: discovery
   occurs inside the isolation boundary and only one exact manifest is admitted.
-- Archive delivery currently reads the full uploaded archive back and compares
-  only its length. The final clean-window weighted package-upload average was
-  5.51 seconds. A production design should compute and compare SHA-256 inside
-  the sandbox instead of paying a second full transfer.
+- The baseline archive delivery read the full upload back and compared only its
+  length, at a 5.51-second clean-window weighted average. Optimized commit
+  `cb53d51` preserves that measured baseline but replaces the readback with
+  in-sandbox SHA-256 verification before extraction/readiness. The optimized
+  upload/verification averages were 135.085/0.157 ms.
 
 ## Cleanup
 
