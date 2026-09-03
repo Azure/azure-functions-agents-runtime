@@ -263,7 +263,6 @@ class InvocationSandboxLease(ToolExecutionBackend):
         try:
             async with self._queue_lock:
                 queue_seconds = time.perf_counter() - queued_at
-                record_hybrid_value(HybridMetric.TOOL_QUEUE_DURATION, queue_seconds)
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     raise TimeoutError("Hybrid tool deadline elapsed before transfer.")
@@ -301,7 +300,7 @@ class InvocationSandboxLease(ToolExecutionBackend):
                 )
                 record_hybrid_value(
                     HybridMetric.TOOL_QUEUE_DURATION,
-                    result.timings.queue_wait_ms / 1000.0,
+                    queue_seconds + (result.timings.queue_wait_ms / 1000.0),
                 )
                 if result.status is HybridInvocationStatus.ERROR:
                     record_hybrid_count(HybridMetric.TOOL_FAILURES)

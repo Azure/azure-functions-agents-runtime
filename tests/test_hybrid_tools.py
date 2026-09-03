@@ -9,6 +9,7 @@ from azure_functions_agents.experimental.hybrid_config import (
     HYBRID_SANDBOX_REGION_ENV,
     HybridSandboxSettings,
 )
+from azure_functions_agents.experimental.hybrid_observability import HybridMetric
 from azure_functions_agents.experimental.hybrid_protocol import (
     HybridInvocationStatus,
     HybridToolDescriptor,
@@ -197,9 +198,16 @@ def _manifest() -> HybridToolManifest:
 
 
 @pytest.mark.asyncio
-async def test_lease_shares_one_handle_for_sequential_calls_and_deletes_once() -> None:
+async def test_lease_shares_one_handle_for_sequential_calls_and_deletes_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     handle = _Handle()
     provider = _Provider()
+    recorded_values: list[tuple[HybridMetric, float]] = []
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.record_hybrid_value",
+        lambda metric, value: recorded_values.append((metric, value)),
+    )
     lease = InvocationSandboxLease(
         settings=_settings(),
         operation_id="operation",
@@ -230,6 +238,16 @@ async def test_lease_shares_one_handle_for_sequential_calls_and_deletes_once() -
     assert handle.deleted == 1
     assert handle.closed == 1
     assert provider.closed == 1
+    assert (
+        len(
+            [
+                value
+                for metric, value in recorded_values
+                if metric is HybridMetric.TOOL_QUEUE_DURATION
+            ]
+        )
+        == 2
+    )
 
 
 @pytest.mark.asyncio
