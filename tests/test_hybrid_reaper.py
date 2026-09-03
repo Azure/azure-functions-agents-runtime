@@ -4,7 +4,15 @@ from types import MappingProxyType
 import pytest
 
 from azure_functions_agents.experimental.hybrid_config import HybridSandboxSettings
-from azure_functions_agents.experimental.hybrid_reaper import reap_hybrid_orphans
+from azure_functions_agents.experimental.hybrid_reaper import (
+    hybrid_app_hash,
+    reap_hybrid_orphans,
+)
+from azure_functions_agents.session_state import (
+    AppIdentity,
+    AppIdentityResolutionError,
+    compute_app_hash,
+)
 from azure_functions_agents.transport.transport_models import SandboxSummary
 
 
@@ -17,7 +25,10 @@ class _Provider:
     async def list_sandboxes(
         self, *, labels: dict[str, str], max_items: int | None = None
     ) -> tuple[SandboxSummary, ...]:
-        assert labels == {"owner_kind": "hybrid_spike"}
+        assert labels == {
+            "owner_kind": "hybrid_spike",
+            "app_hash": f"a1-{'a' * 52}",
+        }
         assert max_items == 100
         return self.sandboxes
 
@@ -67,8 +78,62 @@ async def test_reaper_deletes_only_expired_labeled_inventory() -> None:
         settings=_settings(),
         provider_factory=provider_factory,
         now=now,
+        app_hash=f"a1-{'a' * 52}",
     )
 
     assert deleted == 1
     assert provider.deleted == ["old"]
     assert provider.closed is True
+
+
+@pytest.mark.asyncio
+async def test_reaper_rejects_invalid_explicit_app_hash() -> None:
+    with pytest.raises(ValueError, match="app hash is invalid"):
+        await reap_hybrid_orphans(settings=_settings(), app_hash="shared-root")
+
+
+def test_hybrid_app_hash_uses_stable_platform_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = AppIdentity.create(
+        "00000000-0000-0000-0000-000000000000",
+        "function-app",
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_reaper.resolve_function_app_identity",
+        lambda: identity,
+    )
+
+    assert hybrid_app_hash() == compute_app_hash(identity)
+
+
+def test_hybrid_app_hash_fails_closed_without_platform_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for variable in ("WEBSITE_OWNER_NAME", "WEBSITE_SITE_NAME", "WEBSITE_SLOT_NAME"):
+        monkeypatch.delenv(variable, raising=False)
+
+    with pytest.raises(AppIdentityResolutionError):
+        hybrid_app_hash()
+
+
+@pytest.mark.asyncio
+async def test_reaper_fails_closed_before_listing_when_identity_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for variable in ("WEBSITE_OWNER_NAME", "WEBSITE_SITE_NAME", "WEBSITE_SLOT_NAME"):
+        monkeypatch.delenv(variable, raising=False)
+    factory_calls = 0
+
+    async def provider_factory() -> _Provider:
+        nonlocal factory_calls
+        factory_calls += 1
+        return _Provider(())
+
+    with pytest.raises(AppIdentityResolutionError):
+        await reap_hybrid_orphans(
+            settings=_settings(),
+            provider_factory=provider_factory,
+        )
+
+    assert factory_calls == 0

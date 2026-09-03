@@ -389,5 +389,28 @@
     "interpretation": "noise-dominated; no measurable APIM penalty at n=5",
     "p50_delta_ms": -28.9
   },
+  "post_qualification_review": {
+    "accepted_spike_tradeoffs": {
+      "archive_readback": {
+        "future_optimization": "in-sandbox SHA-256 verification",
+        "measured_package_upload_average_ms": 5510,
+        "status": "retained measured integrity and latency cost"
+      },
+      "broken_customer_module": {
+        "behavior": "reject entire invocation before exact manifest admission",
+        "status": "intentional isolation behavior"
+      }
+    },
+    "azure_load_rerun": false,
+    "cleanup_command_requires_app_hash": true,
+    "metrics_describe_deployed_commit": "77ef399c7984db4532999f48230ca8ab9673affe",
+    "remediations": [
+      "completed-run deletion is bounded best effort and cannot replace completed output",
+      "reaper provisioning and selection use stable app identity plus owner kind",
+      "production APIM model resolution honors AZURE_FUNCTIONS_AGENTS_MODEL",
+      "tool deadline, transport, protocol, and returned errors increment failure metrics",
+      "stream benchmark requires a done event and rejects error or missing terminals"
+    ]
+  },
   "resources_retained": true
 }

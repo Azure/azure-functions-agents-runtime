@@ -103,14 +103,10 @@ class HybridApimClientManager(ClientManager):
     def resolve_model(self, requested: str | None) -> str:
         if requested:
             return requested
-        source = self._environment
-        if source is not None:
-            configured = source.get(HYBRID_APIM_MODEL_ENV, "").strip()
-            if not configured:
-                configured = source.get("AZURE_FUNCTIONS_AGENTS_MODEL", "").strip()
-            if configured:
-                return configured
-        configured = os.environ.get(HYBRID_APIM_MODEL_ENV, "").strip()
+        source = os.environ if self._environment is None else self._environment
+        configured = source.get(HYBRID_APIM_MODEL_ENV, "").strip()
+        if not configured:
+            configured = source.get("AZURE_FUNCTIONS_AGENTS_MODEL", "").strip()
         if configured:
             return configured
         return _DEFAULT_MODEL

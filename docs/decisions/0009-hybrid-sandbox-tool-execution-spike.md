@@ -39,6 +39,10 @@ tool inputs, or tool outputs.
 | 2026-09-02 | Model fallback | Use existing `gpt-4.1-mini` via isolated APIM routing. New-account deployments failed with `SpecialFeatureOrQuotaIdRequired` despite visible quota. |
 | 2026-09-02 | Generic shell | Use non-login `/bin/sh -c` so `run_shell` inherits the ACA disk environment. Login `/bin/sh -lc` reset `PATH` and hid the selected disk's `/opt/python/3/bin`; the absolute interpreter path proved the disk itself was healthy. |
 | 2026-09-02 | Live authorization | Require positive and negative live controls for both identity and egress. The sandbox UAMI could read only its scoped AIServices resource, and sandbox HTTP could reach only the allowed host. |
+| 2026-09-02 | Completed-run cleanup | Treat exhausted post-run deletion as observable best effort: retry handle/provider seams, accept `NotFound`, count/log failure, and preserve already-completed nonstream or streaming output. |
+| 2026-09-02 | Reaper ownership | Label and select with the canonical platform `AppIdentity` hash plus `owner_kind`; never select all hybrid sandboxes in a shared group. |
+| 2026-09-02 | Admission failure | A broken customer tool module rejects the whole invocation. This differs from legacy partial discovery because the sandbox manifest is the executable admission boundary; bounded readiness diagnostics report the terminal exception class without log content. |
+| 2026-09-02 | Package verification | Retain full archive readback for this measured spike. Its weighted package-upload cost was 5.51 s; replace the duplicate transfer with in-sandbox SHA-256 before productionizing. |
 
 ## Architecture review
 
@@ -143,6 +147,7 @@ No resources have been provisioned by this child session yet.
 | 2026-09-03 00:18 | Re-ran the canonical local gate on final source. | Ruff passed, mypy checked 106 files, and pytest completed with 2513 passed and 70 skipped. | Local Definition of Done gate passed. |
 | 2026-09-03 00:20 | Verified the final deployed state. | Temporary debug and worker OTel settings were absent; six expected Functions were indexed; isolated APIM model and MCP APIs remained active and subscription-protected; typed Sandbox Group inventory was zero. | Spike qualification complete; retain resources until teardown is explicitly requested. |
 | 2026-09-03 00:22 | Removed the temporary service-wide APIM diagnostic after final capture. | Historical GatewayLogs remain in `log-hybrid-sbx-0902`. API-scoped model/MCP Application Insights diagnostics remain active with request and response body capture disabled. | Shared APIM no longer exports unrelated service-wide traffic for this spike. |
+| 2026-09-03 00:42 | Applied final independent-review remediations without Azure load. | Hardened completed-run cleanup, app-scoped reaping, production model fallback, tool failure counts, and streaming benchmark terminal validation. Accepted strict broken-module admission and measured archive readback as spike tradeoffs. | Focused tests cover every remediation; deployed benchmark numbers remain unchanged and resources were not modified. |
 
 ## Measurement record
 
@@ -150,6 +155,11 @@ The complete machine-readable report is
 [`0009-hybrid-sandbox-tool-execution-results.json`](0009-hybrid-sandbox-tool-execution-results.json).
 It contains no prompt, completion, tool payload, credential, key, or customer
 content.
+
+Every live measurement below describes deployed commit `77ef399`. The later
+independent-review remediations were validated only by local gates; no
+benchmark, deployment, or Azure load was rerun, so these canonical numbers are
+unchanged and must not be read as measurements of the remediated source.
 
 | Scenario | N | p50 | p95 | p99 | Throughput | Errors | Cleanup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
@@ -216,6 +226,13 @@ diagnostics, token totals, and scenario records are in the JSON report.
   `77ef399` uses a non-login shell and the deployed regression passed.
 - Direct ARM Sandbox Group inventory probes returned stale-version and 404
   errors. All final cleanup evidence uses the typed ACA data-plane provider.
+- A customer module import error rejects the complete hybrid invocation rather
+  than preserving tools from other modules. This is intentional: discovery
+  occurs inside the isolation boundary and only one exact manifest is admitted.
+- Archive delivery currently reads the full uploaded archive back and compares
+  only its length. The final clean-window weighted package-upload average was
+  5.51 seconds. A production design should compute and compare SHA-256 inside
+  the sandbox instead of paying a second full transfer.
 
 ## Cleanup
 
@@ -229,7 +246,7 @@ The API-scoped body-free diagnostics remain until the isolated APIs are deleted.
 
 ```powershell
 az functionapp stop --resource-group larohra-test-adc-tools-hosted-skill --name func-hybrid-sbx-0902
-uv run python eng\scripts\reap_hybrid_spike_sandboxes.py --sandbox-group-resource-id "/subscriptions/2ac40cf6-193e-4a44-a55b-d7a17bdd5aee/resourceGroups/larohra-test-adc-tools-hosted-skill/providers/Microsoft.App/sandboxGroups/sbg-hybrid-tools-0902" --region westus2 --minimum-age-seconds 1 --confirm delete-hybrid-spike-sandboxes
+uv run python eng\scripts\reap_hybrid_spike_sandboxes.py --sandbox-group-resource-id "/subscriptions/2ac40cf6-193e-4a44-a55b-d7a17bdd5aee/resourceGroups/larohra-test-adc-tools-hosted-skill/providers/Microsoft.App/sandboxGroups/sbg-hybrid-tools-0902" --region westus2 --app-hash a1-g3rs6sm34ab2go7wspx4n2x3s3gid7bn7waubpa7wsh65dqhwq7a --minimum-age-seconds 1 --confirm delete-hybrid-spike-sandboxes
 az apim api delete --resource-group larohra-operations-agent-3p-rg --service-name larohra-ai-gateway --api-id hybrid-sandbox-spike-model --yes
 az apim api delete --resource-group larohra-operations-agent-3p-rg --service-name larohra-ai-gateway --api-id hybrid-sandbox-spike-mcp --yes
 az apim product delete --resource-group larohra-operations-agent-3p-rg --service-name larohra-ai-gateway --product-id hybrid-sandbox-spike --delete-subscriptions true --yes

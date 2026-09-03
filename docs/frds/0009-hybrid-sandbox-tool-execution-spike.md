@@ -125,15 +125,20 @@ MAF `Agent` construction:
    then construct the MAF `Agent` with `HybridToolMiddleware`.
 
 The lease admits tool calls while the run is live. Closure stops admissions,
-waits a bounded interval for active calls, deletes the sandbox, closes the
-handle/provider, and records any cleanup failure. Nonstreaming execution wraps
-agent build plus `agent.run` in the lease. Streaming enters the lease before
-agent construction and releases it from the outermost generator
+waits a bounded interval for active calls, then performs bounded best-effort
+deletion through the handle and provider seams. `NotFound` is success; exhausted
+cleanup is counted and logged but never replaces completed output or appends an
+error after stream completion. Nonstreaming execution wraps agent build plus
+`agent.run` in the lease. Streaming enters the lease before agent construction
+and releases it from the outermost generator
 `finally`/`__aexit__`, outside `_drive_stream`, so disconnect/`aclose()` and
 `GeneratorExit` reach the same cleanup path. Auto-delete and a timer-based
-label reaper cover worker death. Its minimum orphan age is strictly greater
-than the maximum configured top-level run timeout plus bounded drain/delete
-allowance, so it cannot reclaim a live invocation by age alone.
+label reaper cover worker death. Provisioning and reaping use the same
+platform-derived `AppIdentity` hash plus the hybrid owner kind, so a shared
+Sandbox Group cannot cause one Function App to reap another's sandboxes. Its
+minimum orphan age is strictly greater than the maximum configured top-level
+run timeout plus bounded drain/delete allowance, so it cannot reclaim a live
+invocation by age alone.
 
 The lease is acquired only by the two top-level run paths. Nested delegate,
 workflow, and leaf paths never acquire one and are rejected by hybrid startup.
@@ -266,6 +271,10 @@ be removed or redesigned without deprecation.
 | 16 | Executor launch | Blocking exec / detached exec / create-time full-run bootstrap | Spawn a detached executor through the existing process port and verify readiness/manifest only through the no-ingress file plane. | Agent | 2026-09-02 |
 | 17 | Reaper safety | Age only / liveness journal / age beyond run bound | Set orphan age above the maximum run plus drain/delete allowance; invocation cleanup remains primary. | Agent | 2026-09-02 |
 | 18 | Model deployment | New gpt-5.4-mini / existing gpt-4.1-mini / existing gpt-5 | Use existing gpt-4.1-mini through an isolated APIM API because new-account deployments require unavailable special entitlement. | Agent | 2026-09-02 |
+| 19 | Completed-run cleanup | Propagate delete error / bounded best effort / TTL only | Retry handle/provider deletion and count/log exhaustion without invalidating completed nonstream or streaming output; auto-delete/reaper remain backstops. | Agent | 2026-09-02 |
+| 20 | Reaper ownership | Owner kind only / shared root hash / stable app hash plus owner kind | Compute the existing canonical `AppIdentity` hash for both provisioning and reaper selection, preventing cross-app deletion in a shared group. | Agent | 2026-09-02 |
+| 21 | Broken customer module | Partial discovery / whole-invocation rejection / omit module | Reject the entire invocation when any customer tool module fails sandbox import; exact manifest admission takes priority over legacy partial discovery. | Human + Agent | 2026-09-02 |
+| 22 | Package readback | Length readback / in-sandbox SHA-256 / no verification | Keep full readback for the measured spike despite its 5.51 s weighted upload cost; evaluate in-sandbox SHA-256 before productionizing. | Human + Agent | 2026-09-02 |
 
 ## 6. Test plan
 

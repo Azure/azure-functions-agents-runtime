@@ -16,6 +16,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sandbox-group-resource-id", required=True)
     parser.add_argument("--region", required=True)
+    parser.add_argument("--app-hash")
     parser.add_argument("--minimum-age-seconds", required=True, type=int)
     parser.add_argument("--confirm", required=True, choices=(_CONFIRMATION,))
     return parser
@@ -35,7 +36,7 @@ async def _run(arguments: argparse.Namespace) -> int:
         auto_delete_seconds=1800,
         orphan_age_seconds=arguments.minimum_age_seconds,
     )
-    return await reap_hybrid_orphans(settings=settings)
+    return await reap_hybrid_orphans(settings=settings, app_hash=arguments.app_hash)
 
 
 def main(argv: list[str] | None = None) -> int:

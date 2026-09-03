@@ -72,7 +72,7 @@ from .hybrid_protocol import (
     parse_hybrid_tool_manifest,
     parse_hybrid_tool_result,
 )
-from .hybrid_reaper import HYBRID_OWNER_KIND
+from .hybrid_reaper import HYBRID_OWNER_KIND, hybrid_app_hash
 
 _HYBRID_ROOT = "/tmp/azure-functions-agents-runtime/hybrid"
 _APP_ZIP_PATH = f"{_HYBRID_ROOT}/app.zip"
@@ -266,9 +266,7 @@ class InvocationSandboxLease(ToolExecutionBackend):
         try:
             async with self._queue_lock:
                 queue_seconds = time.perf_counter() - queued_at
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise TimeoutError("Hybrid tool deadline elapsed before transfer.")
+                remaining = _remaining_tool_seconds(deadline)
                 record_hybrid_count(HybridMetric.TOOL_CALLS)
                 transfer_started = time.perf_counter()
                 request = HybridToolInvocationRequest(
@@ -308,6 +306,9 @@ class InvocationSandboxLease(ToolExecutionBackend):
                 if result.status is HybridInvocationStatus.ERROR:
                     record_hybrid_count(HybridMetric.TOOL_FAILURES)
                 return result
+        except Exception:
+            record_hybrid_count(HybridMetric.TOOL_FAILURES)
+            raise
         finally:
             async with self._active_condition:
                 self._active_calls -= 1
@@ -335,20 +336,23 @@ class InvocationSandboxLease(ToolExecutionBackend):
             )
         except Exception:
             logger.warning("Hybrid executor shutdown signal failed.", exc_info=True)
-        delete_started = time.perf_counter()
-        record_hybrid_count(HybridMetric.SANDBOX_DELETES)
         try:
-            await asyncio.wait_for(
-                self._handle.delete(),
-                timeout=self._settings.create_timeout_seconds,
+            await _best_effort_delete(
+                self._handle,
+                self._provider,
+                timeout_seconds=self._settings.create_timeout_seconds,
             )
-        except BaseException:
+        except Exception:
             record_hybrid_count(HybridMetric.SANDBOX_DELETE_FAILURES)
-            raise
+            logger.error(
+                "Hybrid sandbox cleanup failed after the run completed.",
+                exc_info=True,
+            )
         finally:
-            record_hybrid_duration(HybridMetric.SANDBOX_DELETE_DURATION, delete_started)
-            await self._handle.close()
-            await self._provider.close()
+            try:
+                await self._provider.close()
+            except Exception:
+                logger.warning("Hybrid sandbox provider close failed.", exc_info=True)
 
 
 @asynccontextmanager
@@ -442,7 +446,7 @@ def _provisioning_labels(operation_id: str) -> SandboxProvisioningLabels:
         owner_hash_version="h1",
         owner_kind=HYBRID_OWNER_KIND,
         owner_hash=f"h1-{digest[:52]}",
-        app_hash=f"h1-{hashlib.sha256(str(get_app_root()).encode()).hexdigest()[:52]}",
+        app_hash=hybrid_app_hash(),
         session_id=f"hybrid-{uuid.uuid4().hex}",
         operation_label=uuid.uuid4().hex,
     )
@@ -630,14 +634,19 @@ def _current_traceparent() -> str | None:
 async def _best_effort_delete(
     handle: SandboxSessionHandle,
     provider: SandboxSessionProvider,
+    *,
+    timeout_seconds: float = _ROLLBACK_DELETE_TIMEOUT_SECONDS,
 ) -> None:
-    """Boundedly retry failed-acquire deletion through two independent seams."""
+    """Boundedly retry deletion through independent handle and provider seams."""
     started = time.perf_counter()
     record_hybrid_count(HybridMetric.SANDBOX_DELETES)
-    deadline = asyncio.get_running_loop().time() + _ROLLBACK_DELETE_TIMEOUT_SECONDS
-    sandbox_id = handle.identity.sandbox_id
+    deadline = asyncio.get_running_loop().time() + min(
+        timeout_seconds,
+        _ROLLBACK_DELETE_TIMEOUT_SECONDS,
+    )
     error: Exception | None = None
     try:
+        sandbox_id = handle.identity.sandbox_id
         for attempt in range(_ROLLBACK_DELETE_ATTEMPTS):
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
@@ -655,14 +664,24 @@ async def _best_effort_delete(
                 return
             except Exception as exc:
                 error = exc
-                if attempt + 1 < _ROLLBACK_DELETE_ATTEMPTS:
+                if attempt > 0 and attempt + 1 < _ROLLBACK_DELETE_ATTEMPTS:
                     await asyncio.sleep(min(0.5 * (attempt + 1), max(0.0, remaining)))
         record_hybrid_count(HybridMetric.SANDBOX_DELETE_FAILURES)
         logger.error(
-            "Hybrid sandbox rollback deletion exhausted its bounded retries "
+            "Hybrid sandbox deletion exhausted its bounded retries "
             "(last_error_type=%s).",
             type(error).__name__ if error is not None else "timeout",
         )
     finally:
         record_hybrid_duration(HybridMetric.SANDBOX_DELETE_DURATION, started)
-        await handle.close()
+        try:
+            await handle.close()
+        except Exception:
+            logger.warning("Hybrid sandbox handle close failed.", exc_info=True)
+
+
+def _remaining_tool_seconds(deadline: float) -> float:
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        raise TimeoutError("Hybrid tool deadline elapsed before transfer.")
+    return remaining

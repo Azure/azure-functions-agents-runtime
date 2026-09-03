@@ -1,6 +1,7 @@
 import pytest
 
 from azure_functions_agents.experimental.hybrid_apim import HybridApimClientManager
+from azure_functions_agents.experimental.hybrid_config import HYBRID_APIM_MODEL_ENV
 
 
 def test_hybrid_apim_client_uses_custom_subscription_header() -> None:
@@ -28,3 +29,18 @@ async def test_hybrid_apim_manager_close_is_idempotent() -> None:
 
     await manager.close()
     await manager.close()
+
+
+def test_hybrid_apim_production_environment_uses_general_model_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(HYBRID_APIM_MODEL_ENV, raising=False)
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_MODEL", "production-deployment")
+    manager = HybridApimClientManager(
+        base_url="https://example.test/openai/v1",
+        audience=None,
+        subscription_key="private",
+        environment=None,
+    )
+
+    assert manager.resolve_model(None) == "production-deployment"

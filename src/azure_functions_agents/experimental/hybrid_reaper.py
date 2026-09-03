@@ -6,6 +6,12 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from .._logger import logger
+from ..session_state import (
+    APP_HASH_VERSION,
+    LABEL_SAFE_PAYLOAD_PATTERN,
+    compute_app_hash,
+    resolve_function_app_identity,
+)
 from ..transport.ports import SandboxSessionProvider
 from ..transport.transport_models import SandboxSummary
 from .hybrid_config import HybridSandboxSettings
@@ -21,11 +27,13 @@ async def reap_hybrid_orphans(
     settings: HybridSandboxSettings | None = None,
     provider_factory: Callable[[], Awaitable[SandboxSessionProvider]] | None = None,
     now: datetime | None = None,
+    app_hash: str | None = None,
 ) -> int:
-    """Delete only expired sandboxes carrying the private hybrid owner label."""
+    """Delete only expired sandboxes owned by this Function App's hybrid runtime."""
     resolved = settings or HybridSandboxSettings.from_environment()
     if resolved is None:
         return 0
+    resolved_app_hash = _validate_app_hash(app_hash or hybrid_app_hash())
     factory = provider_factory or _provider_factory(
         resolved.group_resource_id,
         resolved.region,
@@ -35,7 +43,10 @@ async def reap_hybrid_orphans(
     observed_now = now or datetime.now(UTC)
     try:
         sandboxes = await provider.list_sandboxes(
-            labels={"owner_kind": HYBRID_OWNER_KIND},
+            labels={
+                "owner_kind": HYBRID_OWNER_KIND,
+                "app_hash": resolved_app_hash,
+            },
             max_items=_MAX_REAPER_ITEMS,
         )
         for sandbox in sandboxes:
@@ -52,6 +63,22 @@ async def reap_hybrid_orphans(
         return deleted
     finally:
         await provider.close()
+
+
+def hybrid_app_hash() -> str:
+    """Return the stable platform-derived application label for hybrid ownership."""
+    return compute_app_hash(resolve_function_app_identity())
+
+
+def _validate_app_hash(value: str) -> str:
+    version, separator, payload = value.partition("-")
+    if (
+        not separator
+        or version != APP_HASH_VERSION
+        or LABEL_SAFE_PAYLOAD_PATTERN.fullmatch(payload) is None
+    ):
+        raise ValueError("Hybrid reaper app hash is invalid.")
+    return value
 
 
 def _provider_factory(
