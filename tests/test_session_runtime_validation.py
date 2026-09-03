@@ -52,7 +52,7 @@ still active" framing):
   something ``validate_session_runtime`` itself raises):
 
   * an ``aca_sandbox: {}`` block present but missing its required
-    ``sandbox_group_resource_id`` -- a plain Pydantic required-field error;
+    ``sandbox_group_resource_id`` and ``region`` -- plain Pydantic required-field errors;
     ``AcaSandboxConfig`` construction runs (the key's value is a dict, not
     ``None``) and fails on the missing field. No dedicated fixture; see
     ``test_config_schema.py::test_aca_sandbox_config_rejects_missing_sandbox_group_resource_id``.

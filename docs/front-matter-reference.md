@@ -63,6 +63,7 @@ Optional file in the root directory. All properties are optional.
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `sandbox_group_resource_id` | string | **Yes** | N/A | Azure resource ID of a pre-provisioned Sandbox Group. The runtime never creates one; this must reference an existing, customer-owned Sandbox Group. |
+| `region` | string | **Yes** | N/A | Required authored Azure region that identifies and selects the Sandbox Group's regional data-plane endpoint directly. The Function App and Sandbox Group may be in the same or different regions; the runtime does not use ARM discovery or fallback. |
 | `retention` | object | No | `null` | Idle/reclaim retention policy for ACA Sandbox sessions. [Details](#global-session_runtimeaca_sandboxretention) |
 
 ### Global: `session_runtime.aca_sandbox.retention`

@@ -20,11 +20,13 @@ from azure_functions_agents.controller.readiness import (
     HARNESS_PROTOCOL_PATH,
     ActivatedSession,
     SessionActivationAuthorizationError,
+    SessionActivationBindingError,
     SessionActivationConflictError,
     SessionActivationError,
     SessionActivationGoneError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
+    SessionActivationTransientError,
     SessionBindingChangedError,
     SessionRuntimeBinding,
     StateStoreBinding,
@@ -73,7 +75,10 @@ from azure_functions_agents.transport.transport_models import (
     SandboxFileOperationError,
     SandboxGroupAuthorizationError,
     SandboxGroupBinding,
+    SandboxGroupBindingError,
+    SandboxGroupTransientError,
     SandboxInvalidStateError,
+    SandboxNotFoundError,
 )
 from tests.doubles.content_package import content_package
 from tests.doubles.fake_session_runtime import DEFAULT_GROUP_RESOURCE_ID
@@ -85,6 +90,14 @@ _GROUP_RESOURCE_ID = DEFAULT_GROUP_RESOURCE_ID
 _FINGERPRINT = "s1-" + ("a" * 52)
 _TEST_SOURCE = DiskSource.create("test-harness")
 pytestmark = pytest.mark.usefixtures("deterministic_content_package")
+
+
+def test_persistent_capacity_failure_remains_retryable() -> None:
+    with pytest.raises(SessionActivationTransientError, match="capacity exhausted"):
+        readiness_module._raise_provision_provider_error(
+            SandboxCapacityError("capacity exhausted"),
+            SetupBudget.start(),
+        )
 
 
 def _owner() -> FunctionAppOwnerContext:
@@ -735,6 +748,51 @@ async def test_targeted_reconciliation_authorization_is_redacted(tmp_path: Path)
         )
 
     assert str(caught.value) == SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("callback_field", "method_name"),
+    [
+        ("_targeted_reconciler", "reconcile_session"),
+        ("_post_create_reconciler", "reconcile_after_create"),
+        ("_capacity_reaper", "reap_for_capacity"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("provider_error", "activation_error"),
+    [
+        (
+            SandboxGroupAuthorizationError(status_code=401),
+            SessionActivationAuthorizationError,
+        ),
+        (
+            SandboxGroupBindingError("Configured Sandbox Group was not found."),
+            SessionActivationBindingError,
+        ),
+        (
+            SandboxGroupTransientError(
+                "ACA Sandbox data plane is temporarily unavailable."
+            ),
+            SessionActivationTransientError,
+        ),
+    ],
+)
+async def test_reconciliation_callbacks_translate_provider_errors(
+    tmp_path: Path,
+    callback_field: str,
+    method_name: str,
+    provider_error: Exception,
+    activation_error: type[Exception],
+) -> None:
+    async def reconciliation(*_args: object) -> None:
+        raise provider_error
+
+    runtime = _runtime(_script_root(tmp_path), _FakeProvider(_FakeHandle()), _FakeStore())
+    runtime = replace(runtime, **{callback_field: reconciliation})
+
+    with pytest.raises(activation_error):
+        await getattr(runtime, method_name)(owner_partition(_owner()), "session-1")
 
 
 @pytest.mark.asyncio
@@ -1447,6 +1505,75 @@ async def test_invalid_sandbox_state_becomes_a_sanitized_activation_conflict(
     assert "provider-secret" not in str(caught.value)
     assert provider.attach_calls == 0
     assert provider.resume_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_error", "activation_error"),
+    [
+        (
+            SandboxGroupBindingError("Configured Sandbox Group was not found."),
+            SessionActivationBindingError,
+        ),
+        (
+            SandboxGroupTransientError("ACA Sandbox data plane is temporarily unavailable."),
+            SessionActivationTransientError,
+        ),
+        (
+            SandboxNotFoundError("Session backing sandbox was not found."),
+            SessionActivationGoneError,
+        ),
+    ],
+)
+async def test_resume_transport_failures_become_typed_activation_errors(
+    tmp_path: Path,
+    provider_error: Exception,
+    activation_error: type[Exception],
+) -> None:
+    script_root = _script_root(tmp_path)
+    provider = _FakeProvider(_FakeHandle())
+    provider.resume_error = provider_error
+    session = _session(script_root)
+    store = _FakeStore(session)
+
+    with pytest.raises(activation_error) as caught:
+        await activate_session(
+            _runtime(script_root, provider, store),
+            _owner(),
+            session.session_id,
+            SetupBudget.start(),
+            allow_create=False,
+        )
+
+    assert caught.value.__cause__ is None
+    assert provider.attach_calls == 0
+    assert provider.resume_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_readiness_deadline_precedes_the_activation_deadline(
+    tmp_path: Path,
+) -> None:
+    class DeadlineCapturingProvider(_FakeProvider):
+        readiness_timeout_seconds: float | None = None
+
+        async def resume(self, *args: object, **kwargs: object) -> _FakeHandle:
+            self.readiness_timeout_seconds = kwargs["readiness_timeout_seconds"]  # type: ignore[assignment]
+            return await super().resume(*args, **kwargs)
+
+    script_root = _script_root(tmp_path)
+    provider = DeadlineCapturingProvider(_FakeHandle())
+    session = _session(script_root)
+    activated = await activate_session(
+        _runtime(script_root, provider, _FakeStore(session)),
+        _owner(),
+        session.session_id,
+        SetupBudget.start(setup_seconds=10.0, clock=lambda: 0.0),
+        allow_create=False,
+    )
+
+    assert provider.readiness_timeout_seconds == pytest.approx(9.9)
+    await activated.handle.close()
 
 
 @pytest.mark.asyncio

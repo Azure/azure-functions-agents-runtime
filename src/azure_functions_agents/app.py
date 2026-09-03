@@ -420,7 +420,10 @@ def _build_session_runtime_binding(
     async def default_provider_factory() -> SandboxSessionProvider:
         from .transport.aca_sdk import AcaSandboxAdapter
 
-        return await AcaSandboxAdapter.open(aca_sandbox.sandbox_group_resource_id)
+        return await AcaSandboxAdapter.open(
+            aca_sandbox.sandbox_group_resource_id,
+            region=aca_sandbox.region,
+        )
 
     async def state_store_factory() -> StateStoreBinding:
         service_client, fingerprint = await get_table_service_client()

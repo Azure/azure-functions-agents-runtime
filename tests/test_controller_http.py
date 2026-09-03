@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -17,9 +18,13 @@ from azure_functions_agents.controller.http import (
 from azure_functions_agents.controller.idempotency import IdempotencyResultUnavailableError
 from azure_functions_agents.controller.readiness import (
     SessionActivationAuthorizationError,
+    SessionActivationBindingError,
     SessionActivationConflictError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
+    SessionActivationTransientError,
+    SessionRuntimeBinding,
+    StateStoreBinding,
 )
 from azure_functions_agents.execution.backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
@@ -45,8 +50,14 @@ from azure_functions_agents.execution.setup_budget import (
 )
 from azure_functions_agents.session_state import (
     ActiveRunConflictError,
+    AppIdentity,
     IdempotencyConflictError,
     RunRowNotFoundError,
+)
+from azure_functions_agents.transport.ports import SandboxSessionProvider
+from azure_functions_agents.transport.transport_models import (
+    SandboxGroupBindingError,
+    SandboxGroupTransientError,
 )
 
 
@@ -933,6 +944,153 @@ async def test_tombstoned_abandoned_run_keeps_status_but_result_is_gone() -> Non
 
     assert status_response.status_code == 200
     assert result_response.status_code == 410
+
+
+
+
+
+class _ProviderBoundBackend:
+    """A backend whose start_run resolves the provider, as the real one does."""
+
+    def __init__(self, runtime: SessionRuntimeBinding) -> None:
+        self._runtime = runtime
+
+    async def start_run(self, *args: object, **kwargs: object) -> RunHandle:
+        del args, kwargs
+        await self._runtime.get_provider()
+        raise AssertionError("provider resolution should not have succeeded")
+
+
+def _provider_bound_runtime(
+    tmp_path: Path,
+    provider_error: Exception,
+) -> SessionRuntimeBinding:
+    async def provider_factory() -> SandboxSessionProvider:
+        raise provider_error
+
+    async def state_store_factory() -> StateStoreBinding:
+        raise AssertionError("the state store must not be resolved for this path")
+
+    return SessionRuntimeBinding.create(
+        app_identity=AppIdentity.create(
+            subscription_id="11111111-2222-3333-4444-555555555555",
+            site_name="agent-app",
+        ),
+        sandbox_group_resource_id=(
+            "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/sandboxGroups/g"
+        ),
+        script_root=tmp_path,
+        provider_factory=provider_factory,
+        state_store_factory=state_store_factory,
+    )
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [429, 500, 501, 502, 503, 504, 505, 599])
+async def test_transient_data_plane_status_reaches_the_caller_as_retryable(
+    tmp_path: Path,
+    status: int,
+) -> None:
+    """A retryable provider status becomes 503 with Retry-After, not an untyped 500."""
+    backend = _ProviderBoundBackend(
+        _provider_bound_runtime(
+            tmp_path,
+            SandboxGroupTransientError(f"provider status {status}"),
+        )
+    )
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 503
+    assert response.headers.get("Retry-After") == "2"
+    assert response.body == {
+        "error": "sandbox_group_transient",
+        "reason": "sandbox_group_transient",
+    }
+    assert str(status) not in str(response.body)
+
+
+@pytest.mark.asyncio
+async def test_permanent_data_plane_binding_failure_is_not_reported_as_retryable(
+    tmp_path: Path,
+) -> None:
+    """A missing group is a permanent binding fault with no retry advertisement."""
+    backend = _ProviderBoundBackend(
+        _provider_bound_runtime(
+            tmp_path,
+            SandboxGroupBindingError("sensitive provider status 404"),
+        )
+    )
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 503
+    assert response.headers.get("Retry-After") is None
+    assert response.body == {
+        "error": "sandbox_group_binding_failed",
+        "reason": "sandbox_group_binding_failed",
+    }
+    assert "sensitive provider status" not in str(response.body)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ("submit", "status", "result", "cancel"))
+@pytest.mark.parametrize(
+    ("activation_error", "error_code", "retry_after"),
+    [
+        (
+            SessionActivationBindingError("traceId=provider-secret"),
+            "sandbox_group_binding_failed",
+            None,
+        ),
+        (
+            SessionActivationTransientError("traceId=provider-secret"),
+            "sandbox_group_transient",
+            "2",
+        ),
+    ],
+)
+async def test_provider_availability_failures_are_redacted_on_every_http_surface(
+    surface: str,
+    activation_error: Exception,
+    error_code: str,
+    retry_after: str | None,
+) -> None:
+    backend = FakeBackend(_status())
+    context = RunContext(run_id="run-1", session_id="session-1")
+    if surface == "submit":
+        backend.raise_on_start = activation_error
+        response = await submit_run(
+            backend,  # type: ignore[arg-type]
+            StartRunRequest(prompt="hello"),
+            agent_slug="main",
+            respond_async=True,
+            budget=_expired_budget(),
+        )
+    elif surface == "status":
+        backend.raise_on_get = activation_error
+        response = await read_status(backend, context)  # type: ignore[arg-type]
+    elif surface == "result":
+        backend.raise_on_get = activation_error
+        response = await read_result(backend, context)  # type: ignore[arg-type]
+    else:
+        backend.raise_on_cancel = activation_error
+        response = await cancel_run(backend, context)  # type: ignore[arg-type]
+
+    assert response.status_code == 503
+    assert response.body == {"error": error_code, "reason": error_code}
+    assert response.headers.get("Retry-After") == retry_after
+    assert "provider-secret" not in str(response.body)
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,7 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-08-25
+updated: 2026-09-02
 issues: []
 pull_requests: []
 branch: feature/aca-sandboxes
@@ -434,6 +434,8 @@ controlling amendments.
 | 186 | Capacity-failure reconciliation ownership (narrows #58/#61) | Bounded app-wide request sweep / session-targeted repair / timer-only | Keep session-targeted repair and one retry; unrelated global reclamation stays timer-owned, so capacity may remain exhausted. | Human | 2026-08-27 | Bug-fix correction |
 | 187 | Authorization replay and settlement origin (revises #159/#185) | Generic replay / status-preserving replay; any HTTPS / same origin | Preserve sanitized `401`/`403` across exact replay, while keeping the public reason generic; reject cross-origin status URLs before attaching Function credentials or session metadata. | Human + Agent | 2026-08-27 | Review correction |
 | 188 | Bounded recovery closure (refines #183/#184) | Broad/implicit / targeted and explicit | Use session-filtered request repair; retain accepted-create lookup failures as indeterminate; report deferred timer work as partial; apply the declared ARM retry set and hard delay caps after jitter. | Human + Agent | 2026-08-27 | Review correction |
+| 189 | Required Sandbox Group region and endpoint (revises #99/#184/#188) | ARM discovery/equality check / authored direct endpoint | Require normalized `region` beside the group resource ID and construct its regional data-plane client directly. Use no ARM lookup or fallback, and permit Function App and Sandbox Group regions to differ. | Human | 2026-09-02 | Replacement stack layer 1 |
+| 190 | ACA provider error boundary (refines #159/#184/#187/#188) | Raw SDK propagation / typed redacted boundary | Translate all SDK failures: group 401/403 authorization, group 404 binding, 429/5xx/timeout/transport transient, sandbox 404 missing backing, and 409 invalid state unless typed state is `Running` or `Resuming`. | Human | 2026-09-02 | Replacement stack layer 1 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -658,6 +660,23 @@ risk is API churn, not the absence of the capabilities below.
   egress audit signals. The controller must use them rather than inventing
   equivalents.
 
+### Regional binding and provider exception boundary
+
+The Sandbox Group resource ID and normalized authored `region` select the
+regional ACA data-plane endpoint directly. The adapter performs no ARM lookup
+or compatibility fallback. It compares the configured, persisted, and live
+Sandbox Group identity and region and fails closed on mismatch. It does not
+compare the Function App location with the Sandbox Group region; same-region
+and cross-region placement are both supported.
+
+`transport/aca_sdk.py` contains the complete preview-SDK exception boundary.
+Group-scoped `401`/`403` becomes authorization, group-scoped `404` becomes a
+permanent binding failure, and `429`/5xx/timeout or transport failure becomes
+transient. Sandbox-scoped `404` means missing session backing. Resume treats a
+`409` as safe progress only when a typed state read reports `Running` or
+`Resuming`; every other `409` is invalid state. No raw SDK exception, provider
+payload, identifier, or credential crosses into a controller route.
+
 ### Fail-closed creation and egress defaults
 
 `begin_create_sandbox` must explicitly provide exactly one of `disk`, `disk_id`,
@@ -823,7 +842,7 @@ class AgentExecutionBackend(Protocol):
 
 ##### Residency/provisioning boundary
 
-* One group per app/environment in customer subscription is hard v1 invariant; customer chooses one region and state account must be co-regional. Customer IaC/customer identity creates standing ARM/RBAC resources; customer owns standing-IaC teardown. Runtime has SandboxGroup Data Owner scoped to the one pre-provisioned group and creates/resumes/deletes session sandboxes only. Runtime never creates/updates group ARM resources, images, or role assignments.
+* One group per app/environment in customer subscription is a hard v1 invariant; the customer authors its region independently. The runtime does not require or validate equality with the Function App or state-account region. Customer IaC/customer identity creates standing ARM/RBAC resources; customer owns standing-IaC teardown. Runtime has SandboxGroup Data Owner scoped to the one pre-provisioned group and creates/resumes/deletes session sandboxes only. Runtime never creates/updates group ARM resources, images, or role assignments.
 * v1 uses preview default group quotas; 100 concurrency must be tested, not assumed. Multi-region/DR/multiple groups are deferred. v1 ships composable documented sample IaC; customer-run composite quickstart is post-v1. Deploying scoped RBAC requires Owner or User Access Administrator.
 * The runtime uses the public `python-3.<minor>` disk by default; a customer may supply a disk name or immutable ID override. The controller captures script root plus `.python_packages`, computes SHA-256 `digest_kind=funcs_zip`, and transfers content with the stdlib bootstrap; sandbox does not read storage. No custom OCI image is built by this runtime.
 
@@ -844,7 +863,7 @@ class AgentExecutionBackend(Protocol):
 * Management routes are session-scoped: `GET .../sessions/{session_id}/runs/{run_id}`, `.../result`, `.../events`, `POST .../cancel`; headers are `Prefer: respond-async`, `x-ms-session-id`, `Idempotency-Key`, `Last-Event-ID`.
 * Async accepted -> `202` + `Location` + `Retry-After: 2`. A failed async **status** read is `200`, never 5xx; a result URL is `410` when no result is available or its session is tombstoned. Active slot -> `409 active_run_exists`; same idempotency key/different payload -> `422 idempotency_key_conflict`; two typed setup/run cap breaches -> `504`. Deduplicate first, then active-run check: same key+payload replay; distinct key while active=409; retry after abandon rotates key.
 * Config/startup: absence of `session_runtime` (or of the `aca_sandbox` block within it) means `in_lang_worker`. On supported Linux x86_64 CPython 3.13/3.14 hosts, valid `aca_sandbox` configuration selects the real ACA backend; no unconditional unavailable-backend gate remains. Unsupported ACA combinations—including `workflows.enabled` and Dynamic Sessions `execute_python`—fail startup. Reject dropped `max_run_seconds`, `region`, `disk`, `content_package`. `auto_suspend_idle` legal set is `{60,120,300,600,1800,3600}` mapping to `auto_suspend_seconds`; `reclaim_idle` positive and > suspend idle; 10 of the 13 matrix rows fail closed (rows 6 and 7 are superseded by Decisions #87/#86, row 11 is structurally unrepresentable — see the matrix).
-* Config/startup and runtime gates fail closed on: group-not-pre-provisioned, cross-region binding, ABI/protocol/digest mismatch, anonymous ingress, missing readiness, unsafe egress defaults, and snapshot-incompatible mutable entrypoint/cmd/environment. (The former Shared-Key/dedicated-account preflight on state storage no longer applies — Decisions #86/#87; session state always reuses `AzureWebJobsStorage`, with no auth-mode gate at this layer.)
+* Config/startup and runtime gates fail closed on: group-not-pre-provisioned, configured/persisted/live Sandbox Group identity or region mismatch, ABI/protocol/digest mismatch, anonymous ingress, missing readiness, unsafe egress defaults, and snapshot-incompatible mutable entrypoint/cmd/environment. A Function App/Sandbox Group region difference is explicitly allowed and is not a binding mismatch. (The former Shared-Key/dedicated-account preflight on state storage no longer applies — Decisions #86/#87; session state always reuses `AzureWebJobsStorage`, with no auth-mode gate at this layer.)
 * Required quality gates: ruff, strict mypy, pytest for every PR; full existing suite unchanged at the local seam; Azurite CAS/EGT/concurrency tests; no `src` import from tests/import graph test; typed seam conformance for local and ACA; journal/Table credential redaction; crash injection; golden traces every CI; real ACA smoke; and full e2e plus 100-concurrent and large-payload gates.
 
 #### Source contradictions, stale assertions, and required consolidation edits
@@ -880,7 +899,7 @@ by real ACA smoke.
 
 * Execution is seam-first and additive. `in_lang_worker` remains the default; declaring valid `aca_sandbox` configuration opts into the available backend on supported hosts, while unsupported/unsafe combinations fail startup without fallback. Discovery is read-only; registration is the only Azure-aware stage; execution is lazy.
 * The controller (Functions app) owns identity/owner resolution, Azure Tables, sandbox binding/provisioning, package capture/delivery, budgets, HTTP/SSE, egress-policy compilation, and reconciliation. The sandbox/harness owns stdlib bootstrap, MAF adapter, journal writes, whole-turn atomic commit, watchdog, in-process delegation, and workload-scoped use of its attached Sandbox Group managed identity.
-* Runtime sandbox groups are pre-provisioned customer IaC. Runtime never creates a group, never opens inbound ports, and only creates individual sandboxes in the bound region. Group absence or cross-region binding fails closed.
+* Runtime sandbox groups are pre-provisioned customer IaC. Runtime never creates a group, never opens inbound ports, and only creates individual sandboxes in the bound region. Group absence or configured/persisted/live Sandbox Group identity or region mismatch fails closed; Function App and Sandbox Group regions may differ.
 * The deployment has a controller Functions process and a public or customer-selected sandbox disk, not a custom sandbox image. Harness code is importable for tests but guarded by `_ensure_sandbox()` and must raise outside a marked sandbox. Bootstrap, application, and dependency closure are delivered through the file plane; MAF is not baked.
 * Production contains exactly one transport implementation. Test doubles are only `tests/doubles/`, never importable from `src`; `UnavailableBackend` is a typed capability error, never a simulated backend. CI guards: no `src`→`tests` import, SDK imported only in `transport/aca_sdk.py`, and factory cannot return a double.
 
@@ -1082,15 +1101,16 @@ session_runtime:
   harness: maf                          # default and only v1 value
   aca_sandbox:                          # presence of this block selects the ACA backend
     sandbox_group_resource_id: $ACA_SANDBOX_GROUP_RESOURCE_ID
+    region: $ACA_SANDBOX_REGION         # required Sandbox Group region
     retention:                          # optional; app-scoped only
       auto_suspend_idle: 300            # seconds; int
       reclaim_idle: 3600                # seconds; int, must exceed auto_suspend_idle
 ```
 
-* Keys are locked: `session_runtime`, `harness`, `aca_sandbox`, `sandbox_group_resource_id`, and `retention` (nested under `aca_sandbox`). The remaining SDK spike is only the accepted identifier value format and its Pydantic validation.
+* Keys are locked: `session_runtime`, `harness`, `aca_sandbox`, `sandbox_group_resource_id`, `region`, and `retention` (nested under `aca_sandbox`).
 * This is global application configuration in `agents.config.yaml`, never per-agent front matter. Per-agent harness/group/retention is deferred; future retention precedence is per-agent > app-level > group default.
-* The resource ID is non-secret and uses existing environment substitution. Its region is derived from the resolved group; it is not authored.
-* No `max_run_seconds`, `region`, `disk`, or `content_package` field exists; reject dropped fields. Existing per-agent `timeout` is the sole run-duration knob. For a shared session sandbox, the entry/coordinator timeout controls the whole run; subagents are bounded by `min(subagent timeout, coordinator remaining)`.
+* The resource ID and region are non-secret and use existing environment substitution. Both are authored; the runtime performs no ARM discovery or Function App placement-equality validation. The normalized region is forwarded as non-secret guest configuration because the delivered `agents.config.yaml` reconstructs the catalog; the Sandbox Group resource ID and controller credentials remain host-only.
+* No `max_run_seconds`, `disk`, or `content_package` field exists; reject dropped fields. Existing per-agent `timeout` is the sole run-duration knob. For a shared session sandbox, the entry/coordinator timeout controls the whole run; subagents are bounded by `min(subagent timeout, coordinator remaining)`.
 * The watchdog equals authored `timeout`; synchronous wait is `min(timeout, 180s)`. The in-lang-worker backend imposes no additional synchronous-wait cap of its own, but remains subject to the Azure Functions platform's own ~230-second HTTP timeout for synchronous responses regardless of backend ([service limits](https://learn.microsoft.com/azure/azure-functions/functions-scale#service-limits)); long-running work should use the existing async-accepted (`202`) pattern.
 * Disk defaults to public `python-3.<minor>` with an optional customer disk
   name or immutable-ID override. Content is controller-captured from script
@@ -1110,7 +1130,7 @@ session_runtime:
 | 2 | `workflows.enabled: true` | Fail startup; Dynamic Workflows are incompatible in v1. | 0008.7 #36 |
 | 3 | Dynamic Sessions code-interpreter configured | Fail startup; unsupported with ACA in v1. | 0008.7 #36 |
 | 4 | Agent is bound to a non-HTTP trigger | Fail startup; ACA is HTTP-only in v1. | Parent / FRD 0009 |
-| 5 | Missing/empty `sandbox_group_resource_id` | Fail startup. | 0008.10 |
+| 5 | Missing/empty `sandbox_group_resource_id` or missing/invalid `region` | Fail startup. | 0008.10 + Decision #189 |
 | 6 | ~~State account permits Shared Key or RBAC is not scoped~~ — **superseded** (Decision 87): the Shared-Key-disallowed check is dropped entirely, matching core Azure Functions' own `AzureWebJobsStorage` posture (Shared Key accepted by default). | N/A — condition is no longer checked; row retained for numbering stability. | 0008.3 (superseded by #87) |
 | 7 | ~~Production uses `AzureWebJobsStorage` rather than dedicated `AzureFunctionsAgentsStateStorage`~~ — **superseded** (Decision 86): there is no dedicated state-storage account at all; `AzureWebJobsStorage` is always reused for session state, in every environment, so this condition is structurally unrepresentable. | N/A — condition cannot occur; row retained for numbering stability. | 0008.3 #31 (superseded by #86) |
 | 8 | Neither function-key nor Easy Auth/Entra Functions authentication is configured | Fail startup; some valid Functions auth is mandatory, but Entra-only is not. | 0008.2 (method-agnostic) |
@@ -1187,6 +1207,8 @@ Canonical stored/wire run states: `accepted`, `running`, `succeeded`, `failed`, 
 | Unavailable async result | `410 Gone` after result eviction, missing result content, or session tombstone; status remains readable. |
 | Unknown run | `404`. |
 | Auth/authz | `401`/`403`. |
+| Sandbox Group binding missing/invalid | Sanitized non-retryable `503 sandbox_group_binding_failed`. |
+| Sandbox Group transient failure | Sanitized `503 sandbox_group_transient` with `Retry-After: 2`. |
 | Different submission while active run holds slot | Flat `409 active_run_exists`, naming active run. |
 | Sandbox lifecycle rejects idempotent resume | Sanitized `409 sandbox_invalid_state` from submission, status, result, events, or cancel; body contains only `error` and `reason` set to that value. |
 | Same Idempotency-Key, different payload | `422 idempotency_key_conflict`; never a bare ambiguous `409`. |
@@ -1389,7 +1411,7 @@ an enabled v1 surface.
 * Config scenario fixture for every matrix row, absence/default, valid ACA config, dropped fields, supported-host and unsafe-configuration startup failures, HTTP-only restriction, ABI rule, and always-hard row 13.
 * Typed execution seam conformance against Local and ACA backend: all seven states, exclusive cursor semantics, typed cursor expiry, cancellation, result eviction, and default local parity.
 * Azurite: owner vectors, ETag one-active-run race across two controllers, entity-group atomicity, idempotency, generation monotonicity, tombstone/410, loss-always-tombstones, redaction, and generic operation begin/resume/advance/complete/abort with stale-token races. Cover provision reservation's owner claim/run/operation EGT, submit admission's operation EGT, rearm-vs-admission, and terminal-vs-reclaim interactions.
-* Stub transport plus real ACA adapter smoke: six verbs, direct file journal operations, `ensure_ready` authoritative under lag, idempotent cancel, no ingress ports, pre-provisioned group failure, SDK import firewall.
+* Stub transport plus real ACA adapter smoke: six verbs, direct file journal operations, `ensure_ready` authoritative under lag, idempotent cancel, no ingress ports, pre-provisioned group failure, permitted Function App/Sandbox Group region differences, and the SDK import firewall.
 * HTTP: async submit/poll/result; both typed 504 reasons; 180-second mid-tool cancellation cleanup; three idempotency cases; replay after abandon requires key rotation; resume after disk suspension; disconnect does not cancel; failed async status read is `200` while unavailable result reads are `410`.
 * Crash injection: file-write/rename/pointer-fsync boundaries; disk-intact crash resumes same sandbox; lost sandbox tombstones; stopped/suspended redeploy digest mismatch; OOM/disk full fails cleanly; clock-skew grace; post-terminal lifecycle re-arm.
 * Reconciler: stale heartbeat verification, no false abandon, label-scoped platform divergence, per-sandbox lifecycle writes, no-live-delete CAS, backstop inequality, terminal/tombstone and completed-operation pruning, snapshot pruning, capacity reap-and-retry, resumed incomplete operations, required operation fields, and fail-closed orphan idle markers. Fault injection covers each provider create/lifecycle/content/manifest/journal phase and stable-label recovery after ambiguous create or launch response loss.

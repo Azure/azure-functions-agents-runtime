@@ -26,9 +26,11 @@ from azure_functions_agents.controller.readiness import (
     ActivatedSession,
     ProvisionedSubmission,
     SessionActivationAuthorizationError,
+    SessionActivationBindingError,
     SessionActivationConflictError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
+    SessionActivationTransientError,
     SessionRunOwnershipChangedError,
     SessionRuntimeBinding,
     StateStoreBinding,
@@ -105,7 +107,10 @@ from azure_functions_agents.transport.transport_models import (
     SandboxFileNotFoundError,
     SandboxFileOperationError,
     SandboxGroupAuthorizationError,
+    SandboxGroupBindingError,
+    SandboxGroupTransientError,
     SandboxInvalidStateError,
+    SandboxProvisioningError,
 )
 from tests.doubles.content_package import content_package
 from tests.doubles.fake_session_runtime import (
@@ -900,6 +905,96 @@ async def test_cancel_run_propagates_provider_invalid_state(
 
     with pytest.raises(SessionActivationConflictError):
         await backend.cancel_run(RunContext(run_id=run.run_id, session_id=session.session_id))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ("status", "result", "events", "cancel"))
+@pytest.mark.parametrize(
+    ("provider_error", "activation_error", "error_code", "retry_after"),
+    [
+        (
+            SandboxGroupBindingError("Configured Sandbox Group was not found."),
+            SessionActivationBindingError,
+            "sandbox_group_binding_failed",
+            None,
+        ),
+        (
+            SandboxGroupTransientError(
+                "ACA Sandbox data plane is temporarily unavailable."
+            ),
+            SessionActivationTransientError,
+            "sandbox_group_transient",
+            "2",
+        ),
+    ],
+)
+async def test_management_surfaces_propagate_provider_availability_failures(
+    tmp_path: Path,
+    surface: str,
+    provider_error: Exception,
+    activation_error: type[Exception],
+    error_code: str,
+    retry_after: str | None,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    run = _run(session, state="running")
+    store.runs[run.run_id] = run
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    provider.resume_error = provider_error
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    context = RunContext(run_id=run.run_id, session_id=session.session_id)
+
+    if surface == "events":
+        with pytest.raises(activation_error):
+            await anext(backend.read_events(context, after_sequence=0))
+        return
+    if surface == "status":
+        response = await read_status(backend, context)
+    elif surface == "result":
+        response = await read_result(backend, context)
+    else:
+        response = await cancel_controller_run(backend, context)
+
+    assert response.status_code == 503
+    assert response.body == {"error": error_code, "reason": error_code}
+    assert response.headers.get("Retry-After") == retry_after
+
+
+@pytest.mark.asyncio
+async def test_residual_provider_rejection_is_not_reported_as_invalid_state(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    run = _run(session)
+    store.runs[run.run_id] = run
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    provider.resume_error = SandboxProvisioningError(
+        "ACA Sandbox data-plane request was rejected."
+    )
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    response = await read_status(
+        backend,
+        RunContext(run_id=run.run_id, session_id=session.session_id),
+    )
+
+    assert response.status_code == 503
+    assert response.body == {
+        "error": "sandbox_group_binding_failed",
+        "reason": "sandbox_group_binding_failed",
+    }
 
 
 @pytest.mark.asyncio
