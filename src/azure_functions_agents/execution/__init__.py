@@ -2,6 +2,7 @@
 
 from .backend import (
     AgentExecutionBackend,
+    DurableAdmissionIndeterminateError,
     EventCursorExpiredError,
     RunContext,
     RunError,
@@ -27,6 +28,7 @@ from .run_control import (
     RunEnvelope,
     RunSubmissionDefinitiveFailureError,
     RunSubmissionIndeterminateError,
+    RunSubmissionPreLaunchStatusError,
     SandboxRunControl,
 )
 from .setup_budget import SetupBudget, SetupBudgetExpiredError
@@ -40,6 +42,7 @@ __all__ = [
     "AgentExecutionBackend",
     "AgentResult",
     "BackendUnavailableError",
+    "DurableAdmissionIndeterminateError",
     "EventCursorExpiredError",
     "LanguageWorkerExecutionBackend",
     "RunContext",
@@ -53,6 +56,7 @@ __all__ = [
     "RunStatus",
     "RunSubmissionDefinitiveFailureError",
     "RunSubmissionIndeterminateError",
+    "RunSubmissionPreLaunchStatusError",
     "SandboxRunControl",
     "SetupBudget",
     "SetupBudgetExpiredError",

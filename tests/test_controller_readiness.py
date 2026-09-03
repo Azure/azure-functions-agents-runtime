@@ -50,6 +50,7 @@ from azure_functions_agents.execution.setup_budget import (
 )
 from azure_functions_agents.harness.sandbox_capabilities import REQUIRED_HARNESS_CAPABILITIES
 from azure_functions_agents.journal_paths import BOOTSTRAP_ERROR_PATH
+from azure_functions_agents.sandbox_runtime_limits import RESULT_HOLD_SECONDS
 from azure_functions_agents.session_state import (
     AdmissionRecords,
     AppIdentity,
@@ -168,6 +169,8 @@ def _runtime(
     source: DiskSource | None = _TEST_SOURCE,
     fingerprint: str = _FINGERPRINT,
     post_create_reconciler: Callable[[], Awaitable[None]] | None = None,
+    auto_suspend_seconds: int = readiness_module.DEFAULT_AUTO_SUSPEND_SECONDS,
+    reclaim_idle_seconds: int = readiness_module.DEFAULT_RECLAIM_IDLE_SECONDS,
     capacity_reaper: Callable[[OwnerPartition, str], Awaitable[None]] | None = None,
 ) -> SessionRuntimeBinding:
     async def provider_factory() -> _FakeProvider:
@@ -187,6 +190,8 @@ def _runtime(
         state_store_factory=state_store_factory,
         creation_source=source,
         post_create_reconciler=post_create_reconciler,
+        auto_suspend_seconds=auto_suspend_seconds,
+        reclaim_idle_seconds=reclaim_idle_seconds,
         capacity_reaper=capacity_reaper,
     )
 
@@ -726,6 +731,33 @@ async def test_reserved_provision_authorization_failure_terminalizes_durable_sta
     [operation] = store.durable_operations.values()
     assert operation.state == "completed"
     assert operation.lease_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_targeted_reconciliation_passes_a_deadline_argument_even_when_absent(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    provider = _FakeProvider(_FakeHandle())
+    store = _FakeStore()
+    seen: list[object] = []
+
+    async def reconciliation(
+        partition: OwnerPartition,
+        session_id: str,
+        setup_deadline: object,
+    ) -> None:
+        seen.append(setup_deadline)
+
+    runtime = _runtime(script_root, provider, store)
+    runtime = replace(runtime, _targeted_reconciler=reconciliation)
+
+    await runtime.reconcile_session(owner_partition(_owner()), "session-1")
+    assert seen == [None]
+
+    budget = SetupBudget.start()
+    await runtime.reconcile_session(owner_partition(_owner()), "session-1", budget)
+    assert seen == [None, budget]
 
 
 @pytest.mark.asyncio
@@ -1305,6 +1337,52 @@ async def test_management_touch_only_renews_live_session_retention(
         else:
             assert store.session == previous
             assert store.operations == []
+
+
+@pytest.mark.asyncio
+async def test_management_touch_cannot_shorten_an_existing_result_hold(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    existing_expiry = datetime.now(UTC) + timedelta(minutes=10)
+    session = replace(_session(script_root), expires_at=existing_expiry)
+    store = _FakeStore(session)
+    runtime = _runtime(
+        script_root,
+        _FakeProvider(_FakeHandle()),
+        store,
+        auto_suspend_seconds=60,
+        reclaim_idle_seconds=120,
+    )
+
+    await touch_session_activity(runtime, _owner(), session.session_id)
+
+    assert store.session is not None
+    assert store.session.expires_at == existing_expiry
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [
+        readiness_module._session_after_submit_rearm,
+        readiness_module._session_after_missing_submit_run,
+    ],
+)
+def test_no_result_submit_rearm_cannot_shorten_an_existing_result_hold(
+    builder: Callable[..., DurableSessionRecord],
+) -> None:
+    session = _session(Path("."))
+    now = session.updated_at + timedelta(seconds=1)
+    existing_expiry = now + timedelta(minutes=10)
+    session = replace(session, expires_at=existing_expiry)
+
+    rearmed = builder(
+        session,
+        reclaim_idle_seconds=120,
+        updated_at=now,
+    )
+
+    assert rearmed.expires_at == existing_expiry
 
 
 @pytest.mark.asyncio
@@ -2106,7 +2184,10 @@ async def test_pre_submit_change_releases_slot_before_quarantine(tmp_path: Path)
 @pytest.mark.asyncio
 async def test_terminal_submit_fences_admission_before_lifecycle_write(tmp_path: Path) -> None:
     script_root = _script_root(tmp_path)
-    session = _session(script_root)
+    session = replace(
+        _session(script_root),
+        expires_at=datetime.now(UTC) + timedelta(seconds=60),
+    )
     store = _FakeStore(session)
     admission_blocked = False
 
@@ -2131,7 +2212,13 @@ async def test_terminal_submit_fences_admission_before_lifecycle_write(tmp_path:
             await super().set_lifecycle_policy(policy)
 
     handle = AdmissionProbeHandle()
-    runtime = _runtime(script_root, _FakeProvider(handle), store)
+    runtime = _runtime(
+        script_root,
+        _FakeProvider(handle),
+        store,
+        auto_suspend_seconds=60,
+        reclaim_idle_seconds=120,
+    )
     activated = ActivatedSession.create(
         handle=handle,
         session=session,
@@ -2151,7 +2238,9 @@ async def test_terminal_submit_fences_admission_before_lifecycle_write(tmp_path:
         fence=fence,
         records=AdmissionRecords.create(admitted, run),
     )
-    await store.adopt_terminal_run(replace(run, status="succeeded"))
+    await store.adopt_terminal_run(
+        replace(run, status="succeeded", result_available=True)
+    )
 
     assert await finalize_submit_operation(
         runtime,
@@ -2162,6 +2251,9 @@ async def test_terminal_submit_fences_admission_before_lifecycle_write(tmp_path:
     assert store.session is not None
     assert store.session.active_operation_id is None
     assert store.session.idle_policy_armed
+    assert (
+        store.session.expires_at - store.session.last_activity_at
+    ).total_seconds() == RESULT_HOLD_SECONDS
     operation = next(iter(store.durable_operations.values()))
     assert operation.kind == "submit_run"
     assert operation.state == "completed"

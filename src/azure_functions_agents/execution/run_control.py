@@ -94,6 +94,10 @@ class RunSubmissionDefinitiveFailureError(RunControlError):
     """Submission failed before a harness process could start."""
 
 
+class RunSubmissionPreLaunchStatusError(RunControlError):
+    """The existing-run status probe failed before any launch attempt."""
+
+
 class RunSubmissionIndeterminateError(RunControlError):
     """A harness launch may have started but journal acceptance was not confirmed."""
 
@@ -252,7 +256,7 @@ class SandboxRunControl:
         except RunJournalProtocolError:
             raise
         except Exception as exc:
-            raise RunSubmissionIndeterminateError(
+            raise RunSubmissionPreLaunchStatusError(
                 "Existing run state could not be confirmed before launch."
             ) from exc
 
