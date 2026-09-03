@@ -1,0 +1,47 @@
+{
+  "voice": "Microsoft Mark",
+  "rate": 0,
+  "volume": 100,
+  "segments": [
+    {
+      "id": "opening",
+      "text": "This is a live evidence story for serverless agents with isolated customer tool execution. Azure Functions keeps the Microsoft Agent Framework orchestration loop. API Management governs access to the Foundry model and read-only MCP. Every executable local tool runs in a fresh customer-owned Azure Container Apps Sandbox."
+    },
+    {
+      "id": "topology",
+      "text": "The topology is deliberately hybrid. The Hosted Skill endpoint and model loop remain in Functions. Model and Microsoft Learn MCP traffic pass through two isolated API Management surfaces. Only local executable tools cross into the sandbox. Application Insights records content-free lifecycle evidence across the path."
+    },
+    {
+      "id": "function",
+      "text": "For this package, one authorized streaming request ran against the retained Function App. It returned HTTP two hundred and the terminal done event. Client-observed completion was twenty-three point six seconds, with first output at ten point seven seconds. The Function request and runtime trace identifiers are preserved, while prompt and result content are not."
+    },
+    {
+      "id": "apim",
+      "text": "Inside the same bounded time window, API Management recorded two successful Foundry model calls and four successful MCP protocol posts. The model lane uses APIM managed identity to reach GPT four point one mini. Both APIs require a subscription, use W3C correlation, stream without buffering, and capture zero request or response body bytes."
+    },
+    {
+      "id": "sandbox",
+      "text": "Typed Sandbox Group inventory was zero before admission, then showed one running invocation-created sandbox. This run also exposed an important failure path: nonblocking delete initiation failed once. We did not intervene. After the twenty-minute orphan threshold, the existing ownership-scoped reaper returned the shared group to zero at twenty-three hundred UTC."
+    },
+    {
+      "id": "waterfall",
+      "text": "Application Insights captured a successful hybrid invocation span plus low-cardinality metrics for each stage. This live request spent two point eight six seconds creating the sandbox, eighty-two milliseconds uploading the package, three hundred five milliseconds reaching executor readiness, a fraction of a millisecond inside the customer tool, and forty-seven milliseconds handing off cleanup."
+    },
+    {
+      "id": "boundaries",
+      "text": "The security boundary is not a single shared identity. Functions has narrow Sandbox Group and storage access. API Management owns model-backend access. The sandbox workload identity can read one positive-control resource and is denied elsewhere. There is no anonymous ingress, egress is deny by default, and sensitive body logging stays disabled."
+    },
+    {
+      "id": "performance",
+      "text": "The prior optimized qualification provides the statistically useful view. Across twenty-one requests, sandbox creation averaged three point zero one seconds, upload one hundred thirty-five milliseconds, executor readiness three hundred thirty-three milliseconds, tool execution zero point three milliseconds, and cleanup handoff forty-nine point nine milliseconds. Runtime request average fell forty-eight percent, from twenty point five to ten point six five seconds."
+    },
+    {
+      "id": "takeaway",
+      "text": "The leadership takeaway is straightforward. We can preserve the simple Azure Functions Hosted Skills authoring and hosting experience, centralize model and MCP governance in API Management, and move only untrusted executable work across the isolation boundary. The remaining work is productization: lifecycle reliability, capacity policy, and operator experience."
+    },
+    {
+      "id": "closing",
+      "text": "The live path completed successfully, model and MCP traffic was governed, the sandbox lifecycle was observable, and final inventory returned to zero without changing or tearing down retained resources. Functions orchestrates. API Management governs. Azure Container Apps Sandbox isolates. Application Insights proves the path."
+    }
+  ]
+}
