@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "title": "Hybrid ACA Sandbox/APIM leadership demo",
-  "recorded_at": "2026-09-03",
+  "recorded_at": "2026-09-04",
   "live_request": {
     "window_start": "2026-09-03T22:31:54.6749887Z",
     "window_end": "2026-09-03T22:32:28.5140488Z",
@@ -17,6 +17,45 @@
     "function_duration_ms": 20317.2874,
     "function_operation_id": "c9cfb8d52497c15862277558e1a96a9c",
     "runtime_trace_id": "fc2ce69d3b9c95984da4c48e15b8d48f"
+  },
+  "portal_capture_request": {
+    "window_start": "2026-09-04T00:00:39.9521489Z",
+    "window_end": "2026-09-04T00:01:08.9715532Z",
+    "function_app": "func-hybrid-sbx-0902",
+    "route": "/agents/main/chatstream",
+    "prompt_id": "leadership-portal-evidence",
+    "http_status": 200,
+    "terminal_event": "done",
+    "client_first_event_ms": 12874.666,
+    "client_total_ms": 21893.113,
+    "function_duration_ms": 18258.073,
+    "operation_id": "f8e1f7aec373b17ab9d1ae1d730b2105",
+    "request_span_id": "89ec0a0ed2feec2e",
+    "correlated_trace_items": 2,
+    "apim_rows_in_exact_window": 0,
+    "apim_provenance_note": "Live APIM policy views prove retained governance; no unrelated gateway diagnostic row is presented as same-run evidence."
+  },
+  "portal_capture_provenance": {
+    "method": "Playwright persistent context with a session-local copy of the authenticated, device-compliant Microsoft Edge Work profile",
+    "source": "Live Azure Portal views of the retained resources",
+    "views": [
+      "Azure Functions Function App and deployed functions",
+      "API Management model and MCP API policy designers",
+      "Container Apps Sandbox Group overview",
+      "Application Insights end-to-end transaction details"
+    ],
+    "account_banner_excluded_at_capture": true,
+    "request_response_bodies_captured": false,
+    "redacted_fields": [
+      "account identity",
+      "subscription name and ID",
+      "build and commit hashes",
+      "InvocationId",
+      "ProcessId",
+      "HostInstanceId"
+    ],
+    "raw_captures_retained": false,
+    "temporary_browser_profile_retained": false
   },
   "live_apim": {
     "model": {
@@ -69,6 +108,17 @@
     "operator_cleanup_used": false,
     "observed_cleanup_path": "scheduled ownership-scoped reaper after the configured 1200-second orphan threshold"
   },
+  "portal_capture_inventory": {
+    "poll_observations": 29,
+    "polling_observed_nonzero": false,
+    "polling_note": "The transient sandbox completed between 8-10 second inventory polls; no active-state claim is made for this request.",
+    "final_observation": {
+      "observed_at": "2026-09-04T00:12:45.1317448Z",
+      "count": 0,
+      "states": {}
+    },
+    "operator_cleanup_used": false
+  },
   "qualification_reference": {
     "optimized_commit": "cb53d513964cb4ab225144f12c8018c49b25cd84",
     "request_count": 21,
@@ -89,34 +139,35 @@
       "evidence/aca-sandbox-lifecycle.png",
       "evidence/appinsights-waterfall.png"
     ],
-    "silent_master": "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-silent.mp4",
-    "enhanced_video": "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-demo.mp4",
-    "contact_sheet": "session-artifact:hybrid-sandbox-leadership-video/contact-sheet.png"
+    "previous_enhanced_video": "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-demo.mp4",
+    "silent_master": "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-live-portal-silent.mp4",
+    "enhanced_video": "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-live-portal.mp4",
+    "contact_sheet": "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-live-portal-contact-sheet.png"
   },
   "asset_metadata": {
     "evidence/function-hosted-skill.png": {
-      "bytes": 787901,
-      "sha256": "7764ac18f3aee83ef484c7b1ed420a21848701206320dc331c53a3dea7f80664",
+      "bytes": 254421,
+      "sha256": "c1d7e90e622423b0449b038da3432dc91ac0c4c367734106ca3393bf19746ca3",
       "dimensions": "1920x1080"
     },
     "evidence/apim-foundry-mcp.png": {
-      "bytes": 624556,
-      "sha256": "9bc5a3f58df1b02941de3af92c2c2ce6129950cc7def3c0ec2143b86fc80dab0",
+      "bytes": 140262,
+      "sha256": "308b1c6e14c1f6cc634ebcd94e3bf29c82422fc8051bc8db46a1d78fae3e0a22",
       "dimensions": "1920x1080"
     },
     "evidence/aca-sandbox-lifecycle.png": {
-      "bytes": 613138,
-      "sha256": "2bd158e01cada3bfa0623cc4007c7ed51440043fa366904042721218aa54e734",
+      "bytes": 125930,
+      "sha256": "dff6650bb97f67c5f2ceb95f5486553274b634a49a0b01ad19d2230050bbcc44",
       "dimensions": "1920x1080"
     },
     "evidence/appinsights-waterfall.png": {
-      "bytes": 604240,
-      "sha256": "dd4411c3194e0030731a1de8ab8197247dde56b9ce72f87bf2c8b1b746735f75",
+      "bytes": 179717,
+      "sha256": "1d2514b08cb94d3bb3d081c72ed089ea6413cbf6d5b5ce73e70177e50a2950bb",
       "dimensions": "1920x1080"
     },
-    "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-silent.mp4": {
-      "bytes": 16093393,
-      "sha256": "58ace724cc47b8bba351e9c1f8a61e01e79f5960bb1452aec1e28164641a87b7",
+    "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-live-portal-silent.mp4": {
+      "bytes": 39130640,
+      "sha256": "580ca564a54c0d5d08fe4434f633d670c1097e8eba18efb07996580c45dae7d9",
       "duration_seconds": 307.667,
       "video": "H.264 1920x1080 30fps",
       "audio": null
@@ -128,10 +179,17 @@
       "video": "H.264 1920x1080 30fps",
       "audio": "AAC 48kHz stereo; mean -23.5 dB, max -2.2 dB"
     },
-    "session-artifact:hybrid-sandbox-leadership-video/contact-sheet.png": {
-      "bytes": 553858,
-      "sha256": "5684d9e61524872fd73d953a01003e25a299a5b5688a5b1e2faace7dbbf666e8",
-      "dimensions": "1440x1080"
+    "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-live-portal.mp4": {
+      "bytes": 44142258,
+      "sha256": "f365a14698c238e170442411ae32bc2da08b66c4beb6769c99d03a5ba579a53d",
+      "duration_seconds": 307.667,
+      "video": "H.264 1920x1080 30fps",
+      "audio": "AAC 48kHz stereo; mean -23.4 dB, max -2.4 dB"
+    },
+    "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-live-portal-contact-sheet.png": {
+      "bytes": 398092,
+      "sha256": "a5242f640a23d3ba8792805c398955e600eb7c5951486d223345806c1082882d",
+      "dimensions": "1920x432"
     }
   }
 }
