@@ -1,47 +1,35 @@
 {
   "voice": "Microsoft Mark",
-  "rate": 0,
+  "rate": 1,
   "volume": 100,
   "segments": [
     {
-      "id": "opening",
-      "text": "This is a live evidence story for serverless agents with isolated customer tool execution. Azure Functions keeps the Microsoft Agent Framework orchestration loop. API Management governs access to the Foundry model and read-only MCP. Every executable local tool runs in a fresh customer-owned Azure Container Apps Sandbox."
-    },
-    {
       "id": "topology",
-      "text": "The topology is deliberately hybrid. The Hosted Skill endpoint and model loop remain in Functions. Model and Microsoft Learn MCP traffic pass through two isolated API Management surfaces. Only local executable tools cross into the sandbox. Application Insights records content-free lifecycle evidence across the path."
+      "text": "One live request crosses four governed surfaces: Functions, API Management, ACA Sandbox, and Application Insights."
     },
     {
-      "id": "function",
-      "text": "This is the retained Function App itself, not a mock. The live Functions blade shows the Hosted Skill chat, chat stream, history, and MCP surfaces, plus the ownership-scoped reaper, all enabled. The portal evidence run called agent main builtin chat stream, returned HTTP two hundred and terminal done, and completed as an eighteen point three second server request."
-    },
-    {
-      "id": "apim",
-      "text": "These are the live API Management policy design views. The Foundry model lane sets the governed backend, enforces a token limit, and emits token metrics. The Microsoft Learn MCP lane applies rate limiting and streaming forward behavior. The original bounded qualification window recorded two successful model calls and four successful MCP posts, with W three C correlation and zero body capture."
+      "id": "live-flow",
+      "text": "This is the deployed Hosted Skills chat UI. The prompt asks Microsoft Learn MCP for grounding, then asks the model to issue two independent local shell calls in parallel. The tool counter reaches three before the answer returns both safe markers. Model fan-out is parallel; the shared sandbox queues local execution through its file journal so isolation and ordering remain deterministic."
     },
     {
       "id": "sandbox",
-      "text": "The live Container Apps Sandbox Group portal now shows zero running, zero idle, and zero stopped sandboxes. The portal evidence request completed too quickly for the eight to ten second polling interval to catch its transient object. The earlier qualification run did record one running sandbox, followed by zero through the existing ownership-scoped reaper. No operator cleanup was used."
+      "text": "The run created one fresh sandbox in two point nine four seconds. Both shell commands stayed in that sandbox. Cleanup handoff took sixty-five point nine milliseconds, delete succeeded in one point six eight seconds, and typed inventory is now zero."
     },
     {
-      "id": "waterfall",
-      "text": "This is the same portal evidence request in Application Insights. The end-to-end transaction shows the Function request, HTTP two hundred, eighteen point three seconds, and two correlated trace items under operation f eight e one. Sensitive runtime identifiers are cropped, and bodies were never logged. Qualification telemetry separately measures three point zero one seconds to create, one hundred thirty-five milliseconds to upload, three hundred thirty-three milliseconds to ready, and forty-nine point nine milliseconds to hand off cleanup."
+      "id": "agent-trace",
+      "text": "This is the same live run from its Application Insights spans, not a generic trace. The thirty point nine five second hybrid invocation includes sandbox creation, a four point five five second model planning call, a six hundred twenty-three millisecond Microsoft Learn tool call, two local journal executions, a two point eight two second synthesis call, and cleanup. Sixty-eight dependency spans preserve the relationship while prompt text, tool arguments, results, and sandbox identifiers stay out of telemetry."
     },
     {
-      "id": "boundaries",
-      "text": "The security boundary is not a single shared identity. Functions has narrow Sandbox Group and storage access. API Management owns model-backend access. The sandbox workload identity can read one positive-control resource and is denied elsewhere. There is no anonymous ingress, egress is deny by default, and sensitive body logging stays disabled."
+      "id": "apim",
+      "text": "The same UTC window shows two successful model posts and five successful MCP posts through the AI Gateway. The live policies enforce backend routing, token governance, rate limits, streaming, W three C correlation, and zero body capture."
     },
     {
-      "id": "performance",
-      "text": "The prior optimized qualification provides the statistically useful view. Across twenty-one requests, sandbox creation averaged three point zero one seconds, upload one hundred thirty-five milliseconds, executor readiness three hundred thirty-three milliseconds, tool execution zero point three milliseconds, and cleanup handoff forty-nine point nine milliseconds. Runtime request average fell forty-eight percent, from twenty point five to ten point six five seconds."
+      "id": "demo-results",
+      "text": "For this demo app, the live request returned HTTP two hundred in thirty-one seconds and inventory returned to zero. Across twenty-one optimized qualification runs, create averaged three point zero one seconds, upload one hundred thirty-five milliseconds, readiness three hundred thirty-three milliseconds, and runtime fell forty-eight percent with zero request errors."
     },
     {
       "id": "takeaway",
-      "text": "The leadership takeaway is straightforward. We can preserve the simple Azure Functions Hosted Skills authoring and hosting experience, centralize model and MCP governance in API Management, and move only untrusted executable work across the isolation boundary. The remaining work is productization: lifecycle reliability, capacity policy, and operator experience."
-    },
-    {
-      "id": "closing",
-      "text": "The live product views show every retained component directly. Functions exposes the Hosted Skill. API Management governs model and MCP. Container Apps Sandbox ends at zero. Application Insights proves the request and trace. Nothing was changed or torn down."
+      "text": "Functions orchestrates. API Management governs. ACA Sandbox isolates. Application Insights proves the flow: live, end to end, and cleaned up."
     }
   ]
 }
