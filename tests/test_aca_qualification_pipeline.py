@@ -425,6 +425,87 @@ class TestSweepExecution:
         assert "delete_failures=1" in report
         assert "incomplete=2" in report
 
+    def test_delete_not_found_counts_as_already_absent_without_warning(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from azure_functions_agents.transport.transport_models import (
+            SandboxNotFoundError,
+        )
+
+        now = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
+
+        class _Adapter:
+            async def list_sandboxes(
+                self,
+                *,
+                labels: dict[str, str],
+            ) -> tuple[_Summary, ...]:
+                assert labels == {}
+                return (_Summary("already-gone", (now - timedelta(hours=7)).isoformat()),)
+
+            async def delete_sandbox(self, sandbox_id: str) -> None:
+                assert sandbox_id == "already-gone"
+                raise SandboxNotFoundError("Session backing sandbox was not found.")
+
+            async def close(self) -> None:
+                return None
+
+        outcome = asyncio.run(
+            sweep_with_adapter(
+                _Adapter(),
+                now=now,
+                dedicated_group_scope=_DEDICATED_GROUP_SCOPE_ACKNOWLEDGMENT,
+            )
+        )
+        report = render_sweep_report(outcome)
+
+        assert capsys.readouterr().out == ""
+        assert "stale=1" in report
+        assert "deleted=0" in report
+        assert "already_absent=1" in report
+        assert "delete_failures=0" in report
+        assert "incomplete=0" in report
+
+    def test_run_sweep_does_not_warn_when_all_stale_resources_are_already_absent(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        async def already_absent(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            return aca_qualification_pipeline.SweepOutcome(
+                selection=aca_qualification_pipeline.SweepSelection(
+                    stale_ids=("already-gone",),
+                    unknown_age_ids=(),
+                    recent_count=0,
+                ),
+                deleted_count=0,
+                already_absent_count=1,
+                delete_failure_count=0,
+                inspection_failure_count=0,
+            )
+
+        monkeypatch.setattr(aca_qualification_pipeline, "_sweep", already_absent)
+
+        result = run_sweep(
+            {
+                "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID": (
+                    "/subscriptions/example/resourceGroups/example/providers/"
+                    "Microsoft.App/sessionPools/example"
+                )
+            },
+            region="eastus",
+            dedicated_group_scope=_DEDICATED_GROUP_SCOPE_ACKNOWLEDGMENT,
+        )
+        output = capsys.readouterr().out
+
+        assert result == 0
+        assert "##vso[task.logissue type=warning]" not in output
+        assert "stale=1" in output
+        assert "already_absent=1" in output
+        assert "incomplete=0" in output
+
     def test_adapter_open_failure_is_warning_only_and_explicitly_incomplete(
         self,
         monkeypatch: pytest.MonkeyPatch,

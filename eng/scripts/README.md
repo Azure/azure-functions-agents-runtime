@@ -114,7 +114,9 @@ an external infrastructure invariant; the data-plane API cannot verify that the
 group is exclusive to CI, so using a shared group is unsafe. Unknown-age and
 recent resources are retained. Inspection, unknown-age, and delete failures
 emit Azure DevOps warnings, and the summary exposes incomplete and
-delete-failure counts while remaining nonblocking.
+delete-failure counts while remaining nonblocking. A stale sandbox that ACA
+idle-delete removes between inventory and deletion is reported as
+`already_absent`, without a failure warning.
 
 The sweep is pre-run rather than a destructive post-run reaper. Current-run
 qualification suites already assert their own cleanup; deleting immediately

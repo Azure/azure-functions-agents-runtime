@@ -1871,8 +1871,10 @@ ownership attestation.
 
 Every inspection failure, delete failure, and unknown-age resource emits a
 durable Azure DevOps warning with redacted or hashed detail. The nonblocking
-summary includes `incomplete` and `delete_failures`, and failed inspection uses
-unavailable counts rather than looking clean. The sweep runs before
+summary includes `already_absent`, `incomplete`, and `delete_failures`; a typed
+sandbox-not-found delete race increments `already_absent` without warning or
+incompleteness, and failed inspection uses unavailable counts rather than
+looking clean. The sweep runs before
 qualification because each suite already asserts current-run cleanup; immediate
 post-run deletion would mask idle-delete or controller-reconciliation failures.
 A report-only final group audit could falsely flag intentionally retained

@@ -297,6 +297,7 @@ class SweepOutcome:
 
     selection: SweepSelection | None
     deleted_count: int
+    already_absent_count: int
     delete_failure_count: int
     inspection_failure_count: int
     close_failure_count: int = 0
@@ -361,6 +362,7 @@ def render_sweep_report(outcome: SweepOutcome) -> str:
         recent = str(selection.recent_count)
     return (
         f"ACA pre-run sweep: stale={stale} deleted={outcome.deleted_count} "
+        f"already_absent={outcome.already_absent_count} "
         f"unknown_age={unknown_age} recent={recent} "
         f"delete_failures={outcome.delete_failure_count} "
         f"inspection_failures={outcome.inspection_failure_count} "
@@ -412,11 +414,16 @@ async def sweep_with_adapter(
     """Inspect and delete stale resources through an already-open adapter."""
     selection: SweepSelection | None = None
     deleted_count = 0
+    already_absent_count = 0
     delete_failure_count = 0
     inspection_failure_count = 0
     close_failure_count = 0
     try:
         _require_dedicated_group_acknowledgment(dedicated_group_scope)
+        from azure_functions_agents.transport.transport_models import (
+            SandboxNotFoundError,
+        )
+
         try:
             async with asyncio.timeout(_SWEEP_INSPECTION_TIMEOUT_SECONDS):
                 summaries = await adapter.list_sandboxes(labels={})
@@ -439,6 +446,8 @@ async def sweep_with_adapter(
                 try:
                     await adapter.delete_sandbox(sandbox_id)
                     deleted_count += 1
+                except SandboxNotFoundError:
+                    already_absent_count += 1
                 except Exception as error:
                     delete_failure_count += 1
                     _emit_ado_warning(
@@ -458,6 +467,7 @@ async def sweep_with_adapter(
     return SweepOutcome(
         selection=selection,
         deleted_count=deleted_count,
+        already_absent_count=already_absent_count,
         delete_failure_count=delete_failure_count,
         inspection_failure_count=inspection_failure_count,
         close_failure_count=close_failure_count,
@@ -490,6 +500,7 @@ def run_sweep(
     unavailable = SweepOutcome(
         selection=None,
         deleted_count=0,
+        already_absent_count=0,
         delete_failure_count=0,
         inspection_failure_count=1,
     )
@@ -528,7 +539,7 @@ def run_sweep(
         outcome = unavailable
 
     print(render_sweep_report(outcome))
-    if outcome.selection is not None and outcome.selection.stale_ids:
+    if outcome.deleted_count or outcome.delete_failure_count:
         _emit_ado_warning(
             "Stale ACA resources were found. Automatic cleanup through ACA "
             "idle-delete or controller reconciliation may have stopped working."
