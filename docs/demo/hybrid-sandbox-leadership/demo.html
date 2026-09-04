@@ -98,6 +98,20 @@
     .delay1 { animation-delay: .25s; } .delay2 { animation-delay: .55s; } .delay3 { animation-delay: .85s; }
     @keyframes fade { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
     .tiny { font-size: 17px; color: #7691aa; }
+    .scene.product-scene { padding: 0; background: var(--bg); }
+    .scene.product-scene.active { display: block; }
+    .product-view {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      object-fit: cover;
+      animation: product-zoom 32s ease-in-out both;
+      transform-origin: center;
+    }
+    @keyframes product-zoom {
+      from { transform: scale(1); }
+      to { transform: scale(1.025); }
+    }
   </style>
 </head>
 <body>
@@ -133,80 +147,20 @@
     <div class="caption">The model loop and MCP client never enter the sandbox; only local executable tools do.</div>
   </section>
 
-  <section class="scene" data-scene="3">
-    <div class="footer">02 · FUNCTION HOSTED SKILL</div>
-    <div class="toprow"><div><div class="eyebrow">Live Function invocation</div><h2>Hosted Skill completed a streaming agent turn</h2></div><div class="status"><span class="dot"></span>HTTP 200 · DONE</div></div>
-    <div class="grid grid-2" style="margin-bottom:62px">
-      <div class="card">
-        <div class="label">Function App</div><div class="metric small">func-hybrid-sbx-0902</div>
-        <p>Route: <span class="run-id">/agents/main/chatstream</span></p>
-        <div style="height:24px"></div>
-        <div class="label">Host operation</div><div class="run-id">c9cfb8d52497c15862277558e1a96a9c</div>
-        <p style="margin-top:18px">Body content intentionally not persisted.</p>
-      </div>
-      <div class="grid grid-2">
-        <div class="card green"><div class="label">Client-observed total</div><div class="metric">23.64s</div><p>Network + streaming</p></div>
-        <div class="card cyan"><div class="label">First event</div><div class="metric">10.70s</div><p>Client-observed</p></div>
-        <div class="card"><div class="label">Function duration</div><div class="metric">20.32s</div><p>Server request</p></div>
-        <div class="card orange"><div class="label">Local tool calls</div><div class="metric">1</div><p>ACA-executed</p></div>
-      </div>
-    </div>
-    <div class="caption">The public stream completed normally while telemetry retained only status, timing, and correlation.</div>
+  <section class="scene product-scene" data-scene="3">
+    <img class="product-view" src="evidence/function-hosted-skill.png" alt="Live Azure Functions Hosted Skill endpoints">
   </section>
 
-  <section class="scene" data-scene="4">
-    <div class="footer">03 · APIM GOVERNANCE</div>
-    <div class="eyebrow">Live APIM telemetry · same request window</div>
-    <h2>Foundry model and Microsoft Learn MCP traffic used isolated APIs</h2>
-    <div class="grid grid-2" style="margin-bottom:62px">
-      <div class="card">
-        <div class="toprow"><h3>Foundry model lane</h3><span class="status"><span class="dot"></span>2 / 2 successful</span></div>
-        <div class="metric">2.34s</div><div class="label">P50 gateway request</div>
-        <p style="margin-top:20px">API: <strong>hybrid-sandbox-spike-model</strong><br>Backend: gpt-4.1-mini via managed identity</p>
-        <div style="margin-top:22px"><span class="chip">Subscription protected</span><span class="chip">Unbuffered</span></div>
-      </div>
-      <div class="card cyan">
-        <div class="toprow"><h3>Read-only MCP lane</h3><span class="status"><span class="dot"></span>4 / 4 POST successful</span></div>
-        <div class="metric">80ms</div><div class="label">P50 gateway request</div>
-        <p style="margin-top:20px">API: <strong>hybrid-sandbox-spike-mcp</strong><br>Backend: Microsoft Learn MCP</p>
-        <div style="margin-top:22px"><span class="chip">W3C correlation</span><span class="chip">0-byte body capture</span></div>
-      </div>
-    </div>
-    <div class="caption">APIM recorded two model calls and four successful MCP protocol calls in the exact bounded window.</div>
+  <section class="scene product-scene" data-scene="4">
+    <img class="product-view" src="evidence/apim-foundry-mcp.png" alt="Live APIM model and MCP policy views">
   </section>
 
-  <section class="scene" data-scene="5">
-    <div class="footer">04 · ACA SANDBOX LIFECYCLE</div>
-    <div class="eyebrow">Typed Sandbox Group inventory</div>
-    <h2>Fresh isolation was observable—and the group returned to zero</h2>
-    <div class="card" style="margin-bottom:62px">
-      <div class="toprow"><div><div class="label">Sandbox Group</div><div class="metric small">sbg-hybrid-tools-0902</div></div><span class="chip">West US 2 · max 100</span></div>
-      <div class="timeline">
-        <div class="state"><div class="label">Before request</div><strong class="check">0 sandboxes</strong><p>Admission preflight</p></div>
-        <div class="state"><div class="label">22:38:32 UTC</div><strong style="color:var(--orange)">1 Running</strong><p>Invocation-created object retained after a failed delete initiation</p></div>
-        <div class="state"><div class="label">23:00:08 UTC</div><strong class="check">0 sandboxes</strong><p>Scheduled app-scoped reaper after the 20-minute orphan threshold</p></div>
-      </div>
-      <p style="margin-top:28px">No resource settings were changed. No operator cleanup was used.</p>
-    </div>
-    <div class="caption">Deletion initiation failed once; the existing ownership-scoped reaper converged inventory to zero without operator cleanup.</div>
+  <section class="scene product-scene" data-scene="5">
+    <img class="product-view" src="evidence/aca-sandbox-lifecycle.png" alt="Live ACA Sandbox Group zero inventory and lifecycle evidence">
   </section>
 
-  <section class="scene" data-scene="6">
-    <div class="footer">05 · APPLICATION INSIGHTS</div>
-    <div class="toprow"><div><div class="eyebrow">Live content-free runtime telemetry</div><h2>Lifecycle waterfall for trace fc2ce69d…</h2></div><span class="status"><span class="dot"></span>hybrid.invocation · success</span></div>
-    <div class="card" style="margin-bottom:62px">
-      <div class="waterfall">
-        <div>Sandbox create</div><div class="bartrack"><div class="bar" style="width:100%"></div></div><div class="value">2.859s</div>
-        <div>Package upload</div><div class="bartrack"><div class="bar" style="width:27%"></div></div><div class="value">82.0ms</div>
-        <div>Executor ready</div><div class="bartrack"><div class="bar" style="width:45%"></div></div><div class="value">304.7ms</div>
-        <div>Package verify</div><div class="bartrack"><div class="bar orange" style="width:4%"></div></div><div class="value">0.150ms</div>
-        <div>Tool transfer</div><div class="bartrack"><div class="bar" style="width:42%"></div></div><div class="value">285.7ms</div>
-        <div>Tool execution</div><div class="bartrack"><div class="bar orange" style="width:4%"></div></div><div class="value">0.231ms</div>
-        <div>Cleanup handoff</div><div class="bartrack"><div class="bar" style="width:22%"></div></div><div class="value">47.1ms</div>
-      </div>
-      <p class="tiny" style="margin-top:18px">Bars use a presentation scale; numeric durations are the live custom metric values.</p>
-    </div>
-    <div class="caption">Application Insights captured the lifecycle without prompt, arguments, tool output, credentials, or sandbox identifiers.</div>
+  <section class="scene product-scene" data-scene="6">
+    <img class="product-view" src="evidence/appinsights-waterfall.png" alt="Live Application Insights end-to-end transaction">
   </section>
 
   <section class="scene" data-scene="7">

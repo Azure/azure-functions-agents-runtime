@@ -13,19 +13,19 @@
     },
     {
       "id": "function",
-      "text": "For this package, one authorized streaming request ran against the retained Function App. It returned HTTP two hundred and the terminal done event. Client-observed completion was twenty-three point six seconds, with first output at ten point seven seconds. The Function request and runtime trace identifiers are preserved, while prompt and result content are not."
+      "text": "This is the retained Function App itself, not a mock. The live Functions blade shows the Hosted Skill chat, chat stream, history, and MCP surfaces, plus the ownership-scoped reaper, all enabled. The portal evidence run called agent main builtin chat stream, returned HTTP two hundred and terminal done, and completed as an eighteen point three second server request."
     },
     {
       "id": "apim",
-      "text": "Inside the same bounded time window, API Management recorded two successful Foundry model calls and four successful MCP protocol posts. The model lane uses APIM managed identity to reach GPT four point one mini. Both APIs require a subscription, use W3C correlation, stream without buffering, and capture zero request or response body bytes."
+      "text": "These are the live API Management policy design views. The Foundry model lane sets the governed backend, enforces a token limit, and emits token metrics. The Microsoft Learn MCP lane applies rate limiting and streaming forward behavior. The original bounded qualification window recorded two successful model calls and four successful MCP posts, with W three C correlation and zero body capture."
     },
     {
       "id": "sandbox",
-      "text": "Typed Sandbox Group inventory was zero before admission, then showed one running invocation-created sandbox. This run also exposed an important failure path: nonblocking delete initiation failed once. We did not intervene. After the twenty-minute orphan threshold, the existing ownership-scoped reaper returned the shared group to zero at twenty-three hundred UTC."
+      "text": "The live Container Apps Sandbox Group portal now shows zero running, zero idle, and zero stopped sandboxes. The portal evidence request completed too quickly for the eight to ten second polling interval to catch its transient object. The earlier qualification run did record one running sandbox, followed by zero through the existing ownership-scoped reaper. No operator cleanup was used."
     },
     {
       "id": "waterfall",
-      "text": "Application Insights captured a successful hybrid invocation span plus low-cardinality metrics for each stage. This live request spent two point eight six seconds creating the sandbox, eighty-two milliseconds uploading the package, three hundred five milliseconds reaching executor readiness, a fraction of a millisecond inside the customer tool, and forty-seven milliseconds handing off cleanup."
+      "text": "This is the same portal evidence request in Application Insights. The end-to-end transaction shows the Function request, HTTP two hundred, eighteen point three seconds, and two correlated trace items under operation f eight e one. Sensitive runtime identifiers are cropped, and bodies were never logged. Qualification telemetry separately measures three point zero one seconds to create, one hundred thirty-five milliseconds to upload, three hundred thirty-three milliseconds to ready, and forty-nine point nine milliseconds to hand off cleanup."
     },
     {
       "id": "boundaries",
@@ -41,7 +41,7 @@
     },
     {
       "id": "closing",
-      "text": "The live path completed successfully, model and MCP traffic was governed, the sandbox lifecycle was observable, and final inventory returned to zero without changing or tearing down retained resources. Functions orchestrates. API Management governs. Azure Container Apps Sandbox isolates. Application Insights proves the path."
+      "text": "The live product views show every retained component directly. Functions exposes the Hosted Skill. API Management governs model and MCP. Container Apps Sandbox ends at zero. Application Insights proves the request and trace. Nothing was changed or torn down."
     }
   ]
 }

@@ -23,14 +23,6 @@ SCENES = [
     {"id": "closing", "scene": 10, "duration": 24},
 ]
 
-STILLS = {
-    3: "function-hosted-skill.png",
-    4: "apim-foundry-mcp.png",
-    5: "aca-sandbox-lifecycle.png",
-    6: "appinsights-waterfall.png",
-}
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-root", required=True, type=Path)
@@ -41,9 +33,7 @@ def main() -> None:
     root = Path(__file__).resolve().parent
     page_url = (root / "demo.html").resolve().as_uri()
     clips = args.output_root / "raw"
-    stills = root / "evidence"
     clips.mkdir(parents=True, exist_ok=True)
-    stills.mkdir(parents=True, exist_ok=True)
     manifest: list[dict[str, object]] = []
 
     with sync_playwright() as playwright:
@@ -70,9 +60,6 @@ def main() -> None:
             page.goto(f"{page_url}?scene={item['scene']}", wait_until="load")
             page.locator(".scene.active").wait_for()
             time.sleep(1)
-            still_name = STILLS.get(int(item["scene"]))
-            if still_name:
-                page.screenshot(path=str(stills / still_name), full_page=True)
             time.sleep(float(item["duration"]) - 1)
             page.close()
             context.close()

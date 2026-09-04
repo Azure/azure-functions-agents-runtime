@@ -11,8 +11,8 @@ content-free Application Insights telemetry and lifecycle cleanup.
 - `storyboard.md` - 5:08 scene and narration plan.
 - `manifest.json` - exact request, telemetry window, trace IDs, stage metrics,
   inventory observations, and asset provenance.
-- `evidence/*.png` - 1920x1080 stills for Functions, APIM, ACA lifecycle, and
-  Application Insights.
+- `evidence/*.png` - 1920x1080 redacted live product views for Functions, APIM,
+  ACA lifecycle, and Application Insights.
 - `demo.html` and `record_scenes.py` - deterministic Playwright render source.
 - `narration.json` - narration text used for the enhanced cut.
 - Final video, silent master, and contact sheet are retained in the session
@@ -21,19 +21,30 @@ content-free Application Insights telemetry and lifecycle cleanup.
 
 ## Recording provenance
 
-The four evidence frames are not Azure Portal mockups. They are deterministic
-Playwright-rendered evidence panels populated from the retained deployment's
-read-only Azure CLI, Application Insights, APIM diagnostic, and typed ACA SDK
-query results. The exact values and correlation window are preserved in
-`manifest.json`. This approach avoided exporting or reusing authenticated portal
-SSO state and removed portal chrome, tenant identifiers, unrelated activity,
-and any chance of recording credential entry.
+The four evidence frames are not Azure Portal mockups. Playwright used a
+session-local copy of the already authenticated, device-compliant Edge Work
+profile to capture the retained Function App, APIM policy designer, ACA Sandbox
+Group, and Application Insights end-to-end transaction. No credential entry was
+recorded. The account banner was excluded at capture time. Subscription IDs,
+build hashes, InvocationId, ProcessId, HostInstanceId, and other internal
+identifiers were then cropped or visibly redacted before the screenshots entered
+the repository.
 
-The final MP4 was recorded as ten independent 1920x1080 Playwright scenes,
-stitched into a silent H.264 master, then enhanced non-destructively with Windows
-SAPI narration, visible captions/callouts, and a generated license-free ambient
-bed. Asset hashes, codecs, dimensions, duration, and audio levels are in the
-manifest.
+The Application Insights view is correlated to the portal evidence request from
+`2026-09-04T00:00:39.9521489Z` through
+`2026-09-04T00:01:08.9715532Z`, operation
+`f8e1f7aec373b17ab9d1ae1d730b2105`. The exact window produced no APIM
+diagnostic row, so the package does not mislabel unrelated gateway traffic as
+same-run evidence. APIM screenshots prove the retained live governance
+configuration; request counts and lifecycle timings remain tied to the earlier
+qualification run identified separately in `manifest.json`.
+
+The enhanced MP4 was recorded as ten independent 1920x1080 Playwright scenes.
+Scenes 3-6 animate the redacted product captures with a restrained push-in; the
+other scenes preserve the architecture, boundary, and measured qualification
+story. The scenes were stitched into a new silent H.264 master and mixed
+non-destructively with Windows SAPI narration, visible callouts, and a generated
+license-free ambient bed. The original presentation-led cut remains preserved.
 
 ## Safe rerun
 
@@ -73,7 +84,13 @@ exist; this package does not provision or configure it.
 5. Poll typed Sandbox Group inventory without deleting anything until it returns
    to zero. A failed nonblocking delete initiation must rely on the already
    configured lifecycle/reaper backstop.
-6. Render with:
+6. For authenticated portal captures, copy the Edge profile to a session-local
+   temporary directory, launch system Edge through Playwright
+   `launch_persistent_context`, and exclude the top 70 pixels containing the
+   account banner. Never commit or retain the temporary profile. Crop or redact
+   subscription IDs, account identity, build hashes, InvocationId, ProcessId, and
+   HostInstanceId before publication.
+7. Render with:
 
    ```powershell
    uv run --with playwright python docs\demo\hybrid-sandbox-leadership\record_scenes.py `
@@ -81,7 +98,7 @@ exist; this package does not provision or configure it.
      --chrome "C:\Program Files\Google\Chrome\Application\chrome.exe"
    ```
 
-7. Stitch the scene manifest, generate narration and the ambient bed, mix a
+8. Stitch the scene manifest, generate narration and the ambient bed, mix a
    separate enhanced output, then inspect a contact sheet and FFprobe output.
    Never overwrite the silent master.
 
@@ -89,10 +106,11 @@ exist; this package does not provision or configure it.
 
 | Claim | Evidence |
 | --- | --- |
-| Hosted Skill request succeeded | `manifest.json` live request status, terminal event, Function operation |
-| Foundry model and MCP used APIM | Live APIM request counts in the exact telemetry window; `apim-foundry-mcp.png` |
+| Hosted Skill surface is deployed | Live Function App capture; `function-hosted-skill.png` |
+| Portal evidence request succeeded | Operation `f8e1f7aec373b17ab9d1ae1d730b2105`; `appinsights-waterfall.png` |
+| Foundry model and MCP are governed by APIM | Live APIM policy designer; qualification request counts remain separately attributed; `apim-foundry-mcp.png` |
 | Local tool ran through ACA Sandbox | Runtime tool metric plus sandbox create/upload/readiness/tool spans |
-| Scheduled reaper returned inventory to zero | Typed pre/active/final observations in `manifest.json` |
+| Sandbox inventory returned to zero | Live Sandbox Group portal plus typed final observation in `manifest.json` |
 | Telemetry is content-free | Projected metrics and API diagnostic configuration; no body fields in assets |
 | Optimized runtime average fell 48.03% | `docs/decisions/0009-hybrid-sandbox-tool-execution-results.json`, n=21 clean window |
 
