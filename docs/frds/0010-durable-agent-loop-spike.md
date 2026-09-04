@@ -41,10 +41,15 @@ customer executable tools run in customer-owned ACA Sandboxes.
 The clarified target is a reasoning model that may alternate among many model
 steps and tool batches, changing direction after every result. The current
 MAF `1.3.*` pin is not sufficient for that target's stateless reasoning replay.
-The spike therefore has an explicit prerequisite to qualify and adopt MAF
-`>=1.13`, which supports background Responses and automatic
-`reasoning.encrypted_content` capture/replay, or to build an equivalent
-provider adapter if the upgrade is blocked.
+The spike therefore has an explicit prerequisite to qualify and adopt the
+latest compatible MAF package set available on 2026-09-04:
+`agent-framework-core==1.17.0`, `agent-framework-openai==1.14.2`, and
+`agent-framework-foundry==1.12.0`. The provider packages require core
+`>=1.17.0`. The latest Durable Extension packages remain preview
+`agent-framework-durabletask==1.0.0b260730` and
+`agent-framework-azurefunctions==1.0.0b260730`. If this exact upgrade cannot
+preserve the runtime's existing behavior, an equivalent provider adapter is the
+fallback; the reasoning-first spike does not silently stay on MAF 1.3.
 
 This FRD prepares an architecture review only. It adds no product code, public
 schema, deployment, Azure resource, or Azure call.
@@ -83,13 +88,13 @@ experience while moving the inner loop boundary to Durable checkpoints.
   back to the model. This makes it a useful policy, telemetry, or experimental
   replay-cache interception point. It does not turn middleware into a Durable
   scheduler or make the live Python call stack rehydratable.
-- Exact `agent-framework-core==1.3.0` inspection found only three middleware
-  categories: `AgentMiddleware` around one complete `Agent.run()`,
+- Historical `agent-framework-core==1.3.0` inspection found the three native
+  middleware categories: `AgentMiddleware` around one complete `Agent.run()`,
   `ChatMiddleware` around each individual model service call, and
   `FunctionMiddleware` around each individual tool call. Current MAF main adds
-  Agent Hooks, `MiddlewareBundle`, `MiddlewareFailure`, and an experimental
-  `AgentLoopMiddleware`, but those either map back onto the same three seams or
-  wrap whole runs; they are absent from the pinned package and none is a
+  Agent Hooks, `MiddlewareBundle`, `MiddlewareFailure`, and
+  `AgentLoopMiddleware`; all are present in the target core `1.17.0` baseline.
+  They either map back onto the same three seams or wrap whole runs; none is a
   workflow/Durable scheduler. There is no workflow executor middleware.
 - MAF 1.3's public
   `require_per_service_call_history_persistence=True` installs
@@ -108,15 +113,17 @@ experience while moving the inner loop boundary to Durable checkpoints.
   `client.function_invocation_configuration["enabled"] = False` executes no
   function. This is the viable public seam for receiving model-produced
   function-call contents without running the tools.
-- An exact 1.3 fake-client probe through a full `Agent.run()` confirmed this
+- An exact 1.3 fake-client probe through a full `Agent.run()` established the
+  historical behavior: this
   seam performs one model call, executes zero tool implementations, returns
   ordered `function_call` contents, and still traverses the Agent and Chat
-  middleware/context preparation layers.
-- The branch pins MAF `1.3.*`, while current upstream documentation and tests
-  continue to evolve. Before product implementation, the contract simulator
-  must prove the exact pinned client returns ordered function-call contents
-  with auto-invocation disabled. Any MAF upgrade is a separate reviewed
-  dependency decision.
+  middleware/context preparation layers. The same contract must pass on the
+  target core `1.17.0`/OpenAI `1.14.2` set before implementation.
+- The branch currently pins MAF `1.3.*`; the target package set above is a
+  deliberate breaking-risk upgrade, not a loose lower bound. Before product
+  implementation, the contract and compatibility suites must prove the exact
+  target clients preserve runner, APIM, MCP, middleware, history, telemetry,
+  usage, streaming, and tool behavior.
 - MAF's ordinary `Message` serialization excludes provider
   `raw_representation`, but explicit `Content` fields (`id`, `call_id`, name,
   arguments, result, annotations, protected reasoning data, and
@@ -245,10 +252,13 @@ experience while moving the inner loop boundary to Durable checkpoints.
 The model activity should use a one-step `Agent.run()` rather than a raw client
 call so the normal instruction, tool-schema, Agent middleware, and supported
 context-provider preparation stay centralized. Its client instance is
-dedicated to durable inference because `function_invocation_configuration` is
-client-level in MAF 1.3, not a per-run option. Disabling invocation is the
-execution boundary and applies even to lazily materialized MCP functions. A
-known-safe `FunctionMiddleware` guard may intercept without calling
+dedicated to durable inference as a conservative isolation choice: the target
+MAF baseline exposes construction helpers and mutable runtime inputs, but a
+shared client's invocation mode must never race another concurrent run.
+Per-run control is evaluated in the exact target contract tests; the dedicated
+client remains the fail-closed default. Disabling invocation is the execution
+boundary and applies even to lazily materialized MCP functions. A known-safe
+`FunctionMiddleware` guard may intercept without calling
 `call_next()`, record a violation, and terminate the loop if any invocation is
 attempted. After `Agent.run()` returns, the activity checks that violation flag
 and fails rather than accepting the synthetic result. The activity must prove
@@ -313,7 +323,11 @@ Function activity window, `start_model_step_v1` starts a background Response
 and returns its continuation token; the orchestrator uses Durable timers and
 `poll_model_step_v1` activities until the same provider operation completes.
 
-### 4.1.2 Middleware and checkpoint alternatives proven on MAF 1.3
+### 4.1.2 Middleware and checkpoint alternatives on MAF 1.17
+
+The semantic seams are validated on target core `1.17.0`. Historical 1.3 probes
+remain regression evidence for one-step execution and failure windows, not the
+shipping contract.
 
 | Surface | Exact granularity | Durable-loop use |
 | --- | --- | --- |
@@ -322,7 +336,8 @@ and returns its continuation token; the orchestrator uses Durable timers and
 | `FunctionMiddleware` | Every individual function call | Tool policy, routing, result memoization, or graceful loop termination. It cannot schedule a child activity into its caller's orchestration history. |
 | Per-service-call history | Before/after each model inference | Useful audit/session feature; insufficient after a tool completes but before the next model response is saved. |
 | Context/History providers | Normally before/after one complete run | Reuse only when their state is explicitly included in the durable model-step contract. |
-| Agent Hooks (current main only) | Mapped to agent/chat/function seams | No new durability boundary; unavailable on 1.3. |
+| Agent Hooks / `MiddlewareBundle` | Mapped to agent/chat/function seams | Complete fail-closed control bundle on 1.17; no new durability boundary. |
+| `AgentLoopMiddleware` | Re-invokes whole Agent runs | Useful harness behavior, but each nested run remains nondurable unless driven by the explicit orchestration. |
 | MAF Workflow checkpoint | End of a workflow superstep/executor | Coarse durability only because an Agent executor awaits a whole `Agent.run()`. |
 
 A paired chat/function middleware replay journal is technically viable as a
@@ -393,6 +408,22 @@ so it can later converge rather than fork semantically.
 
 ### 4.1.4 AgentMiddleware as starter vs. middleware as scheduler
 
+`AgentMiddleware` itself is only the outer run seam. It can mutate
+`AgentContext.messages`, tools/options, `client_kwargs`,
+`function_invocation_kwargs`, metadata, and result; it cannot receive each
+inner model/tool callback by itself. On the latest MAF baseline, one application
+can install a complete `MiddlewareBundle` (or Agent Hooks bundle) containing:
+
+- an Agent middleware for start/admission/final output;
+- a Chat middleware or custom `SupportsChatGetResponse` client for each model
+  request/response; and
+- a Function middleware for each framework-executed tool request/result.
+
+Agent Hooks standardizes `pre_model_call`/`post_model_call` and
+`pre_tool_call`/`post_tool_call`, but still implements them on those same Chat
+and Function middleware seams. It is a control boundary, not a Durable
+scheduler.
+
 An `AgentMiddleware` can validly be the common **starter adapter**:
 
 1. It receives the top-level request-turn `AgentContext`.
@@ -414,6 +445,42 @@ orchestration, raise an external event, or await/poll external state, but the
 parent activity remains one in-flight at-least-once activity and its Python
 stack is lost on worker failure. External events also do not synchronously
 return a child activity result into that frame.
+
+A custom client/middleware bridge could implement this protocol:
+
+```text
+ChatMiddleware / proxy client
+  -> write ModelStepRequested(run_id, step, messages_hash)
+  -> signal parent orchestration
+parent orchestration
+  -> call model activity
+  -> call publish_step_result_v1 activity
+publish_step_result_v1
+  -> write ModelStepCompleted(step, response_ref)
+ChatMiddleware / proxy client
+  -> poll/read response_ref
+  -> set context.result
+
+FunctionMiddleware
+  -> write ToolStepRequested(run_id, step, call_id, request_hash)
+  -> signal parent orchestration
+parent orchestration
+  -> call MCP/ACA activity
+  -> call publish_step_result_v1 activity
+publish_step_result_v1
+  -> write ToolStepCompleted(call_id, result_ref)
+FunctionMiddleware
+  -> poll/read result_ref
+  -> set context.result
+```
+
+This is technically workable as a durable RPC/replay adapter. The middleware
+does not itself call `context.call_activity`; it has no
+`DurableOrchestrationContext`. A normal Durable client can only start, signal,
+query, or terminate an orchestration. The parent orchestrator receives the
+request, yields the real activity, and publishes the reply.
+All journal writes are performed by activities/entities; the orchestrator
+remains deterministic and performs no direct I/O.
 
 There are two valid reconstructions:
 
@@ -601,7 +668,7 @@ explicit `schema_version`. Unknown versions fail closed.
 | `ContentRefV1` | Opaque storage reference, SHA-256 integrity hash, byte length, media/content type, encryption/key version metadata, retention class. Never a SAS/token/credential. |
 | `MAFMessageBundleV1` | Opaque ref to ordered `Message.to_dict()` envelopes containing text, function calls/results, and protected/encrypted reasoning fields required by the qualified Responses path; MAF/API/model/version binding and canonical bundle hash. A supplemental provider-item ref is allowed only when a conformance test proves the normalized envelope loses required semantics. |
 | `WorkingContextRefV1` | Exact bundle sent to the next model step: compaction generation, summary ref, retained atomic message-group refs/boundaries, source audit range/hash, estimated and actual token/byte counts, parent working-context ref, and model/tokenizer/version binding. |
-| `ModelOperationV1` | Deterministic local model-step key, provider response ID/serialized continuation token, exact APIM/backend-resource/deployment/API binding, `queued`/`in_progress`/terminal state, poll count/deadline, and eventual decision-bundle ref. The local key is correlation, not provider idempotency. |
+| `ModelOperationV1` | Deterministic local model-step key; provider response ID/serialized continuation token; exact APIM/backend-resource/deployment/API binding; accepted time; provider/run operation deadline; last poll/result-retrieval time; `queued`/`in_progress`/terminal state; whether polling/retrieval consumes or refreshes availability; poll count; and eventual decision-bundle ref. The local key is correlation, not provider idempotency. |
 | `ToolManifestV1` | Canonical sandbox-discovered tool names, descriptions, parameter schemas, provenance, package/catalog hash, and manifest hash frozen by `turn_init_v1`. |
 | `WorkspaceRefV1` | Immutable verified archive of the bounded local workspace after one call, with parent ref, package/manifest binding, integrity hash, byte/file caps, and no credential material. |
 | `ModelDecisionEnvelopeV1` | Run/step identity, deterministic model call key, provider response/call ID when returned, model/deployment hash, MAF message-bundle ref, ordered tool-call summaries, usage/cost metadata, finish reason, retry attempt metadata. |
@@ -714,9 +781,9 @@ ambiguous attempt.
   `AgentSession`/HistoryProvider unless its complete state is part of the
   versioned step contract, and supplies the explicit durable MAF message bundle
   instead, preventing auto-injected/double history persistence;
-- uses a qualified reasoning model through MAF `>=1.13` (or a validated
-  equivalent adapter), preserving encrypted reasoning required for the next
-  stateless tool-loop step;
+- uses the qualified latest MAF package set (core `1.17.0`, OpenAI `1.14.2`,
+  Foundry `1.12.0`) or a validated equivalent adapter, preserving encrypted
+  reasoning required for the next stateless tool-loop step;
 - performs one model request, persists the complete normalized MAF response
   messages and raw call arguments by ref, and returns a bounded decision
   envelope;
@@ -741,11 +808,22 @@ not load-balance or fail over a poll to another backend.
 
 Provider retention and privacy are coupled to background execution. With
 `store=False`, the provider may retain a background operation only for a short
-temporary polling window. Gate 0 measures the selected Azure deployment's
-actual window and caps the model-step deadline below it with safety margin. If
-that window cannot cover the target inference, the customer must explicitly
-approve the provider's `store=True` retention contract or the long-background
-path is no-go. The private runtime never silently changes storage mode.
+temporary polling window. Gate 0 measures three separate properties on the
+selected Azure deployment:
+
+1. maximum accepted-to-terminal background operation duration;
+2. terminal-to-expiry result retrieval window; and
+3. whether polling/retrieval is repeatable, one-shot, or refreshes expiry.
+
+The model-step deadline is derived from (1) and the run budget; polling cadence
+and recovery margin are derived from (2)-(3). If the provider's stateless
+operation duration cannot exceed the Function activity window, `store=False`
+does not solve long inference. The customer must then explicitly approve the
+provider's `store=True` retention contract or the long-background path is
+no-go. A one-shot terminal read is copied to the customer-owned result store
+before any response is exposed; loss before that copy is an explicit
+unrecoverable/ambiguous model outcome. The private runtime never silently
+changes storage mode.
 
 There is one Durable activity instance per model call and per remote tool call.
 For local execution, one `local_tool_wave_v1` activity is a wave of exactly one
@@ -1002,7 +1080,7 @@ are intentionally conservative and may be tightened by measured evidence:
 | Budget | Candidate spike cap |
 | --- | --- |
 | Model steps | 48 maximum; correctness qualification uses at least 16 |
-| One background model step | Less than the measured provider `store=False` retention window minus safety margin; 2-second initial poll with bounded exponential backoff to 30 seconds |
+| One background model step | Less than the measured provider accepted-to-terminal maximum and remaining run budget; 2-second initial poll with bounded exponential backoff to 30 seconds; terminal retrieval completes inside its separately measured expiry window |
 | Total tool calls | 128 |
 | Parallel safe remote reads | 4 |
 | Local sandbox mutations | 1 at a time |
@@ -1116,10 +1194,10 @@ For each planned seam, kill/restart the worker and assert:
 
 | Gate | Go | No-go consequence |
 | --- | --- | --- |
-| Public MAF one-step seam | Pinned dependency executes exactly one model request, exposes ordered function-call contents, and invokes zero tools with auto-invocation disabled in 100% of contract tests. The Agent has no implicit session/history provider, every context provider is allow-listed with state in the step contract, and the provider request is a pure function of the durable message bundle and frozen config. | **Architecture no-go:** do not implement by middleware or private MAF internals. Revisit only with a supported public hook. |
-| MAF reasoning baseline | A reviewed upgrade to MAF `>=1.13` (or equivalent adapter) preserves the existing runtime contract and provides stateless encrypted-reasoning replay plus background Responses through APIM. | **Architecture no-go:** the clarified reasoning-first spike does not fall back to MAF 1.3/non-reasoning behavior. |
+| Public MAF one-step seam | Core `1.17.0` + OpenAI `1.14.2` execute exactly one model request, expose ordered function-call contents, and invoke zero tools with auto-invocation disabled in 100% of contract tests. The Agent has no implicit session/history provider, every context provider is allow-listed with state in the step contract, and the provider request is a pure function of the durable message bundle and frozen config. | **Architecture no-go:** do not implement by middleware or private MAF internals. Revisit only with a supported public hook. |
+| MAF reasoning baseline | A reviewed upgrade to core `1.17.0`, OpenAI `1.14.2`, Foundry `1.12.0` (or equivalent adapter) preserves the existing runtime contract and provides stateless encrypted-reasoning replay plus background Responses through APIM. | **Architecture no-go:** the clarified reasoning-first spike does not fall back to MAF 1.3/non-reasoning behavior. |
 | MAF-envelope transcript fidelity | The selected reasoning-model APIM Responses path passes a >=3-step in-process-versus-durable comparison with item-equivalent reasoning/function-call/function-result transcripts after `Message.to_dict()`/`from_dict()`; invalid/missing encrypted reasoning fails closed. | **Architecture no-go:** use a supplemental provider-item adapter only if it passes the same comparison; never silently lose required content. |
-| Background retention and recovery | Measure the selected Azure backend's `store=False` retention and cap the step below it. Once a response ID/token is acknowledged, worker loss during polling resumes the same backend-bound operation without reissue and commits terminal output once. A lost start acknowledgement is surfaced as a known duplicate-cost/orphan window, not hidden. | Use an explicitly approved `store=True` contract if it meets privacy requirements; otherwise **architecture no-go** for model steps longer than the measured stateless window. |
+| Background retention and recovery | Measure accepted-to-terminal maximum duration, terminal-result expiry, and repeatable/one-shot/refreshing retrieval semantics separately. Once a response ID/token is acknowledged, worker loss during polling resumes the same backend-bound operation without reissue; a one-shot terminal result is copied once before exposure. A lost start acknowledgement is surfaced as a known duplicate-cost/orphan window. | Use an explicitly approved `store=True` contract if it meets privacy requirements; otherwise **architecture no-go** when stateless operation duration cannot exceed the activity window or terminal retrieval cannot survive the recovery margin. |
 | APIM response affinity | Start/get/cancel for one background response remain pinned to the accepting backend resource/deployment and survive ordinary gateway routing; failover never turns a valid response ID into an unexplained 404. | **Architecture no-go** for background mode until affinity is enforceable. |
 | Multi-hour context/compaction | A >=16-step scripted reasoning loop changes direction, compacts working context deterministically, preserves atomic reasoning/call/result groups and full audit history, and remains within measured token/cost/context caps. | **Architecture no-go** for the clarified multi-hour target; a short-turn spike alone is insufficient. |
 | Durable Extension convergence | A prototype accepts structured tool results, fences the active turn/pending calls, performs one declaration-only Agent inference per entity call across its supported MAF range, and represents remote MCP tools as a frozen declaration manifest with orchestrator-side dispatch. | Use the private model-step blueprint; record the upstream gap rather than weakening semantics. |
@@ -1147,10 +1225,10 @@ production design. It must not be waived by documenting the failure.
    1.6.0), prove entity registration/call/signal/fencing and host recovery on
    each claimed backend; prove the singleton-orchestration + block-Blob lease
    fallback before selecting the session substrate.
-2. **MAF upgrade and reasoning proof:** qualify MAF `>=1.13` against current
-   runner, APIM, MCP, telemetry, history, and tool contracts; prove encrypted
-   reasoning replay and background continuation through the selected Azure
-   model/API.
+2. **MAF upgrade and reasoning proof:** qualify core `1.17.0`, OpenAI
+   `1.14.2`, and Foundry `1.12.0` against current runner, APIM, MCP, telemetry,
+   history, and tool contracts; prove encrypted reasoning replay and background
+   continuation through the selected Azure model/API.
 3. **Contract and loop simulator:** implement only pure versioned contracts,
    deterministic classification, fake content refs, the pinned MAF one-step
    `Agent.run()` contract, MAF message-envelope equivalence, budgets, and replay
@@ -1246,37 +1324,45 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
 | 24 | Durable Extension reuse | Consume unchanged / structured-continuation enhancement / ignore extension | Prefer an upstream `continue_with_tool_results` entity operation; use the private blueprint until structured inputs, pending-call validation, and dependency compatibility exist. | Agent deep dive | 2026-09-04 |
 | 25 | Middleware replay journal | Primary scheduler / comparative baseline / reject | Keep it as a fault-tested fast-forward baseline, not the source of first-class Durable step checkpoints. | Agent deep dive | 2026-09-04 |
 | 26 | Alternate one-step seam | Declaration-only / `additional_tools` / disabled invocation | Use disabled invocation as the broad fail-safe (including lazy MCP). Evaluate `additional_tools`; reserve declaration-only tools for the upstream structured-continuation path. | Agent deep dive | 2026-09-04 |
-| 27 | Reasoning-model baseline | Stay on MAF 1.3 / upgrade MAF / custom provider adapter | Require a qualified MAF `>=1.13` upgrade for stateless encrypted-reasoning replay and background continuation; use an adapter only if upgrade compatibility fails. | Human + Agent | 2026-09-04 |
+| 27 | Reasoning-model baseline | Stay on MAF 1.3 / latest compatible MAF set / custom provider adapter | Target core `1.17.0`, OpenAI `1.14.2`, and Foundry `1.12.0`; use an adapter only if exact upgrade compatibility fails. | Human + Agent | 2026-09-04 |
 | 28 | Long individual inference | Hold activity / retry whole model call / background Response | Persist provider continuation tokens and poll the same operation through Durable timers/activities. | Human + Agent | 2026-09-04 |
 | 29 | AgentMiddleware role | Own loop / start orchestration / observe only | Permit it as an idempotent starter that stops local execution; the orchestrator, not later middleware callbacks, owns scheduling. | Human + Agent | 2026-09-04 |
 | 30 | Recovery model | Serialize Python stack / logical state replay / rerun everything | Reconstruct a fresh one-step Agent from explicit durable messages, calls, results, continuation tokens, budgets, and policy; never require call-stack serialization. | Human + Agent | 2026-09-04 |
-| 31 | Background retention | Assume `store=False` indefinitely / explicit `store=True` / measure and gate | Measure stateless provider retention and cap below it; require explicit customer approval for longer provider storage or fail the long-background path. | Agent review | 2026-09-04 |
+| 31 | Background retention | Assume `store=False` indefinitely / explicit `store=True` / measure and gate | Separately measure max operation duration, terminal-result expiry, and retrieval semantics; require explicit customer approval for longer provider storage or fail the long-background path. | Agent review | 2026-09-04 |
 | 32 | Background APIM routing | Normal backend pool / sticky backend binding / direct model bypass | Persist and enforce the accepting backend resource/deployment for start/get/cancel; no failover of an existing response ID. | Agent review | 2026-09-04 |
 | 33 | Multi-hour context | Resend unbounded transcript / discard history / immutable audit plus checkpointed compaction | Preserve full audit history while generating a bounded working-context summary with atomic reasoning/call/result groups. | Agent review | 2026-09-04 |
+| 34 | Latest MAF package set | Loose `>=1.13` / exact current set / stay pinned | Target core `1.17.0`, OpenAI `1.14.2`, and Foundry `1.12.0`; Durable Extension remains `1.0.0b260730`. Advance only after compatibility gates. | Human + Agent | 2026-09-04 |
+| 35 | Middleware-to-Durable bridge | Middleware calls activities / event-journal RPC / explicit loop | Middleware may signal and await an external journal, but only the parent orchestrator yields activities. Keep the RPC bridge as a short-turn comparison; use the explicit loop for multi-hour runs. | Human + Agent | 2026-09-04 |
 
 ## 6. Test plan
 
-- [ ] Contract: pinned MAF one-step client exposes ordered function-call contents
-  and invokes no tool.
-- [ ] Dependency: MAF `>=1.13` upgrade passes runner, APIM, MCP, telemetry,
-  history, and tool compatibility suites before reasoning mode is enabled.
+- [ ] Contract: core `1.17.0` + OpenAI `1.14.2` one-step client exposes ordered
+  function-call contents and invokes no tool.
+- [ ] Dependency: core `1.17.0`, OpenAI `1.14.2`, and Foundry `1.12.0`
+  pass runner, APIM, MCP, telemetry, history, streaming, usage, and tool
+  compatibility suites before reasoning mode is enabled.
 - [ ] Contract: the qualified reasoning Responses surface preserves normalized
   MAF encrypted-reasoning/function-call/function-result messages across a
   multi-step durable round trip with item equivalence to the in-process
   control.
 - [ ] Background model integration: start/poll/resume uses one provider response
-  ID across worker loss, returns a stable continuation token while pending, and
-  never reissues an accepted reasoning request.
-- [ ] Contract: exact MAF 1.3 one-step `Agent.run()` performs one inference and
-  zero tool implementations with auto-invocation disabled; one/multiple
-  proposed calls preserve order. Compare declaration-only and
-  `additional_tools` behavior without weakening the primary guard.
+  ID across worker loss after acknowledgement, returns a stable continuation
+  token while pending, copies one-shot terminal output before exposure, and
+  separately detects/accounts for the lost-start-ack duplicate window.
+- [ ] Historical regression: exact MAF 1.3 one-step behavior is retained as a
+  comparison only. All one/multiple-call order, disabled-invocation,
+  declaration-only, and `additional_tools` assertions must independently pass
+  on core `1.17.0`.
 - [ ] Contract: the one-step Agent uses an explicit context-provider allowlist,
   has no implicit session/history state, and emits the same provider request
   after reconstructing only its versioned durable inputs.
 - [ ] Contract: per-service-call history alone reproduces the tool-result crash
   gap, while paired chat/function replay journaling fast-forwards the same
   deterministic scenario without repeating its side effect.
+- [ ] Comparative middleware bridge: latest `MiddlewareBundle` routes model/tool
+  requests through a parent-orchestration event journal, proves deterministic
+  replay after driver loss, and demonstrates the configured activity-timeout
+  ceiling rather than claiming multi-hour support.
 - [ ] Upstream compatibility: DurableAIAgent structured tool-result
   continuation preserves roles/call IDs, validates the latest pending-call set,
   fences the whole turn, dedupes redelivery, and supports the extension's MAF
@@ -1349,7 +1435,7 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
   reasoning-first clarification then added the MAF upgrade, background
   continuation/retention/affinity, middleware-starter, logical-reconstruction,
   and context-compaction requirements; these corrections are recorded in
-  Decisions 18-33.
+  Decisions 18-35.
 - **Human sign-off:** Pending. This FRD remains `In review`; set
   `status: Finalized` only after explicit human approval. No product
   implementation may begin before that gate.
