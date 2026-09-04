@@ -46,9 +46,10 @@ only resources whose creation time proves they are strictly older than six
 hours. Recent resources and resources with missing or unparseable age are never
 deleted. Every unknown-age resource, inspection failure, and delete failure
 emits a durable Azure DevOps warning with a hashed resource reference or
-redacted error detail. The summary includes incomplete and delete-failure counts;
-an inspection that did not complete reports counts as unavailable rather than
-presenting a clean group.
+redacted error detail. A stale sandbox already removed by ACA idle-delete is
+counted as `already_absent`, not as a failure. The summary includes
+already-absent, incomplete, and delete-failure counts; an inspection that did
+not complete reports counts as unavailable rather than presenting a clean group.
 
 Unfiltered deletion is safe only because this infrastructure is externally
 provisioned as a CI-dedicated Sandbox Group. The data-plane inventory cannot
