@@ -60,3 +60,14 @@ extends:
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
               PoolName: 1es-pool-azfunc
               acaServiceConnection: ${{ parameters.acaServiceConnection }}
+
+      - stage: AcaQualification
+        displayName: 'ACA deployed qualification'
+        dependsOn: Build
+        condition: and(succeeded(), or(eq(variables['Build.Reason'], 'Manual'), and(in(variables['Build.Reason'], 'IndividualCI', 'BatchedCI'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))))
+        jobs:
+          - template: /eng/templates/official/jobs/aca-qualify.yml@self
+            parameters:
+              acaServiceConnection: ${{ parameters.acaServiceConnection }}
+              artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
+              poolName: 1es-pool-azfunc

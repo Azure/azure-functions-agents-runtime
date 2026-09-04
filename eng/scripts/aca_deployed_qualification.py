@@ -129,7 +129,12 @@ def preflight_auth(environment: Mapping[str, str]) -> None:
         raise QualificationError("auth_preflight_failed") from None
     print("Azure service connection authenticated")
 
-def _run_pytest(paths: Sequence[str], environment: Mapping[str, str]) -> int:
+def _run_pytest(
+    paths: Sequence[str],
+    environment: Mapping[str, str],
+    *,
+    fail_fast: bool = False,
+) -> int:
     result = subprocess.run(
         [
             sys.executable,
@@ -137,6 +142,7 @@ def _run_pytest(paths: Sequence[str], environment: Mapping[str, str]) -> int:
             "pytest",
             "-m",
             "live_aca",
+            *(("-x",) if fail_fast else ()),
             *paths,
             "-v",
             "-o",
@@ -175,6 +181,7 @@ def run_deployed_suite(
     cold_start_result = _run_pytest(
         ("tests/live/test_aca_deployed_cold_start.py",),
         inherited,
+        fail_fast=True,
     )
     if cold_start_result != 0:
         return cold_start_result
@@ -186,6 +193,7 @@ def run_deployed_suite(
             "tests/live/test_aca_deployed_load.py",
         ),
         inherited,
+        fail_fast=True,
     )
 
 
