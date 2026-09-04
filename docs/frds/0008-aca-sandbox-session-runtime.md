@@ -440,6 +440,7 @@ controlling amendments.
 | 192 | Deployed ACA qualification fixture and coverage | Reuse E2E / dedicated N=5 fixture / formal N=100 fixture | Add a dedicated fixture and live suites for fresh acceptance, authenticated turn, lifecycle, backing loss, and N=5 admission/idempotency/events/results/cleanup. Keep its 120-second reclaim policy and reject N=100 preflight; Decision #29 requires a future purpose-built workflow. | Human | 2026-09-02 | Replacement stack layer 3 |
 | 193 | Lightweight in-package build provenance | No provenance / marker file / content-addressed chain | Ship a `BUILD_INFO.json` inside the deployed package and check build ID, commit SHA, and live Python minor after cold-start timing; a mismatch fails and suppresses metrics. Explicitly excludes wheel digest, installed package version, deploy-input manifest, deployment-storage chain, and rollback. | Human | 2026-09-02 | Replacement stack layer 3 |
 | 194 | Qualification CI policy | Main CI only / trusted manual runs / PR or Schedule | Add one nonblocking post-Build stage using basic pipeline variables and parallel Python 3.13/3.14 jobs (provisioning 1 each, aggregate 2); restricted queue permissions authorize branch-controlled manual deployment, and the dedicated group retains headroom. | Human | 2026-09-02 | Replacement stack layer 4 |
+| 195 | Qualification leak sweep | Post-run reaper / pre-run age sweep / no sweep | Add a nonblocking pre-run sweep for resources older than six hours with explicit CI-dedicated-group acknowledgment; exclusivity remains external. Warn durably on incomplete/delete failures; retain suite cleanup assertions and the next-run signal, with no destructive post-run cleanup or rollback. | Human | 2026-09-02 | Replacement stack layer 5 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -1817,16 +1818,16 @@ there is intentionally no rollback machinery.
 
 ## 14. Deployed ACA qualification — issue #166
 
-**Status: Finalized for the committed assets and qualification stage.**
-Decisions #192–#194 are the qualification contract implemented here. Group-wide
-sweep and post-run cleanup remain outside this layer.
+**Status: Finalized for the committed assets and qualification stages.**
+Decisions #192–#195 are the qualification contract implemented here.
 
-The deployed qualification lives in `eng/ci/e2e-tests.yml`. One
-`AcaQualification` stage depends only on `Build` and expands independent Python
-3.13 and Python 3.14 jobs with `maxParallel: 2`. Each job assembles and deploys
-its own fixture, then invokes one ordered suite with provisioning concurrency 1;
-aggregate provisioning concurrency is therefore 2. The dedicated Sandbox Group
-must retain quota and headroom for both jobs plus retained sessions.
+The deployed qualification lives in `eng/ci/e2e-tests.yml`. `AcaSweep` starts
+alongside `Build`; `AcaQualification` waits for both, gates only on the Build
+result, and expands independent Python 3.13 and Python 3.14 jobs with
+`maxParallel: 2`. Each job assembles and deploys its own fixture, then invokes
+one ordered suite with provisioning concurrency 1; aggregate provisioning
+concurrency is therefore 2. The dedicated Sandbox Group must retain quota and
+headroom for both jobs plus retained sessions.
 
 Automatic execution is limited to `IndividualCI` and `BatchedCI` builds of
 `refs/heads/main`; manual runs are allowed from any branch. Pull request and
@@ -1858,6 +1859,27 @@ deployment rights, configures the authored region, deploys through the normal
 Flex Consumption ZIP remote-build path, adds best-effort redacted portal metadata,
 and fetches and compares the deployed build info. Ambiguous wheel selection is a
 hard error rather than a silent "newest wins".
+
+The same script's advisory `sweep` command binds the configured group resource
+ID and authored region, then lists the CI-dedicated group without a label filter.
+It deletes only resources proven strictly older than six hours and never deletes
+recent or unknown-age resources. Unfiltered deletion requires the exact
+`exclusive-ci-qualification` acknowledgment at both the CLI and adapter helper
+seams. That acknowledgment cannot prove ownership: group exclusivity remains an
+external IaC/operations prerequisite because the data-plane API exposes no
+ownership attestation.
+
+Every inspection failure, delete failure, and unknown-age resource emits a
+durable Azure DevOps warning with redacted or hashed detail. The nonblocking
+summary includes `already_absent`, `incomplete`, and `delete_failures`; a typed
+sandbox-not-found delete race increments `already_absent` without warning or
+incompleteness, and failed inspection uses unavailable counts rather than
+looking clean. The sweep runs before
+qualification because each suite already asserts current-run cleanup; immediate
+post-run deletion would mask idle-delete or controller-reconciliation failures.
+A report-only final group audit could falsely flag intentionally retained
+sessions, so the next pre-run sweep remains the durable accumulated-leak signal.
+There is no destructive post-run cleanup or rollback.
 
 `eng/scripts/aca_deployed_qualification.py` runs one ordered suite: the
 cold/fresh-session module first, then public turn, lifecycle, backing loss, and
