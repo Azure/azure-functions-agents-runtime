@@ -108,6 +108,72 @@
       animation: product-zoom 32s ease-in-out both;
       transform-origin: center;
     }
+    .trace-shell {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1.55fr .7fr;
+      gap: 22px;
+      min-height: 0;
+      margin-bottom: 56px;
+    }
+    .trace-panel {
+      background: #071523;
+      border: 1px solid rgba(83,183,255,.24);
+      border-radius: 18px;
+      padding: 20px 24px;
+      overflow: hidden;
+    }
+    .trace-header {
+      display: flex;
+      justify-content: space-between;
+      color: #b8cee2;
+      font-size: 17px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid rgba(255,255,255,.08);
+      margin-bottom: 14px;
+    }
+    .trace-row {
+      display: grid;
+      grid-template-columns: 260px 1fr 100px;
+      gap: 12px;
+      align-items: center;
+      height: 54px;
+      color: #e7f3ff;
+      font-size: 18px;
+    }
+    .trace-row.child .trace-name { padding-left: 22px; color: #c7dced; }
+    .trace-row.grandchild .trace-name { padding-left: 46px; color: #a9c4da; }
+    .trace-track { height: 26px; border-radius: 7px; background: rgba(255,255,255,.055); overflow: hidden; }
+    .trace-bar { height: 100%; border-radius: 7px; background: linear-gradient(90deg, #278ed0, #53e0cf); animation: grow 1.3s ease-out both; }
+    .trace-bar.orange { background: linear-gradient(90deg, #d87725, #ffbd62); }
+    .trace-bar.green { background: linear-gradient(90deg, #27885e, #65d28e); }
+    .trace-value { text-align: right; font-family: Consolas, monospace; color: #cce5f7; font-size: 17px; }
+    .trace-summary { display: grid; grid-template-rows: repeat(4, 1fr); gap: 14px; }
+    .trace-summary .card { padding: 20px 22px; }
+    .trace-summary .metric { font-size: 42px; }
+    .portal-strip {
+      height: 245px;
+      border: 1px solid rgba(83,183,255,.28);
+      border-radius: 16px;
+      overflow: hidden;
+      background: white;
+      margin-bottom: 22px;
+    }
+    .portal-strip img {
+      width: 100%;
+      height: auto;
+      display: block;
+      transform: translateY(-2px);
+    }
+    .lifecycle-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 18px;
+      flex: 1;
+      margin-bottom: 58px;
+    }
+    .lifecycle-grid .card { padding: 22px 24px; }
+    .lifecycle-grid .metric { font-size: 40px; }
     @keyframes product-zoom {
       from { transform: scale(1); }
       to { transform: scale(1.025); }
@@ -116,7 +182,7 @@
 </head>
 <body>
   <section class="scene hero" data-scene="1">
-    <div class="footer">LIVE LEADERSHIP DEMO · 03 SEP 2026</div>
+    <div class="footer">LIVE LEADERSHIP DEMO · 04 SEP 2026</div>
     <div class="hero-grid">
       <div>
         <div class="eyebrow fadein">Azure Functions serverless agents</div>
@@ -155,12 +221,45 @@
     <img class="product-view" src="evidence/apim-foundry-mcp.png" alt="Live APIM model and MCP policy views">
   </section>
 
-  <section class="scene product-scene" data-scene="5">
-    <img class="product-view" src="evidence/aca-sandbox-lifecycle.png" alt="Live ACA Sandbox Group zero inventory and lifecycle evidence">
+  <section class="scene" data-scene="5">
+    <div class="footer">03 · LIVE ACA SANDBOX LIFECYCLE</div>
+    <div class="eyebrow">Same invocation · retained Sandbox Group</div>
+    <h2>One sandbox held both local calls, then inventory returned to zero</h2>
+    <div class="portal-strip">
+      <img src="evidence/aca-sandbox-lifecycle.png" alt="Live ACA Sandbox Group portal zero-state">
+    </div>
+    <div class="lifecycle-grid">
+      <div class="card"><div class="label">16:45:30Z</div><div class="metric">Create</div><p>Fresh invocation sandbox starts.</p></div>
+      <div class="card cyan"><div class="label">16:45:39Z</div><div class="metric">3 tools</div><p>MCP plus two local shell calls.</p></div>
+      <div class="card orange"><div class="label">16:45:59Z</div><div class="metric">Delete</div><p>Cleanup handoff and delete succeed.</p></div>
+      <div class="card green"><div class="label">Post-run check</div><div class="metric">0</div><p>Typed inventory; no operator cleanup.</p></div>
+    </div>
+    <div class="caption">Same-run trace 3d57819c… proves create and delete; the live portal and typed adapter confirm zero inventory.</div>
   </section>
 
-  <section class="scene product-scene" data-scene="6">
-    <img class="product-view" src="evidence/appinsights-waterfall.png" alt="Live Application Insights end-to-end transaction">
+  <section class="scene" data-scene="6">
+    <div class="footer">04 · APPLICATION INSIGHTS AGENT TRACE</div>
+    <div class="eyebrow">Same live invocation · 68 dependency spans</div>
+    <h2>Model, MCP, sandbox, tool journal, and cleanup share one trace</h2>
+    <div class="trace-shell">
+      <div class="trace-panel">
+        <div class="trace-header"><span>Operation 3d57819c…</span><span>04 Sep 2026 · 16:45:30Z</span></div>
+        <div class="trace-row"><span class="trace-name">hybrid.invocation</span><div class="trace-track"><div class="trace-bar" style="width:100%"></div></div><span class="trace-value">30.95s</span></div>
+        <div class="trace-row child"><span class="trace-name">Sandbox create</span><div class="trace-track"><div class="trace-bar orange" style="width:19%"></div></div><span class="trace-value">2.94s</span></div>
+        <div class="trace-row child"><span class="trace-name">Model call · plan</span><div class="trace-track"><div class="trace-bar" style="width:29%"></div></div><span class="trace-value">4.55s</span></div>
+        <div class="trace-row grandchild"><span class="trace-name">MCP · microsoft_docs_search</span><div class="trace-track"><div class="trace-bar green" style="width:9%"></div></div><span class="trace-value">623ms</span></div>
+        <div class="trace-row grandchild"><span class="trace-name">Local tools · shared journal ×2</span><div class="trace-track"><div class="trace-bar orange" style="width:53%"></div></div><span class="trace-value">queued</span></div>
+        <div class="trace-row child"><span class="trace-name">Model call · synthesize</span><div class="trace-track"><div class="trace-bar" style="width:18%"></div></div><span class="trace-value">2.82s</span></div>
+        <div class="trace-row child"><span class="trace-name">Cleanup + delete</span><div class="trace-track"><div class="trace-bar green" style="width:11%"></div></div><span class="trace-value">1.75s</span></div>
+      </div>
+      <div class="trace-summary">
+        <div class="card cyan"><div class="label">Tool calls surfaced</div><div class="metric">3</div><p>MCP + two local</p></div>
+        <div class="card"><div class="label">Model calls</div><div class="metric">2</div><p>Both through APIM</p></div>
+        <div class="card orange"><div class="label">Sandbox</div><div class="metric">1 → 0</div><p>Fresh, then deleted</p></div>
+        <div class="card green"><div class="label">Function result</div><div class="metric">200</div><p>31.02 seconds</p></div>
+      </div>
+    </div>
+    <div class="caption">Application Insights spans only; prompt, tool arguments, results, and sandbox identifiers are excluded.</div>
   </section>
 
   <section class="scene" data-scene="7">
@@ -176,9 +275,9 @@
   </section>
 
   <section class="scene" data-scene="8">
-    <div class="footer">07 · MEASURED QUALIFICATION</div>
-    <div class="eyebrow">Optimized clean window · n=21</div>
-    <h2>The architecture removed nearly half of runtime request latency</h2>
+    <div class="footer">06 · DEMO RESULTS</div>
+    <div class="eyebrow">Live run + optimized qualification window · n=21</div>
+    <h2>This demo app returns cleanly—and the optimized path is 48% faster</h2>
     <div class="grid grid-2" style="margin-bottom:62px">
       <div class="card">
         <div class="toprow"><div><div class="label">Runtime average</div><div class="metric">48.03% lower</div></div><span class="status"><span class="dot"></span>0 request errors</span></div>
@@ -200,7 +299,7 @@
   </section>
 
   <section class="scene" data-scene="9">
-    <div class="footer">08 · LEADERSHIP TAKEAWAY</div>
+    <div class="footer">07 · LEADERSHIP TAKEAWAY</div>
     <div class="eyebrow">What this spike proves</div>
     <h2>Serverless orchestration and customer isolation can coexist</h2>
     <div class="grid grid-3" style="margin-bottom:62px">
