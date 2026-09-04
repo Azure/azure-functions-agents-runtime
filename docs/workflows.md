@@ -554,10 +554,11 @@ The runtime uses a closed failure classification:
 - `WorkflowRetryableError` — transient. Durable schedules the next attempt.
 - A Workflow Sub Agent `TimeoutError` — transient. Durable schedules the next
   attempt.
-- `WorkflowTerminalError`, any other tool exception, or any other Sub Agent
-  exception — terminal. The task fails
-  immediately and the workflow fails with the handler's stable `error_code`;
-  no exception detail reaches Durable history.
+- `WorkflowTerminalError` — terminal. The task fails immediately and preserves
+  the handler-owned stable `error_code`.
+- Any other tool or Sub Agent exception — terminal. The task fails immediately
+  with the runtime-owned `workflow_task_execution_unknown` code; no exception
+  detail reaches Durable history.
 
 `error_code` must match `^[a-z][a-z0-9_]{0,63}$` and may not start with
 `workflow_`, which is reserved for runtime-generated codes.

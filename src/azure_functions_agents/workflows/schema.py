@@ -192,7 +192,7 @@ def _policy_duration_ms(value: str, *, field_name: str) -> int:
 
 
 class WorkflowRetryBackoff(BaseModel):
-    """Bounded exponential backoff authored on a task or workflow tool."""
+    """Bounded exponential backoff authored in a plan task execution policy."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 

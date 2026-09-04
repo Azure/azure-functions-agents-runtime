@@ -189,6 +189,7 @@ def test_exhausted_retry_fails_with_the_application_error_code(
         overwrite=True,
     )
 
+    log_start = len(retry_sample_host.read_output())
     _start_workflow(retry_sample_host.base_url, workflow_id)
     status = _await_terminal(retry_sample_host.base_url, workflow_id)
 
@@ -206,7 +207,9 @@ def test_exhausted_retry_fails_with_the_application_error_code(
     # orchestration, so fall back to the host log there rather than asserting
     # nothing.
     output = status.get("output")
-    failure_text = str(output) if output is not None else retry_sample_host.read_output()
+    failure_text = (
+        str(output) if output is not None else retry_sample_host.read_output()[log_start:]
+    )
     assert "inventory_temporarily_unavailable" in failure_text
     assert "Inventory reservation is temporarily unavailable." in failure_text
     assert "reserve_inventory" in failure_text

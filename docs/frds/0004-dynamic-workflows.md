@@ -146,9 +146,11 @@ slice adds plan-authored retry without changing discovery or registration:
   "execution": {
     "retry": {
       "max_attempts": 4,
-      "first_interval": "PT1S",
-      "backoff_coefficient": 2,
-      "max_interval": "PT10S"
+      "backoff": {
+        "initial": "PT1S",
+        "multiplier": 2,
+        "max": "PT10S"
+      }
     }
   }
 }
@@ -157,10 +159,12 @@ slice adds plan-authored retry without changing discovery or registration:
 `WorkflowTaskExecution` is validated at submission and translated once into an
 `EffectiveWorkflowTaskExecution` wire value persisted with each tool or Sub
 Agent Activity input. The effective policy contains the exact Durable retry
-mapping and a stable idempotency key derived from workflow instance and task
-identity. Replay selects `call_activity` versus `call_activity_with_retry` and
-the expected result envelope only from that persisted input. Histories without
-the new execution payload retain the legacy call and result shape.
+mapping. At Activity execution, the stable idempotency key is derived from the
+persisted workflow and node-instance identities rather than stored in that
+policy. Replay always uses `call_activity`, conditionally supplying its
+`retry_policy` argument and selecting the expected result envelope only from
+the persisted input. Histories without the new execution payload retain the
+legacy call and result shape.
 
 Durable `RetryPolicy` has no exception predicate. Policy-aware Activities
 therefore classify failures at the worker boundary, derive retryability from a
@@ -173,12 +177,12 @@ remain terminal because the runtime cannot safely infer that replaying them will
 succeed. Exhaustion decoding recognizes only the runtime's private marker and
 surfaces its bounded application error code without leaking exception text.
 
-The retry schedule is bounded at submission. `max_attempts`,
-`first_interval`, `backoff_coefficient`, and `max_interval` have fixed limits,
-and the ceiling of all native retry delays must fit a one-hour admission cap.
-Durable's finite `retry_timeout` remains unset because the SDK evaluates it
-against real wall-clock time while replaying history. Individual attempt timeout
-remains a later slice and is bounded only by the Functions host until then.
+The retry schedule is bounded at submission. `max_attempts`, `backoff.initial`,
+`backoff.multiplier`, and `backoff.max` have fixed limits, and the ceiling of
+all native retry delays must fit a one-hour admission cap. Durable's finite
+`retry_timeout` remains unset because the SDK evaluates it against real
+wall-clock time while replaying history. Individual attempt timeout remains a
+later slice and is bounded only by the Functions host until then.
 
 ### Delivery plan
 
@@ -1269,7 +1273,9 @@ results remain unchanged.
 - [ ] Evolution #1278 slice 1: plan-authored retry contract
   - validate the bounded retry schema and reject unsupported task types or
     schedules whose delay ceiling exceeds the internal retry window;
-  - persist the effective policy and stable idempotency key at submission;
+  - persist the effective policy at submission and derive the stable
+    idempotency key at Activity execution from persisted workflow and
+    node-instance identities;
   - ignore later optional keys while rejecting inconsistent persisted mappings.
 - [ ] Evolution #1278 slice 1: execution and compatibility
   - dispatch static and dynamic tool/Sub Agent tasks through Durable native retry
