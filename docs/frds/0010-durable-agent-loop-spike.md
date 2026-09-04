@@ -377,6 +377,8 @@ One session coordinator entity serializes turn admission across Functions
 instances. It holds only:
 
 - the committed history `ContentRefV1` and generation;
+- the last commit receipt (`run_id`, request hash, final-response ref, and
+  committed generation) needed to recognize an acknowledged-or-lost retry;
 - immutable session/owner/agent policy bindings;
 - active `run_id`, request hash, status, deadline, and in-progress state ref;
 - a bounded idempotency index from hashed request ID to run/result reference;
@@ -395,13 +397,18 @@ queued. The entity/coordinator contract and deterministic orchestration
 instance ID must reconcile the ambiguity between admitting and receiving the
 start acknowledgement.
 
-`commit_turn_v1` validates the active run, expected committed generation,
-terminal final response ref, policy/catalog hashes, and complete call set. The
-entity then atomically promotes the completed turn's history ref, increments
-the committed generation, terminalizes the run, and clears the active slot.
-Stale, failed, cancelled, or differently fenced runs cannot commit. The
-committed response is authoritative if a provider response is later observed
-for an uncommitted or ambiguous attempt.
+`commit_turn_v1` is an idempotent compare-and-set keyed by
+`(run_id, expected_generation, request_hash, final_response_ref)`. It validates
+the active run, expected committed generation, terminal final response ref,
+policy/catalog hashes, and complete call set. The entity then atomically
+promotes the completed turn's history ref, records the commit receipt,
+increments the committed generation, terminalizes the run, and clears the
+active slot. If the commit applied but its acknowledgement was lost, a retry
+with the identical key returns the recorded committed generation as success.
+Only a different run, request hash, response ref, failed/cancelled state, or
+fence at that generation fails closed. The committed response is authoritative
+if a provider or activity response is later observed for an uncommitted or
+ambiguous attempt.
 
 ### 4.7 Activities and tool routing
 
@@ -556,6 +563,11 @@ forbidden.
   payloads as compare-and-swap durable facts. They then raise an external event
   only as a wake-up hint. Every orchestration generation rereads the durable
   mailbox before waiting, so a dropped event does not drop the approval.
+- A parked wait reuses one `wait_for_external_event` task and races it against
+  a sequence of bounded Durable timers with `task_any`. When a timer wins, a
+  mailbox-read activity checks the durable fact and either resumes or schedules
+  the next timer. The wake-up event reduces latency; the one-hour candidate
+  re-poll interval provides bounded recovery when event delivery is lost.
 - Each activity has a deadline, bounded attempts, retry classification, and
   remaining run budget. The orchestrator uses Durable context time only.
 - Cancellation marks intent in the session coordinator, raises the external
@@ -568,6 +580,10 @@ forbidden.
   next generation rereads those facts and carries only
   `CheckpointStateRefV1`, immutable identity/policy hashes, counters, deadlines,
   and budgets; the full turn state remains in external customer-owned storage.
+- The orchestrator never calls `continue_as_new` while parked on an unresolved
+  external-event task. It rotates immediately before entering a wait when
+  needed, or after the event/fact has resolved and the pending timer is
+  cancelled.
 - Orchestrator/activity names, input/output contracts, and schema versions are
   versioned (`*_v1`). In-flight runs stay on compatible code. Deployment
   manifests retain required old handlers until no run references them.
@@ -638,6 +654,12 @@ links, `possibly_committed`/`Ambiguous` handling for uncertain writes, and
 `410 Gone` after retained state expires. This spike adds durable model/tool
 phases without creating a third incompatible run-management state machine.
 
+`Ambiguous` is an error disposition, not a seventh top-level run status. An
+uncertain write terminalizes as `status: "Failed"` with a sanitized
+`ErrorEnvelopeV1` containing `disposition: "Ambiguous"` and
+`possibly_committed: true`. This preserves the six-state status enumeration
+while making uncertainty machine-readable and impossible to report as success.
+
 The status contract exposes only:
 
 - `Pending`, `Running`, `Waiting`, `Completed`, `Failed`, or `Cancelled`;
@@ -665,6 +687,7 @@ are intentionally conservative and may be tightened by measured evidence:
 | Total tool calls | 32 |
 | Parallel safe remote reads | 4 |
 | Local sandbox mutations | 1 at a time |
+| Concurrent app-owned sandboxes | `min(10, maxSandboxCount - reserved_headroom)`; reserve at least 5 group slots and fail configuration when no positive allowance remains |
 | Autonomous active execution | 4 hours, still bounded by step/tool/token/cost caps |
 | Approval-parked absolute lifetime | 24 hours, then fail/cancel and clean up |
 | Model token budget | 200,000 aggregate input + output tokens |
@@ -676,6 +699,7 @@ are intentionally conservative and may be tightened by measured evidence:
 | Transcript supplied to one model step | 4 MiB and the pinned model context/token limit; reject before O(n²) reread growth exceeds the run budget |
 | Local-tool wave | Exactly 1 call and 5 minutes |
 | Hosting / activity timeout | Flex Consumption spike with `functionTimeout` 10 minutes; every activity deadline <=8 minutes and every local tool deadline <=5 minutes |
+| Approval mailbox re-poll | 1 hour while parked; event delivery remains the fast path |
 | Sandbox lifecycle | Delete after wave; 10-minute auto-delete/reaper target |
 | Continue-as-new | At most 20 checkpoints or 200 history events per generation |
 
@@ -683,6 +707,15 @@ Caps are checked before scheduling and after every activity. A cap breach
 produces a typed terminal failure, stops new work, and still schedules cleanup.
 The spike rejects unbounded model loops, tool loops, retries, payloads,
 parallelism, spend, sandbox retention, and autonomous hours-long execution.
+
+A customer-owned capacity coordinator grants expiring, fenced app-owned
+sandbox slots before `turn_init_v1` or a local wave. Runs above the allowance
+park on a Durable timer without holding compute and retry with bounded backoff.
+Platform capacity rejection never triggers an unbounded create loop: the run
+returns to `Waiting` with a sanitized `sandbox_capacity` phase and terminalizes
+as `sandbox_capacity_exhausted` when its run budget expires. Slot release is
+idempotent, and the reaper reconciles leaked capacity leases with owned
+sandbox inventory.
 
 ### 4.14 Observability and qualification metrics
 
@@ -701,8 +734,9 @@ Required measurements:
 - MCP/APIM latency, backend latency, attempts, throttles, and failures;
 - tool queue, execution, transfer, attempts, retries, dedupe hits, ambiguity,
   and artifact bytes;
-- sandbox create, attach, resume, readiness, restore, snapshot-to-Blob,
-  lifecycle policy, delete, reaper, retained capacity, and orphan age;
+- sandbox capacity queue/rejections, create, optional attach/resume, readiness,
+  workspace restore/export-to-Blob, lifecycle policy, delete, reaper, retained
+  capacity, and orphan age;
 - run/session throughput, concurrent active runs, busy/idempotency conflicts,
   terminal outcomes, errors, and cost.
 
@@ -752,12 +786,13 @@ For each planned seam, kill/restart the worker and assert:
 | Frozen local tool catalog | `turn_init_v1` discovers without worker import; every later sandbox matches the canonical manifest/package/catalog hash or fails closed. | **Architecture no-go.** |
 | Durable replay | Across every injected restart seam, all already-acknowledged model/tool activities show zero redispatches and recovery catch-up p95 is <=60 seconds excluding provider latency. | **Architecture no-go** if acknowledged work repeats; otherwise investigate performance before broader use. |
 | Session correctness | Twenty-five concurrent cross-process submissions yield at most one active turn; duplicate IDs dedupe 100%; conflicting hashes fail; only the expected generation commits. | **Architecture no-go.** |
-| Side-effect truth | Across at least 100 ambiguity-window trials, the synthetic idempotent write has one logical committed effect; unsafe/unreconciled writes fail closed or surface `Ambiguous`, never false success. | **Architecture no-go** for general tool enablement if classification cannot be enforced. |
-| ACA single-call recovery | Two sequential create/restore/manifest-check/execute/export/delete activities preserve the exact workspace artifact chain and pass 20/20 live trials, including activity retry from the prior committed ref. | **Architecture no-go** for local tools until immutable artifact transfer is reliable. |
+| Side-effect truth | Across at least 100 ambiguity-window trials, the synthetic idempotent write has one logical committed effect; unsafe/unreconciled writes return `Failed` with `ErrorEnvelopeV1.disposition="Ambiguous"` and `possibly_committed=true`, never false success. | **Architecture no-go** for general tool enablement if classification cannot be enforced. |
+| Commit acknowledgement loss | Killing the worker after the session commit but before activity acknowledgement returns the same commit receipt on retry and leaves the run `Completed` exactly once. | **Architecture no-go.** |
+| ACA single-call recovery and capacity | Two sequential create/restore/manifest-check/execute/export/delete activities preserve the exact workspace artifact chain and pass 20/20 live trials, including activity retry from the prior committed ref. At 25 concurrent qualifying sessions, the configured app-owned cap is never exceeded, excess runs wait durably, and no run fails from avoidable group saturation. | **Architecture no-go** for local tools until immutable artifact transfer and bounded admission are reliable. |
 | Run-scoped ACA optimization | Dedicated short-turn attach/resume/executor-ready/fencing trials pass 100/100 with bounded retained capacity. | Disable the optimization; this does not block per-wave v1. |
 | Privacy | Automated inspection finds zero raw prompts, args, outputs, credentials, tokens, sandbox IDs, Blob paths, SAS values, or authorization-bearing refs in Durable history/dashboard/metrics/default traces. Durable history may contain only opaque content IDs, hashes, sizes, and bounded classifications. | **Architecture no-go.** |
 | Bounded history/content | Activity envelopes stay <=32 KiB; generation stays <=200 events; continue-as-new preserves output and budgets; integrity/cap violations fail closed. | **Architecture no-go.** |
-| Approval continuation | A fact committed immediately before/after continue-as-new is observed exactly once despite lost/duplicate wake-up events; no continuation occurs with pending Durable tasks. | **Architecture no-go** for waits/approvals. |
+| Approval continuation | A fact committed immediately before/after continue-as-new is observed exactly once despite lost/duplicate wake-up events; timer re-poll observes a lost wake-up within the configured interval; no continuation occurs with pending Durable tasks. | **Architecture no-go** for waits/approvals. |
 | Hosting timeout | The pinned plan honors the configured 10-minute `functionTimeout`; all activity/tool deadlines terminate within their safety margins under host replacement. | **Architecture no-go** until retry ambiguity is bounded. |
 | Cleanup | After normal, failure, cancellation, and worker-loss trials, final app-owned sandbox inventory is zero within 10 minutes in 100% of runs; reaper proves ownership filtering. | **Architecture no-go** until cleanup/capacity is bounded. |
 | Cost/latency | Report p50/p95/p99 wall, active/parked, checkpoint, APIM, tool, sandbox, and recovery costs under the fixed workload with no unbounded growth. | No production recommendation; optimize or narrow scope before follow-up. |
@@ -851,6 +886,10 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
 | 15 | Session substrate | Assume Durable Entity / prove entity with fallback / process lock | Gate exact Durable 1.6 entity behavior; fall back to singleton orchestration plus block-Blob lease/fencing. | Agent review | 2026-09-04 |
 | 16 | Continuation events | Trust external event / preserve event history / durable fact plus wake-up | Persist approval/callback facts with CAS; events only wake; continue-as-new only when quiescent. | Agent review | 2026-09-04 |
 | 17 | Async state API | New run vocabulary / synchronous response / reuse session-runtime vocabulary | Reuse idempotency, status/result/cancel, ambiguity, expiry, and terminal semantics from the ACA session runtime. | Agent review | 2026-09-04 |
+| 18 | Final commit retry | Generation fence only / idempotent commit receipt / separate transaction service | Record the committing run/request/response tuple and return the same receipt when acknowledgement loss retries an already-applied commit. | Agent review | 2026-09-04 |
+| 19 | Lost approval wake-up | Event only / short polling / event plus bounded mailbox re-poll | Treat the fact as authoritative, reuse one event task, and re-read the mailbox on one-hour Durable timers while parked. | Agent review | 2026-09-04 |
+| 20 | Sandbox capacity | Rely on group errors / host concurrency only / fenced app-owned allowance | Admit through a bounded capacity coordinator with reserved group headroom, Durable waiting, expiry, and reaper reconciliation. | Agent review | 2026-09-04 |
+| 21 | Ambiguous public outcome | Seventh status / false failure / failed plus disposition | Keep six run statuses; expose uncertainty as `Failed` plus `disposition=Ambiguous` and `possibly_committed=true`. | Agent review | 2026-09-04 |
 
 ## 6. Test plan
 
@@ -867,7 +906,8 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
   scheduling.
 - [ ] Unit/integration: cross-process session admission, duplicate/conflicting
   request IDs, one-active-turn invariant, generation fencing, failed/cancelled
-  journal isolation, and atomic final commit.
+  journal isolation, atomic final commit, and idempotent success after
+  commit-acknowledgement loss.
 - [ ] Local Durable integration: exact Durable Functions 1.6 entity/fallback
   substrate, Azurite or Durable Task Scheduler recovery at each checkpoint,
   quiescent continue-as-new with durable approval facts, and bounded
@@ -879,7 +919,7 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
 - [ ] ACA integration: `turn_init_v1` manifest pin plus sequential single-call
   create/restore/verify/execute/export/delete activities, request-hash
   validation, immutable workspace chain, no credential persistence,
-  auto-delete, and reaper.
+  bounded capacity admission/waiting, auto-delete, and reaper.
 - [ ] Fault injection and E2E: the full matrix in sections 4.15-4.16, including
   three model steps, two local calls, one remote MCP read, one synthetic write,
   worker kills, cancellation, compatible deployment, final correctness, no
@@ -908,7 +948,11 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
   single-call ACA waves with immutable workspace refs, freezes the sandbox tool
   manifest at turn initialization, makes approval events wake-up hints over
   durable facts, reuses the existing async run vocabulary, and bounds
-  cancellation, continuation, timeout, privacy, and cleanup semantics.
+  cancellation, continuation, timeout, privacy, and cleanup semantics. A final
+  post-commit audit also required an idempotent final-commit receipt, timer-based
+  mailbox recovery for lost approval wake-ups, fenced sandbox-capacity
+  admission, and an explicit `Failed` + `Ambiguous` disposition mapping; those
+  corrections are recorded in Decisions 18-21.
 - **Human sign-off:** Pending. This FRD remains `In review`; set
   `status: Finalized` only after explicit human approval. No product
   implementation may begin before that gate.
