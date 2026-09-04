@@ -9,15 +9,19 @@
     },
     {
       "id": "live-flow",
-      "text": "This is the deployed Hosted Skills chat UI. The prompt asks Microsoft Learn MCP for grounding, then asks the model to issue two independent local shell calls in parallel. The tool counter reaches three before the answer returns both safe markers. Model fan-out is parallel; the shared sandbox queues local execution through its file journal so isolation and ordering remain deterministic."
+      "text": "This is the deployed Hosted Skills chat UI, not a reconstruction. One prompt asks Microsoft Learn for grounding and issues two local shell calls. Expanding the live bubble shows all three calls while typed inventory proves one sandbox is running. The answer then returns the Learn takeaway and both safe markers."
     },
     {
       "id": "sandbox",
-      "text": "The run created one fresh sandbox in two point nine four seconds. Both shell commands stayed in that sandbox. Cleanup handoff took sixty-five point nine milliseconds, delete succeeded in one point six eight seconds, and typed inventory is now zero."
+      "text": "Both local calls share that fresh invocation sandbox and queue safely through its file journal. The twenty-five second holds make the running state visible; they are not performance measurements. After the response, an independent inventory check returns zero with no operator cleanup."
     },
     {
-      "id": "agent-trace",
-      "text": "This is the same live run from its Application Insights spans, not a generic trace. The thirty point nine five second hybrid invocation includes sandbox creation, a four point five five second model planning call, a six hundred twenty-three millisecond Microsoft Learn tool call, two local journal executions, a two point eight two second synthesis call, and cleanup. Sixty-eight dependency spans preserve the relationship while prompt text, tool arguments, results, and sandbox identifiers stay out of telemetry."
+      "id": "agent-trace-portal",
+      "text": "Application Insights exposes the native Agent Trace experience. This retained live run shows the agent span, two model calls, Azure Container Apps sandbox operations, and the file journal. Account, operation, resource, and sandbox identifiers are redacted."
+    },
+    {
+      "id": "agent-trace-analysis",
+      "text": "The new capture run is correlated separately because it is not yet indexed as an invoke-agent row in the preview blade. Its sixty-eight point eight one second runtime trace still contains model planning and synthesis, Microsoft Learn MCP, sandbox creation, both queued journal executions, cleanup, and deletion."
     },
     {
       "id": "apim",
@@ -25,11 +29,11 @@
     },
     {
       "id": "demo-results",
-      "text": "For this demo app, the live request returned HTTP two hundred in thirty-one seconds and inventory returned to zero. Across twenty-one optimized qualification runs, create averaged three point zero one seconds, upload one hundred thirty-five milliseconds, readiness three hundred thirty-three milliseconds, and runtime fell forty-eight percent with zero request errors."
+      "text": "The bounded capture returned HTTP two hundred and inventory zero. Across twenty-one qualification runs, create averaged three point zero one seconds, upload one hundred thirty-five milliseconds, readiness three hundred thirty-three milliseconds, and optimized runtime fell forty-eight percent with zero errors."
     },
     {
       "id": "takeaway",
-      "text": "Functions orchestrates. API Management governs. ACA Sandbox isolates. Application Insights proves the flow: live, end to end, and cleaned up."
+      "text": "Functions orchestrates. API Management governs. ACA Sandbox isolates. Application Insights proves the live path and cleanup."
     }
   ]
 }
