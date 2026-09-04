@@ -1,0 +1,580 @@
+{
+  "$defs": {
+    "AgentConfiguration": {
+      "additionalProperties": false,
+      "description": "Portable and framework-specific agent configuration.",
+      "properties": {
+        "max_output_tokens": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveTokenLimit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "agent_framework": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentFrameworkConfiguration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "AgentConfiguration",
+      "type": "object"
+    },
+    "AgentFrameworkCompactionConfig": {
+      "additionalProperties": false,
+      "description": "Microsoft Agent Framework conversation-compaction settings.",
+      "properties": {
+        "max_context_window_tokens": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveTokenLimit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "AgentFrameworkCompactionConfig",
+      "type": "object"
+    },
+    "AgentFrameworkConfiguration": {
+      "additionalProperties": false,
+      "description": "Microsoft Agent Framework-specific agent configuration.",
+      "properties": {
+        "compaction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentFrameworkCompactionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "AgentFrameworkConfiguration",
+      "type": "object"
+    },
+    "BuiltinEndpointsConfig": {
+      "additionalProperties": false,
+      "description": "Concrete built-in endpoint toggles for debug chat UI, chat API, and MCP exposure.",
+      "properties": {
+        "debug_chat_ui": {
+          "default": false,
+          "title": "Debug Chat Ui",
+          "type": "boolean"
+        },
+        "chat_api": {
+          "default": false,
+          "title": "Chat Api",
+          "type": "boolean"
+        },
+        "mcp": {
+          "default": false,
+          "title": "Mcp",
+          "type": "boolean"
+        },
+        "http_auth": {
+          "$ref": "#/$defs/EndpointAuthConfig",
+          "description": "Inbound authentication policy for the HTTP chat API endpoints (chat_api / debug_chat_ui). Applies only to HTTP endpoints and does not affect the MCP endpoint. Modes: function (API key, default), admin (master key), anonymous, entra (Entra ID)."
+        }
+      },
+      "title": "BuiltinEndpointsConfig",
+      "type": "object"
+    },
+    "EndpointAuthConfig": {
+      "additionalProperties": false,
+      "description": "Inbound authentication policy for an agent's built-in endpoints.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/EndpointAuthMode",
+          "default": "function"
+        },
+        "entra": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntraAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "EndpointAuthConfig",
+      "type": "object"
+    },
+    "EndpointAuthMode": {
+      "enum": [
+        "function",
+        "admin",
+        "anonymous",
+        "entra"
+      ],
+      "type": "string"
+    },
+    "EntraAuthConfig": {
+      "additionalProperties": false,
+      "description": "Entra ID (Azure AD) validation settings for built-in endpoint auth.\n\nEvery field is optional. To keep secrets out of source, reference an\nenvironment variable inline with the runtime's ``$VAR`` / ``%VAR%``\nsubstitution (e.g. ``tenant_id: $MY_TENANT_ID``); the placeholder is\nresolved at load time so frontmatter stays the single source of truth. A\nconfigured allow-list must contain the caller's matching claim; an\nempty/unset allow-list skips that check.",
+      "properties": {
+        "tenant_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tenant Id"
+        },
+        "allowed_audiences": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Audiences",
+          "type": "array"
+        },
+        "allowed_client_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Client Ids",
+          "type": "array"
+        }
+      },
+      "title": "EntraAuthConfig",
+      "type": "object"
+    },
+    "McpFilter": {
+      "additionalProperties": false,
+      "description": "Agent-level MCP exclude list override.",
+      "properties": {
+        "exclude": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude",
+          "type": "array"
+        }
+      },
+      "title": "McpFilter",
+      "type": "object"
+    },
+    "PositiveTokenLimit": {
+      "gt": 0,
+      "type": "integer"
+    },
+    "SkillsFilter": {
+      "additionalProperties": false,
+      "description": "Agent-level skills exclude list override.",
+      "properties": {
+        "exclude": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude",
+          "type": "array"
+        }
+      },
+      "title": "SkillsFilter",
+      "type": "object"
+    },
+    "SubagentRef": {
+      "additionalProperties": false,
+      "description": "A coordinator's reference to one specialist agent it may delegate to.\n\nObject form only (no string shorthand) — see FRD 0007 §5 Decision #16.\n``agent`` is the specialist's identity slug (its file stem, sanitized;\nsee :mod:`azure_functions_agents._slug`). ``when`` is an optional\nrouting hint surfaced to the coordinator model as the ``delegate_<slug>``\ntool's description; if omitted, the specialist's own ``description`` is\nused instead (resolved once the specialist is known, not here).",
+      "properties": {
+        "agent": {
+          "title": "Agent",
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        }
+      },
+      "required": [
+        "agent"
+      ],
+      "title": "SubagentRef",
+      "type": "object"
+    },
+    "SystemToolsAgentOverride": {
+      "additionalProperties": false,
+      "description": "Agent-level system tool overrides, primarily sandbox opt-out.",
+      "properties": {
+        "dynamic_sessions_code_interpreter": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dynamic Sessions Code Interpreter"
+        },
+        "web_request": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Web Request"
+        }
+      },
+      "title": "SystemToolsAgentOverride",
+      "type": "object"
+    },
+    "ToolsFilter": {
+      "additionalProperties": false,
+      "description": "Agent/global tool filtering settings for discovered tools.",
+      "properties": {
+        "exclude": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude",
+          "type": "array"
+        }
+      },
+      "title": "ToolsFilter",
+      "type": "object"
+    },
+    "TriggerSpec": {
+      "additionalProperties": false,
+      "description": "Trigger definition parsed from agent frontmatter.",
+      "properties": {
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "args": {
+          "additionalProperties": true,
+          "title": "Args",
+          "type": "object"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "TriggerSpec",
+      "type": "object"
+    },
+    "WorkflowConfig": {
+      "additionalProperties": false,
+      "description": "Dynamic Workflow enablement and agent-specific capability grants.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "exclude": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude",
+          "type": "array"
+        },
+        "subagents": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WorkflowSubagentRef"
+          },
+          "title": "Subagents",
+          "type": "array"
+        }
+      },
+      "title": "WorkflowConfig",
+      "type": "object"
+    },
+    "WorkflowSubagentRef": {
+      "additionalProperties": false,
+      "description": "A workflow-enabled agent's authorization grant for one leaf specialist.",
+      "properties": {
+        "agent": {
+          "title": "Agent",
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        }
+      },
+      "required": [
+        "agent"
+      ],
+      "title": "WorkflowSubagentRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "YAML front matter for an Azure Functions agent (.agent.md). Generated from AgentSpec in src/azure_functions_agents/config/schema.py.",
+  "properties": {
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "description": {
+      "title": "Description",
+      "type": "string"
+    },
+    "agent_configuration": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AgentConfiguration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "trigger": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TriggerSpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "builtin_endpoints": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/$defs/BuiltinEndpointsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Builtin Endpoints"
+    },
+    "model": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model"
+    },
+    "timeout": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Timeout"
+    },
+    "logger": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Logger"
+    },
+    "substitute_variables": {
+      "default": true,
+      "title": "Substitute Variables",
+      "type": "boolean"
+    },
+    "system_tools": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SystemToolsAgentOverride"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "mcp": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/$defs/McpFilter"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Mcp"
+    },
+    "skills": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/$defs/SkillsFilter"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Skills"
+    },
+    "tools": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/$defs/ToolsFilter"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tools"
+    },
+    "workflows": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkflowConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "subagents": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/SubagentRef"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Subagents"
+    },
+    "input_schema": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Input Schema"
+    },
+    "response_schema": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Response Schema"
+    },
+    "response_example": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Response Example"
+    },
+    "metadata": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Metadata"
+    }
+  },
+  "required": [
+    "name",
+    "description"
+  ],
+  "title": "Azure Functions Agent front matter (.agent.md)",
+  "type": "object",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://azure.github.io/azure-functions-agents-runtime/agent.schema.json"
+}

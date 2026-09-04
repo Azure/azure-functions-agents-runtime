@@ -1,0 +1,359 @@
+{
+  "$defs": {
+    "AgentConfiguration": {
+      "additionalProperties": false,
+      "description": "Portable and framework-specific agent configuration.",
+      "properties": {
+        "max_output_tokens": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveTokenLimit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "agent_framework": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentFrameworkConfiguration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "AgentConfiguration",
+      "type": "object"
+    },
+    "AgentFrameworkCompactionConfig": {
+      "additionalProperties": false,
+      "description": "Microsoft Agent Framework conversation-compaction settings.",
+      "properties": {
+        "max_context_window_tokens": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveTokenLimit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "AgentFrameworkCompactionConfig",
+      "type": "object"
+    },
+    "AgentFrameworkConfiguration": {
+      "additionalProperties": false,
+      "description": "Microsoft Agent Framework-specific agent configuration.",
+      "properties": {
+        "compaction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentFrameworkCompactionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "AgentFrameworkConfiguration",
+      "type": "object"
+    },
+    "DynamicSessionsCodeInterpreterConfig": {
+      "additionalProperties": false,
+      "description": "Configuration for the ACA Dynamic Sessions-backed code interpreter.",
+      "properties": {
+        "endpoint": {
+          "title": "Endpoint",
+          "type": "string"
+        },
+        "client_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Client Id"
+        }
+      },
+      "required": [
+        "endpoint"
+      ],
+      "title": "DynamicSessionsCodeInterpreterConfig",
+      "type": "object"
+    },
+    "EndpointAuthConfig": {
+      "additionalProperties": false,
+      "description": "Inbound authentication policy for an agent's built-in endpoints.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/EndpointAuthMode",
+          "default": "function"
+        },
+        "entra": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntraAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "EndpointAuthConfig",
+      "type": "object"
+    },
+    "EndpointAuthMode": {
+      "enum": [
+        "function",
+        "admin",
+        "anonymous",
+        "entra"
+      ],
+      "type": "string"
+    },
+    "EntraAuthConfig": {
+      "additionalProperties": false,
+      "description": "Entra ID (Azure AD) validation settings for built-in endpoint auth.\n\nEvery field is optional. To keep secrets out of source, reference an\nenvironment variable inline with the runtime's ``$VAR`` / ``%VAR%``\nsubstitution (e.g. ``tenant_id: $MY_TENANT_ID``); the placeholder is\nresolved at load time so frontmatter stays the single source of truth. A\nconfigured allow-list must contain the caller's matching claim; an\nempty/unset allow-list skips that check.",
+      "properties": {
+        "tenant_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tenant Id"
+        },
+        "allowed_audiences": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Audiences",
+          "type": "array"
+        },
+        "allowed_client_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Client Ids",
+          "type": "array"
+        }
+      },
+      "title": "EntraAuthConfig",
+      "type": "object"
+    },
+    "PositiveTokenLimit": {
+      "gt": 0,
+      "type": "integer"
+    },
+    "SystemToolsConfig": {
+      "additionalProperties": false,
+      "description": "Global system tool configuration shared across agents.",
+      "properties": {
+        "dynamic_sessions_code_interpreter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DynamicSessionsCodeInterpreterConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "web_request": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WebRequestConfig"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Web Request"
+        }
+      },
+      "title": "SystemToolsConfig",
+      "type": "object"
+    },
+    "ToolsFilter": {
+      "additionalProperties": false,
+      "description": "Agent/global tool filtering settings for discovered tools.",
+      "properties": {
+        "exclude": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude",
+          "type": "array"
+        }
+      },
+      "title": "ToolsFilter",
+      "type": "object"
+    },
+    "WebRequestConfig": {
+      "additionalProperties": false,
+      "description": "Configuration for the built-in, default-on ``web_request`` system tool.\n\nv1 is intentionally minimal: an exact-host allowlist plus operator caps.\nSee ``docs/frds/0005-web-request-system-tool.md`` for the full (future)\nsurface — per-host auth, wildcard hosts, and redirect following are v2.",
+      "properties": {
+        "allowed_hosts": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allowed Hosts"
+        },
+        "require_https": {
+          "default": true,
+          "title": "Require Https",
+          "type": "boolean"
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Seconds"
+        },
+        "max_response_bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Response Bytes"
+        },
+        "max_request_bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Request Bytes"
+        }
+      },
+      "title": "WebRequestConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "App-wide runtime defaults (agents.config.yaml). Generated from GlobalConfig in src/azure_functions_agents/config/schema.py.",
+  "properties": {
+    "agent_configuration": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AgentConfiguration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "system_tools": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SystemToolsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "model": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model"
+    },
+    "timeout": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Timeout"
+    },
+    "tools": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ToolsFilter"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "http_auth": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EndpointAuthConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "App-wide default inbound HTTP authentication policy inherited by every agent's built-in HTTP endpoints. A per-agent builtin_endpoints.http_auth overrides it. Applies only to HTTP endpoints and does not affect MCP. Modes: function (API key, default), admin (master key), anonymous, entra (Entra ID)."
+    }
+  },
+  "title": "Azure Functions Agents global configuration (agents.config.yaml)",
+  "type": "object",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://azure.github.io/azure-functions-agents-runtime/agents-config.schema.json"
+}

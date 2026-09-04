@@ -1,0 +1,156 @@
+{
+  "name": "hosted-skills-authoring",
+  "displayName": "Hosted Skills",
+  "description": "Author markdown-first Hosted Skills agents (.agent.md) the easy way: scaffolding, an Add Agent wizard, front-matter IntelliSense/validation, and opening the built-in chat UI.",
+  "version": "0.2.1",
+  "publisher": "hosted-skills",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.84.0"
+  },
+  "categories": [
+    "Snippets",
+    "Linters",
+    "Other"
+  ],
+  "keywords": [
+    "azure functions",
+    "agents",
+    "ai",
+    "agent.md",
+    "serverless"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Azure/azure-functions-agents-runtime"
+  },
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:markdown",
+    "onLanguage:chatagent",
+    "onLanguage:yaml",
+    "onView:hostedSkillsAgents",
+    "workspaceContains:**/*.agent.md",
+    "workspaceContains:**/*.claude.md",
+    "workspaceContains:**/agents.config.yaml"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentsAuthoring.scaffoldApp",
+        "title": "Scaffold New Agent App",
+        "category": "Hosted Skills"
+      },
+      {
+        "command": "agentsAuthoring.addAgent",
+        "title": "Add Agent",
+        "category": "Hosted Skills"
+      },
+      {
+        "command": "agentsAuthoring.addTool",
+        "title": "Add Tool",
+        "category": "Hosted Skills"
+      },
+      {
+        "command": "agentsAuthoring.addSkill",
+        "title": "Add Skill",
+        "category": "Hosted Skills"
+      },
+      {
+        "command": "agentsAuthoring.addSubagent",
+        "title": "Add Subagent",
+        "category": "Hosted Skills"
+      },
+      {
+        "command": "agentsAuthoring.openChatUI",
+        "title": "Open Chat UI",
+        "category": "Hosted Skills"
+      },
+      {
+        "command": "agentsAuthoring.refreshAgents",
+        "title": "Refresh Agents",
+        "category": "Hosted Skills",
+        "icon": "$(refresh)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "hostedSkills",
+          "title": "Hosted Skills",
+          "icon": "$(hubot)"
+        }
+      ]
+    },
+    "views": {
+      "hostedSkills": [
+        {
+          "id": "hostedSkillsAgents",
+          "name": "Agents",
+          "icon": "$(hubot)",
+          "contextualTitle": "Hosted Skills Agents"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "agentsAuthoring.refreshAgents",
+          "when": "view == hostedSkillsAgents",
+          "group": "navigation"
+        },
+        {
+          "command": "agentsAuthoring.addAgent",
+          "when": "view == hostedSkillsAgents",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "agentsAuthoring.refreshAgents",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Hosted Skills",
+      "properties": {
+        "agentsAuthoring.validation.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Validate .agent.md front matter and agents.config.yaml against the Hosted Skills runtime schema."
+        },
+        "agentsAuthoring.treatAgentFilesAsMarkdown": {
+          "type": "boolean",
+          "default": true,
+          "description": "Treat Hosted Skills .agent.md / .claude.md files as Markdown instead of VS Code's built-in 'chatagent' language. This prevents VS Code's incompatible agent-file schema from flagging valid Hosted Skills fields such as 'trigger' and 'builtin_endpoints'. Only applies to agent files inside a Hosted Skills app (one with function_app.py / agents.config.yaml / host.json)."
+        },
+        "agentsAuthoring.localRun.baseUrl": {
+          "type": "string",
+          "default": "http://localhost:7071",
+          "description": "Base URL used by the Open Chat UI command."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "gen-schemas": "python ../eng/scripts/generate_frontmatter_jsonschema.py",
+    "typecheck": "tsc -p ./tsconfig.json --noEmit",
+    "compile": "npm run typecheck && node esbuild.js",
+    "package": "node esbuild.js --production",
+    "watch": "node esbuild.js --watch",
+    "pretest": "tsc -p ./tsconfig.test.json",
+    "test": "node --test \"out-test/test/**/*.test.js\"",
+    "vscode:prepublish": "npm run package"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "yaml": "^2.5.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.84.0",
+    "esbuild": "^0.23.1",
+    "typescript": "^5.5.4"
+  }
+}
