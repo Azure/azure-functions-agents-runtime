@@ -22,8 +22,8 @@ DEFAULT_PROMPT = (
     "First use Microsoft Learn MCP to confirm in one sentence what Azure Container "
     "Apps dynamic sessions provide. Then, in the same model turn, issue these two "
     "independent local tool calls in parallel: run_shell with "
-    '`python -c "import time; time.sleep(8); print(\'ALPHA_COMPLETE\')"` and '
-    'run_shell with `python -c "import time; time.sleep(8); '
+    '`python -c "import time; time.sleep(25); print(\'ALPHA_COMPLETE\')"` and '
+    'run_shell with `python -c "import time; time.sleep(25); '
     "print('BETA_COMPLETE')\"`. Report the MCP takeaway and both exact markers. "
     "Do not include internal identifiers."
 )
@@ -73,6 +73,43 @@ def _poll_inventory(
     asyncio.run(_inventory(sandbox_group, region, observations, stop, interval))
 
 
+def _wait_for_active_inventory(
+    observations: list[dict[str, Any]],
+    timeout: float = 45.0,
+) -> dict[str, Any] | None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if observations and observations[-1]["inventory_count"] > 0:
+            return observations[-1]
+        time.sleep(0.25)
+    return None
+
+
+def _show_live_inventory(page: Page, observation: dict[str, Any]) -> None:
+    page.evaluate(
+        """observation => {
+            document.querySelector("#liveSandboxEvidence")?.remove();
+            const panel = document.createElement("aside");
+            panel.id = "liveSandboxEvidence";
+            panel.setAttribute("aria-label", "Live ACA Sandbox inventory");
+            const stateSummary = Object.entries(observation.states)
+                .map(([state, count]) => `${state}: ${count}`)
+                .join(" · ");
+            panel.innerHTML = `
+                <div class="live-label"><span></span>LIVE READ-ONLY ACA INVENTORY</div>
+                <div class="live-count">${observation.inventory_count} active sandbox</div>
+                <div class="live-state"></div>
+                <div class="live-time"></div>
+            `;
+            panel.querySelector(".live-state").textContent = stateSummary;
+            panel.querySelector(".live-time").textContent =
+                `Observed ${observation.observed_at}`;
+            document.body.appendChild(panel);
+        }""",
+        observation,
+    )
+
+
 def _prepare_chat(page: Page, base_url: str, function_key: str) -> None:
     page.goto(f"{base_url}/agents/main/", wait_until="networkidle", timeout=120_000)
     page.evaluate(
@@ -88,12 +125,56 @@ def _prepare_chat(page: Page, base_url: str, function_key: str) -> None:
     page.reload(wait_until="networkidle", timeout=120_000)
     page.add_style_tag(
         content="""
-            #sessionBar, #status, .details-pre { display: none !important; }
+            #sessionBar, #status, .details-pre,
+            .details-section:first-child { display: none !important; }
             .app { max-width: 1180px !important; }
             .chat { padding: 28px 34px !important; }
             .bubble { font-size: 17px !important; line-height: 1.5 !important; }
             .details-modal { width: min(1050px, 100%) !important; }
             .details-item-title { color: #111827 !important; font-size: 17px !important; }
+            #liveSandboxEvidence {
+                position: fixed;
+                right: 24px;
+                bottom: 24px;
+                z-index: 10001;
+                width: 370px;
+                padding: 20px 22px;
+                border: 1px solid #86efac;
+                border-radius: 14px;
+                background: rgba(240, 253, 244, 0.98);
+                box-shadow: 0 18px 44px rgba(15, 23, 42, 0.18);
+                color: #14532d;
+                font-family: "Segoe UI", sans-serif;
+            }
+            #liveSandboxEvidence .live-label {
+                font-size: 13px;
+                font-weight: 700;
+                letter-spacing: 0.08em;
+            }
+            #liveSandboxEvidence .live-label span {
+                display: inline-block;
+                width: 10px;
+                height: 10px;
+                margin-right: 8px;
+                border-radius: 50%;
+                background: #16a34a;
+                box-shadow: 0 0 0 5px rgba(22, 163, 74, 0.14);
+            }
+            #liveSandboxEvidence .live-count {
+                margin-top: 14px;
+                font-size: 28px;
+                font-weight: 750;
+            }
+            #liveSandboxEvidence .live-state {
+                margin-top: 8px;
+                font-size: 16px;
+                font-weight: 600;
+            }
+            #liveSandboxEvidence .live-time {
+                margin-top: 10px;
+                color: #3f6212;
+                font-size: 12px;
+            }
         """
     )
     page.locator("#settingsBackdrop").wait_for(state="hidden", timeout=30_000)
@@ -142,6 +223,8 @@ def main() -> None:  # noqa: PLR0915 - linear orchestration keeps the safety gat
     request_start: str | None = None
     request_end: str | None = None
     terminal_state = "unknown"
+    active_observation: dict[str, Any] | None = None
+    raw_video: Path | None = None
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
@@ -173,10 +256,21 @@ def main() -> None:  # noqa: PLR0915 - linear orchestration keeps the safety gat
         request_status = response.status
 
         try:
-            page.locator(".bubble.assistant.has-details").wait_for(timeout=90_000)
-            page.locator(".bubble.assistant.has-details").click()
+            tool_bubble = page.locator(
+                ".bubble.assistant.has-details",
+                has_text="3 tool calls",
+            )
+            tool_bubble.wait_for(timeout=120_000)
+            tool_bubble.click()
             page.locator("#detailsBackdrop.open").wait_for()
-            time.sleep(10)
+            page.locator(".details-item-title").nth(2).wait_for(timeout=30_000)
+            active_observation = _wait_for_active_inventory(observations)
+            if active_observation is not None:
+                _show_live_inventory(page, active_observation)
+            page.screenshot(path=args.output_root / "live-chat-tool-calls.png")
+            if active_observation is not None:
+                page.screenshot(path=args.output_root / "live-sandbox-active.png")
+            time.sleep(12)
             page.locator("#closeDetailsBtn").click()
         except PlaywrightTimeoutError:
             pass
@@ -193,6 +287,7 @@ def main() -> None:  # noqa: PLR0915 - linear orchestration keeps the safety gat
         body_text = page.locator("body").inner_text()
         page.close()
         context.close()
+        raw_video = Path(video.path())
         browser.close()
 
     deadline = time.monotonic() + 30
@@ -204,7 +299,8 @@ def main() -> None:  # noqa: PLR0915 - linear orchestration keeps the safety gat
     poller.join(timeout=30)
 
     final_inventory = asyncio.run(_inventory(args.sandbox_group, args.region))
-    raw_video = Path(video.path())
+    if raw_video is None:
+        raise RuntimeError("Playwright did not finalize the live recording.")
     video_target = args.output_root / "live-hosted-skill-flow.webm"
     raw_video.replace(video_target)
 
@@ -225,6 +321,7 @@ def main() -> None:  # noqa: PLR0915 - linear orchestration keeps the safety gat
         "sandbox_inventory": {
             "pre_run": pre_run,
             "observations": observations,
+            "active_capture": active_observation,
             "final": final_inventory,
             "operator_cleanup_used": False,
         },
@@ -232,6 +329,14 @@ def main() -> None:  # noqa: PLR0915 - linear orchestration keeps the safety gat
             "video": str(video_target.resolve()),
             "final_screenshot": str(
                 (args.output_root / "live-chat-final.png").resolve()
+            ),
+            "tool_calls_screenshot": str(
+                (args.output_root / "live-chat-tool-calls.png").resolve()
+            ),
+            "active_sandbox_screenshot": (
+                str((args.output_root / "live-sandbox-active.png").resolve())
+                if active_observation is not None
+                else None
             ),
             "transcript": str(
                 (args.output_root / "live-chat-transcript.txt").resolve()
@@ -246,6 +351,8 @@ def main() -> None:  # noqa: PLR0915 - linear orchestration keeps the safety gat
         raise RuntimeError("The bounded live request did not complete successfully.")
     if final_inventory["inventory_count"] != 0:
         raise RuntimeError("Sandbox inventory did not return to zero.")
+    if active_observation is None:
+        raise RuntimeError("No active sandbox was observed during the bounded request.")
 
 
 if __name__ == "__main__":

@@ -12,11 +12,11 @@ from playwright.sync_api import sync_playwright
 SCENES = [
     {"id": "opening", "scene": 1, "duration": 4},
     {"id": "topology", "scene": 2, "duration": 8},
-    {"id": "sandbox", "scene": 5, "duration": 20},
-    {"id": "agent-trace", "scene": 6, "duration": 35},
-    {"id": "apim", "scene": 4, "duration": 20},
-    {"id": "demo-results", "scene": 8, "duration": 20},
-    {"id": "takeaway", "scene": 9, "duration": 12},
+    {"id": "sandbox", "scene": 5, "duration": 16},
+    {"id": "agent-trace", "scene": 6, "duration": 20},
+    {"id": "apim", "scene": 4, "duration": 18},
+    {"id": "demo-results", "scene": 8, "duration": 18},
+    {"id": "takeaway", "scene": 9, "duration": 10},
 ]
 
 def main() -> None:

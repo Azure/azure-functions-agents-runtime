@@ -174,6 +174,29 @@
     }
     .lifecycle-grid .card { padding: 22px 24px; }
     .lifecycle-grid .metric { font-size: 40px; }
+    .live-proof-shell {
+      display: grid;
+      grid-template-columns: 1.35fr .65fr;
+      gap: 22px;
+      flex: 1;
+      min-height: 0;
+      margin-bottom: 58px;
+    }
+    .live-proof-image {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #f4f7fb;
+      border-radius: 18px;
+      border: 1px solid rgba(83,183,255,.24);
+    }
+    .live-proof-metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .live-proof-metrics .card { padding: 20px 22px; }
+    .live-proof-metrics .metric { font-size: 38px; }
     @keyframes product-zoom {
       from { transform: scale(1); }
       to { transform: scale(1.025); }
@@ -223,43 +246,43 @@
 
   <section class="scene" data-scene="5">
     <div class="footer">03 · LIVE ACA SANDBOX LIFECYCLE</div>
-    <div class="eyebrow">Same invocation · retained Sandbox Group</div>
-    <h2>One sandbox held both local calls, then inventory returned to zero</h2>
-    <div class="portal-strip">
-      <img src="evidence/aca-sandbox-lifecycle.png" alt="Live ACA Sandbox Group portal zero-state">
+    <div class="eyebrow">Same capture invocation · typed live inventory</div>
+    <h2>The recorder observed the sandbox running both local tools, then zero inventory</h2>
+    <div class="live-proof-shell">
+      <img class="live-proof-image" src="evidence/live-sandbox-active.png" alt="Live Hosted Skills tool details and active ACA Sandbox inventory">
+      <div class="live-proof-metrics">
+        <div class="card"><div class="label">17:43:16Z</div><div class="metric">Create</div><p>Fresh invocation sandbox starts.</p></div>
+        <div class="card cyan"><div class="label">17:43:25Z</div><div class="metric">1 running</div><p>Observed during tool execution.</p></div>
+        <div class="card orange"><div class="label">One plan</div><div class="metric">3 tools</div><p>MCP plus two queued local calls.</p></div>
+        <div class="card green"><div class="label">17:45:20Z</div><div class="metric">0</div><p>Independent typed inventory check.</p></div>
+      </div>
     </div>
-    <div class="lifecycle-grid">
-      <div class="card"><div class="label">16:45:30Z</div><div class="metric">Create</div><p>Fresh invocation sandbox starts.</p></div>
-      <div class="card cyan"><div class="label">16:45:39Z</div><div class="metric">3 tools</div><p>MCP plus two local shell calls.</p></div>
-      <div class="card orange"><div class="label">16:45:59Z</div><div class="metric">Delete</div><p>Cleanup handoff and delete succeed.</p></div>
-      <div class="card green"><div class="label">Post-run check</div><div class="metric">0</div><p>Typed inventory; no operator cleanup.</p></div>
-    </div>
-    <div class="caption">Same-run trace 3d57819c… proves create and delete; the live portal and typed adapter confirm zero inventory.</div>
+    <div class="caption">The two 25-second shell holds are deliberate capture aids, not performance measurements; no operator cleanup was used.</div>
   </section>
 
   <section class="scene" data-scene="6">
-    <div class="footer">04 · APPLICATION INSIGHTS AGENT TRACE</div>
-    <div class="eyebrow">Same live invocation · 68 dependency spans</div>
-    <h2>Model, MCP, sandbox, tool journal, and cleanup share one trace</h2>
+    <div class="footer">05 · SAME-RUN TELEMETRY ANALYSIS</div>
+    <div class="eyebrow">68.81-second capture invocation · content-free dependencies</div>
+    <h2>The capture run correlates model, MCP, sandbox, journal, and cleanup operations</h2>
     <div class="trace-shell">
       <div class="trace-panel">
-        <div class="trace-header"><span>Operation 3d57819c…</span><span>04 Sep 2026 · 16:45:30Z</span></div>
-        <div class="trace-row"><span class="trace-name">hybrid.invocation</span><div class="trace-track"><div class="trace-bar" style="width:100%"></div></div><span class="trace-value">30.95s</span></div>
-        <div class="trace-row child"><span class="trace-name">Sandbox create</span><div class="trace-track"><div class="trace-bar orange" style="width:19%"></div></div><span class="trace-value">2.94s</span></div>
-        <div class="trace-row child"><span class="trace-name">Model call · plan</span><div class="trace-track"><div class="trace-bar" style="width:29%"></div></div><span class="trace-value">4.55s</span></div>
-        <div class="trace-row grandchild"><span class="trace-name">MCP · microsoft_docs_search</span><div class="trace-track"><div class="trace-bar green" style="width:9%"></div></div><span class="trace-value">623ms</span></div>
-        <div class="trace-row grandchild"><span class="trace-name">Local tools · shared journal ×2</span><div class="trace-track"><div class="trace-bar orange" style="width:53%"></div></div><span class="trace-value">queued</span></div>
-        <div class="trace-row child"><span class="trace-name">Model call · synthesize</span><div class="trace-track"><div class="trace-bar" style="width:18%"></div></div><span class="trace-value">2.82s</span></div>
-        <div class="trace-row child"><span class="trace-name">Cleanup + delete</span><div class="trace-track"><div class="trace-bar green" style="width:11%"></div></div><span class="trace-value">1.75s</span></div>
+        <div class="trace-header"><span>Operation a34b1843…</span><span>04 Sep 2026 · 17:43:16Z</span></div>
+        <div class="trace-row"><span class="trace-name">hybrid.invocation</span><div class="trace-track"><div class="trace-bar" style="width:100%"></div></div><span class="trace-value">68.81s</span></div>
+        <div class="trace-row child"><span class="trace-name">Sandbox list + create</span><div class="trace-track"><div class="trace-bar orange" style="width:15%"></div></div><span class="trace-value">observed</span></div>
+        <div class="trace-row child"><span class="trace-name">Model call · plan</span><div class="trace-track"><div class="trace-bar" style="width:24%"></div></div><span class="trace-value">call 1</span></div>
+        <div class="trace-row grandchild"><span class="trace-name">MCP · microsoft_docs_search</span><div class="trace-track"><div class="trace-bar green" style="width:11%"></div></div><span class="trace-value">call 1</span></div>
+        <div class="trace-row grandchild"><span class="trace-name">Local tools · shared journal ×2</span><div class="trace-track"><div class="trace-bar orange" style="width:72%"></div></div><span class="trace-value">queued</span></div>
+        <div class="trace-row child"><span class="trace-name">Model call · synthesize</span><div class="trace-track"><div class="trace-bar" style="width:20%"></div></div><span class="trace-value">call 2</span></div>
+        <div class="trace-row child"><span class="trace-name">Cleanup + sandbox delete</span><div class="trace-track"><div class="trace-bar green" style="width:13%"></div></div><span class="trace-value">zero</span></div>
       </div>
       <div class="trace-summary">
         <div class="card cyan"><div class="label">Tool calls surfaced</div><div class="metric">3</div><p>MCP + two local</p></div>
         <div class="card"><div class="label">Model calls</div><div class="metric">2</div><p>Both through APIM</p></div>
         <div class="card orange"><div class="label">Sandbox</div><div class="metric">1 → 0</div><p>Fresh, then deleted</p></div>
-        <div class="card green"><div class="label">Function result</div><div class="metric">200</div><p>31.02 seconds</p></div>
+        <div class="card green"><div class="label">Function result</div><div class="metric">200</div><p>Bounded capture run</p></div>
       </div>
     </div>
-    <div class="caption">Application Insights spans only; prompt, tool arguments, results, and sandbox identifiers are excluded.</div>
+    <div class="caption">Same-run analysis uses Application Insights spans only; prompts, arguments, results, and sandbox identifiers are excluded.</div>
   </section>
 
   <section class="scene" data-scene="7">
@@ -276,8 +299,8 @@
 
   <section class="scene" data-scene="8">
     <div class="footer">06 · DEMO RESULTS</div>
-    <div class="eyebrow">Live run + optimized qualification window · n=21</div>
-    <h2>This demo app returns cleanly—and the optimized path is 48% faster</h2>
+    <div class="eyebrow">Bounded capture + optimized qualification window · n=21</div>
+    <h2>The capture returns cleanly—and the optimized path remains 48% faster</h2>
     <div class="grid grid-2" style="margin-bottom:62px">
       <div class="card">
         <div class="toprow"><div><div class="label">Runtime average</div><div class="metric">48.03% lower</div></div><span class="status"><span class="dot"></span>0 request errors</span></div>

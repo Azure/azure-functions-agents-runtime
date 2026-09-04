@@ -1,10 +1,11 @@
 {
-  "schema_version": "2.0",
+  "schema_version": "3.0",
   "package": "hybrid-sandbox-leadership-live-e2e",
-  "generated_at": "2026-09-04T17:01:45.7843079Z",
+  "generated_at": "2026-09-04T18:23:42.6632764Z",
   "safety": {
     "existing_resources_only": true,
-    "bounded_demo_invocations": 1,
+    "bounded_demo_invocations_in_package": 2,
+    "bounded_demo_invocations_in_revision": 1,
     "settings_changed": false,
     "resources_provisioned": false,
     "operator_cleanup_used": false,
@@ -20,50 +21,60 @@
     "api_management": "larohra-ai-gateway",
     "region": "westus2"
   },
-  "live_invocation": {
-    "prompt_id": "parallel-shell-mcp-leadership-demo",
+  "capture_invocation": {
+    "prompt_id": "parallel-shell-mcp-active-sandbox-demo",
+    "purpose": "Hold both local tools for 25 seconds so active sandbox inventory can be captured.",
+    "performance_use": "The capture duration is not a service benchmark.",
     "window": {
-      "request_start_utc": "2026-09-04T16:45:30.1047464Z",
-      "request_end_utc": "2026-09-04T16:46:01.1258946Z",
-      "telemetry_query_start_utc": "2026-09-04T16:43:30Z",
-      "telemetry_query_end_utc": "2026-09-04T16:49:30Z",
-      "final_inventory_observed_utc": "2026-09-04T17:01:45.7843079Z"
+      "request_start_utc": "2026-09-04T17:43:16.2144452Z",
+      "request_end_utc": "2026-09-04T17:44:25.1028758Z",
+      "telemetry_query_start_utc": "2026-09-04T17:41:16Z",
+      "telemetry_query_end_utc": "2026-09-04T17:47:16Z",
+      "active_sandbox_observed_utc": "2026-09-04T17:43:25.674400Z",
+      "final_inventory_observed_utc": "2026-09-04T17:45:20.5636273Z"
     },
     "function_request": {
-      "operation_id": "a241847fb7325d57b8516c2bd52f2f08",
-      "span_id": "8736a63dac475478",
+      "operation_id": "b4ea9ff6bea845d373dceada288512df",
       "http_status": 200,
-      "duration_ms": 31021.1482
+      "duration_ms": 68888.4306
     },
     "runtime_trace": {
-      "operation_id": "3d57819cb9fda4dcfe439fc457a93133",
-      "root_span_id": "158bbc457b673a47",
-      "dependency_span_count": 68,
-      "duration_ms": 30949,
-      "role": "hybrid-sandbox-spike"
+      "operation_id": "a34b1843f6dc8321c646cf8bb772f10c",
+      "root_span": "hybrid.invocation",
+      "duration_ms": 68810,
+      "role": "hybrid-sandbox-spike",
+      "observed_span_groups": [
+        "model planning and synthesis",
+        "Microsoft Learn MCP tool execution",
+        "ACA Sandbox list, create, and delete",
+        "lifecycle policy",
+        "file upload, read, and write",
+        "same-sandbox file-journal polling",
+        "blob-backed journal operations"
+      ]
     },
     "tool_behavior": {
       "tool_calls_surfaced": 3,
       "model_calls": 2,
       "mcp_tool_calls": 1,
       "local_shell_calls": 2,
+      "tool_detail_names": [
+        "microsoft_docs_search",
+        "run_shell",
+        "run_shell"
+      ],
       "returned_markers": [
         "ALPHA_COMPLETE",
         "BETA_COMPLETE"
       ],
       "execution_statement": "Parallel model fan-out with safe same-sandbox queuing."
     },
-    "sandbox_lifecycle_ms": {
-      "create": 2941.824648,
-      "package_upload": 276.333387,
-      "package_verify": 0.143268,
-      "executor_ready": 385.796795,
-      "discovery": 19.574902,
-      "cleanup_handoff": 65.87749,
-      "delete": 1685
-    },
     "sandbox_inventory": {
       "pre_run": 0,
+      "active": 1,
+      "active_states": {
+        "Running": 1
+      },
       "final": 0,
       "final_states": {},
       "operator_cleanup_used": false
@@ -72,11 +83,33 @@
   "same_window_apim": {
     "role": "larohra-ai-gateway West US",
     "successful_model_posts": 2,
-    "successful_mcp_posts": 5,
-    "expected_failed_mcp_close_gets": 2,
-    "azure_diagnostics_rows": 0,
+    "successful_mcp_posts_minimum": 1,
+    "expected_mcp_close_probes_excluded_from_failures": true,
     "source": "Application Insights APIM-role dependencies",
     "body_fields_queried": false
+  },
+  "portal_agent_trace_capture": {
+    "literal_agent_trace_blade_captured": true,
+    "captured_at_utc": "2026-09-04T18:15:23.374821Z",
+    "source": "Application Insights Agents (Preview) Agent Trace blade",
+    "source_run_relationship": "Earlier retained live agent run; not the 68.8-second capture invocation.",
+    "visible_span_types": [
+      "agent.run",
+      "invoke_agent",
+      "LLM",
+      "ACA Sandbox management",
+      "file journal",
+      "Azure Blob"
+    ],
+    "capture_invocation_indexing_limitation": "The capture invocation was not present as an invoke_agent row in the preview Agent Runs index.",
+    "redactions": [
+      "account identity",
+      "operation identifiers",
+      "subscription identifiers",
+      "sandbox identifiers",
+      "resource paths",
+      "tool definitions"
+    ]
   },
   "qualification_baseline": {
     "source": "../../decisions/0009-hybrid-sandbox-tool-execution-results.json",
@@ -94,34 +127,51 @@
     {
       "claim": "A real Hosted Skills request returned a governed MCP result and two local tool markers.",
       "evidence": [
-        "evidence/live-chat-multitool.png",
-        "external:live-flow-v3/page@8c512b9186a4a477efca4cb9e35dbcdf.webm",
-        "live_invocation.function_request"
+        "evidence/live-chat-final-v4.png",
+        "external:live-flow-v4/page@47b4743e2af7276851ef6f02d9662685.webm",
+        "capture_invocation.function_request"
       ]
     },
     {
-      "claim": "Foundry and MCP traffic crossed APIM during the invocation window.",
+      "claim": "The live UI exposed one MCP call and two local shell calls.",
+      "evidence": [
+        "evidence/live-chat-tool-calls.png",
+        "capture_invocation.tool_behavior"
+      ]
+    },
+    {
+      "claim": "One sandbox was running while the two local tools were processed.",
+      "evidence": [
+        "evidence/live-sandbox-active.png",
+        "capture_invocation.sandbox_inventory.active"
+      ]
+    },
+    {
+      "claim": "The sandbox inventory returned to zero without operator cleanup.",
+      "evidence": [
+        "capture_invocation.sandbox_inventory.final",
+        "external:live-flow-v4/final-inventory.json"
+      ]
+    },
+    {
+      "claim": "The product exposes an Agent Trace view with agent, LLM, sandbox, and journal spans.",
+      "evidence": [
+        "evidence/appinsights-agent-trace-portal.png",
+        "portal_agent_trace_capture"
+      ]
+    },
+    {
+      "claim": "The capture invocation has a separately correlated end-to-end runtime trace.",
+      "evidence": [
+        "capture_invocation.runtime_trace",
+        "evidence/appinsights-agent-trace.png"
+      ]
+    },
+    {
+      "claim": "Foundry model and MCP traffic crossed APIM during the capture window.",
       "evidence": [
         "same_window_apim",
-        "external:live-flow-v3/apim-dependencies-redacted.json",
         "evidence/apim-foundry-mcp.png"
-      ]
-    },
-    {
-      "claim": "The invocation used one fresh sandbox and returned inventory to zero.",
-      "evidence": [
-        "live_invocation.sandbox_lifecycle_ms",
-        "live_invocation.sandbox_inventory",
-        "evidence/aca-sandbox-live-run.png",
-        "external:live-flow-v3/final-inventory.json"
-      ]
-    },
-    {
-      "claim": "Model, MCP, sandbox, file journal, tool, and cleanup operations are represented in one runtime trace.",
-      "evidence": [
-        "evidence/appinsights-agent-trace.png",
-        "external:live-flow-v3/runtime-dependencies-redacted.json",
-        "external:live-flow-v3/runtime-progress.json"
       ]
     },
     {
@@ -138,11 +188,15 @@
     },
     {
       "path": "record_live_flow.py",
-      "kind": "automation"
+      "kind": "bounded_live_automation"
+    },
+    {
+      "path": "record_agent_trace.py",
+      "kind": "redacted_portal_automation"
     },
     {
       "path": "record_scenes.py",
-      "kind": "automation"
+      "kind": "supporting_scene_automation"
     },
     {
       "path": "demo.html",
@@ -153,12 +207,44 @@
       "kind": "narration_source"
     },
     {
-      "path": "evidence/function-hosted-skill.png",
-      "kind": "historical_live_portal_support",
+      "path": "evidence/live-chat-tool-calls.png",
+      "kind": "same_run_live_ui_and_inventory",
       "width": 1920,
       "height": 1080,
-      "bytes": 254421,
-      "sha256": "c1d7e90e622423b0449b038da3432dc91ac0c4c367734106ca3393bf19746ca3"
+      "bytes": 75857,
+      "sha256": "8d0f6e69dc2db592b3bdb8bc9b5fd2ab09336fd8ed893ee1ce47c1c3150b3454"
+    },
+    {
+      "path": "evidence/live-sandbox-active.png",
+      "kind": "same_run_live_inventory",
+      "width": 1920,
+      "height": 1080,
+      "bytes": 75857,
+      "sha256": "8d0f6e69dc2db592b3bdb8bc9b5fd2ab09336fd8ed893ee1ce47c1c3150b3454"
+    },
+    {
+      "path": "evidence/live-chat-final-v4.png",
+      "kind": "same_run_live_result",
+      "width": 1920,
+      "height": 1080,
+      "bytes": 86535,
+      "sha256": "5ffc3cea6b9dd85d261d143eb8ece8cda0d634ed9929baf6b1b04c9187cf3595"
+    },
+    {
+      "path": "evidence/appinsights-agent-trace-portal.png",
+      "kind": "live_portal_agent_trace_redacted",
+      "width": 1920,
+      "height": 1080,
+      "bytes": 244302,
+      "sha256": "e34a7c684b6636898f9df9d4b071d11fd2f3dd63910b478607ba067e1234e101"
+    },
+    {
+      "path": "evidence/appinsights-agent-trace.png",
+      "kind": "telemetry_derived_analysis",
+      "width": 1920,
+      "height": 1080,
+      "bytes": 567763,
+      "sha256": "dbac3690160c261cbe2bed7423b9b14dc39d7b431072298b1324485e06a0f3b4"
     },
     {
       "path": "evidence/apim-foundry-mcp.png",
@@ -167,55 +253,15 @@
       "height": 1080,
       "bytes": 140262,
       "sha256": "308b1c6e14c1f6cc634ebcd94e3bf29c82422fc8051bc8db46a1d78fae3e0a22"
-    },
-    {
-      "path": "evidence/aca-sandbox-lifecycle.png",
-      "kind": "historical_live_portal_support",
-      "width": 1920,
-      "height": 1080,
-      "bytes": 125930,
-      "sha256": "dff6650bb97f67c5f2ceb95f5486553274b634a49a0b01ad19d2230050bbcc44"
-    },
-    {
-      "path": "evidence/appinsights-waterfall.png",
-      "kind": "historical_live_portal_support",
-      "width": 1920,
-      "height": 1080,
-      "bytes": 179717,
-      "sha256": "1d2514b08cb94d3bb3d081c72ed089ea6413cbf6d5b5ce73e70177e50a2950bb"
-    },
-    {
-      "path": "evidence/live-chat-multitool.png",
-      "kind": "same_run_live_ui",
-      "width": 1920,
-      "height": 1080,
-      "bytes": 371061,
-      "sha256": "a78bb301eb0ff940bc8d3a83a88d1ebe27f86bf38d04ec2cdc496155729a26e9"
-    },
-    {
-      "path": "evidence/appinsights-agent-trace.png",
-      "kind": "same_run_telemetry_visualization",
-      "width": 1920,
-      "height": 1080,
-      "bytes": 532911,
-      "sha256": "9fff8a9cc53ce875905dc796cdad9d9d4f362466676bec4cd5c6addfc9f8525d"
-    },
-    {
-      "path": "evidence/aca-sandbox-live-run.png",
-      "kind": "live_portal_and_same_run_telemetry",
-      "width": 1920,
-      "height": 1080,
-      "bytes": 571726,
-      "sha256": "612c20b467d526583aa4b8357b3f6b9a90bbc4bfd3e5a94c85eacee1255a16ca"
     }
   ],
   "external_artifacts": {
-    "root": "C:\\Users\\larohra\\.copilot\\session-state\\e29c49e0-41eb-4fab-be8c-6e9a671f8008\\files\\hybrid-sandbox-leadership-video\\live-flow-v3",
+    "root": "C:\\Users\\larohra\\.copilot\\session-state\\e29c49e0-41eb-4fab-be8c-6e9a671f8008\\files\\hybrid-sandbox-leadership-video\\live-flow-v4",
     "final_video": {
-      "path": "hybrid-sandbox-leadership-live-e2e.mp4",
-      "bytes": 14384789,
-      "sha256": "edd17bbdf5becdf2bb592126b33ad6602cf9c9a2279508c4a5c37bceef0aa953",
-      "duration_seconds": 156.4,
+      "path": "hybrid-sandbox-leadership-live-e2e-v4.mp4",
+      "bytes": 14094370,
+      "sha256": "91a3ce2dd21a16c80ecf0ec2b55abdbf52b0cd5debdf8ef10344ace2a5ec5b48",
+      "duration_seconds": 153.9,
       "width": 1920,
       "height": 1080,
       "frame_rate": 30,
@@ -223,28 +269,42 @@
       "audio_codec": "aac",
       "audio_sample_rate_hz": 48000,
       "audio_channels": 2,
-      "audio_mean_db": -23.8,
-      "audio_max_db": -3.8
+      "audio_mean_db": -24.0,
+      "audio_max_db": -4.1
     },
     "silent_master": {
-      "path": "hybrid-sandbox-leadership-live-e2e-silent.mp4",
-      "bytes": 11850410,
-      "sha256": "f9f56dbb6b47eaa1181b53f8e05b77a5df44129a379ce6ef88f1143b0d3c861f"
+      "path": "hybrid-sandbox-leadership-live-e2e-v4-silent.mp4",
+      "bytes": 11734913,
+      "sha256": "c286cc499588d85bc1d192786c3c186e2d9334d9208ba8ca136c9c440d474690",
+      "duration_seconds": 153.9
     },
     "contact_sheet": {
-      "path": "hybrid-sandbox-leadership-live-e2e-contact-sheet.png",
-      "bytes": 739962,
-      "sha256": "09faa95052cb9f2d8da2e5aabd9806b16b1d14e3563ff754cee9d6b2b6cec26e"
+      "path": "hybrid-sandbox-leadership-live-e2e-v4-contact-sheet.png",
+      "bytes": 484599,
+      "sha256": "9cca4619f7bf69d80b62e71d67270a34a02248d704905bd594c3bb57bda6c0d4"
     },
-    "raw_live_recording": "page@8c512b9186a4a477efca4cb9e35dbcdf.webm",
-    "redacted_runtime_dependencies": "runtime-dependencies-redacted.json",
-    "redacted_apim_dependencies": "apim-dependencies-redacted.json",
-    "runtime_progress": "runtime-progress.json",
-    "final_inventory": "final-inventory.json"
+    "raw_live_recording": {
+      "path": "page@47b4743e2af7276851ef6f02d9662685.webm",
+      "bytes": 5748493,
+      "sha256": "b52cee54e5f52c7c8fb7f09aaf33633226c4b2b599af37af6466c109f67379cd",
+      "duration_seconds": 93.4
+    },
+    "raw_agent_trace_recording": {
+      "path": "appinsights-agent-trace-portal.webm",
+      "bytes": 2254453,
+      "sha256": "fecf1893f686ebb57041b41f5ee7bbb995cbd38b1a992e8ff600ad1033dc591d",
+      "duration_seconds": 27.4
+    },
+    "final_inventory": {
+      "path": "final-inventory.json",
+      "bytes": 51,
+      "sha256": "a7c03902e4aae808389bf7aa52a68f0a323370e543675645f8818d83303d8884"
+    }
   },
-  "portal_capture_limitation": {
-    "literal_agent_trace_blade_captured": false,
-    "reason": "The authenticated Edge session was in active use; automation failed closed.",
-    "replacement": "A content-free visualization generated from the same Application Insights dependency spans."
+  "authenticated_profile": {
+    "path": "%LOCALAPPDATA%\\ms-playwright-demo-video\\hybrid-sandbox-azure-portal",
+    "repository_asset": false,
+    "contains_sensitive_authenticated_state": true,
+    "copy_or_commit": false
   }
 }
