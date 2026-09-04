@@ -1842,17 +1842,20 @@ hard error rather than a silent "newest wins".
 
 `eng/scripts/aca_deployed_qualification.py` runs one ordered suite: the
 cold/fresh-session module first, then public turn, lifecycle, backing loss, and
-N=5 load. Within that first module, fresh-session acceptance, first-event, and
+N=5 load. It invokes the cold/fresh-session module as a separate gate and does
+not start the remaining suites unless that process succeeds. Within that first
+module, fresh-session acceptance, first-event, and
 terminal timing complete *before* the same test reads the deployed marker and
 compares build ID, commit SHA, and live Python minor version. A missing or
 mismatched marker fails the test and suppresses latency metrics, so evidence
 from the wrong deployment is never reported as trustworthy.
 
-The fixture's 120-second reclaim policy is intentionally limited to N=5
-diagnostics and the bounded lifecycle suite. Both the operator command and the
-direct live-test entry point reject N=100 before authentication or provider
-work. Formal N=100 remains future human-only acceptance requiring a
-purpose-built workflow; these assets do not discharge Decision #29.
+The canonical qualification uses N=5 with provisioning concurrency 1. Manual
+diagnostics retain load values 1–99 and provisioning values 1, 2, or 4 under
+operator-owned quota and cost. Both the operator command and direct live-test
+entry point reject N=100 before authentication or provider work. Formal N=100
+remains future human-only acceptance requiring a purpose-built workflow; these
+assets do not discharge Decision #29.
 
 This is deliberately lightweight in-package provenance, not a detached
 content-addressed attestation chain. Per Decision #193 it does not prove the

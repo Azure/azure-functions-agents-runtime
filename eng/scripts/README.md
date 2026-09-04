@@ -99,7 +99,9 @@ The provenance is deliberately narrow. It does not cover the wheel digest, the
 installed package version, a deploy-input manifest, the deployment-storage
 chain, or rollback; those remain open under issue #166.
 
-The deployed fixture is limited to N=5 diagnostics with a 120-second reclaim
-policy. `aca_deployed_qualification.py` rejects N=100 before authentication or
+The canonical qualification uses N=5 with provisioning concurrency 1 and the
+fixture's 120-second reclaim policy. Manual diagnostics retain load values 1–99
+and provisioning values 1, 2, or 4; their operator owns shared-group quota and
+cost. `aca_deployed_qualification.py` rejects N=100 before authentication or
 provider work with `formal_n100_unsupported_by_qualification_fixture`. Formal
 N=100 remains future human-only acceptance requiring a purpose-built workflow.

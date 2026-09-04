@@ -157,7 +157,7 @@ def run_deployed_suite(
     load_concurrency: str,
     provision_concurrency: str,
 ) -> int:
-    """Run cold start first, then turn, lifecycle, loss, and N=5."""
+    """Gate turn, lifecycle, loss, and load on cold-start provenance."""
     load, provision = validate_deployed_environment(
         environment,
         runtime_target=runtime_target,
@@ -172,9 +172,14 @@ def run_deployed_suite(
     if samples is not None:
         inherited["AZURE_FUNCTIONS_AGENTS_ACA_COLD_START_SAMPLES"] = str(samples)
     preflight_auth(inherited)
+    cold_start_result = _run_pytest(
+        ("tests/live/test_aca_deployed_cold_start.py",),
+        inherited,
+    )
+    if cold_start_result != 0:
+        return cold_start_result
     return _run_pytest(
         (
-            "tests/live/test_aca_deployed_cold_start.py",
             "tests/live/test_aca_deployed_agent_turn.py",
             "tests/live/test_aca_deployed_lifecycle.py",
             "tests/live/test_aca_deployed_loss.py",

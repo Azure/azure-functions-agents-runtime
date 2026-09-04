@@ -725,7 +725,7 @@ def client_timeout(config: DeployedAcaSmokeConfig) -> ClientTimeout:
 def _required_function_base_url(name: str) -> str:
     value = _required_value(name)
     parsed = urlsplit(value)
-    normalized_path = parsed.path.rstrip("/")
+    normalized_path = parsed.path.rstrip("/") or "/api"
     if (
         parsed.scheme != "https"
         or not parsed.netloc
@@ -733,11 +733,11 @@ def _required_function_base_url(name: str) -> str:
         or parsed.password is not None
         or parsed.query
         or parsed.fragment
-        or normalized_path not in ("", "/api")
+        or normalized_path != "/api"
     ):
         raise AcaSmokeEnvironmentError(
-            f"{name} must be an HTTPS Function base URL without a path, credentials, "
-            "query, or fragment, except for the /api route root."
+            f"{name} must be an HTTPS Function base URL at the site origin or /api "
+            "route root, without credentials, query, or fragment."
         )
     return urlunsplit(("https", parsed.netloc, normalized_path, "", ""))
 

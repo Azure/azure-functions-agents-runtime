@@ -38,9 +38,15 @@ region; the group resource ID, model deployment, storage, and Entra values must
 already be configured. This layer adds no pipeline wiring — the deploy is
 driven by `eng/scripts/aca_qualification_pipeline.py` by hand.
 
-The fixed 120-second reclaim policy supports the lifecycle suite and N=5 load
-diagnostics only. N=100 is rejected before authentication or provider work; it
-remains future human-only formal acceptance requiring a purpose-built workflow.
+Configure `AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL` as either the
+HTTPS site origin or that origin plus `/api`; the client normalizes a pathless
+origin to the fixture's default `/api` route root.
+
+The canonical qualification uses N=5 with provisioning concurrency 1. Manual
+diagnostics retain load values 1–99 and provisioning values 1, 2, or 4; their
+operator owns shared-group quota and cost. N=100 is rejected before
+authentication or provider work and remains future human-only formal acceptance
+requiring a purpose-built workflow.
 
 ## `/__buildinfo`
 

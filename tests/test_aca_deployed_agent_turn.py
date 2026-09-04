@@ -612,6 +612,23 @@ def test_deployed_config_reads_only_safe_url_and_route_contract(
     }
 
 
+def test_deployed_config_normalizes_a_pathless_origin_to_the_api_route_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_deployed_environment(monkeypatch)
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL",
+        "https://deployed-aca.azurewebsites.net/",
+    )
+
+    config = support.deployed_aca_smoke_config_from_environment()
+
+    assert config.base_url == "https://deployed-aca.azurewebsites.net/api"
+    assert config.chat_url == (
+        "https://deployed-aca.azurewebsites.net/api/agents/deployed_turn/chat"
+    )
+
+
 def test_timeout_recovery_config_requires_the_controlled_fixture_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -949,12 +966,12 @@ def _lifecycle_session() -> DurableSessionRecord:
         (
             "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL",
             "https://user:password@deployed-aca.azurewebsites.net",
-            "without a path, credentials, query, or fragment",
+            "without credentials, query, or fragment",
         ),
         (
             "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL",
             "https://deployed-aca.azurewebsites.net?code=secret",
-            "without a path, credentials, query, or fragment",
+            "without credentials, query, or fragment",
         ),
         (
             "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE",

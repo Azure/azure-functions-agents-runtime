@@ -27,6 +27,9 @@ target metadata, or queue-time parameters in this repository. Drive them with
 `tests/live/apps/aca-qualification/` with
 `eng/scripts/aca_qualification_pipeline.py`. They still skip unless
 `AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1` is set explicitly.
+`AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL` may be the HTTPS site
+origin or include `/api`; a pathless origin is normalized to the fixture's
+default `/api` route root.
 
 ## Controlled deployed one-shot recovery
 
@@ -48,7 +51,7 @@ deployment target.
 
 ```bash
 export AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1
-export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL="https://<app>.azurewebsites.net"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL="https://<app>.azurewebsites.net/api"
 export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG="deployed_setup_timeout"
 export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE="api://<app-id>/.default"
 export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE="<app-id>"
@@ -85,9 +88,11 @@ clocks: at least 120 seconds after session activity for reclaim, and at least
 availability. It does not compare the result hold to the later rearm activity
 timestamp.
 
-The same 120-second fixture supports N=5 diagnostics only. The operator wrapper
-and direct live-test entry point reject N=100 before authentication or provider
-work. Formal N=100 remains future human-only acceptance and requires a
-purpose-built workflow; this fixture does not discharge Decision #29.
+The canonical qualification uses N=5 with provisioning concurrency 1. Manual
+diagnostics retain load values 1–99 and provisioning values 1, 2, or 4; their
+operator owns shared-group quota and cost. The operator wrapper and direct
+live-test entry point reject N=100 before authentication or provider work.
+Formal N=100 remains future human-only acceptance and requires a purpose-built
+workflow; this fixture does not discharge Decision #29.
 
 There is no pipeline wiring for any of this; every step is run by hand.

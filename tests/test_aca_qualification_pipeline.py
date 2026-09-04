@@ -356,10 +356,10 @@ class TestCombinedDeployedSuite:
             f"{aca_deployed_qualification.FORMAL_N100_UNSUPPORTED_ERROR}"
         )
 
-    def test_cold_start_is_the_first_module_in_the_single_suite(
+    def test_cold_start_gates_the_remaining_modules(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        captured: list[str] = []
+        captured: list[tuple[str, ...]] = []
         monkeypatch.setattr(
             aca_deployed_qualification,
             "validate_deployed_environment",
@@ -369,7 +369,7 @@ class TestCombinedDeployedSuite:
         monkeypatch.setattr(
             aca_deployed_qualification,
             "_run_pytest",
-            lambda paths, _: captured.extend(paths) or 0,
+            lambda paths, _: captured.append(tuple(paths)) or 0,
         )
 
         result = aca_deployed_qualification.run_deployed_suite(
@@ -381,12 +381,46 @@ class TestCombinedDeployedSuite:
 
         assert result == 0
         assert captured == [
-            "tests/live/test_aca_deployed_cold_start.py",
-            "tests/live/test_aca_deployed_agent_turn.py",
-            "tests/live/test_aca_deployed_lifecycle.py",
-            "tests/live/test_aca_deployed_loss.py",
-            "tests/live/test_aca_deployed_load.py",
+            ("tests/live/test_aca_deployed_cold_start.py",),
+            (
+                "tests/live/test_aca_deployed_agent_turn.py",
+                "tests/live/test_aca_deployed_lifecycle.py",
+                "tests/live/test_aca_deployed_loss.py",
+                "tests/live/test_aca_deployed_load.py",
+            ),
         ]
+
+    def test_cold_start_failure_suppresses_later_suites(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: list[tuple[str, ...]] = []
+        monkeypatch.setattr(
+            aca_deployed_qualification,
+            "validate_deployed_environment",
+            lambda *args, **kwargs: (5, 1),
+        )
+        monkeypatch.setattr(aca_deployed_qualification, "preflight_auth", lambda _: None)
+
+        def fail_cold_start(
+            paths: tuple[str, ...],
+            _: object,
+        ) -> int:
+            captured.append(paths)
+            return 1
+
+        monkeypatch.setattr(aca_deployed_qualification, "_run_pytest", fail_cold_start)
+
+        assert (
+            aca_deployed_qualification.run_deployed_suite(
+                {},
+                runtime_target="python313",
+                load_concurrency="5",
+                provision_concurrency="1",
+            )
+            == 1
+        )
+        assert captured == [("tests/live/test_aca_deployed_cold_start.py",)]
 
     def test_the_expected_identity_environment_is_required(self) -> None:
         """Every provenance input must be required before a deployed run starts."""
