@@ -22,7 +22,14 @@ backend.
 
 Deployed cold-start, lifecycle, loss, load, and one-shot recovery suites remain
 direct/manual test assets pending issue #166. They have no pipeline wiring,
-target metadata, or queue-time parameters in this repository.
+target metadata, or queue-time parameters in this repository. Drive them with
+`eng/scripts/aca_deployed_qualification.py`, after packaging and deploying
+`tests/live/apps/aca-qualification/` with
+`eng/scripts/aca_qualification_pipeline.py`. They still skip unless
+`AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1` is set explicitly.
+`AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL` may be the HTTPS site
+origin or include `/api`; a pathless origin is normalized to the fixture's
+default `/api` route root.
 
 ## Controlled deployed one-shot recovery
 
@@ -44,7 +51,7 @@ deployment target.
 
 ```bash
 export AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1
-export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL="https://<app>.azurewebsites.net"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL="https://<app>.azurewebsites.net/api"
 export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG="deployed_setup_timeout"
 export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE="api://<app-id>/.default"
 export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE="<app-id>"
@@ -62,3 +69,30 @@ cancel and poll for a terminal outcome. A cancellation `202` honors
 `Retry-After` before status polling. The terminal polling window is five
 minutes: it covers the 120-second operation lease plus a 60-second dedicated
 fixture reconciler cadence and scheduling jitter.
+
+## Deployed ACA qualification fixture
+
+`tests/live/apps/aca-qualification/` is the deployable fixture app that the
+deployed cold-start, agent-turn, lifecycle, loss, and load suites target. It is
+packaged and deployed by `eng/scripts/aca_qualification_pipeline.py`, which
+stamps an in-package `BUILD_INFO.json` marker. The cold-start module runs first
+in `eng/scripts/aca_deployed_qualification.py` and, once its timing assertions
+complete, checks that marker's build ID and commit SHA plus the live Python
+minor version against the expected values in the environment. A mismatch fails
+the run and suppresses the cold-start metrics, so timings from a stale build are
+never reported as if they described the build under test.
+
+The lifecycle suite verifies terminal session expiry on both authoritative
+clocks: at least 120 seconds after session activity for reclaim, and at least
+300 seconds after the matching terminal run update for successful-result
+availability. It does not compare the result hold to the later rearm activity
+timestamp.
+
+The canonical qualification uses N=5 with provisioning concurrency 1. Manual
+diagnostics retain load values 1–99 and provisioning values 1, 2, or 4; their
+operator owns shared-group quota and cost. The operator wrapper and direct
+live-test entry point reject N=100 before authentication or provider work.
+Formal N=100 remains future human-only acceptance and requires a purpose-built
+workflow; this fixture does not discharge Decision #29.
+
+There is no pipeline wiring for any of this; every step is run by hand.

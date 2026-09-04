@@ -40,7 +40,9 @@ from tests.doubles.fake_session_runtime import (
 from tests.live import aca_deployed_agent_support as support
 from tests.live import aca_deployed_lifecycle_support as lifecycle_support
 
-_DEPLOYABLE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "live_aca_deployed_agent_turn"
+_DEPLOYABLE_FIXTURE = (
+    Path(__file__).resolve().parent / "live" / "apps" / "aca-qualification"
+)
 _TIMEOUT_RECOVERY_FIXTURE = (
     Path(__file__).resolve().parent / "fixtures" / "live_aca_setup_timeout_recovery"
 )
@@ -148,6 +150,87 @@ async def test_lifecycle_submission_honors_the_setup_retry_after_contract(
 
     assert result is accepted
     assert sleeps == [120.0]
+
+
+def _load_lifecycle_test_module(
+    monkeypatch: pytest.MonkeyPatch,
+    module_name: str,
+) -> Any:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE", "1")
+    module_path = Path(__file__).parent / "live" / "test_aca_deployed_lifecycle.py"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_retention_uses_session_and_terminal_run_clocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_lifecycle_test_module(monkeypatch, "_lifecycle_retention_regression")
+    accepted = SimpleNamespace(session_id="session-1", run_id="run-1")
+    terminal_updated_at = _NOW
+    session = SimpleNamespace(
+        last_activity_at=terminal_updated_at + timedelta(milliseconds=660),
+        expires_at=terminal_updated_at + timedelta(seconds=300),
+    )
+    terminal_run = SimpleNamespace(
+        session_id="session-1",
+        run_id="run-1",
+        status="succeeded",
+        result_available=True,
+        updated_at=terminal_updated_at,
+    )
+
+    async def read_run(*_args: object, **_kwargs: object) -> object:
+        return terminal_run
+
+    monkeypatch.setattr(module, "read_authoritative_run", read_run)
+
+    await module._assert_terminal_retention(
+        object(),
+        session=session,
+        accepted=accepted,
+    )
+
+
+@pytest.mark.parametrize(
+    "terminal_run",
+    [
+        SimpleNamespace(
+            session_id="different-session",
+            run_id="run-1",
+            status="succeeded",
+            result_available=True,
+        ),
+        SimpleNamespace(
+            session_id="session-1",
+            run_id="different-run",
+            status="succeeded",
+            result_available=True,
+        ),
+        SimpleNamespace(
+            session_id="session-1",
+            run_id="run-1",
+            status="failed",
+            result_available=False,
+        ),
+    ],
+)
+def test_lifecycle_retention_rejects_wrong_or_unsuccessful_run(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_run: object,
+) -> None:
+    module = _load_lifecycle_test_module(monkeypatch, "_lifecycle_retention_fail_closed")
+
+    with pytest.raises(AssertionError):
+        module._assert_matching_successful_run(
+            terminal_run,
+            SimpleNamespace(session_id="session-1", run_id="run-1"),
+        )
 
 
 @pytest.mark.asyncio
@@ -529,6 +612,23 @@ def test_deployed_config_reads_only_safe_url_and_route_contract(
     }
 
 
+def test_deployed_config_normalizes_a_pathless_origin_to_the_api_route_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_deployed_environment(monkeypatch)
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL",
+        "https://deployed-aca.azurewebsites.net/",
+    )
+
+    config = support.deployed_aca_smoke_config_from_environment()
+
+    assert config.base_url == "https://deployed-aca.azurewebsites.net/api"
+    assert config.chat_url == (
+        "https://deployed-aca.azurewebsites.net/api/agents/deployed_turn/chat"
+    )
+
+
 def test_timeout_recovery_config_requires_the_controlled_fixture_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -866,12 +966,12 @@ def _lifecycle_session() -> DurableSessionRecord:
         (
             "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL",
             "https://user:password@deployed-aca.azurewebsites.net",
-            "without a path, credentials, query, or fragment",
+            "without credentials, query, or fragment",
         ),
         (
             "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL",
             "https://deployed-aca.azurewebsites.net?code=secret",
-            "without a path, credentials, query, or fragment",
+            "without credentials, query, or fragment",
         ),
         (
             "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE",

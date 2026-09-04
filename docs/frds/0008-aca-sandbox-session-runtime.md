@@ -5,7 +5,7 @@ status: Finalized
 author: larohra
 created: 2026-07-20
 updated: 2026-09-02
-issues: []
+issues: [166]
 pull_requests: []
 branch: feature/aca-sandboxes
 ---
@@ -437,6 +437,8 @@ controlling amendments.
 | 189 | Required Sandbox Group region and endpoint (revises #99/#184/#188) | ARM discovery/equality check / authored direct endpoint | Require normalized `region` beside the group resource ID and construct its regional data-plane client directly. Use no ARM lookup or fallback, and permit Function App and Sandbox Group regions to differ. | Human | 2026-09-02 | Replacement stack layer 1 |
 | 190 | ACA provider error boundary (refines #159/#184/#187/#188) | Raw SDK propagation / typed redacted boundary | Translate all SDK failures: group 401/403 authorization, group 404 binding, 429/5xx/timeout/transport transient, sandbox 404 missing backing, and 409 invalid state unless typed state is `Running` or `Resuming`. | Human | 2026-09-02 | Replacement stack layer 1 |
 | 191 | Result retention and reclaim authority | Complete run scan / monotonic session bound | `session.expires_at` never decreases and upper-bounds every result hold. Bounded scans may evict observed expired results but never block due reclaim; persisted off-page operation backing is exact-read before absence handling. | Human | 2026-09-02 | Replacement stack layer 2 |
+| 192 | Deployed ACA qualification fixture and coverage | Reuse E2E / dedicated N=5 fixture / formal N=100 fixture | Add a dedicated fixture and live suites for fresh acceptance, authenticated turn, lifecycle, backing loss, and N=5 admission/idempotency/events/results/cleanup. Keep its 120-second reclaim policy and reject N=100 preflight; Decision #29 requires a future purpose-built workflow. | Human | 2026-09-02 | Replacement stack layer 3 |
+| 193 | Lightweight in-package build provenance | No provenance / marker file / content-addressed chain | Ship a `BUILD_INFO.json` inside the deployed package and check build ID, commit SHA, and live Python minor after cold-start timing; a mismatch fails and suppresses metrics. Explicitly excludes wheel digest, installed package version, deploy-input manifest, deployment-storage chain, and rollback. | Human | 2026-09-02 | Replacement stack layer 3 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -1051,10 +1053,12 @@ Invariants: no anonymous ingress; no ingress ports; one active run; free slot on
   credential-source isolation, identity boundaries, SSRF defenses, static
   single-level delegation, and whole-chain timeout behavior.
 * Real ACA acceptance requires create/submit/result, stop/resume readiness,
-  loss-to-`410`, egress audit, and 100-concurrent/large-payload validation.
-  Status/event visibility, cancellation/lifecycle repair, cost, and throttling
-  must meet the documented acceptance target; anonymous ingress is never a
-  fallback.
+  loss-to-`410`, egress audit, and large-payload validation. Current deployed
+  qualification uses N=5 as an orchestration diagnostic; 100-concurrent
+  acceptance remains human-only (Decision #192). Status/event visibility is
+  observed against the documented target but does not gate; cancellation,
+  lifecycle repair, cost, and throttling remain acceptance evidence. Anonymous
+  ingress is never a fallback.
 
 All changes run ruff, strict mypy, pytest, observability/redaction checks, and
 the relevant documentation and real-ACA validation slices.
@@ -1422,7 +1426,7 @@ an enabled v1 surface.
 * Security/egress: reject unsafe defaults/bypass, rule ordering lint, static and secret credential Transform sources, group-identity boundaries, redirect/DNS-rebind revalidation, block sandbox-to-control-plane SSRF, journal/Table redaction.
 * Harness: bootstrap ABI/protocol/digest failure, no anonymous ingress, workflows/code-interpreter fail-closed, semantic golden traces every CI, advertise capability only after exercised trace.
 * Delegation: static/single-level guard, cycle/depth guard, egress union, co-location/no second run, recoverable specialist failure, whole-chain sync timeout.
-* Real ACA E2E/full-system: create-submit-result, stop-resume-ensure-ready, egress deny/transform audit, and large-payload gates are evidenced by U3. The committed deployed destructive backing-loss proof has passed; only formal human sign-off remains deferred. The committed public Easy-Auth load runner uses N=5 as the sole agent/CI diagnostic validation for orchestration and cleanup; it is not capacity evidence. Decision #29 remains human-only N=100 formal acceptance and is not passed until human-supplied N=100 evidence is available. At default preview quota, assert <=2-second p95 status/event visibility at <=1 poll/s per active stream, reliable cancellation/lifecycle repair, and acceptable cost/throttling; failure is an explicit private-ingress/load-shaping review finding, never a reason to permit anonymous ingress. Every validation slice also requires `ruff`, strict `mypy`, and `pytest`, plus docs/observability/redaction gates.
+* Real ACA E2E/full-system: create-submit-result, stop-resume-ensure-ready, egress deny/transform audit, and large-payload gates are evidenced by U3. The committed deployed destructive backing-loss proof has passed; only formal human sign-off remains deferred. Under Decision #192, a deployed qualification run exercises fresh-session acceptance, public turn, lifecycle, backing loss, and N=5 in that order with provisioning concurrency 1. N=5 is diagnostic evidence for orchestration and cleanup, not capacity. This 120-second-reclaim fixture rejects N=100 before authentication or provider work; Decision #29 remains pending a future purpose-built, human-only formal workflow. Observe status/event latency against the two-second p95 target at <=1 poll/s per active stream, but never gate on it; report reliable cancellation/lifecycle repair and acceptable cost/throttling. Failure is an explicit private-ingress/load-shaping review finding, never a reason to permit anonymous ingress. Every validation slice also requires `ruff`, strict `mypy`, and `pytest`, plus docs/observability/redaction gates.
 
 ## 11. Sandbox harness integration
 
@@ -1805,5 +1809,63 @@ BuildId-derived labels isolate concurrent runs. Fixture cleanup plus an
 remains. The smoke deploys no Function and performs no artifact attestation.
 
 ADO 298692 passed the low-level entrypoint, journal acceptance, real model turn,
-and cleanup. Post-main deployment, external attestation, py313/py314
-lifecycle/loss/N=5 qualification, and rollback remain owned by issue #166.
+and cleanup. The deployed qualification fixture, suites, and packaging/deploy
+tooling described in §14 are now committed and runnable by hand. Pipeline
+wiring for them, external attestation, and rollback remain owned by issue #166;
+there is intentionally no rollback machinery.
+
+## 14. Deployed ACA qualification assets — issue #166
+
+**Status: Finalized for the committed assets.** Decisions #192 and #193 are the
+qualification contract implemented here. This section describes committed test,
+fixture, and tooling assets only. **No pipeline wiring exists in this
+repository for them**; scheduling, gating, promotion criteria, and group sweep
+remain open under issue #166.
+
+`tests/live/apps/aca-qualification/` is the deployable qualification fixture: an
+agent app that selects the ACA Sandbox backend, authors its Sandbox Group region,
+reads every environment-specific value from app settings, and adds one
+fixture-only `/__buildinfo` route. The route lives in the fixture and imports
+nothing from product endpoint registration, so it cannot collide with product
+surface work. The fixture is deliberately outside `tests/endtoend/apps/`, whose
+suite auto-parameterizes a `func start` test over every app it finds and would
+fail on an app that requires real Azure.
+
+`eng/scripts/aca_qualification_pipeline.py` packages, deploys, and verifies that
+fixture by hand: it installs tooling, stamps `BUILD_INFO.json`, assembles an
+upload from exactly one runtime wheel plus a pinned, Oryx-compatible
+`eng/constraints/aca-fixture-requirements.txt` export of `uv.lock`, preflights
+deployment rights, configures the authored region, deploys through the normal
+Flex Consumption ZIP remote-build path, adds best-effort redacted portal metadata,
+and fetches and compares the deployed build info. Ambiguous wheel selection is a
+hard error rather than a silent "newest wins".
+
+`eng/scripts/aca_deployed_qualification.py` runs one ordered suite: the
+cold/fresh-session module first, then public turn, lifecycle, backing loss, and
+N=5 load. It invokes the cold/fresh-session module as a separate gate and does
+not start the remaining suites unless that process succeeds. Within that first
+module, fresh-session acceptance, first-event, and
+terminal timing complete *before* the same test reads the deployed marker and
+compares build ID, commit SHA, and live Python minor version. A missing or
+mismatched marker fails the test and suppresses latency metrics, so evidence
+from the wrong deployment is never reported as trustworthy.
+
+The canonical qualification uses N=5 with provisioning concurrency 1. Manual
+diagnostics retain load values 1–99 and provisioning values 1, 2, or 4 under
+operator-owned quota and cost. Both the operator command and direct live-test
+entry point reject N=100 before authentication or provider work. Formal N=100
+remains future human-only acceptance requiring a purpose-built workflow; these
+assets do not discharge Decision #29.
+
+This is deliberately lightweight in-package provenance, not a detached
+content-addressed attestation chain. Per Decision #193 it does not prove the
+wheel digest, the installed package version, a deploy-input manifest, or the
+deployment-storage version, and there is no retained-package or automatic
+rollback. A later deployment corrects a bad deployment.
+
+The qualification client is hardened for a real App Service frontend: bounded
+502/503 retries applied only to safe or explicitly idempotent requests, bounded
+result-materialization retry, SSE throttling retry that honors `Retry-After`,
+bounded event-batch visibility metrics, stable journal-acceptance assertions,
+and cleanup/recovery safeguards. All of that lives in test and live assets; no
+product runtime code participates.

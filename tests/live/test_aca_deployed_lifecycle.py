@@ -22,6 +22,7 @@ from tests.live.aca_deployed_agent_support import (
     submission_payload,
 )
 from tests.live.aca_deployed_lifecycle_support import (
+    LIFECYCLE_RECLAIM_IDLE_SECONDS,
     DeployedAcaLifecycleConfig,
     DeployedAcaLifecycleResources,
     assert_session_belongs_to_deployment,
@@ -30,6 +31,7 @@ from tests.live.aca_deployed_lifecycle_support import (
     open_deployed_aca_lifecycle_resources,
     owned_sandbox,
     owned_snapshots,
+    read_authoritative_run,
     read_authoritative_session,
     wait_for_idle_session,
     wait_for_reclaimed_session,
@@ -37,7 +39,8 @@ from tests.live.aca_deployed_lifecycle_support import (
     wait_until_reclaim_due,
 )
 
-from azure_functions_agents.session_state import DurableSessionRecord
+from azure_functions_agents.sandbox_runtime_limits import RESULT_HOLD_SECONDS
+from azure_functions_agents.session_state import DurableRunRecord, DurableSessionRecord
 
 _SETUP_RETRY_ATTEMPTS = 4
 
@@ -107,7 +110,11 @@ async def _qualify_first_run_and_suspend(
     assert_session_belongs_to_deployment(first_session, config)
     assert first_session.generation >= 1
     assert first_session.sandbox_id is not None
-    assert first_session.expires_at - first_session.last_activity_at == timedelta(seconds=120)
+    await _assert_terminal_retention(
+        resources,
+        session=first_session,
+        accepted=first_run,
+    )
     first_sandbox_id = first_session.sandbox_id
     first_generation = first_session.generation
 
@@ -136,7 +143,11 @@ async def _qualify_resume_and_reclaim(
     progress.cleanup_session = resumed_session
     assert resumed_session.sandbox_id == first.sandbox_id
     assert resumed_session.generation == first.generation
-    assert resumed_session.expires_at - resumed_session.last_activity_at == timedelta(seconds=120)
+    await _assert_terminal_retention(
+        resources,
+        session=resumed_session,
+        accepted=resumed_run,
+    )
 
     resumed_suspended = await wait_for_suspended_sandbox(
         resources, resumed_session, timeout_seconds=105.0
@@ -153,6 +164,36 @@ async def _qualify_resume_and_reclaim(
     snapshots_after_reclaim = await owned_snapshots(resources, reclaimed)
     assert not snapshots_after_reclaim
     return resumed_run
+
+
+async def _assert_terminal_retention(
+    resources: DeployedAcaLifecycleResources,
+    *,
+    session: DurableSessionRecord,
+    accepted: AcceptedRun,
+) -> None:
+    terminal_run = await read_authoritative_run(
+        resources,
+        session_id=accepted.session_id,
+        run_id=accepted.run_id,
+    )
+    _assert_matching_successful_run(terminal_run, accepted)
+    assert session.expires_at >= session.last_activity_at + timedelta(
+        seconds=LIFECYCLE_RECLAIM_IDLE_SECONDS
+    )
+    assert session.expires_at >= terminal_run.updated_at + timedelta(
+        seconds=RESULT_HOLD_SECONDS
+    )
+
+
+def _assert_matching_successful_run(
+    terminal_run: DurableRunRecord,
+    accepted: AcceptedRun,
+) -> None:
+    assert terminal_run.session_id == accepted.session_id
+    assert terminal_run.run_id == accepted.run_id
+    assert terminal_run.status == "succeeded"
+    assert terminal_run.result_available
 
 
 async def _assert_public_terminal_after_reclaim(

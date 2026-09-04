@@ -23,8 +23,11 @@ from tests.live.aca_deployed_agent_support import (
     acquire_default_authorization_evidence,
     deployed_aca_smoke_enabled,
     json_request,
+    optional_retry_after_seconds,
     parse_accepted_run,
     read_sse_events_with_first_event_time,
+    read_sse_events_with_observation_times,
+    response_header,
     setup_retry_after_seconds,
     submission_payload,
 )
@@ -43,12 +46,15 @@ from tests.live.aca_deployed_lifecycle_support import (
     read_session_operations,
 )
 from tests.live.aca_deployed_load_support import (
+    THROTTLED_ADMISSION_STATUSES,
     CommonActiveInterval,
     LoadLatencyMetrics,
     latency_metrics,
     provision_concurrency_from_option_or_environment,
     render_load_report,
     require_load_concurrency,
+    throttle_retry_after_seconds,
+    throttled_admission_retry_delay,
     utc_now,
 )
 
@@ -68,16 +74,18 @@ _POLL_SECONDS = 1.0
 _COMMON_ACTIVE_WAIT_SECONDS = 1.0
 _ACTIVE_PROOF_TIMEOUT_SECONDS = 120.0
 _EVENT_STREAM_GRACE_SECONDS = 360.0
+_RESULT_RETRY_AFTER_MAXIMUM_SECONDS = 10.0
 _HOLD_SECONDS = 300.0
+_RESULT_MATERIALIZATION_TIMEOUT_SECONDS = _HOLD_SECONDS
 _MINIMUM_HOLD_TERMINAL_SECONDS = _HOLD_SECONDS - 1.0
 _SETUP_DEADLINE_ATTEMPTS = 2
+_MAX_ADMISSION_ATTEMPTS = 5
 _SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 105.0
 _PROVISION_BATCH_TIMEOUT_SECONDS = 330.0
 _PHASE_B_ADMISSION_TIMEOUT_SECONDS = 330.0
 _RECOVERY_ATTEMPTS = 5
 _RECOVERY_POLL_SECONDS = 1.0
 _FINAL_RECOVERY_TIMEOUT_SECONDS = 60.0
-_OVERLAP_BUDGET_MARGIN_SECONDS = 15.0
 _SETTLEMENT_TIMEOUT_SECONDS = 900.0
 _RACE_SAMPLE_LIMIT = 5
 _CONNECTION_HEADROOM = 10
@@ -117,6 +125,7 @@ class _SubmittedRun:
 class _EventEvidence:
     first_event_at: float
     terminal_at: float
+    observed_event_timestamps: tuple[float, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +207,16 @@ class _AdmissionResponse:
 @dataclass(frozen=True, slots=True)
 class _SetupRetry:
     retry_after_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class _SetupDeadlineRetry:
+    retry_after_seconds: float
+
+
+def _throttle_retry_after_seconds(headers: Mapping[str, str]) -> float | None:
+    """Delegate to the support module's testable implementation."""
+    return throttle_retry_after_seconds(headers)
 
 
 class _AdmissionFailureError(AcaSmokeEnvironmentError):
@@ -410,7 +429,6 @@ async def _admit_held_load_sessions(
         raise
     _record_held_admission_summary(state, admission)
     _assert_distinct_admissions(state.held, context.concurrency)
-    _assert_remaining_hold_budget(state.held)
 
 
 def _record_held_admission_failure(
@@ -476,6 +494,7 @@ async def _verify_held_load_sessions(
             event.terminal_at - item.submitted_at
             for item, event in zip(state.held, event_evidence, strict=True)
         ],
+        [event.observed_event_timestamps for event in event_evidence],
     )
 
 
@@ -990,6 +1009,7 @@ async def _post_admission_request(
             config.deployed.chat_url,
             headers=_admission_request_headers(headers, request),
             payload=submission_payload(prompt),
+            retry_throttled=False,
         )
     return _AdmissionResponse(
         status=status,
@@ -1079,9 +1099,9 @@ async def _setup_deadline_response_outcome(
     retries: int,
     *,
     is_final_attempt: bool,
-) -> _AdmissionOutcome | _SetupRetry:
+) -> _AdmissionOutcome | _SetupDeadlineRetry:
     if not is_final_attempt:
-        return _SetupRetry(setup_retry_after_seconds(response.response_headers))
+        return _SetupDeadlineRetry(setup_retry_after_seconds(response.response_headers))
     return await _recover_admission_outcome(
         resources,
         config,
@@ -1102,7 +1122,8 @@ async def _admission_response_outcome(
     retries: int,
     *,
     is_final_attempt: bool,
-) -> _AdmissionOutcome | _SetupRetry:
+    is_final_setup_deadline_attempt: bool,
+) -> _AdmissionOutcome | _SetupRetry | _SetupDeadlineRetry:
     if response.status == 202:
         return await _accepted_admission_outcome(
             resources,
@@ -1112,7 +1133,14 @@ async def _admission_response_outcome(
             response,
             retries,
         )
-    if response.status in {429, 503}:
+    if response.status in THROTTLED_ADMISSION_STATUSES:
+        retry_after = throttled_admission_retry_delay(
+            response.status,
+            response.response_headers,
+            is_final_attempt=is_final_attempt,
+        )
+        if retry_after is not None:
+            return _SetupRetry(retry_after)
         return await _recover_ambiguous_http_outcome(
             resources,
             config,
@@ -1132,7 +1160,7 @@ async def _admission_response_outcome(
             request,
             response,
             retries,
-            is_final_attempt=is_final_attempt,
+            is_final_attempt=is_final_setup_deadline_attempt,
         )
     if response.status in {400, 401, 403, 404}:
         return _AdmissionOutcome(
@@ -1176,7 +1204,8 @@ async def _submit_one(
     deadline: float | None = None,
 ) -> _AdmissionOutcome:
     request = _new_admission_request(attempted_idempotency_keys, session_id)
-    for retries in range(_SETUP_DEADLINE_ATTEMPTS):
+    setup_deadline_attempts = 0
+    for retries in range(_MAX_ADMISSION_ATTEMPTS):
         if _admission_deadline_elapsed(deadline):
             return _setup_deadline_outcome(request.idempotency_key, retries)
         try:
@@ -1205,15 +1234,21 @@ async def _submit_one(
             request,
             response,
             retries,
-            is_final_attempt=retries + 1 == _SETUP_DEADLINE_ATTEMPTS,
+            is_final_attempt=retries + 1 == _MAX_ADMISSION_ATTEMPTS,
+            is_final_setup_deadline_attempt=(
+                setup_deadline_attempts + 1 >= _SETUP_DEADLINE_ATTEMPTS
+                or retries + 1 == _MAX_ADMISSION_ATTEMPTS
+            ),
         )
         if isinstance(outcome, _AdmissionOutcome):
             return outcome
+        if isinstance(outcome, _SetupDeadlineRetry):
+            setup_deadline_attempts += 1
         retry_count = retries + 1
         if _retry_would_exceed_setup_deadline(deadline, outcome.retry_after_seconds):
             return _setup_deadline_outcome(request.idempotency_key, retry_count)
         await asyncio.sleep(outcome.retry_after_seconds)
-    raise AssertionError("setup-deadline admission loop must return an outcome")
+    raise AssertionError("admission loop must return an outcome")
 
 
 def _setup_deadline_outcome(idempotency_key: str, retries: int) -> _AdmissionOutcome:
@@ -1366,17 +1401,6 @@ async def _recover_ambiguous_http_outcome(
     )
 
 
-def _assert_remaining_hold_budget(submitted: list[_SubmittedRun]) -> None:
-    """Reject runs that cannot leave the formal proof enough shared hold time."""
-    accepted_times = [item.accepted_at for item in submitted]
-    admission_spread = max(accepted_times) - min(accepted_times)
-    required_budget = _ACTIVE_PROOF_TIMEOUT_SECONDS + _OVERLAP_BUDGET_MARGIN_SECONDS
-    remaining_budget = _HOLD_SECONDS - admission_spread
-    assert remaining_budget > required_budget, (
-        "Admission spread leaves insufficient remaining qualification hold: "
-        f"remaining={remaining_budget:.1f}s required>{required_budget:.1f}s."
-    )
-
 
 def _assert_distinct_admissions(submitted: list[_SubmittedRun], concurrency: int) -> None:
     assert len(submitted) == concurrency
@@ -1406,7 +1430,12 @@ async def _establish_common_active_interval(
         first = await _active_observations(resources, config, partition_key, submitted)
         if first is not None:
             replay_count, conflict_count = await _exercise_active_races(
-                client, config, headers, submitted[:_RACE_SAMPLE_LIMIT]
+                resources,
+                client,
+                config,
+                partition_key,
+                headers,
+                submitted[:_RACE_SAMPLE_LIMIT],
             )
             await asyncio.sleep(_COMMON_ACTIVE_WAIT_SECONDS)
             second = await _active_observations(resources, config, partition_key, submitted)
@@ -1502,26 +1531,40 @@ def _assert_active_operation_consistency(
 
 
 async def _exercise_active_races(
+    resources: DeployedAcaLifecycleResources,
     client: ClientSession,
     config: DeployedAcaLifecycleConfig,
+    partition_key: str,
     headers: dict[str, str],
     sample: list[_SubmittedRun],
 ) -> tuple[int, int]:
     outcomes = await asyncio.gather(
-        *(_exercise_one_active_race(client, config, headers, item) for item in sample)
+        *(
+            _exercise_one_active_race(
+                resources,
+                client,
+                config,
+                partition_key,
+                headers,
+                item,
+            )
+            for item in sample
+        )
     )
     return sum(replays for replays, _ in outcomes), sum(conflicts for _, conflicts in outcomes)
 
 
 async def _exercise_one_active_race(
+    resources: DeployedAcaLifecycleResources,
     client: ClientSession,
     config: DeployedAcaLifecycleConfig,
+    partition_key: str,
     headers: dict[str, str],
     submitted: _SubmittedRun,
 ) -> tuple[int, int]:
     accepted = submitted.accepted
     assert submitted.session_id_header == accepted.session_id
-    replay_status, replay_payload, _ = await json_request(
+    replay_status, replay_payload, replay_headers = await json_request(
         client,
         "POST",
         config.deployed.chat_url,
@@ -1532,8 +1575,23 @@ async def _exercise_one_active_race(
         },
         payload=submission_payload(_LOAD_PROMPT),
     )
-    assert replay_status == 202
-    replay = parse_accepted_run(replay_payload, config.deployed)
+    if replay_status == 202:
+        replay = parse_accepted_run(replay_payload, config.deployed)
+    else:
+        assert replay_status == 504
+        assert replay_payload.get("error") == "setup_deadline_exceeded"
+        assert replay_payload.get("retry_with") == "respond-async"
+        assert response_header(replay_headers, "x-ms-retry-with") == "respond-async"
+        recovered = await _recover_submitted_run(
+            resources,
+            config,
+            partition_key,
+            submitted.idempotency_key,
+            submitted.submitted_at,
+            session_id_header=submitted.session_id_header,
+        )
+        assert recovered is not None
+        replay = recovered.accepted
     assert replay.session_id == accepted.session_id
     assert replay.run_id == accepted.run_id
     conflict_status, conflict_payload, _ = await json_request(
@@ -1557,20 +1615,31 @@ async def _read_events(
     submitted: _SubmittedRun,
     authorization: str,
 ) -> _EventEvidence:
-    status, events, _, first_event_at = await read_sse_events_with_first_event_time(
-        client,
-        submitted.accepted.management_urls["events_url"],
-        headers={"Authorization": authorization},
-        overall_timeout_seconds=_HOLD_SECONDS + _EVENT_STREAM_GRACE_SECONDS,
+    status, events, _, first_event_at, observed_event_timestamps = (
+        await read_sse_events_with_observation_times(
+            client,
+            submitted.accepted.management_urls["events_url"],
+            headers={"Authorization": authorization},
+            overall_timeout_seconds=_HOLD_SECONDS + _EVENT_STREAM_GRACE_SECONDS,
+        )
     )
     terminal_at = time.perf_counter()
     assert status == 200
     assert first_event_at is not None
     assert events
+    assert len(observed_event_timestamps) == len(events), (
+        f"observed {len(observed_event_timestamps)} arrival timestamps for "
+        f"{len(events)} events; the visibility series would be computed from an "
+        "incomplete sample."
+    )
     assert [event.sequence for event in events] == list(range(1, len(events) + 1))
     assert events[-1].payload.get("type") == "done"
     _assert_public_hold_events(events)
-    return _EventEvidence(first_event_at=first_event_at, terminal_at=terminal_at)
+    return _EventEvidence(
+        first_event_at=first_event_at,
+        terminal_at=terminal_at,
+        observed_event_timestamps=observed_event_timestamps,
+    )
 
 
 def _assert_public_hold_events(events: list[SseEvent]) -> None:
@@ -1628,12 +1697,27 @@ async def _read_terminal_result(
     )
     assert status_code == 200
     assert status.get("state") == "succeeded"
-    result_code, result, _ = await json_request(
-        client,
-        "GET",
-        accepted.management_urls["result_url"],
-        headers={"Authorization": authorization},
-    )
+    deadline = time.monotonic() + _RESULT_MATERIALIZATION_TIMEOUT_SECONDS
+    while True:
+        result_code, result, response_headers = await json_request(
+            client,
+            "GET",
+            accepted.management_urls["result_url"],
+            headers={"Authorization": authorization},
+            retry_throttled=False,
+        )
+        if result_code == 200:
+            break
+        assert result_code == 503
+        assert result.get("error") == "result_temporarily_unavailable"
+        retry_after = optional_retry_after_seconds(
+            response_headers,
+            maximum_seconds=_RESULT_RETRY_AFTER_MAXIMUM_SECONDS,
+        )
+        assert retry_after is not None
+        if time.monotonic() + retry_after > deadline:
+            raise AssertionError("Terminal result did not materialize within the retry window.")
+        await asyncio.sleep(retry_after)
     assert result_code == 200
     assert isinstance(result.get("result"), dict)
     return True

@@ -22,11 +22,15 @@ _DEPLOYED_ENVIRONMENT = (
     "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_NAME",
     "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID",
     "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME",
+    "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_BUILD_ID",
+    "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_COMMIT_SHA",
+    "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EXPECTED_PYTHON_VERSION",
     "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID",
     "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION",
 )
 _PROVISION_CONCURRENCIES = frozenset({1, 2, 4})
 _SMOKE_RUN_ID = "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_RUN_ID"
+FORMAL_N100_UNSUPPORTED_ERROR = "formal_n100_unsupported_by_qualification_fixture"
 
 
 class QualificationError(Exception):
@@ -66,29 +70,28 @@ def validate_deployed_environment(
     provision_concurrency: str | None = None,
 ) -> tuple[int | None, int | None]:
     """Validate redacted deployed-suite inputs and shared-group limits."""
-    for name in _DEPLOYED_ENVIRONMENT:
-        _required(environment, name)
-    if runtime_target not in {"both", "python313", "python314"}:
-        raise QualificationError("invalid_runtime_target")
-
     load = (
         _integer(load_concurrency, name="acaLoadConcurrency", minimum=1, maximum=100)
         if load_concurrency is not None
         else None
     )
+    if load == 100:
+        raise QualificationError(FORMAL_N100_UNSUPPORTED_ERROR)
     provision = (
         _integer(provision_concurrency, name="acaProvisionConcurrency", minimum=1, maximum=4)
         if provision_concurrency is not None
         else None
     )
+    for name in _DEPLOYED_ENVIRONMENT:
+        _required(environment, name)
+    if runtime_target not in {"both", "python313", "python314"}:
+        raise QualificationError("invalid_runtime_target")
     if provision is not None and provision not in _PROVISION_CONCURRENCIES:
         raise QualificationError("invalid_provision_concurrency")
     if runtime_target == "both" and load is not None and load > 5:
         raise QualificationError("dual_runtime_load_concurrency_requires_single_runtime")
     if runtime_target == "both" and provision is not None and provision > 1:
         raise QualificationError("provision_concurrency_requires_single_runtime")
-    if load == 100 and environment.get("BUILD_REASON", "").strip() != "Manual":
-        raise QualificationError("formal_n100_requires_manual_build")
     return load, provision
 
 
@@ -154,7 +157,7 @@ def run_deployed_suite(
     load_concurrency: str,
     provision_concurrency: str,
 ) -> int:
-    """Run the protected deployed turn, lifecycle, loss, and N=5 smoke suite."""
+    """Gate turn, lifecycle, loss, and load on cold-start provenance."""
     load, provision = validate_deployed_environment(
         environment,
         runtime_target=runtime_target,
@@ -165,7 +168,16 @@ def run_deployed_suite(
     inherited = dict(environment)
     inherited["AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY"] = str(load)
     inherited["AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY"] = str(provision)
+    samples = validate_cold_start_samples(inherited)
+    if samples is not None:
+        inherited["AZURE_FUNCTIONS_AGENTS_ACA_COLD_START_SAMPLES"] = str(samples)
     preflight_auth(inherited)
+    cold_start_result = _run_pytest(
+        ("tests/live/test_aca_deployed_cold_start.py",),
+        inherited,
+    )
+    if cold_start_result != 0:
+        return cold_start_result
     return _run_pytest(
         (
             "tests/live/test_aca_deployed_agent_turn.py",
