@@ -1,195 +1,250 @@
 {
-  "schema_version": 1,
-  "title": "Hybrid ACA Sandbox/APIM leadership demo",
-  "recorded_at": "2026-09-04",
-  "live_request": {
-    "window_start": "2026-09-03T22:31:54.6749887Z",
-    "window_end": "2026-09-03T22:32:28.5140488Z",
-    "telemetry_window_start": "2026-09-03T22:31:50Z",
-    "telemetry_window_end": "2026-09-03T22:33:30Z",
-    "function_app": "func-hybrid-sbx-0902",
-    "route": "/agents/main/chatstream",
-    "prompt_id": "customer-probe-leadership-demo-repeat-3",
-    "http_status": 200,
-    "terminal_event": "done",
-    "client_first_event_ms": 10696.811,
-    "client_total_ms": 23642.241,
-    "function_duration_ms": 20317.2874,
-    "function_operation_id": "c9cfb8d52497c15862277558e1a96a9c",
-    "runtime_trace_id": "fc2ce69d3b9c95984da4c48e15b8d48f"
-  },
-  "portal_capture_request": {
-    "window_start": "2026-09-04T00:00:39.9521489Z",
-    "window_end": "2026-09-04T00:01:08.9715532Z",
-    "function_app": "func-hybrid-sbx-0902",
-    "route": "/agents/main/chatstream",
-    "prompt_id": "leadership-portal-evidence",
-    "http_status": 200,
-    "terminal_event": "done",
-    "client_first_event_ms": 12874.666,
-    "client_total_ms": 21893.113,
-    "function_duration_ms": 18258.073,
-    "operation_id": "f8e1f7aec373b17ab9d1ae1d730b2105",
-    "request_span_id": "89ec0a0ed2feec2e",
-    "correlated_trace_items": 2,
-    "apim_rows_in_exact_window": 0,
-    "apim_provenance_note": "Live APIM policy views prove retained governance; no unrelated gateway diagnostic row is presented as same-run evidence."
-  },
-  "portal_capture_provenance": {
-    "method": "Playwright persistent context with a session-local copy of the authenticated, device-compliant Microsoft Edge Work profile",
-    "source": "Live Azure Portal views of the retained resources",
-    "views": [
-      "Azure Functions Function App and deployed functions",
-      "API Management model and MCP API policy designers",
-      "Container Apps Sandbox Group overview",
-      "Application Insights end-to-end transaction details"
-    ],
-    "account_banner_excluded_at_capture": true,
-    "request_response_bodies_captured": false,
-    "redacted_fields": [
-      "account identity",
-      "subscription name and ID",
-      "build and commit hashes",
-      "InvocationId",
-      "ProcessId",
-      "HostInstanceId"
-    ],
-    "raw_captures_retained": false,
-    "temporary_browser_profile_retained": false
-  },
-  "live_apim": {
-    "model": {
-      "api_id": "hybrid-sandbox-spike-model",
-      "post_requests": 2,
-      "errors": 0,
-      "p50_ms": 2344.0438,
-      "p95_ms": 2853.5343
-    },
-    "mcp": {
-      "api_id": "hybrid-sandbox-spike-mcp",
-      "post_requests": 4,
-      "post_errors": 0,
-      "p50_ms": 80.4918,
-      "p95_ms": 128.1154,
-      "expected_nonfatal_close_405": 2
-    },
-    "diagnostics": {
-      "logger_type": "applicationInsights",
-      "http_correlation_protocol": "W3C",
-      "request_body_bytes": 0,
-      "response_body_bytes": 0
-    }
-  },
-  "live_runtime_metrics": {
-    "sandbox_create_ms": 2858.681183,
-    "package_upload_ms": 82.005902,
-    "package_verify_ms": 0.149715,
-    "executor_ready_ms": 304.723439,
-    "tool_execution_ms": 0.230681,
-    "tool_transfer_ms": 285.701713,
-    "cleanup_handoff_ms": 47.130153,
-    "request_ms": 16478.87676,
-    "delete_request_failures": 1
-  },
-  "sandbox_inventory": {
-    "pre_run": 0,
-    "active_observation": {
-      "observed_at": "2026-09-03T22:38:32.4454776Z",
-      "count": 1,
-      "states": {
-        "Running": 1
-      }
-    },
-    "final_observation": {
-      "observed_at": "2026-09-03T23:00:08.9225485Z",
-      "count": 0,
-      "states": {}
-    },
+  "schema_version": "2.0",
+  "package": "hybrid-sandbox-leadership-live-e2e",
+  "generated_at": "2026-09-04T17:01:45.7843079Z",
+  "safety": {
+    "existing_resources_only": true,
+    "bounded_demo_invocations": 1,
+    "settings_changed": false,
+    "resources_provisioned": false,
     "operator_cleanup_used": false,
-    "observed_cleanup_path": "scheduled ownership-scoped reaper after the configured 1200-second orphan threshold"
+    "body_logging_enabled": false,
+    "credentials_recorded": false
   },
-  "portal_capture_inventory": {
-    "poll_observations": 29,
-    "polling_observed_nonzero": false,
-    "polling_note": "The transient sandbox completed between 8-10 second inventory polls; no active-state claim is made for this request.",
-    "final_observation": {
-      "observed_at": "2026-09-04T00:12:45.1317448Z",
-      "count": 0,
-      "states": {}
-    },
-    "operator_cleanup_used": false
+  "resources": {
+    "resource_group": "larohra-test-adc-tools-hosted-skill",
+    "function_app": "func-hybrid-sbx-0902",
+    "sandbox_group": "sbg-hybrid-tools-0902",
+    "application_insights": "appi-hybrid-sbx-0902",
+    "log_analytics": "log-hybrid-sbx-0902",
+    "api_management": "larohra-ai-gateway",
+    "region": "westus2"
   },
-  "qualification_reference": {
-    "optimized_commit": "cb53d513964cb4ab225144f12c8018c49b25cd84",
-    "request_count": 21,
-    "error_count": 0,
-    "runtime_average_ms": 10649.358,
-    "runtime_reduction_percent": 48.03,
-    "sandbox_create_average_ms": 3010.806,
-    "package_upload_average_ms": 135.085,
-    "executor_ready_average_ms": 333.192,
-    "tool_execution_average_ms": 0.299,
-    "cleanup_handoff_average_ms": 49.914
-  },
-  "assets": {
-    "storyboard": "storyboard.md",
-    "screenshots": [
-      "evidence/function-hosted-skill.png",
-      "evidence/apim-foundry-mcp.png",
-      "evidence/aca-sandbox-lifecycle.png",
-      "evidence/appinsights-waterfall.png"
-    ],
-    "previous_enhanced_video": "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-demo.mp4",
-    "silent_master": "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-live-portal-silent.mp4",
-    "enhanced_video": "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-live-portal.mp4",
-    "contact_sheet": "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-live-portal-contact-sheet.png"
-  },
-  "asset_metadata": {
-    "evidence/function-hosted-skill.png": {
-      "bytes": 254421,
-      "sha256": "c1d7e90e622423b0449b038da3432dc91ac0c4c367734106ca3393bf19746ca3",
-      "dimensions": "1920x1080"
+  "live_invocation": {
+    "prompt_id": "parallel-shell-mcp-leadership-demo",
+    "window": {
+      "request_start_utc": "2026-09-04T16:45:30.1047464Z",
+      "request_end_utc": "2026-09-04T16:46:01.1258946Z",
+      "telemetry_query_start_utc": "2026-09-04T16:43:30Z",
+      "telemetry_query_end_utc": "2026-09-04T16:49:30Z",
+      "final_inventory_observed_utc": "2026-09-04T17:01:45.7843079Z"
     },
-    "evidence/apim-foundry-mcp.png": {
-      "bytes": 140262,
-      "sha256": "308b1c6e14c1f6cc634ebcd94e3bf29c82422fc8051bc8db46a1d78fae3e0a22",
-      "dimensions": "1920x1080"
+    "function_request": {
+      "operation_id": "a241847fb7325d57b8516c2bd52f2f08",
+      "span_id": "8736a63dac475478",
+      "http_status": 200,
+      "duration_ms": 31021.1482
     },
-    "evidence/aca-sandbox-lifecycle.png": {
-      "bytes": 125930,
-      "sha256": "dff6650bb97f67c5f2ceb95f5486553274b634a49a0b01ad19d2230050bbcc44",
-      "dimensions": "1920x1080"
+    "runtime_trace": {
+      "operation_id": "3d57819cb9fda4dcfe439fc457a93133",
+      "root_span_id": "158bbc457b673a47",
+      "dependency_span_count": 68,
+      "duration_ms": 30949,
+      "role": "hybrid-sandbox-spike"
     },
-    "evidence/appinsights-waterfall.png": {
-      "bytes": 179717,
-      "sha256": "1d2514b08cb94d3bb3d081c72ed089ea6413cbf6d5b5ce73e70177e50a2950bb",
-      "dimensions": "1920x1080"
+    "tool_behavior": {
+      "tool_calls_surfaced": 3,
+      "model_calls": 2,
+      "mcp_tool_calls": 1,
+      "local_shell_calls": 2,
+      "returned_markers": [
+        "ALPHA_COMPLETE",
+        "BETA_COMPLETE"
+      ],
+      "execution_statement": "Parallel model fan-out with safe same-sandbox queuing."
     },
-    "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-live-portal-silent.mp4": {
-      "bytes": 39130640,
-      "sha256": "580ca564a54c0d5d08fe4434f633d670c1097e8eba18efb07996580c45dae7d9",
-      "duration_seconds": 307.667,
-      "video": "H.264 1920x1080 30fps",
-      "audio": null
+    "sandbox_lifecycle_ms": {
+      "create": 2941.824648,
+      "package_upload": 276.333387,
+      "package_verify": 0.143268,
+      "executor_ready": 385.796795,
+      "discovery": 19.574902,
+      "cleanup_handoff": 65.87749,
+      "delete": 1685
     },
-    "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-demo.mp4": {
-      "bytes": 22638417,
-      "sha256": "6224f86719ea93a2c154a93270043c2f8222a945152821b96408fd576a0c7324",
-      "duration_seconds": 307.667,
-      "video": "H.264 1920x1080 30fps",
-      "audio": "AAC 48kHz stereo; mean -23.5 dB, max -2.2 dB"
-    },
-    "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-live-portal.mp4": {
-      "bytes": 44142258,
-      "sha256": "f365a14698c238e170442411ae32bc2da08b66c4beb6769c99d03a5ba579a53d",
-      "duration_seconds": 307.667,
-      "video": "H.264 1920x1080 30fps",
-      "audio": "AAC 48kHz stereo; mean -23.4 dB, max -2.4 dB"
-    },
-    "session-artifact:hybrid-sandbox-leadership-video/hybrid-sandbox-leadership-live-portal-contact-sheet.png": {
-      "bytes": 398092,
-      "sha256": "a5242f640a23d3ba8792805c398955e600eb7c5951486d223345806c1082882d",
-      "dimensions": "1920x432"
+    "sandbox_inventory": {
+      "pre_run": 0,
+      "final": 0,
+      "final_states": {},
+      "operator_cleanup_used": false
     }
+  },
+  "same_window_apim": {
+    "role": "larohra-ai-gateway West US",
+    "successful_model_posts": 2,
+    "successful_mcp_posts": 5,
+    "expected_failed_mcp_close_gets": 2,
+    "azure_diagnostics_rows": 0,
+    "source": "Application Insights APIM-role dependencies",
+    "body_fields_queried": false
+  },
+  "qualification_baseline": {
+    "source": "../../decisions/0009-hybrid-sandbox-tool-execution-results.json",
+    "runtime_reduction_percent": 48.03,
+    "optimized_runtime_seconds": 10.65,
+    "baseline_runtime_seconds": 20.49,
+    "optimized_create_ms": 3010,
+    "optimized_upload_ms": 135,
+    "optimized_executor_ready_ms": 333,
+    "optimized_tool_ms": 0.3,
+    "optimized_cleanup_handoff_ms": 49.9,
+    "final_inventory": 0
+  },
+  "claims": [
+    {
+      "claim": "A real Hosted Skills request returned a governed MCP result and two local tool markers.",
+      "evidence": [
+        "evidence/live-chat-multitool.png",
+        "external:live-flow-v3/page@8c512b9186a4a477efca4cb9e35dbcdf.webm",
+        "live_invocation.function_request"
+      ]
+    },
+    {
+      "claim": "Foundry and MCP traffic crossed APIM during the invocation window.",
+      "evidence": [
+        "same_window_apim",
+        "external:live-flow-v3/apim-dependencies-redacted.json",
+        "evidence/apim-foundry-mcp.png"
+      ]
+    },
+    {
+      "claim": "The invocation used one fresh sandbox and returned inventory to zero.",
+      "evidence": [
+        "live_invocation.sandbox_lifecycle_ms",
+        "live_invocation.sandbox_inventory",
+        "evidence/aca-sandbox-live-run.png",
+        "external:live-flow-v3/final-inventory.json"
+      ]
+    },
+    {
+      "claim": "Model, MCP, sandbox, file journal, tool, and cleanup operations are represented in one runtime trace.",
+      "evidence": [
+        "evidence/appinsights-agent-trace.png",
+        "external:live-flow-v3/runtime-dependencies-redacted.json",
+        "external:live-flow-v3/runtime-progress.json"
+      ]
+    },
+    {
+      "claim": "The optimized qualification path reduced measured runtime by 48.03 percent.",
+      "evidence": [
+        "qualification_baseline"
+      ]
+    }
+  ],
+  "repository_assets": [
+    {
+      "path": "storyboard.md",
+      "kind": "storyboard"
+    },
+    {
+      "path": "record_live_flow.py",
+      "kind": "automation"
+    },
+    {
+      "path": "record_scenes.py",
+      "kind": "automation"
+    },
+    {
+      "path": "demo.html",
+      "kind": "scene_source"
+    },
+    {
+      "path": "narration.json",
+      "kind": "narration_source"
+    },
+    {
+      "path": "evidence/function-hosted-skill.png",
+      "kind": "historical_live_portal_support",
+      "width": 1920,
+      "height": 1080,
+      "bytes": 254421,
+      "sha256": "c1d7e90e622423b0449b038da3432dc91ac0c4c367734106ca3393bf19746ca3"
+    },
+    {
+      "path": "evidence/apim-foundry-mcp.png",
+      "kind": "live_portal_support",
+      "width": 1920,
+      "height": 1080,
+      "bytes": 140262,
+      "sha256": "308b1c6e14c1f6cc634ebcd94e3bf29c82422fc8051bc8db46a1d78fae3e0a22"
+    },
+    {
+      "path": "evidence/aca-sandbox-lifecycle.png",
+      "kind": "historical_live_portal_support",
+      "width": 1920,
+      "height": 1080,
+      "bytes": 125930,
+      "sha256": "dff6650bb97f67c5f2ceb95f5486553274b634a49a0b01ad19d2230050bbcc44"
+    },
+    {
+      "path": "evidence/appinsights-waterfall.png",
+      "kind": "historical_live_portal_support",
+      "width": 1920,
+      "height": 1080,
+      "bytes": 179717,
+      "sha256": "1d2514b08cb94d3bb3d081c72ed089ea6413cbf6d5b5ce73e70177e50a2950bb"
+    },
+    {
+      "path": "evidence/live-chat-multitool.png",
+      "kind": "same_run_live_ui",
+      "width": 1920,
+      "height": 1080,
+      "bytes": 371061,
+      "sha256": "a78bb301eb0ff940bc8d3a83a88d1ebe27f86bf38d04ec2cdc496155729a26e9"
+    },
+    {
+      "path": "evidence/appinsights-agent-trace.png",
+      "kind": "same_run_telemetry_visualization",
+      "width": 1920,
+      "height": 1080,
+      "bytes": 532911,
+      "sha256": "9fff8a9cc53ce875905dc796cdad9d9d4f362466676bec4cd5c6addfc9f8525d"
+    },
+    {
+      "path": "evidence/aca-sandbox-live-run.png",
+      "kind": "live_portal_and_same_run_telemetry",
+      "width": 1920,
+      "height": 1080,
+      "bytes": 571726,
+      "sha256": "612c20b467d526583aa4b8357b3f6b9a90bbc4bfd3e5a94c85eacee1255a16ca"
+    }
+  ],
+  "external_artifacts": {
+    "root": "C:\\Users\\larohra\\.copilot\\session-state\\e29c49e0-41eb-4fab-be8c-6e9a671f8008\\files\\hybrid-sandbox-leadership-video\\live-flow-v3",
+    "final_video": {
+      "path": "hybrid-sandbox-leadership-live-e2e.mp4",
+      "bytes": 14384789,
+      "sha256": "edd17bbdf5becdf2bb592126b33ad6602cf9c9a2279508c4a5c37bceef0aa953",
+      "duration_seconds": 156.4,
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 30,
+      "video_codec": "h264",
+      "audio_codec": "aac",
+      "audio_sample_rate_hz": 48000,
+      "audio_channels": 2,
+      "audio_mean_db": -23.8,
+      "audio_max_db": -3.8
+    },
+    "silent_master": {
+      "path": "hybrid-sandbox-leadership-live-e2e-silent.mp4",
+      "bytes": 11850410,
+      "sha256": "f9f56dbb6b47eaa1181b53f8e05b77a5df44129a379ce6ef88f1143b0d3c861f"
+    },
+    "contact_sheet": {
+      "path": "hybrid-sandbox-leadership-live-e2e-contact-sheet.png",
+      "bytes": 739962,
+      "sha256": "09faa95052cb9f2d8da2e5aabd9806b16b1d14e3563ff754cee9d6b2b6cec26e"
+    },
+    "raw_live_recording": "page@8c512b9186a4a477efca4cb9e35dbcdf.webm",
+    "redacted_runtime_dependencies": "runtime-dependencies-redacted.json",
+    "redacted_apim_dependencies": "apim-dependencies-redacted.json",
+    "runtime_progress": "runtime-progress.json",
+    "final_inventory": "final-inventory.json"
+  },
+  "portal_capture_limitation": {
+    "literal_agent_trace_blade_captured": false,
+    "reason": "The authenticated Edge session was in active use; automation failed closed.",
+    "replacement": "A content-free visualization generated from the same Application Insights dependency spans."
   }
 }

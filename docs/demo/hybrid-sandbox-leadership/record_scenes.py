@@ -9,18 +9,14 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-
 SCENES = [
-    {"id": "opening", "scene": 1, "duration": 24},
-    {"id": "topology", "scene": 2, "duration": 32},
-    {"id": "function", "scene": 3, "duration": 32},
-    {"id": "apim", "scene": 4, "duration": 32},
-    {"id": "sandbox", "scene": 5, "duration": 34},
-    {"id": "waterfall", "scene": 6, "duration": 38},
-    {"id": "boundaries", "scene": 7, "duration": 30},
-    {"id": "performance", "scene": 8, "duration": 34},
-    {"id": "takeaway", "scene": 9, "duration": 28},
-    {"id": "closing", "scene": 10, "duration": 24},
+    {"id": "opening", "scene": 1, "duration": 4},
+    {"id": "topology", "scene": 2, "duration": 8},
+    {"id": "sandbox", "scene": 5, "duration": 20},
+    {"id": "agent-trace", "scene": 6, "duration": 35},
+    {"id": "apim", "scene": 4, "duration": 20},
+    {"id": "demo-results", "scene": 8, "duration": 20},
+    {"id": "takeaway", "scene": 9, "duration": 12},
 ]
 
 def main() -> None:
