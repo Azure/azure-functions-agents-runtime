@@ -24,9 +24,11 @@ jobs that deploy and qualify Python 3.13 and Python 3.14 in parallel.
 The cold-start module is first. Only after its acceptance, first-event, and
 terminal timing completes does it compare the embedded marker with the expected
 build ID, commit SHA, and Python runtime. A mismatch fails and suppresses the
-cold-start metrics. This remains lightweight in-package provenance: it does not
-attest the exact wheel digest, installed package version, deploy-input manifest,
-or deployment-storage version.
+cold-start metrics. The deployed-suite runner uses pytest fail-fast behavior and
+does not start the turn, lifecycle, loss, or load modules after a cold/provenance
+failure. This remains lightweight in-package provenance: it does not attest the
+exact wheel digest, installed package version, deploy-input manifest, or
+deployment-storage version.
 
 Each job passes provisioning concurrency 1; `maxParallel: 2` makes aggregate
 provisioning concurrency 2. Do not serialize the matrix. The dedicated Sandbox
@@ -71,9 +73,37 @@ checks: either would defeat the approved feature-branch validation workflow.
 
 ## Fixture-app prerequisites
 
-Each standing qualification Function App must define
-`AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID`. The deployment job
-writes `AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION` before uploading the package.
+Each standing qualification Function App must have these app settings before
+deployment:
+
+- ACA runtime: `AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID`. The
+  deployment job writes `AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION`.
+- Azure OpenAI: `AZURE_FUNCTIONS_AGENTS_PROVIDER=azure_openai`,
+  `AZURE_OPENAI_ENDPOINT`, and `AZURE_OPENAI_DEPLOYMENT`.
+  `AZURE_OPENAI_API_VERSION` is optional; when omitted, the Agent Framework
+  default is used.
+- Auth allowlists:
+  `AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_ENTRA_TENANT_ID`,
+  `AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE`, and
+  `AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TEST_INVOKER_CLIENT_ID`.
+- Session storage: either an `AzureWebJobsStorage` connection string or
+  identity-based `AzureWebJobsStorage__tableServiceUri`. For a user-assigned
+  storage identity, also set `AzureWebJobsStorage__clientId`; otherwise the
+  runtime follows its documented `AZURE_CLIENT_ID` or default-credential
+  resolution.
+
+The runtime table name is fixed as `AzureFunctionsAgentsSessions`; it is not an
+additional app setting. Pipeline variable `ACA_DEPLOYED_TABLE_SERVICE_URI` must
+identify the same Table service as the app's `AzureWebJobsStorage`, and
+`ACA_DEPLOYED_TABLE_NAME` must be `AzureFunctionsAgentsSessions`.
+
+Platform Easy Auth must be enabled for the standing app. Its configured allowed
+token audience must match `ACA_DEPLOYED_EASY_AUTH_AUDIENCE`, whose value is
+passed into the fixture as
+`AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE`. App Service injects
+`WEBSITE_AUTH_ENABLED` when Easy Auth is enforced; only environments where that
+platform signal is unavailable need the explicit
+`AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH=true` assertion.
 
 Each `ACA_DEPLOYED_FUNCTION_BASE_URL_*` value must include the app's HTTP route
 prefix. With the fixture's default `host.json`, the URL ends in `/api`.

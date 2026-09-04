@@ -459,7 +459,7 @@ class TestCombinedDeployedSuite:
     def test_cold_start_gates_the_remaining_modules(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        captured: list[tuple[str, ...]] = []
+        captured: list[tuple[tuple[str, ...], bool]] = []
         monkeypatch.setattr(
             aca_deployed_qualification,
             "validate_deployed_environment",
@@ -469,7 +469,10 @@ class TestCombinedDeployedSuite:
         monkeypatch.setattr(
             aca_deployed_qualification,
             "_run_pytest",
-            lambda paths, _: captured.append(tuple(paths)) or 0,
+            lambda paths, _, *, fail_fast=False: captured.append(
+                (tuple(paths), fail_fast)
+            )
+            or 0,
         )
 
         result = aca_deployed_qualification.run_deployed_suite(
@@ -481,20 +484,49 @@ class TestCombinedDeployedSuite:
 
         assert result == 0
         assert captured == [
-            ("tests/live/test_aca_deployed_cold_start.py",),
             (
-                "tests/live/test_aca_deployed_agent_turn.py",
-                "tests/live/test_aca_deployed_lifecycle.py",
-                "tests/live/test_aca_deployed_loss.py",
-                "tests/live/test_aca_deployed_load.py",
+                ("tests/live/test_aca_deployed_cold_start.py",),
+                True,
+            ),
+            (
+                (
+                    "tests/live/test_aca_deployed_agent_turn.py",
+                    "tests/live/test_aca_deployed_lifecycle.py",
+                    "tests/live/test_aca_deployed_loss.py",
+                    "tests/live/test_aca_deployed_load.py",
+                ),
+                True,
             ),
         ]
+
+    def test_run_deployed_suite_pytest_command_enables_fail_fast(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: list[list[str]] = []
+
+        def capture_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            captured.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        monkeypatch.setattr(aca_deployed_qualification.subprocess, "run", capture_run)
+
+        assert (
+            aca_deployed_qualification._run_pytest(
+                ("cold.py", "later.py"),
+                {},
+                fail_fast=True,
+            )
+            == 0
+        )
+        assert captured[0].index("-x") < captured[0].index("cold.py")
+        assert captured[0].index("cold.py") < captured[0].index("later.py")
 
     def test_cold_start_failure_suppresses_later_suites(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        captured: list[tuple[str, ...]] = []
+        captured: list[tuple[tuple[str, ...], bool]] = []
         monkeypatch.setattr(
             aca_deployed_qualification,
             "validate_deployed_environment",
@@ -505,8 +537,10 @@ class TestCombinedDeployedSuite:
         def fail_cold_start(
             paths: tuple[str, ...],
             _: object,
+            *,
+            fail_fast: bool = False,
         ) -> int:
-            captured.append(paths)
+            captured.append((paths, fail_fast))
             return 1
 
         monkeypatch.setattr(aca_deployed_qualification, "_run_pytest", fail_cold_start)
@@ -520,7 +554,7 @@ class TestCombinedDeployedSuite:
             )
             == 1
         )
-        assert captured == [("tests/live/test_aca_deployed_cold_start.py",)]
+        assert captured == [(("tests/live/test_aca_deployed_cold_start.py",), True)]
 
     def test_the_expected_identity_environment_is_required(self) -> None:
         """Every provenance input must be required before a deployed run starts."""
