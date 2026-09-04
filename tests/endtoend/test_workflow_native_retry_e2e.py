@@ -42,6 +42,12 @@ STORAGE_CONNECTION = "UseDevelopmentStorage=true"
 CONTAINER = "workflow-retry-policy"
 ORDER_ID = "ORD-1001"
 MAX_ATTEMPTS = 3
+_ORCHESTRATOR_NAME = "agents_workflow_orchestrator"
+_EXPECTED_EXHAUSTION_FAILURE = (
+    "task 'reserve_inventory': Inventory reservation is temporarily unavailable. "
+    "(inventory_temporarily_unavailable)"
+)
+_STATUS_RUNTIME_ERROR_PREFIX = "builtins.RuntimeError: "
 
 pytestmark = [
     pytest.mark.e2e,
@@ -148,6 +154,74 @@ def _await_terminal(base_url: str, workflow_id: str, *, timeout: float = 240.0) 
     raise AssertionError(f"workflow {workflow_id} never reached a terminal state: {body}")
 
 
+def _final_orchestration_failure_from_log(host_output: str, workflow_id: str) -> str:
+    """Extract the final orchestrator failure bounded by workflow-correlated records."""
+    lines = host_output.splitlines()
+    completed = (
+        f"{workflow_id}: Orchestration {_ORCHESTRATOR_NAME} completed with status: FAILED"
+    )
+    completed_indexes = [index for index, line in enumerate(lines) if completed in line]
+    if not completed_indexes:
+        raise AssertionError(f"no final FAILED orchestration record for {workflow_id}")
+    start = completed_indexes[-1]
+
+    failed = (
+        f"{workflow_id}: Function '{_ORCHESTRATOR_NAME} (Orchestrator)' "
+        "failed with an error."
+    )
+    try:
+        end = next(index for index in range(start + 1, len(lines)) if failed in lines[index])
+    except StopIteration as exc:
+        raise AssertionError(f"no correlated final failure record for {workflow_id}") from exc
+
+    prefix = (
+        "System.Private.CoreLib: Exception while executing function: "
+        f"Functions.{_ORCHESTRATOR_NAME}. "
+        "Microsoft.Azure.WebJobs.Extensions.DurableTask: "
+    )
+    messages = [
+        line.partition(prefix)[2].removesuffix(".")
+        for line in lines[start : end + 1]
+        if prefix in line
+    ]
+    if len(messages) != 1:
+        raise AssertionError(
+            f"expected one final orchestration failure message for {workflow_id}, got {messages}"
+        )
+    return messages[0]
+
+
+def _assert_decoded_exhaustion_failure(
+    status: dict[str, Any],
+    *,
+    host_output: str,
+    workflow_id: str,
+) -> None:
+    """Require the authoritative terminal failure to be the decoded application error."""
+    failure_details = status.get("failureDetails")
+    if failure_details is not None:
+        if not isinstance(failure_details, dict) or not isinstance(
+            failure_details.get("errorMessage"), str
+        ):
+            raise AssertionError(f"invalid terminal failureDetails: {failure_details!r}")
+        failure_message = failure_details["errorMessage"]
+    else:
+        output = status.get("output")
+        if output is not None:
+            if not isinstance(output, str):
+                raise AssertionError(f"invalid terminal output: {output!r}")
+            failure_message = output.removeprefix(_STATUS_RUNTIME_ERROR_PREFIX)
+        else:
+            failure_message = _final_orchestration_failure_from_log(host_output, workflow_id)
+
+    assert failure_message == _EXPECTED_EXHAUSTION_FAILURE, (
+        f"expected decoded final failure {_EXPECTED_EXHAUSTION_FAILURE!r}, "
+        f"got {failure_message!r}"
+    )
+    assert "Activity task #" not in failure_message
+    assert '"outcome"' not in failure_message
+
+
 @pytest.fixture(scope="module")
 def retry_sample_host() -> Any:
     """One host for both cases: a second host would contend for the task-hub lease."""
@@ -200,16 +274,11 @@ def test_exhausted_retry_fails_with_the_application_error_code(
     assert incident["transient_failures_observed"] == MAX_ATTEMPTS
     assert incident["failures_remaining"] == 99 - MAX_ATTEMPTS
 
-    # The application's own sanitized failure survives, rather than degrading to
-    # an opaque Durable TaskFailedError message. Only the Azure Storage backend
-    # surfaces the orchestration failure through the status API's `output`; the
-    # Durable Task Scheduler backend reports `output: null` for a failed
-    # orchestration, so fall back to the host log there rather than asserting
-    # nothing.
-    output = status.get("output")
-    failure_text = (
-        str(output) if output is not None else retry_sample_host.read_output()[log_start:]
+    # The authoritative terminal failure must be the decoded application error.
+    # DTS currently reports `output: null`, so correlate the final orchestrator
+    # failure records rather than accepting marker-bearing intermediate logs.
+    _assert_decoded_exhaustion_failure(
+        status,
+        host_output=retry_sample_host.read_output()[log_start:],
+        workflow_id=workflow_id,
     )
-    assert "inventory_temporarily_unavailable" in failure_text
-    assert "Inventory reservation is temporarily unavailable." in failure_text
-    assert "reserve_inventory" in failure_text

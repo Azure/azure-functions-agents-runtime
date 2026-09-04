@@ -24,6 +24,9 @@ from azure_functions_agents.workflows.schema import (
     resolve_workflow_task_execution,
     validate_plan,
 )
+from tests.endtoend.test_workflow_native_retry_e2e import (
+    _assert_decoded_exhaustion_failure,
+)
 
 _SAMPLE_SRC = (
     Path(__file__).resolve().parents[1] / "samples" / "workflow-retry-policy" / "src"
@@ -43,6 +46,52 @@ def test_sample_agent_authors_the_retry_policy() -> None:
     assert "start_workflow" in agent_text
     assert "execution.retry" in agent_text
     assert "max_attempts: 3" in agent_text
+
+
+def _terminal_host_output(workflow_id: str, failure_message: str) -> str:
+    return "\n".join(
+        (
+            f"{workflow_id}: Orchestration agents_workflow_orchestrator "
+            "completed with status: FAILED",
+            "Executed 'Functions.agents_workflow_orchestrator' (Failed, Id=test)",
+            "System.Private.CoreLib: Exception while executing function: "
+            "Functions.agents_workflow_orchestrator. "
+            f"Microsoft.Azure.WebJobs.Extensions.DurableTask: {failure_message}.",
+            f"{workflow_id}: Function 'agents_workflow_orchestrator (Orchestrator)' "
+            "failed with an error.",
+        )
+    )
+
+
+def test_retry_e2e_accepts_only_the_decoded_final_orchestration_failure() -> None:
+    workflow_id = "workflow-1"
+    decoded = (
+        "task 'reserve_inventory': Inventory reservation is temporarily unavailable. "
+        "(inventory_temporarily_unavailable)"
+    )
+
+    _assert_decoded_exhaustion_failure(
+        {"output": None},
+        host_output=_terminal_host_output(workflow_id, decoded),
+        workflow_id=workflow_id,
+    )
+
+
+def test_retry_e2e_rejects_the_raw_activity_failure_wrapper() -> None:
+    workflow_id = "workflow-1"
+    raw_marker = (
+        f"{workflow_id}: Activity task #2 failed: "
+        '{"outcome":{"failure":{"error":"Inventory reservation is temporarily unavailable.",'
+        '"error_code":"inventory_temporarily_unavailable","kind":"handler_transient",'
+        '"retryable":true},"id":"reserve_inventory","ok":false},"version":1}'
+    )
+
+    with pytest.raises(AssertionError, match="expected decoded final failure"):
+        _assert_decoded_exhaustion_failure(
+            {"output": None},
+            host_output=_terminal_host_output(workflow_id, raw_marker),
+            workflow_id=workflow_id,
+        )
 
 
 def test_sample_tools_are_discoverable_without_retry_metadata() -> None:
