@@ -195,6 +195,9 @@ experience while moving the inner loop boundary to Durable checkpoints.
 - Durably park and resume one long-running model inference through the
   Responses background/continuation-token protocol rather than holding a
   Function activity open or reissuing the request after a client disconnect.
+- Let the reasoning model request human clarification as a structured runtime
+  tool call, park the orchestration without holding compute, and resume the same
+  logical turn from the matching human answer.
 - Checkpoint after every model response and every tool result so recovery
   replays orchestrator code without normally redispatching completed
   activities.
@@ -225,6 +228,8 @@ experience while moving the inner loop boundary to Durable checkpoints.
   `FunctionMiddleware`, or from inside an existing full `agent.run()`.
 - Making arbitrary external tools exactly once. MCP has no universal
   idempotency contract.
+- Guessing from natural-language assistant text that the model intended to
+  pause. Human waits require a structured runtime-owned request.
 - True replayable token streaming. Reliable Redis-backed streaming is a
   separate follow-up.
 - Declared triggers, agent-as-MCP starters, subagents, or every connector in the
@@ -300,6 +305,71 @@ orchestrator classifies each against frozen capability/approval policy and
 parks before dispatch where required. MAF's `user_input_request=True` marking
 exists on the declaration-only/`additional_tools` alternatives, not on the
 primary disabled-invocation path.
+
+Clarification is represented by one reserved model-visible tool schema:
+
+```json
+{
+  "name": "request_human_input",
+  "arguments": {
+    "question": "Which production region should I investigate?",
+    "choices": ["eastus2", "westus3"],
+    "allow_free_text": false
+  }
+}
+```
+
+The tool has no customer implementation and never executes in Functions or
+ACA. The orchestrator recognizes its reserved provenance, persists a
+`HumanInputRequestV1`, publishes `Waiting`, and waits for the answer. The model
+is instructed to emit `request_human_input` as the only actionable call in that
+model step. If it mixes clarification with other calls, no call executes; the
+runtime appends one deterministic protocol-error `function_result` for
+**every** call ID in that assistant message, including every clarification
+call, and allows one bounded repair model step before failing closed. Two or
+more clarification calls are also a rejected mixed batch. The repair consumes
+the normal model-step/token budget and may not itself emit another invalid
+mixed batch.
+
+The primary disabled-invocation seam bypasses MAF's automatic
+`user_input_request`/approval classification, so the orchestrator deliberately
+detects this raw `function_call` from `FrozenToolCatalogV1` rather than relying
+on `AgentResponse.user_input_requests`. The declaration-only/`additional_tools`
+variant remains a comparative MAF-assisted classification path.
+
+After the human responds, the answer re-enters the normal function-calling
+protocol as the matching tool result:
+
+```text
+assistant:
+  function_call call-7: request_human_input(...)
+
+tool:
+  function_result call-7:
+    {"status":"answered","answer":"westus3","response_id":"response-2"}
+```
+
+Using a role=`tool` result preserves the call ID and avoids leaving an orphaned
+function call. The next one-step Agent sees that answer alongside all prior
+reasoning and tool results and can continue, change direction, or ask another
+clarifying question. Model-requested clarification and policy-required approval
+share the Durable wait machinery but remain different contracts: clarification
+supplies missing information; approval authorizes or rejects one exact
+side-effecting call and arguments hash.
+
+The exact encrypted-reasoning/function-call transcript is the preferred resume
+path even after a long wait. Before consuming the accepted answer, a
+`validate_resume_context_v1` activity checks the frozen
+model/deployment/API binding, client-side serialization, content integrity, and
+deployment availability. The next model step then attempts exact replay once.
+If that call returns a recognized stale-reasoning or retired-deployment
+condition, `rehydrate_context_v1` creates a new working context from the
+immutable audit summary plus an explicit user-attributed clarification answer,
+while the original call/result remain in the audit journal. Any deployment
+migration is versioned and policy-approved, never silent. Failure of both exact
+replay and controlled rehydration leaves the answer accepted but the run failed
+with a specific resumability disposition; it does not repeat prior tool side
+effects.
 
 For a large request, the exposed loop can look like:
 
@@ -520,8 +590,8 @@ spike.
 | Pipeline stage | Module(s) | Change |
 | --- | --- | --- |
 | discover | Existing `discovery/tools.py`, `discovery/mcp.py`, FRD 0009 hybrid discovery path | No new authoring discovery. Reuse the immutable tool/MCP inventory and sandbox-discovered local manifest; do not import customer tools in the worker. |
-| translate | New `experimental/durable_loop_protocol.py`; existing `registration/capabilities.py`, `registration/catalog.py`, `experimental/hybrid_protocol.py` | Freeze versioned run, model-decision, tool, error, content-ref, policy, and sandbox-wave contracts. Bind agent/catalog/deployment/package hashes before admission. |
-| register | `app.py`, `registration/endpoints.py`, `registration/_handlers.py`, likely new `experimental/durable_loop_registration.py` | Under one private env gate, register the non-streaming starter, status/cancel routes, session coordinator/entity, `durable_agent_turn_orchestrator_v1`, and versioned activities. Registration remains the only Azure-aware startup stage. |
+| translate | New `experimental/durable_loop_protocol.py`; existing `registration/capabilities.py`, `registration/catalog.py`, `experimental/hybrid_protocol.py` | Freeze versioned run, model-decision, tool, human-input, error, content-ref, policy, and sandbox-wave contracts. Bind agent/catalog/deployment/package hashes before admission. |
+| register | `app.py`, `registration/endpoints.py`, `registration/_handlers.py`, likely new `experimental/durable_loop_registration.py` | Under one private env gate, register the non-streaming starter, status/cancel/human-input routes, session coordinator/entity, `durable_agent_turn_orchestrator_v1`, and versioned activities. Registration remains the only Azure-aware startup stage. |
 | execute | New `experimental/durable_loop.py`, `experimental/durable_loop_activities.py`; existing `client_manager.py`, `workflows/engine.py` patterns, `experimental/hybrid_*`, `transport/*` | The orchestrator owns the alternating model/tool loop. Activities read/write content refs, compact the model's working context without changing the immutable audit journal, authorize against frozen policy, call APIM model/MCP routes or bounded ACA wave sandboxes, checkpoint results, and atomically commit final history. Existing `runner.py` remains the normal non-durable path. |
 
 `experimental/durable_loop.py` contains deterministic orchestration and
@@ -540,8 +610,11 @@ flowchart LR
     S -->|"202 run_id, session_id,<br/>status_url, cancel_url"| C
     E --> O["durable_agent_turn_orchestrator_v1"]
     C -->|"GET status / POST cancel"| X["Status + control endpoints"]
+    C -->|"POST clarification answer"| U["Human-input endpoint"]
     X --> E
     X --> O
+    U -->|"accept answer fact"| E
+    U -->|"raise unique external event"| O
 
     O --> I["turn_init_v1 activity<br/>freeze local tool manifest"]
     O --> M["model_step_v1 activity"]
@@ -558,6 +631,7 @@ flowchart LR
     W --> B
     A --> B
     F --> B
+    U --> B
     O -->|"bounded refs + metadata only"| D["Customer-owned Durable backend"]
 
     M --> P["APIM AI Gateway"]
@@ -589,6 +663,7 @@ sequenceDiagram
     autonumber
     participant C as Caller
     participant H as HTTP starter
+    participant U as Human-input endpoint
     participant S as Session coordinator entity
     participant O as durable_agent_turn_orchestrator_v1
     participant I as turn_init_v1 activity
@@ -620,11 +695,25 @@ sequenceDiagram
         end
         O->>M: Schedule model step with working-context/state refs
         M->>B: Read working-context refs
-        M->>A: One model request, store=False, auto tools disabled
+        M->>A: One model request/background poll, immutable storage policy, auto tools disabled
         M->>B: Persist decision content, args, integrity hashes
         M-->>O: Bounded ModelDecisionEnvelopeV1
         Note over O: Deterministically classify final text or ordered tool calls; apply approval policy to calls
-        alt Local executable call
+        alt request_human_input
+            O->>J: Persist HumanInputRequestV1 and unique event name
+            J->>B: Store question/schema by opaque ref
+            J-->>O: Pending request receipt
+            Note over O: Set status Waiting; race answer event, cancel event, and timer
+            C->>U: POST answer + submission_id
+            U->>J: CAS first valid HumanInputResponseV1
+            J->>B: Store answer by opaque ref
+            J-->>U: Accepted or idempotent receipt
+            U->>O: Raise answer:<generation>:<request_id>
+            O->>J: Read authoritative accepted answer
+            J-->>O: HumanInputResponseV1
+            O->>J: Append role=tool function_result for original call_id
+            J-->>O: New CheckpointStateRefV1
+        else Local executable call
             O->>T: One single-call sandbox-wave activity
             T->>B: Read previous immutable workspace ref
             T->>X: Create, restore workspace, rediscover and verify manifest
@@ -670,10 +759,13 @@ explicit `schema_version`. Unknown versions fail closed.
 | `WorkingContextRefV1` | Exact bundle sent to the next model step: compaction generation, summary ref, retained atomic message-group refs/boundaries, source audit range/hash, estimated and actual token/byte counts, parent working-context ref, and model/tokenizer/version binding. |
 | `ModelOperationV1` | Deterministic local model-step key; provider response ID/serialized continuation token; exact APIM/backend-resource/deployment/API binding; accepted time; provider/run operation deadline; last poll/result-retrieval time; `queued`/`in_progress`/terminal state; whether polling/retrieval consumes or refreshes availability; poll count; and eventual decision-bundle ref. The local key is correlation, not provider idempotency. |
 | `ToolManifestV1` | Canonical sandbox-discovered tool names, descriptions, parameter schemas, provenance, package/catalog hash, and manifest hash frozen by `turn_init_v1`. |
+| `FrozenToolCatalogV1` | Collision-free model-visible schemas and provenance for sandbox-local tools, remote MCP/connectors, and runtime control tools such as `request_human_input`; immutable catalog/policy hash and routing class per name. |
 | `WorkspaceRefV1` | Immutable verified archive of the bounded local workspace after one call, with parent ref, package/manifest binding, integrity hash, byte/file caps, and no credential material. |
 | `ModelDecisionEnvelopeV1` | Run/step identity, deterministic model call key, provider response/call ID when returned, model/deployment hash, MAF message-bundle ref, ordered tool-call summaries, usage/cost metadata, finish reason, retry attempt metadata. |
 | `ToolRequestV1` | Run/step/call ordinal, provider call ID, runtime deterministic call key, tool name/provenance, canonical request hash, argument ref, policy/catalog/package hashes, deadline, approval ref if required, optional sandbox-wave lease ref. |
 | `ToolResultV1` | Matching call key and request hash, status, bounded result/stdout/stderr/artifact refs, provider operation ID where safe, timing, dedupe/reconciliation disposition. |
+| `HumanInputRequestV1` | Immutable generation/run/turn/step/request/call IDs, reserved request kind (`clarification`), question ref, bounded choices/response schema, actor policy, unique server-generated event name/nonce, issued/advisory expiry times, record version, and `pending`/`answered`/`timed_out`/`cancelled` terminal state. |
+| `HumanInputResponseV1` | Matching request/call/generation IDs, one-time submission ID and body hash, authenticated actor/tenant, answer ref, accepted time, schema-validation result, outbox delivery state, and `accepted`/`consumed`/`orphaned` disposition. |
 | `ErrorEnvelopeV1` | Stable bounded error code/classification, retryability, ambiguity classification, failed phase/step/call, sanitized detail ref where allowed; no raw exception content in status/history. |
 | `CheckpointStateRefV1` | External in-progress turn-state ref and integrity hash, immutable audit-journal head, current `WorkingContextRefV1`, compaction generation, completed step/call set, checkpointed byte/token usage, next deterministic step, committed session generation, continue-as-new generation. |
 | `SandboxWaveLeaseV1` | Opaque lease ID plus persisted sandbox/group/region binding, manifest/package/policy hashes, fencing generation, expiry, selected artifact refs, lifecycle state. Stored outside metrics and never contains credentials. |
@@ -710,7 +802,8 @@ instances. It holds only:
 - immutable session/owner/agent policy bindings;
 - active `run_id`, request hash, status, deadline, and in-progress state ref;
 - a bounded idempotency index from hashed request ID to run/result reference;
-- a bounded cancellation/approval mailbox and retention metadata.
+- a bounded cancellation/approval/clarification mailbox, first-answer receipts,
+  and retention metadata.
 
 The detailed in-progress turn journal is separate from committed history.
 Model and tool activities append immutable refs to that journal. Failed,
@@ -746,22 +839,35 @@ ambiguous attempt.
   tool modules in the Functions worker;
 - delivers the exact package, discovers the local tool schemas in ACA, and
   persists a canonical `ToolManifestV1` plus package/catalog hash;
-- deletes the initialization sandbox; and
-- freezes that manifest for the run. Every later local activity rediscovers
-  its sandbox manifest and compares the exact hash before execution.
+- deletes the initialization sandbox;
+- builds `FrozenToolCatalogV1`, adding the runtime-owned
+  `request_human_input` descriptor after failing on any customer/MCP name
+  collision; and
+- freezes the manifest and combined catalog for the run. Every later local activity rediscovers
+  its sandbox manifest and compares the exact hash before execution. Reserved
+  control-tool provenance can never route to ACA or MCP.
 
 `compact_context_v1`:
 
 - reads the immutable audit-journal range and current working context selected
   by its input refs, never by querying mutable "latest" state;
 - preserves system instructions, the current user objective, pending
-  approvals, and complete atomic reasoning/function-call/function-result
-  groups;
+  approvals/clarifications, and complete atomic
+  reasoning/function-call/function-result groups;
 - produces a budgeted summary plus retained recent groups, source range hashes,
   token/byte counts, and a new `WorkingContextRefV1`;
 - never modifies or replaces the full audit journal; and
 - is itself a Durable activity, so replay reuses the exact summary rather than
   asking the model to summarize again.
+
+`validate_resume_context_v1` and `rehydrate_context_v1`:
+
+- validate long-park content integrity, serialization, frozen deployment/API
+  availability, and model/tokenizer compatibility before the next step;
+- attempt exact encrypted-reasoning continuation first; and
+- on a recognized replay incompatibility, create a new versioned working
+  context from the immutable audit/summary plus the human answer, without
+  rerunning completed tools or rewriting audit history.
 
 `model_step_v1`:
 
@@ -848,6 +954,11 @@ Tool routing is:
 - **Remote MCP or connector:** a privileged worker-side activity through its
   approved APIM API where applicable. Read-only calls may fan out; writes
   require provider idempotency/outbox policy.
+- **Human clarification:** the reserved `request_human_input` call creates no
+  tool activity. It persists a pending request, exposes the question through an
+  authorized endpoint, waits on a unique external-event name plus
+  cancel/timeout timers, and appends the accepted answer as the matching
+  `function_result`.
 - **Approval-gated tool:** no activity runs until an authenticated external
   approval event matches the run, call key, request hash, policy version,
   actor, expiry, and nonce.
@@ -856,6 +967,13 @@ Tool routing is:
 metadata, not properties the runtime infers from a tool name or description.
 Remote calls are serialized by default unless the frozen policy explicitly
 allows parallel execution and the activity revalidates that classification.
+
+In the base one-call-sandbox design, no ACA sandbox remains active while the
+orchestration waits for a human. If the separately gated session-to-sandbox
+optimization is enabled, entering `Waiting` first drains local calls, commits a
+workspace checkpoint, releases the active capacity lease, and applies
+auto-suspend while retaining the fenced session mapping. The next local call
+resumes and revalidates that sandbox or recreates it from the checkpoint.
 
 ### 4.8 ACA lifecycle alternatives and recommendation
 
@@ -949,15 +1067,47 @@ forbidden.
   sandbox mutations are serialized. Independently authorized remote calls
   explicitly classified as read-only and parallel-safe may run in parallel up
   to the immutable parallelism cap; all others remain serialized.
-- Approval and callback endpoints first persist authenticated, nonce-bound
-  payloads as compare-and-swap durable facts. They then raise an external event
-  only as a wake-up hint. Every orchestration generation rereads the durable
-  mailbox before waiting, so a dropped event does not drop the approval.
-- A parked wait reuses one `wait_for_external_event` task and races it against
-  a sequence of bounded Durable timers with `task_any`. When a timer wins, a
-  mailbox-read activity checks the durable fact and either resumes or schedules
-  the next timer. The wake-up event reduces latency; the one-hour candidate
-  re-poll interval provides bounded recovery when event delivery is lost.
+- Approval, clarification, and callback endpoints first persist authenticated,
+  nonce-bound payloads as compare-and-swap durable facts. They then raise an
+  external event only as a wake-up hint. Every orchestration generation rereads
+  the durable mailbox before waiting, so a dropped event does not drop accepted
+  input.
+- Durable external events are one-way and at-least-once. An event raised after
+  the orchestration instance exists but before it starts waiting is buffered
+  for the matching event name. If the instance does not exist, the event is
+  routable; the pinned Python Durable client surfaces `404` for unknown
+  instances and `410` for completed/failed instances. Every clarification
+  therefore uses a never-reused, server-generated
+  `answer:<generation>:<request_id>` event name and a separate authoritative
+  answer ledger.
+- A parked wait creates exactly one answer event task, one request-scoped
+  cancel event task, and one final deadline timer, then races those three with
+  `task_any`. The answer outbox retries `raise_event` until delivery succeeds or
+  receives terminal `404`/`410`; it does not require periodic orchestrator
+  wake-ups. If the final timer wins, one mailbox-read activity reconciles any
+  accepted answer before attempting timeout closure.
+- The answer endpoint atomically accepts the first valid response. Repeating
+  the same submission ID and body is idempotent; a conflicting second answer
+  returns `409`; consumed requests return `410`; unknown or unauthorized
+  requests return `404`/`403` without raising an event. The endpoint does not
+  decide expiry from its wall clock: it accepts or rejects solely through the
+  authoritative request-record CAS. The accepted-fact to `raise_event` gap is
+  closed by an outbox delivery state or a session-entity inbox that retries the
+  wake-up.
+- Timeout uses a single-writer `close_human_request_v1` activity that CASes the
+  same `pending` record to `timed_out`. Whichever of answer acceptance or close
+  wins the CAS is authoritative; `expires_at` is advisory display metadata.
+  If `raise_event` later returns `404`/`410`, the outbox stops retrying, marks
+  the accepted response `orphaned`, and the endpoint exposes a typed
+  `run_terminal` disposition rather than pretending the answer was consumed.
+- If timeout, cancellation, and answer race, the authoritative mailbox terminal
+  state decides the outcome. A timeout may append a typed
+  `{"status":"timed_out"}` result and allow one bounded model step to ask again
+  or conclude; it never silently fabricates an answer.
+- When answer or cancellation wins, the orchestrator cancels the pending timer.
+  External-event tasks have no cancellation requirement; late losing events
+  cannot affect another request because generation-scoped event names are never
+  reused.
 - Each activity has a deadline, bounded attempts, retry classification, and
   remaining run budget. The orchestrator uses Durable context time only.
 - The compaction decision is deterministic: it uses only checkpointed
@@ -977,9 +1127,10 @@ forbidden.
   `CheckpointStateRefV1`, immutable identity/policy hashes, counters, deadlines,
   and budgets; the full turn state remains in external customer-owned storage.
 - The orchestrator never calls `continue_as_new` while parked on an unresolved
-  external-event task. It rotates immediately before entering a wait when
-  needed, or after the event/fact has resolved and the pending timer is
-  cancelled.
+  external-event task or while a clarification endpoint is accepting that
+  generation's event name. It rotates immediately before opening the request
+  when needed, or after the event/fact has resolved, the request is terminal,
+  and the pending timer is cancelled.
 - Orchestrator/activity names, input/output contracts, and schema versions are
   versioned (`*_v1`). In-flight runs stay on compatible code. Deployment
   manifests retain required old handlers until no run references them.
@@ -1019,6 +1170,12 @@ forbidden.
 - Cross-tenant owner/session/run bindings, replay authorization, approval actor
   authenticity, callback nonce/expiry, SSRF controls, inspected egress, and
   connector audience validation fail closed.
+- Clarification response URLs and request IDs are not bearer secrets. The
+  answer endpoint authenticates the principal, authorizes it against the exact
+  owner/run/generation/request/call tuple, validates schema/choice/size limits,
+  and constructs the event name server-side. Human answers are untrusted model
+  input: they may influence reasoning but cannot alter immutable capabilities,
+  approval policy, identities, budgets, or tool routing.
 
 ### 4.12 Private product/API shape
 
@@ -1041,7 +1198,40 @@ Content-Type: application/json
 The request requires a client `request_id`; duplicate IDs with the same
 canonical request hash return the same `run_id`. Authentication/owner binding
 matches the existing built-in endpoint policy and is rechecked for status,
-cancel, approval, and callback operations.
+cancel, approval, clarification, and callback operations.
+
+When status is `Waiting` for clarification, the authorized status/content
+surface returns a pending request:
+
+```json
+{
+  "request_id": "human-input-3",
+  "kind": "clarification",
+  "question": "Which production region should I investigate?",
+  "choices": ["eastus2", "westus3"],
+  "allow_free_text": false,
+  "expires_at": "2026-09-05T00:00:00Z",
+  "respond_url": "/api/experimental/durable-agent-runs/run-789/input/human-input-3"
+}
+```
+
+The client submits:
+
+```http
+POST /api/experimental/durable-agent-runs/run-789/input/human-input-3
+Idempotency-Key: submission-42
+Content-Type: application/json
+
+{"answer":"westus3"}
+```
+
+The endpoint persists the answer before calling the Durable client's
+`raise_event(...)` and returns an accepted/idempotent receipt; it does not wait
+synchronously for the next model step. If the answer was accepted but
+`raise_event` reports unknown/terminal orchestration (`404`/`410`), delivery is
+marked `orphaned` and the endpoint returns a typed `410 run_terminal` response
+that preserves the accepted submission receipt; it never reports an
+uncommitted 5xx or retries forever.
 
 The starter and management endpoints reuse the async run vocabulary already
 defined by `docs/aca-sandbox-session-runtime.md`: `Idempotency-Key` plus body
@@ -1061,8 +1251,9 @@ The status contract exposes only:
 - `Pending`, `Running`, `Waiting`, `Completed`, `Failed`, or `Cancelled`;
 - run/session IDs, created/updated times, current bounded phase and step index;
 - completed model/tool counts and aggregate budget usage;
-- approval/callback requirement metadata that contains no raw prompt,
-  arguments, or result;
+- approval/clarification/callback requirement metadata. Raw question and
+  answer content is returned only through an authorized content projection, not
+  copied into Durable custom status;
 - final response ref retrieval through an authorized content endpoint, or a
   sanitized error code.
 
@@ -1086,7 +1277,9 @@ are intentionally conservative and may be tightened by measured evidence:
 | Local sandbox mutations | 1 at a time |
 | Concurrent app-owned sandboxes | `min(10, maxSandboxCount - reserved_headroom)`; reserve at least 5 group slots and fail configuration when no positive allowance remains |
 | Autonomous active execution | 4 hours, still bounded by step/tool/token/cost caps |
-| Approval-parked absolute lifetime | 24 hours, then fail/cancel and clean up |
+| Human/approval waits | 8 per request turn; one open request at a time in v1 |
+| Human/approval parked lifetime | 24 hours per request and 7 days per run, then append timeout or cancel and clean up |
+| Clarification question/choices/answer | 8 KiB question, 20 choices of 256 characters, 64 KiB answer after schema validation |
 | Model token budget | 1,000,000 aggregate input + output tokens for the multi-hour profile; a lower-cost correctness profile remains separate |
 | Cost budget | Explicit deployment/model/profile-specific cap; never inferred from token count alone |
 | Durable activity attempts | 3 for model/safe reads; writes follow idempotency policy and may be 1 |
@@ -1096,7 +1289,8 @@ are intentionally conservative and may be tightened by measured evidence:
 | Working context supplied to one model step | Trigger compaction before 75% of the model context, 4 MiB, or remaining token budget; reject only when the compacted context still cannot fit |
 | Local-tool wave | Exactly 1 call and 5 minutes |
 | Hosting / activity timeout | Flex Consumption spike with `functionTimeout` 10 minutes; every activity deadline <=8 minutes and every local tool deadline <=5 minutes |
-| Approval mailbox re-poll | 1 hour while parked; event delivery remains the fast path |
+| Human wake-up delivery | One answer event task + one cancel event task + one final timer; outbox retries event delivery with bounded backoff and no orchestration polling loop |
+| Human wait history | Measured <=60 Durable history events per request, leaving >=140-event generation headroom |
 | Sandbox lifecycle | Delete after wave; 10-minute auto-delete/reaper target |
 | Continue-as-new | At most 20 checkpoints or 200 history events per generation |
 
@@ -1141,6 +1335,10 @@ Required measurements:
 - model/APIM latency, backend latency, TTFT, tokens, cost, attempts, 429s,
   timeouts, and response-loss ambiguity;
 - MCP/APIM latency, backend latency, attempts, throttles, and failures;
+- human-input requests, wait duration, buffered-before-wait delivery, event
+  duplicates, outbox delivery attempts/terminal errors, final-timeout ledger
+  reconciliation, answer/timeout/cancel outcomes, stale/conflict submissions,
+  and time from accepted answer to next model step;
 - tool queue, execution, transfer, attempts, retries, dedupe hits, ambiguity,
   and artifact bytes;
 - sandbox capacity queue/rejections, create, optional attach/resume, readiness,
@@ -1151,14 +1349,15 @@ Required measurements:
 
 ### 4.15 End-to-end and fault-injection qualification
 
-The correctness profile requires at least four model steps and a scripted
-direction change: the model first requests two local ACA calls, observes their
-shared-workspace results, abandons the initial plan, calls one read-only remote
-MCP operation through APIM, performs one synthetic idempotent external
-write/counter, then returns a final answer grounded in all results. The
-multi-hour profile extends that scenario to at least 16 model steps with
-checkpointed context compaction. At least one model step runs as a background
-Response.
+The correctness profile requires at least five model steps and a scripted
+direction change: the model first calls `request_human_input` for the target
+region, resumes from the human's role=`tool` answer, requests two local ACA
+calls, observes their shared-workspace results, abandons the initial plan,
+calls one read-only remote MCP operation through APIM, performs one synthetic
+idempotent external write/counter, then returns a final answer grounded in all
+results. The multi-hour profile extends that scenario to at least 16 model
+steps with checkpointed context compaction. At least one model step runs as a
+background Response.
 
 Faults are injected:
 
@@ -1173,7 +1372,16 @@ Faults are injected:
   sandbox loss; the optional retained-sandbox gate separately injects
   auto-suspend and attach/resume failures;
 - on duplicate HTTP requests, duplicate queue/event delivery, duplicate
-  approvals, and conflicting request hashes;
+  approvals/clarification answers, conflicting answer bodies, stale/expired
+  request IDs, answer-before-wait buffering, and conflicting request hashes;
+- while waiting for clarification: host shutdown, sandbox auto-suspend in the
+  optional session-mapping mode, answer/timeout/cancel races, and immediately
+  before/after accepted-answer event delivery;
+- after answer CAS acceptance but before `raise_event`, after acceptance when
+  the orchestration has terminalized or been purged (`404`/`410`), and every
+  accept-vs-`close_human_request_v1` interleaving;
+- after the maximum configured human park, including exact encrypted-reasoning
+  replay, frozen-deployment retirement, and controlled context rehydration;
 - during host restart, worker replacement, scale-to-zero, cancellation, and a
   deployment-compatible restart;
 - immediately before and after continue-as-new and final session commit.
@@ -1211,7 +1419,10 @@ For each planned seam, kill/restart the worker and assert:
 | Run-scoped ACA optimization | Dedicated short-turn attach/resume/executor-ready/fencing trials pass 100/100 with bounded retained capacity. | Disable the optimization; this does not block per-wave v1. |
 | Privacy | Automated inspection finds zero raw prompts, args, outputs, credentials, tokens, sandbox IDs, Blob paths, SAS values, or authorization-bearing refs in Durable history/dashboard/metrics/default traces. Durable history may contain only opaque content IDs, hashes, sizes, and bounded classifications. | **Architecture no-go.** |
 | Bounded history/content | Activity envelopes stay <=32 KiB; generation stays <=200 events; continue-as-new preserves output and budgets; integrity/cap violations fail closed. | **Architecture no-go.** |
-| Approval continuation | A fact committed immediately before/after continue-as-new is observed exactly once despite lost/duplicate wake-up events; timer re-poll observes a lost wake-up within the configured interval; no continuation occurs with pending Durable tasks. | **Architecture no-go** for waits/approvals. |
+| Human clarification | A structured `request_human_input` emitted as the only call parks with no compute; an answer raised before the wait is buffered; duplicate/conflicting/stale submissions follow the first-answer ledger; accept-vs-timeout CAS has one winner; outbox `404`/`410` terminalizes delivery without infinite retry; the accepted answer becomes the matching role=`tool` result and the next model step continues exactly once. | **Architecture no-go** for clarification waits. |
+| Human wait history | The exact pinned Durable backend proves the one answer/cancel/timer `task_any` pattern across restart/duplicate delivery and keeps one 24-hour request below 60 history events; no continue-as-new occurs while the request is open. | **Architecture no-go** until the wait is bounded and replay-safe. |
+| Max-park reasoning resume | At the configured 24-hour park boundary, exact encrypted-reasoning/call-ID replay succeeds on the frozen deployment, or controlled `rehydrate_context_v1` resumes on an explicitly compatible deployment without repeating completed tools. | **Architecture no-go** for long human waits if both paths fail. |
+| Approval/callback continuation | A fact committed immediately before/after a wait boundary is observed exactly once despite lost/duplicate wake-up events; outbox retry or final-timeout reconciliation observes accepted facts; no continue-as-new occurs while the request is open. | **Architecture no-go** for waits/approvals. |
 | Hosting timeout | The pinned plan honors the configured 10-minute `functionTimeout`; all activity/tool deadlines terminate within their safety margins under host replacement. | **Architecture no-go** until retry ambiguity is bounded. |
 | Cleanup | After normal, failure, cancellation, and worker-loss trials, final app-owned sandbox inventory is zero within 10 minutes in 100% of runs; reaper proves ownership filtering. | **Architecture no-go** until cleanup/capacity is bounded. |
 | Cost/latency | Report p50/p95/p99 wall, active/parked, checkpoint, APIM, tool, sandbox, and recovery costs under the fixed workload with no unbounded growth. | No production recommendation; optimize or narrow scope before follow-up. |
@@ -1239,8 +1450,9 @@ production design. It must not be waived by documenting the failure.
    exact one-inference tests pass; otherwise retain the private blueprint with
    equivalent contracts.
 5. **Local Durable backend:** run the orchestrator, session coordinator/entity,
-   activities, idempotent admission, cancellation, external events, and
-   continue-as-new against Azurite or Durable Task Scheduler.
+   activities, idempotent admission, structured clarification endpoint,
+   first-answer ledger/outbox, cancellation, external-event buffering/races,
+   and continue-as-new against Azurite or Durable Task Scheduler.
 6. **APIM model:** connect one-step `store=False` reasoning-model activities and
    background start/poll/cancel through the AI Gateway; prove no tool
    auto-invocation and collect cost/latency/retry evidence.
@@ -1290,6 +1502,12 @@ parallel private runner. The private route/contract can be removed or changed
 without deprecation. Any future public surface requires a new finalized FRD,
 schema/docs updates, migration policy, and security review.
 
+Human clarification adds no dependency to the explicit loop:
+`azure-functions-durable` already supplies `wait_for_external_event`,
+`create_timer`, `task_any`, and the client `raise_event` API. The MAF Durable
+Extension's Workflow HITL routes are useful precedent but are not required or
+reused for this custom orchestrator.
+
 While the private gate is enabled, durable and legacy in-process turns may not
 use the same session ID. The legacy runner's process-local lock cannot
 coordinate with a Durable session owner; mixed-mode admission fails closed.
@@ -1316,7 +1534,7 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
 | 16 | Continuation events | Trust external event / preserve event history / durable fact plus wake-up | Persist approval/callback facts with CAS; events only wake; continue-as-new only when quiescent. | Agent review | 2026-09-04 |
 | 17 | Async state API | New run vocabulary / synchronous response / reuse session-runtime vocabulary | Reuse idempotency, status/result/cancel, ambiguity, expiry, and terminal semantics from the ACA session runtime. | Agent review | 2026-09-04 |
 | 18 | Final commit retry | Generation fence only / idempotent commit receipt / separate transaction service | Record the committing run/request/response tuple and return the same receipt when acknowledgement loss retries an already-applied commit. | Agent review | 2026-09-04 |
-| 19 | Lost approval wake-up | Event only / short polling / event plus bounded mailbox re-poll | Treat the fact as authoritative, reuse one event task, and re-read the mailbox on one-hour Durable timers while parked. | Agent review | 2026-09-04 |
+| 19 | Lost approval wake-up (initial design; superseded by #39) | Event only / short polling / event plus bounded mailbox re-poll | Initially selected event plus timer re-poll; later replaced by one answer/cancel/timeout race and outbox delivery to bound history. | Agent review | 2026-09-04 |
 | 20 | Sandbox capacity | Rely on group errors / host concurrency only / fenced app-owned allowance | Admit through a bounded capacity coordinator with reserved group headroom, Durable waiting, expiry, and reaper reconciliation. | Agent review | 2026-09-04 |
 | 21 | Ambiguous public outcome | Seventh status / false failure / failed plus disposition | Keep six run statuses; expose uncertainty as `Failed` plus `disposition=Ambiguous` and `possibly_committed=true`. | Agent review | 2026-09-04 |
 | 22 | MAF step construction | Raw client / one-step Agent / terminate middleware | Use a dedicated one-step `Agent.run()` with client auto-invocation disabled; retain known-safe Agent/Chat middleware and treat any FunctionMiddleware invocation as a configuration failure. | Agent deep dive | 2026-09-04 |
@@ -1333,6 +1551,13 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
 | 33 | Multi-hour context | Resend unbounded transcript / discard history / immutable audit plus checkpointed compaction | Preserve full audit history while generating a bounded working-context summary with atomic reasoning/call/result groups. | Agent review | 2026-09-04 |
 | 34 | Latest MAF package set | Loose `>=1.13` / exact current set / stay pinned | Target core `1.17.0`, OpenAI `1.14.2`, and Foundry `1.12.0`; Durable Extension remains `1.0.0b260730`. Advance only after compatibility gates. | Human + Agent | 2026-09-04 |
 | 35 | Middleware-to-Durable bridge | Middleware calls activities / event-journal RPC / explicit loop | Middleware may signal and await an external journal, but only the parent orchestrator yields activities. Keep the RPC bridge as a short-turn comparison; use the explicit loop for multi-hour runs. | Human + Agent | 2026-09-04 |
+| 36 | Model-requested clarification | Natural-language question / approval mechanism / reserved tool | Expose `request_human_input`; persist the request and return the accepted answer as its matching role=`tool` function result. | Human + Agent | 2026-09-04 |
+| 37 | Human-input delivery | External event only / polling only / authoritative fact plus event | Atomically accept the first response, then raise a unique at-least-once external event; buffer early delivery, retry through an outbox, and reconcile the ledger if the final timer wins. | Human + Agent | 2026-09-04 |
+| 38 | Clarification dependency | MAF Workflow HITL extension / existing Durable Functions APIs / custom broker | Use the existing `azure-functions-durable` client/event/timer APIs and a custom authenticated endpoint; add no runtime dependency for the explicit loop. | Human + Agent | 2026-09-04 |
+| 39 | Human wait topology | Repeated timer re-poll / single event-cancel-timeout race / continue-as-new while waiting | Supersede #19: use one answer event, one cancel event, one final timer, plus outbox retries; never roll over with an open request. | Agent review | 2026-09-04 |
+| 40 | Answer vs. timeout race | Endpoint wall clock / orchestration winner / one request-record CAS | `accept_human_response` and `close_human_request_v1` compete on one record; the CAS winner is authoritative and displayed expiry is advisory. | Agent review | 2026-09-04 |
+| 41 | Human wake-up terminal errors | Retry forever / discard silently / orphan accepted answer | Treat Durable client `404`/`410` as terminal outbox results, mark the answer orphaned, and expose typed `run_terminal`. | Agent review | 2026-09-04 |
+| 42 | Long-park model context | Fail after answer / exact replay only / exact replay plus controlled rehydration | Validate exact encrypted-reasoning replay; on recognized incompatibility rebuild working context from immutable audit without repeating tools. | Agent review | 2026-09-04 |
 
 ## 6. Test plan
 
@@ -1373,6 +1598,15 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
 - [ ] Unit: pure orchestrator replay, stable fan-out/fan-in, retry selection,
   approval/cancel event races, deadlines, continue-as-new, and cleanup
   scheduling.
+- [ ] Unit/integration: reserved clarification call validation, mixed-batch
+  rejection with one result per call ID, unique event names, early-event
+  buffering, first-answer/close CAS interleavings, duplicate/conflict/stale
+  handling, answer/timeout/cancel races, outbox wake-up retry and terminal
+  `404`/`410`, orphaned-answer receipts, and exact role=`tool` call-ID
+  continuation.
+- [ ] Integration: a request parked for the configured maximum resumes through
+  exact encrypted-reasoning replay or controlled `rehydrate_context_v1`, with
+  frozen/retired deployment scenarios and no repeated tool effect.
 - [ ] Unit/integration: deterministic compaction trigger, immutable source-range
   hashes, atomic reasoning/call/result groups, summary replay, full-audit
   preservation, and compacted-context overflow failure.
@@ -1395,8 +1629,9 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
   validation, immutable workspace chain, no credential persistence,
   bounded capacity admission/waiting, auto-delete, and reaper.
 - [ ] Fault injection and E2E: the full matrix in sections 4.15-4.16, including
-  the four-step correctness profile, the >=16-step multi-hour/compaction
-  profile, two local calls, one remote MCP read, one synthetic write,
+  the five-step clarification correctness profile, the >=16-step multi-hour/
+  compaction profile, two local calls, one remote MCP read, one synthetic
+  write, human answer-before-wait and duplicate/race seams,
   background-response loss seams, worker kills, cancellation, compatible
   deployment, final correctness, no duplicate committed effect, no
   acknowledged activity redispatch, no content leak, and zero final sandbox
@@ -1434,8 +1669,8 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
   tool-result continuation as the missing Durable Extension API. The user's
   reasoning-first clarification then added the MAF upgrade, background
   continuation/retention/affinity, middleware-starter, logical-reconstruction,
-  and context-compaction requirements; these corrections are recorded in
-  Decisions 18-35.
+  context-compaction, and durable human-clarification requirements; these
+  corrections are recorded in Decisions 18-42.
 - **Human sign-off:** Pending. This FRD remains `In review`; set
   `status: Finalized` only after explicit human approval. No product
   implementation may begin before that gate.
