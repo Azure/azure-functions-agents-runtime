@@ -24,6 +24,7 @@ service benchmark. Telemetry scenes exclude prompt text, tool arguments/results,
 function keys, account identity, subscription/tenant IDs, sandbox IDs, and
 runtime host identifiers.
 
-The 2026-09-04 streaming rerun stopped after its inventory safety gate and did
-not produce a replacement c1/c10 comparison. The existing recorded scene stays
+The 2026-09-04 streaming rerun and corrected 2026-09-05 nonstream retry both
+stopped at inventory safety gates after ACA delete-response timeouts. Neither
+produced a replacement c1/c10 comparison. The existing recorded scene stays
 bound to the complete 2026-09-03 qualification.

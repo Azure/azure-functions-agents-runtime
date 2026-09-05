@@ -84,6 +84,16 @@ qualification used nonstream responses, the aborted attempt publishes no new
 latency comparison. Its exact evidence is retained under
 `latest_rerun_attempt` in the results JSON.
 
+A corrected nonstream rerun then used a fail-closed orchestrator with explicit
+native exit-code, report-shape, and typed-inventory checks. Its sole cold canary
+returned HTTP 200 in 22,700.556 ms, but the invocation-handle delete request
+again timed out before response headers. The orchestrator stopped before c1, so
+c10 also never started. The sandbox remained `Running` until the scoped reaper
+issued a group-level DELETE at 00:40 UTC; that request returned 200 in 244 ms
+and typed inventory reached zero without operator cleanup. The service-side
+delete-response stall is therefore a concrete external blocker, and the
+2026-09-03 sequence remains the latest complete qualification.
+
 The lifecycle backstop is not prompt cleanup. In an isolated probe with no
 explicit delete, the sandbox was first observed `Stopped` 340.441 seconds after
 policy application and absent at 1,071.150 seconds. The 600-second delete timer

@@ -85,6 +85,13 @@ replacement benchmark. The existing v4 video and deck therefore retain the
 complete historical qualification rather than presenting the incomplete run as
 new performance data.
 
+The corrected nonstream retry also stopped after its single cold canary when
+the ACA invocation-handle delete endpoint again failed to return response
+headers within the five-second bound. No c1 or c10 request was admitted, and
+the existing scoped reaper returned typed inventory to zero. This second
+attempt reinforces why the demo keeps the complete 2026-09-03 performance
+headline rather than substituting incomplete data.
+
 ## Recording provenance and limitations
 
 - The Hosted Skills interaction is an actual 1920×1080 Playwright recording

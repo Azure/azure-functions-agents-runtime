@@ -1,7 +1,7 @@
 {
   "schema_version": "3.0",
   "package": "hybrid-sandbox-leadership-live-e2e",
-  "generated_at": "2026-09-05T00:02:00Z",
+  "generated_at": "2026-09-05T00:41:00Z",
   "safety": {
     "existing_resources_only": true,
     "bounded_demo_invocations_in_package": 2,
@@ -137,6 +137,20 @@
     "operator_cleanup_used": false,
     "performance_claim_replaced": false,
     "reason": "Incomplete streaming attempt; retained only as operational cleanup evidence."
+  },
+  "latest_nonstream_rerun_attempt": {
+    "source": "../../decisions/0009-hybrid-sandbox-tool-execution-results.json#latest_nonstream_rerun_attempt",
+    "started_at_utc": "2026-09-05T00:13:34.000808Z",
+    "status": "blocked_by_delete_endpoint_timeout",
+    "completed_requests": 1,
+    "requested_requests": 21,
+    "concurrency_1_started": false,
+    "concurrency_10_started": false,
+    "delete_request_failures": 1,
+    "final_inventory": 0,
+    "operator_cleanup_used": false,
+    "performance_claim_replaced": false,
+    "reason": "The corrected nonstream cold canary passed HTTP/report validation but failed the inventory gate after the ACA delete endpoint timed out before response headers."
   },
   "latest_result_scene_regeneration": {
     "source": "demo.html#demo-results",

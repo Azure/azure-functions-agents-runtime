@@ -548,6 +548,169 @@
       "latest_complete_qualification_remains_authoritative": true
     }
   },
+  "latest_nonstream_rerun_attempt": {
+    "generated_at": "2026-09-05T00:41:00Z",
+    "status": "blocked_by_delete_endpoint_timeout",
+    "qualification_replaced": false,
+    "reason": "The exact nonstream cold canary completed successfully, but the invocation-handle DELETE again timed out before response headers and inventory remained nonzero. The fail-closed orchestrator stopped before c1; c10 was never started.",
+    "requested_plan": {
+      "cold_requests": 1,
+      "concurrency_1_requests": 10,
+      "concurrency_10_requests": 10,
+      "total_requests": 21,
+      "duplicate_stages_allowed": false
+    },
+    "source_and_configuration": {
+      "pr_head": "e16683396d982d1a509aee5af3b944a3267a83d5",
+      "deployed_commit": "cb53d513964cb4ab225144f12c8018c49b25cd84",
+      "redeployed": false,
+      "deployable_runtime_changes_after_deployed_commit": false,
+      "function_app": "func-hybrid-sbx-0902",
+      "function_count": 6,
+      "bundle_root": "sandbox_bundle",
+      "sandbox_group": "sbg-hybrid-tools-0902",
+      "sandbox_group_max_count": 100,
+      "sandbox_group_provisioning_state": "Succeeded",
+      "debug_settings_present": false,
+      "worker_opentelemetry_setting_present": false,
+      "functions_always_ready_configured": false
+    },
+    "safety_orchestrator": {
+      "location": "session artifact only; not committed",
+      "native_exit_codes_checked": true,
+      "inventory_gates_fail_closed": true,
+      "report_fields_validated": [
+        "mode",
+        "concurrency",
+        "request_count",
+        "success_count",
+        "error_count",
+        "status_counts",
+        "terminal_counts"
+      ],
+      "initial_compile_only_failure_sent_requests": 0,
+      "initial_inventory": 0,
+      "stopped_before_concurrency_1": true
+    },
+    "measurement_scope": {
+      "benchmark_prompt_id": "customer-probe-alpha-repeat-3",
+      "mode": "nonstream",
+      "orchestrator_started_at": "2026-09-05T00:13:34.000808Z",
+      "function_request_start": "2026-09-05T00:13:50.1686068Z",
+      "delete_failure_observed_at": "2026-09-05T00:14:08.936378Z",
+      "cleanup_completed_at": "2026-09-05T00:40:05.539243Z",
+      "completed_requests": 1,
+      "requested_requests": 21,
+      "concurrency_1_started": false,
+      "concurrency_10_started": false,
+      "comparison_valid": false
+    },
+    "cold_request": {
+      "http_status": 200,
+      "client_first_event_ms": 22700.545,
+      "client_total_ms": 22700.556,
+      "function_request_ms": 18785.429,
+      "runtime_request_ms": 14720.547,
+      "inventory_before": 0,
+      "first_inventory_after": 1,
+      "delete_request_accepted": false,
+      "lifecycle_handoff_succeeded": true
+    },
+    "runtime_metrics": {
+      "counts": {
+        "requests": 1,
+        "sandbox_creates": 1,
+        "sandbox_lifecycle_handoffs": 1,
+        "sandbox_delete_request_failures": 1,
+        "sandbox_delete_requests_accepted": 0,
+        "tool_calls": 1,
+        "model_calls": 2
+      },
+      "duration_ms": {
+        "sandbox_create": 3081.618,
+        "package_upload": 93.74,
+        "package_verify": 0.159,
+        "executor_ready": 273.926,
+        "discovery": 18.817,
+        "model_per_call_average": 2236.564,
+        "tool_execution": 0.327,
+        "tool_queue": 25.117,
+        "tool_transfer": 293.027,
+        "lifecycle_handoff": 50.247
+      }
+    },
+    "apim": {
+      "model_post_requests": 2,
+      "model_errors": 0,
+      "model_total_ms": [
+        1583.604,
+        2148.794
+      ],
+      "mcp_post_requests": 4,
+      "mcp_post_errors": 0,
+      "mcp_expected_close_get_requests": 2,
+      "mcp_expected_close_get_errors": 2,
+      "tokens": {
+        "prompt_total": 2222,
+        "prompt_cached_total": 1024,
+        "completion_total": 88,
+        "total": 2310
+      },
+      "gateway_log_latency_split": {
+        "available": false,
+        "rows": 0
+      }
+    },
+    "delete_failure_diagnosis": {
+      "classification": "ACA invocation-handle delete endpoint response timeout",
+      "exception_type": "TimeoutError",
+      "timeout_seconds": 5,
+      "stage": "SandboxClient.begin_delete -> _dp_delete -> aiohttp response-header wait",
+      "http_status_observed": false,
+      "poller_created": false,
+      "affected_requests_across_both_attempts": 5,
+      "failed_dependency_span_subset": {
+        "sample_count": 2,
+        "duration_ms": [
+          5000,
+          5001
+        ],
+        "result_code": "0"
+      },
+      "previous_successful_2026_09_03_subset": {
+        "sample_count": 12,
+        "minimum_ms": 944,
+        "average_ms": 1140.25,
+        "maximum_ms": 1297,
+        "accepted_delete_metric_count": 21
+      },
+      "current_health": {
+        "function_app": "Running",
+        "runtime": "Normal",
+        "plan": "Ready",
+        "sandbox_group": "Succeeded"
+      },
+      "interpretation": "The five failures are content-free timeouts before the ACA service returned response headers; no HTTP rejection or runtime exception occurred after a response. The same deployed code previously returned initial acceptance in 0.944-1.297 seconds. Raising the request bound would change the nonblocking cleanup contract and invalidate the apples-to-apples runtime comparison, so no runtime change was made."
+    },
+    "cleanup": {
+      "maximum_typed_inventory": 1,
+      "last_observed_running_at": "2026-09-05T00:39:33.635725Z",
+      "typed_inventory_zero_at": "2026-09-05T00:40:05.539243Z",
+      "final_inventory": 0,
+      "operator_cleanup_used": false,
+      "reaper_delete": {
+        "observed_at": "2026-09-05T00:40:00.196945Z",
+        "http_status": 200,
+        "duration_ms": 244
+      }
+    },
+    "historical_comparison": {
+      "canonical_baseline_commit": "77ef399c7984db4532999f48230ca8ab9673affe",
+      "latest_complete_optimized_commit": "cb53d513964cb4ab225144f12c8018c49b25cd84",
+      "latest_complete_results_commit": "26a78b99e7eeb8bf4f03ac9de801e1ccc9e73363",
+      "latest_complete_qualification_remains_authoritative": true
+    }
+  },
   "end_to_end": {
     "concurrency_1": {
       "cleanup_inventory": 0,

@@ -174,6 +174,7 @@ No resources have been provisioned by this child session yet.
 | 2026-09-03 11:44-12:02 | Ran one isolated lifecycle-only 300/600 probe. | No explicit delete was requested. `Running` lasted through 309.543 seconds, `Stopped` was first observed at 340.441 seconds, and the object was absent at 1,071.150 seconds. | Auto-delete is not measured from policy application; it follows stop with additional reconciliation delay. No reaper was needed and final typed inventory was zero. |
 | 2026-09-03 12:03 | Verified final optimized retained state. | Exact deployed tag is `cb53d513964cb4ab225144f12c8018c49b25cd84`; six functions remain indexed; model and MCP APIM APIs remain active and subscription-required; group capacity is 100/`Succeeded`; debug/worker OTel remain absent; typed inventory is zero. | Qualification complete. Retain resources and API-scoped body-free diagnostics until explicit teardown. |
 | 2026-09-04 23:24-2026-09-05 00:01 | Attempted the authorized streaming cold/c1/c10 rerun and stopped at the inventory safety gate. | No redeploy was needed: PR head `a6f344d` changes only documentation/demo surfaces after deployed `cb53d51`. The cold request returned HTTP 200 with SSE `done` in 24,017.687 ms, but delete initiation failed and its sandbox remained `Running`. A shell chaining defect then admitted three c1 requests before termination; c10 was never started. All four requests returned 200 and all four lifecycle handoffs succeeded, but all four delete requests failed. | This is an aborted attempt, not a new qualification and not comparable with either complete nonstream run. Typed inventory peaked at four, dropped to two after the 23:50 reaper, and reached zero at 00:00:26 after the next reaper window. No manual cleanup or resource/configuration change occurred. The prior `cb53d51`/`26a78b9` qualification remains the latest complete measurement. |
+| 2026-09-05 00:13-00:40 | Ran the required nonstream cold canary through an artifact-local fail-closed orchestrator. | Preflight verified exact deployed `cb53d51`, six functions, group 100/`Succeeded`, and typed inventory zero. The deterministic cold request returned HTTP 200 in 22,700.556 ms, but `SandboxClient.begin_delete` again timed out at the five-second bound while `aiohttp` awaited response headers. The orchestrator validated the report, observed inventory one, and stopped before c1; c10 was never started. | External blocker. Across both attempts, all five invocation-handle deletes timed out before an HTTP status or poller existed; the same code's 2026-09-03 accepted subset completed in 944-1,297 ms. Inventory stayed `Running` until the 00:40 scoped reaper issued a group-level DELETE that returned 200 in 244 ms; typed inventory was zero at 00:40:05. No manual cleanup, deployment, or resource/configuration change occurred. |
 
 ## Measurement record
 
@@ -197,6 +198,13 @@ or baseline delta: only four of the requested 21 calls completed before the
 inventory safety stop, and every delete initiation failed. The complete
 2026-09-03 optimized qualification therefore remains authoritative; the
 attempt is retained solely as operational failure and cleanup evidence.
+
+The `latest_nonstream_rerun_attempt` object records the corrected apples-to-apples
+canary. Its fail-closed gates prevented any c1 or c10 request after the ACA
+delete endpoint again failed to return response headers within five seconds.
+Because the cold sandbox retained capacity until the scoped reaper ran, a valid
+21-request replacement qualification could not be completed without violating
+the no-duplicate-stage or inventory-zero constraints.
 
 | Scenario | N | p50 | p95 | p99 | Throughput | Errors | Cleanup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
