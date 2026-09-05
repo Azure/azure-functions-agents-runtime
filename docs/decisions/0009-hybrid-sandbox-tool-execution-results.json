@@ -380,6 +380,174 @@
       "sandbox_inventory": 0
     }
   },
+  "latest_rerun_attempt": {
+    "generated_at": "2026-09-05T00:02:00Z",
+    "status": "aborted_at_inventory_safety_gate",
+    "qualification_replaced": false,
+    "reason": "The streaming cold request completed successfully, but its delete initiation failed and typed inventory remained nonzero. A shell chaining error then admitted three c1 requests before the process was stopped. The run did not proceed to c10 and is not a complete or comparable qualification.",
+    "requested_plan": {
+      "cold_requests": 1,
+      "concurrency_1_requests": 10,
+      "concurrency_10_requests": 10,
+      "total_requests": 21,
+      "duplicate_stages_allowed": false
+    },
+    "source_and_configuration": {
+      "pr_head": "a6f344d132b4ba75872949deedd9e42c1edb71bd",
+      "deployed_commit": "cb53d513964cb4ab225144f12c8018c49b25cd84",
+      "redeployed": false,
+      "deployable_runtime_changes_after_deployed_commit": false,
+      "difference_scope": "Documentation, demo assets, and sample README only; src and deployable sample content are unchanged.",
+      "function_app": "func-hybrid-sbx-0902",
+      "function_count": 6,
+      "bundle_root": "sandbox_bundle",
+      "sandbox_group": "sbg-hybrid-tools-0902",
+      "sandbox_group_max_count": 100,
+      "sandbox_group_provisioning_state": "Succeeded",
+      "debug_settings_present": false,
+      "worker_opentelemetry_setting_present": false,
+      "functions_always_ready_configured": false
+    },
+    "measurement_scope": {
+      "benchmark_prompt_id": "customer-probe-alpha-repeat-3",
+      "mode": "stream",
+      "window_start": "2026-09-04T23:24:38.8305347Z",
+      "window_end": "2026-09-05T00:01:21.612816Z",
+      "completed_requests": 4,
+      "requested_requests": 21,
+      "concurrency_10_started": false,
+      "comparison_valid": false,
+      "variance_interpretation": "No latency delta is calculated. Four streaming requests plus a cleanup anomaly cannot be compared with either complete nonstream qualification."
+    },
+    "cold_request": {
+      "http_status": 200,
+      "sse_terminal_event": "done",
+      "client_first_event_ms": 12653.885,
+      "client_total_ms": 24017.687,
+      "function_request_ms": 20603.114,
+      "inventory_before": 0,
+      "first_inventory_after": 1,
+      "delete_request_accepted": false,
+      "lifecycle_handoff_succeeded": true
+    },
+    "incomplete_concurrency_1": {
+      "completed_requests": 3,
+      "requested_requests": 10,
+      "http_200_requests": 3,
+      "client_report_available": false,
+      "function_request_ms": [
+        17757.942,
+        12768.64,
+        8191.899
+      ],
+      "reason": "The benchmark process was terminated after the failed inventory gate was discovered; no c1 percentile or throughput result is published."
+    },
+    "runtime_metrics": {
+      "counts": {
+        "requests": 4,
+        "sandbox_creates": 4,
+        "sandbox_lifecycle_handoffs": 4,
+        "sandbox_delete_request_failures": 4,
+        "sandbox_delete_requests_accepted": 0,
+        "tool_calls": 4,
+        "model_calls": 8,
+        "sandbox_reaped_metric_total": 2
+      },
+      "failures": {
+        "http": 0,
+        "model": 0,
+        "tool": 0,
+        "sandbox_delete_request": 4
+      },
+      "duration_ms": {
+        "request_average": 13922.55,
+        "sandbox_create_average": 3241.175,
+        "package_upload_average": 79.95,
+        "package_verify_average": 0.191,
+        "executor_ready_average": 489.915,
+        "discovery_average": 67.692,
+        "model_per_call_average": 1936.415,
+        "tool_execution_average": 0.306,
+        "tool_queue_average": 15.171,
+        "tool_transfer_average": 142.073,
+        "lifecycle_handoff_average": 93.38
+      }
+    },
+    "function_request_summary": {
+      "requests": 4,
+      "errors": 0,
+      "duration_ms": {
+        "average": 14830.399,
+        "p50": 12768.64,
+        "p95": 20603.114,
+        "p99": 20603.114
+      },
+      "interpretation": "Attempt-only telemetry; not a complete qualification or a replacement performance measurement."
+    },
+    "progress_events": {
+      "separately_materialized_custom_events": 0,
+      "query_surface": "Application Insights customEvents",
+      "interpretation": "The clean attempt window contained no separately materialized hybrid.progress custom-event rows. Runtime component metrics and spans were retained."
+    },
+    "package_bytes": {
+      "metric_emitted": false,
+      "interpretation": "The clean attempt window emitted package upload and verification duration metrics but no package-byte metric."
+    },
+    "apim": {
+      "model_post_requests": 8,
+      "model_errors": 0,
+      "model_total_ms": {
+        "p50": 1433.288,
+        "p95": 2304.262,
+        "p99": 2304.262
+      },
+      "mcp_post_requests": 8,
+      "mcp_post_errors": 0,
+      "mcp_total_ms": {
+        "p50": 73.66,
+        "p95": 207.197,
+        "p99": 207.197
+      },
+      "mcp_expected_close_get_requests": 4,
+      "mcp_expected_close_get_errors": 4,
+      "gateway_log_latency_split": {
+        "available": false,
+        "rows": 0,
+        "interpretation": "The aligned ApiManagementGatewayLogs query returned no rows, so backend and gateway-overhead percentiles are not claimed for this incomplete attempt."
+      },
+      "tokens": {
+        "prompt_total": 8888,
+        "prompt_cached_total": 6144,
+        "completion_total": 313,
+        "total": 9201
+      }
+    },
+    "cleanup": {
+      "maximum_typed_inventory": 4,
+      "all_observed_states": [
+        "Running"
+      ],
+      "first_drop_from_four_at": "2026-09-04T23:50:20.719023Z",
+      "typed_inventory_zero_at": "2026-09-05T00:00:26.270003Z",
+      "final_inventory": 0,
+      "final_typed_inventory_verified_at": "2026-09-05T00:08:02.632985Z",
+      "final_typed_inventory_method": "AcaSandboxAdapter.list_sandboxes against the configured Sandbox Group",
+      "operator_cleanup_used": false,
+      "timer_reaper_firings_observed": [
+        "2026-09-04T23:30:00Z",
+        "2026-09-04T23:40:00Z",
+        "2026-09-04T23:50:00Z",
+        "2026-09-05T00:00:00Z"
+      ],
+      "attribution": "Inventory drops followed the 23:50 and 00:00 scoped reaper firings. The sandbox_reaped metric reported two confirmed reaps; typed inventory is authoritative for final zero, and exact deletion attribution for the other two objects is not proven."
+    },
+    "historical_comparison": {
+      "canonical_baseline_commit": "77ef399c7984db4532999f48230ca8ab9673affe",
+      "latest_complete_optimized_commit": "cb53d513964cb4ab225144f12c8018c49b25cd84",
+      "latest_complete_results_commit": "26a78b99e7eeb8bf4f03ac9de801e1ccc9e73363",
+      "latest_complete_qualification_remains_authoritative": true
+    }
+  },
   "end_to_end": {
     "concurrency_1": {
       "cleanup_inventory": 0,

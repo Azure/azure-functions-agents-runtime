@@ -173,6 +173,7 @@ No resources have been provisioned by this child session yet.
 | 2026-09-03 11:44 | Joined the optimized clean telemetry window. | Exactly 21 requests/creates/uploads/verifications/handoffs/delete acceptances/tool calls and 42 model calls were emitted with no hybrid failure counters. Runtime request average was 10,649.358 ms; upload 135.085 ms, verify 0.157 ms, ready 333.192 ms, lifecycle handoff 49.914 ms. APIM model n=42 had zero errors. | The 9,843.642 ms average saving exceeded the expected 6.3-6.8 seconds. OTel percentiles are weighted bucket-average approximations; client and Function request percentiles are authoritative. |
 | 2026-09-03 11:44-12:02 | Ran one isolated lifecycle-only 300/600 probe. | No explicit delete was requested. `Running` lasted through 309.543 seconds, `Stopped` was first observed at 340.441 seconds, and the object was absent at 1,071.150 seconds. | Auto-delete is not measured from policy application; it follows stop with additional reconciliation delay. No reaper was needed and final typed inventory was zero. |
 | 2026-09-03 12:03 | Verified final optimized retained state. | Exact deployed tag is `cb53d513964cb4ab225144f12c8018c49b25cd84`; six functions remain indexed; model and MCP APIM APIs remain active and subscription-required; group capacity is 100/`Succeeded`; debug/worker OTel remain absent; typed inventory is zero. | Qualification complete. Retain resources and API-scoped body-free diagnostics until explicit teardown. |
+| 2026-09-04 23:24-2026-09-05 00:01 | Attempted the authorized streaming cold/c1/c10 rerun and stopped at the inventory safety gate. | No redeploy was needed: PR head `a6f344d` changes only documentation/demo surfaces after deployed `cb53d51`. The cold request returned HTTP 200 with SSE `done` in 24,017.687 ms, but delete initiation failed and its sandbox remained `Running`. A shell chaining defect then admitted three c1 requests before termination; c10 was never started. All four requests returned 200 and all four lifecycle handoffs succeeded, but all four delete requests failed. | This is an aborted attempt, not a new qualification and not comparable with either complete nonstream run. Typed inventory peaked at four, dropped to two after the 23:50 reaper, and reached zero at 00:00:26 after the next reaper window. No manual cleanup or resource/configuration change occurred. The prior `cb53d51`/`26a78b9` qualification remains the latest complete measurement. |
 
 ## Measurement record
 
@@ -189,6 +190,13 @@ handoff, and nonblocking delete initiation. Both runs used the same deterministi
 prompt. The recorded baseline `sandbox_delete` latencies remain the sizing basis
 for confirmed deletion when acquisition or terminal-policy setup is not
 trustworthy.
+
+The timestamped `latest_rerun_attempt` object records the incomplete
+2026-09-04 streaming attempt. It intentionally publishes no c1/c10 percentiles
+or baseline delta: only four of the requested 21 calls completed before the
+inventory safety stop, and every delete initiation failed. The complete
+2026-09-03 optimized qualification therefore remains authoritative; the
+attempt is retained solely as operational failure and cleanup evidence.
 
 | Scenario | N | p50 | p95 | p99 | Throughput | Errors | Cleanup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |

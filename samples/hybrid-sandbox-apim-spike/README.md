@@ -58,7 +58,8 @@ Create one labeled orphan for the timer reaper scenario.
 
 Exact commit `cb53d51` was deployed with `sandbox_bundle`, no Functions
 always-ready configuration, and no debug or worker-level OTel setting. The
-single cold/c1/c10 sequence started each stage at typed inventory zero:
+single completed cold/c1/c10 sequence on 2026-09-03 started each stage at typed
+inventory zero:
 
 | Scenario | N | p50 | p95 | Throughput | Errors |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -71,6 +72,17 @@ lifecycle-handoff, delete-request-accepted, and tool-call metrics with no
 hybrid failure counter. The first post-run inventory checks were already zero.
 Compared with the `77ef399` baseline, runtime-average request latency fell by
 9,843.642 ms (48.03%), exceeding the expected 6.3-6.8-second saving.
+
+This remains the latest **complete** qualification. An authorized streaming
+rerun on 2026-09-04 was stopped after its cold request failed the inventory-zero
+gate. A shell chaining defect admitted three of the planned c1 requests before
+termination; c10 never started. All four HTTP requests completed successfully,
+but all four server-side delete initiations failed. Typed inventory peaked at
+four and returned to zero through the existing scoped reaper windows, without
+operator cleanup. Because only four of 21 planned requests ran and the earlier
+qualification used nonstream responses, the aborted attempt publishes no new
+latency comparison. Its exact evidence is retained under
+`latest_rerun_attempt` in the results JSON.
 
 The lifecycle backstop is not prompt cleanup. In an isolated probe with no
 explicit delete, the sandbox was first observed `Stopped` 340.441 seconds after

@@ -71,12 +71,19 @@ held for 25 seconds so the recorder could observe the active sandbox. The
 | One fresh sandbox was cleaned up | Same-run create/delete spans and final typed inventory of zero |
 | The product exposes an Agent Trace view | `appinsights-agent-trace-portal.png`, captured from an earlier retained live agent run |
 | The new capture is inspectable as one runtime lifecycle | `appinsights-agent-trace.png` plus the separately correlated runtime trace |
-| The optimized path reduced measured runtime by 48% | `docs/decisions/0009-hybrid-sandbox-tool-execution-results.json` and the demo-results scene |
+| The latest complete optimized path reduced measured runtime by 48% | The 2026-09-03 `cb53d51` qualification in `docs/decisions/0009-hybrid-sandbox-tool-execution-results.json` and the demo-results scene |
 
 The capture window contains successful model and MCP traffic through APIM,
 including two successful model `POST` requests. Expected MCP close/teardown
 probes are not treated as request failures. No request or response bodies were
 queried or recorded.
+
+The demo's performance headline remains the latest complete 2026-09-03
+qualification. A 2026-09-04 streaming rerun was aborted after an inventory
+safety-gate failure and is recorded as operational evidence, not as a
+replacement benchmark. The existing v4 video and deck therefore retain the
+complete historical qualification rather than presenting the incomplete run as
+new performance data.
 
 ## Recording provenance and limitations
 
