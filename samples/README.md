@@ -19,6 +19,10 @@ app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure
 - [workflow-subagents-preview](workflow-subagents-preview/) is a non-runnable,
   reviewer-facing preview of the proposed Dynamic Workflow Sub Agent authoring
   surface. It intentionally has no `host.json`.
+- [durable-agent-loop-spike](durable-agent-loop-spike/) is the private,
+  exact-name infrastructure and qualification slice for FRD 0010. It
+  intentionally omits `function_app.py` until the final stacked application
+  layer is assembled.
 
 ## Run Locally (optional)
 

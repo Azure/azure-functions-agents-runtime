@@ -1,0 +1,9 @@
+name: durable-agent-loop-spike
+infra:
+  provider: bicep
+  path: infra
+services:
+  api:
+    project: ./src
+    language: python
+    host: function

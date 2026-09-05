@@ -1,0 +1,9 @@
+.git*
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+ASSEMBLY_SLOT.md
+local.settings.json
+local.settings.template.json

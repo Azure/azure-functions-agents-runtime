@@ -114,3 +114,24 @@ qualification suites already assert their own cleanup; deleting immediately
 afterward would mask idle-delete or controller-reconciliation failures. The next
 run reports accumulated leftovers. A final report-only group audit is also
 omitted because intentionally retained sessions could create false positives.
+
+### `durable_loop_spike.py`
+
+Builds the local runtime wheel, combines it with the completed
+`samples/durable-agent-loop-spike/src` application, writes a content manifest,
+and produces a deterministic ZIP with sorted paths and fixed metadata. It
+refuses to assemble while `function_app.py` is absent. Deployment is a separate
+command requiring the exact existing Function App name as an acknowledgement;
+it performs only a read preflight and Flex `config-zip` deployment.
+
+The helper never reads app settings or APIM subscription secrets. See the
+sample README for the secure provisioning, assembly, deployment, inventory, and
+exact cleanup workflow.
+
+### `durable_loop_spike_qualification.py`
+
+Calls operator-supplied start, status, result, cancel, and human-answer route
+templates with bounded JSON bodies and response sizes. Authentication secrets
+come from environment variables. Default output is content-free HTTP status,
+latency, and byte count; only a fixed set of explicitly mapped control fields
+can be emitted.
