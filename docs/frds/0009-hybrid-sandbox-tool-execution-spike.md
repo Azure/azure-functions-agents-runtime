@@ -147,10 +147,15 @@ timeout, shutdown-marker failure, or lifecycle-policy failure falls back to
 bounded confirmed deletion through the handle and provider seams because the
 backstop is not trustworthy. If delete initiation fails or times out after the
 terminal policy succeeds, the policy remains armed and the lease closes without
-paying the old multi-second deletion wait. Each confirmed-delete attempt takes
-an even slice of the time actually
-remaining, so a hung seam neither starves the other seam nor extends the
-deadline. The fallback uses the measured 24-second completed-run budget;
+paying the old multi-second deletion wait. If the five-second invocation-handle
+initiation raises or times out before acceptance, cleanup immediately makes one
+separately bounded exact-ID provider deletion attempt instead of retrying the
+same handle seam. A completed provider fallback records confirmed deletion and
+duration; if it also fails, the terminal policy and app-scoped reaper remain
+armed. Each multi-seam confirmed-delete attempt used for failed acquisition or
+untrusted lifecycle handoff takes an even slice of the time actually remaining,
+so a hung seam neither starves the other seam nor extends the deadline. Both
+completed-run fallbacks use the measured 24-second budget;
 failed-acquire rollback keeps its 90-second window because lifecycle setup may
 not be trustworthy yet. `NotFound` is success; exhausted cleanup is counted and
 logged but never replaces completed output or appends an error after stream
@@ -164,8 +169,9 @@ request path, but immediate zero is not the close-time contract. If initiation
 fails, customer code and Disk state remain until lifecycle/reaper cleanup.
 Lifecycle-policy handoff, delete-request acceptance/failure, and confirmed
 deletion have distinct low-cardinality telemetry; initiation is never reported
-as completed deletion. Auto-delete and a timer-based label reaper cover worker
-death. Provisioning and reaping use
+as completed deletion. A separate fallback counter distinguishes handle
+initiation stalls from overall cleanup failures. Auto-delete and a timer-based
+label reaper cover worker death. Provisioning and reaping use
 the same platform-derived `AppIdentity` hash plus the hybrid owner kind, so a
 shared Sandbox Group cannot cause one Function App to reap another's sandboxes.
 Its minimum orphan age is strictly greater than the maximum configured
@@ -367,6 +373,7 @@ be removed or redesigned without deprecation.
 | 30 | Capacity-safe terminal cleanup | Lifecycle-only / await delete / initiate delete plus backstops | Refine #24 after live `maxSandboxCount=25` evidence: apply terminal 300/600 policy, request server-side delete without awaiting LRO completion, then close clients. Initiation failure leaves lifecycle/reaper armed; untrusted policy setup still uses confirmed deletion. | Human | 2026-09-03 |
 | 31 | Sandbox Group headroom | Keep 25 / raise to 100 / rely on retention | Raise `maxSandboxCount` from 25 to 100 for bounded optimized qualification, while retaining nonblocking delete plus lifecycle/reaper cleanup and inventory-zero gates. Capacity is headroom, not a cleanup substitute. | Human | 2026-09-03 |
 | 32 | Lifecycle timer semantics | From policy set / from stop / unspecified | Live no-delete evidence remained present past 600 seconds, stopped by 340 seconds, and disappeared by 1,071 seconds. Treat delete as post-stop plus reconciliation delay; keep prompt nonblocking delete primary. | Live evidence + Agent | 2026-09-03 |
+| 33 | Delete-initiation fallback | Reuse handle / exact-ID provider / reaper only | After a five-second handle initiation failure, immediately attempt separately bounded exact-ID provider deletion. Preserve output; `NotFound` succeeds; lifecycle/reaper remain if both seams fail. | Human | 2026-09-05 |
 
 ## 6. Test plan
 
@@ -380,7 +387,7 @@ be removed or redesigned without deprecation.
   sequential and queued parallel local calls, with ordered active/terminal
   lifecycle policy, nonblocking delete initiation on
   success/cancellation/disconnect, idempotent close, and confirmed delete
-  fallback on acquisition or untrusted handoff.
+  fallback on acquisition, untrusted handoff, or failed handle initiation.
 - [x] Unit: orphan selection/reaping uses bounded age and non-sensitive labels.
 - [x] Unit: low-cardinality metric attributes, bounded progress events, and
   complete timing projection.
@@ -433,3 +440,7 @@ be removed or redesigned without deprecation.
   mechanically bounded progress attributes, and conservative live inventory
   gates. Decisions 29-30 and sections 4.2-4.6 incorporate the findings; the
   user's forwarded direction records Human sign-off for the refinements.
+- **Cleanup remediation sign-off:** On 2026-09-05 the user directed the
+  separately bounded exact-ID provider fallback after repeated live
+  invocation-handle initiation stalls. Decision 33 and section 4.2 record that
+  approved refinement.

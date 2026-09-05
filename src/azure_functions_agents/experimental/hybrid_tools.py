@@ -506,12 +506,13 @@ class InvocationSandboxLease(ToolExecutionBackend):
         except SandboxNotFoundError:
             record_hybrid_count(HybridMetric.SANDBOX_DELETE_REQUESTS_ACCEPTED)
         except Exception:
-            record_hybrid_count(HybridMetric.SANDBOX_DELETE_REQUEST_FAILURES)
+            record_hybrid_count(HybridMetric.SANDBOX_DELETE_FALLBACKS)
             logger.warning(
                 "Hybrid sandbox delete request was not accepted; "
-                "terminal lifecycle and reaper backstops remain armed.",
+                "trying bounded exact-ID provider deletion.",
                 exc_info=True,
             )
+            await self._provider_delete_after_request_failure()
         else:
             record_hybrid_count(HybridMetric.SANDBOX_DELETE_REQUESTS_ACCEPTED)
         finally:
@@ -519,6 +520,27 @@ class InvocationSandboxLease(ToolExecutionBackend):
                 await self._handle.close()
             except Exception:
                 logger.warning("Hybrid sandbox handle close failed.", exc_info=True)
+
+    async def _provider_delete_after_request_failure(self) -> None:
+        started = time.perf_counter()
+        try:
+            await asyncio.wait_for(
+                self._provider.delete_sandbox(self._handle.identity.sandbox_id),
+                timeout=_post_run_delete_seconds(),
+            )
+        except SandboxNotFoundError:
+            record_hybrid_count(HybridMetric.SANDBOX_DELETES)
+        except Exception:
+            record_hybrid_count(HybridMetric.SANDBOX_DELETE_FAILURES)
+            logger.error(
+                "Hybrid sandbox exact-ID provider deletion failed; "
+                "terminal lifecycle and reaper backstops remain armed.",
+                exc_info=True,
+            )
+        else:
+            record_hybrid_count(HybridMetric.SANDBOX_DELETES)
+        finally:
+            record_hybrid_duration(HybridMetric.SANDBOX_DELETE_DURATION, started)
 
     async def _confirmed_post_run_delete(self) -> None:
         try:

@@ -52,6 +52,10 @@ inventory zero, account for every request against the group's hard
 `maxSandboxCount`, and wait for eventual zero before continuing. Normal close
 arms the 300-second Disk suspend/600-second delete lifecycle backstop and asks
 the service to delete immediately, but it does not await deletion completion.
+If the five-second invocation-handle initiation fails before acceptance, close
+immediately attempts one separately bounded exact-ID provider deletion. A
+provider success is confirmed deletion; if both seams fail, completed output is
+preserved and the terminal lifecycle plus app-scoped reaper remain armed.
 Create one labeled orphan for the timer reaper scenario.
 
 ## Optimized live qualification
@@ -133,8 +137,13 @@ customMetrics
 
 `sandbox_delete_requests_accepted` means the service accepted a delete request;
 it does not assert LRO completion. `sandbox_deletes` is reserved for explicit
-deletion whose completion was observed. Lifecycle handoff counts, duration, and
-failures are reported separately.
+deletion whose completion was observed. `sandbox_delete_fallbacks` counts
+pre-acceptance handle failures that reached the exact-ID provider seam;
+`sandbox_delete_failures` counts overall failures across confirmed deletion and
+reaper paths. Builds before the exact-ID fallback emitted
+`sandbox_delete_request_failures`; from this remediation forward, fallback use
+and overall deletion failure are the authoritative signals. Lifecycle handoff
+counts, duration, and failures are reported separately.
 
 ```kusto
 AzureDiagnostics

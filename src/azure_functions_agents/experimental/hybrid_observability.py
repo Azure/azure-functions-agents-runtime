@@ -60,7 +60,7 @@ class HybridMetric(StrEnum):
     SANDBOX_DELETE_FAILURES = "sandbox_delete_failures"
     SANDBOX_DELETE_DURATION = "sandbox_delete_duration"
     SANDBOX_DELETE_REQUESTS_ACCEPTED = "sandbox_delete_requests_accepted"
-    SANDBOX_DELETE_REQUEST_FAILURES = "sandbox_delete_request_failures"
+    SANDBOX_DELETE_FALLBACKS = "sandbox_delete_fallbacks"
     SANDBOX_LIFECYCLE_HANDOFFS = "sandbox_lifecycle_handoffs"
     SANDBOX_LIFECYCLE_HANDOFF_FAILURES = "sandbox_lifecycle_handoff_failures"
     SANDBOX_LIFECYCLE_HANDOFF_DURATION = "sandbox_lifecycle_handoff_duration"

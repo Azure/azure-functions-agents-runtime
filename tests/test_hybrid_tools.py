@@ -55,6 +55,7 @@ from azure_functions_agents.transport.transport_models import (
     SandboxCreateRequest,
     SandboxFileNotFoundError,
     SandboxLifecyclePolicy,
+    SandboxNotFoundError,
 )
 
 _GROUP_ID = (
@@ -819,7 +820,7 @@ async def test_delete_failure_uses_provider_fallback_without_raising() -> None:
 
 
 @pytest.mark.asyncio
-async def test_delete_request_failure_leaves_terminal_policy_backstop(
+async def test_delete_request_exception_uses_provider_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _RequestFailureHandle(_Handle):
@@ -828,9 +829,14 @@ async def test_delete_request_failure_leaves_terminal_policy_backstop(
             raise RuntimeError("request failed")
 
     recorded: list[HybridMetric] = []
+    durations: list[HybridMetric] = []
     monkeypatch.setattr(
         "azure_functions_agents.experimental.hybrid_tools.record_hybrid_count",
         lambda metric: recorded.append(metric),
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.record_hybrid_duration",
+        lambda metric, _started_at: durations.append(metric),
     )
     handle = _RequestFailureHandle()
     provider = _Provider()
@@ -846,13 +852,173 @@ async def test_delete_request_failure_leaves_terminal_policy_backstop(
 
     assert handle.delete_requests == 1
     assert handle.deleted == 0
+    assert provider.deleted == ["sandbox"]
     assert handle.lifecycle_policies[-1] == SandboxLifecyclePolicy.create(
         auto_suspend_seconds=300,
         auto_suspend_mode="Disk",
         auto_delete_seconds=600,
     )
-    assert HybridMetric.SANDBOX_DELETE_REQUEST_FAILURES in recorded
-    assert HybridMetric.SANDBOX_DELETES not in recorded
+    assert HybridMetric.SANDBOX_DELETE_FALLBACKS in recorded
+    assert HybridMetric.SANDBOX_DELETES in recorded
+    assert HybridMetric.SANDBOX_DELETE_FAILURES not in recorded
+    assert HybridMetric.SANDBOX_DELETE_DURATION in durations
+    assert handle.closed == 1
+    assert provider.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_hung_delete_request_is_cancelled_before_provider_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _HangingRequestHandle(_Handle):
+        def __init__(self) -> None:
+            super().__init__()
+            self.request_cancelled = False
+
+        async def request_delete(self) -> None:
+            self.delete_requests += 1
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.request_cancelled = True
+                raise
+
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools._DELETE_REQUEST_TIMEOUT_SECONDS",
+        0.01,
+    )
+    handle = _HangingRequestHandle()
+    provider = _Provider()
+    lease = InvocationSandboxLease(
+        settings=_settings(),
+        operation_id="operation",
+        provider=provider,  # type: ignore[arg-type]
+        handle=handle,  # type: ignore[arg-type]
+        manifest=_manifest(),
+    )
+
+    await lease.close()
+
+    assert handle.request_cancelled is True
+    assert provider.deleted == ["sandbox"]
+    assert handle.closed == 1
+    assert provider.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_fallback_preserves_completed_output_and_closes_resources() -> None:
+    class _RequestFailureHandle(_Handle):
+        async def request_delete(self) -> None:
+            self.delete_requests += 1
+            raise RuntimeError("request failed")
+
+    handle = _RequestFailureHandle()
+    provider = _Provider()
+    lease = InvocationSandboxLease(
+        settings=_settings(),
+        operation_id="operation",
+        provider=provider,  # type: ignore[arg-type]
+        handle=handle,  # type: ignore[arg-type]
+        manifest=_manifest(),
+    )
+    result = await lease.invoke(
+        call_id="completed-call",
+        tool_name="customer_probe",
+        arguments={"message": "alpha"},
+        deadline=asyncio.get_running_loop().time() + 30,
+    )
+
+    await lease.close()
+
+    assert result.status is HybridInvocationStatus.SUCCESS
+    assert result.value == {"sequence": 1}
+    assert provider.deleted == ["sandbox"]
+    assert handle.closed == 1
+    assert provider.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_fallback_failure_leaves_lifecycle_and_reaper_backstops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _RequestFailureHandle(_Handle):
+        async def request_delete(self) -> None:
+            self.delete_requests += 1
+            raise RuntimeError("request failed")
+
+    class _DeleteFailureProvider(_Provider):
+        async def delete_sandbox(self, sandbox_id: str) -> None:
+            self.deleted.append(sandbox_id)
+            raise RuntimeError("provider delete failed")
+
+    recorded: list[HybridMetric] = []
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.record_hybrid_count",
+        lambda metric: recorded.append(metric),
+    )
+    handle = _RequestFailureHandle()
+    provider = _DeleteFailureProvider()
+    lease = InvocationSandboxLease(
+        settings=_settings(),
+        operation_id="operation",
+        provider=provider,  # type: ignore[arg-type]
+        handle=handle,  # type: ignore[arg-type]
+        manifest=_manifest(),
+    )
+
+    await lease.close()
+
+    assert provider.deleted == ["sandbox"]
+    assert handle.lifecycle_policies[-1] == SandboxLifecyclePolicy.create(
+        auto_suspend_seconds=300,
+        auto_suspend_mode="Disk",
+        auto_delete_seconds=600,
+    )
+    assert HybridMetric.SANDBOX_DELETE_FALLBACKS in recorded
+    assert HybridMetric.SANDBOX_DELETE_FAILURES in recorded
+    assert handle.closed == 1
+    assert provider.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_hung_provider_fallback_is_bounded_and_records_overall_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _RequestFailureHandle(_Handle):
+        async def request_delete(self) -> None:
+            raise RuntimeError("request failed")
+
+    class _HangingProvider(_Provider):
+        async def delete_sandbox(self, sandbox_id: str) -> None:
+            self.deleted.append(sandbox_id)
+            await asyncio.Event().wait()
+
+    recorded: list[HybridMetric] = []
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.record_hybrid_count",
+        lambda metric: recorded.append(metric),
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools._post_run_delete_seconds",
+        lambda: 0.02,
+    )
+    handle = _RequestFailureHandle()
+    provider = _HangingProvider()
+    lease = InvocationSandboxLease(
+        settings=_settings(),
+        operation_id="operation",
+        provider=provider,  # type: ignore[arg-type]
+        handle=handle,  # type: ignore[arg-type]
+        manifest=_manifest(),
+    )
+    started = asyncio.get_running_loop().time()
+
+    await lease.close()
+
+    assert asyncio.get_running_loop().time() - started < 0.2
+    assert provider.deleted == ["sandbox"]
+    assert HybridMetric.SANDBOX_DELETE_FALLBACKS in recorded
+    assert HybridMetric.SANDBOX_DELETE_FAILURES in recorded
     assert handle.closed == 1
     assert provider.closed == 1
 
@@ -880,7 +1046,55 @@ async def test_successful_delete_request_is_not_reported_as_completed_delete(
 
     assert HybridMetric.SANDBOX_LIFECYCLE_HANDOFFS in recorded
     assert HybridMetric.SANDBOX_DELETE_REQUESTS_ACCEPTED in recorded
+    assert HybridMetric.SANDBOX_DELETE_FALLBACKS not in recorded
     assert HybridMetric.SANDBOX_DELETES not in recorded
+    assert provider.deleted == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_at", ["request", "fallback"])
+async def test_terminal_delete_not_found_is_success(
+    missing_at: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _MissingHandle(_Handle):
+        async def request_delete(self) -> None:
+            self.delete_requests += 1
+            if missing_at == "request":
+                raise SandboxNotFoundError("already gone")
+            raise RuntimeError("request failed")
+
+    class _MissingProvider(_Provider):
+        async def delete_sandbox(self, sandbox_id: str) -> None:
+            self.deleted.append(sandbox_id)
+            raise SandboxNotFoundError("already gone")
+
+    recorded: list[HybridMetric] = []
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools.record_hybrid_count",
+        lambda metric: recorded.append(metric),
+    )
+    handle = _MissingHandle()
+    provider = _MissingProvider()
+    lease = InvocationSandboxLease(
+        settings=_settings(),
+        operation_id="operation",
+        provider=provider,  # type: ignore[arg-type]
+        handle=handle,  # type: ignore[arg-type]
+        manifest=_manifest(),
+    )
+
+    await lease.close()
+
+    if missing_at == "request":
+        assert provider.deleted == []
+        assert HybridMetric.SANDBOX_DELETE_REQUESTS_ACCEPTED in recorded
+        assert HybridMetric.SANDBOX_DELETE_FALLBACKS not in recorded
+    else:
+        assert provider.deleted == ["sandbox"]
+        assert HybridMetric.SANDBOX_DELETE_FALLBACKS in recorded
+        assert HybridMetric.SANDBOX_DELETES in recorded
+    assert HybridMetric.SANDBOX_DELETE_FAILURES not in recorded
 
 
 @pytest.mark.asyncio
