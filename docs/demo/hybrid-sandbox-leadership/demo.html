@@ -299,26 +299,26 @@
 
   <section class="scene" data-scene="8">
     <div class="footer">06 · DEMO RESULTS</div>
-    <div class="eyebrow">Latest complete qualification · 2026-09-03 · n=21</div>
-    <h2>The capture returns cleanly—and the complete optimized run is 48% faster</h2>
+    <div class="eyebrow">Latest complete qualification · 2026-09-05 · n=21</div>
+    <h2>The capture returns cleanly—and the fallback-qualified run is 36% faster</h2>
     <div class="grid grid-2" style="margin-bottom:62px">
       <div class="card">
-        <div class="toprow"><div><div class="label">Runtime average</div><div class="metric">48.03% lower</div></div><span class="status"><span class="dot"></span>0 request errors</span></div>
+        <div class="toprow"><div><div class="label">Runtime average</div><div class="metric">35.50% lower</div></div><span class="status"><span class="dot"></span>0 request errors</span></div>
         <div class="comparison">
           <div class="column"><strong>20.49s</strong><div class="columnbar" style="height:230px"></div><span class="label">Baseline</span></div>
-          <div class="column"><strong>10.65s</strong><div class="columnbar after" style="height:120px"></div><span class="label">Optimized</span></div>
+          <div class="column"><strong>13.22s</strong><div class="columnbar after" style="height:148px"></div><span class="label">Fallback-qualified</span></div>
         </div>
       </div>
       <div class="grid grid-2">
-        <div class="card"><div class="label">Create</div><div class="metric small">3.01s</div></div>
-        <div class="card cyan"><div class="label">Upload</div><div class="metric small">135ms</div></div>
-        <div class="card orange"><div class="label">Executor ready</div><div class="metric small">333ms</div></div>
-        <div class="card green"><div class="label">Tool execution</div><div class="metric small">0.30ms</div></div>
-        <div class="card"><div class="label">Cleanup handoff</div><div class="metric small">49.9ms</div></div>
+        <div class="card"><div class="label">Create</div><div class="metric small">3.15s</div></div>
+        <div class="card cyan"><div class="label">Upload</div><div class="metric small">103ms</div></div>
+        <div class="card orange"><div class="label">Executor ready</div><div class="metric small">464ms</div></div>
+        <div class="card green"><div class="label">Tool execution</div><div class="metric small">0.28ms</div></div>
+        <div class="card"><div class="label">Fallback recovered</div><div class="metric small">17 / 21</div></div>
         <div class="card cyan"><div class="label">Final inventory</div><div class="metric small">0</div></div>
       </div>
     </div>
-    <div class="caption">Measured create, upload, readiness, tool, and handoff stages explain where the optimized path spends time.</div>
+    <div class="caption">All 17 pre-acceptance handle stalls were recovered by bounded exact-ID provider deletion; final inventory was zero.</div>
   </section>
 
   <section class="scene" data-scene="9">

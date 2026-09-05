@@ -182,6 +182,10 @@ No resources have been provisioned by this child session yet.
 | 2026-09-04 23:24-2026-09-05 00:01 | Attempted the authorized streaming cold/c1/c10 rerun and stopped at the inventory safety gate. | No redeploy was needed: PR head `a6f344d` changes only documentation/demo surfaces after deployed `cb53d51`. The cold request returned HTTP 200 with SSE `done` in 24,017.687 ms, but delete initiation failed and its sandbox remained `Running`. A shell chaining defect then admitted three c1 requests before termination; c10 was never started. All four requests returned 200 and all four lifecycle handoffs succeeded, but all four delete requests failed. | This is an aborted attempt, not a new qualification and not comparable with either complete nonstream run. Typed inventory peaked at four, dropped to two after the 23:50 reaper, and reached zero at 00:00:26 after the next reaper window. No manual cleanup or resource/configuration change occurred. The prior `cb53d51`/`26a78b9` qualification remains the latest complete measurement. |
 | 2026-09-05 00:13-00:40 | Ran the required nonstream cold canary through an artifact-local fail-closed orchestrator. | Preflight verified exact deployed `cb53d51`, six functions, group 100/`Succeeded`, and typed inventory zero. The deterministic cold request returned HTTP 200 in 22,700.556 ms, but `SandboxClient.begin_delete` again timed out at the five-second bound while `aiohttp` awaited response headers. The orchestrator validated the report, observed inventory one, and stopped before c1; c10 was never started. | External blocker. Across both attempts, all five invocation-handle deletes timed out before an HTTP status or poller existed; the same code's 2026-09-03 accepted subset completed in 944-1,297 ms. Inventory stayed `Running` until the 00:40 scoped reaper issued a group-level DELETE that returned 200 in 244 ms; typed inventory was zero at 00:40:05. No manual cleanup, deployment, or resource/configuration change occurred. |
 | 2026-09-05 | Implemented the approved exceptional cleanup fallback. | Regression coverage cancels a hung handle initiation, immediately exercises the exact-ID provider seam, preserves completed tool output, treats `NotFound` as success, bounds a hung provider, leaves terminal lifecycle/reaper armed on dual failure, and proves the normal accepted path never calls the provider. | Source validation completed before deployment. Live qualification remains pending and the 2026-09-03 complete run remains authoritative until then. |
+| 2026-09-05 | Rejected a completed 21-request attempt after proving overlapping deployment. | Its c1 stage crossed an `fd6589e` to `bcdd366` deployment boundary and c10 ran after it; telemetry contained the bcdd-only fallback metric. | Preserve the artifact as diagnostic history only; publish none of its latency values. |
+| 2026-09-05 01:22-01:27 | Redeployed exact `fd6589e`, restarted once, verified the released source and fd metric vocabulary, and enforced a 300.775-second quiet boundary. | Zero agent chat requests and zero fd/bcdd fallback metric rows appeared during the boundary. | Exact-source attribution established before load. |
+| 2026-09-05 01:27-01:31 | Completed exactly one nonstream cold N=1, c1 N=10, c10 N=10 sequence. | 21/21 HTTP 200; zero client/runtime failures; typed inventory zero before and after every stage. | Authoritative latest measurement. |
+| 2026-09-05 | Qualified the exceptional cleanup path. | Four handle delete initiations were accepted normally; 17 stalled at five seconds and exact-ID provider fallback confirmed all 17 in 592.645 ms average. | No overall cleanup failure, output replacement, operator deletion, or residual inventory. |
 
 ## Measurement record
 
@@ -191,7 +195,7 @@ It contains no prompt, completion, tool payload, credential, key, or customer
 content.
 
 The original canonical baseline rows below describe deployed commit `77ef399`.
-The optimized rows describe exact commit
+The historical optimized rows describe exact commit
 `cb53d513964cb4ab225144f12c8018c49b25cd84` with the private
 `sandbox_bundle` boundary, in-sandbox digest verification, terminal lifecycle
 handoff, and nonblocking delete initiation. Both runs used the same deterministic
@@ -199,11 +203,16 @@ prompt. The recorded baseline `sandbox_delete` latencies remain the sizing basis
 for confirmed deletion when acquisition or terminal-policy setup is not
 trustworthy.
 
+The authoritative latest rows describe exact commit
+`fd6589eb0df88be39c8777caa807946fc513d8d2` after its bounded
+exact-ID provider fallback. The released package was source-compared with that
+commit after newline normalization, and a five-minute quiet boundary excluded
+overlapping traffic or deployments before the 21-request run.
+
 The timestamped `latest_rerun_attempt` object records the incomplete
 2026-09-04 streaming attempt. It intentionally publishes no c1/c10 percentiles
 or baseline delta: only four of the requested 21 calls completed before the
 inventory safety stop, and every delete initiation failed. The complete
-2026-09-03 optimized qualification therefore remains authoritative; the
 attempt is retained solely as operational failure and cleanup evidence.
 
 The `latest_nonstream_rerun_attempt` object records the corrected apples-to-apples
@@ -211,7 +220,13 @@ canary. Its fail-closed gates prevented any c1 or c10 request after the ACA
 delete endpoint again failed to return response headers within five seconds.
 Because the cold sandbox retained capacity until the scoped reaper ran, a valid
 21-request replacement qualification could not be completed without violating
-the no-duplicate-stage or inventory-zero constraints.
+the no-duplicate-stage or inventory-zero constraints. It motivated the
+provider fallback that was subsequently qualified.
+
+The `mixed_deployment_rerun_attempt` object records a later completed sequence
+whose c1 stage crossed an overlapping deployment. Its c10 stage ran after that
+boundary, and bcdd-only telemetry proved the source mix. It is retained for
+diagnosis and contributes no current performance claim.
 
 | Scenario | N | p50 | p95 | p99 | Throughput | Errors | Cleanup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
@@ -221,6 +236,9 @@ the no-duplicate-stage or inventory-zero constraints.
 | Functions cold + sandbox cold, optimized | 1 | 17,742.909 ms total | N/A | N/A | N/A | 0 | Complete; delete accepted, final inventory 0 |
 | Concurrency 1, optimized | 10 | 9,108.227 ms | 18,339.288 ms | 18,339.288 ms | 0.090227 req/s | 0 | Complete; final inventory 0 |
 | Concurrency 10, optimized | 10 | 18,468.408 ms | 25,834.005 ms | 25,834.005 ms | 0.386948 req/s | 0 | Complete; final inventory 0 |
+| Functions cold + sandbox cold, latest fallback-qualified | 1 | 22,021.121 ms total | N/A | N/A | 0.045410 req/s | 0 | Complete; final inventory 0 |
+| Concurrency 1, latest fallback-qualified | 10 | 12,862.314 ms | 17,524.462 ms | 17,524.462 ms | 0.077131 req/s | 0 | Complete; final inventory 0 |
+| Concurrency 10, latest fallback-qualified | 10 | 22,490.808 ms | 25,900.302 ms | 25,900.302 ms | 0.385972 req/s | 0 | Complete; final inventory 0 |
 | Concurrency 1, diagnostic duplicate | 10 | 19,233.3 ms | 28,450.5 ms | 28,450.5 ms | 0.04957 req/s | 0 | Complete |
 | Concurrency 25 | 25 | Not run | Not run | Not run | Not run | N/A | Capped at 10 after sufficient stable evidence |
 | Direct Sandbox Group baseline | 1 | create 3524.7 ms | N/A | N/A | N/A | 0 | Complete; delete 5085.3 ms |
@@ -258,6 +276,38 @@ The optimized clean window contained 48,262 model tokens. APIM model requests
 improved 9,091.322 ms (32.99%). The runtime-average request saving was
 9,843.642 ms, so the expected 6.3-6.8-second saving materialized and was
 exceeded by 3.044-3.544 seconds.
+
+The 2026-09-05 latest clean window contained exactly 21 Function requests and
+zero errors; request p50/p95/p99 was
+14,052.128/20,320.389/20,893.798 ms. Runtime telemetry contains 21 requests,
+21 sandbox creates, 21 lifecycle handoffs, 21 tool calls, 42 model calls, four
+normal delete acceptances, 17 exact-ID provider fallbacks, 17 confirmed
+provider deletions, and no hybrid failure metric. The provider fallbacks
+averaged 592.645 ms (464.601-1,098.475 ms), after each affected request paid
+the existing five-second handle bound.
+
+Client-observed APIM dependencies contain 42 successful model posts, 44
+successful MCP posts, and 22 expected MCP close probes returning 405. Model
+dependency p50/p95/p99 was 1,461.384/2,006.946/2,633.163 ms; successful MCP
+POST p50/p95/p99 was 75.704/171.044/187.080 ms. APIM
+`AzureDiagnostics` contained no row for the clean window or preceding day, so
+backend and gateway-only percentile decomposition is unavailable and is not
+inferred from client spans. Retained APIM policies and diagnostics were not
+changed.
+
+Token telemetry reports 46,662 prompt, 39,936 prompt-cached, 1,505 completion,
+and 48,167 total tokens across 42 model calls. Progress traces expose 15
+sampled core lifecycle series and two sampled tool start/completion pairs;
+aggregate metrics, not sampled progress traces, are authoritative.
+
+Latest runtime-average latency was 13,218.470 ms, 7,274.530 ms (35.50%) below
+the canonical baseline. Cold, c1 p50, and c10 p50 improved by
+20.52%, 34.78%, and 18.39%, respectively. The expected 6.3-6.8-second saving
+materialized and was exceeded by 0.475-0.975 seconds. The latest result was
+2,569.112 ms (24.12%) slower than the historical optimized runtime average,
+consistent with 17 of 21 requests paying the handle initiation bound before
+successful fallback. Remaining differences are treated as natural
+model/platform variance across measurement days.
 
 ## Failed experiments and deviations
 

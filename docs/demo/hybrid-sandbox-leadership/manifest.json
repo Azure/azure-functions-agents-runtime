@@ -113,16 +113,20 @@
   },
   "qualification_baseline": {
     "source": "../../decisions/0009-hybrid-sandbox-tool-execution-results.json",
-    "measured_at_utc": "2026-09-03T18:39:21.1055256Z",
+    "measured_at_utc": "2026-09-05T01:27:50.202439Z",
     "status": "latest_complete_qualification",
-    "runtime_reduction_percent": 48.03,
-    "optimized_runtime_seconds": 10.65,
+    "source_commit": "fd6589eb0df88be39c8777caa807946fc513d8d2",
+    "runtime_reduction_percent": 35.5,
+    "optimized_runtime_seconds": 13.22,
     "baseline_runtime_seconds": 20.49,
-    "optimized_create_ms": 3010,
-    "optimized_upload_ms": 135,
-    "optimized_executor_ready_ms": 333,
-    "optimized_tool_ms": 0.3,
-    "optimized_cleanup_handoff_ms": 49.9,
+    "optimized_create_ms": 3149,
+    "optimized_upload_ms": 103,
+    "optimized_executor_ready_ms": 464,
+    "optimized_tool_ms": 0.28,
+    "optimized_cleanup_handoff_ms": 77.4,
+    "delete_handle_accepted": 4,
+    "delete_provider_fallbacks": 17,
+    "delete_provider_fallback_average_ms": 592.645,
     "final_inventory": 0
   },
   "latest_rerun_attempt": {
@@ -152,19 +156,29 @@
     "performance_claim_replaced": false,
     "reason": "The corrected nonstream cold canary passed HTTP/report validation but failed the inventory gate after the ACA delete endpoint timed out before response headers."
   },
+  "mixed_deployment_rerun_attempt": {
+    "source": "../../decisions/0009-hybrid-sandbox-tool-execution-results.json#mixed_deployment_rerun_attempt",
+    "started_at_utc": "2026-09-05T01:09:27.283569Z",
+    "status": "provenance_contaminated_not_authoritative",
+    "completed_requests": 21,
+    "requested_requests": 21,
+    "final_inventory": 0,
+    "performance_claim_replaced": false,
+    "reason": "The c1 stage crossed an fd6589e-to-bcdd366 deployment boundary and c10 ran after it; its latency figures are diagnostic only."
+  },
   "latest_result_scene_regeneration": {
     "source": "demo.html#demo-results",
-    "generated_at_utc": "2026-09-05T00:02:00Z",
+    "generated_at_utc": "2026-09-05T01:46:50.8892541Z",
     "repository_asset": false,
-    "path": "C:\\Users\\larohra\\.copilot\\session-state\\d11d7a47-d9ab-4d6b-9095-e7ba11bd93b3\\files\\hybrid-latest-rerun\\demo-result-scene\\raw\\demo-results.webm",
-    "bytes": 1825873,
-    "sha256": "be1f8f3f7d20e1484bfae57f761c6823393aa49cca64c856cba8a5094f5aae7f",
-    "duration_seconds": 17.96,
+    "path": "C:\\Users\\larohra\\.copilot\\session-state\\d11d7a47-d9ab-4d6b-9095-e7ba11bd93b3\\files\\hybrid-latest-rerun\\demo-result-scene-fd6589e\\raw\\demo-results.webm",
+    "bytes": 2073557,
+    "sha256": "b501b235d31a9b94e6fa99320b779117c8988c42a0d09c5f5ad086bf40c560aa",
+    "duration_seconds": 18.2,
     "width": 1920,
     "height": 1080,
     "video_codec": "vp8",
     "final_video_regenerated": false,
-    "reason": "The attempt produced no valid replacement qualification. The existing v4 video and deck retain the complete 2026-09-03 qualification."
+    "reason": "The repository scene and deck use the 2026-09-05 measurement. The external live-capture video retains the historical 2026-09-03 qualification because regeneration would send prohibited additional Function requests."
   },
   "claims": [
     {
@@ -218,7 +232,7 @@
       ]
     },
     {
-      "claim": "The latest complete optimized qualification, measured on 2026-09-03, reduced runtime by 48.03 percent.",
+      "claim": "The latest complete exact-source qualification, measured on 2026-09-05, reduced runtime by 35.50 percent and recovered all 17 handle stalls through bounded provider fallback.",
       "evidence": [
         "qualification_baseline"
       ]

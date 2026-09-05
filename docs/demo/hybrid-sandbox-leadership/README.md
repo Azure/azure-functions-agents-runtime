@@ -71,26 +71,31 @@ held for 25 seconds so the recorder could observe the active sandbox. The
 | One fresh sandbox was cleaned up | Same-run create/delete spans and final typed inventory of zero |
 | The product exposes an Agent Trace view | `appinsights-agent-trace-portal.png`, captured from an earlier retained live agent run |
 | The new capture is inspectable as one runtime lifecycle | `appinsights-agent-trace.png` plus the separately correlated runtime trace |
-| The latest complete optimized path reduced measured runtime by 48% | The 2026-09-03 `cb53d51` qualification in `docs/decisions/0009-hybrid-sandbox-tool-execution-results.json` and the demo-results scene |
+| The latest complete fallback-qualified path reduced measured runtime by 35.5% | The 2026-09-05 `fd6589e` qualification in `docs/decisions/0009-hybrid-sandbox-tool-execution-results.json` and the demo-results scene |
 
 The capture window contains successful model and MCP traffic through APIM,
 including two successful model `POST` requests. Expected MCP close/teardown
 probes are not treated as request failures. No request or response bodies were
 queried or recorded.
 
-The demo's performance headline remains the latest complete 2026-09-03
-qualification. A 2026-09-04 streaming rerun was aborted after an inventory
+The demo's performance headline now uses the exact-source, quiet-boundary
+2026-09-05 qualification. A 2026-09-04 streaming rerun was aborted after an inventory
 safety-gate failure and is recorded as operational evidence, not as a
-replacement benchmark. The existing v4 video and deck therefore retain the
-complete historical qualification rather than presenting the incomplete run as
-new performance data.
+replacement benchmark.
 
 The corrected nonstream retry also stopped after its single cold canary when
 the ACA invocation-handle delete endpoint again failed to return response
 headers within the five-second bound. No c1 or c10 request was admitted, and
 the existing scoped reaper returned typed inventory to zero. This second
-attempt reinforces why the demo keeps the complete 2026-09-03 performance
-headline rather than substituting incomplete data.
+attempt motivated the exact-ID provider fallback. A subsequent 21-request run
+crossed an overlapping deployment and is also excluded. The authoritative run
+redeployed exact `fd6589e`, restarted the app, proved five quiet minutes, then
+completed exactly 21 nonstream requests with zero inventory at every boundary.
+
+The repository scene source, narration, and deck carry the new measurement.
+The external v4 final video is not regenerated because its live-capture workflow
+would send prohibited additional Function requests; it retains the historical
+2026-09-03 qualification and is labeled accordingly in the manifest.
 
 ## Recording provenance and limitations
 

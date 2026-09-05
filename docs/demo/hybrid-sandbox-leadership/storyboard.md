@@ -11,7 +11,7 @@
 | 1:10-1:28 | Native Agent Trace | Application Insights Agents (Preview) renders a retained live Agent Trace with agent, LLM, sandbox, and journal spans. | `appinsights-agent-trace-portal.png`; identifiers redacted |
 | 1:28-1:48 | Same-run trace analysis | The 68.81-second capture run separately correlates model, MCP, sandbox, shared journal, and cleanup spans. | Runtime trace `a34b1843…` |
 | 1:48-2:06 | AI Gateway | The capture window contains two model posts and successful MCP posts through APIM. | APIM-role dependencies; live policy capture |
-| 2:06-2:24 | Demo results | HTTP 200/zero inventory plus the latest complete n=21 optimized qualification from 2026-09-03 and its 48% reduction. | Live request plus durable results JSON; the incomplete 2026-09-04 rerun is excluded |
+| 2:06-2:24 | Demo results | HTTP 200/zero inventory plus the latest complete n=21 fallback qualification from 2026-09-05 and its 35.5% runtime reduction. | Live request plus durable results JSON; aborted and mixed-deployment attempts are excluded |
 | 2:24-2:34 | Takeaway | The complete governed path works and cleans up. | Combined evidence |
 
 Transitions are hard cuts or sub-second fades; there are no long presentation
@@ -24,7 +24,8 @@ service benchmark. Telemetry scenes exclude prompt text, tool arguments/results,
 function keys, account identity, subscription/tenant IDs, sandbox IDs, and
 runtime host identifiers.
 
-The 2026-09-04 streaming rerun and corrected 2026-09-05 nonstream retry both
-stopped at inventory safety gates after ACA delete-response timeouts. Neither
-produced a replacement c1/c10 comparison. The existing recorded scene stays
-bound to the complete 2026-09-03 qualification.
+The 2026-09-04 streaming rerun and first corrected nonstream retry stopped at
+inventory safety gates after ACA delete-response timeouts. A later 21-request
+attempt crossed an overlapping deployment and is retained only as diagnostic
+history. The scene uses only the quiet-boundary, exact-source `fd6589e`
+qualification completed on 2026-09-05.

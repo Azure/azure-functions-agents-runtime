@@ -58,7 +58,7 @@ provider success is confirmed deletion; if both seams fail, completed output is
 preserved and the terminal lifecycle plus app-scoped reaper remain armed.
 Create one labeled orphan for the timer reaper scenario.
 
-## Optimized live qualification
+## Historical optimized qualification
 
 Exact commit `cb53d51` was deployed with `sandbox_bundle`, no Functions
 always-ready configuration, and no debug or worker-level OTel setting. The
@@ -77,8 +77,7 @@ hybrid failure counter. The first post-run inventory checks were already zero.
 Compared with the `77ef399` baseline, runtime-average request latency fell by
 9,843.642 ms (48.03%), exceeding the expected 6.3-6.8-second saving.
 
-This remains the latest **complete** qualification. An authorized streaming
-rerun on 2026-09-04 was stopped after its cold request failed the inventory-zero
+An authorized streaming rerun on 2026-09-04 was stopped after its cold request failed the inventory-zero
 gate. A shell chaining defect admitted three of the planned c1 requests before
 termination; c10 never started. All four HTTP requests completed successfully,
 but all four server-side delete initiations failed. Typed inventory peaked at
@@ -96,7 +95,42 @@ c10 also never started. The sandbox remained `Running` until the scoped reaper
 issued a group-level DELETE at 00:40 UTC; that request returned 200 in 244 ms
 and typed inventory reached zero without operator cleanup. The service-side
 delete-response stall is therefore a concrete external blocker, and the
-2026-09-03 sequence remains the latest complete qualification.
+2026-09-03 sequence remained authoritative until the fallback fix was qualified.
+
+## Latest cleanup-fallback qualification
+
+Exact commit `fd6589eb0df88be39c8777caa807946fc513d8d2` adds one
+separately bounded exact-ID provider deletion after a five-second
+invocation-handle initiation failure. The released package was byte-compared
+with that commit after newline normalization, the Function App was restarted,
+and a 300.775-second quiet boundary observed zero chat requests and no fd or
+bcdd fallback metrics before load. One nonstream cold/c1/c10 sequence then
+completed on 2026-09-05:
+
+| Scenario | N | p50 | p95 | Throughput | Errors |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Cold | 1 | 22,021.121 ms | N/A | N/A | 0 |
+| c1 | 10 | 12,862.314 ms | 17,524.462 ms | 0.077131 req/s | 0 |
+| c10 | 10 | 22,490.808 ms | 25,900.302 ms | 0.385972 req/s | 0 |
+
+All 21 Function requests, sandbox creates, lifecycle handoffs, and tool calls
+were observed without a request, model, tool, lifecycle, or delete failure.
+Four handle initiations were accepted normally; 17 timed out before acceptance
+and reached the provider fallback, which confirmed all 17 deletions in
+592.645 ms average (464.601-1,098.475 ms). Typed inventory was zero before and
+immediately after every stage.
+
+Compared with the `77ef399` baseline, runtime-average latency fell by
+7,274.530 ms (35.50%). The expected 6.3-6.8-second saving still materialized,
+but this run was 2,569.112 ms slower than the 2026-09-03 optimized runtime
+average because 17 requests paid the five-second handle timeout before the
+successful provider fallback. This is natural run-to-run/platform variance plus
+measured exceptional-cleanup cost, not a regression in sandbox execution.
+
+One earlier 21-request attempt is retained only as mixed-deployment diagnostic
+history: its c1 stage crossed an `fd6589e` to `bcdd366` deployment boundary and
+its c10 stage ran after that boundary. None of its latency figures is used as a
+current result.
 
 The lifecycle backstop is not prompt cleanup. In an isolated probe with no
 explicit delete, the sandbox was first observed `Stopped` 340.441 seconds after

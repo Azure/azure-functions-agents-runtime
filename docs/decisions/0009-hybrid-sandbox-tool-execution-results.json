@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-09-03T06:27:00Z",
+  "generated_at": "2026-09-05T01:47:06.9293196Z",
   "deployment": {
     "commit": "77ef399c7984db4532999f48230ca8ab9673affe",
     "function_app": "func-hybrid-sbx-0902",
@@ -1132,6 +1132,479 @@
       "tool deadline, transport, protocol, and returned errors increment failure metrics",
       "stream benchmark requires a done event and rejects error or missing terminals"
     ]
+  },
+  "mixed_deployment_rerun_attempt": {
+    "schema_version": 1,
+    "status": "provenance_contaminated_not_authoritative",
+    "window_start_utc": "2026-09-05T01:09:27.283569Z",
+    "window_end_utc": "2026-09-05T01:12:40.467223Z",
+    "planned_deployment_commit": "fd6589eb0df88be39c8777caa807946fc513d8d2",
+    "overlapping_deployment_commit": "bcdd36622a905f7ab6a823f1d4055180b6321a39",
+    "requests": {
+      "planned": 21,
+      "completed": 21,
+      "http_successes": 21,
+      "errors": 0,
+      "mode": "nonstream"
+    },
+    "deployment_timeline": [
+      {
+        "commit": "fd6589eb0df88be39c8777caa807946fc513d8d2",
+        "build_id": "pr200-fd6589e",
+        "tag_write_utc": "2026-09-05T01:09:02.738402Z"
+      },
+      {
+        "commit": "bcdd36622a905f7ab6a823f1d4055180b6321a39",
+        "build_id": "hybrid-bcdd366",
+        "site_last_modified_utc": "2026-09-05T01:10:38.756667Z",
+        "tag_write_utc": "2026-09-05T01:10:39.674363Z"
+      }
+    ],
+    "inventory": {
+      "initial": 0,
+      "cold_before": 0,
+      "cold_after": 0,
+      "concurrency_1_before": 0,
+      "concurrency_1_after": 0,
+      "concurrency_10_before": 0,
+      "concurrency_10_after": 0,
+      "final": 0
+    },
+    "reason": "The c1 stage crossed the overlapping deployment boundary and c10 ran after it. The bcdd-only sandbox_delete_provider_fallbacks metric proved mixed source provenance.",
+    "disposition": "Retained as diagnostic history only. No client latency or throughput from this attempt contributes to a benchmark claim."
+  },
+  "latest_authoritative_qualification": {
+    "schema_version": 1,
+    "status": "complete_authoritative_latest",
+    "generated_at_utc": "2026-09-05T01:47:06.9293196Z",
+    "measurement_scope": {
+      "baseline_commit": "77ef399c7984db4532999f48230ca8ab9673affe",
+      "prior_optimized_commit": "cb53d513964cb4ab225144f12c8018c49b25cd84",
+      "measured_commit": "fd6589eb0df88be39c8777caa807946fc513d8d2",
+      "other_session_comparison_commit": "bcdd36622a905f7ab6a823f1d4055180b6321a39",
+      "benchmark_prompt_id": "customer-probe-alpha-repeat-3",
+      "mode": "nonstream",
+      "request_count": 21,
+      "duplicate_load_runs": 0,
+      "window_start_utc": "2026-09-05T01:27:50.202439Z",
+      "window_end_utc": "2026-09-05T01:31:09.863825Z",
+      "telemetry_query_window_start_utc": "2026-09-05T01:27:22Z",
+      "telemetry_query_window_end_utc": "2026-09-05T01:36:30Z"
+    },
+    "fix": {
+      "design": "Retain the five-second invocation-handle request_delete initiation. On pre-acceptance timeout or exception, call exact-ID provider.delete_sandbox once under the existing 24-second completed-run budget. Never await the accepted handle LRO and never replace completed output with cleanup failure.",
+      "normal_path_preserved": true,
+      "provider_fallback_bounded": true,
+      "not_found_is_success": true,
+      "terminal_lifecycle_and_reaper_remain_armed": true,
+      "regression_coverage": [
+        "hung handle is cancelled before exact-ID provider fallback",
+        "handle exception reaches provider fallback",
+        "provider success preserves output and closes resources",
+        "provider failure preserves output and lifecycle/reaper backstops",
+        "normal accepted path never calls provider",
+        "provider NotFound is successful deletion",
+        "provider fallback timeout is bounded"
+      ],
+      "independent_review": "No blocking correctness, lifecycle, timeout, cancellation, telemetry, or output-preservation issue found.",
+      "validation": {
+        "focused_tests_passed": 163,
+        "ruff": "passed",
+        "mypy_source_files": 106,
+        "mypy": "passed",
+        "full_tests_passed": 2574,
+        "full_tests_skipped": 71,
+        "full_tests_deselected": 85,
+        "coverage_xml_generated": true
+      },
+      "comparison_with_bcdd366": "Both commits implement the bounded provider fallback and preserve lifecycle/output safety. fd6589e was retained because sandbox_delete_fallbacks unambiguously records pre-acceptance fallback use while sandbox_delete_failures remains the overall failure signal; no cherry-pick occurred."
+    },
+    "deployment": {
+      "deployment_occurred": true,
+      "deployment_reason": "The cleanup implementation changed deployable runtime source.",
+      "path": "proven Flex remote-build ZIP deployment",
+      "commit": "fd6589eb0df88be39c8777caa807946fc513d8d2",
+      "build_id": "pr200-fd6589e-final",
+      "wheel_sha256": "b3cc3b2089759cd43a9ce530b5e274e2179b17230158156517cd24cd9ac43a13",
+      "upload_zip_sha256": "bc820818ed771f0fe68c735e0ace8841290042fd29c5727f9b2f58c1f686607a",
+      "upload_zip_bytes": 425721,
+      "released_package_sha256": "038a89a9be84c3940cb40fa224db0728cb85fd6c242c778ef2079c99da63fb4a",
+      "released_package_bytes": 37758469,
+      "released_source_match": "hybrid_tools.py and hybrid_observability.py matched fd6589e Git blobs after Windows CRLF was normalized to Git LF",
+      "fd_metric_present": "azure_functions_agents.hybrid.sandbox_delete_fallbacks",
+      "bcdd_only_metric_absent": "azure_functions_agents.hybrid.sandbox_delete_provider_fallbacks",
+      "function_app": "func-hybrid-sbx-0902",
+      "function_state": "Running",
+      "availability_state": "Normal",
+      "function_count": 6,
+      "bundle_root": "sandbox_bundle",
+      "site_update_strategy": "Recreate",
+      "restart_started_at_utc": "2026-09-05T01:22:18.8975026Z",
+      "restart_completed_at_utc": "2026-09-05T01:22:21.3350812Z",
+      "sandbox_group": "sbg-hybrid-tools-0902",
+      "sandbox_group_provisioning_state": "Succeeded",
+      "sandbox_group_max_count": 100,
+      "sandbox_group_default_timeout_seconds": 1800,
+      "debug_settings_present": false,
+      "worker_opentelemetry_setting_present": false,
+      "functions_always_ready_configured": false,
+      "user_assigned_identity_retained": true,
+      "apim_identity_egress_and_policy_changes": 0
+    },
+    "attribution_boundary": {
+      "start_utc": "2026-09-05T01:22:21.3350812Z",
+      "verified_through_utc": "2026-09-05T01:27:22.1099546Z",
+      "duration_seconds": 300.7748734,
+      "agent_chat_requests": 0,
+      "fd_fallback_metric_rows": 0,
+      "bcdd_fallback_metric_rows": 0,
+      "warmup_requests": 0
+    },
+    "client": {
+      "request_count": 21,
+      "success_count": 21,
+      "status_counts": {
+        "200": 21
+      },
+      "error_count": 0,
+      "cold": {
+        "request_count": 1,
+        "total_ms": {
+          "p50": 22021.121199941263,
+          "p95": 22021.121199941263,
+          "p99": 22021.121199941263
+        },
+        "first_event_ms": {
+          "p50": 22021.110499976203,
+          "p95": 22021.110499976203,
+          "p99": 22021.110499976203
+        },
+        "workload_seconds": 22.02174490003381,
+        "throughput_requests_per_second": 0.04540966233781342
+      },
+      "concurrency_1": {
+        "request_count": 10,
+        "total_ms": {
+          "p50": 12862.313799909316,
+          "p95": 17524.462300003506,
+          "p99": 17524.462300003506
+        },
+        "first_event_ms": {
+          "p50": 12862.306499970146,
+          "p95": 17524.450800032355,
+          "p99": 17524.450800032355
+        },
+        "workload_seconds": 129.64968100003898,
+        "throughput_requests_per_second": 0.07713092637688013
+      },
+      "concurrency_10": {
+        "request_count": 10,
+        "total_ms": {
+          "p50": 22490.80819997471,
+          "p95": 25900.302299996838,
+          "p99": 25900.302299996838
+        },
+        "first_event_ms": {
+          "p50": 22490.795099991374,
+          "p95": 25900.294699938968,
+          "p99": 25900.294699938968
+        },
+        "workload_seconds": 25.908629199955612,
+        "throughput_requests_per_second": 0.38597179043409724
+      }
+    },
+    "inventory_gates": {
+      "initial": {
+        "observed_at_utc": "2026-09-05T01:27:55.767072Z",
+        "count": 0
+      },
+      "cold_before": 0,
+      "cold_after": 0,
+      "concurrency_1_before": 0,
+      "concurrency_1_after": 0,
+      "concurrency_10_before": 0,
+      "concurrency_10_after": 0,
+      "final": {
+        "observed_at_utc": "2026-09-05T01:31:09.863825Z",
+        "count": 0
+      },
+      "read_only_follow_up": {
+        "observed_at_utc": "2026-09-05T01:42:17.603235Z",
+        "count": 0
+      },
+      "operator_cleanup_used": false
+    },
+    "function_requests": {
+      "request_count": 21,
+      "error_count": 0,
+      "minimum_ms": 9295.612,
+      "p50_ms": 14052.128,
+      "p95_ms": 20320.389,
+      "p99_ms": 20893.798,
+      "maximum_ms": 20893.798
+    },
+    "runtime": {
+      "counts": {
+        "requests": 21,
+        "sandbox_creates": 21,
+        "sandbox_lifecycle_handoffs": 21,
+        "tool_calls": 21,
+        "model_calls": 42,
+        "sandbox_delete_requests_accepted": 4,
+        "sandbox_delete_fallbacks": 17,
+        "sandbox_deletes_confirmed": 17
+      },
+      "failure_metrics_emitted": 0,
+      "bcdd_only_metric_rows": 0,
+      "histogram_percentile_note": "p50/p95/p99 are percentile approximations over Application Insights aggregation-bucket averages; sample count, weighted average, minimum, and maximum use valueCount/valueSum/valueMin/valueMax.",
+      "duration_ms": {
+        "request": {
+          "samples": 21,
+          "average": 13218.470455619046,
+          "minimum": 9286.791623,
+          "p50_bucket_average": 14286.419789,
+          "p95_bucket_average": 16765.566179,
+          "p99_bucket_average": 16765.566179,
+          "maximum": 16765.566179
+        },
+        "sandbox_create": {
+          "samples": 21,
+          "average": 3148.713394571434,
+          "minimum": 2771.31386899998,
+          "p50_bucket_average": 3063.73729999996,
+          "p95_bucket_average": 4229.02862000001,
+          "p99_bucket_average": 4229.02862000001,
+          "maximum": 4229.02862000001
+        },
+        "package_upload": {
+          "samples": 21,
+          "average": 103.17716552380928,
+          "minimum": 62.474997000038,
+          "p50_bucket_average": 97.8866819999666,
+          "p95_bucket_average": 236.982360000013,
+          "p99_bucket_average": 236.982360000013,
+          "maximum": 236.982360000013
+        },
+        "package_verify": {
+          "samples": 21,
+          "average": 0.1598053333333316,
+          "minimum": 0.13283800000008,
+          "p50_bucket_average": 0.148332999999945,
+          "p95_bucket_average": 0.23355400000002502,
+          "p99_bucket_average": 0.23355400000002502,
+          "maximum": 0.263154999999959
+        },
+        "executor_ready": {
+          "samples": 21,
+          "average": 464.44670938094487,
+          "minimum": 231.610226999919,
+          "p50_bucket_average": 353.745047000018,
+          "p95_bucket_average": 1232.97222100001,
+          "p99_bucket_average": 1232.97222100001,
+          "maximum": 1232.97222100001
+        },
+        "discovery": {
+          "samples": 21,
+          "average": 25.842737333337432,
+          "minimum": 15.5271260000518,
+          "p50_bucket_average": 20.4294520000303,
+          "p95_bucket_average": 89.9012049999897,
+          "p99_bucket_average": 89.9012049999897,
+          "maximum": 89.9012049999897
+        },
+        "model": {
+          "samples": 42,
+          "average": 1749.3320287619174,
+          "minimum": 960.8699110000321,
+          "p50_bucket_average": 1891.27500449999,
+          "p95_bucket_average": 2247.08763000001,
+          "p99_bucket_average": 2247.08763000001,
+          "maximum": 2664.078824
+        },
+        "tool_execution": {
+          "samples": 21,
+          "average": 0.28278561904774135,
+          "minimum": 0.203166000000365,
+          "p50_bucket_average": 0.262918600000094,
+          "p95_bucket_average": 0.520996000000551,
+          "p99_bucket_average": 0.520996000000551,
+          "maximum": 0.520996000000551
+        },
+        "tool_queue": {
+          "samples": 21,
+          "average": 23.734401001886727,
+          "minimum": 2.8478155120410498,
+          "p50_bucket_average": 25.7994736805358,
+          "p95_bucket_average": 38.076874154683104,
+          "p99_bucket_average": 38.076874154683104,
+          "maximum": 47.3794833669672
+        },
+        "tool_transfer": {
+          "samples": 21,
+          "average": 159.0128652380825,
+          "minimum": 37.8559700000096,
+          "p50_bucket_average": 161.71650799992702,
+          "p95_bucket_average": 217.867830399984,
+          "p99_bucket_average": 217.867830399984,
+          "maximum": 404.162331999999
+        },
+        "sandbox_lifecycle_handoff": {
+          "samples": 21,
+          "average": 77.43899771428308,
+          "minimum": 38.9292899999987,
+          "p50_bucket_average": 54.2535919999807,
+          "p95_bucket_average": 358.47492899984,
+          "p99_bucket_average": 358.47492899984,
+          "maximum": 358.47492899984
+        },
+        "sandbox_delete_provider_fallback": {
+          "samples": 17,
+          "average": 592.644826117652,
+          "minimum": 464.601381999955,
+          "p50_bucket_average": 540.561064000002,
+          "p95_bucket_average": 1098.4753170000702,
+          "p99_bucket_average": 1098.4753170000702,
+          "maximum": 1098.4753170000702
+        }
+      }
+    },
+    "cleanup": {
+      "handle_request_bound_ms": 5000,
+      "handle_requests_accepted": 4,
+      "handle_initiation_stalls": 17,
+      "fallback_attempts": 17,
+      "fallback_confirmed_deletions": 17,
+      "fallback_failures": 0,
+      "overall_delete_failures": 0,
+      "affected_request_percent": 80.95238095238095,
+      "average_fallback_duration_ms": 592.644826117652,
+      "average_affected_path_cleanup_cost_ms": 5592.644826117652,
+      "weighted_average_cleanup_cost_ms_per_request": 4527.379144952385,
+      "provider_delete_dependency": {
+        "samples": 17,
+        "status": 200,
+        "average_ms": 565.765,
+        "minimum_ms": 454,
+        "p50_ms": 510,
+        "p95_ms": 1089,
+        "p99_ms": 1089,
+        "maximum_ms": 1089
+      }
+    },
+    "tokens": {
+      "model_call_samples": 42,
+      "prompt_total": 46662,
+      "prompt_cached_total": 39936,
+      "completion_total": 1505,
+      "total_tokens": 48167,
+      "prompt_cache_percent": 85.58484419870559
+    },
+    "apim": {
+      "client_observed_dependencies": {
+        "model": {
+          "request_count": 42,
+          "error_count": 0,
+          "average_ms": 1493.4727523809522,
+          "p50_ms": 1461.3843,
+          "p95_ms": 2006.9458,
+          "p99_ms": 2633.163,
+          "total_ms": 62725.855599999995
+        },
+        "mcp_post": {
+          "request_count": 44,
+          "error_count": 0,
+          "average_ms": 87.20172954545454,
+          "p50_ms": 75.7043,
+          "p95_ms": 171.0437,
+          "p99_ms": 187.0795,
+          "total_ms": 3836.8760999999995
+        },
+        "mcp_close": {
+          "request_count": 22,
+          "expected_405_count": 22,
+          "unexpected_error_count": 0,
+          "average_ms": 27.362031818181823,
+          "p50_ms": 16.8402,
+          "p95_ms": 69.4352,
+          "p99_ms": 95.5871,
+          "total_ms": 601.9647000000001
+        }
+      },
+      "gateway_diagnostics": {
+        "status": "unavailable_for_clean_window",
+        "clean_window_rows": 0,
+        "preceding_day_rows": 0,
+        "last_queried_at_utc": "2026-09-05T01:47:06.9293196Z",
+        "backend_percentiles_available": false,
+        "gateway_overhead_percentiles_available": false,
+        "cache_hit_count_available": false,
+        "interpretation": "No AzureDiagnostics row ingested for the exact window or preceding day. Client-observed dependency spans prove the model and MCP routes but cannot separate APIM backend time from gateway overhead. No value is inferred."
+      }
+    },
+    "progress_traces": {
+      "status": "sampled_subset_not_authoritative_counts",
+      "core_phase_series_observed": 15,
+      "tool_execution_started_observed": 2,
+      "tool_execution_completed_observed": 2,
+      "core_phases": [
+        "sandbox_create",
+        "package_upload",
+        "package_verify",
+        "executor_ready",
+        "discovery",
+        "cleanup_handoff",
+        "cleanup_complete"
+      ],
+      "interpretation": "Aggregate custom metrics contain all 21 requests; progress trace sampling retained only the listed subset."
+    },
+    "comparisons": {
+      "canonical_baseline": {
+        "cold_saved_ms": 5684.578800058738,
+        "cold_reduction_percent": 20.517723068028378,
+        "concurrency_1_p50_saved_ms": 6858.376200090683,
+        "concurrency_1_p50_reduction_percent": 34.77756711398376,
+        "concurrency_1_p95_saved_ms": 14512.777699996495,
+        "concurrency_1_p95_reduction_percent": 45.29971277175092,
+        "concurrency_1_throughput_change_percent": 61.014814055236876,
+        "concurrency_10_p50_saved_ms": 5068.921800025291,
+        "concurrency_10_p50_reduction_percent": 18.39249441132149,
+        "concurrency_10_p95_saved_ms": 6654.7177000031625,
+        "concurrency_10_p95_reduction_percent": 20.441448661383596,
+        "concurrency_10_throughput_change_percent": 25.687273212032103,
+        "runtime_average_saved_ms": 7274.5295443809555,
+        "runtime_average_reduction_percent": 35.49763111492195
+      },
+      "prior_optimized": {
+        "cold_slower_ms": 4278.212199941263,
+        "cold_slower_percent": 24.112236612053092,
+        "concurrency_1_p50_slower_ms": 3754.0863999165595,
+        "concurrency_1_p50_slower_percent": 41.216432518137886,
+        "concurrency_1_p95_faster_ms": 814.8257000138983,
+        "concurrency_1_p95_reduction_percent": 4.443060712134108,
+        "concurrency_1_throughput_change_percent": -14.51424103396597,
+        "concurrency_10_p50_slower_ms": 4022.4001000169665,
+        "concurrency_10_p50_slower_percent": 21.779896124486065,
+        "concurrency_10_p95_slower_ms": 66.29759992938489,
+        "concurrency_10_p95_slower_percent": 0.2566292013146989,
+        "concurrency_10_throughput_change_percent": -0.2522900745701828,
+        "runtime_average_slower_ms": 2569.1124556190443,
+        "runtime_average_slower_percent": 24.124575919215452
+      },
+      "expected_saving": {
+        "expected_low_ms": 6300,
+        "expected_high_ms": 6800,
+        "observed_ms": 7274.5295443809555,
+        "exceeded_low_by_ms": 974.5295443809555,
+        "exceeded_high_by_ms": 474.5295443809555
+      },
+      "interpretation": "The exceptional cleanup fallback made the run safe and complete, but 17 requests paid the five-second handle bound. Differences beyond that measured cost are treated as natural model and platform variance across measurement days."
+    },
+    "retained_resource_state": {
+      "teardown_performed": false,
+      "configuration_changes_after_qualification": 0,
+      "typed_inventory_checked_at_utc": "2026-09-05T01:42:17.603235Z",
+      "typed_inventory": 0
+    }
   },
   "resources_retained": true
 }
