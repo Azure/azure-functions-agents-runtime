@@ -10,6 +10,7 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
+from durabletask.internal.helpers import new_failure_details
 from durabletask.task import TaskFailedError
 
 from azure_functions_agents._function_tool import WorkflowTool
@@ -243,6 +244,29 @@ async def test_retryable_failure_raises_a_sanitized_private_marker() -> None:
             },
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_retry_marker_clears_implicit_exception_context_before_durable_persists_it() -> None:
+    from azure_functions_agents import WorkflowRetryableError
+
+    secret = "SECRET connstr AccountKey=abc123"
+
+    def handler(args: dict[str, Any]) -> None:
+        try:
+            raise ValueError(secret)
+        except ValueError:
+            raise WorkflowRetryableError("service_busy", "Try again.") from None
+
+    with pytest.raises(DurableRetryableActivityError) as raised:
+        await invoke_policy_handler(handler, {}, task=_native_task(), target="publish")
+
+    exc = raised.value
+    assert exc.__cause__ is None
+    assert exc.__context__ is None
+    details = new_failure_details(exc)
+    assert not details.HasField("innerFailure")
+    assert secret not in str(details)
 
 
 @pytest.mark.asyncio
@@ -984,8 +1008,14 @@ def test_exhausted_native_retry_reports_the_sanitized_application_failure() -> N
         {},
     )
 
-    with pytest.raises(RuntimeError, match=r"Try again\. \(service_busy\)"):
+    with pytest.raises(RuntimeError, match=r"Try again\. \(service_busy\)") as raised_workflow:
         _orchestrate(context)
+
+    exc = raised_workflow.value
+    assert exc.__cause__ is None
+    assert exc.__context__ is None
+    details = new_failure_details(exc)
+    assert not details.HasField("innerFailure")
 
 
 # ---- end-to-end submission --------------------------------------------------

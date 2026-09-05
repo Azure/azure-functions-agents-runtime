@@ -47,6 +47,26 @@ _EXPECTED_EXHAUSTION_FAILURE = (
     "task 'reserve_inventory': Inventory reservation is temporarily unavailable. "
     "(inventory_temporarily_unavailable)"
 )
+_PRIVATE_RETRY_MARKERS = (
+    '"outcome"',
+    '"version":1',
+    '"version": 1',
+    "Activity task #",
+    "DurableRetryableActivityError",
+)
+
+
+def _failure_details_chain(failure_details: dict[str, Any]) -> list[dict[str, Any]]:
+    chain = [failure_details]
+    inner = failure_details.get("innerFailure")
+    while inner is not None:
+        if not isinstance(inner, dict):
+            raise AssertionError(f"invalid nested failureDetails: {inner!r}")
+        chain.append(inner)
+        inner = inner.get("innerFailure")
+    return chain
+
+
 _STATUS_RUNTIME_ERROR_PREFIX = "builtins.RuntimeError: "
 
 pytestmark = [
@@ -205,6 +225,14 @@ def _assert_decoded_exhaustion_failure(
         ):
             raise AssertionError(f"invalid terminal failureDetails: {failure_details!r}")
         failure_message = failure_details["errorMessage"]
+        serialized_failure_details = json.dumps(
+            _failure_details_chain(failure_details), sort_keys=True
+        )
+        for marker in _PRIVATE_RETRY_MARKERS:
+            assert marker not in serialized_failure_details, (
+                f"private retry marker {marker!r} leaked into terminal failureDetails: "
+                f"{serialized_failure_details}"
+            )
     else:
         output = status.get("output")
         if output is not None:

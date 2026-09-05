@@ -387,6 +387,8 @@ def _run_static_workflow(
         context.set_custom_status(
             f"{len(results)}/{total} tasks done, running={','.join(wave)}"
         )
+        wave_failure: BaseException | None = None
+        wave_results: list[Any] | None = None
         try:
             wave_results = yield from _await_wave(context, cancel_task, wave_tasks)
         except Exception as exc:
@@ -399,7 +401,9 @@ def _run_static_workflow(
             )
             if decoded is exc:
                 raise
-            raise decoded from exc
+            wave_failure = decoded
+        if wave_failure is not None:
+            raise wave_failure
         if wave_results is None:
             reason = cancel_task.result
             for spec, wave_task in zip(wave_specs, wave_tasks, strict=True):
@@ -1081,6 +1085,8 @@ def _run_dynamic_workflow(
 
         wave_tasks = _dispatch_dynamic_wave(context, state, wave)
         _publish_dynamic_status(context, state)
+        wave_failure: BaseException | None = None
+        wave_results: list[Any] | None = None
         try:
             wave_results = yield from _await_wave(context, cancel_task, wave_tasks)
         except Exception as exc:
@@ -1095,7 +1101,9 @@ def _run_dynamic_workflow(
             )
             if decoded is exc:
                 raise
-            raise decoded from exc
+            wave_failure = decoded
+        if wave_failure is not None:
+            raise wave_failure
         if wave_results is None:
             reason = cancel_task.result
             _restore_canceled_dynamic_wave(state, wave, wave_tasks)
@@ -1304,6 +1312,7 @@ def register_workflows(
         if policy_aware:
 
             async def run_policy_sub_agent(_: dict[str, Any]) -> dict[str, Any]:
+                timeout_failure: WorkflowRetryableError | None = None
                 try:
                     text = await run_leaf_agent_task(
                         entry.resolved,
@@ -1320,10 +1329,12 @@ def register_workflows(
                         task_id,
                         agent_slug,
                     )
-                    raise WorkflowRetryableError(
+                    timeout_failure = WorkflowRetryableError(
                         "subagent_timeout",
                         "Workflow Sub Agent timed out.",
-                    ) from None
+                    )
+                if timeout_failure is not None:
+                    raise timeout_failure
                 return {"agent": agent_slug, "text": text}
 
             return dict(

@@ -71,6 +71,11 @@ def test_retry_e2e_accepts_only_the_decoded_final_orchestration_failure() -> Non
     )
 
     _assert_decoded_exhaustion_failure(
+        {"failureDetails": {"errorMessage": decoded}},
+        host_output="",
+        workflow_id=workflow_id,
+    )
+    _assert_decoded_exhaustion_failure(
         {"output": None},
         host_output=_terminal_host_output(workflow_id, decoded),
         workflow_id=workflow_id,
@@ -90,6 +95,35 @@ def test_retry_e2e_rejects_the_raw_activity_failure_wrapper() -> None:
         _assert_decoded_exhaustion_failure(
             {"output": None},
             host_output=_terminal_host_output(workflow_id, raw_marker),
+            workflow_id=workflow_id,
+        )
+
+
+def test_retry_e2e_rejects_private_marker_nested_under_clean_failure_details() -> None:
+    workflow_id = "workflow-1"
+    decoded = (
+        "task 'reserve_inventory': Inventory reservation is temporarily unavailable. "
+        "(inventory_temporarily_unavailable)"
+    )
+    raw_marker = (
+        f"{workflow_id}: Activity task #2 failed: "
+        '{"outcome":{"failure":{"error":"Inventory reservation is temporarily unavailable.",'
+        '"error_code":"inventory_temporarily_unavailable","kind":"handler_transient",'
+        '"retryable":true},"id":"reserve_inventory","ok":false},"version":1}'
+    )
+
+    with pytest.raises(AssertionError, match="private retry marker"):
+        _assert_decoded_exhaustion_failure(
+            {
+                "failureDetails": {
+                    "errorMessage": decoded,
+                    "innerFailure": {
+                        "errorType": "DurableRetryableActivityError",
+                        "errorMessage": raw_marker,
+                    },
+                }
+            },
+            host_output="",
             workflow_id=workflow_id,
         )
 

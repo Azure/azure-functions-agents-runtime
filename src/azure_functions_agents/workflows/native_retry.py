@@ -43,7 +43,12 @@ def create_durable_retry_policy(spec: DurableRetryPolicyInput) -> RetryPolicy:
 
 
 def raise_for_durable_retry(outcome: ActivityFailureOutcome) -> None:
-    """Raise one bounded, versioned failure without chaining handler exceptions."""
+    """Raise one bounded, versioned failure without chaining handler exceptions.
+
+    The Durable SDK reads ``__context__`` unconditionally when building persisted
+    failure details, so ``raise ... from None`` alone is not sufficient when a
+    caller is inside an active ``except`` block.
+    """
     message = json.dumps(
         {
             "version": _FAILURE_VERSION,
@@ -53,7 +58,11 @@ def raise_for_durable_retry(outcome: ActivityFailureOutcome) -> None:
         separators=(",", ":"),
         sort_keys=True,
     )
-    raise DurableRetryableActivityError(message) from None
+    error = DurableRetryableActivityError(message)
+    error.__cause__ = None
+    error.__context__ = None
+    error.__suppress_context__ = True
+    raise error
 
 
 def decode_durable_retry_failure(

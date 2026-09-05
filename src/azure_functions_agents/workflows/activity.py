@@ -312,24 +312,26 @@ async def invoke_policy_handler(
         return outcome
 
     try:
+        outcome: ActivityOutcome | None = None
+        result: Any = None
         try:
             result = await invoke_handler(handler, args)
         except asyncio.CancelledError:
             raise
         except WorkflowRetryableError as exc:
-            return finish(failure_outcome(
+            outcome = failure_outcome(
                 task_id,
                 error_code=exc.error_code,
                 error=exc.message,
                 kind="handler_transient",
-            ))
+            )
         except WorkflowTerminalError as exc:
-            return finish(failure_outcome(
+            outcome = failure_outcome(
                 task_id,
                 error_code=exc.error_code,
                 error=exc.message,
                 kind="handler_terminal",
-            ))
+            )
         except Exception:
             logger.exception(
                 "workflow task execution failed: workflow_id=%s node_id=%s target=%s",
@@ -337,28 +339,31 @@ async def invoke_policy_handler(
                 context.node_instance_id,
                 target,
             )
-            return finish(failure_outcome(
+            outcome = failure_outcome(
                 task_id,
                 error_code="workflow_task_execution_unknown",
                 error="Task execution failed.",
                 kind="execution_unknown",
-            ))
-        try:
-            json.dumps(result, allow_nan=False)
-        except (TypeError, ValueError):
-            logger.error(
-                "workflow task returned a non-JSON result: workflow_id=%s node_id=%s target=%s",
-                context.workflow_id,
-                context.node_instance_id,
-                target,
             )
-            return finish(failure_outcome(
-                task_id,
-                error_code="workflow_task_handler_contract",
-                error="Task handler returned an invalid result.",
-                kind="handler_contract",
-            ))
-        return {"id": task_id, "ok": True, "result": result}
+        if outcome is None:
+            try:
+                json.dumps(result, allow_nan=False)
+            except (TypeError, ValueError):
+                logger.error(
+                    "workflow task returned a non-JSON result: workflow_id=%s node_id=%s target=%s",
+                    context.workflow_id,
+                    context.node_instance_id,
+                    target,
+                )
+                outcome = failure_outcome(
+                    task_id,
+                    error_code="workflow_task_handler_contract",
+                    error="Task handler returned an invalid result.",
+                    kind="handler_contract",
+                )
+            else:
+                outcome = {"id": task_id, "ok": True, "result": result}
+        return finish(outcome)
     finally:
         _reset_workflow_task_context(token)
 

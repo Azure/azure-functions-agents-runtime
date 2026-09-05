@@ -431,6 +431,8 @@ def resolve_workflow_task_execution(
             path="execution",
         )
     retry = task.execution.retry
+    # Currently unreachable with per-field bounds (5 attempts and <= 15m max
+    # backoff, ~50m worst case); kept as defense in depth if bounds widen.
     if sum(native_retry_delays_ceiling_ms(retry)) > MAX_POLICY_ELAPSED_MS:
         raise PlanValidationError(
             f"task {task.id!r}: configured retry delays must not exceed PT1H in total",
