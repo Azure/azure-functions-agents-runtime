@@ -1,7 +1,7 @@
 ---
 frd: 0010
 title: Durable agent loop spike
-status: In review
+status: Finalized
 author: larohra
 created: 2026-09-04
 updated: 2026-09-04
@@ -1558,6 +1558,7 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
 | 40 | Answer vs. timeout race | Endpoint wall clock / orchestration winner / one request-record CAS | `accept_human_response` and `close_human_request_v1` compete on one record; the CAS winner is authoritative and displayed expiry is advisory. | Agent review | 2026-09-04 |
 | 41 | Human wake-up terminal errors | Retry forever / discard silently / orphan accepted answer | Treat Durable client `404`/`410` as terminal outbox results, mark the answer orphaned, and expose typed `run_terminal`. | Agent review | 2026-09-04 |
 | 42 | Long-park model context | Fail after answer / exact replay only / exact replay plus controlled rehydration | Validate exact encrypted-reasoning replay; on recognized incompatibility rebuild working context from immutable audit without repeating tools. | Agent review | 2026-09-04 |
+| 43 | Architecture approval | Continue review / approve private spike / approve production support | Proceed with the private experimental spike under the recorded gates; this approval does not grant production support. | Human | 2026-09-04 |
 
 ## 6. Test plan
 
@@ -1671,6 +1672,5 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
   continuation/retention/affinity, middleware-starter, logical-reconstruction,
   context-compaction, and durable human-clarification requirements; these
   corrections are recorded in Decisions 18-42.
-- **Human sign-off:** Pending. This FRD remains `In review`; set
-  `status: Finalized` only after explicit human approval. No product
-  implementation may begin before that gate.
+- **Human sign-off:** larohra, 2026-09-04 — approved through explicit
+  implementation request.
