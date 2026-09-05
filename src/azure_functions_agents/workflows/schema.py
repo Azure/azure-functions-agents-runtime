@@ -27,9 +27,17 @@ import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, NotRequired, TypedDict
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 
 class PlanValidationError(ValueError):
@@ -70,6 +78,54 @@ class TemplateResolutionError(ValueError):
         self.error_code = error_code
 
 
+_PUBLIC_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_WHITESPACE_RE = re.compile(r"\s+")
+_DEFAULT_EXECUTION_ERROR_MESSAGE = "Task execution failed."
+
+
+def _normalize_execution_error_message(message: str) -> str:
+    normalized = _CONTROL_CHARACTER_RE.sub(" ", str(message))
+    normalized = _WHITESPACE_RE.sub(" ", normalized).strip()
+    if not normalized:
+        return _DEFAULT_EXECUTION_ERROR_MESSAGE
+    return normalized[:256].strip() or _DEFAULT_EXECUTION_ERROR_MESSAGE
+
+
+class _WorkflowExecutionError(Exception):
+    """Base for application-classified, sanitized workflow task failures."""
+
+    error_code: str
+    message: str
+
+    def __init__(self, error_code: str, message: str) -> None:
+        if (
+            not isinstance(error_code, str)
+            or _PUBLIC_ERROR_CODE_RE.fullmatch(error_code) is None
+            or error_code.startswith("workflow_")
+        ):
+            raise ValueError(
+                "error_code must match ^[a-z][a-z0-9_]{0,63}$ and must not "
+                "start with 'workflow_'"
+            )
+        self.error_code = error_code
+        self.message = _normalize_execution_error_message(message)
+        super().__init__(self.message)
+
+
+class WorkflowRetryableError(_WorkflowExecutionError):
+    """Signal an application failure that Durable may retry.
+
+    A workflow tool raises this to classify its own failure as transient. The
+    runtime uses the same classification for a Workflow Sub Agent timeout and
+    treats other handler exceptions as terminal.
+    """
+
+
+class WorkflowTerminalError(_WorkflowExecutionError):
+    """Signal an application failure that must not be retried."""
+
+
 TOOL_TASK_TYPE: Literal["tool"] = "tool"
 WAIT_TASK_TYPE: Literal["wait"] = "wait"
 SUB_AGENT_TASK_TYPE: Literal["sub_agent"] = "sub_agent"
@@ -85,11 +141,168 @@ class WorkflowPlanPolicy:
     """Immutable per-agent authorization boundary for workflow plans."""
 
     allowed_tools: frozenset[str]
-    allowed_subagents: frozenset[str]
+    allowed_subagents: frozenset[str] = frozenset()
     subagent_guidance: tuple[tuple[str, str], ...] = ()
 
 
 type JsonScalar = str | int | float | bool | None
+
+MAX_POLICY_ATTEMPTS = 5
+MAX_INITIAL_BACKOFF_MS = 5 * 60 * 1_000
+MAX_BACKOFF_MS = 15 * 60 * 1_000
+# Submission-time ceiling for the sum of authored retry delays. Durable's own
+# finite ``retry_timeout`` is intentionally unset because the SDK evaluates it
+# against wall-clock time while replaying history.
+MAX_POLICY_ELAPSED_MS = 60 * 60 * 1_000
+
+
+def _policy_duration_ms(value: str, *, field_name: str) -> int:
+    """Parse an authored policy duration without floating-point conversion."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field_name} must be a non-empty ISO-8601 duration")
+    if len(value) > 64:
+        raise ValueError(f"{field_name} is too large")
+    match = _DURATION_RE.match(value)
+    if match is None:
+        raise ValueError(
+            f"{field_name} must be an ISO-8601 duration like 'PT30S', 'PT5M', or 'PT1H30M'"
+        )
+    if all(component is None for component in match.groupdict().values()):
+        raise ValueError(f"{field_name} duration has no components")
+    if "T" in value and all(
+        match.group(name) is None for name in ("hours", "minutes", "seconds")
+    ):
+        raise ValueError(f"{field_name} duration time section has no components")
+    try:
+        total_ms = (
+            Decimal(match.group("days") or 0) * Decimal(86_400_000)
+            + Decimal(match.group("hours") or 0) * Decimal(3_600_000)
+            + Decimal(match.group("minutes") or 0) * Decimal(60_000)
+            + Decimal(match.group("seconds") or 0) * Decimal(1_000)
+        )
+    except InvalidOperation as exc:
+        raise ValueError(f"{field_name} is not a finite duration") from exc
+    integral_ms = total_ms.to_integral_value()
+    if total_ms != integral_ms:
+        raise ValueError(f"{field_name} must resolve to whole milliseconds")
+    try:
+        return int(integral_ms)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError(f"{field_name} is too large") from exc
+
+
+class WorkflowRetryBackoff(BaseModel):
+    """Bounded exponential backoff authored in a plan task execution policy."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    initial: str
+    multiplier: float
+    max: str
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> WorkflowRetryBackoff:
+        initial_ms = _policy_duration_ms(self.initial, field_name="backoff.initial")
+        maximum_ms = _policy_duration_ms(self.max, field_name="backoff.max")
+        if initial_ms < 1 or initial_ms > MAX_INITIAL_BACKOFF_MS:
+            raise ValueError("backoff.initial must be between PT0.001S and PT5M")
+        if maximum_ms < 0 or maximum_ms > MAX_BACKOFF_MS:
+            raise ValueError("backoff.max must be between PT0S and PT15M")
+        if maximum_ms < initial_ms:
+            raise ValueError("backoff.max must not be less than backoff.initial")
+        if not math.isfinite(self.multiplier) or not 1.0 <= self.multiplier <= 10.0:
+            raise ValueError("backoff.multiplier must be a finite number from 1.0 through 10.0")
+        return self
+
+
+class WorkflowRetryPolicy(BaseModel):
+    """Bounded retry declaration; ``max_attempts`` includes the first attempt."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    max_attempts: int = Field(default=1, ge=1, le=MAX_POLICY_ATTEMPTS)
+    backoff: WorkflowRetryBackoff | None = None
+
+    @model_validator(mode="after")
+    def validate_backoff_presence(self) -> WorkflowRetryPolicy:
+        if self.max_attempts > 1 and self.backoff is None:
+            raise ValueError("backoff is required when max_attempts is greater than 1")
+        if self.max_attempts == 1 and self.backoff is not None:
+            raise ValueError("backoff is not valid when max_attempts is 1")
+        return self
+
+
+class WorkflowTaskExecution(BaseModel):
+    """Authored bounded execution policy for a tool or Sub Agent task."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    retry: WorkflowRetryPolicy
+
+
+class DurableRetryPolicyInput(TypedDict):
+    """JSON-safe Durable Python 2.x retry policy persisted for new histories."""
+
+    first_retry_interval_ms: int
+    max_number_of_attempts: int
+    backoff_coefficient: float
+    max_retry_interval_ms: int
+
+
+class EffectiveWorkflowTaskExecution(TypedDict):
+    """JSON-safe policy frozen into the orchestration input before it starts.
+
+    This shape is persisted in Durable history and replayed by whatever runtime
+    version is deployed later, so it only ever grows: readers must tolerate
+    unknown keys, and any key added by a later runtime must be ``NotRequired``
+    with a default that reproduces this version's behavior.
+    """
+
+    max_attempts: int
+    durable_retry_policy: DurableRetryPolicyInput
+
+
+def durable_retry_policy_input(retry: WorkflowRetryPolicy) -> DurableRetryPolicyInput:
+    """Preserve the authored exponential shape for Durable native retry."""
+    if retry.backoff is None:
+        initial_ms = maximum_ms = 0
+        coefficient = 1.0
+    else:
+        initial_ms = _policy_duration_ms(
+            retry.backoff.initial,
+            field_name="backoff.initial",
+        )
+        maximum_ms = _policy_duration_ms(
+            retry.backoff.max,
+            field_name="backoff.max",
+        )
+        coefficient = retry.backoff.multiplier
+    return {
+        "first_retry_interval_ms": initial_ms,
+        "max_number_of_attempts": retry.max_attempts,
+        "backoff_coefficient": coefficient,
+        "max_retry_interval_ms": maximum_ms,
+    }
+
+
+def native_retry_delays_ceiling_ms(retry: WorkflowRetryPolicy) -> list[int]:
+    """Conservatively bound Durable's floating-point exponential delays."""
+    if retry.backoff is None:
+        return []
+    initial_ms = _policy_duration_ms(retry.backoff.initial, field_name="backoff.initial")
+    maximum_ms = _policy_duration_ms(retry.backoff.max, field_name="backoff.max")
+    multiplier = Decimal(str(retry.backoff.multiplier))
+    return [
+        min(
+            maximum_ms,
+            int(
+                (Decimal(initial_ms) * multiplier**index).to_integral_value(
+                    rounding=ROUND_CEILING
+                )
+            ),
+        )
+        for index in range(retry.max_attempts - 1)
+    ]
 
 
 class WorkflowConditionInput(TypedDict):
@@ -112,6 +325,7 @@ class ToolWorkflowTaskInput(_WorkflowTaskInputBase, _DynamicWorkflowTaskInput):
     type: Literal["tool"]
     tool: str
     args: dict[str, Any]
+    execution: NotRequired[EffectiveWorkflowTaskExecution]
 
 
 class WaitWorkflowTaskInput(_WorkflowTaskInputBase, _DynamicWorkflowTaskInput):
@@ -124,6 +338,7 @@ class SubAgentWorkflowTaskInput(_WorkflowTaskInputBase, _DynamicWorkflowTaskInpu
     type: Literal["sub_agent"]
     agent: str
     task: str
+    execution: NotRequired[EffectiveWorkflowTaskExecution]
 
 
 type WorkflowTaskInput = (
@@ -191,6 +406,44 @@ class WorkflowTask(BaseModel):
     task: str | None = Field(default=None)
     when: WorkflowCondition | None = Field(default=None, exclude_if=lambda value: value is None)
     for_each: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    execution: WorkflowTaskExecution | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+
+def resolve_workflow_task_execution(
+    task: WorkflowTask,
+) -> EffectiveWorkflowTaskExecution | None:
+    """Freeze a plan-authored retry policy for one task at submission time.
+
+    ``None`` means the task is policy-free, and no execution payload may be
+    persisted for it. This keeps histories written by earlier runtime versions
+    on the legacy dispatch path during replay.
+    """
+    authored = "execution" in task.model_fields_set
+    if not authored:
+        return None
+    if task.execution is None:
+        raise PlanValidationError(
+            f"task {task.id!r}: 'execution' must contain a retry policy",
+            error_code="workflow_retry_policy_invalid",
+            node_id=task.id,
+            path="execution",
+        )
+    retry = task.execution.retry
+    # Currently unreachable with per-field bounds (5 attempts and <= 15m max
+    # backoff, ~50m worst case); kept as defense in depth if bounds widen.
+    if sum(native_retry_delays_ceiling_ms(retry)) > MAX_POLICY_ELAPSED_MS:
+        raise PlanValidationError(
+            f"task {task.id!r}: configured retry delays must not exceed PT1H in total",
+            error_code="workflow_retry_schedule_exceeded",
+            node_id=task.id,
+            path="execution.retry.backoff",
+        )
+    return EffectiveWorkflowTaskExecution(
+        max_attempts=retry.max_attempts,
+        durable_retry_policy=durable_retry_policy_input(retry),
+    )
 
 
 class WorkflowPlan(BaseModel):
@@ -288,6 +541,17 @@ def validate_plan(
                 f"task {task.id!r}: type {task.type!r} is not supported. "
                 f"Supported types: {sorted(SUPPORTED_TASK_TYPES)}"
             )
+        if (
+            task.type != WAIT_TASK_TYPE
+            and "execution" in task.model_fields_set
+            and task.execution is None
+        ):
+            raise PlanValidationError(
+                f"task {task.id!r}: 'execution' must contain a retry policy",
+                error_code="workflow_retry_policy_invalid",
+                node_id=task.id,
+                path="execution",
+            )
 
         if task.type == TOOL_TASK_TYPE:
             if not task.tool:
@@ -312,6 +576,10 @@ def validate_plan(
                     "type=sub_agent tasks"
                 )
         elif task.type == WAIT_TASK_TYPE:
+            if "execution" in task.model_fields_set:
+                raise PlanValidationError(
+                    f"task {task.id!r}: 'execution' is not valid on type=wait tasks"
+                )
             if task.tool is not None:
                 raise PlanValidationError(
                     f"task {task.id!r}: 'tool' is not valid on type=wait tasks"
@@ -931,7 +1199,10 @@ def evaluate_condition(
     return equals if condition.operator == "equals" else not equals
 
 
-def plan_to_activity_inputs(plan: WorkflowPlan) -> list[WorkflowTaskInput]:
+def plan_to_activity_inputs(
+    plan: WorkflowPlan,
+    effective_policies: Mapping[str, EffectiveWorkflowTaskExecution] | None = None,
+) -> list[WorkflowTaskInput]:
     """Flatten a validated plan into the JSON list the orchestrator iterates.
 
     The orchestrator needs ``depends_on`` to drive wave scheduling, plus
@@ -979,6 +1250,14 @@ def plan_to_activity_inputs(plan: WorkflowPlan) -> list[WorkflowTaskInput]:
             )
         if t.for_each is not None:
             entry["for_each"] = t.for_each
+        if effective_policies is not None and t.id in effective_policies:
+            if t.type == WAIT_TASK_TYPE:
+                raise RuntimeError(f"validated wait task {t.id!r} has execution policy")
+            capability_entry = cast(
+                "ToolWorkflowTaskInput | SubAgentWorkflowTaskInput",
+                entry,
+            )
+            capability_entry["execution"] = effective_policies[t.id]
         out.append(entry)
     return out
 
@@ -1067,23 +1346,37 @@ def parse_iso8601_datetime(text: str) -> datetime:
 
 __all__ = [
     "ECHO_TOOL_NAME",
+    "MAX_BACKOFF_MS",
+    "MAX_INITIAL_BACKOFF_MS",
     "MAX_NODES",
     "MAX_PARALLELISM",
+    "MAX_POLICY_ATTEMPTS",
+    "MAX_POLICY_ELAPSED_MS",
     "MAX_WAIT_DURATION",
     "SUB_AGENT_TASK_TYPE",
     "SUPPORTED_TASK_TYPES",
     "TOOL_TASK_TYPE",
     "WAIT_TASK_TYPE",
+    "DurableRetryPolicyInput",
+    "EffectiveWorkflowTaskExecution",
     "PlanValidationError",
     "TemplateResolutionError",
     "WorkflowCondition",
     "WorkflowPlan",
     "WorkflowPlanPolicy",
+    "WorkflowRetryBackoff",
+    "WorkflowRetryPolicy",
+    "WorkflowRetryableError",
     "WorkflowTask",
+    "WorkflowTaskExecution",
+    "WorkflowTerminalError",
+    "durable_retry_policy_input",
     "evaluate_condition",
+    "native_retry_delays_ceiling_ms",
     "parse_iso8601_datetime",
     "parse_iso8601_duration",
     "plan_to_activity_inputs",
     "resolve_template_value",
+    "resolve_workflow_task_execution",
     "validate_plan",
 ]
