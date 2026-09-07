@@ -44,6 +44,7 @@ _MAX_URL_CHARS = 2048
 _MAX_TIMESTAMP_CHARS = 64
 _MAX_HUMAN_CHOICES = 100
 _MAX_HEADER_VALUE_CHARS = 8192
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 _SAFE_TEMPLATE_VALUE = re.compile(r"[A-Za-z0-9._~-]+")
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,255}")
 _SAFE_RUN_ID = re.compile(r"run-[0-9a-f]{32}")
@@ -821,11 +822,16 @@ def perform_request(
     except (TimeoutError, urllib.error.URLError, OSError) as error:
         raise QualificationRequestError(f"request_failed:{type(error).__name__}") from None
     latency_ms = (time.perf_counter() - started) * 1000
-    selected = select_response_fields(
-        response_body,
-        field_selections,
-        allow_missing=allow_missing_fields,
-    )
+    try:
+        selected = select_response_fields(
+            response_body,
+            field_selections,
+            allow_missing=allow_missing_fields,
+        )
+    except QualificationRequestError:
+        if not allow_missing_fields or status not in _TRANSIENT_HTTP_STATUSES:
+            raise
+        selected = {}
     return QualificationResult(
         command=command,
         http_status=status,
@@ -892,6 +898,9 @@ def poll_status(
             and result.selected_fields.get("error_code") == "run_not_found"
             and elapsed_seconds < min(deadline_seconds, _POLL_STARTUP_GRACE_SECONDS)
         ):
+            sleeper(min(interval_seconds, deadline_seconds - elapsed_seconds))
+            continue
+        if result.http_status in _TRANSIENT_HTTP_STATUSES:
             sleeper(min(interval_seconds, deadline_seconds - elapsed_seconds))
             continue
         if not 200 <= result.http_status < 400:

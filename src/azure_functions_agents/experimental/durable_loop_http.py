@@ -59,7 +59,7 @@ from .durable_loop_registration import (
 from .durable_loop_tools import DurableToolCatalogPort
 
 _ROUTE_BASE = "experimental/durable-agent-runs"
-_SHORT_WAIT_SECONDS = 5.0
+_SHORT_WAIT_SECONDS = 30.0
 _SHORT_POLL_SECONDS = 0.05
 _MAX_PROMPT_BYTES = 256 * 1024
 _MAX_HUMAN_ANSWER_BYTES = 64 * 1024
