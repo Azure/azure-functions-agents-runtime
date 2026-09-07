@@ -777,7 +777,33 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
             run_id=request.run_id,
             point="tool_activity_ack_loss",
         ):
-            result = await runtime.tools.dispatch(request)
+            if (
+                request.behavior is ToolBehavior.MUTATING
+                and result.status is ToolResultStatus.SUCCEEDED
+            ):
+                result = ToolResultV1(
+                    run_id=request.run_id,
+                    step_index=request.step_index,
+                    call_ordinal=request.call_ordinal,
+                    provider_call_id=request.provider_call_id,
+                    call_key=request.call_key,
+                    request_hash=request.request_hash,
+                    tool_name=request.tool_name,
+                    status=ToolResultStatus.AMBIGUOUS,
+                    elapsed_ms=result.elapsed_ms,
+                    error=ErrorEnvelopeV1(
+                        code="tool_acknowledgement_lost",
+                        classification="tool",
+                        retryable=False,
+                        disposition=ErrorDisposition.AMBIGUOUS,
+                        possibly_committed=True,
+                        phase="tool_step",
+                        step_index=request.step_index,
+                        call_key=request.call_key,
+                    ),
+                )
+            else:
+                result = await runtime.tools.dispatch(request)
         result_ref = await put_protocol_model(
             runtime.content,
             kind="tool-result",

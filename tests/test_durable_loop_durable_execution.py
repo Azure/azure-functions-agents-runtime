@@ -793,6 +793,93 @@ async def test_tool_activity_ack_loss_replays_external_receipt_without_effect(
 
 
 @pytest.mark.asyncio
+async def test_mutating_tool_ack_loss_returns_ambiguous_after_one_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    registry = DurableToolRegistry()
+    effects = 0
+
+    def write(_arguments, _call_key):
+        nonlocal effects
+        effects += 1
+        return {"effects": effects}
+
+    descriptor = FrozenToolDescriptorV1(
+        name="unsafe_write",
+        description="Unsafe write.",
+        parameters={"additionalProperties": True, "type": "object"},
+        provenance=ToolProvenance.REMOTE,
+        behavior=ToolBehavior.MUTATING,
+    )
+    registry.register(descriptor, write)
+    catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
+    arguments = {"value": 1}
+    request_hash = tool_request_hash(
+        tool_name=descriptor.name,
+        arguments=arguments,
+        behavior=descriptor.behavior,
+        provenance=descriptor.provenance,
+        policy_hash=catalog.policy_hash,
+        catalog_hash=catalog.catalog_hash,
+        package_hash=catalog.package_hash,
+        fault_profile=DurableFaultProfile.TOOL_ACTIVITY_ACK_LOSS_ONCE,
+    )
+    request = ToolRequestV1(
+        run_id="run-1",
+        session_id="session-1",
+        step_index=0,
+        call_ordinal=0,
+        provider_call_id="provider-call",
+        call_key="1" * 64,
+        tool_name=descriptor.name,
+        provenance=descriptor.provenance,
+        behavior=descriptor.behavior,
+        arguments=arguments,
+        request_hash=request_hash,
+        policy_hash=catalog.policy_hash,
+        catalog_hash=catalog.catalog_hash,
+        package_hash=catalog.package_hash,
+        fault_profile=DurableFaultProfile.TOOL_ACTIVITY_ACK_LOSS_ONCE,
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    content = InMemoryDurableContentStore()
+    request_ref = await put_protocol_model(
+        content,
+        kind="tool-request",
+        model=request,
+    )
+    runtime = DurableLoopActivityRuntime(
+        model=ScriptedOneStepModelProvider([]),
+        tools=registry.build_dispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=content,
+        faults=DurableOneShotFaults(
+            InMemoryDurableKeyedDocumentStore(),
+            enabled=True,
+        ),
+    )
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    assert isinstance(app, df.DFApp)
+    try:
+        raw = await _registered(app, DURABLE_LOOP_TOOL_ACTIVITY_NAME)(
+            {"request_ref": request_ref.model_dump(mode="json")}
+        )
+    finally:
+        reset_durable_loop_activity_runtime_factory()
+
+    result_ref = ToolResultRefV1.model_validate_json(canonical_json_bytes(raw))
+    result = await get_protocol_model(content, result_ref.result_ref, ToolResultV1)
+    assert effects == 1
+    assert result.status is ToolResultStatus.AMBIGUOUS
+    assert result.error is not None
+    assert result.error.possibly_committed is True
+
+
+@pytest.mark.asyncio
 async def test_registered_orchestrator_completes_with_refs_only_output() -> None:
     registry = DurableToolRegistry()
     catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
