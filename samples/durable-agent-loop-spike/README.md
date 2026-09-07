@@ -107,12 +107,17 @@ The model API exposes only response creation and chat completions. Background
 response polling and cancellation use the separate model-control API. That API
 accepts the provider response ID only in `x-af-response-id`, validates the
 bounded `resp_` shape, stores it in a policy variable, deletes the header, and
-then rewrites to the fixed model backend. The control API has no APIM
-diagnostics because backend dependency names include the rewritten provider
-path and would disclose the response ID. Model-start/chat and MCP diagnostics
-remain API-scoped with zero request/response body bytes. All three inbound
-policies delete the APIM `api-key` subscription header before forwarding so it
-cannot be confused with or exposed as a backend model key.
+then rewrites to the fixed model backend. The control API has no Application
+Insights diagnostic because backend dependency names include the rewritten
+provider path and would disclose the response ID. Because the shared APIM
+service has an inherited all-API Azure Monitor diagnostic, the control API
+defines a child `azuremonitor` override with sampling `0`, no client
+IP/body/header capture, and all query parameters masked. Model-start/chat and
+MCP Application Insights diagnostics remain API-scoped with zero
+request/response body bytes and all query parameters masked. All three inbound
+policies delete both APIM subscription-key carriers (`api-key` header and
+`subscription-key` query parameter) before forwarding so neither can be
+confused with or exposed as a backend model key.
 
 Local operators must supply inbound Function authentication through an
 environment variable. Do not place Function keys, APIM keys, prompts, answers,
@@ -153,8 +158,11 @@ python eng\scripts\durable_loop_spike.py deploy `
 ```
 
 The acknowledgement must exactly match `--app-name`. Deployment performs a
-read preflight and `config-zip` only. It does not retrieve or update app
-settings and therefore never persists the APIM subscription key.
+read preflight and Flex `config-zip --build-remote true`. Remote build is an
+explicit deployment operation; the Function app template does not set the
+unsupported `SCM_DO_BUILD_DURING_DEPLOYMENT` setting. The helper does not
+retrieve or update app settings and therefore never persists the APIM
+subscription key.
 
 ## Bounded qualification CLI
 
@@ -171,8 +179,8 @@ Store an inbound Function key only in the current process environment:
 $env:DURABLE_LOOP_FUNCTION_KEY = '<securely-obtained-function-key>'
 ```
 
-Examples below intentionally use route placeholders. Replace each route and
-JSON field path with the finalized application contract.
+Examples below intentionally use route placeholders. Replace each route with
+the finalized application contract.
 
 ```powershell
 # Start: request.json remains outside the repository and is not printed.
@@ -181,8 +189,8 @@ python eng\scripts\durable_loop_spike_qualification.py start `
   --body-file $env:DURABLE_LOOP_START_REQUEST `
   --header-name x-functions-key `
   --header-secret-env DURABLE_LOOP_FUNCTION_KEY `
-  --extract run_id=<response.run-id-json-path> `
-  --extract session_id=<response.session-id-json-path>
+  --extract run_id `
+  --extract session_id
 
 # Status.
 python eng\scripts\durable_loop_spike_qualification.py status `
@@ -190,8 +198,8 @@ python eng\scripts\durable_loop_spike_qualification.py status `
   --value "run_id=$env:DURABLE_LOOP_RUN_ID" `
   --header-name x-functions-key `
   --header-secret-env DURABLE_LOOP_FUNCTION_KEY `
-  --extract status=<response.status-json-path> `
-  --extract phase=<response.phase-json-path>
+  --extract status `
+  --extract phase
 
 # Result. The result body is counted and discarded unless a safe control field is selected.
 python eng\scripts\durable_loop_spike_qualification.py result `
@@ -218,9 +226,12 @@ python eng\scripts\durable_loop_spike_qualification.py human-answer `
 ```
 
 Each call is capped at 600 seconds and 1 MiB of response data. Start and human
-answer bodies are capped at 256 KiB. Safe selectable output labels are limited
-to run/session/request IDs, status/phase, and control URLs. The default emits no
-response fields.
+answer bodies are capped at 256 KiB. `--extract` accepts fixed top-level field
+names only; it cannot redirect an approved label to another JSON path. Each
+field has a dedicated validator: the six-state run-status enum, bounded
+identifier/phase shapes, query-free HTTPS or relative control URLs,
+non-negative bounded counts, and bounded millisecond durations. The default
+emits no response fields.
 
 ## Sandbox lifecycle evidence
 

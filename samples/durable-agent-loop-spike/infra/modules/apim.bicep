@@ -24,6 +24,11 @@ resource applicationInsights 'Microsoft.Insights/components@2020-02-02' existing
   name: applicationInsightsName
 }
 
+resource azureMonitorLogger 'Microsoft.ApiManagement/service/loggers@2024-05-01' existing = {
+  parent: apimService
+  name: 'azuremonitor'
+}
+
 resource modelBackend 'Microsoft.ApiManagement/service/backends@2024-05-01' = {
   parent: apimService
   name: modelApiName
@@ -98,6 +103,7 @@ resource modelApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-0
         <inbound>
           <base />
           <set-header name="api-key" exists-action="delete" />
+          <set-query-parameter name="subscription-key" exists-action="delete" />
           <set-backend-service backend-id="__MODEL_BACKEND_NAME__" />
           <llm-token-limit counter-key="@(context.Subscription.Id)" tokens-per-minute="__TOKENS_PER_MINUTE__" estimate-prompt-tokens="false" />
           <llm-emit-token-metric namespace="DurableAgentLoopSpike">
@@ -179,7 +185,6 @@ resource modelControlApiPolicy 'Microsoft.ApiManagement/service/apis/policies@20
       <policies>
         <inbound>
           <base />
-          <set-header name="api-key" exists-action="delete" />
           <check-header name="x-af-response-id" failed-check-httpcode="400" failed-check-error-message="Missing response identifier" ignore-case="false" />
           <set-variable name="responseId" value="@(context.Request.Headers.GetValueOrDefault(&quot;x-af-response-id&quot;, &quot;&quot;))" />
           <choose>
@@ -189,6 +194,9 @@ resource modelControlApiPolicy 'Microsoft.ApiManagement/service/apis/policies@20
               </return-response>
             </when>
           </choose>
+          <set-header name="api-key" exists-action="delete" />
+          <set-query-parameter name="subscription-key" exists-action="delete" />
+          <set-header name="x-af-response-id" exists-action="delete" />
           <set-backend-service backend-id="__MODEL_BACKEND_NAME__" />
           <choose>
             <when condition="@(context.Operation.Id == &quot;responses-poll&quot;)">
@@ -203,7 +211,6 @@ resource modelControlApiPolicy 'Microsoft.ApiManagement/service/apis/policies@20
               </return-response>
             </otherwise>
           </choose>
-          <set-header name="x-af-response-id" exists-action="delete" />
         </inbound>
         <backend>
           <forward-request timeout="120" buffer-response="false" fail-on-error-status-code="true" />
@@ -276,6 +283,7 @@ resource mcpApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01'
         <inbound>
           <base />
           <set-header name="api-key" exists-action="delete" />
+          <set-query-parameter name="subscription-key" exists-action="delete" />
           <rate-limit calls="120" renewal-period="60" />
         </inbound>
         <backend>
@@ -326,6 +334,14 @@ var diagnosticProperties = {
       body: {
         bytes: 0
       }
+      dataMasking: {
+        queryParams: [
+          {
+            mode: 'Hide'
+            value: '*'
+          }
+        ]
+      }
       headers: [
         'traceparent'
         'x-af-operation-id'
@@ -344,6 +360,14 @@ var diagnosticProperties = {
     request: {
       body: {
         bytes: 0
+      }
+      dataMasking: {
+        queryParams: [
+          {
+            mode: 'Hide'
+            value: '*'
+          }
+        ]
       }
       headers: [
         'traceparent'
@@ -374,6 +398,50 @@ resource modelDiagnostic 'Microsoft.ApiManagement/service/apis/diagnostics@2024-
   parent: modelApi
   name: 'applicationinsights'
   properties: diagnosticProperties
+}
+
+resource modelControlAzureMonitorDiagnostic 'Microsoft.ApiManagement/service/apis/diagnostics@2024-05-01' = {
+  parent: modelControlApi
+  name: 'azuremonitor'
+  properties: {
+    alwaysLog: null
+    backend: {
+      request: {
+        body: null
+        dataMasking: {
+          queryParams: [
+            {
+              mode: 'Hide'
+              value: '*'
+            }
+          ]
+        }
+        headers: null
+      }
+      response: null
+    }
+    frontend: {
+      request: {
+        body: null
+        dataMasking: {
+          queryParams: [
+            {
+              mode: 'Hide'
+              value: '*'
+            }
+          ]
+        }
+        headers: null
+      }
+      response: null
+    }
+    logClientIp: false
+    loggerId: azureMonitorLogger.id
+    sampling: {
+      percentage: 0
+      samplingType: 'fixed'
+    }
+  }
 }
 
 resource mcpDiagnostic 'Microsoft.ApiManagement/service/apis/diagnostics@2024-05-01' = {

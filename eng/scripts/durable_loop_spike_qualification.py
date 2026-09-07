@@ -13,8 +13,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -24,19 +25,20 @@ _MAX_TIMEOUT_SECONDS = 600
 _DEFAULT_MAX_BODY_BYTES = 256 * 1024
 _MAX_RESPONSE_BYTES = 1024 * 1024
 _SAFE_TEMPLATE_VALUE = re.compile(r"[A-Za-z0-9._~-]+")
-_SAFE_OUTPUT_FIELDS = frozenset(
-    {
-        "cancel_url",
-        "human_answer_url",
-        "phase",
-        "request_id",
-        "result_url",
-        "run_id",
-        "session_id",
-        "status",
-        "status_url",
-    }
-)
+_SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,255}")
+_SAFE_PHASE = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,63}")
+_MAX_URL_CHARS = 2048
+_MAX_COUNT = 1_000_000
+_MAX_DURATION_MS = 7 * 24 * 60 * 60 * 1000
+
+
+class _RunStatus(StrEnum):
+    PENDING = "Pending"
+    RUNNING = "Running"
+    WAITING = "Waiting"
+    COMPLETED = "Completed"
+    FAILED = "Failed"
+    CANCELLED = "Cancelled"
 
 
 class QualificationRequestError(Exception):
@@ -56,6 +58,75 @@ class QualificationResult:
 
 class _ReadableResponse(Protocol):
     def read(self, amount: int = -1) -> bytes: ...
+
+
+def _validated_id(value: Any) -> str:
+    if not isinstance(value, str) or _SAFE_ID.fullmatch(value) is None:
+        raise QualificationRequestError("response_field_invalid:id")
+    return value
+
+
+def _validated_status(value: Any) -> str:
+    if not isinstance(value, str):
+        raise QualificationRequestError("response_field_invalid:status")
+    try:
+        return _RunStatus(value).value
+    except ValueError:
+        raise QualificationRequestError("response_field_invalid:status") from None
+
+
+def _validated_phase(value: Any) -> str:
+    if not isinstance(value, str) or _SAFE_PHASE.fullmatch(value) is None:
+        raise QualificationRequestError("response_field_invalid:phase")
+    return value
+
+
+def _validated_url(value: Any) -> str:
+    if not isinstance(value, str) or not value or len(value) > _MAX_URL_CHARS:
+        raise QualificationRequestError("response_field_invalid:url")
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.query or parsed.fragment:
+        raise QualificationRequestError("response_field_invalid:url")
+    if parsed.scheme:
+        if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+            raise QualificationRequestError("response_field_invalid:url")
+    elif not value.startswith("/") or value.startswith("//"):
+        raise QualificationRequestError("response_field_invalid:url")
+    return value
+
+
+def _validated_count(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _MAX_COUNT:
+        raise QualificationRequestError("response_field_invalid:count")
+    return value
+
+
+def _validated_duration(value: Any) -> int | float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not 0 <= value <= _MAX_DURATION_MS
+    ):
+        raise QualificationRequestError("response_field_invalid:duration")
+    return value
+
+
+_FIELD_VALIDATORS: Mapping[str, Callable[[Any], str | int | float]] = {
+    "cancel_url": _validated_url,
+    "completed_model_count": _validated_count,
+    "completed_tool_count": _validated_count,
+    "duration_ms": _validated_duration,
+    "elapsed_ms": _validated_duration,
+    "human_answer_url": _validated_url,
+    "phase": _validated_phase,
+    "request_id": _validated_id,
+    "result_url": _validated_url,
+    "run_id": _validated_id,
+    "session_id": _validated_id,
+    "status": _validated_status,
+    "status_url": _validated_url,
+    "step_index": _validated_count,
+}
 
 
 def parse_template_values(values: Sequence[str]) -> dict[str, str]:
@@ -124,38 +195,21 @@ def _read_request_body(
     return content
 
 
-def parse_field_selections(selections: Sequence[str]) -> dict[str, str]:
-    """Map approved output labels to operator-supplied JSON paths."""
-    parsed: dict[str, str] = {}
-    for item in selections:
-        label, separator, path = item.partition("=")
-        if (
-            not separator
-            or label not in _SAFE_OUTPUT_FIELDS
-            or label in parsed
-            or re.fullmatch(r"[A-Za-z0-9_.-]+", path) is None
-        ):
+def parse_field_selections(selections: Sequence[str]) -> tuple[str, ...]:
+    """Validate fixed top-level response fields selected for output."""
+    parsed: list[str] = []
+    for label in selections:
+        if "=" in label or label not in _FIELD_VALIDATORS or label in parsed:
             raise QualificationRequestError("response_field_selection_invalid")
-        parsed[label] = path
-    return parsed
-
-
-def _select_json_field(payload: Mapping[str, Any], path: str) -> Any:
-    current: Any = payload
-    for part in path.split("."):
-        if not isinstance(current, Mapping) or part not in current:
-            raise QualificationRequestError("response_field_missing")
-        current = current[part]
-    if current is not None and not isinstance(current, str | int | float | bool):
-        raise QualificationRequestError("response_field_not_scalar")
-    return current
+        parsed.append(label)
+    return tuple(parsed)
 
 
 def select_response_fields(
     body: bytes,
-    selections: Mapping[str, str],
+    selections: Sequence[str],
 ) -> dict[str, str | int | float | bool | None]:
-    """Select only explicitly mapped identifiers, URLs, statuses, or phases."""
+    """Select only fixed top-level fields after label-specific validation."""
     if not selections:
         return {}
     try:
@@ -164,7 +218,12 @@ def select_response_fields(
         raise QualificationRequestError("response_body_invalid_json") from None
     if not isinstance(payload, Mapping):
         raise QualificationRequestError("response_body_must_be_object")
-    return {label: _select_json_field(payload, path) for label, path in selections.items()}
+    selected: dict[str, str | int | float | bool | None] = {}
+    for label in selections:
+        if label not in payload:
+            raise QualificationRequestError("response_field_missing")
+        selected[label] = _FIELD_VALIDATORS[label](payload[label])
+    return selected
 
 
 def _auth_headers(
@@ -200,7 +259,7 @@ def perform_request(
     headers: Mapping[str, str],
     timeout_seconds: int,
     maximum_response_bytes: int,
-    field_selections: Mapping[str, str],
+    field_selections: Sequence[str],
 ) -> QualificationResult:
     """Perform one bounded request and retain no unselected response content."""
     request_headers = {"Accept": "application/json", **headers}
@@ -293,7 +352,8 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
         "--extract",
         action="append",
         default=[],
-        metavar="SAFE_LABEL=JSON_PATH",
+        choices=tuple(sorted(_FIELD_VALIDATORS)),
+        metavar="SAFE_FIELD",
     )
 
 

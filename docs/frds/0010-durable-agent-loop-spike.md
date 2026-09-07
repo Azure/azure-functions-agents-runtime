@@ -1568,6 +1568,8 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
 | 50 | Human status privacy | Inline question / metadata plus owner detail route / omit status | Keep status content-free and expose question/choices/schema only through an owner-authorized GET on the existing human-input route. | Human | 2026-09-07 |
 | 51 | Authorized infrastructure names | Generated names / exact dedicated names / shared APIM mutation | Reproduce the authorized exact names; reuse shared APIM only through isolated child resources, never its global policy or existing APIs. | Human | 2026-09-04 |
 | 52 | APIM response-routing privacy | ID-bearing model routes / diagnostic control route / nondiagnostic control route | Keep model start/chat only; poll/cancel use a nondiagnostic control API, and strip response-ID plus APIM-key headers before backend forwarding. | Human | 2026-09-04 |
+| 53 | APIM diagnostic inheritance | ID-bearing child telemetry / inherited telemetry / child privacy overrides | Keep model start/chat only; poll/cancel use a stable control API, strip both subscription-key carriers, and override inherited Azure Monitor sampling to zero. | Human | 2026-09-04 |
+| 54 | Qualification deployment and output safety | App-setting remote build + free JSON paths / explicit remote build + fixed fields | Flex ZIP deploys use `--build-remote true`; the CLI emits only fixed, label-validated status/ID/URL/count/duration fields. | Human | 2026-09-07 |
 
 ## 6. Test plan
 

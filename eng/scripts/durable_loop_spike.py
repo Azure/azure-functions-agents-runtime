@@ -342,6 +342,8 @@ def deploy(args: argparse.Namespace) -> None:
             args.resource_group,
             "--src",
             str(archive_path),
+            "--build-remote",
+            "true",
         ),
         timeout_seconds=1200,
     )

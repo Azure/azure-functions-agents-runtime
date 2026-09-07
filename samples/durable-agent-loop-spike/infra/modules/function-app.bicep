@@ -117,7 +117,6 @@ resource functionAppSettings 'Microsoft.Web/sites/config@2024-11-01' = {
       ENABLE_SENSITIVE_DATA: string(enableSensitiveData)
       ENABLE_MULTIPLATFORM_BUILD: 'true'
       PYTHON_ENABLE_INIT_INDEXING: '1'
-      SCM_DO_BUILD_DURING_DEPLOYMENT: 'true'
     },
     {
       '${featureGateSettingName}': string(featureGateEnabled)

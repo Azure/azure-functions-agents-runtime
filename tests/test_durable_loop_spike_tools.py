@@ -135,6 +135,7 @@ def test_deploy_requires_exact_existing_app_acknowledgment(
 
     assert calls[0][:2] == ("functionapp", "show")
     assert calls[1][:4] == ("functionapp", "deployment", "source", "config-zip")
+    assert calls[1][-2:] == ("--build-remote", "true")
     assert all("appsettings" not in call for call in calls)
 
 
@@ -175,14 +176,12 @@ def test_route_templates_are_explicit_and_injection_safe() -> None:
 def test_response_selection_allows_only_control_metadata() -> None:
     body = json.dumps(
         {
-            "metadata": {
-                "run": "run-123",
-                "status": "Waiting",
-            },
+            "run_id": "run-123",
+            "status": "Waiting",
             "answer": "sensitive response body",
         }
     ).encode()
-    selections = parse_field_selections(("run_id=metadata.run", "status=metadata.status"))
+    selections = parse_field_selections(("run_id", "status"))
 
     assert select_response_fields(body, selections) == {
         "run_id": "run-123",
@@ -192,7 +191,37 @@ def test_response_selection_allows_only_control_metadata() -> None:
         QualificationRequestError,
         match="response_field_selection_invalid",
     ):
-        parse_field_selections(("answer=answer",))
+        parse_field_selections(("status=answer",))
+    with pytest.raises(
+        QualificationRequestError,
+        match="response_field_selection_invalid",
+    ):
+        parse_field_selections(("credential",))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error_kind"),
+    [
+        ("status", "sensitive response body", "status"),
+        ("run_id", "contains private content", "id"),
+        ("status_url", "https://user:credential@example.test/status", "url"),
+        ("completed_model_count", -1, "count"),
+        ("duration_ms", 999_999_999, "duration"),
+    ],
+)
+def test_response_selection_rejects_invalid_or_sensitive_values(
+    field: str,
+    value: object,
+    error_kind: str,
+) -> None:
+    with pytest.raises(
+        QualificationRequestError,
+        match=f"response_field_invalid:{error_kind}",
+    ):
+        select_response_fields(
+            json.dumps({field: value}).encode(),
+            parse_field_selections((field,)),
+        )
 
 
 def test_request_output_discards_unselected_response_body(
@@ -232,7 +261,7 @@ def test_request_output_discards_unselected_response_body(
         headers={"x-functions-key": "credential-material"},
         timeout_seconds=120,
         maximum_response_bytes=1024,
-        field_selections={},
+        field_selections=(),
     )
     rendered = render_result(result)
 
@@ -318,11 +347,18 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
     assert "^resp_[A-Za-z0-9]{16,160}$" in apim
     assert 'exists-action="delete"' in apim
     assert apim.count('<set-header name="api-key" exists-action="delete" />') == 3
+    assert apim.count('<set-query-parameter name="subscription-key" exists-action="delete" />') == 3
     assert "${modelBackend.name}" not in apim
     assert apim.count("__MODEL_BACKEND_NAME__") == 4
+    assert "resource modelControlAzureMonitorDiagnostic" in apim
+    assert "loggerId: azureMonitorLogger.id" in apim
+    assert "percentage: 0" in apim
     assert "resource modelControlDiagnostic" not in apim
+    assert apim.count("dataMasking:") == 4
+    assert apim.count("value: '*'") == 4
     assert "primaryKey:" not in apim
     assert "secondaryKey:" not in apim
+    assert "SCM_DO_BUILD_DURING_DEPLOYMENT" not in function_app
     assert local_settings["Values"]["AZURE_FUNCTIONS_AGENTS_APIM_SUBSCRIPTION_KEY"] == ""
     assert local_settings["Values"]["AZURE_FUNCTIONS_AGENTS_APIM_MODEL_CONTROL_URL"].endswith(
         "/durable-agent-loop-model-control"
