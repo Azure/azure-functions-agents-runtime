@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
+import azure.durable_functions as df
 import azure.functions as func
 from azurefunctions.extensions.http.fastapi import Request, Response
 
@@ -80,7 +81,7 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
 
     async def start_run(  # noqa: PLR0912
         req: Request,
-        client: Any,
+        client: df.DurableOrchestrationClient,
     ) -> Response:
         owner = _authorized_owner(req, auth)
         if isinstance(owner, Response):
@@ -241,7 +242,10 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
             )
         return _accepted_response(run_id, session_id)
 
-    async def get_status(req: Request, client: Any) -> Response:
+    async def get_status(
+        req: Request,
+        client: df.DurableOrchestrationClient,
+    ) -> Response:
         authorized = await _authorized_status(req, client, auth)
         if isinstance(authorized, Response):
             return authorized
@@ -275,7 +279,10 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
         body["session_id"] = durable_input.identity.session_id
         return _json_response(body)
 
-    async def get_result(req: Request, client: Any) -> Response:
+    async def get_result(
+        req: Request,
+        client: df.DurableOrchestrationClient,
+    ) -> Response:
         authorized = await _authorized_status(req, client, auth)
         if isinstance(authorized, Response):
             return authorized
@@ -308,7 +315,10 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
             }
         )
 
-    async def cancel_run(req: Request, client: Any) -> Response:
+    async def cancel_run(
+        req: Request,
+        client: df.DurableOrchestrationClient,
+    ) -> Response:
         authorized = await _authorized_status(req, client, auth)
         if isinstance(authorized, Response):
             return authorized
@@ -364,7 +374,7 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
 
     async def submit_human_input(  # noqa: PLR0912, PLR0915
         req: Request,
-        client: Any,
+        client: df.DurableOrchestrationClient,
     ) -> Response:
         authorized = await _authorized_status(req, client, auth)
         if isinstance(authorized, Response):
@@ -602,7 +612,10 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
             status_code=202,
         )
 
-    async def get_human_input(req: Request, client: Any) -> Response:
+    async def get_human_input(
+        req: Request,
+        client: df.DurableOrchestrationClient,
+    ) -> Response:
         authorized = await _authorized_status(req, client, auth)
         if isinstance(authorized, Response):
             return authorized

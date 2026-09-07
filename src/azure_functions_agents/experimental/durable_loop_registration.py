@@ -461,7 +461,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         activity=DURABLE_LOOP_MODEL_ACTIVITY_NAME,
     )
     async def durable_agent_model_step_v1(
-        payload: dict[str, object],
+        payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
         runtime = get_durable_loop_activity_runtime()
         reference = ContentRefV1.model_validate(payload["run_document_ref"])
@@ -570,7 +570,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         activity=DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME,
     )
     async def durable_agent_model_poll_v1(
-        payload: dict[str, object],
+        payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
         runtime = get_durable_loop_activity_runtime()
         if runtime.background_model is None:
@@ -630,7 +630,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         activity=DURABLE_LOOP_MODEL_CANCEL_ACTIVITY_NAME,
     )
     async def durable_agent_model_cancel_v1(
-        payload: dict[str, object],
+        payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
         runtime = get_durable_loop_activity_runtime()
         if runtime.background_model is None:
@@ -658,7 +658,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         activity=DURABLE_LOOP_CLEANUP_ACTIVITY_NAME,
     )
     async def durable_agent_cleanup_v1(
-        payload: dict[str, object],
+        payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
         runtime = get_durable_loop_activity_runtime()
         if isinstance(runtime.tools, DurableToolCleanupPort):
@@ -706,7 +706,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         activity=DURABLE_LOOP_FAULT_ACTIVITY_NAME,
     )
     async def durable_agent_fault_v1(
-        payload: dict[str, object],
+        payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
         runtime = get_durable_loop_activity_runtime()
         injected = False
@@ -723,7 +723,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         activity=DURABLE_LOOP_TOOL_ACTIVITY_NAME,
     )
     async def durable_agent_tool_step_v1(
-        payload: dict[str, object],
+        payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
         runtime = get_durable_loop_activity_runtime()
         request_ref = ContentRefV1.model_validate(payload["request_ref"])
@@ -809,7 +809,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         activity=DURABLE_LOOP_APPEND_ACTIVITY_NAME,
     )
     async def durable_agent_append_results_v1(
-        payload: dict[str, object],
+        payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
         runtime = get_durable_loop_activity_runtime()
         document_ref = ContentRefV1.model_validate(payload["run_document_ref"])
@@ -926,7 +926,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         activity=DURABLE_LOOP_HUMAN_ACTIVITY_NAME,
     )
     async def durable_agent_human_request_v1(
-        payload: dict[str, object],
+        payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
         runtime = get_durable_loop_activity_runtime()
         document_ref = ContentRefV1.model_validate(payload["run_document_ref"])
@@ -1015,7 +1015,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         activity=DURABLE_LOOP_HUMAN_RESULT_ACTIVITY_NAME,
     )
     async def durable_agent_human_result_v1(
-        payload: dict[str, object],
+        payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
         runtime = get_durable_loop_activity_runtime()
         document_ref = ContentRefV1.model_validate(payload["run_document_ref"])
@@ -1114,8 +1114,8 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         client_name="client"
     )
     async def durable_agent_human_delivery_v1(
-        payload: dict[str, object],
-        client: Any | None = None,
+        payload: dict,  # type: ignore[type-arg]
+        client: df.DurableOrchestrationClient,
     ) -> dict[str, object]:
         run_id = _required_string(payload, "run_id")
         event_name = _required_string(payload, "event_name")
@@ -1140,7 +1140,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         activity=DURABLE_LOOP_COMPACTION_ACTIVITY_NAME,
     )
     async def durable_agent_compact_context_v1(
-        payload: dict[str, object],
+        payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
         runtime = get_durable_loop_activity_runtime()
         reference = ContentRefV1.model_validate(payload["run_document_ref"])

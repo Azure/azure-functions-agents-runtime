@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from importlib.metadata import version
 from pathlib import Path
+from typing import get_type_hints
 
 import azure.durable_functions as df
 import pytest
@@ -142,6 +143,36 @@ def test_private_gate_registers_one_versioned_durable_blueprint(
         DURABLE_LOOP_COMPACTION_ACTIVITY_NAME,
     ):
         assert list(functions).count(name) == 1
+
+
+def test_registered_durable_binding_annotations_are_worker_compatible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    assert isinstance(app, df.DFApp)
+
+    activity_names = (
+        DURABLE_LOOP_MODEL_ACTIVITY_NAME,
+        DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME,
+        DURABLE_LOOP_MODEL_CANCEL_ACTIVITY_NAME,
+        DURABLE_LOOP_CLEANUP_ACTIVITY_NAME,
+        DURABLE_LOOP_FAULT_ACTIVITY_NAME,
+        DURABLE_LOOP_TOOL_ACTIVITY_NAME,
+        DURABLE_LOOP_APPEND_ACTIVITY_NAME,
+        DURABLE_LOOP_HUMAN_ACTIVITY_NAME,
+        DURABLE_LOOP_HUMAN_RESULT_ACTIVITY_NAME,
+        DURABLE_LOOP_HUMAN_DELIVERY_ACTIVITY_NAME,
+        DURABLE_LOOP_COMPACTION_ACTIVITY_NAME,
+    )
+    for name in activity_names:
+        handler = _registered_handler(app, name)
+        assert get_type_hints(handler)["payload"] is dict
+
+    delivery = _registered_handler(app, DURABLE_LOOP_HUMAN_DELIVERY_ACTIVITY_NAME)
+    assert get_type_hints(delivery)["client"] is str
 
 
 @pytest.mark.asyncio
