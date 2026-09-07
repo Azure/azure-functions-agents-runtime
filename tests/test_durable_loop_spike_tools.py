@@ -966,6 +966,58 @@ def test_poll_stops_on_completed_and_reports_aggregate_metrics(
     )
 
 
+def test_poll_retries_initial_run_not_found_within_startup_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        (
+            QualificationResult(
+                command="poll",
+                http_status=404,
+                latency_ms=5,
+                response_bytes=25,
+                selected_fields={"error_code": "run_not_found"},
+            ),
+            QualificationResult(
+                command="poll",
+                http_status=200,
+                latency_ms=10,
+                response_bytes=50,
+                selected_fields={"status": "Running"},
+            ),
+            QualificationResult(
+                command="poll",
+                http_status=200,
+                latency_ms=15,
+                response_bytes=60,
+                selected_fields={"status": "Completed"},
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        durable_loop_spike_qualification,
+        "perform_request",
+        lambda **_: next(responses),
+    )
+    clock = _FakeClock()
+
+    result = poll_status(
+        url="https://example.test/api/status/run-1",
+        headers={},
+        timeout_seconds=120,
+        maximum_response_bytes=1024,
+        interval_seconds=0.5,
+        deadline_seconds=10,
+        field_selections=(),
+        sleeper=clock.sleep,
+        clock=clock,
+    )
+
+    assert result.http_status == 200
+    assert result.attempts == 3
+    assert result.selected_fields == {"status": "Completed"}
+
+
 def test_poll_stops_on_waiting_and_exposes_only_safe_human_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

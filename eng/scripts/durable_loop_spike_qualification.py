@@ -31,6 +31,7 @@ _MIN_POLL_INTERVAL_SECONDS = 0.5
 _MAX_POLL_INTERVAL_SECONDS = 60.0
 _DEFAULT_POLL_DEADLINE_SECONDS = 600
 _MAX_POLL_DEADLINE_SECONDS = 6 * 60 * 60
+_POLL_STARTUP_GRACE_SECONDS = 60
 _MAX_POLL_ATTEMPTS = math.ceil(
     _MAX_POLL_DEADLINE_SECONDS / _MIN_POLL_INTERVAL_SECONDS
 )
@@ -879,6 +880,13 @@ def poll_status(
         response_bytes += result.response_bytes
         last_status = result.http_status
         last_fields = result.selected_fields
+        if (
+            result.http_status == 404
+            and result.selected_fields.get("error_code") == "run_not_found"
+            and elapsed_seconds < min(deadline_seconds, _POLL_STARTUP_GRACE_SECONDS)
+        ):
+            sleeper(min(interval_seconds, deadline_seconds - elapsed_seconds))
+            continue
         if not 200 <= result.http_status < 400:
             break
         status = result.selected_fields.get("status")
