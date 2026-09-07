@@ -94,7 +94,6 @@ resource functionAppSettings 'Microsoft.Web/sites/config@2024-11-01' = {
   name: 'appsettings'
   properties: union(
     {
-      FUNCTIONS_WORKER_RUNTIME: 'python'
       AzureWebJobsStorage__credential: 'managedidentity'
       AzureWebJobsStorage__clientId: functionIdentityClientId
       AzureWebJobsStorage__blobServiceUri: storageAccount.properties.primaryEndpoints.blob

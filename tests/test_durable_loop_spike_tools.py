@@ -1231,6 +1231,7 @@ def _assert_private_runtime_settings(
         assert values[setting] == value
     assert "param featureGateEnabled bool = false" in main
     assert "'${featureGateSettingName}': string(featureGateEnabled)" in function_app
+    assert "FUNCTIONS_WORKER_RUNTIME:" not in function_app
     assert host["functionTimeout"] == "00:30:00"
 
 
