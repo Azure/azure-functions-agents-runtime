@@ -29,6 +29,7 @@ param functionAppName string = 'func-durable-loop-0904'
 param sharedApimResourceGroupName string = 'larohra-operations-agent-3p-rg'
 param sharedApimServiceName string = 'larohra-ai-gateway'
 param modelApiName string = 'durable-agent-loop-model'
+param modelControlApiName string = 'durable-agent-loop-model-control'
 param mcpApiName string = 'durable-agent-loop-mcp'
 param apimProductName string = 'durable-agent-loop-spike'
 param apimSubscriptionName string = 'durable-agent-loop-spike'
@@ -159,6 +160,7 @@ module apim './modules/apim.bicep' = {
     applicationInsightsName: applicationInsightsName
     foundryAccountName: foundryAccountName
     modelApiName: modelApiName
+    modelControlApiName: modelControlApiName
     mcpApiName: mcpApiName
     productName: apimProductName
     subscriptionName: apimSubscriptionName
@@ -187,6 +189,7 @@ module functionApp './modules/function-app.bicep' = {
     foundryProjectEndpoint: 'https://${foundryAccountName}.services.ai.azure.com/api/projects/${foundryProjectName}'
     foundryModelDeploymentName: foundryModelDeploymentName
     apimModelBaseUrl: 'https://${sharedApimServiceName}.azure-api.net/${modelApiName}/openai/v1'
+    apimModelControlUrl: 'https://${sharedApimServiceName}.azure-api.net/${modelControlApiName}'
     apimMcpUrl: 'https://${sharedApimServiceName}.azure-api.net/${mcpApiName}'
     apimSubscriptionKey: sharedApimSubscription.listSecrets().primaryKey
     sandboxGroupResourceId: sandboxGroup.outputs.sandboxGroupResourceId
@@ -232,5 +235,6 @@ output AZURE_FUNCTION_NAME string = functionApp.outputs.functionAppName
 output FOUNDRY_PROJECT_ENDPOINT string = 'https://${foundryAccountName}.services.ai.azure.com/api/projects/${foundryProjectName}'
 output FOUNDRY_MODEL string = foundryModelDeploymentName
 output APIM_MODEL_BASE_URL string = 'https://${sharedApimServiceName}.azure-api.net/${modelApiName}/openai/v1'
+output APIM_MODEL_CONTROL_URL string = 'https://${sharedApimServiceName}.azure-api.net/${modelControlApiName}'
 output APIM_MCP_URL string = 'https://${sharedApimServiceName}.azure-api.net/${mcpApiName}'
 output SANDBOX_GROUP_RESOURCE_ID string = sandboxGroup.outputs.sandboxGroupResourceId

@@ -288,6 +288,7 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
     main = (sample / "infra/main.bicep").read_text(encoding="utf-8")
     apim = (sample / "infra/modules/apim.bicep").read_text(encoding="utf-8")
     function_app = (sample / "infra/modules/function-app.bicep").read_text(encoding="utf-8")
+    foundry = (sample / "infra/modules/foundry.bicep").read_text(encoding="utf-8")
     local_settings = json.loads(
         (sample / "src/local.settings.template.json").read_text(encoding="utf-8")
     )
@@ -299,21 +300,44 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
         "func-durable-loop-0904",
         "larohra-ai-gateway",
         "durable-agent-loop-model",
+        "durable-agent-loop-model-control",
         "durable-agent-loop-mcp",
     ):
         assert exact_name in main
     assert "sharedApimSubscription.listSecrets().primaryKey" in main
     assert "@secure()\nparam apimSubscriptionKey string" in function_app
+    assert "AZURE_FUNCTIONS_AGENTS_APIM_MODEL_CONTROL_URL" in function_app
+    assert "disableLocalAuth: true" in foundry
+    assert "urlTemplate: '/*'" not in apim
+    assert "name: 'responses-get'" not in apim
+    assert "name: 'responses-delete'" not in apim
+    assert "name: 'responses-poll'" in apim
+    assert "urlTemplate: '/responses'" in apim
+    assert "urlTemplate: '/responses/cancel'" in apim
+    assert 'name="x-af-response-id"' in apim
+    assert "^resp_[A-Za-z0-9]{16,160}$" in apim
+    assert 'exists-action="delete"' in apim
+    assert apim.count('<set-header name="api-key" exists-action="delete" />') == 3
+    assert "${modelBackend.name}" not in apim
+    assert apim.count("__MODEL_BACKEND_NAME__") == 4
+    assert "resource modelControlDiagnostic" not in apim
     assert "primaryKey:" not in apim
     assert "secondaryKey:" not in apim
     assert local_settings["Values"]["AZURE_FUNCTIONS_AGENTS_APIM_SUBSCRIPTION_KEY"] == ""
+    assert local_settings["Values"]["AZURE_FUNCTIONS_AGENTS_APIM_MODEL_CONTROL_URL"].endswith(
+        "/durable-agent-loop-model-control"
+    )
 
 
 def test_cleanup_is_exact_and_never_deletes_shared_apim_or_group() -> None:
     readme = Path("samples/durable-agent-loop-spike/README.md").read_text(encoding="utf-8")
 
     assert "$apimId/apis/durable-agent-loop-model" in readme
+    assert "$apimId/apis/durable-agent-loop-model-control" in readme
     assert "$apimId/apis/durable-agent-loop-mcp" in readme
     assert "$apimId/backends/durable-agent-loop-model" in readme
+    assert "83.527 seconds" in readme
+    assert "327.959 seconds" in readme
+    assert "Explicit server-side delete remains the primary completion path" in readme
     assert "az apim delete" not in readme
     assert "az group delete" not in readme

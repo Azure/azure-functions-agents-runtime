@@ -35,6 +35,7 @@ deliberately separate:
 | Flex app | `func-durable-loop-0904` |
 | Shared APIM | `larohra-ai-gateway` in `larohra-operations-agent-3p-rg` |
 | Model API | `https://larohra-ai-gateway.azure-api.net/durable-agent-loop-model/openai/v1` |
+| Model control API | `https://larohra-ai-gateway.azure-api.net/durable-agent-loop-model-control` |
 | MCP API | `https://larohra-ai-gateway.azure-api.net/durable-agent-loop-mcp` |
 
 The resource group receives only these tags:
@@ -101,6 +102,17 @@ The API-scoped Application Insights logger uses the secret APIM named value
 `durable-agent-loop-appinsights-key`. Its value is resolved directly from the
 Application Insights resource within the deployment; it is never an output or
 committed literal.
+
+The model API exposes only response creation and chat completions. Background
+response polling and cancellation use the separate model-control API. That API
+accepts the provider response ID only in `x-af-response-id`, validates the
+bounded `resp_` shape, stores it in a policy variable, deletes the header, and
+then rewrites to the fixed model backend. The control API has no APIM
+diagnostics because backend dependency names include the rewritten provider
+path and would disclose the response ID. Model-start/chat and MCP diagnostics
+remain API-scoped with zero request/response body bytes. All three inbound
+policies delete the APIM `api-key` subscription header before forwarding so it
+cannot be confused with or exposed as a backend model key.
 
 Local operators must supply inbound Function authentication through an
 environment variable. Do not place Function keys, APIM keys, prompts, answers,
@@ -210,6 +222,14 @@ answer bodies are capped at 256 KiB. Safe selectable output labels are limited
 to run/session/request IDs, status/phase, and control URLs. The default emits no
 response fields.
 
+## Sandbox lifecycle evidence
+
+A bounded live probe without explicit cleanup first observed the sandbox
+`Stopped` at **83.527 seconds** and absent from the group inventory at
+**327.959 seconds**. Timed stop/delete is a failure backstop, not normal prompt
+cleanup. Explicit server-side delete remains the primary completion path; the
+policy and reconciler cover interrupted or ambiguous cleanup.
+
 ## Resource inventory
 
 Inventory the dedicated group without reading app settings or secrets:
@@ -230,6 +250,7 @@ $apimId = az apim show `
   --query id --output tsv
 
 az resource show --ids "$apimId/apis/durable-agent-loop-model"
+az resource show --ids "$apimId/apis/durable-agent-loop-model-control"
 az resource show --ids "$apimId/apis/durable-agent-loop-mcp"
 az resource show --ids "$apimId/backends/durable-agent-loop-model"
 az resource show --ids "$apimId/products/durable-agent-loop-spike"
@@ -252,6 +273,7 @@ $workload = "/subscriptions/$subscriptionId/resourceGroups/larohra-durable-agent
 az resource delete --ids "$apimId/subscriptions/durable-agent-loop-spike"
 az resource delete --ids "$apimId/products/durable-agent-loop-spike"
 az resource delete --ids "$apimId/apis/durable-agent-loop-model"
+az resource delete --ids "$apimId/apis/durable-agent-loop-model-control"
 az resource delete --ids "$apimId/apis/durable-agent-loop-mcp"
 az resource delete --ids "$apimId/backends/durable-agent-loop-model"
 az resource delete --ids "$apimId/loggers/durable-agent-loop-ai"

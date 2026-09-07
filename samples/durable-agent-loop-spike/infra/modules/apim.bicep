@@ -3,6 +3,7 @@ param workloadResourceGroupName string
 param applicationInsightsName string
 param foundryAccountName string
 param modelApiName string
+param modelControlApiName string
 param mcpApiName string
 param productName string
 param subscriptionName string
@@ -12,16 +13,6 @@ param tokensPerMinute int
 
 var modelBackendUrl = 'https://${foundryAccountName}.services.ai.azure.com/'
 var mcpBackendUrl = 'https://learn.microsoft.com/api/mcp'
-var defaultMethods = [
-  'DELETE'
-  'GET'
-  'HEAD'
-  'OPTIONS'
-  'PATCH'
-  'POST'
-  'PUT'
-  'TRACE'
-]
 var applicationInsightsScope = resourceGroup(az.subscription().subscriptionId, workloadResourceGroupName)
 
 resource apimService 'Microsoft.ApiManagement/service@2024-05-01' existing = {
@@ -71,20 +62,6 @@ resource modelApi 'Microsoft.ApiManagement/service/apis@2024-05-01' = {
   }
 }
 
-resource modelDefaultOperations 'Microsoft.ApiManagement/service/apis/operations@2024-05-01' = [
-  for method in defaultMethods: {
-    parent: modelApi
-    name: '${toLower(method)}-default'
-    properties: {
-      displayName: '${toLower(method)}-default'
-      method: method
-      responses: []
-      templateParameters: []
-      urlTemplate: '/*'
-    }
-  }
-]
-
 resource chatCompletionsOperation 'Microsoft.ApiManagement/service/apis/operations@2024-05-01' = {
   parent: modelApi
   name: 'chat-completions'
@@ -109,71 +86,19 @@ resource responsesCreateOperation 'Microsoft.ApiManagement/service/apis/operatio
   }
 }
 
-resource responsesGetOperation 'Microsoft.ApiManagement/service/apis/operations@2024-05-01' = {
-  parent: modelApi
-  name: 'responses-get'
-  properties: {
-    displayName: 'responses-get'
-    method: 'GET'
-    responses: []
-    templateParameters: [
-      {
-        name: 'response_id'
-        required: true
-        type: 'string'
-      }
-    ]
-    urlTemplate: '/openai/v1/responses/{response_id}'
-  }
-}
-
-resource responsesCancelOperation 'Microsoft.ApiManagement/service/apis/operations@2024-05-01' = {
-  parent: modelApi
-  name: 'responses-cancel'
-  properties: {
-    displayName: 'responses-cancel'
-    method: 'POST'
-    responses: []
-    templateParameters: [
-      {
-        name: 'response_id'
-        required: true
-        type: 'string'
-      }
-    ]
-    urlTemplate: '/openai/v1/responses/{response_id}/cancel'
-  }
-}
-
-resource responsesDeleteOperation 'Microsoft.ApiManagement/service/apis/operations@2024-05-01' = {
-  parent: modelApi
-  name: 'responses-delete'
-  properties: {
-    displayName: 'responses-delete'
-    method: 'DELETE'
-    responses: []
-    templateParameters: [
-      {
-        name: 'response_id'
-        required: true
-        type: 'string'
-      }
-    ]
-    urlTemplate: '/openai/v1/responses/{response_id}'
-  }
-}
-
 resource modelApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = {
   parent: modelApi
   name: 'policy'
   properties: {
     format: 'rawxml'
     value: replace(
-      '''
+      replace(
+        '''
       <policies>
         <inbound>
           <base />
-          <set-backend-service backend-id="${modelBackend.name}" />
+          <set-header name="api-key" exists-action="delete" />
+          <set-backend-service backend-id="__MODEL_BACKEND_NAME__" />
           <llm-token-limit counter-key="@(context.Subscription.Id)" tokens-per-minute="__TOKENS_PER_MINUTE__" estimate-prompt-tokens="false" />
           <llm-emit-token-metric namespace="DurableAgentLoopSpike">
             <dimension name="API ID" />
@@ -192,8 +117,107 @@ resource modelApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-0
         </on-error>
       </policies>
     ''',
+        '__MODEL_BACKEND_NAME__',
+        modelBackend.name
+      ),
       '__TOKENS_PER_MINUTE__',
       string(tokensPerMinute)
+    )
+  }
+}
+
+resource modelControlApi 'Microsoft.ApiManagement/service/apis@2024-05-01' = {
+  parent: apimService
+  name: modelControlApiName
+  properties: {
+    apiRevision: '1'
+    description: 'Private bounded background response poll/cancel lane'
+    displayName: 'Durable agent loop model control'
+    path: modelControlApiName
+    protocols: [
+      'https'
+    ]
+    subscriptionKeyParameterNames: {
+      header: 'api-key'
+      query: 'subscription-key'
+    }
+    subscriptionRequired: true
+  }
+}
+
+resource controlResponsesPollOperation 'Microsoft.ApiManagement/service/apis/operations@2024-05-01' = {
+  parent: modelControlApi
+  name: 'responses-poll'
+  properties: {
+    displayName: 'responses-poll'
+    method: 'GET'
+    responses: []
+    templateParameters: []
+    urlTemplate: '/responses'
+  }
+}
+
+resource controlResponsesCancelOperation 'Microsoft.ApiManagement/service/apis/operations@2024-05-01' = {
+  parent: modelControlApi
+  name: 'responses-cancel'
+  properties: {
+    displayName: 'responses-cancel'
+    method: 'POST'
+    responses: []
+    templateParameters: []
+    urlTemplate: '/responses/cancel'
+  }
+}
+
+resource modelControlApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = {
+  parent: modelControlApi
+  name: 'policy'
+  properties: {
+    format: 'rawxml'
+    value: replace(
+      '''
+      <policies>
+        <inbound>
+          <base />
+          <set-header name="api-key" exists-action="delete" />
+          <check-header name="x-af-response-id" failed-check-httpcode="400" failed-check-error-message="Missing response identifier" ignore-case="false" />
+          <set-variable name="responseId" value="@(context.Request.Headers.GetValueOrDefault(&quot;x-af-response-id&quot;, &quot;&quot;))" />
+          <choose>
+            <when condition="@(!System.Text.RegularExpressions.Regex.IsMatch((string)context.Variables[&quot;responseId&quot;], &quot;^resp_[A-Za-z0-9]{16,160}$&quot;))">
+              <return-response>
+                <set-status code="400" reason="Invalid response identifier" />
+              </return-response>
+            </when>
+          </choose>
+          <set-backend-service backend-id="__MODEL_BACKEND_NAME__" />
+          <choose>
+            <when condition="@(context.Operation.Id == &quot;responses-poll&quot;)">
+              <rewrite-uri template="@(&quot;/openai/v1/responses/&quot; + (string)context.Variables[&quot;responseId&quot;])" copy-unmatched-params="false" />
+            </when>
+            <when condition="@(context.Operation.Id == &quot;responses-cancel&quot;)">
+              <rewrite-uri template="@(&quot;/openai/v1/responses/&quot; + (string)context.Variables[&quot;responseId&quot;] + &quot;/cancel&quot;)" copy-unmatched-params="false" />
+            </when>
+            <otherwise>
+              <return-response>
+                <set-status code="404" reason="Not Found" />
+              </return-response>
+            </otherwise>
+          </choose>
+          <set-header name="x-af-response-id" exists-action="delete" />
+        </inbound>
+        <backend>
+          <forward-request timeout="120" buffer-response="false" fail-on-error-status-code="true" />
+        </backend>
+        <outbound>
+          <base />
+        </outbound>
+        <on-error>
+          <base />
+        </on-error>
+      </policies>
+    ''',
+      '__MODEL_BACKEND_NAME__',
+      modelBackend.name
     )
   }
 }
@@ -251,6 +275,7 @@ resource mcpApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01'
       <policies>
         <inbound>
           <base />
+          <set-header name="api-key" exists-action="delete" />
           <rate-limit calls="120" renewal-period="60" />
         </inbound>
         <backend>
@@ -372,6 +397,11 @@ resource product 'Microsoft.ApiManagement/service/products@2024-05-01' = {
 resource modelProductAssociation 'Microsoft.ApiManagement/service/products/apis@2024-05-01' = {
   parent: product
   name: modelApi.name
+}
+
+resource modelControlProductAssociation 'Microsoft.ApiManagement/service/products/apis@2024-05-01' = {
+  parent: product
+  name: modelControlApi.name
 }
 
 resource mcpProductAssociation 'Microsoft.ApiManagement/service/products/apis@2024-05-01' = {

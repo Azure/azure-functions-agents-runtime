@@ -1567,6 +1567,7 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
 | 49 | Retained sandbox recovery | Trust attach error / inventory-first recreate / fail run | Query exact group inventory first; authoritative absence fences the generation, recreates, and restores the last external checkpoint. | Human + Agent | 2026-09-07 |
 | 50 | Human status privacy | Inline question / metadata plus owner detail route / omit status | Keep status content-free and expose question/choices/schema only through an owner-authorized GET on the existing human-input route. | Human | 2026-09-07 |
 | 51 | Authorized infrastructure names | Generated names / exact dedicated names / shared APIM mutation | Reproduce the authorized exact names; reuse shared APIM only through isolated child resources, never its global policy or existing APIs. | Human | 2026-09-04 |
+| 52 | APIM response-routing privacy | ID-bearing model routes / diagnostic control route / nondiagnostic control route | Keep model start/chat only; poll/cancel use a nondiagnostic control API, and strip response-ID plus APIM-key headers before backend forwarding. | Human | 2026-09-04 |
 
 ## 6. Test plan
 

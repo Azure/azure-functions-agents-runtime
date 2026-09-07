@@ -7,6 +7,7 @@
     "FOUNDRY_PROJECT_ENDPOINT": "https://aidurableloop0904e2.services.ai.azure.com/api/projects/durable-agent-loop",
     "FOUNDRY_MODEL": "gpt-6-astra",
     "AZURE_FUNCTIONS_AGENTS_APIM_MODEL_BASE_URL": "https://larohra-ai-gateway.azure-api.net/durable-agent-loop-model/openai/v1",
+    "AZURE_FUNCTIONS_AGENTS_APIM_MODEL_CONTROL_URL": "https://larohra-ai-gateway.azure-api.net/durable-agent-loop-model-control",
     "AZURE_FUNCTIONS_AGENTS_APIM_SUBSCRIPTION_KEY": "",
     "AZURE_FUNCTIONS_AGENTS_APIM_MODEL": "gpt-6-astra",
     "AZURE_FUNCTIONS_AGENTS_APIM_MCP_URL": "https://larohra-ai-gateway.azure-api.net/durable-agent-loop-mcp",

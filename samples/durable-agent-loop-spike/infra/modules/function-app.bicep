@@ -9,6 +9,7 @@ param applicationInsightsName string
 param foundryProjectEndpoint string
 param foundryModelDeploymentName string
 param apimModelBaseUrl string
+param apimModelControlUrl string
 param apimMcpUrl string
 
 @secure()
@@ -105,6 +106,7 @@ resource functionAppSettings 'Microsoft.Web/sites/config@2024-11-01' = {
       FOUNDRY_PROJECT_ENDPOINT: foundryProjectEndpoint
       FOUNDRY_MODEL: foundryModelDeploymentName
       AZURE_FUNCTIONS_AGENTS_APIM_MODEL_BASE_URL: apimModelBaseUrl
+      AZURE_FUNCTIONS_AGENTS_APIM_MODEL_CONTROL_URL: apimModelControlUrl
       AZURE_FUNCTIONS_AGENTS_APIM_MODEL: foundryModelDeploymentName
       AZURE_FUNCTIONS_AGENTS_APIM_MCP_URL: apimMcpUrl
       AZURE_FUNCTIONS_AGENTS_APIM_SUBSCRIPTION_KEY: apimSubscriptionKey
