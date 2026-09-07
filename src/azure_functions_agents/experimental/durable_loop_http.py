@@ -902,14 +902,21 @@ async def _authorized_status(
     if status is None:
         return _json_response({"error": "run_not_found"}, status_code=404)
     try:
-        durable_input = DurableOrchestrationInputV1.model_validate_json(
-            canonical_json_bytes(status.input)
-        )
+        durable_input = _durable_status_input(status.input)
     except Exception:
         return _json_response({"error": "run_not_found"}, status_code=404)
     if durable_input.identity.owner_hash != _owner_hash(owner):
         return _json_response({"error": "run_not_found"}, status_code=404)
     return status, durable_input
+
+
+def _durable_status_input(value: object) -> DurableOrchestrationInputV1:
+    """Parse the mapping or JSON-string input returned by the Durable client."""
+    if isinstance(value, str):
+        return DurableOrchestrationInputV1.model_validate_json(value)
+    return DurableOrchestrationInputV1.model_validate_json(
+        canonical_json_bytes(value)
+    )
 
 
 async def _run_short_orchestration(

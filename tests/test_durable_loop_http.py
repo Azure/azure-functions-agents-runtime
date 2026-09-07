@@ -678,6 +678,7 @@ async def test_human_input_route_uses_durable_outbox_and_server_event_name(
         "request_ref": request_ref.model_dump(mode="json"),
         "status": "Waiting",
     }
+    accepted_status.input = json.dumps(accepted_status.input)
     status_handler = _registered_function(
         durable_app,
         "durable_agent_run_status_v1",
