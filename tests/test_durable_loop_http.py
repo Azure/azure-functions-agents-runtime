@@ -79,6 +79,31 @@ def test_status_projection_maps_terminal_durable_runtime_states(
     assert projection["phase"] == expected_phase
 
 
+def test_status_projection_exposes_sanitized_ambiguous_outcome() -> None:
+    projection = _status_projection(
+        SimpleNamespace(
+            custom_status={"phase": "tool_step"},
+            instance_id="run-1",
+            output={
+                "disposition": "Ambiguous",
+                "error": "tool_outcome_ambiguous",
+                "possibly_committed": True,
+                "status": "Failed",
+            },
+            runtime_status=SimpleNamespace(name="Completed"),
+        )
+    )
+
+    assert projection == {
+        "disposition": "Ambiguous",
+        "error": "tool_outcome_ambiguous",
+        "phase": "tool_step",
+        "possibly_committed": True,
+        "run_id": "run-1",
+        "status": "Failed",
+    }
+
+
 def _write_agent(root: Path) -> None:
     (root / "main.agent.md").write_text(
         (

@@ -1081,36 +1081,19 @@ def _status_projection(status: Any) -> dict[str, object]:
     custom = status.custom_status if isinstance(status.custom_status, Mapping) else {}
     output = status.output if isinstance(status.output, Mapping) else {}
     runtime_status = _runtime_status_name(status)
-    projected = output.get("status")
-    if not isinstance(projected, str):
-        if custom.get("phase") == "human_wait":
-            projected = DurableLoopRunStatus.WAITING.value
-        elif runtime_status == "Pending":
-            projected = DurableLoopRunStatus.PENDING.value
-        elif runtime_status == "Completed":
-            projected = DurableLoopRunStatus.COMPLETED.value
-        elif runtime_status == "Failed":
-            projected = DurableLoopRunStatus.FAILED.value
-        elif runtime_status in {"Canceled", "Terminated"}:
-            projected = DurableLoopRunStatus.CANCELLED.value
-        else:
-            projected = DurableLoopRunStatus.RUNNING.value
-    phase = output.get("phase") or custom.get("phase")
-    if not isinstance(phase, str):
-        phase = (
-            "completed"
-            if runtime_status == "Completed"
-            else "cancellation"
-            if runtime_status in {"Canceled", "Terminated"}
-            else "run"
-            if runtime_status == "Failed"
-            else "durable"
-        )
     projection: dict[str, object] = {
-        "phase": phase,
+        "phase": _projected_phase(output, custom, runtime_status),
         "run_id": status.instance_id,
-        "status": projected,
+        "status": _projected_run_status(output, custom, runtime_status),
     }
+    error = output.get("error")
+    if isinstance(error, str):
+        projection["error"] = error
+    disposition = output.get("disposition")
+    if isinstance(disposition, str):
+        projection["disposition"] = disposition
+    if isinstance(output.get("possibly_committed"), bool):
+        projection["possibly_committed"] = output["possibly_committed"]
     for name in (
         "cost_microunits",
         "external_content_bytes",
@@ -1127,6 +1110,44 @@ def _status_projection(status: Any) -> dict[str, object]:
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             projection[name] = value
     return projection
+
+
+def _projected_run_status(
+    output: Mapping[str, object],
+    custom: Mapping[str, object],
+    runtime_status: str,
+) -> str:
+    projected = output.get("status")
+    if isinstance(projected, str):
+        return projected
+    if custom.get("phase") == "human_wait":
+        return DurableLoopRunStatus.WAITING.value
+    if runtime_status == "Pending":
+        return DurableLoopRunStatus.PENDING.value
+    if runtime_status == "Completed":
+        return DurableLoopRunStatus.COMPLETED.value
+    if runtime_status == "Failed":
+        return DurableLoopRunStatus.FAILED.value
+    if runtime_status in {"Canceled", "Terminated"}:
+        return DurableLoopRunStatus.CANCELLED.value
+    return DurableLoopRunStatus.RUNNING.value
+
+
+def _projected_phase(
+    output: Mapping[str, object],
+    custom: Mapping[str, object],
+    runtime_status: str,
+) -> str:
+    phase = output.get("phase") or custom.get("phase")
+    if isinstance(phase, str):
+        return phase
+    if runtime_status == "Completed":
+        return "completed"
+    if runtime_status in {"Canceled", "Terminated"}:
+        return "cancellation"
+    if runtime_status == "Failed":
+        return "run"
+    return "durable"
 
 
 def _optional_content_ref(value: object) -> ContentRefV1 | None:
