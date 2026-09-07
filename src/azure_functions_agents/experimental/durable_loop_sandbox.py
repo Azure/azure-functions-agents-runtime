@@ -653,7 +653,7 @@ class DurableAcaSandboxLane:
         try:
             lease = await InvocationSandboxLease.acquire(
                 self._settings,
-                maximum_run_seconds=self._loop_settings.max_elapsed_seconds,
+                maximum_run_seconds=self._loop_settings.local_tool_timeout_seconds,
                 session_id=request.session_id,
                 generation=generation,
                 owner_hash=request.owner_hash[:52],

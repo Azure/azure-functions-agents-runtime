@@ -557,8 +557,10 @@ async def test_retained_session_resumes_existing_inventory_without_restore(
     first_lease = _Lease(1)
     resumed_lease = _Lease(1)
     leases = [catalog_lease, first_lease]
+    maximum_run_seconds: list[float | None] = []
 
-    async def acquire(_cls, *_args, **_kwargs):
+    async def acquire(_cls, *_args, **kwargs):
+        maximum_run_seconds.append(kwargs.get("maximum_run_seconds"))
         return leases.pop(0)
 
     async def attach(_cls, *_args, **_kwargs):
@@ -609,6 +611,7 @@ async def test_retained_session_resumes_existing_inventory_without_restore(
     assert second.status is ToolResultStatus.SUCCEEDED
     assert resumed_lease.restored == []
     assert resumed_lease.retained == 1
+    assert maximum_run_seconds == [None, 300]
     assert not leases
 
 
