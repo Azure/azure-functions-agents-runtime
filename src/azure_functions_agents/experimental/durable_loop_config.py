@@ -90,6 +90,31 @@ DURABLE_LOOP_MAX_PARALLEL_READS_ENV = (
 DURABLE_LOOP_CONTINUE_AS_NEW_CHECKPOINTS_ENV = (
     "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTINUE_AS_NEW_CHECKPOINTS"
 )
+DURABLE_LOOP_BACKGROUND_MODEL_ENABLED_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_BACKGROUND_MODEL_ENABLED"
+)
+DURABLE_LOOP_RETAINED_SANDBOX_ENABLED_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RETAINED_SANDBOX_ENABLED"
+)
+DURABLE_LOOP_FAULT_INJECTION_ENABLED_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_FAULT_INJECTION_ENABLED"
+)
+DURABLE_LOOP_APIM_MODEL_CONTROL_BASE_URL_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_APIM_MODEL_CONTROL_URL"
+)
+DURABLE_LOOP_APIM_MCP_BASE_URL_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_APIM_MCP_URL"
+)
+DURABLE_LOOP_MAX_APP_OWNED_SANDBOXES_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_MAX_APP_OWNED_SANDBOXES"
+)
+DURABLE_LOOP_RETAINED_SANDBOX_AUTO_DELETE_SECONDS_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RETAINED_SANDBOX_"
+    "AUTO_DELETE_SECONDS"
+)
+DURABLE_LOOP_SANDBOX_REAPER_AGE_SECONDS_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_SANDBOX_REAPER_AGE_SECONDS"
+)
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
@@ -112,6 +137,9 @@ _DEFAULT_CONTEXT_MAX_BYTES = 4 * 1024 * 1024
 _DEFAULT_CONTEXT_COMPACTION_PERCENT = 75
 _DEFAULT_MAX_PARALLEL_READS = 4
 _DEFAULT_CONTINUE_AS_NEW_CHECKPOINTS = 20
+_DEFAULT_MAX_APP_OWNED_SANDBOXES = 10
+_DEFAULT_RETAINED_SANDBOX_AUTO_DELETE_SECONDS = 24 * 60 * 60
+_DEFAULT_SANDBOX_REAPER_AGE_SECONDS = 10 * 60
 
 
 class DurableLoopConfigurationError(RuntimeError):
@@ -143,6 +171,14 @@ class DurableLoopSettings:
     context_compaction_percent: int = _DEFAULT_CONTEXT_COMPACTION_PERCENT
     max_parallel_reads: int = _DEFAULT_MAX_PARALLEL_READS
     continue_as_new_checkpoints: int = _DEFAULT_CONTINUE_AS_NEW_CHECKPOINTS
+    background_model_enabled: bool = False
+    retained_sandbox_enabled: bool = False
+    fault_injection_enabled: bool = False
+    max_app_owned_sandboxes: int = _DEFAULT_MAX_APP_OWNED_SANDBOXES
+    retained_sandbox_auto_delete_seconds: int = (
+        _DEFAULT_RETAINED_SANDBOX_AUTO_DELETE_SECONDS
+    )
+    sandbox_reaper_age_seconds: int = _DEFAULT_SANDBOX_REAPER_AGE_SECONDS
     mixed_batch_repair_steps: int = 1
 
     @classmethod
@@ -304,6 +340,39 @@ class DurableLoopSettings:
                 _DEFAULT_CONTINUE_AS_NEW_CHECKPOINTS,
                 minimum=1,
                 maximum=100,
+            ),
+            background_model_enabled=_optional_bool(
+                source,
+                DURABLE_LOOP_BACKGROUND_MODEL_ENABLED_ENV,
+            ),
+            retained_sandbox_enabled=_optional_bool(
+                source,
+                DURABLE_LOOP_RETAINED_SANDBOX_ENABLED_ENV,
+            ),
+            fault_injection_enabled=_optional_bool(
+                source,
+                DURABLE_LOOP_FAULT_INJECTION_ENABLED_ENV,
+            ),
+            max_app_owned_sandboxes=_bounded_integer(
+                source,
+                DURABLE_LOOP_MAX_APP_OWNED_SANDBOXES_ENV,
+                _DEFAULT_MAX_APP_OWNED_SANDBOXES,
+                minimum=1,
+                maximum=64,
+            ),
+            retained_sandbox_auto_delete_seconds=_bounded_integer(
+                source,
+                DURABLE_LOOP_RETAINED_SANDBOX_AUTO_DELETE_SECONDS_ENV,
+                _DEFAULT_RETAINED_SANDBOX_AUTO_DELETE_SECONDS,
+                minimum=600,
+                maximum=7 * 24 * 60 * 60,
+            ),
+            sandbox_reaper_age_seconds=_bounded_integer(
+                source,
+                DURABLE_LOOP_SANDBOX_REAPER_AGE_SECONDS_ENV,
+                _DEFAULT_SANDBOX_REAPER_AGE_SECONDS,
+                minimum=60,
+                maximum=24 * 60 * 60,
             ),
         )
         settings.validate()

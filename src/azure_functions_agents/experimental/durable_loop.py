@@ -47,6 +47,7 @@ from .durable_loop_protocol import (
     MAX_HUMAN_QUESTION_BYTES,
     CheckpointStateV1,
     ContentRefV1,
+    DurableFaultProfile,
     DurableLoopBudgetV1,
     DurableLoopFinalResultV1,
     DurableLoopRunStatus,
@@ -64,6 +65,7 @@ from .durable_loop_protocol import (
     MAFMessageBundleV1,
     ModelDecisionEnvelopeV1,
     ModelToolCallV1,
+    SandboxExecutionProfile,
     ToolBehavior,
     ToolProvenance,
     ToolRequestV1,
@@ -168,6 +170,8 @@ class DurableLoopPlan:
     model: str
     api_version: str
     settings: DurableLoopSettings
+    sandbox_profile: SandboxExecutionProfile = SandboxExecutionProfile.PER_CALL
+    fault_profile: DurableFaultProfile = DurableFaultProfile.NONE
 
     def validate(self) -> None:
         """Reject unbounded or non-JSON model inputs before admission."""
@@ -617,6 +621,14 @@ class DurableLoopRunner:
                     "next_model_step": checkpoint.next_model_step + 1,
                     "checkpoints_in_generation": checkpoint.checkpoints_in_generation
                     + 1,
+                    "workspace_ref": next(
+                        (
+                            result.workspace_ref
+                            for result in reversed(tool_results)
+                            if result.workspace_ref is not None
+                        ),
+                        checkpoint.workspace_ref,
+                    ),
                 }
             )
             next_checkpoint = _roll_generation_if_quiescent(next_checkpoint, plan.settings)
@@ -660,6 +672,7 @@ class DurableLoopRunner:
             working_context=checkpoint.working_context,
             catalog=plan.catalog,
             model_settings=plan.model_settings,
+            fault_profile=plan.fault_profile,
             effective_active_deadline=(
                 checkpoint.identity.active_deadline
                 + timedelta(seconds=checkpoint.parked_seconds)
@@ -815,7 +828,7 @@ class DurableLoopRunner:
         compacted_checkpoint = checkpoint.model_copy(
             update={
                 "working_context": compacted,
-                "checkpoints_in_generation": checkpoint.checkpoints_in_generation + 1,
+                "checkpoints_in_generation": checkpoint.checkpoints_in_generation                 + 1,
             }
         )
         compacted_checkpoint = _roll_generation_if_quiescent(
@@ -1269,6 +1282,7 @@ def create_run_identity(
     tool_package_hash: str,
     policy_hash: str,
     settings: DurableLoopSettings,
+    execution_binding_hash: str | None = None,
     now: datetime | None = None,
     run_id: str | None = None,
 ) -> DurableRunIdentityV1:
@@ -1284,6 +1298,7 @@ def create_run_identity(
         agent_hash=agent_hash,
         catalog_hash=catalog_hash,
         deployment_hash=deployment_hash,
+        execution_binding_hash=execution_binding_hash,
         tool_package_hash=tool_package_hash,
         policy_hash=policy_hash,
         orchestration_version="durable_agent_turn_orchestrator_v1",
@@ -1398,10 +1413,16 @@ def build_tool_requests(
             policy_hash=plan.catalog.policy_hash,
             catalog_hash=plan.catalog.catalog_hash,
             package_hash=plan.catalog.package_hash,
+            workspace_ref=checkpoint.workspace_ref,
+            sandbox_profile=plan.sandbox_profile,
+            fault_profile=plan.fault_profile,
+            owner_hash=checkpoint.identity.owner_hash,
         )
         requests.append(
             ToolRequestV1(
                 run_id=checkpoint.identity.run_id,
+                session_id=checkpoint.identity.session_id,
+                owner_hash=checkpoint.identity.owner_hash,
                 step_index=checkpoint.next_model_step,
                 call_ordinal=ordinal,
                 provider_call_id=call.call_id,
@@ -1422,6 +1443,9 @@ def build_tool_requests(
                 policy_hash=plan.catalog.policy_hash,
                 catalog_hash=plan.catalog.catalog_hash,
                 package_hash=plan.catalog.package_hash,
+                workspace_ref=checkpoint.workspace_ref,
+                sandbox_profile=plan.sandbox_profile,
+                fault_profile=plan.fault_profile,
                 deadline=min(
                     checkpoint.identity.active_deadline
                     + timedelta(seconds=checkpoint.parked_seconds),

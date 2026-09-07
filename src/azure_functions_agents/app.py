@@ -693,6 +693,44 @@ def _register_private_durable_loop_routes(
     register_durable_loop_http_routes(app, resolved=main, settings=settings)
 
 
+def _register_private_durable_loop_reaper(
+    app: func.FunctionApp,
+    durable_settings: object | None,
+    hybrid_settings: object | None,
+) -> None:
+    if durable_settings is None or hybrid_settings is None:
+        return
+    from .experimental.durable_loop_config import DurableLoopSettings
+    from .experimental.durable_loop_reaper import (
+        DURABLE_LOOP_REAPER_SCHEDULE,
+        reap_durable_loop_sandboxes,
+    )
+    from .experimental.hybrid_config import HybridSandboxSettings
+
+    if not isinstance(durable_settings, DurableLoopSettings) or not isinstance(
+        hybrid_settings,
+        HybridSandboxSettings,
+    ):
+        raise TypeError("durable-loop reaper settings have invalid types")
+
+    async def reap_durable_loop_tool_sandboxes(
+        timer: func.TimerRequest,
+    ) -> None:
+        del timer
+        await reap_durable_loop_sandboxes(
+            settings=durable_settings,
+            sandbox_settings=hybrid_settings,
+        )
+
+    reap_durable_loop_tool_sandboxes.__name__ = (
+        "azure_functions_agents_durable_loop_reaper"
+    )
+    app.timer_trigger(
+        schedule=DURABLE_LOOP_REAPER_SCHEDULE,
+        arg_name="timer",
+    )(reap_durable_loop_tool_sandboxes)
+
+
 def _enabled_builtin_endpoint_names(builtin_endpoints: Any) -> list[str]:
     names: list[str] = []
     if builtin_endpoints.debug_chat_ui:
@@ -905,6 +943,11 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         app.function_name(name="azure_functions_agents_hybrid_reaper")(
             hybrid_reaper_function
         )
+    _register_private_durable_loop_reaper(
+        app,
+        durable_loop_settings,
+        hybrid_settings,
+    )
 
     # Emit structured indexing summary log
     indexing_summary = {

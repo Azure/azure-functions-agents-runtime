@@ -5,16 +5,22 @@ import pytest
 from azure_functions_agents.execution.aca_composition import compose_aca_application
 from azure_functions_agents.experimental.durable_loop_config import (
     DURABLE_LOOP_ACTIVITY_TIMEOUT_SECONDS_ENV,
+    DURABLE_LOOP_BACKGROUND_MODEL_ENABLED_ENV,
     DURABLE_LOOP_ENABLED_ENV,
+    DURABLE_LOOP_FAULT_INJECTION_ENABLED_ENV,
     DURABLE_LOOP_HUMAN_WAIT_SECONDS_ENV,
     DURABLE_LOOP_INPUT_COST_RATE_ENV,
     DURABLE_LOOP_LOCAL_TOOL_TIMEOUT_SECONDS_ENV,
+    DURABLE_LOOP_MAX_APP_OWNED_SANDBOXES_ENV,
     DURABLE_LOOP_MAX_COST_MICROUNITS_ENV,
     DURABLE_LOOP_MAX_RUN_WAIT_SECONDS_ENV,
     DURABLE_LOOP_MAX_TOTAL_TOKENS_ENV,
     DURABLE_LOOP_OUTPUT_COST_RATE_ENV,
     DURABLE_LOOP_POLL_INITIAL_SECONDS_ENV,
     DURABLE_LOOP_POLL_MAX_SECONDS_ENV,
+    DURABLE_LOOP_RETAINED_SANDBOX_AUTO_DELETE_SECONDS_ENV,
+    DURABLE_LOOP_RETAINED_SANDBOX_ENABLED_ENV,
+    DURABLE_LOOP_SANDBOX_REAPER_AGE_SECONDS_ENV,
     DurableLoopConfigurationError,
     DurableLoopSettings,
 )
@@ -36,6 +42,12 @@ def test_durable_loop_settings_parse_bounded_private_values() -> None:
             DURABLE_LOOP_OUTPUT_COST_RATE_ENV: "2000000",
             DURABLE_LOOP_POLL_INITIAL_SECONDS_ENV: "1.5",
             DURABLE_LOOP_POLL_MAX_SECONDS_ENV: "12",
+            DURABLE_LOOP_BACKGROUND_MODEL_ENABLED_ENV: "true",
+            DURABLE_LOOP_RETAINED_SANDBOX_ENABLED_ENV: "true",
+            DURABLE_LOOP_FAULT_INJECTION_ENABLED_ENV: "true",
+            DURABLE_LOOP_MAX_APP_OWNED_SANDBOXES_ENV: "7",
+            DURABLE_LOOP_RETAINED_SANDBOX_AUTO_DELETE_SECONDS_ENV: "7200",
+            DURABLE_LOOP_SANDBOX_REAPER_AGE_SECONDS_ENV: "900",
         }
     )
 
@@ -48,6 +60,12 @@ def test_durable_loop_settings_parse_bounded_private_values() -> None:
     assert settings.output_cost_microunits_per_million_tokens == 2_000_000
     assert settings.poll_initial_seconds == 1.5
     assert settings.poll_max_seconds == 12
+    assert settings.background_model_enabled is True
+    assert settings.retained_sandbox_enabled is True
+    assert settings.fault_injection_enabled is True
+    assert settings.max_app_owned_sandboxes == 7
+    assert settings.retained_sandbox_auto_delete_seconds == 7200
+    assert settings.sandbox_reaper_age_seconds == 900
 
 
 @pytest.mark.parametrize(

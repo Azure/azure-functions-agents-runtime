@@ -28,7 +28,9 @@ flowchart LR
     K -.->|"private hybrid gate: one invocation lease"| M["experimental/hybrid_tools.py<br/>ACA Sandbox local tools"]
     H -.->|"private durable-loop gate"| O["experimental/durable_loop_*<br/>Durable entity + explicit model/tool loop"]
     O -.->|"one-step Agent; auto tools disabled"| L
-    L -.->|"model + remote MCP only"| N["APIM"]
+    O -.->|"Responses create/get/cancel"| N["APIM model + control frontends"]
+    O -.->|"privileged HTTP MCP"| P["APIM MCP frontend"]
+    O -.->|"single-call or retained profile"| Q["Customer ACA Sandbox Group"]
 ```
 
 Read left to right: files on disk become typed config, typed config becomes a `ResolvedAgent`, the app-wide session runtime is validated before registration, and each resolved agent is registered as Azure Functions bindings plus optional built-in endpoints. The identity-index and catalog nodes exist for multi-agent delegation (FRD 0007, Section 5 below): every agent's slug and capabilities are indexed and frozen *before* `H` mutates the `FunctionApp`, so chat-time and workflow subagent grants can resolve any specialist regardless of file order.
@@ -63,18 +65,28 @@ A few boundaries are worth calling out explicitly:
   polling its LRO, and closes clients. Confirmed deletion and the app-scoped reaper remain failure
   backstops. This path is distinct from the conversation-scoped
   `AcaSandboxExecutionBackend` and adds no public authoring surface.
-- **The durable agent loop is a separate private foundation.** When
+- **The durable agent loop is a separate private execution path.** When
   `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_ENABLED=true`,
   startup selects `DFApp`, skips worker-side customer-tool and executable-skill
   discovery, registers one versioned Durable Entity/blueprint, and adds
   authenticated private start/status/result/cancel/human-input routes. The
   entity fences one active turn per owner/session and the orchestrator owns the
   model-step/tool-step alternation. Each model activity rebuilds a fresh MAF
-  `Agent` on core `1.17.0` with automatic function invocation disabled; tool
-  calls remain ordered data until an approved `DurableToolDispatchPort`
-  activity executes them. The local foundation includes deterministic fake
-  model/tool/content/state adapters, replay receipts, clarification CAS/outbox
-  semantics, context compaction, and background-response state contracts.
+  `Agent` on core `1.17.0` with automatic function invocation disabled. The
+  APIM model adapter sends foreground/background Responses creates through the
+  OpenAI-compatible model base, then uses fixed control-frontend
+  `GET /responses` and `POST /responses/cancel` calls carrying the validated
+  provider ID only in `x-af-response-id`. Provider IDs, provider bodies,
+  prompts, encrypted reasoning, call IDs, arguments, results, workspaces, and
+  receipts remain in the dedicated content Blob container.
+  Tool calls remain ordered data until an approved `DurableToolDispatchPort`
+  activity routes them: privileged remote MCP stays in the worker through the
+  APIM MCP frontend, while customer/local tools execute in ACA. The private
+  app-root `durable-loop-tools.json` file must bind every discovered non-runtime
+  tool to exact `local`/`remote` provenance and
+  `read_only`/`idempotent_write`/`mutating` behavior; only remote read-only
+  tools may be parallel-safe. Missing, unknown, colliding, or drifted entries
+  fail closed.
   Blank or incomplete provider results fail closed, provider identifiers are
   hashed or kept behind content refs, cancellation is fenced against final
   commit, ambiguous tool outcomes terminalize without model recovery, and
@@ -87,10 +99,21 @@ A few boundaries are worth calling out explicitly:
   and deployment bindings are revalidated per activity; cost caps require
   frozen pricing rates; per-call argument/result limits are enforced around
   dispatch; terminal idempotency receipts are retained until explicit expiry;
-  and external protocol JSON rejects duplicate keys.
-  Layer 2 replaces the transport adapters with APIM model/MCP and ACA
-  single-call wave implementations; normal `runner.py` execution is unchanged
-  when the gate is absent. While the gate is present, legacy chat, streaming,
+  and external protocol JSON rejects duplicate keys. ACA defaults to a fresh
+  create/restore/verify/execute/export/delete wave for each local call.
+  Separately gated retained sessions persist an attach manifest, exclusive
+  owner fence, capacity slot, generation, and last external workspace. Every
+  reuse first checks exact group inventory; authoritative absence fences the
+  old generation and recreates from the checkpoint instead of trusting an
+  attach error. Explicit cleanup, auto-delete, and the owner-filtered reaper
+  converge failed/cancelled/orphaned inventory toward zero.
+  The authenticated private starter can select `sandbox_profile=per_call` or,
+  behind a second gate, `retained_session`. A separately gated fixed
+  `fault_profile` enum drives deterministic one-shot qualification faults; no
+  arbitrary fault payload is accepted. Human-input status remains content-free
+  and links to an owner-authorized detail GET for question/schema content.
+  Normal `runner.py` execution is unchanged when the gate is absent. While the
+  gate is present, legacy chat, streaming,
   MCP-agent, declared-trigger, Dynamic Workflow, session-runtime, subagent, and
   executable-skill paths fail closed so one session cannot cross the
   process-local and Durable ownership models.
@@ -122,11 +145,18 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/experimental/durable_loop_protocol.py` | Strict Pydantic v2 schema-v1 contracts, canonical JSON/hashing, deterministic model/call/event keys, six run statuses, explicit ambiguous dispositions, MAF reasoning/call/result message bundles, working context, background operations, tool/human envelopes, checkpoints, and result/status projections. | `DurableRunIdentityV1`, `MAFMessageBundleV1`, `CheckpointStateV1`, `canonical_hash()` |
 | `azure_functions_agents/experimental/durable_loop.py` | Provider-neutral adaptive loop and local replay simulator. It owns deterministic budgets, ordered tool classification, policy-declared parallel reads, serialized writes, clarification repair, commit receipts, session continuity, cancellation, quiescent generation rollover, and fault-injection boundaries. | `DurableLoopRunner`, `DurableLoopPlan`, `create_run_identity()`, `build_tool_requests()` |
 | `azure_functions_agents/experimental/durable_loop_activities.py` | Activity-side one-step MAF adapter plus immutable content, compaction, resume, and background-response seams. `BlobDurableContentStore` uses commit-once block blobs and integrity refs; `MafOneStepModelProvider` constructs a fresh Agent with no session/history providers, forces `store=False` plus encrypted-reasoning capture, rejects continuation fields, and disables local function invocation before one inference. | `BlobDurableContentStore`, `MafOneStepModelProvider`, `BackgroundModelProvider`, `DeterministicContextCompactor` |
+| `azure_functions_agents/experimental/durable_loop_apim.py` | APIM-backed foreground/background Responses provider. It owns bounded retry classification, start/poll/cancel receipts, external provider-ID/body persistence, fixed control paths, backend affinity hashes, encrypted-reasoning parsing, and terminal-status mapping. | `ApimMafResponsesProvider`, `ApimResponsesTransport` |
+| `azure_functions_agents/experimental/durable_loop_catalog.py` | Strict private `durable-loop-tools.json` loader and exact discovery-policy binder. The runtime-owned clarification tool is injected after every non-runtime tool has a matching policy entry. | `load_durable_tool_policy()`, `freeze_durable_tool_catalog()` |
+| `azure_functions_agents/experimental/durable_loop_execution.py` | Worker composition for the trusted model/MCP plane and isolated ACA plane. It reconstructs and verifies the frozen catalog on each worker before dispatch. | `DurableExecutionPlaneRouter`, `build_durable_execution_plane()` |
+| `azure_functions_agents/experimental/durable_loop_mcp.py` | Privileged worker-side HTTP MCP initialization, catalog, invocation, receipt, cancellation, payload, and ambiguity lane through the APIM MCP origin. | `DurableRemoteMcpLane` |
+| `azure_functions_agents/experimental/durable_loop_receipts.py` | Dedicated-Blob keyed create/CAS/delete documents for activity receipts, capacity leases, retained fences, and deterministic one-shot fault consumption. | `BlobDurableKeyedDocumentStore`, `ActivityReceiptV1`, `DurableOneShotFaults` |
+| `azure_functions_agents/experimental/durable_loop_sandbox.py` | ACA single-call waves, optional retained-session ownership, capacity admission, exact inventory-loss recovery, immutable workspace restore/export, request-bound receipts, explicit cleanup, and ambiguous-write truth. | `DurableAcaSandboxLane`, `DurableSandboxCapacityCoordinator` |
+| `azure_functions_agents/experimental/durable_loop_reaper.py` | Owner-filtered authoritative inventory cleanup for expired per-call and retained durable sandboxes. | `reap_durable_loop_sandboxes()` |
 | `azure_functions_agents/experimental/durable_loop_state.py` | Session admission/fencing, first-answer CAS, idempotent commit receipt, committed-context continuity, and deterministic activity receipt ports. The in-memory implementations are test adapters; cross-instance registration uses the Durable Entity. | `DurableLoopStatePort`, `InMemoryDurableLoopStateStore`, `InMemoryActivityJournal` |
 | `azure_functions_agents/experimental/durable_loop_tools.py` | Typed tool catalog/dispatch port with reserved runtime clarification provenance and deterministic local fakes for reads, mutations, idempotent writes, timeouts, failures, and dedupe. Customer tools are never imported by the worker under the durable gate. | `DurableToolRegistry`, `DurableToolDispatchPort`, `human_input_tool_descriptor()` |
 | `azure_functions_agents/experimental/durable_loop_registration.py` | Versioned Durable Entity plus refs-only model/tool/append/human/compaction activities and adaptive orchestrator. Durable inputs, outputs, custom status, activity envelopes, entity state, and external-event payloads contain only bounded IDs, hashes, classifications, and `ContentRefV1`; full messages, instructions, arguments, results, and answers stay in immutable content blobs. Entity transitions own admission, cancellation facts, first-answer/timeout CAS, idempotent commit receipts, committed context, and active-run release. | `register_durable_loop_blueprint()`, `apply_session_entity_operation()` |
-| `azure_functions_agents/experimental/durable_loop_http.py` | Private authenticated HTTP starter and management routes. A short unique admission orchestration obtains the authoritative entity result before the main run starts; raw prompt/answer content is persisted before any Durable boundary. Start returns `202` with status/result/cancel URLs, duplicate requests return the recorded run, conflicts return `409`, and authorized status/result projections dereference content without copying it into Durable history. | `register_durable_loop_http_routes()` |
-| `azure_functions_agents/experimental/durable_loop_observability.py` | Content-free durable-loop progress events and low-cardinality operation/duration metrics for run, model, tool, human wait, replay, compaction, background poll, cancellation, and commit. | `record_durable_loop_event()`, `DurableLoopTimer` |
+| `azure_functions_agents/experimental/durable_loop_http.py` | Private authenticated HTTP starter and management routes. Start freezes the tool policy plus strict sandbox/fault profiles into the integrity binding. Status is content-free; pending human content is available only from the owner-authorized detail GET on the request route. | `register_durable_loop_http_routes()` |
+| `azure_functions_agents/experimental/durable_loop_observability.py` | Content-free durable-loop progress events and low-cardinality operation/duration metrics for run, model start/poll, tool queue, MCP, ACA capacity/create/restore/execute/export/delete, human wait, replay, retry, compaction, cancellation, cleanup, and commit. | `record_durable_loop_event()`, `DurableLoopTimer` |
 | `azure_functions_agents/session_state/_label_encoding.py` | Shared RFC 4648 base32 encoding (FRD 0008 Decision 106, precision in Decision 113) for every digest-derived label used by this package: lower-cases and strips `=` padding from a SHA-256 digest to a fixed 52-character payload, so `a1-`/`o1-`/`s1-` tokens are 55 characters total — inside ACA Sandbox's 63-character label limit — while preserving full 256-bit entropy (unlike truncating hex). One canonical shape is used everywhere: Table partition keys, manifests, paths, and ACA labels alike. | `encode_label_safe_digest()`, `LABEL_SAFE_PAYLOAD_PATTERN` |
 | `azure_functions_agents/session_state/identity.py` | Defines FRD 0008 P3a's pure, versioned Function App/slot and owner canonicalization: exact length-prefixed UTF-8 framing, portable `a1` identity (`subscription_id` + `site_name` + slot; no resource group / no SKU branches), `o1-` owner hashes (Decision 106: label-safe base32, not hex), historical-version verification without eager migration, fail-closed platform identity resolution, typed owner resolution (function/admin key ⇒ app-owned shared sessions; Easy Auth ⇒ per-user only when `tid`/`oid` are stable), server-minted IDs, and delimiter-safe durable row keys. App/agent rename changes identity space with no automatic migration in v1. It has no Azure SDK dependency and does not cross raw claims, function keys, or credentials into execution. | `resolve_function_app_identity()`, `resolve_owner_context()`, `compute_app_hash()`, `compute_owner_hash()`, `owner_partition()` |
 | `azure_functions_agents/session_state/session_models.py` | Defines FRD 0008's immutable Azure-SDK-neutral durable contract for the `AzureFunctionsAgentsSessions` table: owner partitions, session/run/hashed-idempotency rows, monotonic session operations, schema-v1 serialization, generation transition rules, per-status `active_run_id` lifecycle invariants, bounded snapshot-ID JSON, and same-partition EGT invariants. Every session stores `active_operation_id` (empty Table string means none) and a non-negative `operation_sequence`; either missing field fails closed. Each operation has one of three controller flow kinds, binds session/digest/generation/optional run and sandbox, and stores a stable provider label, token, lease schedule, and sanitized failure metadata. `state_store_fingerprint` is validated here as the same label-safe `s1-<52 base32>` shape (P3b/Decision 114 computes its actual bytes). P3b owns Table I/O/CAS/EGT; P4b captures/verifies the live sandbox manifest; P5a owns live region/current-storage-epoch freshness; P6 owns reconciliation. Renamed from `models.py` (P3b, mechanical `git mv`) to satisfy the repo-wide unique-intent-revealing-module-name convention shared with `transport/transport_models.py`. | `DurableSessionRecord`, `DurableRunRecord`, `DurableSessionOperation`, `SessionOperationTarget`, `ProvisionSubmitRecords`, `AdmissionRecords`, `encode_snapshot_ids()`, `validate_state_store_fingerprint()` |

@@ -150,11 +150,14 @@ runtime milestones rather than duplicating tool/model spans.
 
 ### Private durable-loop progress
 
-When the private FRD 0010 gate is enabled, the foundation adds
+When the private FRD 0010 gate is enabled, the runtime adds
 `durable_loop.progress` events through
 `experimental/durable_loop_observability.py`. The fixed phase vocabulary is
-`run`, `model_step`, `tool_step`, `human_wait`, `replay`, `compaction`,
-`background_poll`, `cancellation`, and `commit`; outcomes are similarly bounded.
+`run`, `model_step`, `model_start`, `model_poll`, `tool_step`, `tool_queue`,
+`mcp_call`, `sandbox_capacity_wait`, `sandbox_create`, `sandbox_restore`,
+`sandbox_execute`, `sandbox_export`, `sandbox_delete`, `human_wait`, `replay`,
+`retry`, `compaction`, `background_poll`, `cancellation`, `cleanup`, and
+`commit`; outcomes are similarly bounded.
 Events may include elapsed milliseconds and a fixed tool provenance, but never
 run/session/call IDs, prompts, reasoning, tool arguments/results, human
 questions/answers, content refs, backend IDs, or exception text.
@@ -162,6 +165,21 @@ The authorized polling status may additionally expose bounded numeric
 `input_tokens`, `output_tokens`, `reasoning_tokens`, `cost_microunits`,
 `external_content_bytes`, and `parked_seconds` counters. These values are not
 metric dimensions and contain no content or provider identifiers.
+
+The APIM model adapter measures synchronous model time and background
+start/poll time separately. The remote MCP lane records only the fixed remote
+provenance and outcome. ACA activities distinguish capacity wait, create,
+workspace restore, single-call execution, workspace export, explicit delete,
+and terminal cleanup. Retries use bounded classifications such as `model`,
+`apim_429`, or `sandbox`; provider response IDs, sandbox IDs, Blob object IDs,
+URLs, and SAS values are never dimensions.
+
+Pending clarification status is deliberately metadata-only:
+`request_id`, `expires_at`, `respond_url`, `detail_url`, `allow_free_text`,
+`choice_count`, and `schema_present`. The question, choices, and response
+schema are returned only by the authenticated owner-authorized detail GET at
+the fixed `detail_url`; they are never copied into Durable custom status or a
+progress event.
 
 ### Span `dynamic_session.execute`
 
@@ -289,7 +307,10 @@ Microsoft Agent Framework, **default off**.
   connection strings, and the ACA system key. Endpoints are reduced to host only. The `web_request`
   span never carries the full request URL (query string or userinfo stripped), request/response
   bodies, or header values — it is host/status/size metadata only, unaffected by
-  `ENABLE_SENSITIVE_DATA`.
+  `ENABLE_SENSITIVE_DATA`. Private durable-loop telemetry additionally forbids
+  provider response/call IDs, sandbox guest output, human answers, Blob paths,
+  content object IDs, SAS values, and the APIM `x-af-response-id` /
+  `x-af-call-key` headers even when sensitive-data capture is enabled.
 
 ## Noise & cost control
 

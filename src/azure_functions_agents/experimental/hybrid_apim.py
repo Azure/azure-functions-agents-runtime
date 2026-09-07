@@ -119,6 +119,7 @@ class HybridApimClientManager(ClientManager):
         self, model: str | None
     ) -> tuple[Any, InferenceTarget]:
         from agent_framework.openai import OpenAIChatClient
+        from openai import AsyncOpenAI
 
         resolved_model = self.resolve_model(model)
         headers: dict[str, str] = {}
@@ -127,11 +128,15 @@ class HybridApimClientManager(ClientManager):
             headers[HYBRID_APIM_KEY_HEADER] = self._subscription_key
         else:
             api_key = self._token_provider()
+        sdk = AsyncOpenAI(
+            api_key=api_key,
+            base_url=self._base_url,
+            default_headers=headers,
+            max_retries=0,
+        )
         client = OpenAIChatClient(
             model=resolved_model,
-            base_url=self._base_url,
-            api_key=api_key,
-            default_headers=headers,
+            async_client=sdk,
             middleware=[HybridModelTimingMiddleware()],
         )
         return client, self.resolve_inference_target(resolved_model)
@@ -161,6 +166,24 @@ class HybridApimClientManager(ClientManager):
             return token.token
 
         return get_token
+
+    @property
+    def model_base_url(self) -> str:
+        """Return the validated APIM OpenAI-compatible base URL."""
+        return self._base_url
+
+    async def request_headers(
+        self,
+        extra: Mapping[str, str] | None = None,
+    ) -> dict[str, str]:
+        """Build one APIM request's caller headers without logging credentials."""
+        headers = dict(extra or {})
+        if self._subscription_key is not None:
+            headers[HYBRID_APIM_KEY_HEADER] = self._subscription_key
+            return headers
+        token = await self._token_provider()()
+        headers["Authorization"] = f"Bearer {token}"
+        return headers
 
     async def close(self) -> None:
         if self._credential is None:

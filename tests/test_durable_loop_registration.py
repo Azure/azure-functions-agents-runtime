@@ -20,19 +20,27 @@ from azure_functions_agents.experimental.durable_loop_registration import (
     DURABLE_LOOP_ADMISSION_ORCHESTRATOR_NAME,
     DURABLE_LOOP_APPEND_ACTIVITY_NAME,
     DURABLE_LOOP_CANCEL_DELIVERY_ORCHESTRATOR_NAME,
+    DURABLE_LOOP_CLEANUP_ACTIVITY_NAME,
     DURABLE_LOOP_COMPACTION_ACTIVITY_NAME,
     DURABLE_LOOP_CONTROL_ORCHESTRATOR_NAME,
+    DURABLE_LOOP_FAULT_ACTIVITY_NAME,
     DURABLE_LOOP_HUMAN_ACTIVITY_NAME,
     DURABLE_LOOP_HUMAN_DELIVERY_ACTIVITY_NAME,
     DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME,
     DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME,
     DURABLE_LOOP_HUMAN_RESULT_ACTIVITY_NAME,
     DURABLE_LOOP_MODEL_ACTIVITY_NAME,
+    DURABLE_LOOP_MODEL_CANCEL_ACTIVITY_NAME,
+    DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME,
     DURABLE_LOOP_ORCHESTRATOR_NAME,
     DURABLE_LOOP_SESSION_ENTITY_NAME,
     DURABLE_LOOP_TOOL_ACTIVITY_NAME,
     _deliver_event_with_durable_client,
     apply_session_entity_operation,
+)
+from azure_functions_agents.experimental.hybrid_config import (
+    HYBRID_SANDBOX_GROUP_ENV,
+    HYBRID_SANDBOX_REGION_ENV,
 )
 
 
@@ -98,6 +106,10 @@ def test_private_gate_registers_one_versioned_durable_blueprint(
         "orchestrationTrigger"
     ]
     assert functions[DURABLE_LOOP_MODEL_ACTIVITY_NAME] == ["activityTrigger"]
+    assert functions[DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME] == ["activityTrigger"]
+    assert functions[DURABLE_LOOP_MODEL_CANCEL_ACTIVITY_NAME] == ["activityTrigger"]
+    assert functions[DURABLE_LOOP_CLEANUP_ACTIVITY_NAME] == ["activityTrigger"]
+    assert functions[DURABLE_LOOP_FAULT_ACTIVITY_NAME] == ["activityTrigger"]
     assert functions[DURABLE_LOOP_TOOL_ACTIVITY_NAME] == ["activityTrigger"]
     assert functions[DURABLE_LOOP_APPEND_ACTIVITY_NAME] == ["activityTrigger"]
     assert functions[DURABLE_LOOP_HUMAN_ACTIVITY_NAME] == ["activityTrigger"]
@@ -118,6 +130,10 @@ def test_private_gate_registers_one_versioned_durable_blueprint(
         DURABLE_LOOP_CANCEL_DELIVERY_ORCHESTRATOR_NAME,
         DURABLE_LOOP_CONTROL_ORCHESTRATOR_NAME,
         DURABLE_LOOP_MODEL_ACTIVITY_NAME,
+        DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME,
+        DURABLE_LOOP_MODEL_CANCEL_ACTIVITY_NAME,
+        DURABLE_LOOP_CLEANUP_ACTIVITY_NAME,
+        DURABLE_LOOP_FAULT_ACTIVITY_NAME,
         DURABLE_LOOP_TOOL_ACTIVITY_NAME,
         DURABLE_LOOP_APPEND_ACTIVITY_NAME,
         DURABLE_LOOP_HUMAN_ACTIVITY_NAME,
@@ -205,6 +221,34 @@ def test_gate_absent_registers_no_durable_loop_functions(tmp_path: Path) -> None
     app = app_module.create_function_app(tmp_path)
 
     assert not isinstance(app, df.DFApp)
+
+
+def test_durable_gate_with_aca_registers_owned_inventory_reaper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    monkeypatch.setenv(
+        HYBRID_SANDBOX_GROUP_ENV,
+        (
+            "/subscriptions/s/resourceGroups/r/providers/"
+            "Microsoft.App/sandboxGroups/g"
+        ),
+    )
+    monkeypatch.setenv(HYBRID_SANDBOX_REGION_ENV, "eastus2")
+    (tmp_path / "agents.config.yaml").write_text(
+        "system_tools:\n  web_request: false\n",
+        encoding="utf-8",
+    )
+    _write_agent(tmp_path)
+
+    app = app_module.create_function_app(tmp_path)
+
+    assert isinstance(app, df.DFApp)
+    functions = _registered_functions(app)
+    assert functions["azure_functions_agents_durable_loop_reaper"] == [
+        "timerTrigger"
+    ]
 
 
 def test_exact_durable_entity_wrapper_serializes_state_and_results(

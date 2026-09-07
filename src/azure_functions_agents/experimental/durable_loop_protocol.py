@@ -169,6 +169,25 @@ class BackgroundStartDisposition(StrEnum):
     LOST_ACKNOWLEDGEMENT = "lost_acknowledgement"
 
 
+class SandboxExecutionProfile(StrEnum):
+    """The private ACA lifecycle profile selected for one run."""
+
+    PER_CALL = "per_call"
+    RETAINED_SESSION = "retained_session"
+
+
+class DurableFaultProfile(StrEnum):
+    """A bounded deterministic live-qualification fault."""
+
+    NONE = "none"
+    MODEL_APIM_429_ONCE = "model_apim_429_once"
+    MODEL_TIMEOUT_ONCE = "model_timeout_once"
+    TOOL_ACTIVITY_ACK_LOSS_ONCE = "tool_activity_ack_loss_once"
+    SANDBOX_LOSS_AFTER_CHECKPOINT = "sandbox_loss_after_checkpoint"
+    CLEANUP_FAILURE_ONCE = "cleanup_failure_once"
+    COMMIT_ACK_LOSS_ONCE = "commit_ack_loss_once"
+
+
 class _DurableLoopModel(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
@@ -217,6 +236,7 @@ class DurableRunIdentityV1(_DurableLoopModel):
     agent_hash: _Sha256
     catalog_hash: _Sha256
     deployment_hash: _Sha256
+    execution_binding_hash: _Sha256 | None = None
     tool_package_hash: _Sha256
     policy_hash: _Sha256
     orchestration_version: Annotated[str, Field(min_length=1, max_length=64)]
@@ -255,6 +275,37 @@ class ContentRefV1(_DurableLoopModel):
         if "://" in lowered or "?" in lowered or "=" in lowered or "sig" in lowered:
             raise ValueError("content reference must not contain a URL or authorization material")
         return self
+
+
+class WorkspaceArtifactV1(_DurableLoopModel):
+    """One immutable sandbox workspace checkpoint and its frozen bindings."""
+
+    schema_version: SchemaVersion = DURABLE_LOOP_SCHEMA_VERSION
+    generation: _NonNegativeInt
+    archive_ref: ContentRefV1
+    parent_ref: ContentRefV1 | None = None
+    manifest_hash: _Sha256
+    package_hash: _Sha256
+    policy_hash: _Sha256
+    catalog_hash: _Sha256
+
+
+class SandboxLeaseV1(_DurableLoopModel):
+    """External-only retained sandbox binding with a fencing generation."""
+
+    schema_version: SchemaVersion = DURABLE_LOOP_SCHEMA_VERSION
+    run_id: _OpaqueId
+    session_id: _OpaqueId
+    generation: Annotated[int, Field(ge=1)]
+    sandbox_id_ref: ContentRefV1
+    group_binding_hash: _Sha256
+    manifest_hash: _Sha256
+    package_hash: _Sha256
+    policy_hash: _Sha256
+    catalog_hash: _Sha256
+    workspace_ref: ContentRefV1 | None = None
+    expires_at: datetime
+    owner_call_key: _Sha256 | None = None
 
 
 class MAFMessageBundleV1(_DurableLoopModel):
@@ -430,6 +481,8 @@ class ToolRequestV1(_DurableLoopModel):
 
     schema_version: SchemaVersion = DURABLE_LOOP_SCHEMA_VERSION
     run_id: _OpaqueId
+    session_id: _OpaqueId = "session-unknown"
+    owner_hash: _Sha256 = "0" * 64
     step_index: _NonNegativeInt
     call_ordinal: _NonNegativeInt
     provider_call_id: _OpaqueId
@@ -450,6 +503,9 @@ class ToolRequestV1(_DurableLoopModel):
     policy_hash: _Sha256
     catalog_hash: _Sha256
     package_hash: _Sha256
+    workspace_ref: ContentRefV1 | None = None
+    sandbox_profile: SandboxExecutionProfile = SandboxExecutionProfile.PER_CALL
+    fault_profile: DurableFaultProfile = DurableFaultProfile.NONE
     deadline: datetime
 
     @model_validator(mode="after")
@@ -467,6 +523,10 @@ class ToolRequestV1(_DurableLoopModel):
             policy_hash=self.policy_hash,
             catalog_hash=self.catalog_hash,
             package_hash=self.package_hash,
+            workspace_ref=self.workspace_ref,
+            sandbox_profile=self.sandbox_profile,
+            fault_profile=self.fault_profile,
+            owner_hash=self.owner_hash,
         )
         if self.request_hash != expected:
             raise ValueError("tool request hash mismatch")
@@ -492,6 +552,7 @@ class ToolResultV1(_DurableLoopModel):
     elapsed_ms: Annotated[float, Field(ge=0.0, le=86400000.0, allow_inf_nan=False)]
     error: ErrorEnvelopeV1 | None = None
     deduplicated: bool = False
+    workspace_ref: ContentRefV1 | None = None
 
     @model_validator(mode="after")
     def validate_result(self) -> Self:
@@ -652,6 +713,7 @@ class CheckpointStateV1(_DurableLoopModel):
     cost_microunits: _NonNegativeInt = 0
     parked_seconds: _NonNegativeInt = 0
     external_content_bytes: _NonNegativeInt = 0
+    workspace_ref: ContentRefV1 | None = None
     pending_human_request_id: _OpaqueId | None = None
     cancellation_requested: bool = False
     repair_steps_used: _NonNegativeInt = 0
@@ -724,6 +786,7 @@ class BackgroundStartResultV1(_DurableLoopModel):
     operation: ModelOperationV1 | None = None
     decision: ModelDecisionEnvelopeV1 | None = None
     error: ErrorEnvelopeV1 | None = None
+    written_bytes: _NonNegativeInt = 0
 
     @model_validator(mode="after")
     def validate_start_shape(self) -> Self:
@@ -750,6 +813,7 @@ class BackgroundPollResultV1(_DurableLoopModel):
     operation: ModelOperationV1 | None = None
     decision: ModelDecisionEnvelopeV1 | None = None
     error: ErrorEnvelopeV1 | None = None
+    written_bytes: _NonNegativeInt = 0
 
     @model_validator(mode="after")
     def validate_poll_shape(self) -> Self:
@@ -986,6 +1050,8 @@ class DurableLoopPlanDocumentV1(_DurableLoopModel):
     model: Annotated[str, Field(min_length=1, max_length=256)]
     api_version: Annotated[str, Field(min_length=1, max_length=64)]
     settings: dict[str, object]
+    sandbox_profile: SandboxExecutionProfile = SandboxExecutionProfile.PER_CALL
+    fault_profile: DurableFaultProfile = DurableFaultProfile.NONE
 
     @model_validator(mode="after")
     def validate_plan_json(self) -> Self:
@@ -1030,6 +1096,8 @@ class DurableOrchestrationInputV1(_DurableLoopModel):
     working_context_bytes: _NonNegativeInt = 0
     last_compacted_step: _NonNegativeInt | None = None
     repair_steps_used: _NonNegativeInt = 0
+    sandbox_profile: SandboxExecutionProfile = SandboxExecutionProfile.PER_CALL
+    fault_profile: DurableFaultProfile = DurableFaultProfile.NONE
 
     @model_validator(mode="after")
     def validate_envelope_size(self) -> Self:
@@ -1058,6 +1126,11 @@ class ModelStepActivityResultV1(_DurableLoopModel):
     run_document_ref: ContentRefV1
     step_index: _NonNegativeInt
     final_response_ref: ContentRefV1 | None = None
+    background_operation_ref: ContentRefV1 | None = None
+    poll_after_seconds: Annotated[
+        float,
+        Field(ge=0.1, le=300.0, allow_inf_nan=False),
+    ] | None = None
     tool_calls: Annotated[tuple[ToolDispatchRefV1, ...], Field(max_length=128)] = ()
     error: ErrorEnvelopeV1 | None = None
     usage: UsageV1 = UsageV1()
@@ -1068,6 +1141,7 @@ class ModelStepActivityResultV1(_DurableLoopModel):
         outcomes = sum(
             (
                 self.final_response_ref is not None,
+                self.background_operation_ref is not None,
                 bool(self.tool_calls),
                 self.error is not None,
             )
@@ -1075,6 +1149,12 @@ class ModelStepActivityResultV1(_DurableLoopModel):
         if outcomes != 1:
             raise ValueError(
                 "model-step result must contain final response, tool calls, or error"
+            )
+        if (self.background_operation_ref is None) != (
+            self.poll_after_seconds is None
+        ):
+            raise ValueError(
+                "background operation results must include a polling delay"
             )
         _assert_envelope_size(self)
         return self
@@ -1169,6 +1249,10 @@ def tool_request_hash(
     policy_hash: str,
     catalog_hash: str,
     package_hash: str,
+    workspace_ref: ContentRefV1 | None = None,
+    sandbox_profile: SandboxExecutionProfile = SandboxExecutionProfile.PER_CALL,
+    fault_profile: DurableFaultProfile = DurableFaultProfile.NONE,
+    owner_hash: str = "0" * 64,
 ) -> str:
     """Bind a call key to exact arguments and immutable routing policy."""
     return canonical_hash(
@@ -1178,10 +1262,18 @@ def tool_request_hash(
             "behavior": behavior.value,
             "catalog_hash": catalog_hash,
             "package_hash": package_hash,
+            "owner_hash": owner_hash,
             "policy_hash": policy_hash,
             "provenance": provenance.value,
             "result_byte_limit": result_byte_limit,
+            "sandbox_profile": sandbox_profile.value,
+            "fault_profile": fault_profile.value,
             "tool_name": tool_name,
+            "workspace_ref": (
+                workspace_ref.model_dump(mode="json")
+                if workspace_ref is not None
+                else None
+            ),
         }
     )
 

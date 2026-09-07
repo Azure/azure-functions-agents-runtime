@@ -63,6 +63,9 @@ MAX_SEARCH_RESULTS = 100
 MAX_SEARCH_CANDIDATES = 10_000
 MAX_CALL_SECONDS = 30.0
 POLL_INTERVAL_SECONDS = 0.05
+MAX_WORKSPACE_ARCHIVE_BYTES = 32 * 1024 * 1024
+MAX_WORKSPACE_FILE_BYTES = 8 * 1024 * 1024
+MAX_WORKSPACE_MEMBERS = 8192
 
 _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 _APP_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -261,6 +264,58 @@ def securely_extract_application_archive(archive: Path, extraction_root: Path) -
                             "application archive member exceeds the byte limit"
                         )
                     output.write(chunk)
+
+
+def restore_workspace_archive(
+    archive: Path,
+    workspace_root: Path,
+    expected_digest: str,
+) -> None:
+    """Restore one integrity-bound workspace archive into an empty root."""
+    if archive.stat().st_size > MAX_WORKSPACE_ARCHIVE_BYTES:
+        raise ExecutorProtocolError("workspace archive exceeds the byte limit")
+    _verify_application_archive_digest(archive, expected_digest)
+    securely_extract_application_archive(archive, workspace_root)
+
+
+def export_workspace_archive(workspace_root: Path, archive: Path) -> str:
+    """Export a bounded symlink-free workspace as a deterministic ZIP."""
+    root = workspace_root.resolve(strict=True)
+    members = sorted(root.rglob("*"), key=lambda item: item.as_posix())
+    if len(members) > MAX_WORKSPACE_MEMBERS:
+        raise ExecutorProtocolError("workspace contains too many members")
+    total = 0
+    with zipfile.ZipFile(
+        archive,
+        "w",
+        compression=zipfile.ZIP_STORED,
+        allowZip64=False,
+    ) as output:
+        for path in members:
+            relative = path.relative_to(root).as_posix()
+            stat_result = path.lstat()
+            if stat.S_ISLNK(stat_result.st_mode):
+                raise ExecutorProtocolError("workspace contains a symbolic link")
+            if path.is_dir():
+                info = zipfile.ZipInfo(f"{relative}/")
+                info.external_attr = (stat.S_IFDIR | 0o755) << 16
+                output.writestr(info, b"")
+                continue
+            if not path.is_file() or not stat.S_ISREG(stat_result.st_mode):
+                raise ExecutorProtocolError("workspace contains a special file")
+            if stat_result.st_size > MAX_WORKSPACE_FILE_BYTES:
+                raise ExecutorProtocolError("workspace file exceeds the byte limit")
+            total += stat_result.st_size
+            if total > MAX_WORKSPACE_ARCHIVE_BYTES:
+                raise ExecutorProtocolError("workspace exceeds the byte limit")
+            info = zipfile.ZipInfo(relative)
+            info.external_attr = (stat.S_IFREG | 0o644) << 16
+            output.writestr(info, path.read_bytes())
+    if archive.stat().st_size > MAX_WORKSPACE_ARCHIVE_BYTES:
+        archive.unlink(missing_ok=True)
+        raise ExecutorProtocolError("workspace archive exceeds the byte limit")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    return f"sha256:{digest}"
 
 
 def _validated_archive_member(member: zipfile.ZipInfo) -> PurePosixPath:
@@ -841,7 +896,7 @@ def _copy_request_arguments(request: dict[str, object]) -> dict[str, object]:
     return dict(arguments)
 
 
-def _parse_request(payload: bytes) -> dict[str, object]:
+def _parse_request(payload: bytes) -> dict[str, object]:  # noqa: PLR0912
     if len(payload) > MAX_REQUEST_BYTES:
         raise ExecutorProtocolError("request exceeds the byte limit")
     try:
@@ -852,7 +907,7 @@ def _parse_request(payload: bytes) -> dict[str, object]:
         raise ExecutorProtocolError("request is not valid JSON") from exc
     if not isinstance(decoded, dict):
         raise ExecutorProtocolError("request must be a JSON object")
-    expected = {
+    required = {
         "arguments",
         "call_id",
         "deadline_unix_seconds",
@@ -861,8 +916,10 @@ def _parse_request(payload: bytes) -> dict[str, object]:
         "tool_name",
         "traceparent",
     }
-    if set(decoded) != expected:
+    fields = set(decoded)
+    if not required <= fields or fields - required not in (set(), {"request_hash"}):
         raise ExecutorProtocolError("request fields are invalid")
+    decoded.setdefault("request_hash", None)
     if decoded["protocol_version"] != PROTOCOL_VERSION:
         raise ExecutorProtocolError("request protocol version is unsupported")
     call_id = decoded["call_id"]
@@ -871,6 +928,7 @@ def _parse_request(payload: bytes) -> dict[str, object]:
     traceparent = decoded["traceparent"]
     deadline = decoded["deadline_unix_seconds"]
     arguments = decoded["arguments"]
+    request_hash = decoded["request_hash"]
     if not isinstance(call_id, str) or not _CALL_ID.fullmatch(call_id):
         raise ExecutorProtocolError("request call identifier is invalid")
     if not isinstance(tool_name, str) or not _TOOL_NAME.fullmatch(tool_name):
@@ -890,6 +948,11 @@ def _parse_request(payload: bytes) -> dict[str, object]:
         raise ExecutorProtocolError("request deadline is invalid")
     if not isinstance(arguments, dict):
         raise ExecutorProtocolError("request arguments must be an object")
+    if request_hash is not None and (
+        not isinstance(request_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", request_hash) is None
+    ):
+        raise ExecutorProtocolError("request hash is invalid")
     _assert_json_value(arguments)
     if len(_canonical_json_bytes(arguments)) > MAX_ARGUMENT_BYTES:
         raise ExecutorProtocolError("request arguments exceed the byte limit")
@@ -1020,8 +1083,13 @@ async def _await_tool_result(value: Any) -> object:
     return await value
 
 
-def _base_result(call_id: str, tool_name: str, queue_wait_ms: float) -> dict[str, object]:
-    return {
+def _base_result(
+    call_id: str,
+    tool_name: str,
+    queue_wait_ms: float,
+    request_hash: str | None = None,
+) -> dict[str, object]:
+    result: dict[str, object] = {
         "call_id": call_id,
         "error": None,
         "exit_code": None,
@@ -1037,6 +1105,9 @@ def _base_result(call_id: str, tool_name: str, queue_wait_ms: float) -> dict[str
         "tool_name": tool_name,
         "value": None,
     }
+    if request_hash is not None:
+        result["request_hash"] = request_hash
+    return result
 
 
 def _error_result(
@@ -1045,9 +1116,13 @@ def _error_result(
     code: str,
     message: str,
     queue_wait_ms: float,
+    request_hash: str | None = None,
 ) -> dict[str, object]:
     result = _base_result(
-        call_id, tool_name if _TOOL_NAME.fullmatch(tool_name) else "invalid_request", queue_wait_ms
+        call_id,
+        tool_name if _TOOL_NAME.fullmatch(tool_name) else "invalid_request",
+        queue_wait_ms,
+        request_hash,
     )
     result["status"] = "error"
     result["error"] = {
@@ -1066,13 +1141,16 @@ def _cap_utf8_text(value: str, maximum_bytes: int = MAX_STREAM_BYTES) -> str:
     return (encoded[: maximum_bytes - len(marker)] + marker).decode("utf-8", errors="ignore")
 
 
-def _execute_request(
+def _execute_request(  # noqa: PLR0912
     request: dict[str, object],
     tools: dict[str, _SandboxTool],
     queue_wait_ms: float,
 ) -> dict[str, object]:
     call_id = str(request["call_id"])
     tool_name = str(request["tool_name"])
+    request_hash = request.get("request_hash")
+    if request_hash is not None and not isinstance(request_hash, str):
+        raise ExecutorProtocolError("request hash is invalid")
     deadline_value = request["deadline_unix_seconds"]
     if not isinstance(deadline_value, int | float) or isinstance(deadline_value, bool):
         raise ExecutorProtocolError("request deadline is invalid")
@@ -1080,11 +1158,13 @@ def _execute_request(
     if deadline <= time.time():
         return _error_result(
             call_id, tool_name, "deadline_exceeded", "Tool deadline elapsed.", queue_wait_ms
+            , request_hash
         )
     tool = tools.get(tool_name)
     if tool is None:
         return _error_result(
             call_id, tool_name, "unknown_tool", "Requested tool is not available.", queue_wait_ms
+            , request_hash
         )
     started = time.monotonic()
     try:
@@ -1111,14 +1191,35 @@ def _execute_request(
             exit_code = None
         _assert_value_size(safe_value)
     except ExecutorDeadlineError as exc:
-        result = _error_result(call_id, tool_name, "tool_timeout", str(exc), queue_wait_ms)
+        result = _error_result(
+            call_id,
+            tool_name,
+            "tool_timeout",
+            str(exc),
+            queue_wait_ms,
+            request_hash,
+        )
         result["stdout"] = _cap_utf8_text(exc.stdout)
         result["stderr"] = _cap_utf8_text(exc.stderr)
         result["exit_code"] = exc.exit_code
     except ExecutorProtocolError as exc:
-        result = _error_result(call_id, tool_name, "invalid_tool_result", str(exc), queue_wait_ms)
+        result = _error_result(
+            call_id,
+            tool_name,
+            "invalid_tool_result",
+            str(exc),
+            queue_wait_ms,
+            request_hash,
+        )
     except ExecutorToolError as exc:
-        result = _error_result(call_id, tool_name, "tool_error", str(exc), queue_wait_ms)
+        result = _error_result(
+            call_id,
+            tool_name,
+            "tool_error",
+            str(exc),
+            queue_wait_ms,
+            request_hash,
+        )
         result["stdout"] = _cap_utf8_text(exc.stdout)
         result["stderr"] = _cap_utf8_text(exc.stderr)
     except Exception as exc:
@@ -1128,9 +1229,10 @@ def _execute_request(
             "tool_error",
             f"{type(exc).__name__}: {exc}",
             queue_wait_ms,
+            request_hash,
         )
     else:
-        result = _base_result(call_id, tool_name, queue_wait_ms)
+        result = _base_result(call_id, tool_name, queue_wait_ms, request_hash)
         result["value"] = safe_value
         result["stdout"] = _cap_utf8_text(stdout)
         result["stderr"] = _cap_utf8_text(stderr)
@@ -1283,19 +1385,63 @@ def run_executor(
 
 def _argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--app-zip", required=True, type=Path)
-    parser.add_argument("--app-digest", required=True)
-    parser.add_argument("--extraction-root", required=True, type=Path)
-    parser.add_argument("--journal-root", required=True, type=Path)
+    parser.add_argument("--app-zip", type=Path)
+    parser.add_argument("--app-digest")
+    parser.add_argument("--extraction-root", type=Path)
+    parser.add_argument("--journal-root", type=Path)
     parser.add_argument("--workspace-root", required=True, type=Path)
+    parser.add_argument("--workspace-archive", type=Path)
+    parser.add_argument("--workspace-digest")
+    parser.add_argument(
+        "--workspace-operation",
+        choices=("export", "restore"),
+    )
     parser.add_argument("--poll-interval", default=POLL_INTERVAL_SECONDS, type=float)
     return parser
+
+
+def _run_workspace_operation(options: argparse.Namespace) -> bool:
+    if options.workspace_operation == "export":
+        if options.workspace_archive is None:
+            raise ExecutorProtocolError("workspace export path is required")
+        print(
+            export_workspace_archive(
+                options.workspace_root,
+                options.workspace_archive,
+            )
+        )
+        return True
+    if options.workspace_operation == "restore":
+        if options.workspace_archive is None or not options.workspace_digest:
+            raise ExecutorProtocolError(
+                "workspace restore archive and digest are required"
+            )
+        restore_workspace_archive(
+            options.workspace_archive,
+            options.workspace_root,
+            options.workspace_digest,
+        )
+        return True
+    return False
+
+
+def _require_startup_options(options: argparse.Namespace) -> None:
+    if (
+        options.app_zip is None
+        or not options.app_digest
+        or options.extraction_root is None
+        or options.journal_root is None
+    ):
+        raise ExecutorProtocolError("executor startup paths are required")
 
 
 def main(arguments: list[str] | None = None) -> int:
     """Run the standalone sandbox executor."""
     options = _argument_parser().parse_args(arguments)
     try:
+        if _run_workspace_operation(options):
+            return 0
+        _require_startup_options(options)
         run_executor(
             options.app_zip,
             options.app_digest,
@@ -1306,6 +1452,8 @@ def main(arguments: list[str] | None = None) -> int:
         )
     except Exception as exc:
         with contextlib.suppress(Exception):
+            if options.journal_root is None:
+                raise
             options.journal_root.mkdir(parents=True, exist_ok=True)
             _atomic_write(
                 options.journal_root / STARTUP_FAILURE_FILENAME,

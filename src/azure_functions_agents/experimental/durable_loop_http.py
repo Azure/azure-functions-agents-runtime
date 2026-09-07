@@ -29,6 +29,7 @@ from .durable_loop_config import DurableLoopSettings
 from .durable_loop_protocol import (
     CheckpointStateV1,
     ContentRefV1,
+    DurableFaultProfile,
     DurableLoopPlanDocumentV1,
     DurableLoopRunStatus,
     DurableOrchestrationInputV1,
@@ -38,6 +39,7 @@ from .durable_loop_protocol import (
     HumanInputResponseV1,
     HumanResponseDisposition,
     MAFMessageBundleV1,
+    SandboxExecutionProfile,
     WorkingContextV1,
     canonical_hash,
     validate_human_response_value,
@@ -50,9 +52,10 @@ from .durable_loop_registration import (
     DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME,
     DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME,
     DURABLE_LOOP_ORCHESTRATOR_NAME,
+    configure_durable_loop_execution_binding,
     get_durable_loop_activity_runtime,
 )
-from .durable_loop_tools import DurableToolRegistry
+from .durable_loop_tools import DurableToolCatalogPort
 
 _ROUTE_BASE = "experimental/durable-agent-runs"
 _SHORT_WAIT_SECONDS = 5.0
@@ -68,6 +71,10 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
     settings: DurableLoopSettings,
 ) -> None:
     """Register private start/status/result/cancel/human-input routes."""
+    configure_durable_loop_execution_binding(
+        enabled_mcp_names=resolved.enabled_mcp_names,
+        local_tools_enabled=not resolved.tools_disabled,
+    )
     auth = resolved.builtin_endpoints.http_auth
     auth_level = resolve_endpoint_auth_level(auth)
 
@@ -85,7 +92,7 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
             request_id = _request_id(req, payload)
             owner_hash = _owner_hash(owner)
             run_id = _run_id()
-            metadata = _run_metadata(
+            metadata = await _run_metadata(
                 resolved=resolved,
                 settings=settings,
                 body=payload,
@@ -250,20 +257,20 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
                     request_ref,
                     HumanInputRequestV1,
                 )
-                question = (
-                    await runtime.content.get_bytes(request.question_ref)
-                ).decode("utf-8")
                 body["human_input"] = {
                     "allow_free_text": request.allow_free_text,
-                    "choices": list(request.choices),
+                    "choice_count": len(request.choices),
+                    "detail_url": (
+                        f"/api/{_ROUTE_BASE}/{status.instance_id}/"
+                        f"input/{request.request_id}"
+                    ),
                     "expires_at": request.expires_at.isoformat(),
-                    "question": question,
                     "request_id": request.request_id,
                     "respond_url": (
                         f"/api/{_ROUTE_BASE}/{status.instance_id}/"
                         f"input/{request.request_id}"
                     ),
-                    "response_schema": request.response_schema,
+                    "schema_present": request.response_schema is not None,
                 }
         body["session_id"] = durable_input.identity.session_id
         return _json_response(body)
@@ -503,6 +510,7 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
                 },
                 status_code=410,
             )
+
         if receipt.get("delivery") == "delivered":
             return _json_response(
                 {
@@ -594,6 +602,45 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
             status_code=202,
         )
 
+    async def get_human_input(req: Request, client: Any) -> Response:
+        authorized = await _authorized_status(req, client, auth)
+        if isinstance(authorized, Response):
+            return authorized
+        status, durable_input = authorized
+        custom = status.custom_status
+        if not isinstance(custom, Mapping) or custom.get("phase") != "human_wait":
+            return _json_response({"error": "human_input_gone"}, status_code=410)
+        request_ref = _optional_content_ref(custom.get("request_ref"))
+        if request_ref is None:
+            return _json_response({"error": "human_input_not_found"}, status_code=404)
+        runtime = get_durable_loop_activity_runtime()
+        human = await get_protocol_model(
+            runtime.content,
+            request_ref,
+            HumanInputRequestV1,
+        )
+        request_id = _path_parameter(req, "request_id")
+        if (
+            human.request_id != request_id
+            or human.run_id != status.instance_id
+            or human.actor_policy_hash != durable_input.identity.owner_hash
+        ):
+            return _json_response({"error": "human_input_not_found"}, status_code=404)
+        question = (
+            await runtime.content.get_bytes(human.question_ref)
+        ).decode("utf-8")
+        return _json_response(
+            {
+                "allow_free_text": human.allow_free_text,
+                "choices": list(human.choices),
+                "expires_at": human.expires_at.isoformat(),
+                "question": question,
+                "request_id": human.request_id,
+                "response_schema": human.response_schema,
+                "run_id": human.run_id,
+            }
+        )
+
     _register_route(app, "durable_agent_run_start_v1", _ROUTE_BASE, ["POST"], auth_level, start_run)
     _register_route(
         app,
@@ -618,6 +665,14 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
         ["POST"],
         auth_level,
         cancel_run,
+    )
+    _register_route(
+        app,
+        "durable_agent_run_human_input_detail_v1",
+        f"{_ROUTE_BASE}/{{run_id}}/input/{{request_id}}",
+        ["GET"],
+        auth_level,
+        get_human_input,
     )
     _register_route(
         app,
@@ -649,7 +704,7 @@ class _RunMetadata:
     session_entity_key: str
 
 
-def _run_metadata(
+async def _run_metadata(
     *,
     resolved: ResolvedAgent,
     settings: DurableLoopSettings,
@@ -665,17 +720,22 @@ def _run_metadata(
     if not resolved_model or not target.provider:
         raise ValueError("durable-loop inference target is incomplete")
     api_version = target.api_version or "responses-v1"
-    package_hash = canonical_hash({"foundation_tools": []})
-    policy_hash = canonical_hash(
+    sandbox_profile = _sandbox_profile(body, settings)
+    fault_profile = _fault_profile(body, settings)
+    base_policy_hash = canonical_hash(
         {
             "agent": resolved.slug,
             "auth": resolved.builtin_endpoints.http_auth.model_dump(mode="json"),
         }
     )
-    catalog = DurableToolRegistry().catalog(
-        policy_hash=policy_hash,
-        package_hash=package_hash,
+    runtime = get_durable_loop_activity_runtime()
+    if not isinstance(runtime.tools, DurableToolCatalogPort):
+        raise ValueError("durable tool catalog provider is unavailable")
+    snapshot = await runtime.tools.freeze_catalog(
+        policy_hash=base_policy_hash,
+        sandbox_profile=sandbox_profile,
     )
+    catalog = snapshot.catalog
     identity = create_run_identity(
         run_id=run_id,
         session_id=session_id,
@@ -699,19 +759,30 @@ def _run_metadata(
                 "provider": target.provider,
             }
         ),
-        tool_package_hash=package_hash,
-        policy_hash=policy_hash,
+        tool_package_hash=snapshot.package_hash,
+        policy_hash=catalog.policy_hash,
         settings=settings,
+        execution_binding_hash=canonical_hash(
+            {
+                "catalog_hash": catalog.catalog_hash,
+                "fault_profile": fault_profile.value,
+                "package_hash": snapshot.package_hash,
+                "policy_hash": catalog.policy_hash,
+                "sandbox_profile": sandbox_profile.value,
+            }
+        ),
     )
     plan = DurableLoopPlanDocumentV1(
         instructions=resolved.instructions or "",
         catalog=catalog,
-        model_settings={},
+        model_settings={"background": settings.background_model_enabled},
         maf_core_version="1.17.0",
         provider=target.provider,
         model=resolved_model,
         api_version=api_version,
         settings=asdict(settings),
+        sandbox_profile=sandbox_profile,
+        fault_profile=fault_profile,
     )
     return _RunMetadata(
         identity=identity,
@@ -800,6 +871,8 @@ async def _persist_run_input(
         committed_session_generation=committed_generation,
         external_content_bytes=document_ref.byte_length,
         working_context_bytes=len(canonical_json_bytes(messages)),
+        sandbox_profile=metadata.plan.sandbox_profile,
+        fault_profile=metadata.plan.fault_profile,
     )
 
 
@@ -872,6 +945,47 @@ def _start_payload(body: object) -> Mapping[str, object]:
     if len(prompt.encode("utf-8")) > _MAX_PROMPT_BYTES:
         raise ValueError("prompt exceeds the byte limit")
     return body
+
+
+def _sandbox_profile(
+    body: Mapping[str, object],
+    settings: DurableLoopSettings,
+) -> SandboxExecutionProfile:
+    raw = body.get("sandbox_profile", SandboxExecutionProfile.PER_CALL.value)
+    if not isinstance(raw, str):
+        raise ValueError("sandbox_profile is invalid")
+    try:
+        profile = SandboxExecutionProfile(raw)
+    except ValueError:
+        raise ValueError(
+            "sandbox_profile must be per_call or retained_session"
+        ) from None
+    if (
+        profile is SandboxExecutionProfile.RETAINED_SESSION
+        and not settings.retained_sandbox_enabled
+    ):
+        raise ValueError(
+            "retained_session requires the private retained-sandbox gate"
+        )
+    return profile
+
+
+def _fault_profile(
+    body: Mapping[str, object],
+    settings: DurableLoopSettings,
+) -> DurableFaultProfile:
+    raw = body.get("fault_profile", DurableFaultProfile.NONE.value)
+    if not isinstance(raw, str):
+        raise ValueError("fault_profile is invalid")
+    try:
+        profile = DurableFaultProfile(raw)
+    except ValueError:
+        raise ValueError("fault_profile is not a supported fixed profile") from None
+    if profile is not DurableFaultProfile.NONE and not settings.fault_injection_enabled:
+        raise ValueError(
+            "fault_profile requires the private fault-injection gate"
+        )
+    return profile
 
 
 def _authorized_owner(req: Request, auth: EndpointAuthConfig) -> OwnerPrincipal | Response:

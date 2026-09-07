@@ -11,10 +11,12 @@ from typing import Protocol, runtime_checkable
 
 from ..strict_json import canonical_json_bytes
 from .durable_loop_protocol import (
+    DurableFaultProfile,
     ErrorDisposition,
     ErrorEnvelopeV1,
     FrozenToolCatalogV1,
     FrozenToolDescriptorV1,
+    SandboxExecutionProfile,
     ToolBehavior,
     ToolProvenance,
     ToolRequestV1,
@@ -45,6 +47,42 @@ class DurableToolDispatchPort(Protocol):
 
     async def dispatch(self, request: ToolRequestV1) -> ToolResultV1:
         """Dispatch one tool without changing request identity."""
+
+
+@dataclass(frozen=True, slots=True)
+class DurableToolCatalogSnapshot:
+    """One frozen catalog plus the exact local package hash."""
+
+    catalog: FrozenToolCatalogV1
+    package_hash: str
+
+
+@runtime_checkable
+class DurableToolCatalogPort(Protocol):
+    """Private discovery seam used before durable run admission."""
+
+    async def freeze_catalog(
+        self,
+        *,
+        policy_hash: str,
+        sandbox_profile: SandboxExecutionProfile,
+    ) -> DurableToolCatalogSnapshot:
+        """Freeze the exact remote/local inventory for one run."""
+
+
+@runtime_checkable
+class DurableToolCleanupPort(Protocol):
+    """Cleanup retained execution-plane resources at a terminal boundary."""
+
+    async def cleanup(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        sandbox_profile: SandboxExecutionProfile,
+        fault_profile: DurableFaultProfile,
+    ) -> None:
+        """Converge app-owned execution resources toward zero."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +141,45 @@ class RegistryToolDispatcher:
     def __init__(self, tools: Mapping[str, RegisteredDurableTool]) -> None:
         self._tools = dict(tools)
         self._ledger = InMemoryToolEffectLedger()
+
+    async def freeze_catalog(
+        self,
+        *,
+        policy_hash: str,
+        sandbox_profile: SandboxExecutionProfile,
+    ) -> DurableToolCatalogSnapshot:
+        """Freeze deterministic test tools without external discovery."""
+        del sandbox_profile
+        package_hash = canonical_hash(
+            {
+                "registered_tools": sorted(self._tools),
+            }
+            if self._tools
+            else {"foundation_tools": []}
+        )
+        catalog = FrozenToolCatalogV1.create(
+            tools=(
+                *(entry.descriptor for entry in self._tools.values()),
+                human_input_tool_descriptor(),
+            ),
+            policy_hash=policy_hash,
+            package_hash=package_hash,
+        )
+        return DurableToolCatalogSnapshot(
+            catalog=catalog,
+            package_hash=package_hash,
+        )
+
+    async def cleanup(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        sandbox_profile: SandboxExecutionProfile,
+        fault_profile: DurableFaultProfile,
+    ) -> None:
+        """No-op cleanup for the deterministic in-memory dispatcher."""
+        del run_id, session_id, sandbox_profile, fault_profile
 
     async def dispatch(self, request: ToolRequestV1) -> ToolResultV1:
         """Execute one fake/local handler with request-bound deduplication."""

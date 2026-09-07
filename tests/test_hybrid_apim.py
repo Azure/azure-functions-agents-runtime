@@ -31,6 +31,24 @@ async def test_hybrid_apim_manager_close_is_idempotent() -> None:
     await manager.close()
 
 
+@pytest.mark.asyncio
+async def test_hybrid_apim_managed_identity_header_uses_token() -> None:
+    manager = HybridApimClientManager(
+        base_url="https://example.test/openai/v1",
+        audience="api://gateway",
+        subscription_key=None,
+    )
+
+    async def token() -> str:
+        return "token-value"
+
+    manager._token_provider = lambda: token  # type: ignore[method-assign]
+
+    headers = await manager.request_headers()
+
+    assert headers["Authorization"] == "Bearer token-value"
+
+
 def test_hybrid_apim_production_environment_uses_general_model_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

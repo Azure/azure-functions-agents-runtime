@@ -29,12 +29,18 @@ from ..config.paths import get_app_root
 from ..controller.package import CapturedContentPackage, get_content_package
 from ..egress.policy import MAX_EGRESS_POLICY_RULES
 from ..harness import SANDBOX_MARKER_ENV_VAR
+from ..transport.manifest import (
+    SESSION_MANIFEST_PATH,
+    ExpectedSandboxManifestBinding,
+    render_sandbox_manifest_binding,
+)
 from ..transport.ports import (
     SandboxSessionHandle,
     SandboxSessionProvider,
 )
 from ..transport.transport_models import (
     DiskSource,
+    PersistedSandboxBinding,
     SandboxCreateRequest,
     SandboxEgressHostRule,
     SandboxEgressPolicy,
@@ -86,6 +92,8 @@ _EXECUTOR_PATH = f"{_HYBRID_ROOT}/hybrid_executor.py"
 _EXTRACTION_PATH = f"{_HYBRID_ROOT}/application"
 _JOURNAL_PATH = f"{_HYBRID_ROOT}/journal"
 _WORKSPACE_PATH = f"{_HYBRID_ROOT}/workspace"
+_WORKSPACE_IMPORT_PATH = f"{_HYBRID_ROOT}/workspace-import.zip"
+_WORKSPACE_EXPORT_PATH = f"{_HYBRID_ROOT}/workspace-export.zip"
 _EXECUTOR_LOG_PATH = f"{_HYBRID_ROOT}/executor.log"
 _POLL_INTERVAL_SECONDS = 0.1
 _MAX_TOOL_SECONDS = 30.0
@@ -117,6 +125,7 @@ class ToolExecutionBackend(Protocol):
         tool_name: str,
         arguments: Mapping[str, object],
         deadline: float,
+        request_hash: str | None = None,
     ) -> HybridToolInvocationResult:
         """Invoke one idempotent local tool before the monotonic deadline."""
 
@@ -190,12 +199,16 @@ class InvocationSandboxLease(ToolExecutionBackend):
         provider: SandboxSessionProvider,
         handle: SandboxSessionHandle,
         manifest: HybridToolManifest,
+        package: CapturedContentPackage | None = None,
+        expected_manifest: ExpectedSandboxManifestBinding | None = None,
     ) -> None:
         self._settings = settings
         self._operation_id = operation_id
         self._provider = provider
         self._handle = handle
         self._manifest = manifest
+        self._package = package
+        self._expected_manifest = expected_manifest
         self._admitting = True
         self._active_calls = 0
         self._active_condition = asyncio.Condition()
@@ -208,6 +221,11 @@ class InvocationSandboxLease(ToolExecutionBackend):
         settings: HybridSandboxSettings,
         *,
         maximum_run_seconds: float | None = None,
+        session_id: str | None = None,
+        generation: int = 1,
+        owner_hash: str | None = None,
+        owner_kind: str = HYBRID_OWNER_KIND,
+        persist_attach_manifest: bool = False,
         provider_factory: Callable[[], Awaitable[SandboxSessionProvider]] | None = None,
         package_factory: Callable[[Path], Awaitable[CapturedContentPackage]] = get_content_package,
     ) -> InvocationSandboxLease:
@@ -230,7 +248,7 @@ class InvocationSandboxLease(ToolExecutionBackend):
                 HybridProgressPhase.SANDBOX_CREATE,
                 HybridProgressStatus.STARTED,
             )
-            labels = _provisioning_labels(operation_id)
+            labels = _provisioning_labels(operation_id, owner_kind=owner_kind)
             request = _create_request(settings, labels)
             persisted_group = SandboxGroupBinding.create(
                 provider.group.resource_id,
@@ -279,16 +297,118 @@ class InvocationSandboxLease(ToolExecutionBackend):
                 settings.ready_timeout_seconds,
                 package.digest,
             )
+            expected_manifest = None
+            if persist_attach_manifest:
+                expected_manifest = _expected_retained_manifest(
+                    handle=handle,
+                    labels=labels,
+                    package=package,
+                    session_id=session_id or labels.session_id,
+                    generation=generation,
+                    owner_hash=owner_hash or labels.owner_hash,
+                )
+                await handle.write_file(
+                    SESSION_MANIFEST_PATH,
+                    render_sandbox_manifest_binding(expected_manifest),
+                    create_dirs=True,
+                )
             return cls(
                 settings=settings,
                 operation_id=operation_id,
                 provider=provider,
                 handle=handle,
                 manifest=manifest,
+                package=package,
+                expected_manifest=expected_manifest,
             )
         except BaseException:
             if handle is not None:
                 await _best_effort_delete(handle, provider)
+            await provider.close()
+            raise
+
+    @property
+    def manifest(self) -> HybridToolManifest:
+        """Return the exact sandbox-discovered tool manifest."""
+        return self._manifest
+
+    @property
+    def package(self) -> CapturedContentPackage:
+        """Return the immutable package delivered to this sandbox."""
+        if self._package is None:
+            raise RuntimeError("Hybrid lease has no retained package binding.")
+        return self._package
+
+    @property
+    def expected_manifest(self) -> ExpectedSandboxManifestBinding:
+        """Return the persisted attach/resume binding."""
+        if self._expected_manifest is None:
+            raise RuntimeError("Hybrid lease has no retained manifest binding.")
+        return self._expected_manifest
+
+    @property
+    def persisted_binding(self) -> PersistedSandboxBinding:
+        """Return the provider-neutral sandbox location for later attach."""
+        return PersistedSandboxBinding.create(
+            self._handle.identity.sandbox_id,
+            SandboxGroupBinding.create(
+                self._handle.identity.group_resource_id,
+                self._handle.identity.region,
+            ),
+        )
+
+    @classmethod
+    async def attach(
+        cls,
+        settings: HybridSandboxSettings,
+        *,
+        operation_id: str,
+        persisted: PersistedSandboxBinding,
+        expected_manifest: ExpectedSandboxManifestBinding,
+        manifest: HybridToolManifest,
+        package: CapturedContentPackage,
+        resume: bool,
+        provider_factory: Callable[[], Awaitable[SandboxSessionProvider]] | None = None,
+    ) -> InvocationSandboxLease:
+        """Attach or resume one retained sandbox after authoritative inventory proof."""
+        factory = provider_factory or _provider_factory(
+            settings.group_resource_id,
+            settings.region,
+        )
+        provider = await factory()
+        try:
+            if resume:
+                handle = await provider.resume(
+                    persisted,
+                    expected_manifest,
+                    readiness_timeout_seconds=settings.ready_timeout_seconds,
+                )
+            else:
+                handle = await provider.attach(
+                    persisted,
+                    expected_manifest,
+                    readiness_timeout_seconds=settings.ready_timeout_seconds,
+                )
+            observed = parse_hybrid_tool_manifest(
+                await handle.read_file(
+                    f"{_JOURNAL_PATH}/{HYBRID_TOOL_MANIFEST_FILENAME}"
+                )
+            )
+            try:
+                _require_matching_retained_manifest(observed, manifest)
+            except RuntimeError:
+                await handle.close()
+                raise
+            return cls(
+                settings=settings,
+                operation_id=operation_id,
+                provider=provider,
+                handle=handle,
+                manifest=manifest,
+                package=package,
+                expected_manifest=expected_manifest,
+            )
+        except BaseException:
             await provider.close()
             raise
 
@@ -304,6 +424,7 @@ class InvocationSandboxLease(ToolExecutionBackend):
         tool_name: str,
         arguments: Mapping[str, object],
         deadline: float,
+        request_hash: str | None = None,
     ) -> HybridToolInvocationResult:
         """Transfer one request/result through the serialized file journal."""
         async with self._active_condition:
@@ -322,6 +443,13 @@ class InvocationSandboxLease(ToolExecutionBackend):
                 record_hybrid_count(HybridMetric.TOOL_CALLS)
                 remaining = _remaining_tool_seconds(deadline)
                 transfer_started = time.perf_counter()
+                existing = await self.read_result(
+                    call_id,
+                    tool_name=tool_name,
+                    request_hash=request_hash,
+                )
+                if existing is not None:
+                    return existing
                 request = HybridToolInvocationRequest(
                     protocol_version=HYBRID_TOOL_PROTOCOL_VERSION,
                     call_id=call_id,
@@ -330,6 +458,7 @@ class InvocationSandboxLease(ToolExecutionBackend):
                     deadline_unix_seconds=time.time() + min(remaining, _MAX_TOOL_SECONDS),
                     traceparent=_current_traceparent(),
                     operation_id=self._operation_id,
+                    request_hash=request_hash,
                 )
                 request_path = (
                     f"{_JOURNAL_PATH}/{HYBRID_TOOL_REQUEST_DIRECTORY}/{call_id}.json"
@@ -346,6 +475,11 @@ class InvocationSandboxLease(ToolExecutionBackend):
                     self._handle,
                     result_path,
                     timeout_seconds=min(remaining, _MAX_TOOL_SECONDS),
+                )
+                _validate_existing_result(
+                    result,
+                    tool_name=tool_name,
+                    request_hash=request_hash,
                 )
                 record_hybrid_duration(HybridMetric.TOOL_TRANSFER_DURATION, transfer_started)
                 record_hybrid_value(
@@ -390,11 +524,108 @@ class InvocationSandboxLease(ToolExecutionBackend):
                 self._active_calls -= 1
                 self._active_condition.notify_all()
 
-    async def close(self, *, cancelled: bool = False) -> None:
+    async def restore_workspace(self, archive: bytes, digest: str) -> None:
+        """Restore one verified external workspace before admitting a call."""
+        async with self._active_condition:
+            if self._active_calls or not self._admitting:
+                raise RuntimeError("Hybrid workspace restore requires an idle lease.")
+        await self._handle.write_file(
+            _WORKSPACE_IMPORT_PATH,
+            archive,
+            create_dirs=True,
+        )
+        command = " ".join(
+            (
+                "python3",
+                "-E",
+                "-S",
+                shlex.quote(_EXECUTOR_PATH),
+                "--workspace-operation",
+                "restore",
+                "--workspace-root",
+                shlex.quote(_WORKSPACE_PATH),
+                "--workspace-archive",
+                shlex.quote(_WORKSPACE_IMPORT_PATH),
+                "--workspace-digest",
+                shlex.quote(digest),
+            )
+        )
+        result = await self._handle.exec(
+            command,
+            timeout_seconds=self._settings.ready_timeout_seconds,
+        )
+        if result.exit_code != 0:
+            raise RuntimeError("Hybrid workspace restore failed.")
+
+    async def export_workspace(self) -> tuple[bytes, str]:
+        """Export the bounded workspace after one completed call."""
+        async with self._active_condition:
+            if self._active_calls:
+                raise RuntimeError("Hybrid workspace export requires an idle lease.")
+        command = " ".join(
+            (
+                "python3",
+                "-E",
+                "-S",
+                shlex.quote(_EXECUTOR_PATH),
+                "--workspace-operation",
+                "export",
+                "--workspace-root",
+                shlex.quote(_WORKSPACE_PATH),
+                "--workspace-archive",
+                shlex.quote(_WORKSPACE_EXPORT_PATH),
+            )
+        )
+        result = await self._handle.exec(
+            command,
+            timeout_seconds=self._settings.ready_timeout_seconds,
+        )
+        digest = result.stdout.strip()
+        if result.exit_code != 0 or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+            raise RuntimeError("Hybrid workspace export failed.")
+        archive = await self._handle.read_file(_WORKSPACE_EXPORT_PATH)
+        observed = "sha256:" + hashlib.sha256(archive).hexdigest()
+        if observed != digest:
+            raise RuntimeError("Hybrid workspace export integrity check failed.")
+        return archive, digest
+
+    async def read_result(
+        self,
+        call_id: str,
+        *,
+        tool_name: str | None = None,
+        request_hash: str | None = None,
+    ) -> HybridToolInvocationResult | None:
+        """Read one retained journal result for acknowledgement-loss recovery."""
+        try:
+            payload = await self._handle.read_file(
+                f"{_JOURNAL_PATH}/{HYBRID_TOOL_RESULT_DIRECTORY}/{call_id}.json"
+            )
+        except SandboxFileNotFoundError:
+            return None
+        result = parse_hybrid_tool_result(payload)
+        if tool_name is not None:
+            _validate_existing_result(
+                result,
+                tool_name=tool_name,
+                request_hash=request_hash,
+            )
+        return result
+
+    async def close(
+        self,
+        *,
+        cancelled: bool = False,
+        retain: bool = False,
+        retain_auto_delete_seconds: int = _ACTIVE_AUTO_DELETE_SECONDS,
+    ) -> None:
         """Stop admissions and hand terminal cleanup to ACA without polling delete."""
         if self._closed:
             return
         self._closed = True
+        if retain:
+            await self._release_retained(retain_auto_delete_seconds)
+            return
         progress_started = time.perf_counter()
         record_hybrid_progress(
             HybridProgressPhase.CLEANUP_HANDOFF,
@@ -425,6 +656,52 @@ class InvocationSandboxLease(ToolExecutionBackend):
                 HybridProgressPhase.CLEANUP_COMPLETE,
                 cleanup_status,
             )
+
+    async def delete(self) -> None:
+        """Explicitly delete this lease and close controller resources."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            await _best_effort_delete(self._handle, self._provider)
+        finally:
+            await self._provider.close()
+
+    async def _release_retained(self, auto_delete_seconds: int) -> None:
+        try:
+            async with self._active_condition:
+                self._admitting = False
+                try:
+                    await asyncio.wait_for(
+                        self._active_condition.wait_for(
+                            lambda: self._active_calls == 0
+                        ),
+                        timeout=self._settings.drain_timeout_seconds,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "Retained hybrid sandbox drain timed out; "
+                        "closing controller resources with lifecycle backstop."
+                    )
+            try:
+                await self._handle.set_lifecycle_policy(
+                    SandboxLifecyclePolicy.create(
+                        auto_suspend_seconds=_TERMINAL_AUTO_SUSPEND_SECONDS,
+                        auto_suspend_mode="Disk",
+                        auto_delete_seconds=auto_delete_seconds,
+                    )
+                )
+            except Exception:
+                logger.warning(
+                    "Retained hybrid sandbox lifecycle handoff failed; "
+                    "the durable reaper remains the cleanup backstop.",
+                    exc_info=True,
+                )
+        finally:
+            try:
+                await self._handle.close()
+            finally:
+                await self._provider.close()
 
     async def _prepare_terminal_handoff(self) -> bool:
         async with self._active_condition:
@@ -657,16 +934,59 @@ def _validate_active_lifecycle_bound(
     )
 
 
-def _provisioning_labels(operation_id: str) -> SandboxProvisioningLabels:
+def _provisioning_labels(
+    operation_id: str,
+    *,
+    owner_kind: str = HYBRID_OWNER_KIND,
+) -> SandboxProvisioningLabels:
     digest = hashlib.sha256(operation_id.encode("ascii")).hexdigest()
     return SandboxProvisioningLabels.create(
         owner_hash_version="h1",
-        owner_kind=HYBRID_OWNER_KIND,
+        owner_kind=owner_kind,
         owner_hash=f"h1-{digest[:52]}",
         app_hash=hybrid_app_hash(),
         session_id=f"hybrid-{uuid.uuid4().hex}",
         operation_label=uuid.uuid4().hex,
     )
+
+
+def _expected_retained_manifest(
+    *,
+    handle: SandboxSessionHandle,
+    labels: SandboxProvisioningLabels,
+    package: CapturedContentPackage,
+    session_id: str,
+    generation: int,
+    owner_hash: str,
+) -> ExpectedSandboxManifestBinding:
+    state_store_fingerprint = (
+        "s1-"
+        + hashlib.sha256(
+            f"{session_id}:{generation}:{package.digest}".encode()
+        ).hexdigest()[:52]
+    )
+    return ExpectedSandboxManifestBinding.create(
+        manifest_version=1,
+        protocol_version=HYBRID_TOOL_PROTOCOL_VERSION,
+        session_id=session_id,
+        owner_hash_version=labels.owner_hash_version,
+        owner_hash=owner_hash,
+        app_hash=labels.app_hash,
+        sandbox_group_resource_id=handle.identity.group_resource_id,
+        sandbox_id=handle.identity.sandbox_id,
+        generation=generation,
+        digest_kind=package.digest_kind,
+        digest=package.digest,
+        state_store_fingerprint=state_store_fingerprint,
+    )
+
+
+def _require_matching_retained_manifest(
+    observed: HybridToolManifest,
+    expected: HybridToolManifest,
+) -> None:
+    if observed != expected:
+        raise RuntimeError("Retained hybrid tool manifest changed.")
 
 
 async def _deliver_executor(
@@ -707,6 +1027,16 @@ async def _deliver_executor(
 def _validate_executor_delivery(observed: bytes, expected: bytes) -> None:
     if observed != expected:
         raise RuntimeError("Hybrid executor verification failed.")
+
+
+def _validate_existing_result(
+    result: HybridToolInvocationResult,
+    *,
+    tool_name: str,
+    request_hash: str | None,
+) -> None:
+    if result.tool_name != tool_name or result.request_hash != request_hash:
+        raise RuntimeError("Hybrid call identifier was reused with a different request.")
 
 
 async def _start_and_discover(

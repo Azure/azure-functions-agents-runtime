@@ -30,6 +30,7 @@ from .durable_loop_protocol import (
     BackgroundStartDisposition,
     BackgroundStartResultV1,
     ContentRefV1,
+    DurableFaultProfile,
     DurableRunIdentityV1,
     ErrorDisposition,
     ErrorEnvelopeV1,
@@ -220,43 +221,13 @@ class BlobDurableContentStore:
         """Build from explicit durable-content settings, never host storage defaults."""
         from azure.storage.blob.aio import BlobServiceClient
 
-        service_url = os.environ.get(DURABLE_LOOP_CONTENT_BLOB_URI_ENV, "").strip()
-        if not service_url:
-            raise DurableLoopContentError(
-                "durable-loop content storage requires "
-                f"{DURABLE_LOOP_CONTENT_BLOB_URI_ENV}"
-            )
-        parsed = urlsplit(service_url)
-        if (
-            parsed.scheme != "https"
-            or not parsed.netloc
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.path not in {"", "/"}
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise DurableLoopContentError(
-                f"{DURABLE_LOOP_CONTENT_BLOB_URI_ENV} must be a credential-free HTTPS origin"
-            )
-        container_name = os.environ.get(
-            DURABLE_LOOP_CONTENT_CONTAINER_ENV,
-            "",
-        ).strip()
-        if not _valid_container_name(container_name):
-            raise DurableLoopContentError(
-                f"{DURABLE_LOOP_CONTENT_CONTAINER_ENV} must be a valid explicit container name"
-            )
-        client_id = os.environ.get(
-            DURABLE_LOOP_CONTENT_CLIENT_ID_ENV,
-            "",
-        ).strip() or None
+        binding = resolve_durable_content_blob_binding()
         return cls(
             BlobServiceClient(
-                account_url=service_url,
-                credential=build_async_credential_with_client_id(client_id),
+                account_url=binding.service_url,
+                credential=build_async_credential_with_client_id(binding.client_id),
             ),
-            container_name=container_name,
+            container_name=binding.container_name,
         )
 
     async def put_bytes(
@@ -324,6 +295,58 @@ class BlobDurableContentStore:
             self._ensured = True
 
 
+@dataclass(frozen=True, slots=True)
+class DurableContentBlobBinding:
+    """Validated shared Blob origin used by content and receipt stores."""
+
+    service_url: str
+    container_name: str
+    client_id: str | None
+
+
+def resolve_durable_content_blob_binding(
+    environment: Mapping[str, str] | None = None,
+) -> DurableContentBlobBinding:
+    """Resolve the dedicated credential-free Blob binding once."""
+    source = os.environ if environment is None else environment
+    service_url = source.get(DURABLE_LOOP_CONTENT_BLOB_URI_ENV, "").strip()
+    if not service_url:
+        raise DurableLoopContentError(
+            "durable-loop content storage requires "
+            f"{DURABLE_LOOP_CONTENT_BLOB_URI_ENV}"
+        )
+    parsed = urlsplit(service_url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise DurableLoopContentError(
+            f"{DURABLE_LOOP_CONTENT_BLOB_URI_ENV} must be a credential-free HTTPS origin"
+        )
+    container_name = source.get(
+        DURABLE_LOOP_CONTENT_CONTAINER_ENV,
+        "",
+    ).strip()
+    if not _valid_container_name(container_name):
+        raise DurableLoopContentError(
+            f"{DURABLE_LOOP_CONTENT_CONTAINER_ENV} must be a valid explicit container name"
+        )
+    client_id = source.get(
+        DURABLE_LOOP_CONTENT_CLIENT_ID_ENV,
+        "",
+    ).strip() or None
+    return DurableContentBlobBinding(
+        service_url=service_url,
+        container_name=container_name,
+        client_id=client_id,
+    )
+
+
 async def put_protocol_model(
     store: DurableContentStore,
     *,
@@ -364,6 +387,7 @@ class OneStepModelRequest:
     working_context: WorkingContextV1
     catalog: FrozenToolCatalogV1
     model_settings: Mapping[str, object]
+    fault_profile: DurableFaultProfile = DurableFaultProfile.NONE
     effective_active_deadline: datetime | None = None
 
     def canonical_request_hash(self) -> str:
@@ -373,6 +397,7 @@ class OneStepModelRequest:
             {
                 "catalog": self.catalog.model_dump(mode="json"),
                 "deployment_hash": self.identity.deployment_hash,
+                "execution_binding_hash": self.identity.execution_binding_hash,
                 "instructions": self.instructions,
                 "messages": self.working_context.bundle.model_dump(mode="json"),
                 "model_settings": dict(self.model_settings),
@@ -383,6 +408,7 @@ class OneStepModelRequest:
                     if self.effective_active_deadline is not None
                     else self.identity.active_deadline.isoformat()
                 ),
+                "fault_profile": self.fault_profile.value,
             }
         )
 
@@ -609,6 +635,20 @@ class MafOneStepModelProvider:
         request: OneStepModelRequest,
     ) -> ModelDecisionEnvelopeV1:
         """Rebuild a fresh Agent and perform exactly one explicit inference."""
+        response = await self.run_agent_response(request)
+        if response.continuation_token is not None:
+            raise DurableLoopModelError(
+                "foreground one-step inference returned a continuation token"
+            )
+        return self.parse_agent_response(request, response)
+
+    async def run_agent_response(
+        self,
+        request: OneStepModelRequest,
+        *,
+        background: bool = False,
+    ) -> Any:
+        """Run the fresh one-step Agent and return its public response object."""
         _require_target_maf_versions()
         from agent_framework import Agent, FunctionTool, Message
 
@@ -654,6 +694,10 @@ class MafOneStepModelProvider:
             )
         configuration["enabled"] = False
         options = _durable_model_options(request)
+        if background:
+            options["background"] = True
+        else:
+            options.pop("background", None)
         tools = [
             FunctionTool(
                 name=descriptor.name,
@@ -680,6 +724,14 @@ class MafOneStepModelProvider:
             messages,
             session=None,
         )
+        return response
+
+    def parse_agent_response(
+        self,
+        request: OneStepModelRequest,
+        response: Any,
+    ) -> ModelDecisionEnvelopeV1:
+        """Parse one terminal public Agent response into the durable envelope."""
         finish_reason = _finish_reason_value(response.finish_reason)
         usage = response.usage_details or {}
         normalized_usage = UsageV1(

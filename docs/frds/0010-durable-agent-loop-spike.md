@@ -1561,6 +1561,11 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
 | 43 | Architecture approval | Continue review / approve private spike / approve production support | Proceed with the private experimental spike under the recorded gates; this approval does not grant production support. | Human | 2026-09-04 |
 | 44 | Foundation implementation slice | Simulator only / private Durable foundation / include live transports | Implement exact MAF pins, strict contracts, local replay/HITL/tool fakes, Durable entity/blueprint/routes, and content-free telemetry now; defer APIM, remote MCP, and ACA live adapters to layer 2. | Human | 2026-09-04 |
 | 45 | Newly published MAF artifacts | Wait for proxy / local wheel paths / official release assets | Keep exact package pins and lock to the official `python-1.17.0` GitHub release wheels until the repository proxy mirrors them; cap runtime Python support to CI's 3.13-3.14 line. | Agent | 2026-09-04 |
+| 46 | Private tool policy | Infer behavior / public schema / fixed private policy file | Require app-root `durable-loop-tools.json` to bind every discovered local/remote tool to provenance and behavior; only remote reads may be parallel-safe. | Human + Agent | 2026-09-07 |
+| 47 | Qualification controls | Redeploy per mode / arbitrary fault payload / gated fixed enums | Bind strict `sandbox_profile` and deterministic one-shot `fault_profile` values into the run plan; retained and fault modes each require a separate private gate. | Human | 2026-09-07 |
+| 48 | Background start retry | Retry uncertain start / fail ambiguous / provider idempotency guess | Persist `started` before POST; retry explicit throttles only. An uncertain acknowledgement becomes Ambiguous and never issues a second background response. | Agent | 2026-09-07 |
+| 49 | Retained sandbox recovery | Trust attach error / inventory-first recreate / fail run | Query exact group inventory first; authoritative absence fences the generation, recreates, and restores the last external checkpoint. | Human + Agent | 2026-09-07 |
+| 50 | Human status privacy | Inline question / metadata plus owner detail route / omit status | Keep status content-free and expose question/choices/schema only through an owner-authorized GET on the existing human-input route. | Human | 2026-09-07 |
 
 ## 6. Test plan
 
@@ -1621,6 +1626,13 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
   substrate, Azurite or Durable Task Scheduler recovery at each checkpoint,
   quiescent continue-as-new with durable approval facts, and bounded
   history/status payloads.
+- [x] Layer-2 adapter contract: deterministic tests cover APIM foreground and
+  background start/poll/cancel receipts, exact fixed control routes and
+  response-ID header validation, remote MCP initialization/routing and
+  ambiguity, per-call workspace waves, retained reuse/loss/recreation,
+  capacity fencing, cleanup/reaping, strict private policy/profile parsing,
+  activity/commit acknowledgement replay, content-free human status, and
+  layer-2 metrics without live Azure or secrets.
 - [ ] APIM/model integration: one stateless request per foreground model step;
   background start/get/cancel with measured retention and exact backend
   affinity; no APIM retry/body log; response-loss/orphan accounting,
@@ -1709,3 +1721,23 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
   remote MCP, ACA single-call workspace waves, and deployed multi-process/backend
   qualification remain layer 2+ gates; the FRD does not become `Implemented`
   until those deployed layers complete.
+- **Layer 2 implementation note:** the private runtime now composes the existing
+  APIM client manager, MAF one-step Agent, remote HTTP MCP client, ACA transport,
+  hybrid executor, immutable content store, and Durable activity factory. Model
+  create remains `${APIM model base}/responses`; background control uses fixed
+  `GET /responses` and `POST /responses/cancel` with a validated
+  `x-af-response-id`. Start/poll/cancel/tool/capacity/cleanup receipts use keyed
+  CAS documents in the dedicated content container, with provider identifiers,
+  bodies, encrypted reasoning, arguments/results, retained bindings, and
+  workspace archives externalized. `durable-loop-tools.json` supplies exact
+  private provenance/behavior policy. Per-call ACA waves explicitly
+  create/restore/verify/execute/export/delete; separately gated retained mode
+  uses exclusive ownership, generation fencing, attach-manifest verification,
+  inventory-first loss recovery, checkpoint restore, final cleanup, timed
+  auto-delete, and an owner-filtered reaper. The authenticated starter binds
+  strict sandbox/fault profiles into the execution hash, and human status no
+  longer exposes question/schema content inline. Deterministic tests cover
+  transport and crash-window state machines; final Function App deployment,
+  real backend retention/affinity measurement, multi-process Durable
+  qualification, live identity/egress verification, load/soak, and the full
+  security review remain deployment-layer work.

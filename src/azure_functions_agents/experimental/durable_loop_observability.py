@@ -15,7 +15,19 @@ class DurableLoopPhase(StrEnum):
 
     RUN = "run"
     MODEL_STEP = "model_step"
+    MODEL_START = "model_start"
+    MODEL_POLL = "model_poll"
     TOOL_STEP = "tool_step"
+    TOOL_QUEUE = "tool_queue"
+    MCP_CALL = "mcp_call"
+    SANDBOX_CAPACITY_WAIT = "sandbox_capacity_wait"
+    SANDBOX_CREATE = "sandbox_create"
+    SANDBOX_RESTORE = "sandbox_restore"
+    SANDBOX_EXECUTE = "sandbox_execute"
+    SANDBOX_EXPORT = "sandbox_export"
+    SANDBOX_DELETE = "sandbox_delete"
+    CLEANUP = "cleanup"
+    RETRY = "retry"
     HUMAN_WAIT = "human_wait"
     REPLAY = "replay"
     COMPACTION = "compaction"
@@ -40,6 +52,19 @@ _meter: Any | None = None
 _counter: Any | None = None
 _duration: Any | None = None
 _ready = False
+_PROVENANCE_VALUES = frozenset(
+    {
+        "apim",
+        "apim_429",
+        "local",
+        "model",
+        "per_call",
+        "remote",
+        "retained_session",
+        "runtime",
+        "sandbox",
+    }
+)
 
 
 def record_durable_loop_event(
@@ -59,6 +84,8 @@ def record_durable_loop_event(
         "outcome": outcome.value,
     }
     if provenance is not None:
+        if provenance not in _PROVENANCE_VALUES:
+            raise ValueError("durable-loop provenance is not a bounded value")
         metric_attributes["provenance"] = provenance
         attributes["provenance"] = provenance
     if duration_seconds is not None:

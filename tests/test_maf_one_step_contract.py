@@ -488,6 +488,7 @@ async def test_real_openai_responses_client_sends_one_request_per_invocation() -
     requests: list[dict[str, Any]] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://example.test/v1/responses"
         requests.append(json.loads(request.content))
         return httpx.Response(
             200,

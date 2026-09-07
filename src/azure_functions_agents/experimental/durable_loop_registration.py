@@ -11,16 +11,17 @@ from typing import Any
 import azure.durable_functions as df
 import azure.functions as func
 
+from .._logger import logger
 from ..client_manager import get_client_manager
 from ..strict_json import canonical_json_bytes
 from .durable_loop import DurableLoopPlan, build_tool_requests
 from .durable_loop_activities import (
+    BackgroundModelProvider,
     BlobDurableContentStore,
     DeterministicContextCompactor,
     DurableContentStore,
     DurableLoopProviderTerminalError,
     HumanEventDeliveryPort,
-    MafOneStepModelProvider,
     OneStepModelProvider,
     OneStepModelRequest,
     append_audit_final,
@@ -32,9 +33,11 @@ from .durable_loop_activities import (
     put_protocol_model,
 )
 from .durable_loop_config import DurableLoopSettings
+from .durable_loop_execution import DurableLoopExecutionBinding
 from .durable_loop_protocol import (
     CheckpointStateV1,
     ContentRefV1,
+    DurableFaultProfile,
     DurableLoopPlanDocumentV1,
     DurableLoopRunStatus,
     DurableOrchestrationInputV1,
@@ -47,7 +50,10 @@ from .durable_loop_protocol import (
     HumanInputResponseV1,
     HumanWaitActivityResultV1,
     ModelDecisionEnvelopeV1,
+    ModelOperationStatus,
+    ModelOperationV1,
     ModelStepActivityResultV1,
+    SandboxExecutionProfile,
     ToolBehavior,
     ToolDispatchRefV1,
     ToolRequestV1,
@@ -55,12 +61,14 @@ from .durable_loop_protocol import (
     ToolResultStatus,
     ToolResultV1,
     WorkingContextV1,
+    WorkspaceArtifactV1,
     canonical_hash,
     deterministic_human_event_name,
     deterministic_model_step_key,
 )
 from .durable_loop_tools import (
     REQUEST_HUMAN_INPUT_TOOL_NAME,
+    DurableToolCleanupPort,
     DurableToolDispatchPort,
 )
 
@@ -82,6 +90,10 @@ DURABLE_LOOP_HUMAN_ACTIVITY_NAME = "durable_agent_human_request_v1"
 DURABLE_LOOP_HUMAN_RESULT_ACTIVITY_NAME = "durable_agent_human_result_v1"
 DURABLE_LOOP_HUMAN_DELIVERY_ACTIVITY_NAME = "durable_agent_human_delivery_v1"
 DURABLE_LOOP_COMPACTION_ACTIVITY_NAME = "durable_agent_compact_context_v1"
+DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME = "durable_agent_model_poll_v1"
+DURABLE_LOOP_MODEL_CANCEL_ACTIVITY_NAME = "durable_agent_model_cancel_v1"
+DURABLE_LOOP_CLEANUP_ACTIVITY_NAME = "durable_agent_cleanup_v1"
+DURABLE_LOOP_FAULT_ACTIVITY_NAME = "durable_agent_fault_v1"
 DURABLE_LOOP_CANCEL_EVENT_NAME = "durable_agent_cancel_v1"
 
 _MAX_ENTITY_IDEMPOTENCY_RECEIPTS = 128
@@ -135,6 +147,8 @@ class DurableLoopActivityRuntime:
     tools: DurableToolDispatchPort
     compactor: DeterministicContextCompactor
     content: DurableContentStore
+    background_model: BackgroundModelProvider | None = None
+    faults: Any | None = None
     human_events: HumanEventDeliveryPort = field(
         default_factory=_UnavailableHumanEventDelivery
     )
@@ -146,11 +160,50 @@ type ActivityRuntimeFactory = Callable[[], DurableLoopActivityRuntime]
 def _default_activity_runtime() -> DurableLoopActivityRuntime:
     global _default_runtime_instance
     if _default_runtime_instance is None:
+        from .durable_loop_apim import ApimMafResponsesProvider
+        from .durable_loop_execution import (
+            build_durable_execution_plane,
+            durable_model_control_base_url,
+        )
+        from .durable_loop_receipts import (
+            BlobDurableKeyedDocumentStore,
+            DurableOneShotFaults,
+        )
+        from .hybrid_apim import HybridApimClientManager
+
+        settings = DurableLoopSettings.from_environment()
+        if settings is None:
+            raise RuntimeError("durable-loop activity runtime is not enabled")
+        content = BlobDurableContentStore.from_environment()
+        receipts = BlobDurableKeyedDocumentStore.from_environment()
+        manager = get_client_manager()
+        if not isinstance(manager, HybridApimClientManager):
+            raise RuntimeError("durable-loop APIM client manager is unavailable")
+        tools = build_durable_execution_plane(
+            client_manager=manager,
+            settings=settings,
+            content=content,
+            receipts=receipts,
+            binding=_execution_binding,
+        )
+        model = ApimMafResponsesProvider(
+            manager,
+            content=content,
+            receipts=receipts,
+            settings=settings,
+            control_base_url=durable_model_control_base_url(),
+        )
+        faults = DurableOneShotFaults(
+            receipts,
+            enabled=settings.fault_injection_enabled,
+        )
         _default_runtime_instance = DurableLoopActivityRuntime(
-            model=MafOneStepModelProvider(get_client_manager()),
-            tools=_UnavailableToolDispatcher(),
+            model=model,
+            background_model=model if settings.background_model_enabled else None,
+            tools=tools,
             compactor=DeterministicContextCompactor(),
-            content=BlobDurableContentStore.from_environment(),
+            content=content,
+            faults=faults,
             human_events=_UnavailableHumanEventDelivery(),
         )
     return _default_runtime_instance
@@ -158,6 +211,25 @@ def _default_activity_runtime() -> DurableLoopActivityRuntime:
 
 _default_runtime_instance: DurableLoopActivityRuntime | None = None
 _activity_runtime_factory: ActivityRuntimeFactory = _default_activity_runtime
+
+_execution_binding = DurableLoopExecutionBinding(
+    enabled_mcp_names=(),
+    local_tools_enabled=True,
+)
+
+
+def configure_durable_loop_execution_binding(
+    *,
+    enabled_mcp_names: Sequence[str],
+    local_tools_enabled: bool,
+) -> None:
+    """Configure the app-scoped filters consumed by worker runtime factories."""
+    global _execution_binding, _default_runtime_instance
+    _execution_binding = DurableLoopExecutionBinding(
+        enabled_mcp_names=tuple(enabled_mcp_names),
+        local_tools_enabled=local_tools_enabled,
+    )
+    _default_runtime_instance = None
 
 
 def get_durable_loop_activity_runtime() -> DurableLoopActivityRuntime:
@@ -367,6 +439,7 @@ def register_durable_loop_blueprint(app: func.FunctionApp) -> None:
         try:
             return (yield from _run_durable_loop(context, entity, payload))
         except Exception:
+            yield from _cleanup_execution_plane(context, payload)
             yield context.call_entity(
                 entity,
                 "abort",
@@ -406,14 +479,48 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
             working_context=checkpoint.working_context,
             catalog=plan.catalog,
             model_settings=plan.model_settings,
+            fault_profile=plan.fault_profile,
             effective_active_deadline=(
                 checkpoint.identity.active_deadline
                 + timedelta(seconds=checkpoint.parked_seconds)
             ),
         )
+        background_written_bytes = 0
         try:
             async with asyncio.timeout(plan.settings.activity_timeout_seconds):
-                decision = await runtime.model.run_one_step(request)
+                if runtime.background_model is None:
+                    decision = await runtime.model.run_one_step(request)
+                else:
+                    started = await runtime.background_model.start(request)
+                    background_written_bytes = started.written_bytes
+                    if started.operation is not None:
+                        operation_ref = await put_protocol_model(
+                            runtime.content,
+                            kind="model-operation",
+                            model=started.operation,
+                        )
+                        return ModelStepActivityResultV1(
+                            run_document_ref=reference,
+                            step_index=checkpoint.next_model_step,
+                            background_operation_ref=operation_ref,
+                            poll_after_seconds=plan.settings.poll_initial_seconds,
+                            written_bytes=(
+                                started.written_bytes
+                                or operation_ref.byte_length
+                            ),
+                        ).model_dump(mode="json")
+                    if started.error is not None:
+                        return await _persist_model_error(
+                            runtime,
+                            document,
+                            started.error,
+                            extra_written_bytes=started.written_bytes,
+                        )
+                    if started.decision is None:
+                        raise RuntimeError(
+                            "background model start returned no outcome"
+                        )
+                    decision = started.decision
         except TimeoutError:
             raise RuntimeError("durable model activity timed out") from None
         except DurableLoopProviderTerminalError as exc:
@@ -449,93 +556,167 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                 usage=exc.usage,
                 written_bytes=failed_ref.byte_length,
             ).model_dump(mode="json")
-        _validate_decision(checkpoint, decision)
-        checkpoint = _checkpoint_with_usage(checkpoint, decision.usage)
-        if decision.final_text is not None:
-            response_ref = await runtime.content.put_bytes(
-                kind="final-response",
-                payload=decision.final_text.encode("utf-8"),
-                media_type="text/plain; charset=utf-8",
-                retention_class="result",
-            )
-            working = append_final_message(checkpoint.working_context, decision)
-            audit = append_audit_final(checkpoint.audit_bundle, decision)
-            working = working.model_copy(
-                update={"source_audit_hash": audit.bundle_hash}
-            )
-            updated = document.model_copy(
-                update={
-                    "checkpoint": checkpoint.model_copy(
-                        update={
-                            "audit_bundle": audit,
-                            "audit_head_hash": audit.bundle_hash,
-                            "completed_model_steps": (
-                                checkpoint.completed_model_steps + 1
-                            ),
-                            "next_model_step": checkpoint.next_model_step + 1,
-                            "status": DurableLoopRunStatus.COMPLETED,
-                            "working_context": working,
-                        }
-                    ),
-                    "pending_decision": None,
-                }
-            )
-            document_ref = await put_protocol_model(
+        return await _persist_model_decision(
+            runtime,
+            document,
+            decision,
+            extra_written_bytes=(
+                background_written_bytes
+            ),
+        )
+
+    @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
+        input_name="payload",
+        activity=DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME,
+    )
+    async def durable_agent_model_poll_v1(
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        runtime = get_durable_loop_activity_runtime()
+        if runtime.background_model is None:
+            raise RuntimeError("background model provider is unavailable")
+        document = await get_protocol_model(
+            runtime.content,
+            ContentRefV1.model_validate(payload["run_document_ref"]),
+            DurableRunDocumentV1,
+        )
+        operation = await get_protocol_model(
+            runtime.content,
+            ContentRefV1.model_validate(payload["operation_ref"]),
+            ModelOperationV1,
+        )
+        plan = _plan_from_document(document.plan)
+        polled = await runtime.background_model.poll(operation)
+        if polled.operation is not None:
+            operation_ref = await put_protocol_model(
                 runtime.content,
-                kind="run-document",
-                model=updated,
+                kind="model-operation",
+                model=polled.operation,
             )
             return ModelStepActivityResultV1(
-                run_document_ref=document_ref,
-                step_index=decision.step_index,
-                final_response_ref=response_ref,
-                usage=decision.usage,
-                written_bytes=document_ref.byte_length + response_ref.byte_length,
+                run_document_ref=ContentRefV1.model_validate(
+                    payload["run_document_ref"]
+                ),
+                step_index=operation.step_index,
+                background_operation_ref=operation_ref,
+                poll_after_seconds=min(
+                    plan.settings.poll_max_seconds,
+                    plan.settings.poll_initial_seconds
+                    * (2 ** min(polled.operation.poll_count, 8)),
+                ),
+                written_bytes=(
+                    polled.written_bytes
+                    or operation_ref.byte_length
+                ),
             ).model_dump(mode="json")
-
-        tool_refs: list[ToolDispatchRefV1] = []
-        for request_item in build_tool_requests(
-            checkpoint,
-            decision,
-            plan,
-            datetime.now(UTC),
-        ):
-            request_ref = await put_protocol_model(
-                runtime.content,
-                kind="tool-request",
-                model=request_item,
+        if polled.error is not None:
+            return await _persist_model_error(
+                runtime,
+                document,
+                polled.error,
+                extra_written_bytes=polled.written_bytes,
             )
-            descriptor = plan.catalog.by_name().get(request_item.tool_name)
-            tool_refs.append(
-                ToolDispatchRefV1(
-                    request_ref=request_ref,
-                    call_ordinal=request_item.call_ordinal,
-                    call_key=request_item.call_key,
-                    request_hash=request_item.request_hash,
-                    tool_name=request_item.tool_name,
-                    provenance=request_item.provenance,
-                    behavior=request_item.behavior,
-                    parallel_safe=bool(
-                        descriptor is not None and descriptor.parallel_safe
-                    ),
-                )
-            )
-        pending = document.model_copy(update={"pending_decision": decision})
-        document_ref = await put_protocol_model(
-            runtime.content,
-            kind="run-document",
-            model=pending,
+        if polled.decision is None:
+            raise RuntimeError("background model poll returned no outcome")
+        return await _persist_model_decision(
+            runtime,
+            document,
+            polled.decision,
+            extra_written_bytes=polled.written_bytes,
         )
-        return ModelStepActivityResultV1(
-            run_document_ref=document_ref,
-            step_index=decision.step_index,
-            tool_calls=tuple(tool_refs),
-            usage=decision.usage,
-            written_bytes=(
-                document_ref.byte_length
-                + sum(item.request_ref.byte_length for item in tool_refs)
-            ),
-        ).model_dump(mode="json")
+
+    @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
+        input_name="payload",
+        activity=DURABLE_LOOP_MODEL_CANCEL_ACTIVITY_NAME,
+    )
+    async def durable_agent_model_cancel_v1(
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        runtime = get_durable_loop_activity_runtime()
+        if runtime.background_model is None:
+            return {"status": ModelOperationStatus.CANCELLED.value}
+        operation_ref = ContentRefV1.model_validate(payload["operation_ref"])
+        operation = await get_protocol_model(
+            runtime.content,
+            operation_ref,
+            ModelOperationV1,
+        )
+        cancelled = await runtime.background_model.cancel(operation)
+        cancelled_ref = await put_protocol_model(
+            runtime.content,
+            kind="model-operation",
+            model=cancelled,
+        )
+        return {
+            "operation_ref": cancelled_ref.model_dump(mode="json"),
+            "status": cancelled.status.value,
+            "written_bytes": cancelled_ref.byte_length,
+        }
+
+    @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
+        input_name="payload",
+        activity=DURABLE_LOOP_CLEANUP_ACTIVITY_NAME,
+    )
+    async def durable_agent_cleanup_v1(
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        runtime = get_durable_loop_activity_runtime()
+        if isinstance(runtime.tools, DurableToolCleanupPort):
+            run_id = _required_string(payload, "run_id")
+            session_id = _required_string(payload, "session_id")
+            sandbox_profile = SandboxExecutionProfile(
+                _required_string(payload, "sandbox_profile")
+            )
+            fault_profile = DurableFaultProfile(
+                _required_string(payload, "fault_profile")
+            )
+            try:
+                await runtime.tools.cleanup(
+                    run_id=run_id,
+                    session_id=session_id,
+                    sandbox_profile=sandbox_profile,
+                    fault_profile=fault_profile,
+                )
+            except Exception as exc:
+                if fault_profile is DurableFaultProfile.CLEANUP_FAILURE_ONCE:
+                    try:
+                        await runtime.tools.cleanup(
+                            run_id=run_id,
+                            session_id=session_id,
+                            sandbox_profile=sandbox_profile,
+                            fault_profile=fault_profile,
+                        )
+                    except Exception as retry_exc:
+                        logger.error(
+                            "Durable-loop cleanup retry failed "
+                            "(error_type=%s).",
+                            type(retry_exc).__name__,
+                        )
+                        return {"cleaned": False}
+                else:
+                    logger.error(
+                        "Durable-loop cleanup failed (error_type=%s).",
+                        type(exc).__name__,
+                    )
+                    return {"cleaned": False}
+        return {"cleaned": True}
+
+    @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
+        input_name="payload",
+        activity=DURABLE_LOOP_FAULT_ACTIVITY_NAME,
+    )
+    async def durable_agent_fault_v1(
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        runtime = get_durable_loop_activity_runtime()
+        injected = False
+        if runtime.faults is not None:
+            injected = await runtime.faults.consume(
+                DurableFaultProfile(_required_string(payload, "fault_profile")),
+                run_id=_required_string(payload, "run_id"),
+                point=_required_string(payload, "point"),
+            )
+        return {"injected": injected}
 
     @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
         input_name="payload",
@@ -591,11 +772,28 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                     call_key=request.call_key,
                 ),
             )
+        if runtime.faults is not None and await runtime.faults.consume(
+            request.fault_profile,
+            run_id=request.run_id,
+            point="tool_activity_ack_loss",
+        ):
+            result = await runtime.tools.dispatch(request)
         result_ref = await put_protocol_model(
             runtime.content,
             kind="tool-result",
             model=result,
         )
+        written_bytes = result_ref.byte_length
+        if result.workspace_ref is not None:
+            workspace = await get_protocol_model(
+                runtime.content,
+                result.workspace_ref,
+                WorkspaceArtifactV1,
+            )
+            written_bytes += (
+                result.workspace_ref.byte_length
+                + workspace.archive_ref.byte_length
+            )
         return ToolResultRefV1(
             result_ref=result_ref,
             call_ordinal=result.call_ordinal,
@@ -603,7 +801,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
             request_hash=result.request_hash,
             tool_name=result.tool_name,
             status=result.status,
-            written_bytes=result_ref.byte_length,
+            written_bytes=written_bytes,
         ).model_dump(mode="json")
 
     @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
@@ -693,6 +891,18 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                 "next_model_step": document.checkpoint.next_model_step + 1,
                 "status": DurableLoopRunStatus.RUNNING,
                 "working_context": working,
+                "workspace_ref": next(
+                    (
+                        result.workspace_ref
+                        for result in sorted(
+                            results,
+                            key=lambda item: item.call_ordinal,
+                            reverse=True,
+                        )
+                        if result.workspace_ref is not None
+                    ),
+                    document.checkpoint.workspace_ref,
+                ),
             }
         )
         updated = document.model_copy(
@@ -1162,6 +1372,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
             {"run_id": current.identity.run_id},
         )
         if cancelled.get("cancelled") is True:
+            yield from _cleanup_execution_plane(context, current)
             yield context.call_entity(
                 entity,
                 "abort",
@@ -1214,6 +1425,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
             )
         budget_error = _orchestration_budget_error(current, context)
         if budget_error is not None:
+            yield from _cleanup_execution_plane(context, current)
             yield context.call_entity(
                 entity,
                 "abort",
@@ -1274,12 +1486,97 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
                 "run_document_ref": model_result.run_document_ref,
             }
         )
+        while model_result.background_operation_ref is not None:
+            context.set_custom_status(
+                {
+                    "phase": "background_poll",
+                    "status": DurableLoopRunStatus.WAITING.value,
+                    "step_index": current.next_model_step,
+                }
+            )
+            timer = context.create_timer(
+                min(
+                    current.identity.active_deadline
+                    + timedelta(seconds=current.parked_seconds),
+                    context.current_utc_datetime
+                    + timedelta(seconds=model_result.poll_after_seconds or 1.0),
+                )
+            )
+            cancel_event = context.wait_for_external_event(
+                DURABLE_LOOP_CANCEL_EVENT_NAME
+            )
+            winner = yield context.task_any([timer, cancel_event])
+            if winner == cancel_event:
+                timer.cancel()
+                yield context.call_activity(
+                    DURABLE_LOOP_MODEL_CANCEL_ACTIVITY_NAME,
+                    {
+                        "operation_ref": (
+                            model_result.background_operation_ref.model_dump(
+                                mode="json"
+                            )
+                        )
+                    },
+                )
+                yield from _cleanup_execution_plane(context, current)
+                yield context.call_entity(
+                    entity,
+                    "abort",
+                    {
+                        "context_ref": current.run_document_ref.model_dump(
+                            mode="json"
+                        ),
+                        "run_id": current.identity.run_id,
+                        "status": DurableLoopRunStatus.CANCELLED.value,
+                    },
+                )
+                return {"status": DurableLoopRunStatus.CANCELLED.value}
+            polled_data = yield context.call_activity(
+                DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME,
+                {
+                    "operation_ref": (
+                        model_result.background_operation_ref.model_dump(
+                            mode="json"
+                        )
+                    ),
+                    "run_document_ref": current.run_document_ref.model_dump(
+                        mode="json"
+                    ),
+                },
+            )
+            model_result = ModelStepActivityResultV1.model_validate_json(
+                canonical_json_bytes(polled_data)
+            )
+            current = current.model_copy(
+                update={
+                    "cost_microunits": (
+                        current.cost_microunits
+                        + (model_result.usage.cost_microunits or 0)
+                    ),
+                    "input_tokens": (
+                        current.input_tokens + model_result.usage.input_tokens
+                    ),
+                    "output_tokens": (
+                        current.output_tokens + model_result.usage.output_tokens
+                    ),
+                    "reasoning_tokens": (
+                        current.reasoning_tokens
+                        + model_result.usage.reasoning_tokens
+                    ),
+                    "external_content_bytes": (
+                        current.external_content_bytes
+                        + model_result.written_bytes
+                    ),
+                    "run_document_ref": model_result.run_document_ref,
+                }
+            )
         cancelled_after_model = yield context.call_entity(
             entity,
             "is_cancelled",
             {"run_id": current.identity.run_id},
         )
         if cancelled_after_model.get("cancelled") is True:
+            yield from _cleanup_execution_plane(context, current)
             yield context.call_entity(
                 entity,
                 "abort",
@@ -1291,6 +1588,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
             )
             return {"status": DurableLoopRunStatus.CANCELLED.value}
         if model_result.error is not None:
+            yield from _cleanup_execution_plane(context, current)
             yield context.call_entity(
                 entity,
                 "abort",
@@ -1308,6 +1606,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
             }
         usage_error = _orchestration_budget_error(current, context)
         if usage_error is not None:
+            yield from _cleanup_execution_plane(context, current)
             yield context.call_entity(
                 entity,
                 "abort",
@@ -1322,6 +1621,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
                 "status": DurableLoopRunStatus.FAILED.value,
             }
         if model_result.final_response_ref is not None:
+            yield from _cleanup_execution_plane(context, current)
             commit_key = canonical_hash(
                 {
                     "context_ref": model_result.run_document_ref.model_dump(
@@ -1335,21 +1635,22 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
                     "run_id": current.identity.run_id,
                 }
             )
+            completion_payload = {
+                "commit_key": commit_key,
+                "context_ref": model_result.run_document_ref.model_dump(
+                    mode="json"
+                ),
+                "expected_generation": current.committed_session_generation,
+                "request_hash": current.identity.request_hash,
+                "response_ref": model_result.final_response_ref.model_dump(
+                    mode="json"
+                ),
+                "run_id": current.identity.run_id,
+            }
             completion = yield context.call_entity(
                 entity,
                 "complete",
-                {
-                    "commit_key": commit_key,
-                    "context_ref": model_result.run_document_ref.model_dump(
-                        mode="json"
-                    ),
-                    "expected_generation": current.committed_session_generation,
-                    "request_hash": current.identity.request_hash,
-                    "response_ref": model_result.final_response_ref.model_dump(
-                        mode="json"
-                    ),
-                    "run_id": current.identity.run_id,
-                },
+                completion_payload,
             )
             if completion.get("disposition") == "cancelled":
                 yield context.call_entity(
@@ -1364,6 +1665,30 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
                 return {"status": DurableLoopRunStatus.CANCELLED.value}
             if completion.get("disposition") != "completed":
                 raise RuntimeError("session commit did not match the active fence")
+            if (
+                current.fault_profile
+                is DurableFaultProfile.COMMIT_ACK_LOSS_ONCE
+            ):
+                fault = yield context.call_activity(
+                    DURABLE_LOOP_FAULT_ACTIVITY_NAME,
+                    {
+                        "fault_profile": current.fault_profile.value,
+                        "point": "commit_ack_loss",
+                        "run_id": current.identity.run_id,
+                    },
+                )
+            else:
+                fault = {"injected": False}
+            if fault.get("injected") is True:
+                completion = yield context.call_entity(
+                    entity,
+                    "complete",
+                    completion_payload,
+                )
+                if completion.get("disposition") != "completed":
+                    raise RuntimeError(
+                        "session commit receipt was not idempotent"
+                    )
             return {
                 "committed_generation": completion.get("committed_generation"),
                 "cost_microunits": current.cost_microunits,
@@ -1391,6 +1716,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
         if clarification:
             if len(model_result.tool_calls) != 1:
                 if current.repair_steps_used >= 1:
+                    yield from _cleanup_execution_plane(context, current)
                     yield context.call_entity(
                         entity,
                         "abort",
@@ -1434,6 +1760,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
                 )
                 continue
             if current.human_wait_count >= current.identity.budget.max_human_waits:
+                yield from _cleanup_execution_plane(context, current)
                 yield context.call_entity(
                     entity,
                     "abort",
@@ -1479,6 +1806,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
             )
             content_error = _orchestration_budget_error(current, context)
             if content_error is not None:
+                yield from _cleanup_execution_plane(context, current)
                 yield context.call_entity(
                     entity,
                     "abort",
@@ -1615,6 +1943,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
             current.completed_tool_calls + len(model_result.tool_calls)
             > current.identity.budget.max_tool_calls
         ):
+            yield from _cleanup_execution_plane(context, current)
             yield context.call_entity(
                 entity,
                 "abort",
@@ -1669,6 +1998,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
             ),
         )
         if any(item.status is ToolResultStatus.AMBIGUOUS for item in result_refs):
+            yield from _cleanup_execution_plane(context, current)
             yield context.call_entity(
                 entity,
                 "abort",
@@ -1695,6 +2025,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
                 {"run_id": current.identity.run_id},
             )
         if cancelled_after_tools.get("cancelled") is True:
+            yield from _cleanup_execution_plane(context, current)
             yield context.call_entity(
                 entity,
                 "abort",
@@ -1737,6 +2068,26 @@ def _call_session_entity(
         if key not in {"operation", "session_entity_key"}
     }
     return (yield context.call_entity(entity, operation, operation_payload))
+
+
+def _cleanup_execution_plane(
+    context: df.DurableOrchestrationContext,
+    current: DurableOrchestrationInputV1,
+) -> Any:
+    """Schedule idempotent terminal cleanup before releasing session ownership."""
+    if current.sandbox_profile is SandboxExecutionProfile.PER_CALL:
+        return None
+    return (
+        yield context.call_activity(
+            DURABLE_LOOP_CLEANUP_ACTIVITY_NAME,
+            {
+                "fault_profile": current.fault_profile.value,
+                "run_id": current.identity.run_id,
+                "sandbox_profile": current.sandbox_profile.value,
+                "session_id": current.identity.session_id,
+            },
+        )
+    )
 
 
 def _schedule_tool_refs(
@@ -2199,7 +2550,156 @@ def _plan_from_document(document: DurableLoopPlanDocumentV1) -> DurableLoopPlan:
         model=document.model,
         api_version=document.api_version,
         settings=DurableLoopSettings(**document.settings),  # type: ignore[arg-type]
+        sandbox_profile=document.sandbox_profile,
+        fault_profile=document.fault_profile,
     )
+
+
+async def _persist_model_error(
+    runtime: DurableLoopActivityRuntime,
+    document: DurableRunDocumentV1,
+    error: ErrorEnvelopeV1,
+    *,
+    extra_written_bytes: int = 0,
+) -> dict[str, object]:
+    failed = document.model_copy(
+        update={
+            "checkpoint": document.checkpoint.model_copy(
+                update={
+                    "last_error": error,
+                    "status": DurableLoopRunStatus.FAILED,
+                }
+            )
+        }
+    )
+    failed_ref = await put_protocol_model(
+        runtime.content,
+        kind="run-document",
+        model=failed,
+    )
+    return ModelStepActivityResultV1(
+        run_document_ref=failed_ref,
+        step_index=document.checkpoint.next_model_step,
+        error=error,
+        written_bytes=failed_ref.byte_length + extra_written_bytes,
+    ).model_dump(mode="json")
+
+
+async def _persist_model_decision(
+    runtime: DurableLoopActivityRuntime,
+    document: DurableRunDocumentV1,
+    decision: ModelDecisionEnvelopeV1,
+    *,
+    extra_written_bytes: int = 0,
+) -> dict[str, object]:
+    checkpoint = document.checkpoint
+    plan = _plan_from_document(document.plan)
+    if decision.usage.cost_microunits is None:
+        decision = decision.model_copy(
+            update={
+                "usage": decision.usage.model_copy(
+                    update={
+                        "cost_microunits": (
+                            (
+                                decision.usage.input_tokens
+                                * plan.settings.input_cost_microunits_per_million_tokens
+                                + decision.usage.output_tokens
+                                * plan.settings.output_cost_microunits_per_million_tokens
+                            )
+                            // 1_000_000
+                        )
+                    }
+                )
+            }
+        )
+    _validate_decision(checkpoint, decision)
+    checkpoint = _checkpoint_with_usage(checkpoint, decision.usage)
+    if decision.final_text is not None:
+        response_ref = await runtime.content.put_bytes(
+            kind="final-response",
+            payload=decision.final_text.encode("utf-8"),
+            media_type="text/plain; charset=utf-8",
+            retention_class="result",
+        )
+        working = append_final_message(checkpoint.working_context, decision)
+        audit = append_audit_final(checkpoint.audit_bundle, decision)
+        working = working.model_copy(update={"source_audit_hash": audit.bundle_hash})
+        updated = document.model_copy(
+            update={
+                "checkpoint": checkpoint.model_copy(
+                    update={
+                        "audit_bundle": audit,
+                        "audit_head_hash": audit.bundle_hash,
+                        "completed_model_steps": checkpoint.completed_model_steps + 1,
+                        "next_model_step": checkpoint.next_model_step + 1,
+                        "status": DurableLoopRunStatus.COMPLETED,
+                        "working_context": working,
+                    }
+                ),
+                "pending_decision": None,
+            }
+        )
+        document_ref = await put_protocol_model(
+            runtime.content,
+            kind="run-document",
+            model=updated,
+        )
+        return ModelStepActivityResultV1(
+            run_document_ref=document_ref,
+            step_index=decision.step_index,
+            final_response_ref=response_ref,
+            usage=decision.usage,
+            written_bytes=(
+                document_ref.byte_length
+                + response_ref.byte_length
+                + extra_written_bytes
+            ),
+        ).model_dump(mode="json")
+
+    tool_refs: list[ToolDispatchRefV1] = []
+    for request_item in build_tool_requests(
+        checkpoint,
+        decision,
+        plan,
+        datetime.now(UTC),
+    ):
+        request_ref = await put_protocol_model(
+            runtime.content,
+            kind="tool-request",
+            model=request_item,
+        )
+        descriptor = plan.catalog.by_name().get(request_item.tool_name)
+        tool_refs.append(
+            ToolDispatchRefV1(
+                request_ref=request_ref,
+                call_ordinal=request_item.call_ordinal,
+                call_key=request_item.call_key,
+                request_hash=request_item.request_hash,
+                tool_name=request_item.tool_name,
+                provenance=request_item.provenance,
+                behavior=request_item.behavior,
+                parallel_safe=bool(
+                    descriptor is not None and descriptor.parallel_safe
+                ),
+            )
+        )
+    pending = document.model_copy(update={"pending_decision": decision})
+    document_ref = await put_protocol_model(
+        runtime.content,
+        kind="run-document",
+        model=pending,
+    )
+    return ModelStepActivityResultV1(
+        run_document_ref=document_ref,
+        step_index=decision.step_index,
+        tool_calls=tuple(tool_refs),
+        usage=decision.usage,
+        written_bytes=(
+            document_ref.byte_length
+            + sum(item.request_ref.byte_length for item in tool_refs)
+            + extra_written_bytes
+        ),
+    ).model_dump(mode="json")
 
 
 def _validate_decision(

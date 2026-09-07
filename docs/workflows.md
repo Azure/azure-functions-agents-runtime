@@ -24,8 +24,12 @@ orchestrations of workflow-safe tool calls and durable timers.
 > Dynamic Workflows are separate from the private FRD 0010 durable agent-loop
 > foundation. The private
 > `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_ENABLED` gate
-> checkpoints an adaptive model/tool turn; `workflows.enabled` executes an
-> explicit DAG. The runtime rejects enabling both engines in one app.
+> checkpoints an adaptive model/tool turn and privately routes APIM model/MCP
+> plus ACA sandbox activities; `workflows.enabled` executes an explicit DAG.
+> The durable loop's `durable-loop-tools.json`, `sandbox_profile`, and fixed
+> qualification `fault_profile` controls do not extend or alter the Dynamic
+> Workflow authoring surface. The runtime rejects enabling both engines in one
+> app.
 
 ## Who this is for
 

@@ -28,6 +28,7 @@ from azure_functions_agents.experimental.durable_loop_config import (
 from azure_functions_agents.experimental.durable_loop_protocol import (
     CheckpointStateV1,
     ContentRefV1,
+    DurableFaultProfile,
     DurableLoopPlanDocumentV1,
     DurableLoopRunStatus,
     DurableOrchestrationInputV1,
@@ -36,6 +37,8 @@ from azure_functions_agents.experimental.durable_loop_protocol import (
     HumanEventDeliveryResultV1,
     HumanEventDeliveryStatus,
     MAFMessageBundleV1,
+    ModelOperationStatus,
+    ModelOperationV1,
     ModelStepActivityResultV1,
     ToolBehavior,
     ToolProvenance,
@@ -48,14 +51,20 @@ from azure_functions_agents.experimental.durable_loop_protocol import (
     canonical_hash,
     tool_request_hash,
 )
+from azure_functions_agents.experimental.durable_loop_receipts import (
+    DurableOneShotFaults,
+    InMemoryDurableKeyedDocumentStore,
+)
 from azure_functions_agents.experimental.durable_loop_registration import (
     DURABLE_LOOP_APPEND_ACTIVITY_NAME,
     DURABLE_LOOP_CANCEL_DELIVERY_ORCHESTRATOR_NAME,
     DURABLE_LOOP_COMPACTION_ACTIVITY_NAME,
+    DURABLE_LOOP_FAULT_ACTIVITY_NAME,
     DURABLE_LOOP_HUMAN_ACTIVITY_NAME,
     DURABLE_LOOP_HUMAN_DELIVERY_ACTIVITY_NAME,
     DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME,
     DURABLE_LOOP_MODEL_ACTIVITY_NAME,
+    DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME,
     DURABLE_LOOP_ORCHESTRATOR_NAME,
     DURABLE_LOOP_TOOL_ACTIVITY_NAME,
     DurableLoopActivityRuntime,
@@ -682,6 +691,108 @@ async def test_registered_tool_activity_enforces_configured_payload_limits(
 
 
 @pytest.mark.asyncio
+async def test_tool_activity_ack_loss_replays_external_receipt_without_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    registry = DurableToolRegistry()
+    effects = 0
+
+    def write(_arguments, _call_key):
+        nonlocal effects
+        effects += 1
+        return {"effects": effects}
+
+    descriptor = FrozenToolDescriptorV1(
+        name="write",
+        description="Idempotent write.",
+        parameters={"additionalProperties": True, "type": "object"},
+        provenance=ToolProvenance.REMOTE,
+        behavior=ToolBehavior.IDEMPOTENT_WRITE,
+    )
+    registry.register(descriptor, write)
+    catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
+    arguments = {"value": 1}
+    request_hash = tool_request_hash(
+        tool_name="write",
+        arguments=arguments,
+        behavior=descriptor.behavior,
+        provenance=descriptor.provenance,
+        policy_hash=catalog.policy_hash,
+        catalog_hash=catalog.catalog_hash,
+        package_hash=catalog.package_hash,
+        fault_profile=DurableFaultProfile.TOOL_ACTIVITY_ACK_LOSS_ONCE,
+    )
+    request = ToolRequestV1(
+        run_id="run-1",
+        session_id="session-1",
+        step_index=0,
+        call_ordinal=0,
+        provider_call_id="provider-call",
+        call_key="1" * 64,
+        tool_name="write",
+        provenance=descriptor.provenance,
+        behavior=descriptor.behavior,
+        arguments=arguments,
+        request_hash=request_hash,
+        policy_hash=catalog.policy_hash,
+        catalog_hash=catalog.catalog_hash,
+        package_hash=catalog.package_hash,
+        fault_profile=DurableFaultProfile.TOOL_ACTIVITY_ACK_LOSS_ONCE,
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    content = InMemoryDurableContentStore()
+    request_ref = await put_protocol_model(
+        content,
+        kind="tool-request",
+        model=request,
+    )
+    receipt_store = InMemoryDurableKeyedDocumentStore()
+    runtime = DurableLoopActivityRuntime(
+        model=ScriptedOneStepModelProvider([]),
+        tools=registry.build_dispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=content,
+        faults=DurableOneShotFaults(receipt_store, enabled=True),
+    )
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    assert isinstance(app, df.DFApp)
+    try:
+        activity = _registered(app, DURABLE_LOOP_TOOL_ACTIVITY_NAME)
+        raw = await activity(
+            {"request_ref": request_ref.model_dump(mode="json")}
+        )
+        replay_raw = await activity(
+            {"request_ref": request_ref.model_dump(mode="json")}
+        )
+    finally:
+        reset_durable_loop_activity_runtime_factory()
+
+    result_ref = ToolResultRefV1.model_validate_json(
+        canonical_json_bytes(raw)
+    )
+    result = await get_protocol_model(
+        content,
+        result_ref.result_ref,
+        ToolResultV1,
+    )
+    assert effects == 1
+    assert result.deduplicated is True
+    replay_ref = ToolResultRefV1.model_validate_json(
+        canonical_json_bytes(replay_raw)
+    )
+    replay = await get_protocol_model(
+        content,
+        replay_ref.result_ref,
+        ToolResultV1,
+    )
+    assert replay.deduplicated is True
+
+
+@pytest.mark.asyncio
 async def test_registered_orchestrator_completes_with_refs_only_output() -> None:
     registry = DurableToolRegistry()
     catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
@@ -727,6 +838,120 @@ async def test_registered_orchestrator_completes_with_refs_only_output() -> None
         "is_cancelled",
         "complete",
     ]
+
+
+@pytest.mark.asyncio
+async def test_registered_orchestrator_parks_and_polls_background_response() -> None:
+    registry = DurableToolRegistry()
+    catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
+    content = InMemoryDurableContentStore()
+    run_input = await _run_input(content, catalog)
+    operation = ModelOperationV1(
+        operation_key=canonical_hash({"operation": "model"}),
+        run_id=run_input.identity.run_id,
+        step_index=0,
+        status=ModelOperationStatus.QUEUED,
+        backend_binding_hash="b" * 64,
+        deployment_hash=run_input.identity.deployment_hash,
+        deadline=run_input.identity.active_deadline,
+    )
+    operation_ref = await put_protocol_model(
+        content,
+        kind="model-operation",
+        model=operation,
+    )
+    final_ref = await content.put_text(
+        kind="final",
+        value="sensitive final answer",
+        retention_class="result",
+    )
+    pending = ModelStepActivityResultV1(
+        run_document_ref=run_input.run_document_ref,
+        step_index=0,
+        background_operation_ref=operation_ref,
+        poll_after_seconds=2,
+    )
+    terminal = ModelStepActivityResultV1(
+        run_document_ref=run_input.run_document_ref,
+        step_index=0,
+        final_response_ref=final_ref,
+    )
+    context = _OrchestrationContext(
+        run_input.model_dump(mode="json"),
+        activity_results={
+            DURABLE_LOOP_MODEL_ACTIVITY_NAME: pending.model_dump(mode="json"),
+            DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME: terminal.model_dump(mode="json"),
+        },
+    )
+    from azure_functions_agents.experimental.durable_loop_registration import (
+        _run_durable_loop,
+    )
+
+    output = _drive_to_completion(
+        _run_durable_loop(
+            context,
+            df.EntityId("durable_agent_session_entity_v1", "e" * 64),
+            run_input,
+        )
+    )
+
+    assert output["status"] == DurableLoopRunStatus.COMPLETED.value  # type: ignore[index]
+    assert len(context.timers) == 1
+    assert [name for name, _payload in context.activity_calls] == [
+        DURABLE_LOOP_MODEL_ACTIVITY_NAME,
+        DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME,
+    ]
+    assert any(
+        status["phase"] == "background_poll"  # type: ignore[index]
+        for status in context.custom_statuses
+    )
+
+
+@pytest.mark.asyncio
+async def test_commit_ack_loss_replays_same_entity_commit_receipt() -> None:
+    registry = DurableToolRegistry()
+    catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
+    content = InMemoryDurableContentStore()
+    run_input = (await _run_input(content, catalog)).model_copy(
+        update={"fault_profile": DurableFaultProfile.COMMIT_ACK_LOSS_ONCE}
+    )
+    final_ref = await content.put_text(
+        kind="final",
+        value="done",
+        retention_class="result",
+    )
+    model_result = ModelStepActivityResultV1(
+        run_document_ref=run_input.run_document_ref,
+        step_index=0,
+        final_response_ref=final_ref,
+    )
+    context = _OrchestrationContext(
+        run_input.model_dump(mode="json"),
+        activity_results={
+            DURABLE_LOOP_MODEL_ACTIVITY_NAME: model_result.model_dump(mode="json"),
+            DURABLE_LOOP_FAULT_ACTIVITY_NAME: {"injected": True},
+        },
+    )
+    from azure_functions_agents.experimental.durable_loop_registration import (
+        _run_durable_loop,
+    )
+
+    output = _drive_to_completion(
+        _run_durable_loop(
+            context,
+            df.EntityId("durable_agent_session_entity_v1", "e" * 64),
+            run_input,
+        )
+    )
+
+    assert output["status"] == DurableLoopRunStatus.COMPLETED.value  # type: ignore[index]
+    completions = [
+        payload
+        for operation, payload in context.entity_calls
+        if operation == "complete"
+    ]
+    assert len(completions) == 2
+    assert completions[0] == completions[1]
 
 
 @pytest.mark.asyncio

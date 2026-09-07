@@ -124,6 +124,7 @@ class HybridToolInvocationRequest(_HybridProtocolModel):
     deadline_unix_seconds: Annotated[float, Field(gt=0.0, allow_inf_nan=False)]
     traceparent: Annotated[str, Field(pattern=_TRACEPARENT_PATTERN.pattern)] | None
     operation_id: Annotated[str, Field(min_length=1, max_length=128)]
+    request_hash: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
 
     @model_validator(mode="after")
     def validate_arguments(self) -> Self:
@@ -166,6 +167,7 @@ class HybridToolInvocationResult(_HybridProtocolModel):
     exit_code: int | None
     error: HybridToolInvocationError | None
     timings: HybridToolInternalTimings
+    request_hash: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
 
     @model_validator(mode="after")
     def validate_terminal_shape(self) -> Self:

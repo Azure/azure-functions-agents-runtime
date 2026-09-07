@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -20,11 +21,15 @@ from azure_functions_agents.experimental.durable_loop_activities import (
 )
 from azure_functions_agents.experimental.durable_loop_config import (
     DURABLE_LOOP_ENABLED_ENV,
+    DURABLE_LOOP_FAULT_INJECTION_ENABLED_ENV,
+    DURABLE_LOOP_RETAINED_SANDBOX_ENABLED_ENV,
 )
 from azure_functions_agents.experimental.durable_loop_protocol import (
+    DurableFaultProfile,
     DurableOrchestrationInputV1,
     DurableRunDocumentV1,
     HumanInputRequestV1,
+    SandboxExecutionProfile,
     canonical_hash,
 )
 from azure_functions_agents.experimental.durable_loop_registration import (
@@ -58,6 +63,40 @@ def _write_agent(root: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _write_entra_agent(root: Path) -> None:
+    (root / "main.agent.md").write_text(
+        (
+            "---\n"
+            "name: Main\n"
+            "description: Durable test\n"
+            "builtin_endpoints:\n"
+            "  chat_api: true\n"
+            "  http_auth:\n"
+            "    mode: entra\n"
+            "---\n"
+            "Test."
+        ),
+        encoding="utf-8",
+    )
+
+
+def _principal_header(object_id: str) -> str:
+    return base64.b64encode(
+        json.dumps(
+            {
+                "auth_typ": "aad",
+                "claims": [
+                    {
+                        "typ": "tid",
+                        "val": "00000000-0000-0000-0000-000000000001",
+                    },
+                    {"typ": "oid", "val": object_id},
+                ],
+            }
+        ).encode()
+    ).decode("ascii")
 
 
 def _registered_function(app: df.DFApp, name: str) -> Any:
@@ -225,6 +264,10 @@ def test_private_http_routes_register_auth_and_durable_client(
             "POST",
             "experimental/durable-agent-runs/{run_id}/input/{request_id}",
         ),
+        "durable_agent_run_human_input_detail_v1": (
+            "GET",
+            "experimental/durable-agent-runs/{run_id}/input/{request_id}",
+        ),
     }
     for name, (method, route) in expected.items():
         bindings = _bindings(durable_app, name)
@@ -304,6 +347,96 @@ async def test_start_route_returns_202_urls_and_deduplicates(
             "model": "resolved-model",
             "provider": "openai",
         }
+    )
+    assert durable_input.identity.execution_binding_hash is not None
+
+
+@pytest.mark.asyncio
+async def test_private_start_profiles_are_strict_and_gate_controlled(
+    durable_app: df.DFApp,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = _registered_function(durable_app, "durable_agent_run_start_v1")
+    rejected_retained = await start(
+        _Request(
+            body={
+                "prompt": "hello",
+                "request_id": "request-retained",
+                "sandbox_profile": "retained_session",
+            }
+        ),
+        _Client(),
+    )
+    rejected_fault = await start(
+        _Request(
+            body={
+                "prompt": "hello",
+                "request_id": "request-fault",
+                "fault_profile": "model_apim_429_once",
+            }
+        ),
+        _Client(),
+    )
+    rejected_unknown = await start(
+        _Request(
+            body={
+                "prompt": "hello",
+                "request_id": "request-unknown",
+                "fault_profile": "arbitrary",
+            }
+        ),
+        _Client(),
+    )
+
+    assert rejected_retained.status_code == 400
+    assert rejected_fault.status_code == 400
+    assert rejected_unknown.status_code == 400
+
+    reset_durable_loop_activity_runtime_factory()
+    monkeypatch.setenv(DURABLE_LOOP_RETAINED_SANDBOX_ENABLED_ENV, "true")
+    monkeypatch.setenv(DURABLE_LOOP_FAULT_INJECTION_ENABLED_ENV, "true")
+    enabled_root = tmp_path / "enabled"
+    enabled_root.mkdir()
+    _write_agent(enabled_root)
+    runtime = DurableLoopActivityRuntime(
+        model=ScriptedOneStepModelProvider([]),
+        tools=DurableToolRegistry().build_dispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=InMemoryDurableContentStore(),
+    )
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    enabled_app = app_module.create_function_app(enabled_root)
+    assert isinstance(enabled_app, df.DFApp)
+    enabled_start = _registered_function(
+        enabled_app,
+        "durable_agent_run_start_v1",
+    )
+    client = _Client()
+    accepted = await enabled_start(
+        _Request(
+            body={
+                "prompt": "hello",
+                "request_id": "request-enabled",
+                "sandbox_profile": "retained_session",
+                "fault_profile": "model_apim_429_once",
+            }
+        ),
+        client,
+    )
+
+    assert accepted.status_code == 202
+    run_id = json.loads(accepted.body)["run_id"]
+    durable_input = DurableOrchestrationInputV1.model_validate_json(
+        json.dumps(client.statuses[run_id].input)
+    )
+    assert (
+        durable_input.sandbox_profile
+        is SandboxExecutionProfile.RETAINED_SESSION
+    )
+    assert (
+        durable_input.fault_profile
+        is DurableFaultProfile.MODEL_APIM_429_ONCE
     )
 
 
@@ -554,8 +687,27 @@ async def test_human_input_route_uses_durable_outbox_and_server_event_name(
         client,
     )
     pending_body = json.loads(pending.body)
-    assert pending_body["human_input"]["question"] == "Which region?"
-    assert pending_body["human_input"]["choices"] == ["eastus2", "westus3"]
+    assert "question" not in pending_body["human_input"]
+    assert "choices" not in pending_body["human_input"]
+    assert "response_schema" not in pending_body["human_input"]
+    assert pending_body["human_input"]["choice_count"] == 2
+    assert pending_body["human_input"]["schema_present"] is False
+    detail = _registered_function(
+        durable_app,
+        "durable_agent_run_human_input_detail_v1",
+    )
+    detail_response = await detail(
+        _Request(
+            path_params={
+                "run_id": accepted_run_id,
+                "request_id": human.request_id,
+            }
+        ),
+        client,
+    )
+    detail_body = json.loads(detail_response.body)
+    assert detail_body["question"] == "Which region?"
+    assert detail_body["choices"] == ["eastus2", "westus3"]
 
     response = await submit(
         _Request(
@@ -596,3 +748,113 @@ async def test_human_input_route_uses_durable_outbox_and_server_event_name(
     assert conflict.status_code == 409
     assert json.loads(conflict.body) == {"error": "human_input_conflict"}
     assert runtime.content.object_count == stored_objects
+
+
+@pytest.mark.asyncio
+async def test_other_owner_cannot_read_status_or_human_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CountingContentStore(InMemoryDurableContentStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads = 0
+
+        async def get_bytes(self, reference):
+            self.reads += 1
+            return await super().get_bytes(reference)
+
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_MODEL", "resolved-model")
+    content = CountingContentStore()
+    runtime = DurableLoopActivityRuntime(
+        model=ScriptedOneStepModelProvider([]),
+        tools=DurableToolRegistry().build_dispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=content,
+    )
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    _write_entra_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    assert isinstance(app, df.DFApp)
+    client = _Client()
+    owner_a = _principal_header("11111111-1111-1111-1111-111111111111")
+    owner_b = _principal_header("22222222-2222-2222-2222-222222222222")
+    start = _registered_function(app, "durable_agent_run_start_v1")
+    accepted = await start(
+        _Request(
+            body={"prompt": "hello", "request_id": "request-1"},
+            headers={
+                "x-ms-client-principal": owner_a,
+                "x-ms-session-id": "session-1",
+            },
+        ),
+        client,
+    )
+    run_id = json.loads(accepted.body)["run_id"]
+    status = client.statuses[run_id]
+    durable_input = DurableOrchestrationInputV1.model_validate_json(
+        json.dumps(status.input)
+    )
+    question_ref = await content.put_text(
+        kind="human-question",
+        value="Private question",
+        retention_class="run",
+    )
+    human = HumanInputRequestV1(
+        request_id="human-1",
+        run_id=run_id,
+        session_id=durable_input.identity.session_id,
+        generation=1,
+        turn_index=0,
+        step_index=0,
+        call_id="call-1",
+        call_key="a" * 64,
+        request_hash="b" * 64,
+        question_ref=question_ref,
+        choices=("one",),
+        allow_free_text=False,
+        actor_policy_hash=durable_input.identity.owner_hash,
+        event_name="answer:1:server-generated",
+        issued_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        record_version=1,
+    )
+    request_ref = await put_protocol_model(
+        content,
+        kind="human-request",
+        model=human,
+    )
+    status.custom_status = {
+        "phase": "human_wait",
+        "request_ref": request_ref.model_dump(mode="json"),
+    }
+    content.reads = 0
+    foreign_headers = {"x-ms-client-principal": owner_b}
+    status_response = await _registered_function(
+        app,
+        "durable_agent_run_status_v1",
+    )(
+        _Request(
+            headers=foreign_headers,
+            path_params={"run_id": run_id},
+        ),
+        client,
+    )
+    detail_response = await _registered_function(
+        app,
+        "durable_agent_run_human_input_detail_v1",
+    )(
+        _Request(
+            headers=foreign_headers,
+            path_params={"run_id": run_id, "request_id": "human-1"},
+        ),
+        client,
+    )
+    reset_durable_loop_activity_runtime_factory()
+
+    assert status_response.status_code == 404
+    assert detail_response.status_code == 404
+    assert content.reads == 0
