@@ -154,10 +154,13 @@ depending on process defaults:
 | `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_MAX_APP_OWNED_SANDBOXES` | `10` |
 | `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RETAINED_SANDBOX_AUTO_DELETE_SECONDS` | `86400` |
 | `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_SANDBOX_REAPER_AGE_SECONDS` | `600` |
+| `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS` | `aiohttp-client,httpx,requests,urllib,urllib3` |
 
 After the package is deployed and indexed with the main gate off, live
 qualification enables the main, background-model, retained-sandbox, and
 fault-injection gates together through a secure app-setting update.
+The HTTP client auto-instrumentors are disabled for this privacy-focused spike;
+the runtime's bounded durable-loop spans and metrics remain enabled.
 
 ## Final application assembly
 

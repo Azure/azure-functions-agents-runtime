@@ -587,7 +587,35 @@ def test_kusto_query_returns_only_aggregate_columns() -> None:
     assert "project " not in query
     assert "take " not in query
     assert "PROMPT-CANARY-ALPHA" in query
+    assert "(?<!" not in query
+    assert "(?!" not in query
     assert query.strip().splitlines()[-1].startswith("| summarize ")
+
+
+def test_durable_scan_parses_nested_json_and_ignores_schema_keys() -> None:
+    result = scan_recursive(
+        {
+            "Input": json.dumps(
+                {
+                    "run_id": "run-" + "a" * 32,
+                    "state": json.dumps(
+                        {
+                            "schema_version": "1",
+                            "content_ref": {
+                                "object_id": "content/" + "b" * 64,
+                                "sha256": "b" * 64,
+                            },
+                            "protected_data": False,
+                        }
+                    ),
+                }
+            )
+        },
+        PrivacyMatcher(_canaries()),
+        durable_envelope=True,
+    )
+
+    assert result.violations == 0
 
 
 def test_server_aggregate_missing_data_is_inconclusive() -> None:

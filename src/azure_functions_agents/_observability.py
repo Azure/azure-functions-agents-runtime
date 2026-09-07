@@ -105,6 +105,9 @@ class ResolvedObservability:
 _MAF_SENSITIVE_ENV = "ENABLE_SENSITIVE_DATA"
 _CONNECTION_ENV = "APPLICATIONINSIGHTS_CONNECTION_STRING"
 _AAD_AUTH_STRING_ENV = "APPLICATIONINSIGHTS_AUTHENTICATION_STRING"
+_DURABLE_LOOP_ENABLED_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_ENABLED"
+)
 
 _CONTENT_ATTR_MAX_CHARS = 2048
 
@@ -172,7 +175,13 @@ def configure_observability() -> ResolvedObservability:
     _configured = True
 
     if _enabled:
-        _enable_agent_framework_instrumentation(_capture_sensitive_data)
+        if _durable_private_telemetry_mode():
+            logger.info(
+                "Agent Framework instrumentation disabled for the private durable loop; "
+                "content-free runtime spans and metrics remain enabled."
+            )
+        else:
+            _enable_agent_framework_instrumentation(_capture_sensitive_data)
         logger.info("Observability enabled (capture_sensitive_data=%s)", _capture_sensitive_data)
     elif connection:
         logger.warning(
@@ -185,6 +194,11 @@ def configure_observability() -> ResolvedObservability:
         logger.info("Observability inactive (no OpenTelemetry provider or exporter configured)")
 
     return ResolvedObservability(enabled=_enabled, capture_sensitive_data=_capture_sensitive_data)
+
+
+def _durable_private_telemetry_mode() -> bool:
+    value = runtime_env_value(_DURABLE_LOOP_ENABLED_ENV)
+    return bool(value) and _to_bool(value) and not _capture_sensitive_data
 
 
 def _enable_agent_framework_instrumentation(capture: bool) -> None:

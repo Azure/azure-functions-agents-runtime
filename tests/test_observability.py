@@ -13,6 +13,7 @@ def _clear_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     for name in (
         "APPLICATIONINSIGHTS_CONNECTION_STRING",
         "APPLICATIONINSIGHTS_AUTHENTICATION_STRING",
+        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_ENABLED",
         "ENABLE_SENSITIVE_DATA",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -60,6 +61,29 @@ def test_configure_observability_enabled_when_provider_active(monkeypatch) -> No
     assert obs.capture_sensitive_data() is True
     assert obs.is_observability_enabled() is True
     assert enable_calls == [True]  # MAF instrumentation enabled with the resolved capture flag
+
+
+def test_private_durable_loop_skips_maf_instrumentation(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "InstrumentationKey=abc")
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_ENABLED",
+        "true",
+    )
+    _reset_bootstrap(monkeypatch)
+    monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: True)
+    enable_calls: list[bool] = []
+    monkeypatch.setattr(
+        obs,
+        "_enable_agent_framework_instrumentation",
+        lambda capture: enable_calls.append(capture),
+    )
+
+    resolved = obs.configure_observability()
+
+    assert resolved.enabled is True
+    assert resolved.capture_sensitive_data is False
+    assert enable_calls == []
 
 
 def test_configure_observability_noop_without_provider_or_connection(monkeypatch) -> None:  # type: ignore[no-untyped-def]

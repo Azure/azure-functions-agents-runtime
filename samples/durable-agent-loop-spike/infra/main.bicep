@@ -68,6 +68,7 @@ param roleAssignmentNames object = {
   sandboxFoundryReader: 'fbb65a30-6d98-4cac-ac1b-d2f940bc559e'
   apimCognitiveServicesOpenAiUser: 'aaaf4f95-61da-4b53-b1f1-40d228c9147d'
   deployerStorageBlobContributor: 'de7eec46-02c7-4b7a-ac7d-b2eecb81938a'
+  deployerStorageBlobOwner: '43bbeeb1-fac2-4426-a550-197d99b32ee8'
   deployerSandboxGroupDataOwner: 'c1f2afbc-e13b-47a2-a1c9-aef769cddaa6'
 }
 

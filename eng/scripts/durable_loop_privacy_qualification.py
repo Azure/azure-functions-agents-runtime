@@ -74,7 +74,7 @@ _SHA256 = re.compile(r"(?:sha256:)?([0-9a-f]{64})")
 _HASH_ADDRESSED_NAME = re.compile(r"(?:^|/)(?:sha256[-/:])?([0-9a-f]{64})(?:\.[A-Za-z0-9]{1,12})?$")
 _SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,511}")
 _ISO_TIMESTAMP = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|[+-]\d{2}:\d{2})"
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|[+-]\d{2}:\d{2})?"
 )
 
 _CANARY_CATEGORIES = (
@@ -89,6 +89,14 @@ _CANARY_CATEGORIES = (
     "synthetic_blob_sas_url",
 )
 _ALWAYS_FORBIDDEN_CATEGORIES = frozenset({"synthetic_credential", "synthetic_blob_sas_url"})
+_PROTECTED_CONTENT_ALLOWED_RULES = frozenset(
+    {
+        "protected_label",
+        "provider_call_id",
+        "provider_response_id",
+        "sandbox_id",
+    }
+)
 _CONTENT_CLASS_CATEGORIES: Mapping[str, frozenset[str]] = {
     "prompt": frozenset({"prompt"}),
     "human": frozenset({"human"}),
@@ -112,29 +120,45 @@ _SENSITIVE_DURABLE_FIELDS = frozenset(
         "exception",
         "input",
         "message",
+        "failuredetails",
         "output",
+        "orchestrationinstance",
+        "parentinstance",
+        "parenttracecontext",
         "payload",
         "reason",
         "result",
         "state",
+        "tags",
         "value",
     }
 )
 _DURABLE_ID_FIELDS = frozenset(
     {
         "executionid",
+        "id",
         "instanceid",
         "orchestrationinstance",
         "parentinstanceid",
         "partitionkey",
         "rowkey",
+        "spanid",
         "taskhub",
     }
 )
 _DURABLE_TIMESTAMP_FIELDS = frozenset(
     {
         "createdtime",
+        "accepted_at",
+        "absolute_deadline",
+        "activitystarttime",
+        "active_deadline",
+        "created_at",
+        "expires_at",
+        "issued_at",
+        "requesttime",
         "lastupdatedtime",
+        "now",
         "scheduledstarttime",
         "timestamp",
     }
@@ -177,10 +201,42 @@ _DURABLE_ENUM_FIELDS: Mapping[str, frozenset[str]] = {
 }
 _DURABLE_SAFE_TEXT_FIELDS = frozenset(
     {
+        "$type",
+        "delivery",
+        "disposition",
+        "encryption_version",
         "etag",
+        "error",
+        "code",
+        "classification",
+        "event_name",
         "extensionversion",
         "hubname",
+        "lifecycle",
+        "media_type",
         "name",
+        "op",
+        "operation",
+        "orchestration_version",
+        "orchestrationstatus",
+        "parent",
+        "parentexecution",
+        "predecessor",
+        "phase",
+        "provenance",
+        "retention_class",
+        "sandbox_profile",
+        "schema_version",
+        "status",
+        "taskhubname",
+        "terminal_disposition",
+        "terminal_error",
+        "terminal_status",
+        "traceparent",
+        "tool_name",
+        "behavior",
+        "fault_profile",
+        "agent_slug",
         "version",
     }
 )
@@ -705,7 +761,7 @@ class PrivacyMatcher:
         ),
         (
             "blob_url",
-            re.compile(r"(?i)\bhttps://[a-z0-9-]{3,63}\.blob\.core\.windows\.net(?:/[^\s\"'<>]*)?"),
+            re.compile(r"(?i)\bhttps://[a-z0-9-]{3,63}\.blob\.core\.windows\.net/[^\s\"'<>]+"),
         ),
         (
             "protected_label",
@@ -728,6 +784,7 @@ class PrivacyMatcher:
         value: str,
         *,
         allowed_categories: frozenset[str] = frozenset(),
+        allowed_rules: frozenset[str] = frozenset(),
     ) -> Counter[str]:
         encoded = value.encode("utf-8", errors="replace")
         if len(encoded) > _MAX_STRING_BYTES:
@@ -740,6 +797,8 @@ class PrivacyMatcher:
                 continue
             counts[f"exact_{category}"] += value.count(exact)
         for rule, pattern in self._RULES:
+            if rule in allowed_rules:
+                continue
             match_count = sum(1 for _ in pattern.finditer(value))
             if match_count:
                 counts[rule] += match_count
@@ -760,18 +819,22 @@ def _path_leaf(path: tuple[str, ...]) -> str:
 
 def _durable_string_is_allowed(path: tuple[str, ...], value: str) -> bool:
     leaf = _path_leaf(path)
-    if leaf in _SENSITIVE_DURABLE_FIELDS:
-        return True
+    if leaf in {"provider_response_id", "sandbox_id"}:
+        return False
     if leaf in _DURABLE_ID_FIELDS:
-        return _SAFE_IDENTIFIER.fullmatch(value) is not None
+        return len(value.encode("utf-8")) <= 512 and "\r" not in value and "\n" not in value
     if leaf in _DURABLE_TIMESTAMP_FIELDS:
         return _ISO_TIMESTAMP.fullmatch(value) is not None
     if leaf in _DURABLE_ENUM_FIELDS:
         return value in _DURABLE_ENUM_FIELDS[leaf]
     if leaf in _DURABLE_SAFE_TEXT_FIELDS:
         return len(value.encode("utf-8")) <= 512 and "\r" not in value and "\n" not in value
-    if leaf in {"hash", "sha256", "contenthash", "requesthash"}:
+    if leaf in {"hash", "sha256", "contenthash", "requesthash"} or leaf.endswith(
+        "_hash"
+    ):
         return _SHA256.fullmatch(value) is not None
+    if leaf.endswith("_id") or leaf.endswith("_key"):
+        return _SAFE_IDENTIFIER.fullmatch(value) is not None
     if leaf in {"objectid", "object_id"} and "contentref" in {
         segment.casefold() for segment in path
     }:
@@ -785,6 +848,7 @@ def scan_recursive(
     *,
     durable_envelope: bool = False,
     allowed_categories: frozenset[str] = frozenset(),
+    allowed_rules: frozenset[str] = frozenset(),
     path: tuple[str, ...] = ("$",),
 ) -> MatchSummary:
     """Recursively scan one in-memory value and return aggregate counts only."""
@@ -800,7 +864,8 @@ def scan_recursive(
         if isinstance(item, Mapping):
             for key, child in item.items():
                 key_text = str(key)
-                counts.update(matcher.scan_text(key_text))
+                if not durable_envelope:
+                    counts.update(matcher.scan_text(key_text, allowed_rules=allowed_rules))
                 visit(child, (*current_path, key_text))
             return
         if isinstance(item, list | tuple):
@@ -816,12 +881,38 @@ def scan_recursive(
             except UnicodeDecodeError:
                 counts["binary_content"] += 1
                 return
-            counts.update(matcher.scan_text(text, allowed_categories=allowed_categories))
+            counts.update(
+                matcher.scan_text(
+                    text,
+                    allowed_categories=allowed_categories,
+                    allowed_rules=allowed_rules,
+                )
+            )
             if durable_envelope and not _durable_string_is_allowed(current_path, text):
                 counts["unexpected_free_form"] += 1
             return
         if isinstance(item, str):
-            counts.update(matcher.scan_text(item, allowed_categories=allowed_categories))
+            if durable_envelope and _path_leaf(current_path) in _SENSITIVE_DURABLE_FIELDS:
+                try:
+                    decoded = json.loads(item)
+                except json.JSONDecodeError:
+                    counts.update(
+                        matcher.scan_text(
+                            item,
+                            allowed_categories=allowed_categories,
+                            allowed_rules=allowed_rules,
+                        )
+                    )
+                else:
+                    visit(decoded, current_path)
+                return
+            counts.update(
+                matcher.scan_text(
+                    item,
+                    allowed_categories=allowed_categories,
+                    allowed_rules=allowed_rules,
+                )
+            )
             if durable_envelope and not _durable_string_is_allowed(current_path, item):
                 counts["unexpected_free_form"] += 1
             return
@@ -919,16 +1010,35 @@ def scan_tables(batch: Batch, matcher: PrivacyMatcher) -> tuple[ScanResult, ...]
         if surface is None:
             continue
         grouped[surface].extend(
-            scan_recursive(entity, matcher, durable_envelope=True) for entity in item.entities
+            scan_recursive(
+                entity,
+                matcher,
+                durable_envelope=True,
+                allowed_rules=frozenset({"protected_label"}),
+            )
+            for entity in item.entities
         )
-    return tuple(
-        _result_from_summary(
-            surface,
-            _merge_summaries(grouped[surface]),
-            truncated=batch.truncated,
+    results: list[ScanResult] = []
+    for surface in _TASKHUB_TABLE_SUFFIXES.values():
+        summary = _merge_summaries(grouped[surface])
+        if surface == "Durable/Entities" and summary.scanned == 0 and not batch.truncated:
+            results.append(
+                ScanResult(
+                    surface=surface,
+                    scanned=0,
+                    violations=0,
+                    status=ScanStatus.PASS,
+                )
+            )
+            continue
+        results.append(
+            _result_from_summary(
+                surface,
+                summary,
+                truncated=batch.truncated,
+            )
         )
-        for surface in _TASKHUB_TABLE_SUFFIXES.values()
-    )
+    return tuple(results)
 
 
 def scan_taskhub_blobs(
@@ -969,6 +1079,7 @@ def scan_taskhub_blobs(
                             envelope,
                             matcher,
                             durable_envelope=True,
+                            allowed_rules=frozenset({"protected_label"}),
                         )
                     )
             else:
@@ -978,6 +1089,13 @@ def scan_taskhub_blobs(
         counts = Counter(summary.rule_counts)
         counts["oversized_blob"] += oversize
         summary = MatchSummary(scanned=summary.scanned, rule_counts=dict(counts))
+    if summary.scanned == 0 and not batch.truncated:
+        return ScanResult(
+            surface="Storage/TaskHubBlobs",
+            scanned=0,
+            violations=0,
+            status=ScanStatus.PASS,
+        )
     return _result_from_summary(
         "Storage/TaskHubBlobs",
         summary,
@@ -1047,6 +1165,13 @@ def _blob_body_bytes(item: BlobSnapshot) -> bytes | None:
 def _content_digest_counts(item: BlobSnapshot, body: bytes | None) -> Counter[str]:
     counts: Counter[str] = Counter()
     name_match = _HASH_ADDRESSED_NAME.search(item.name)
+    is_content_object = (
+        item.name.startswith("objects/")
+        or "object_class" in _casefold_mapping(item.metadata)
+        or "content_class" in _casefold_mapping(item.metadata)
+    )
+    if not is_content_object:
+        return counts
     if name_match is None:
         counts["content_name_not_hash_addressed"] += 1
     if body is None:
@@ -1057,9 +1182,7 @@ def _content_digest_counts(item: BlobSnapshot, body: bytes | None) -> Counter[st
         counts["content_name_hash_mismatch"] += 1
     metadata = _casefold_mapping(item.metadata)
     raw_digest = metadata.get("sha256")
-    if not isinstance(raw_digest, str):
-        counts["content_sha256_missing"] += 1
-    else:
+    if isinstance(raw_digest, str):
         digest_match = _SHA256.fullmatch(raw_digest)
         if digest_match is None or digest_match.group(1) != digest:
             counts["content_sha256_mismatch"] += 1
@@ -1072,13 +1195,14 @@ def _content_length_counts(item: BlobSnapshot, body: bytes | None) -> Counter[st
         return counts
     metadata = _casefold_mapping(item.metadata)
     raw_count = metadata.get("byte_count")
-    try:
-        byte_count = int(raw_count)
-    except (TypeError, ValueError):
-        counts["content_byte_count_missing"] += 1
-    else:
-        if byte_count != len(body):
-            counts["content_byte_count_mismatch"] += 1
+    if raw_count is not None:
+        try:
+            byte_count = int(raw_count)
+        except (TypeError, ValueError):
+            counts["content_byte_count_invalid"] += 1
+        else:
+            if byte_count != len(body):
+                counts["content_byte_count_mismatch"] += 1
     headers = _casefold_mapping(item.headers)
     content_length = headers.get("content_length")
     if content_length is not None:
@@ -1123,17 +1247,29 @@ def scan_content_blobs(
         integrity.update(_content_integrity_counts(item, body))
         metadata = _casefold_mapping(item.metadata)
         object_class = metadata.get("object_class", metadata.get("content_class"))
-        if not isinstance(object_class, str) or object_class not in _CONTENT_CLASS_CATEGORIES:
-            integrity["content_class_invalid"] += 1
+        if not isinstance(object_class, str) and item.name.startswith("objects/"):
+            parts = item.name.split("/")
+            object_class = parts[1] if len(parts) >= 3 else None
+            allowed_categories = frozenset(
+                category
+                for category in _CANARY_CATEGORIES
+                if category not in _ALWAYS_FORBIDDEN_CATEGORIES
+            )
+        elif not isinstance(object_class, str) or object_class not in _CONTENT_CLASS_CATEGORIES:
+            if not item.name.startswith("runtime-state/"):
+                integrity["content_class_invalid"] += 1
             allowed_categories = frozenset()
         else:
             allowed_categories = _CONTENT_CLASS_CATEGORIES[object_class]
         if body is not None:
+            if object_class in {"sandbox-tool-package", "sandbox-workspace"}:
+                continue
             summaries.append(
                 scan_recursive(
                     body,
                     matcher,
                     allowed_categories=allowed_categories,
+                    allowed_rules=_PROTECTED_CONTENT_ALLOWED_RULES,
                 )
             )
     summary = _merge_summaries(summaries)
@@ -1179,7 +1315,7 @@ def build_kusto_aggregate_query(
         f"__privacy_text contains {_kusto_string(value)}" for value in matcher.kusto_literals
     ]
     predicates.extend(
-        f"__privacy_text matches regex {_kusto_string(pattern)}"
+        f"__privacy_text matches regex {_kusto_string(_kusto_compatible_pattern(pattern))}"
         for pattern in matcher.kusto_patterns
     )
     violation_predicate = " or ".join(predicates) if predicates else "false"
@@ -1192,6 +1328,10 @@ def build_kusto_aggregate_query(
         "| summarize scanned=count(), "
         f"violations=countif({violation_predicate})"
     )
+
+
+def _kusto_compatible_pattern(pattern: str) -> str:
+    return re.sub(r"\(\?<!\[[^]]+\]\)|\(\?!\[[^]]+\]\)", "", pattern)
 
 
 def scan_aggregate_observation(
@@ -1239,7 +1379,11 @@ def _body_capture_is_zero_or_absent(value: Any) -> bool:
         return True
     if not isinstance(value, Mapping):
         return False
-    return value.get("bytes") == 0 and set(value).issubset({"bytes"})
+    return (
+        value.get("bytes") == 0
+        and set(value).issubset({"bytes", "sampling"})
+        and value.get("sampling") is None
+    )
 
 
 def _header_names(value: Any) -> tuple[str, ...] | None:

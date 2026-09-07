@@ -128,6 +128,7 @@ resource functionAppSettings 'Microsoft.Web/sites/config@2024-11-01' = {
       AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY: 'concise'
       ENABLE_SENSITIVE_DATA: string(enableSensitiveData)
       ENABLE_MULTIPLATFORM_BUILD: 'true'
+      OTEL_PYTHON_DISABLED_INSTRUMENTATIONS: 'aiohttp-client,httpx,requests,urllib,urllib3'
       PYTHON_ENABLE_INIT_INDEXING: '1'
     },
     {

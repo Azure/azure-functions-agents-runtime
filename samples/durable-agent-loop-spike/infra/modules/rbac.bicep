@@ -154,6 +154,19 @@ resource deployerStorageBlobContributor 'Microsoft.Authorization/roleAssignments
   }
 }
 
+resource deployerStorageBlobOwner 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: assignmentNames.deployerStorageBlobOwner
+  scope: storageAccount
+  properties: {
+    principalId: deployerPrincipalId
+    principalType: deployerPrincipalType
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      storageBlobDataOwnerRoleId
+    )
+  }
+}
+
 resource deployerSandboxGroupDataOwner 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: assignmentNames.deployerSandboxGroupDataOwner
   scope: sandboxGroup

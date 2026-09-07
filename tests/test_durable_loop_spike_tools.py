@@ -1018,6 +1018,51 @@ def test_poll_retries_initial_run_not_found_within_startup_grace(
     assert result.selected_fields == {"status": "Completed"}
 
 
+def test_poll_retries_transient_non_json_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        (
+            QualificationResult(
+                command="poll",
+                http_status=502,
+                latency_ms=5,
+                response_bytes=0,
+                selected_fields={},
+            ),
+            QualificationResult(
+                command="poll",
+                http_status=200,
+                latency_ms=10,
+                response_bytes=50,
+                selected_fields={"status": "Completed"},
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        durable_loop_spike_qualification,
+        "perform_request",
+        lambda **_: next(responses),
+    )
+    clock = _FakeClock()
+
+    result = poll_status(
+        url="https://example.test/api/status/run-1",
+        headers={},
+        timeout_seconds=120,
+        maximum_response_bytes=1024,
+        interval_seconds=0.5,
+        deadline_seconds=10,
+        field_selections=(),
+        sleeper=clock.sleep,
+        clock=clock,
+    )
+
+    assert result.http_status == 200
+    assert result.attempts == 2
+    assert result.selected_fields == {"status": "Completed"}
+
+
 def test_poll_stops_on_waiting_and_exposes_only_safe_human_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1343,6 +1388,7 @@ def _assert_private_runtime_settings(
         "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_MAX_APP_OWNED_SANDBOXES": "10",
         "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RETAINED_SANDBOX_AUTO_DELETE_SECONDS": "86400",
         "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_SANDBOX_REAPER_AGE_SECONDS": "600",
+        "OTEL_PYTHON_DISABLED_INSTRUMENTATIONS": "aiohttp-client,httpx,requests,urllib,urllib3",
     }
     values = local_settings["Values"]
     assert isinstance(values, dict)
@@ -1377,6 +1423,7 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
         "durable-agent-loop-model-control",
         "durable-agent-loop-mcp",
         "durable-loop-content",
+        "43bbeeb1-fac2-4426-a550-197d99b32ee8",
     ):
         assert exact_name in main
     assert "sharedApimSubscription.listSecrets().primaryKey" in main
