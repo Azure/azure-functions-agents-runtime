@@ -95,8 +95,12 @@ class _RunStatus(StrEnum):
 
 class _RunPhase(StrEnum):
     DURABLE = "durable"
+    BACKGROUND_POLL = "background_poll"
     MODEL_STEP = "model_step"
+    TOOL_STEP = "tool_step"
     HUMAN_WAIT = "human_wait"
+    CANCELLATION = "cancellation"
+    RUN = "run"
     COMPLETED = "completed"
 
 

@@ -1132,6 +1132,26 @@ def test_poll_stops_on_other_terminal_statuses(
     assert result.selected_fields == {"status": status}
 
 
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "background_poll",
+        "cancellation",
+        "completed",
+        "durable",
+        "human_wait",
+        "model_step",
+        "run",
+        "tool_step",
+    ],
+)
+def test_status_phase_selector_accepts_runtime_phases(phase: str) -> None:
+    assert select_response_fields(
+        json.dumps({"phase": phase}).encode(),
+        ("phase",),
+    ) == {"phase": phase}
+
+
 def test_metrics_outputs_are_content_free_and_refuse_repository_paths(
     tmp_path: Path,
 ) -> None:

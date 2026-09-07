@@ -24,6 +24,7 @@ from azure_functions_agents.experimental.durable_loop_config import (
     DURABLE_LOOP_FAULT_INJECTION_ENABLED_ENV,
     DURABLE_LOOP_RETAINED_SANDBOX_ENABLED_ENV,
 )
+from azure_functions_agents.experimental.durable_loop_http import _status_projection
 from azure_functions_agents.experimental.durable_loop_protocol import (
     DurableFaultProfile,
     DurableOrchestrationInputV1,
@@ -49,6 +50,33 @@ from azure_functions_agents.experimental.durable_loop_registration import (
 from azure_functions_agents.experimental.durable_loop_tools import (
     DurableToolRegistry,
 )
+
+
+@pytest.mark.parametrize(
+    ("runtime_status", "expected_status", "expected_phase"),
+    [
+        ("Completed", "Completed", "completed"),
+        ("Failed", "Failed", "run"),
+        ("Canceled", "Cancelled", "cancellation"),
+        ("Terminated", "Cancelled", "cancellation"),
+    ],
+)
+def test_status_projection_maps_terminal_durable_runtime_states(
+    runtime_status: str,
+    expected_status: str,
+    expected_phase: str,
+) -> None:
+    projection = _status_projection(
+        SimpleNamespace(
+            custom_status=None,
+            instance_id="run-1",
+            output=None,
+            runtime_status=SimpleNamespace(name=runtime_status),
+        )
+    )
+
+    assert projection["status"] == expected_status
+    assert projection["phase"] == expected_phase
 
 
 def _write_agent(root: Path) -> None:

@@ -1080,19 +1080,34 @@ def _http_status_code(exc: Exception) -> int | None:
 def _status_projection(status: Any) -> dict[str, object]:
     custom = status.custom_status if isinstance(status.custom_status, Mapping) else {}
     output = status.output if isinstance(status.output, Mapping) else {}
+    runtime_status = _runtime_status_name(status)
     projected = output.get("status")
     if not isinstance(projected, str):
-        projected = (
-            DurableLoopRunStatus.WAITING.value
-            if custom.get("phase") == "human_wait"
-            else (
-                DurableLoopRunStatus.PENDING.value
-                if _runtime_status_name(status) == "Pending"
-                else DurableLoopRunStatus.RUNNING.value
-            )
+        if custom.get("phase") == "human_wait":
+            projected = DurableLoopRunStatus.WAITING.value
+        elif runtime_status == "Pending":
+            projected = DurableLoopRunStatus.PENDING.value
+        elif runtime_status == "Completed":
+            projected = DurableLoopRunStatus.COMPLETED.value
+        elif runtime_status == "Failed":
+            projected = DurableLoopRunStatus.FAILED.value
+        elif runtime_status in {"Canceled", "Terminated"}:
+            projected = DurableLoopRunStatus.CANCELLED.value
+        else:
+            projected = DurableLoopRunStatus.RUNNING.value
+    phase = output.get("phase") or custom.get("phase")
+    if not isinstance(phase, str):
+        phase = (
+            "completed"
+            if runtime_status == "Completed"
+            else "cancellation"
+            if runtime_status in {"Canceled", "Terminated"}
+            else "run"
+            if runtime_status == "Failed"
+            else "durable"
         )
     projection: dict[str, object] = {
-        "phase": output.get("phase") or custom.get("phase") or "durable",
+        "phase": phase,
         "run_id": status.instance_id,
         "status": projected,
     }
