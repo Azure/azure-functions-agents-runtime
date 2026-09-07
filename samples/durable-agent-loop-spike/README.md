@@ -131,6 +131,17 @@ ID through the three
 The existing account-scoped Storage Blob Data Owner assignment grants the
 Function identity access without a connection string or storage key.
 
+The application settings also pin
+`AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_BUNDLE_ROOT=sandbox_bundle`
+and
+`AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_ALLOWED_HOSTS=management.azure.com,www.example.com`.
+The final application layer must place its bounded customer-tool package under
+that bundle root. The compatibility fallback therefore cannot archive the
+whole Function app into each sandbox, and sandbox egress remains limited to the
+two approved qualification hosts. No credential is copied into the bundle or
+sandbox. The durable-loop feature gate remains `false` in IaC until the
+operator explicitly activates the deployed application.
+
 ## Final application assembly
 
 The final stacked layer adds `function_app.py` and all application files
@@ -140,7 +151,7 @@ directly under `src/`. Until then, assembly fails with
 After that layer is present:
 
 ```powershell
-python eng\scripts\durable_loop_spike.py assemble
+uv run --with pip python eng\scripts\durable_loop_spike.py assemble
 ```
 
 The command:
@@ -148,7 +159,9 @@ The command:
 - builds exactly one local `azurefunctions-agents-runtime` wheel with
   `pip wheel --no-deps`;
 - copies the sample source while excluding local settings and caches;
-- writes `requirements.txt` with the local wheel first;
+- writes `requirements.txt` with
+  `./<wheel>[aca_sandbox,monitor]` first, so the sample resolves the runtime's
+  own ACA SDK and Azure Monitor optional extras without duplicating their pins;
 - writes a content-only `DEPLOYMENT_MANIFEST.json`;
 - creates a sorted ZIP with fixed timestamps and permissions; and
 - prints only the archive path, wheel filename, and SHA-256.
@@ -157,11 +170,17 @@ If the final source needs additional packages, place them in an
 operator-reviewed file and pass `--requirements-extra <path>`. The helper
 copies its text after the local wheel requirement.
 
+`src/host.json` sets `functionTimeout` to 30 minutes. Individual durable
+activities remain bounded to eight minutes or less; the extra host margin
+covers provider polling and cleanup. Multi-hour run lifetime still comes from
+orchestration checkpoints and durable timers, never one long-running Function
+invocation.
+
 Application deployment is a separate, explicit command and is not run by
 infrastructure provisioning:
 
 ```powershell
-python eng\scripts\durable_loop_spike.py deploy `
+uv run --with pip python eng\scripts\durable_loop_spike.py deploy `
   --acknowledge-existing-app func-durable-loop-0904
 ```
 
@@ -174,72 +193,153 @@ subscription key.
 
 ## Bounded qualification CLI
 
-The final layer owns route and payload names. Every invocation therefore
-requires an explicit route template, and template values are supplied
-separately. Bodies come from standard input or an operator-controlled file;
-the CLI validates bounded JSON but never prints it. Output contains HTTP
-status, latency, response byte count, and only explicitly selected control
-fields.
+Each command defaults to the finalized application route. `--route-template`
+remains available only for controlled tests and accepts relative templates with
+fixed placeholder values supplied through `--value`. Bodies come from standard
+input or an operator-controlled file outside the repository. The CLI validates
+bounded JSON, rejects duplicate keys at every nesting level, and never prints a
+request or response body.
 
 Store an inbound Function key only in the current process environment:
 
 ```powershell
 $env:DURABLE_LOOP_FUNCTION_KEY = '<securely-obtained-function-key>'
+$env:DURABLE_LOOP_START_REQUEST = 'C:\secure\durable-loop\start.json'
+$env:DURABLE_LOOP_START_IDEMPOTENCY_KEY = '<operator-generated-idempotency-key>'
+$env:DURABLE_LOOP_ANSWER_REQUEST = 'C:\secure\durable-loop\answer.json'
+$env:DURABLE_LOOP_ANSWER_IDEMPOTENCY_KEY = '<operator-generated-idempotency-key>'
+$env:DURABLE_LOOP_METRICS = 'C:\secure\durable-loop\qualification.jsonl'
 ```
 
-Examples below intentionally use route placeholders. Replace each route with
-the finalized application contract.
+The start document must contain `prompt` and may contain `session_id`. It must
+also contain `request_id` or the command must supply `Idempotency-Key` from an
+environment variable. The human-answer document contains only `answer` and
+always supplies `Idempotency-Key` from an environment variable.
 
 ```powershell
-# Start: request.json remains outside the repository and is not printed.
-python eng\scripts\durable_loop_spike_qualification.py start `
-  --route-template '/api/<start-route>' `
+# Start.
+uv run --with pip python eng\scripts\durable_loop_spike_qualification.py start `
   --body-file $env:DURABLE_LOOP_START_REQUEST `
   --header-name x-functions-key `
   --header-secret-env DURABLE_LOOP_FUNCTION_KEY `
+  --idempotency-key-env DURABLE_LOOP_START_IDEMPOTENCY_KEY `
   --extract run_id `
-  --extract session_id
+  --extract session_id `
+  --extract status
 
-# Status.
-python eng\scripts\durable_loop_spike_qualification.py status `
-  --route-template '/api/<status-route>/{run_id}' `
+# One status snapshot with content-free counters.
+uv run --with pip python eng\scripts\durable_loop_spike_qualification.py status `
   --value "run_id=$env:DURABLE_LOOP_RUN_ID" `
   --header-name x-functions-key `
   --header-secret-env DURABLE_LOOP_FUNCTION_KEY `
   --extract status `
-  --extract phase
+  --extract phase `
+  --extract model_steps `
+  --extract tool_calls `
+  --extract human_waits `
+  --extract step_index `
+  --extract input_tokens `
+  --extract output_tokens `
+  --extract reasoning_tokens `
+  --extract cost_microunits `
+  --extract external_content_bytes `
+  --extract parked_seconds
 
-# Result. The result body is counted and discarded unless a safe control field is selected.
-python eng\scripts\durable_loop_spike_qualification.py result `
-  --route-template '/api/<result-route>/{run_id}' `
+# Poll until Completed, Failed, Cancelled, or Waiting. JSONL is appended.
+uv run --with pip python eng\scripts\durable_loop_spike_qualification.py poll `
+  --value "run_id=$env:DURABLE_LOOP_RUN_ID" `
+  --header-name x-functions-key `
+  --header-secret-env DURABLE_LOOP_FUNCTION_KEY `
+  --poll-interval-seconds 2 `
+  --poll-deadline-seconds 1800 `
+  --metrics-output $env:DURABLE_LOOP_METRICS `
+  --metrics-format jsonl
+
+# When status is Waiting, inspect only safe human-input control metadata.
+uv run --with pip python eng\scripts\durable_loop_spike_qualification.py status `
+  --value "run_id=$env:DURABLE_LOOP_RUN_ID" `
+  --header-name x-functions-key `
+  --header-secret-env DURABLE_LOOP_FUNCTION_KEY `
+  --extract status `
+  --extract human_request_id `
+  --extract human_respond_url `
+  --extract human_detail_url `
+  --extract human_expires_at `
+  --extract human_allow_free_text `
+  --extract human_choice_count `
+  --extract human_schema_present
+
+# Authenticated HITL detail availability probe. Content is counted and discarded.
+uv run --with pip python eng\scripts\durable_loop_spike_qualification.py human-detail `
+  --value "run_id=$env:DURABLE_LOOP_RUN_ID" `
+  --value "request_id=$env:DURABLE_LOOP_REQUEST_ID" `
+  --header-name x-functions-key `
+  --header-secret-env DURABLE_LOOP_FUNCTION_KEY
+
+# Result. The final response is counted and discarded.
+uv run --with pip python eng\scripts\durable_loop_spike_qualification.py result `
   --value "run_id=$env:DURABLE_LOOP_RUN_ID" `
   --header-name x-functions-key `
   --header-secret-env DURABLE_LOOP_FUNCTION_KEY
 
 # Cancel.
-python eng\scripts\durable_loop_spike_qualification.py cancel `
-  --route-template '/api/<cancel-route>/{run_id}' `
+uv run --with pip python eng\scripts\durable_loop_spike_qualification.py cancel `
   --value "run_id=$env:DURABLE_LOOP_RUN_ID" `
   --header-name x-functions-key `
-  --header-secret-env DURABLE_LOOP_FUNCTION_KEY
+  --header-secret-env DURABLE_LOOP_FUNCTION_KEY `
+  --extract status `
+  --extract disposition `
+  --extract possibly_committed `
+  --extract error_code
 
-# Human answer: answer.json remains outside the repository and is not printed.
-python eng\scripts\durable_loop_spike_qualification.py human-answer `
-  --route-template '/api/<human-answer-route>/{run_id}/{request_id}' `
+# Human answer.
+uv run --with pip python eng\scripts\durable_loop_spike_qualification.py human-answer `
   --value "run_id=$env:DURABLE_LOOP_RUN_ID" `
   --value "request_id=$env:DURABLE_LOOP_REQUEST_ID" `
   --body-file $env:DURABLE_LOOP_ANSWER_REQUEST `
   --header-name x-functions-key `
-  --header-secret-env DURABLE_LOOP_FUNCTION_KEY
+  --header-secret-env DURABLE_LOOP_FUNCTION_KEY `
+  --idempotency-key-env DURABLE_LOOP_ANSWER_IDEMPOTENCY_KEY `
+  --extract status `
+  --extract delivery `
+  --extract disposition `
+  --extract possibly_committed `
+  --extract error_code
 ```
 
 Each call is capped at 600 seconds and 1 MiB of response data. Start and human
-answer bodies are capped at 256 KiB. `--extract` accepts fixed top-level field
-names only; it cannot redirect an approved label to another JSON path. Each
-field has a dedicated validator: the six-state run-status enum, bounded
-identifier/phase shapes, query-free HTTPS or relative control URLs,
-non-negative bounded counts, and bounded millisecond durations. The default
-emits no response fields.
+answer bodies are capped at 256 KiB. Polling intervals are bounded from 0.5 to
+60 seconds and deadlines from 1 second to 6 hours. Poll output contains
+attempts, total elapsed time, total response bytes, p50 request latency, and p95
+latency when at least two requests were made. `Waiting` terminates polling just
+like a terminal run state.
+
+`--extract` accepts only this fixed content-free selector allowlist:
+`run_id`, `session_id`, `status`, `phase`, `model_steps`, `tool_calls`,
+`human_waits`, `step_index`, `input_tokens`, `output_tokens`,
+`reasoning_tokens`, `cost_microunits`, `external_content_bytes`,
+`parked_seconds`, `delivery`, `disposition`, `possibly_committed`,
+`error_code`, `human_request_id`, `human_respond_url`, `human_expires_at`,
+`human_allow_free_text`, `human_choice_count`, `human_detail_url`, and
+`human_schema_present`. The `human_*` selectors map to the exact nested
+`human_input` control fields `request_id`, `expires_at`, `respond_url`,
+`detail_url`, `allow_free_text`, `choice_count`, and `schema_present`.
+Both control URLs must equal the fixed owner-authorized input route for the
+validated run and human-request IDs. Phase, delivery, disposition, and error
+codes are fixed enums rather than arbitrary response strings. Legacy selectors such as
+`completed_model_count`, `completed_tool_count`, `duration_ms`, control URL
+aliases, arbitrary dotted paths, and label-to-path redirects are rejected.
+
+Question text, choice values, response schemas, prompts, answers, final
+responses, tool data, provider IDs, credentials, and raw bodies can never be
+selected. The `human-detail` GET command verifies authorization, availability,
+latency, and response size but discards its `question`, `choices`, and
+`response_schema`; those values are never written to metrics. HTTP and local
+errors use content-free codes. Metrics output requires
+an absolute `.jsonl` or `.json` path outside the repository, refuses symlinks
+and unsafe targets, and contains only the same validated fields plus
+latency/byte/count aggregates. JSONL appends one record per command; JSON
+replaces one single-command snapshot.
 
 ## Sandbox lifecycle evidence
 

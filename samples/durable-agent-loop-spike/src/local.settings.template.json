@@ -13,6 +13,8 @@
     "AZURE_FUNCTIONS_AGENTS_APIM_MCP_URL": "https://larohra-ai-gateway.azure-api.net/durable-agent-loop-mcp",
     "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_SANDBOX_GROUP_RESOURCE_ID": "/subscriptions/<subscription-id>/resourceGroups/larohra-durable-agent-loop/providers/Microsoft.App/sandboxGroups/sbg-durable-loop-0904",
     "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION": "eastus2",
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_ALLOWED_HOSTS": "management.azure.com,www.example.com",
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_BUNDLE_ROOT": "sandbox_bundle",
     "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_BLOB_URI": "https://stdurableloop0904e2.blob.core.windows.net",
     "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_CONTAINER": "durable-loop-content",
     "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_CLIENT_ID": "<function-uami-client-id>",

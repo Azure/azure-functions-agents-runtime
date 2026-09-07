@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 import zipfile
 from argparse import Namespace
@@ -20,18 +22,26 @@ from eng.scripts.durable_loop_spike import (
     write_deterministic_archive,
 )
 from eng.scripts.durable_loop_spike_qualification import (
+    PollResult,
     QualificationRequestError,
     QualificationResult,
     _auth_headers,
     parse_field_selections,
     parse_template_values,
     perform_request,
+    poll_status,
     render_result,
     render_route,
     select_response_fields,
+    write_metrics,
 )
 
 _COMMIT = "3429e2ccce77fa0ad0a86c9dde9cdb7c58e66916"
+_RUN_ID = "run-" + "a" * 32
+_HUMAN_REQUEST_ID = "human-7-" + "b" * 16
+_HUMAN_INPUT_URL = (
+    f"/api/experimental/durable-agent-runs/{_RUN_ID}/input/{_HUMAN_REQUEST_ID}"
+)
 
 
 def _write_source(root: Path) -> None:
@@ -85,11 +95,35 @@ def test_stage_excludes_local_content_and_writes_manifest(tmp_path: Path) -> Non
     assert not (staging / "local.settings.template.json").exists()
     assert not (staging / "ASSEMBLY_SLOT.md").exists()
     requirements = (staging / "requirements.txt").read_text(encoding="utf-8")
-    assert requirements == f"./{wheel.name}\n"
+    assert requirements == f"./{wheel.name}[aca_sandbox,monitor]\n"
     manifest = json.loads((staging / "DEPLOYMENT_MANIFEST.json").read_text(encoding="utf-8"))
     assert manifest["commit_sha"] == _COMMIT
     assert manifest["wheel"]["filename"] == wheel.name
     assert "local.settings.json" not in manifest["files"]
+
+
+def test_stage_requirements_keep_fixed_runtime_extras_before_operator_dependencies(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    _write_source(source)
+    wheel = _write_wheel(tmp_path / "dist")
+    extra = tmp_path / "requirements.extra.txt"
+    extra.write_text("operator-package==1.2.3\n", encoding="utf-8")
+    staging = tmp_path / "staging"
+
+    stage_application(
+        source_root=source,
+        wheel_path=wheel,
+        staging_root=staging,
+        commit_sha=_COMMIT,
+        requirements_extra=extra,
+    )
+
+    assert (staging / "requirements.txt").read_text(encoding="utf-8") == (
+        f"./{wheel.name}[aca_sandbox,monitor]\n\n"
+        "operator-package==1.2.3\n"
+    )
 
 
 def test_wheel_build_rejects_dist_ancestor_of_repo(
@@ -217,7 +251,32 @@ def test_deploy_rejects_mismatched_acknowledgment(tmp_path: Path) -> None:
         )
 
 
-def test_route_templates_are_explicit_and_injection_safe() -> None:
+def test_qualification_commands_use_exact_default_routes_and_allow_override() -> None:
+    parser = durable_loop_spike_qualification._parser()
+    expected = {
+        "start": "/api/experimental/durable-agent-runs",
+        "status": "/api/experimental/durable-agent-runs/{run_id}",
+        "poll": "/api/experimental/durable-agent-runs/{run_id}",
+        "result": "/api/experimental/durable-agent-runs/{run_id}/result",
+        "cancel": "/api/experimental/durable-agent-runs/{run_id}/cancel",
+        "human-detail": (
+            "/api/experimental/durable-agent-runs/{run_id}/input/{request_id}"
+        ),
+        "human-answer": (
+            "/api/experimental/durable-agent-runs/{run_id}/input/{request_id}"
+        ),
+    }
+
+    for command, route in expected.items():
+        assert parser.parse_args([command]).route_template == route
+    assert (
+        parser.parse_args(["status", "--route-template", "/controlled/{run_id}"])
+        .route_template
+        == "/controlled/{run_id}"
+    )
+
+
+def test_route_templates_are_injection_safe() -> None:
     values = parse_template_values(("run_id=run-123", "request_id=request_7"))
     assert (
         render_route(
@@ -231,39 +290,121 @@ def test_route_templates_are_explicit_and_injection_safe() -> None:
         parse_template_values(("run_id=../secret",))
     with pytest.raises(QualificationRequestError, match="route_values_mismatch"):
         render_route("/api/status/{run_id}", {})
+    with pytest.raises(QualificationRequestError, match="route_template_invalid"):
+        render_route("/api/status/{run_id!r}", {"run_id": "run-123"})
+    with pytest.raises(QualificationRequestError, match="route_template_invalid"):
+        render_route("/api/status/{run_id}?answer=secret", {"run_id": "run-123"})
 
 
-def test_response_selection_allows_only_control_metadata() -> None:
+def test_response_selection_allows_fixed_top_level_and_nested_control_metadata() -> None:
     body = json.dumps(
         {
-            "run_id": "run-123",
+            "run_id": _RUN_ID,
+            "session_id": "session-7",
             "status": "Waiting",
+            "phase": "human_wait",
+            "model_steps": 3,
+            "tool_calls": 4,
+            "human_waits": 1,
+            "step_index": 7,
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "reasoning_tokens": 30,
+            "cost_microunits": 400,
+            "external_content_bytes": 500,
+            "parked_seconds": 6.5,
+            "delivery": "delivered",
+            "disposition": "Ambiguous",
+            "possibly_committed": False,
+            "error": "human_input_not_pending",
+            "human_input": {
+                "request_id": _HUMAN_REQUEST_ID,
+                "respond_url": _HUMAN_INPUT_URL,
+                "detail_url": _HUMAN_INPUT_URL,
+                "expires_at": "2026-09-08T12:00:00Z",
+                "allow_free_text": True,
+                "choice_count": 2,
+                "schema_present": True,
+            },
             "answer": "sensitive response body",
         }
     ).encode()
-    selections = parse_field_selections(("run_id", "status"))
+    selections = parse_field_selections(
+        (
+            "run_id",
+            "session_id",
+            "status",
+            "phase",
+            "model_steps",
+            "tool_calls",
+            "human_waits",
+            "step_index",
+            "input_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+            "cost_microunits",
+            "external_content_bytes",
+            "parked_seconds",
+            "delivery",
+            "disposition",
+            "possibly_committed",
+            "error_code",
+            "human_request_id",
+            "human_respond_url",
+            "human_detail_url",
+            "human_expires_at",
+            "human_allow_free_text",
+            "human_choice_count",
+            "human_schema_present",
+        )
+    )
 
-    assert select_response_fields(body, selections) == {
-        "run_id": "run-123",
-        "status": "Waiting",
-    }
+    selected = select_response_fields(body, selections)
+    assert selected["human_request_id"] == _HUMAN_REQUEST_ID
+    assert selected["human_choice_count"] == 2
+    assert selected["human_detail_url"] == _HUMAN_INPUT_URL
+    assert selected["human_schema_present"] is True
+    assert selected["possibly_committed"] is False
+    assert selected["model_steps"] == 3
+    assert "question" not in selected
+    assert "choices" not in selected
+    assert "response_schema" not in selected
+    assert "answer" not in selected
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "prompt",
+        "answer",
+        "final_response",
+        "tool_data",
+        "provider_id",
+        "credential",
+        "human_input.question",
+        "human_input.response_schema",
+        "completed_model_count",
+        "human_answer_url",
+    ],
+)
+def test_response_selection_rejects_content_fields_and_legacy_aliases(field: str) -> None:
+    with pytest.raises(
+        QualificationRequestError,
+        match="response_field_selection_invalid",
+    ):
+        parse_field_selections((field,))
     with pytest.raises(
         QualificationRequestError,
         match="response_field_selection_invalid",
     ):
         parse_field_selections(("status=answer",))
-    with pytest.raises(
-        QualificationRequestError,
-        match="response_field_selection_invalid",
-    ):
-        parse_field_selections(("credential",))
 
 
 @pytest.mark.parametrize(
     ("field", "value", "error_kind"),
     [
         ("status", "sensitive response body", "status"),
-        ("run_id", "contains private content", "id"),
+        ("run_id", "contains private content", "run_id"),
         ("status_url", "https://user:credential@example.test/status", "url"),
         ("completed_model_count", -1, "count"),
         ("duration_ms", 999_999_999, "duration"),
@@ -274,6 +415,13 @@ def test_response_selection_rejects_invalid_or_sensitive_values(
     value: object,
     error_kind: str,
 ) -> None:
+    if field in {"status_url", "completed_model_count", "duration_ms"}:
+        with pytest.raises(
+            QualificationRequestError,
+            match="response_field_selection_invalid",
+        ):
+            parse_field_selections((field,))
+        return
     with pytest.raises(
         QualificationRequestError,
         match=f"response_field_invalid:{error_kind}",
@@ -282,6 +430,219 @@ def test_response_selection_rejects_invalid_or_sensitive_values(
             json.dumps({field: value}).encode(),
             parse_field_selections((field,)),
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "payload", "error_kind"),
+    [
+        ("model_steps", {"model_steps": -1}, "model_steps"),
+        ("input_tokens", {"input_tokens": 1_000_000_001}, "input_tokens"),
+        ("parked_seconds", {"parked_seconds": 999_999_999}, "parked_seconds"),
+        ("delivery", {"delivery": "contains private content"}, "delivery"),
+        ("phase", {"phase": "sk-live-secret"}, "phase"),
+        ("error_code", {"error": "sk-live-secret"}, "error_code"),
+        ("possibly_committed", {"possibly_committed": "false"}, "bool"),
+        (
+            "human_respond_url",
+            {
+                "run_id": _RUN_ID,
+                "human_input": {
+                    "request_id": _HUMAN_REQUEST_ID,
+                    "respond_url": "/api/respond/private-answer",
+                },
+            },
+            "human_respond_url",
+        ),
+        (
+            "human_expires_at",
+            {"human_input": {"expires_at": "tomorrow"}},
+            "timestamp",
+        ),
+        (
+            "human_choice_count",
+            {"human_input": {"choice_count": 101}},
+            "human_choice_count",
+        ),
+    ],
+)
+def test_actual_response_selectors_reject_invalid_values(
+    field: str,
+    payload: object,
+    error_kind: str,
+) -> None:
+    with pytest.raises(
+        QualificationRequestError,
+        match=f"response_field_invalid:{error_kind}",
+    ):
+        select_response_fields(
+            json.dumps(payload).encode(),
+            parse_field_selections((field,)),
+        )
+
+
+@pytest.mark.parametrize(
+    ("body", "selections"),
+    [
+        (b'{"run_id":"first","run_id":"second"}', ()),
+        (
+            b'{"human_input":{"request_id":"first","request_id":"second"}}',
+            ("human_request_id",),
+        ),
+    ],
+)
+def test_response_documents_reject_duplicate_keys(
+    body: bytes,
+    selections: tuple[str, ...],
+) -> None:
+    with pytest.raises(
+        QualificationRequestError,
+        match="response_body_duplicate_key",
+    ):
+        select_response_fields(body, selections)
+
+
+def test_request_documents_reject_duplicate_keys_without_echoing_content(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    body = tmp_path / "private-start.json"
+    body.write_text(
+        '{"prompt":"first secret","prompt":"second secret","request_id":"request-1"}',
+        encoding="utf-8",
+    )
+
+    exit_code = durable_loop_spike_qualification.main(
+        ["start", "--body-file", str(body)],
+        {},
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert captured.err == (
+        "Durable loop qualification failed: request_body_duplicate_key\n"
+    )
+    assert "secret" not in captured.err
+    assert str(body) not in captured.err
+
+
+def test_start_and_human_answer_enforce_idempotency_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    start_body = tmp_path / "start.json"
+    start_body.write_text('{"prompt":"private prompt"}', encoding="utf-8")
+
+    with pytest.raises(QualificationRequestError, match="start_idempotency_required"):
+        durable_loop_spike_qualification._validate_request_payload(
+            "start",
+            {"prompt": "private prompt"},
+            has_idempotency_key=False,
+        )
+    with pytest.raises(
+        QualificationRequestError,
+        match="human_answer_idempotency_required",
+    ):
+        durable_loop_spike_qualification._validate_request_payload(
+            "human-answer",
+            {"answer": "private answer"},
+            has_idempotency_key=False,
+        )
+
+    class FakeResponse:
+        status = 202
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self, _: int) -> bytes:
+            return json.dumps({"run_id": _RUN_ID}).encode()
+
+    def fake_urlopen(
+        request: urllib.request.Request,
+        *,
+        timeout: int,
+    ) -> FakeResponse:
+        assert timeout == 120
+        assert request.get_header("Idempotency-key") == "request-header-1"
+        assert request.full_url.endswith("/api/experimental/durable-agent-runs")
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        durable_loop_spike_qualification,
+        "_urlopen",
+        fake_urlopen,
+    )
+    assert (
+        durable_loop_spike_qualification.main(
+            [
+                "start",
+                "--body-file",
+                str(start_body),
+                "--idempotency-key-env",
+                "IDEMPOTENCY_ENV",
+                "--extract",
+                "run_id",
+            ],
+            {"IDEMPOTENCY_ENV": "request-header-1"},
+        )
+        == 0
+    )
+    rendered = capsys.readouterr().out
+    assert "private prompt" not in rendered
+    assert "request-header-1" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("payload", "error_code"),
+    [
+        ({"prompt": "private", "request_id": None}, "start_request_id_invalid"),
+        (
+            {"prompt": "private", "request_id": "request-1", "session_id": None},
+            "start_session_id_invalid",
+        ),
+        ({"prompt": "private", "unexpected": True}, "start_body_field_invalid"),
+        ({"answer": None}, "human_answer_invalid"),
+        (
+            {"answer": "private", "unexpected": True},
+            "human_answer_body_invalid",
+        ),
+    ],
+)
+def test_request_contract_rejects_invalid_shapes(
+    payload: dict[str, object],
+    error_code: str,
+) -> None:
+    command = "human-answer" if "answer" in payload else "start"
+    with pytest.raises(QualificationRequestError, match=error_code):
+        durable_loop_spike_qualification._validate_request_payload(
+            command,
+            payload,
+            has_idempotency_key=True,
+        )
+
+
+def test_missing_body_file_error_is_content_free(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret_path = str(Path.cwd() / "private-prompt-does-not-exist.json")
+
+    assert (
+        durable_loop_spike_qualification.main(
+            ["start", "--body-file", secret_path],
+            {},
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.err == (
+        "Durable loop qualification failed: request_body_read_failed\n"
+    )
+    assert secret_path not in captured.err
 
 
 def test_request_output_discards_unselected_response_body(
@@ -309,8 +670,8 @@ def test_request_output_discards_unselected_response_body(
         return FakeResponse()
 
     monkeypatch.setattr(
-        durable_loop_spike_qualification.urllib.request,
-        "urlopen",
+        durable_loop_spike_qualification,
+        "_urlopen",
         fake_urlopen,
     )
     result = perform_request(
@@ -329,6 +690,422 @@ def test_request_output_discards_unselected_response_body(
     assert "credential-material" not in rendered
     assert "private" not in rendered
     assert json.loads(rendered)["response_bytes"] > 0
+
+
+def test_http_error_is_counted_and_only_safe_error_code_is_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_urlopen(
+        request: urllib.request.Request,
+        *,
+        timeout: int,
+    ) -> None:
+        del request, timeout
+        raise urllib.error.HTTPError(
+            "https://example.test",
+            409,
+            "private upstream message",
+            {},
+            io.BytesIO(
+                b'{"error":"session_busy","detail":"private response"}'
+            ),
+        )
+
+    monkeypatch.setattr(
+        durable_loop_spike_qualification,
+        "_urlopen",
+        fake_urlopen,
+    )
+    result = perform_request(
+        command="start",
+        method="POST",
+        url="https://example.test/api/experimental/durable-agent-runs",
+        body=b'{"prompt":"private","request_id":"request-1"}',
+        headers={},
+        timeout_seconds=120,
+        maximum_response_bytes=1024,
+        field_selections=("error_code",),
+    )
+
+    assert result.http_status == 409
+    assert result.selected_fields == {"error_code": "session_busy"}
+    assert "private" not in render_result(result)
+
+
+def test_redirect_handler_rejects_cross_origin_and_downgrade_redirects() -> None:
+    handler = durable_loop_spike_qualification._RejectRedirectHandler()
+    request = urllib.request.Request(
+        "https://example.test/api/status",
+        headers={
+            "Authorization": "Bearer credential-material",
+            "Idempotency-Key": "request-1",
+        },
+    )
+
+    with pytest.raises(QualificationRequestError, match="redirect_rejected"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "http://attacker.test/collect",
+        )
+
+
+def test_human_detail_probe_discards_question_choices_and_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self, _: int) -> bytes:
+            return json.dumps(
+                {
+                    "question": "private question",
+                    "choices": ["private choice"],
+                    "response_schema": {"type": "string"},
+                }
+            ).encode()
+
+    monkeypatch.setattr(
+        durable_loop_spike_qualification,
+        "_urlopen",
+        lambda *_args, **_kwargs: FakeResponse(),
+    )
+
+    rendered = render_result(
+        perform_request(
+            command="human-detail",
+            method="GET",
+            url=f"https://example.test{_HUMAN_INPUT_URL}",
+            body=None,
+            headers={},
+            timeout_seconds=120,
+            maximum_response_bytes=1024,
+            field_selections=(),
+        )
+    )
+
+    assert "private question" not in rendered
+    assert "private choice" not in rendered
+    assert "response_schema" not in rendered
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def sleep(self, seconds: float) -> None:
+        self.value += seconds
+
+
+def test_poll_stops_on_completed_and_reports_aggregate_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        (
+            QualificationResult(
+                command="poll",
+                http_status=200,
+                latency_ms=10,
+                response_bytes=100,
+                selected_fields={"status": "Running", "model_steps": 1},
+            ),
+            QualificationResult(
+                command="poll",
+                http_status=200,
+                latency_ms=30,
+                response_bytes=120,
+                selected_fields={
+                    "status": "Completed",
+                    "phase": "terminal",
+                    "model_steps": 2,
+                    "tool_calls": 1,
+                },
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        durable_loop_spike_qualification,
+        "perform_request",
+        lambda **_: next(responses),
+    )
+    clock = _FakeClock()
+
+    result = poll_status(
+        url="https://example.test/api/status/run-1",
+        headers={},
+        timeout_seconds=120,
+        maximum_response_bytes=1024,
+        interval_seconds=0.5,
+        deadline_seconds=10,
+        field_selections=(),
+        sleeper=clock.sleep,
+        clock=clock,
+    )
+
+    assert result == PollResult(
+        command="poll",
+        http_status=200,
+        attempts=2,
+        total_elapsed_ms=500,
+        response_bytes=220,
+        request_latency_p50_ms=10,
+        request_latency_p95_ms=30,
+        timed_out=False,
+        selected_fields={
+            "status": "Completed",
+            "phase": "terminal",
+            "model_steps": 2,
+            "tool_calls": 1,
+        },
+    )
+
+
+def test_poll_stops_on_waiting_and_exposes_only_safe_human_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        durable_loop_spike_qualification,
+        "perform_request",
+        lambda **_: QualificationResult(
+            command="poll",
+            http_status=200,
+            latency_ms=15,
+            response_bytes=150,
+            selected_fields={
+                "status": "Waiting",
+                "run_id": _RUN_ID,
+                "human_request_id": _HUMAN_REQUEST_ID,
+                "human_respond_url": _HUMAN_INPUT_URL,
+                "human_detail_url": _HUMAN_INPUT_URL,
+                "human_expires_at": "2026-09-08T12:00:00Z",
+                "human_allow_free_text": False,
+                "human_choice_count": 2,
+                "human_schema_present": True,
+            },
+        ),
+    )
+    clock = _FakeClock()
+
+    rendered = render_result(
+        poll_status(
+            url="https://example.test/api/status/run-1",
+            headers={},
+            timeout_seconds=120,
+            maximum_response_bytes=1024,
+            interval_seconds=0.5,
+            deadline_seconds=10,
+            field_selections=(),
+            sleeper=clock.sleep,
+            clock=clock,
+        )
+    )
+
+    assert "question" not in rendered
+    assert "response_schema" not in rendered
+    assert json.loads(rendered)["selected_fields"]["human_choice_count"] == 2
+    assert "request_latency_p95_ms" not in rendered
+
+
+def test_poll_timeout_is_bounded_and_returns_content_free_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        durable_loop_spike_qualification,
+        "perform_request",
+        lambda **_: QualificationResult(
+            command="poll",
+            http_status=200,
+            latency_ms=5,
+            response_bytes=50,
+            selected_fields={"status": "Running"},
+        ),
+    )
+    clock = _FakeClock()
+
+    result = poll_status(
+        url="https://example.test/api/status/run-1",
+        headers={},
+        timeout_seconds=120,
+        maximum_response_bytes=1024,
+        interval_seconds=0.5,
+        deadline_seconds=1,
+        field_selections=(),
+        sleeper=clock.sleep,
+        clock=clock,
+    )
+
+    assert result.timed_out is True
+    assert result.attempts == 2
+    assert result.total_elapsed_ms == 1000
+    assert result.selected_fields == {"status": "Running"}
+
+
+@pytest.mark.parametrize("status", ["Failed", "Cancelled"])
+def test_poll_stops_on_other_terminal_statuses(
+    status: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        durable_loop_spike_qualification,
+        "perform_request",
+        lambda **_: QualificationResult(
+            command="poll",
+            http_status=200,
+            latency_ms=5,
+            response_bytes=50,
+            selected_fields={"status": status},
+        ),
+    )
+    clock = _FakeClock()
+
+    result = poll_status(
+        url="https://example.test/api/status/run-1",
+        headers={},
+        timeout_seconds=120,
+        maximum_response_bytes=1024,
+        interval_seconds=0.5,
+        deadline_seconds=10,
+        field_selections=(),
+        sleeper=clock.sleep,
+        clock=clock,
+    )
+
+    assert result.attempts == 1
+    assert result.selected_fields == {"status": status}
+
+
+def test_metrics_outputs_are_content_free_and_refuse_repository_paths(
+    tmp_path: Path,
+) -> None:
+    result = QualificationResult(
+        command="result",
+        http_status=200,
+        latency_ms=12.5,
+        response_bytes=321,
+        selected_fields={"status": "Completed", "tool_calls": 2},
+    )
+    jsonl_path = tmp_path / "qualification.jsonl"
+    json_path = tmp_path / "qualification.json"
+
+    write_metrics(str(jsonl_path), "jsonl", result)
+    write_metrics(str(jsonl_path), "jsonl", result)
+    write_metrics(str(json_path), "json", result)
+
+    assert len(jsonl_path.read_text(encoding="utf-8").splitlines()) == 2
+    json_record = json.loads(json_path.read_text(encoding="utf-8"))
+    assert json_record["selected_fields"]["tool_calls"] == 2
+    evidence = jsonl_path.read_text(encoding="utf-8")
+    assert "prompt" not in evidence
+    assert "answer" not in evidence
+    assert "credential" not in evidence
+    assert "response_body" not in evidence
+    with pytest.raises(QualificationRequestError, match="metrics_path_inside_repository"):
+        write_metrics(
+            str(Path.cwd() / "qualification.jsonl"),
+            "jsonl",
+            result,
+        )
+    with pytest.raises(QualificationRequestError, match="result_field_invalid"):
+        write_metrics(
+            str(tmp_path / "unsafe.jsonl"),
+            "jsonl",
+            QualificationResult(
+                command="result",
+                http_status=200,
+                latency_ms=1,
+                response_bytes=1,
+                selected_fields={"prompt": "private"},
+            ),
+        )
+
+
+def test_metrics_path_is_validated_before_network_request(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        durable_loop_spike_qualification,
+        "_urlopen",
+        lambda *_args, **_kwargs: pytest.fail("network request must not start"),
+    )
+
+    exit_code = durable_loop_spike_qualification.main(
+        [
+            "status",
+            "--value",
+            f"run_id={_RUN_ID}",
+            "--metrics-output",
+            str(Path.cwd() / "unsafe.jsonl"),
+        ],
+        {},
+    )
+
+    assert exit_code == 1
+    assert capsys.readouterr().err == (
+        "Durable loop qualification failed: metrics_path_inside_repository\n"
+    )
+
+
+def test_post_request_metrics_failure_has_distinct_exit_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self, _: int) -> bytes:
+            return b'{"status":"Running"}'
+
+    monkeypatch.setattr(
+        durable_loop_spike_qualification,
+        "_urlopen",
+        lambda *_args, **_kwargs: FakeResponse(),
+    )
+    monkeypatch.setattr(
+        durable_loop_spike_qualification,
+        "_write_metrics_path",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            QualificationRequestError("metrics_write_failed")
+        ),
+    )
+
+    exit_code = durable_loop_spike_qualification.main(
+        [
+            "status",
+            "--value",
+            f"run_id={_RUN_ID}",
+            "--metrics-output",
+            str(tmp_path / "status.jsonl"),
+        ],
+        {},
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert json.loads(captured.out)["http_status"] == 200
+    assert captured.err == (
+        "Durable loop qualification metrics failed after request: "
+        "metrics_write_failed\n"
+    )
 
 
 def test_bearer_auth_uses_environment_secret_without_logging_it() -> None:
@@ -382,6 +1159,7 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
     local_settings = json.loads(
         (sample / "src/local.settings.template.json").read_text(encoding="utf-8")
     )
+    host = json.loads((sample / "src/host.json").read_text(encoding="utf-8"))
 
     for exact_name in (
         "larohra-durable-agent-loop",
@@ -421,6 +1199,15 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
     assert "primaryKey:" not in apim
     assert "secondaryKey:" not in apim
     assert "SCM_DO_BUILD_DURING_DEPLOYMENT" not in function_app
+    assert (
+        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_ALLOWED_HOSTS:"
+        " '${replace(replace(environment().resourceManager, 'https://', ''), '/', '')},"
+        "www.example.com'" in function_app
+    )
+    assert (
+        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_BUNDLE_ROOT:"
+        " 'sandbox_bundle'" in function_app
+    )
     assert "resource durableContentContainer" in storage
     assert "publicAccess: 'None'" in storage
     assert (
@@ -436,6 +1223,18 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
         " functionIdentityClientId" in function_app
     )
     assert local_settings["Values"]["AZURE_FUNCTIONS_AGENTS_APIM_SUBSCRIPTION_KEY"] == ""
+    assert (
+        local_settings["Values"][
+            "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_ALLOWED_HOSTS"
+        ]
+        == "management.azure.com,www.example.com"
+    )
+    assert (
+        local_settings["Values"][
+            "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_BUNDLE_ROOT"
+        ]
+        == "sandbox_bundle"
+    )
     assert local_settings["Values"]["AZURE_FUNCTIONS_AGENTS_APIM_MODEL_CONTROL_URL"].endswith(
         "/durable-agent-loop-model-control"
     )
@@ -457,11 +1256,18 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
         ]
         == "<function-uami-client-id>"
     )
+    assert host["functionTimeout"] == "00:30:00"
 
 
 def test_cleanup_is_exact_and_never_deletes_shared_apim_or_group() -> None:
     readme = Path("samples/durable-agent-loop-spike/README.md").read_text(encoding="utf-8")
 
+    assert "uv run --with pip python eng\\scripts\\durable_loop_spike.py assemble" in readme
+    assert (
+        "uv run --with pip python eng\\scripts\\durable_loop_spike_qualification.py poll"
+        in readme
+    )
+    assert "\npython eng\\scripts\\durable_loop_spike" not in readme
     assert "$apimId/apis/durable-agent-loop-model" in readme
     assert "$apimId/apis/durable-agent-loop-model-control" in readme
     assert "$apimId/apis/durable-agent-loop-mcp" in readme

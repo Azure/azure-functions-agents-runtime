@@ -20,6 +20,7 @@ _DEFAULT_SOURCE_ROOT = _DEFAULT_SAMPLE_ROOT / "src"
 _DEFAULT_ARTIFACT_ROOT = _DEFAULT_SAMPLE_ROOT / ".artifacts"
 _DEFAULT_RESOURCE_GROUP = "larohra-durable-agent-loop"
 _DEFAULT_FUNCTION_APP = "func-durable-loop-0904"
+_RUNTIME_EXTRAS = ("aca_sandbox", "monitor")
 _FIXED_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 _IGNORED_DIRECTORIES = frozenset(
     {
@@ -172,7 +173,8 @@ def _source_files(source_root: Path) -> tuple[Path, ...]:
 
 
 def _render_requirements(wheel_name: str, requirements_extra: Path | None) -> str:
-    sections = [f"./{wheel_name}"]
+    extras = ",".join(_RUNTIME_EXTRAS)
+    sections = [f"./{wheel_name}[{extras}]"]
     if requirements_extra is not None:
         if not requirements_extra.is_file():
             raise DurableLoopDeploymentError("requirements_extra_missing")
