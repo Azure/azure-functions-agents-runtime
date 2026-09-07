@@ -52,6 +52,8 @@ validation:
 nav:
   - Home: index.md
   - Getting started: getting-started.md
+  - Tutorials:
+      - Build a small runtime (日本語): tutorials/runtime-from-scratch/index.md
   - Concepts:
       - Architecture: architecture.md
       - Triggers: triggers.md

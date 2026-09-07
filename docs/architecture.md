@@ -8,6 +8,10 @@ One agent can also declare a `subagents:` list so its own model can call other a
 
 ## 2. High-level data flow
 
+For a progressive, hands-on walkthrough of these boundaries, see
+[Build a small runtime from scratch (Japanese)](tutorials/runtime-from-scratch/index.md).
+The tutorial builds an independent learning implementation, not a replacement runtime.
+
 ```mermaid
 flowchart LR
     A["Agent project inputs<br/>*.agent.md / agent.md / CLAUDE.md / *.claude.md<br/>agents.config.yaml<br/>mcp.json<br/>skills/<br/>tools/"] -->|"Path"| B["config/paths.py"]
