@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -70,9 +71,14 @@ def _sha256_file(path: Path) -> str:
 
 def _reset_generated_directory(path: Path, *, protected: Sequence[Path]) -> None:
     resolved = path.resolve()
-    protected_paths = {item.resolve() for item in protected}
+    resolved_key = os.path.normcase(os.fspath(resolved))
+    protected_paths_and_ancestors = {
+        os.path.normcase(os.fspath(candidate))
+        for item in protected
+        for candidate in (item.resolve(), *item.resolve().parents)
+    }
     if (
-        resolved in protected_paths
+        resolved_key in protected_paths_and_ancestors
         or resolved == Path(resolved.anchor)
         or resolved == Path.home().resolve()
     ):

@@ -14,6 +14,7 @@ import pytest
 from eng.scripts import durable_loop_spike, durable_loop_spike_qualification
 from eng.scripts.durable_loop_spike import (
     DurableLoopDeploymentError,
+    build_runtime_wheel,
     deploy,
     stage_application,
     write_deterministic_archive,
@@ -89,6 +90,65 @@ def test_stage_excludes_local_content_and_writes_manifest(tmp_path: Path) -> Non
     assert manifest["commit_sha"] == _COMMIT
     assert manifest["wheel"]["filename"] == wheel.name
     assert "local.settings.json" not in manifest["files"]
+
+
+def test_wheel_build_rejects_dist_ancestor_of_repo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dist = tmp_path / "artifacts" / "dist"
+    repo = dist / "repo"
+    repo.mkdir(parents=True)
+    (repo / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
+    marker = repo / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+
+    monkeypatch.setattr(
+        durable_loop_spike,
+        "_run_command",
+        lambda *_args, **_kwargs: pytest.fail("build command must not run"),
+    )
+
+    with pytest.raises(DurableLoopDeploymentError, match="unsafe_generated_directory:dist"):
+        build_runtime_wheel(repo, dist)
+
+    assert marker.read_text(encoding="utf-8") == "keep"
+
+
+def test_stage_rejects_staging_ancestor_of_source(tmp_path: Path) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    source = staging / "source"
+    _write_source(source)
+    wheel = _write_wheel(tmp_path / "dist")
+
+    with pytest.raises(DurableLoopDeploymentError, match="unsafe_generated_directory:staging"):
+        stage_application(
+            source_root=source,
+            wheel_path=wheel,
+            staging_root=staging,
+            commit_sha=_COMMIT,
+        )
+
+    assert (source / "function_app.py").is_file()
+
+
+def test_stage_rejects_staging_ancestor_of_wheel(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _write_source(source)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    wheel = _write_wheel(staging / "dist")
+
+    with pytest.raises(DurableLoopDeploymentError, match="unsafe_generated_directory:staging"):
+        stage_application(
+            source_root=source,
+            wheel_path=wheel,
+            staging_root=staging,
+            commit_sha=_COMMIT,
+        )
+
+    assert wheel.read_bytes() == b"wheel-bytes"
 
 
 def test_deterministic_archive_ignores_file_mtimes(tmp_path: Path) -> None:
