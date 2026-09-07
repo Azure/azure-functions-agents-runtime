@@ -190,6 +190,7 @@ class _Client:
             self.statuses[instance_id] = SimpleNamespace(
                 custom_status=None,
                 input=client_input,
+                input_=client_input,
                 instance_id=instance_id,
                 output=output,
                 runtime_status=SimpleNamespace(name="Completed"),
@@ -201,6 +202,7 @@ class _Client:
         self.statuses[instance_id] = SimpleNamespace(
             custom_status=None,
             input=client_input,
+            input_=client_input,
             instance_id=instance_id,
             output=None,
             runtime_status=SimpleNamespace(name="Pending"),
@@ -678,7 +680,7 @@ async def test_human_input_route_uses_durable_outbox_and_server_event_name(
         "request_ref": request_ref.model_dump(mode="json"),
         "status": "Waiting",
     }
-    accepted_status.input = json.dumps(accepted_status.input)
+    accepted_status.input_ = json.dumps(accepted_status.input)
     status_handler = _registered_function(
         durable_app,
         "durable_agent_run_status_v1",

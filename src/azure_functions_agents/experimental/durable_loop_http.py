@@ -902,12 +902,13 @@ async def _authorized_status(
     if status is None:
         logger.warning("durable-loop status lookup returned no instance")
         return _json_response({"error": "run_not_found"}, status_code=404)
+    raw_input = status.input_
     try:
-        durable_input = _durable_status_input(status.input)
+        durable_input = _durable_status_input(raw_input)
     except Exception as exc:
         logger.warning(
             "durable-loop status input was rejected: input_type=%s error_type=%s",
-            type(status.input).__name__,
+            type(raw_input).__name__,
             type(exc).__name__,
         )
         return _json_response({"error": "run_not_found"}, status_code=404)
