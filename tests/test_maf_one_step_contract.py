@@ -861,7 +861,12 @@ async def test_real_openai_client_continues_from_externalized_reasoning_and_tool
             request_hash="b" * 64,
             tool_name="lookup",
             status=ToolResultStatus.SUCCEEDED,
-            value={"region": "westus3", "healthy": True},
+            value=[
+                {
+                    "type": "text",
+                    "text": '{"healthy":true,"region":"westus3"}',
+                }
+            ],
             elapsed_ms=1.0,
         )
         externalized = WorkingContextV1.model_validate_json(
@@ -894,6 +899,12 @@ async def test_real_openai_client_continues_from_externalized_reasoning_and_tool
         if item.get("type") == "function_call"
     )
     assert function_call["arguments"] == '{"region":"westus3"}'
+    function_result = next(
+        item
+        for item in requests[1]["input"]
+        if item.get("type") == "function_call_output"
+    )
+    assert function_result["output"] == '{"healthy":true,"region":"westus3"}'
     assert serialized_second.index("call_1") < serialized_second.index(
         "function_call_output"
     )

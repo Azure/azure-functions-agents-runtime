@@ -1127,9 +1127,27 @@ def _maf_replay_message(message: Mapping[str, object]) -> dict[str, object]:
             rendered_content["arguments"] = canonical_json_bytes(arguments).decode(
                 "utf-8"
             )
+        result = rendered_content.get("result")
+        if (
+            rendered_content.get("type") == "function_result"
+            and not isinstance(result, str)
+            and result is not None
+        ):
+            rendered_content["result"] = _maf_replay_result(result)
         rendered_contents.append(rendered_content)
     rendered["contents"] = rendered_contents
     return rendered
+
+
+def _maf_replay_result(result: object) -> str:
+    if isinstance(result, list) and all(
+        isinstance(item, Mapping)
+        and item.get("type") == "text"
+        and isinstance(item.get("text"), str)
+        for item in result
+    ):
+        return "\n".join(str(item["text"]) for item in result)
+    return canonical_json_bytes(result).decode("utf-8")
 
 
 def _replace_bundle_messages(
