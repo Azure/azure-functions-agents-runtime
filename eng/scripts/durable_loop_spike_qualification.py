@@ -147,6 +147,7 @@ _ERROR_CODES = frozenset(
         "run_terminal",
         "sandbox_capacity_exhausted",
         "session_busy",
+        "tool_outcome_ambiguous",
     }
 )
 

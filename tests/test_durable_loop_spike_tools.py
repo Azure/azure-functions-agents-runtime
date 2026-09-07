@@ -1159,6 +1159,13 @@ def test_status_selector_accepts_human_answer_receipt() -> None:
     ) == {"status": "accepted"}
 
 
+def test_error_selector_accepts_ambiguous_tool_outcome() -> None:
+    assert select_response_fields(
+        b'{"error":"tool_outcome_ambiguous"}',
+        ("error_code",),
+    ) == {"error_code": "tool_outcome_ambiguous"}
+
+
 def test_metrics_outputs_are_content_free_and_refuse_repository_paths(
     tmp_path: Path,
 ) -> None:
