@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,7 +21,22 @@ _DEFAULT_ARTIFACT_ROOT = _DEFAULT_SAMPLE_ROOT / ".artifacts"
 _DEFAULT_RESOURCE_GROUP = "larohra-durable-agent-loop"
 _DEFAULT_FUNCTION_APP = "func-durable-loop-0904"
 _RUNTIME_EXTRAS = ("aca_sandbox", "monitor")
+_MAF_WHEEL_REQUIREMENTS = (
+    "agent-framework-core @ "
+    "https://github.com/microsoft/agent-framework/releases/download/python-1.17.0/"
+    "agent_framework_core-1.17.0-py3-none-any.whl"
+    "#sha256=1c5c22232fd22cb50bceb61ed380cbefc8fc3c574e80b239d52e20a2cc803a2c",
+    "agent-framework-openai @ "
+    "https://github.com/microsoft/agent-framework/releases/download/python-1.17.0/"
+    "agent_framework_openai-1.14.2-py3-none-any.whl"
+    "#sha256=2559d923f64c559883d038ceaf66c6ab7250d61d1383cfa9cbbb0e401accccca",
+    "agent-framework-foundry @ "
+    "https://github.com/microsoft/agent-framework/releases/download/python-1.17.0/"
+    "agent_framework_foundry-1.12.0-py3-none-any.whl"
+    "#sha256=92e2aa2bfa5d9026cbdfb217ca3e7e19fe2c088c2b0592e4a08a191526dff78f",
+)
 _FIXED_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+_FIXED_SOURCE_DATE_EPOCH = "315532800"
 _IGNORED_DIRECTORIES = frozenset(
     {
         ".git",
@@ -114,6 +129,7 @@ def _run_command(
     cwd: Path,
     operation: str,
     timeout_seconds: float,
+    environment: Mapping[str, str] | None = None,
 ) -> None:
     try:
         completed = subprocess.run(
@@ -123,6 +139,7 @@ def _run_command(
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
+            env=dict(environment) if environment is not None else None,
         )
     except subprocess.TimeoutExpired:
         raise DurableLoopDeploymentError(f"{operation}_timeout") from None
@@ -153,6 +170,10 @@ def build_runtime_wheel(repo_root: Path, dist_root: Path) -> Path:
         cwd=repo_root,
         operation="runtime_wheel_build",
         timeout_seconds=900,
+        environment={
+            **os.environ,
+            "SOURCE_DATE_EPOCH": _FIXED_SOURCE_DATE_EPOCH,
+        },
     )
     return select_runtime_wheel(tuple(dist_root.iterdir()))
 
@@ -174,7 +195,7 @@ def _source_files(source_root: Path) -> tuple[Path, ...]:
 
 def _render_requirements(wheel_name: str, requirements_extra: Path | None) -> str:
     extras = ",".join(_RUNTIME_EXTRAS)
-    sections = [f"./{wheel_name}[{extras}]"]
+    sections = ["\n".join((f"./{wheel_name}[{extras}]", *_MAF_WHEEL_REQUIREMENTS))]
     if requirements_extra is not None:
         if not requirements_extra.is_file():
             raise DurableLoopDeploymentError("requirements_extra_missing")
@@ -312,8 +333,11 @@ def assemble(args: argparse.Namespace) -> AssemblyResult:
 
 
 def _run_az(arguments: Sequence[str], *, timeout_seconds: float) -> None:
+    executable = shutil.which("az")
+    if executable is None:
+        raise DurableLoopDeploymentError("azure_cli_unavailable")
     _run_command(
-        ("az", *arguments, "--only-show-errors", "--output", "none"),
+        (executable, *arguments, "--only-show-errors", "--output", "none"),
         cwd=Path.cwd(),
         operation=f"az_{'_'.join(arguments[:2])}",
         timeout_seconds=timeout_seconds,

@@ -142,6 +142,23 @@ two approved qualification hosts. No credential is copied into the bundle or
 sandbox. The durable-loop feature gate remains `false` in IaC until the
 operator explicitly activates the deployed application.
 
+The deployment pins the private qualification controls explicitly rather than
+depending on process defaults:
+
+| Setting | Provisioned value |
+| --- | --- |
+| `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_ENABLED` | `false` |
+| `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_BACKGROUND_MODEL_ENABLED` | `false` |
+| `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RETAINED_SANDBOX_ENABLED` | `false` |
+| `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_FAULT_INJECTION_ENABLED` | `false` |
+| `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_MAX_APP_OWNED_SANDBOXES` | `10` |
+| `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RETAINED_SANDBOX_AUTO_DELETE_SECONDS` | `86400` |
+| `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_SANDBOX_REAPER_AGE_SECONDS` | `600` |
+
+After the package is deployed and indexed with the main gate off, live
+qualification enables the main, background-model, retained-sandbox, and
+fault-injection gates together through a secure app-setting update.
+
 ## Final application assembly
 
 The final stacked layer adds `function_app.py` and all application files
@@ -162,6 +179,9 @@ The command:
 - writes `requirements.txt` with
   `./<wheel>[aca_sandbox,monitor]` first, so the sample resolves the runtime's
   own ACA SDK and Azure Monitor optional extras without duplicating their pins;
+- adds the three exact, hash-pinned official MAF release-wheel URLs from the
+  repository lock so Flex remote build does not depend on package-index
+  propagation;
 - writes a content-only `DEPLOYMENT_MANIFEST.json`;
 - creates a sorted ZIP with fixed timestamps and permissions; and
 - prints only the archive path, wheel filename, and SHA-256.

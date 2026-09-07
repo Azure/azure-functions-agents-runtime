@@ -95,7 +95,11 @@ def test_stage_excludes_local_content_and_writes_manifest(tmp_path: Path) -> Non
     assert not (staging / "local.settings.template.json").exists()
     assert not (staging / "ASSEMBLY_SLOT.md").exists()
     requirements = (staging / "requirements.txt").read_text(encoding="utf-8")
-    assert requirements == f"./{wheel.name}[aca_sandbox,monitor]\n"
+    requirement_lines = requirements.splitlines()
+    assert requirement_lines[0] == f"./{wheel.name}[aca_sandbox,monitor]"
+    assert requirement_lines[1].startswith("agent-framework-core @ https://github.com/")
+    assert requirement_lines[2].startswith("agent-framework-openai @ https://github.com/")
+    assert requirement_lines[3].startswith("agent-framework-foundry @ https://github.com/")
     manifest = json.loads((staging / "DEPLOYMENT_MANIFEST.json").read_text(encoding="utf-8"))
     assert manifest["commit_sha"] == _COMMIT
     assert manifest["wheel"]["filename"] == wheel.name
@@ -121,7 +125,19 @@ def test_stage_requirements_keep_fixed_runtime_extras_before_operator_dependenci
     )
 
     assert (staging / "requirements.txt").read_text(encoding="utf-8") == (
-        f"./{wheel.name}[aca_sandbox,monitor]\n\n"
+        f"./{wheel.name}[aca_sandbox,monitor]\n"
+        "agent-framework-core @ "
+        "https://github.com/microsoft/agent-framework/releases/download/python-1.17.0/"
+        "agent_framework_core-1.17.0-py3-none-any.whl"
+        "#sha256=1c5c22232fd22cb50bceb61ed380cbefc8fc3c574e80b239d52e20a2cc803a2c\n"
+        "agent-framework-openai @ "
+        "https://github.com/microsoft/agent-framework/releases/download/python-1.17.0/"
+        "agent_framework_openai-1.14.2-py3-none-any.whl"
+        "#sha256=2559d923f64c559883d038ceaf66c6ab7250d61d1383cfa9cbbb0e401accccca\n"
+        "agent-framework-foundry @ "
+        "https://github.com/microsoft/agent-framework/releases/download/python-1.17.0/"
+        "agent_framework_foundry-1.12.0-py3-none-any.whl"
+        "#sha256=92e2aa2bfa5d9026cbdfb217ca3e7e19fe2c088c2b0592e4a08a191526dff78f\n\n"
         "operator-package==1.2.3\n"
     )
 
@@ -147,6 +163,32 @@ def test_wheel_build_rejects_dist_ancestor_of_repo(
         build_runtime_wheel(repo, dist)
 
     assert marker.read_text(encoding="utf-8") == "keep"
+
+
+def test_wheel_build_sets_reproducible_source_date(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
+    dist = tmp_path / "dist"
+    environments: list[dict[str, str]] = []
+
+    def fake_run_command(*_args: object, **kwargs: object) -> None:
+        environment = kwargs["environment"]
+        assert isinstance(environment, dict)
+        environments.append(environment)
+        (dist / "azurefunctions_agents_runtime-1.2.3-py3-none-any.whl").write_bytes(
+            b"wheel-bytes"
+        )
+
+    monkeypatch.setattr(durable_loop_spike, "_run_command", fake_run_command)
+
+    wheel = build_runtime_wheel(repo, dist)
+
+    assert wheel.is_file()
+    assert environments[0]["SOURCE_DATE_EPOCH"] == "315532800"
 
 
 def test_stage_rejects_staging_ancestor_of_source(tmp_path: Path) -> None:
@@ -231,6 +273,24 @@ def test_deploy_requires_exact_existing_app_acknowledgment(
     assert calls[1][:4] == ("functionapp", "deployment", "source", "config-zip")
     assert calls[1][-2:] == ("--build-remote", "true")
     assert all("appsettings" not in call for call in calls)
+
+
+def test_azure_cli_resolves_windows_command_shim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    azure_cli = r"C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
+
+    monkeypatch.setattr(durable_loop_spike.shutil, "which", lambda name: azure_cli)
+    monkeypatch.setattr(
+        durable_loop_spike,
+        "_run_command",
+        lambda command, **_kwargs: calls.append(tuple(command)),
+    )
+
+    durable_loop_spike._run_az(("account", "show"), timeout_seconds=30)
+
+    assert calls == [(azure_cli, "account", "show", "--only-show-errors", "--output", "none")]
 
 
 def test_deploy_rejects_mismatched_acknowledgment(tmp_path: Path) -> None:
@@ -1149,6 +1209,31 @@ def test_render_result_contains_only_selected_metadata() -> None:
     }
 
 
+def _assert_private_runtime_settings(
+    *,
+    main: str,
+    function_app: str,
+    host: dict[str, object],
+    local_settings: dict[str, object],
+) -> None:
+    expected = {
+        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_BACKGROUND_MODEL_ENABLED": "false",
+        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RETAINED_SANDBOX_ENABLED": "false",
+        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_FAULT_INJECTION_ENABLED": "false",
+        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_MAX_APP_OWNED_SANDBOXES": "10",
+        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RETAINED_SANDBOX_AUTO_DELETE_SECONDS": "86400",
+        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_SANDBOX_REAPER_AGE_SECONDS": "600",
+    }
+    values = local_settings["Values"]
+    assert isinstance(values, dict)
+    for setting, value in expected.items():
+        assert f"{setting}: '{value}'" in function_app
+        assert values[setting] == value
+    assert "param featureGateEnabled bool = false" in main
+    assert "'${featureGateSettingName}': string(featureGateEnabled)" in function_app
+    assert host["functionTimeout"] == "00:30:00"
+
+
 def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
     sample = Path("samples/durable-agent-loop-spike")
     main = (sample / "infra/main.bicep").read_text(encoding="utf-8")
@@ -1222,6 +1307,12 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
         "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_CLIENT_ID:"
         " functionIdentityClientId" in function_app
     )
+    _assert_private_runtime_settings(
+        main=main,
+        function_app=function_app,
+        host=host,
+        local_settings=local_settings,
+    )
     assert local_settings["Values"]["AZURE_FUNCTIONS_AGENTS_APIM_SUBSCRIPTION_KEY"] == ""
     assert (
         local_settings["Values"][
@@ -1256,7 +1347,6 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
         ]
         == "<function-uami-client-id>"
     )
-    assert host["functionTimeout"] == "00:30:00"
 
 
 def test_cleanup_is_exact_and_never_deletes_shared_apim_or_group() -> None:
