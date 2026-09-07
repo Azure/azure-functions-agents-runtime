@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "microsoft-learn-through-apim": {
+      "type": "http",
+      "url": "$AZURE_FUNCTIONS_AGENTS_APIM_MCP_URL",
+      "headers": {
+        "api-key": "$AZURE_FUNCTIONS_AGENTS_APIM_SUBSCRIPTION_KEY"
+      },
+      "tools": [
+        "microsoft_docs_search",
+        "microsoft_code_sample_search",
+        "microsoft_docs_fetch"
+      ]
+    }
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "schema_version": "1",
+  "tools": {
+    "adaptive_probe": {
+      "provenance": "local",
+      "behavior": "read_only",
+      "parallel_safe": false
+    },
+    "chain_probe": {
+      "provenance": "local",
+      "behavior": "read_only",
+      "parallel_safe": false
+    },
+    "customer_probe": {
+      "provenance": "local",
+      "behavior": "read_only",
+      "parallel_safe": false
+    },
+    "delayed_probe": {
+      "provenance": "local",
+      "behavior": "read_only",
+      "parallel_safe": false
+    },
+    "microsoft_code_sample_search": {
+      "provenance": "remote",
+      "behavior": "read_only",
+      "parallel_safe": true
+    },
+    "microsoft_docs_fetch": {
+      "provenance": "remote",
+      "behavior": "read_only",
+      "parallel_safe": true
+    },
+    "microsoft_docs_search": {
+      "provenance": "remote",
+      "behavior": "read_only",
+      "parallel_safe": true
+    },
+    "read_file": {
+      "provenance": "local",
+      "behavior": "read_only",
+      "parallel_safe": false
+    },
+    "run_shell": {
+      "provenance": "local",
+      "behavior": "mutating",
+      "parallel_safe": false
+    },
+    "search_files": {
+      "provenance": "local",
+      "behavior": "read_only",
+      "parallel_safe": false
+    },
+    "unsafe_write_probe": {
+      "provenance": "local",
+      "behavior": "mutating",
+      "parallel_safe": false
+    },
+    "write_file": {
+      "provenance": "local",
+      "behavior": "idempotent_write",
+      "parallel_safe": false
+    }
+  }
+}
