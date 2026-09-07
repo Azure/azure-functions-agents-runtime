@@ -378,6 +378,7 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
     apim = (sample / "infra/modules/apim.bicep").read_text(encoding="utf-8")
     function_app = (sample / "infra/modules/function-app.bicep").read_text(encoding="utf-8")
     foundry = (sample / "infra/modules/foundry.bicep").read_text(encoding="utf-8")
+    storage = (sample / "infra/modules/storage.bicep").read_text(encoding="utf-8")
     local_settings = json.loads(
         (sample / "src/local.settings.template.json").read_text(encoding="utf-8")
     )
@@ -391,6 +392,7 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
         "durable-agent-loop-model",
         "durable-agent-loop-model-control",
         "durable-agent-loop-mcp",
+        "durable-loop-content",
     ):
         assert exact_name in main
     assert "sharedApimSubscription.listSecrets().primaryKey" in main
@@ -419,9 +421,41 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
     assert "primaryKey:" not in apim
     assert "secondaryKey:" not in apim
     assert "SCM_DO_BUILD_DURING_DEPLOYMENT" not in function_app
+    assert "resource durableContentContainer" in storage
+    assert "publicAccess: 'None'" in storage
+    assert (
+        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_BLOB_URI:"
+        " durableContentBlobUri" in function_app
+    )
+    assert (
+        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_CONTAINER:"
+        " durableContentContainerName" in function_app
+    )
+    assert (
+        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_CLIENT_ID:"
+        " functionIdentityClientId" in function_app
+    )
     assert local_settings["Values"]["AZURE_FUNCTIONS_AGENTS_APIM_SUBSCRIPTION_KEY"] == ""
     assert local_settings["Values"]["AZURE_FUNCTIONS_AGENTS_APIM_MODEL_CONTROL_URL"].endswith(
         "/durable-agent-loop-model-control"
+    )
+    assert (
+        local_settings["Values"][
+            "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_BLOB_URI"
+        ]
+        == "https://stdurableloop0904e2.blob.core.windows.net"
+    )
+    assert (
+        local_settings["Values"][
+            "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_CONTAINER"
+        ]
+        == "durable-loop-content"
+    )
+    assert (
+        local_settings["Values"][
+            "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_CLIENT_ID"
+        ]
+        == "<function-uami-client-id>"
     )
 
 

@@ -5,6 +5,8 @@ param functionIdentityResourceId string
 param functionIdentityClientId string
 param storageAccountName string
 param deploymentStorageContainerName string
+param durableContentBlobUri string
+param durableContentContainerName string
 param applicationInsightsName string
 param foundryProjectEndpoint string
 param foundryModelDeploymentName string
@@ -112,6 +114,9 @@ resource functionAppSettings 'Microsoft.Web/sites/config@2024-11-01' = {
       AZURE_FUNCTIONS_AGENTS_APIM_SUBSCRIPTION_KEY: apimSubscriptionKey
       AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_SANDBOX_GROUP_RESOURCE_ID: sandboxGroupResourceId
       AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION: sandboxRegion
+      AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_BLOB_URI: durableContentBlobUri
+      AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_CONTAINER: durableContentContainerName
+      AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_CLIENT_ID: functionIdentityClientId
       AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT: 'medium'
       AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY: 'concise'
       ENABLE_SENSITIVE_DATA: string(enableSensitiveData)

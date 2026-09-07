@@ -29,7 +29,7 @@ deliberately separate:
 | AIServices account / project | `aidurableloop0904e2` / `durable-agent-loop` |
 | Model deployment | `gpt-6-astra` (`gpt-6-astra`, version `2026-09-03`, GlobalStandard 200) |
 | Function / sandbox identities | `id-durable-loop-func-0904` / `id-durable-loop-sandbox-0904` |
-| Storage / deployment container | `stdurableloop0904e2` / `app-package-func-durable-loop-0904` |
+| Storage / containers | `stdurableloop0904e2` / `app-package-func-durable-loop-0904` / `durable-loop-content` |
 | Log Analytics / App Insights | `log-durable-loop-0904` / `appi-durable-loop-0904` |
 | Sandbox Group | `sbg-durable-loop-0904` |
 | Flex app | `func-durable-loop-0904` |
@@ -122,6 +122,14 @@ confused with or exposed as a backend model key.
 Local operators must supply inbound Function authentication through an
 environment variable. Do not place Function keys, APIM keys, prompts, answers,
 or response bodies in command lines, committed files, or logs.
+
+Durable prompt, tool, and result content uses the dedicated private
+`durable-loop-content` Blob container rather than `AzureWebJobsStorage`. The
+Function app receives the account URI, container name, and Function UAMI client
+ID through the three
+`AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_*` settings.
+The existing account-scoped Storage Blob Data Owner assignment grants the
+Function identity access without a connection string or storage key.
 
 ## Final application assembly
 

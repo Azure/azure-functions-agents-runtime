@@ -20,6 +20,7 @@ param functionIdentityName string = 'id-durable-loop-func-0904'
 param sandboxIdentityName string = 'id-durable-loop-sandbox-0904'
 param storageAccountName string = 'stdurableloop0904e2'
 param deploymentStorageContainerName string = 'app-package-func-durable-loop-0904'
+param durableContentContainerName string = 'durable-loop-content'
 param logAnalyticsName string = 'log-durable-loop-0904'
 param applicationInsightsName string = 'appi-durable-loop-0904'
 param sandboxGroupName string = 'sbg-durable-loop-0904'
@@ -124,6 +125,7 @@ module storage './modules/storage.bicep' = {
     location: location
     storageAccountName: storageAccountName
     deploymentStorageContainerName: deploymentStorageContainerName
+    durableContentContainerName: durableContentContainerName
   }
 }
 
@@ -185,6 +187,8 @@ module functionApp './modules/function-app.bicep' = {
     functionIdentityClientId: identities.outputs.functionIdentityClientId
     storageAccountName: storageAccountName
     deploymentStorageContainerName: deploymentStorageContainerName
+    durableContentBlobUri: 'https://${storageAccountName}.blob.${environment().suffixes.storage}'
+    durableContentContainerName: durableContentContainerName
     applicationInsightsName: applicationInsightsName
     foundryProjectEndpoint: 'https://${foundryAccountName}.services.ai.azure.com/api/projects/${foundryProjectName}'
     foundryModelDeploymentName: foundryModelDeploymentName

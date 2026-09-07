@@ -1,6 +1,7 @@
 param location string
 param storageAccountName string
 param deploymentStorageContainerName string
+param durableContentContainerName string
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
@@ -32,5 +33,14 @@ resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/con
   }
 }
 
+resource durableContentContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobService
+  name: durableContentContainerName
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
 output storageAccountResourceId string = storageAccount.id
 output deploymentContainerResourceId string = deploymentContainer.id
+output durableContentContainerResourceId string = durableContentContainer.id
