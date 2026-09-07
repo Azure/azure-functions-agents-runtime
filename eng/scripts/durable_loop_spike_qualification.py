@@ -53,6 +53,18 @@ _SAFE_HUMAN_URL = re.compile(
 )
 _SAFE_HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+_SANDBOX_PROFILES = frozenset({"per_call", "retained_session"})
+_FAULT_PROFILES = frozenset(
+    {
+        "none",
+        "model_apim_429_once",
+        "model_timeout_once",
+        "tool_activity_ack_loss_once",
+        "sandbox_loss_after_checkpoint",
+        "cleanup_failure_once",
+        "commit_ack_loss_once",
+    }
+)
 
 _DEFAULT_ROUTES = {
     "start": "/api/experimental/durable-agent-runs",
@@ -551,7 +563,13 @@ def _validate_start_payload(
 ) -> None:
     if payload is None:
         raise QualificationRequestError("request_body_required")
-    if set(payload) - {"prompt", "request_id", "session_id"}:
+    if set(payload) - {
+        "fault_profile",
+        "prompt",
+        "request_id",
+        "sandbox_profile",
+        "session_id",
+    }:
         raise QualificationRequestError("start_body_field_invalid")
     prompt = payload.get("prompt")
     if not isinstance(prompt, str) or not prompt:
@@ -566,6 +584,12 @@ def _validate_start_payload(
         not isinstance(session_id, str) or _SAFE_ID.fullmatch(session_id) is None
     ):
         raise QualificationRequestError("start_session_id_invalid")
+    sandbox_profile = payload.get("sandbox_profile", "per_call")
+    if not isinstance(sandbox_profile, str) or sandbox_profile not in _SANDBOX_PROFILES:
+        raise QualificationRequestError("start_sandbox_profile_invalid")
+    fault_profile = payload.get("fault_profile", "none")
+    if not isinstance(fault_profile, str) or fault_profile not in _FAULT_PROFILES:
+        raise QualificationRequestError("start_fault_profile_invalid")
     if request_id is None and not has_idempotency_key:
         raise QualificationRequestError("start_idempotency_required")
 

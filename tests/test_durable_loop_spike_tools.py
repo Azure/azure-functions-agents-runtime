@@ -686,6 +686,40 @@ def test_request_contract_rejects_invalid_shapes(
         )
 
 
+def test_start_request_accepts_fixed_qualification_profiles() -> None:
+    durable_loop_spike_qualification._validate_request_payload(
+        "start",
+        {
+            "fault_profile": "tool_activity_ack_loss_once",
+            "prompt": "private",
+            "request_id": "request-1",
+            "sandbox_profile": "retained_session",
+            "session_id": "session-1",
+        },
+        has_idempotency_key=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error_code"),
+    [
+        ("sandbox_profile", "unknown", "start_sandbox_profile_invalid"),
+        ("fault_profile", "unknown", "start_fault_profile_invalid"),
+    ],
+)
+def test_start_request_rejects_unknown_qualification_profiles(
+    field: str,
+    value: str,
+    error_code: str,
+) -> None:
+    with pytest.raises(QualificationRequestError, match=error_code):
+        durable_loop_spike_qualification._validate_request_payload(
+            "start",
+            {"prompt": "private", "request_id": "request-1", field: value},
+            has_idempotency_key=True,
+        )
+
+
 def test_missing_body_file_error_is_content_free(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

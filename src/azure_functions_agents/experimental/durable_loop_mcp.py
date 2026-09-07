@@ -114,7 +114,7 @@ class DurableRemoteMcpLane:
             FrozenToolDescriptorV1(
                 name=name,
                 description=function.description,
-                parameters=dict(function.parameters),
+                parameters=dict(function.parameters()),
                 provenance=ToolProvenance.REMOTE,
                 behavior=ToolBehavior.MUTATING,
                 parallel_safe=False,

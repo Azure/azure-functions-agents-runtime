@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
+from agent_framework import FunctionTool
 
 from azure_functions_agents.experimental import durable_loop_execution
 from azure_functions_agents.experimental.durable_loop_activities import (
@@ -48,10 +48,11 @@ class _Session:
         self.calls = 0
         self.closed = 0
         self.functions = [
-            SimpleNamespace(
+            FunctionTool(
                 name="microsoft_docs_search",
                 description="Search Microsoft Learn.",
-                parameters={
+                func=None,
+                input_model={
                     "additionalProperties": False,
                     "properties": {"query": {"type": "string"}},
                     "required": ["query"],

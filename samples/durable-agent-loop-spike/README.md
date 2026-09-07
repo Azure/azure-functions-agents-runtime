@@ -233,8 +233,11 @@ $env:DURABLE_LOOP_METRICS = 'C:\secure\durable-loop\qualification.jsonl'
 
 The start document must contain `prompt` and may contain `session_id`. It must
 also contain `request_id` or the command must supply `Idempotency-Key` from an
-environment variable. The human-answer document contains only `answer` and
-always supplies `Idempotency-Key` from an environment variable.
+environment variable. Qualification requests may also select
+`sandbox_profile` as `per_call` or `retained_session`, and `fault_profile` as
+one of the fixed runtime fault values; the corresponding private gate must be
+enabled. The human-answer document contains only `answer` and always supplies
+`Idempotency-Key` from an environment variable.
 
 ```powershell
 # Start.
