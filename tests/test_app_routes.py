@@ -6,6 +6,9 @@ import azure.durable_functions as df
 import pytest
 
 from azure_functions_agents import app as app_module
+from azure_functions_agents.experimental.durable_loop_config import (
+    DURABLE_LOOP_ENABLED_ENV,
+)
 from azure_functions_agents.workflows import context as workflow_context
 from azure_functions_agents.workflows import workflow_tools
 
@@ -82,6 +85,18 @@ def test_non_workflow_app_does_not_use_durable_function_app(tmp_path: Path):
 
 def test_workflow_app_uses_durable_function_app(tmp_path: Path):
     _write_main_agent(tmp_path, workflows=True)
+
+    function_app = app_module.create_function_app(app_root=tmp_path)
+
+    assert isinstance(function_app, df.DFApp)
+
+
+def test_private_durable_loop_gate_uses_durable_function_app(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    _write_main_agent(tmp_path)
 
     function_app = app_module.create_function_app(app_root=tmp_path)
 

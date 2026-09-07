@@ -655,6 +655,44 @@ def _agent_system_tools(resolved: ResolvedAgent) -> set[str]:
     return tools
 
 
+def _create_registration_app(
+    *,
+    workflows_requested: bool,
+) -> tuple[func.FunctionApp, object | None]:
+    """Create the required app type and register private shared blueprints."""
+    from .experimental.durable_loop_config import DurableLoopSettings
+
+    durable_loop_settings = DurableLoopSettings.from_environment()
+    app: func.FunctionApp = (
+        df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
+        if workflows_requested or durable_loop_settings is not None
+        else func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+    )
+    if durable_loop_settings is not None:
+        from .experimental.durable_loop_registration import (
+            register_durable_loop_blueprint,
+        )
+
+        register_durable_loop_blueprint(app)
+    return app, durable_loop_settings
+
+
+def _register_private_durable_loop_routes(
+    app: func.FunctionApp,
+    resolved_agents: tuple[ResolvedAgent, ...],
+    settings: object | None,
+) -> None:
+    if settings is None:
+        return
+    from .experimental.durable_loop_config import DurableLoopSettings
+    from .experimental.durable_loop_http import register_durable_loop_http_routes
+
+    if not isinstance(settings, DurableLoopSettings):
+        raise TypeError("durable-loop settings have an invalid type")
+    main = next(resolved for resolved in resolved_agents if resolved.is_main)
+    register_durable_loop_http_routes(app, resolved=main, settings=settings)
+
+
 def _enabled_builtin_endpoint_names(builtin_endpoints: Any) -> list[str]:
     names: list[str] = []
     if builtin_endpoints.debug_chat_ui:
@@ -798,10 +836,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         resolved.is_main and _workflows_requested(resolved.workflows)
         for resolved in resolved_agents
     )
-    app: func.FunctionApp = (
-        df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
-        if workflows_requested
-        else func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+    app, durable_loop_settings = _create_registration_app(
+        workflows_requested=workflows_requested,
     )
 
     # Collect indexing summary for structured logging
@@ -812,6 +848,11 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     catalog = aca_composition.catalog
     terminal_bindings = aca_composition.bindings
     session_runtime = aca_composition.session_runtime
+    _register_private_durable_loop_routes(
+        app,
+        resolved_agents,
+        durable_loop_settings,
+    )
 
     # --- Two-pass composition, pass 2 (FRD 0007 §4.2): mutate `app` --------------------
     for resolved in resolved_agents:

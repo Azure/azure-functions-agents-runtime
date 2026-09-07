@@ -21,6 +21,10 @@ from ..controller.sandbox_config import SandboxCreateProfile
 from ..discovery.mcp import discover_mcp_servers
 from ..discovery.skills import SkillDiscoveryResult, discover_skills
 from ..discovery.tools import ProjectTools, discover_project_tools
+from ..experimental.durable_loop_config import (
+    durable_loop_enabled,
+    validate_durable_loop_application,
+)
 from ..experimental.hybrid_config import hybrid_enabled, validate_hybrid_application
 from ..harness.delegation import validate_delegation_graph
 from ..registration._handlers import build_output_validator
@@ -126,15 +130,19 @@ def compose_aca_application(
     global_config = load_global_config(app_root)
     agent_specs = load_agent_specs(app_root)
     private_hybrid_enabled = hybrid_enabled()
+    private_durable_loop_enabled = durable_loop_enabled()
+    disable_worker_tool_discovery = (
+        private_hybrid_enabled or private_durable_loop_enabled
+    )
     tool_result = (
         ProjectTools(user_tools=[], workflow_tools=[], failed_loads=[])
-        if private_hybrid_enabled
+        if disable_worker_tool_discovery
         else discover_project_tools(app_root)
     )
     mcp_result = discover_mcp_servers(app_root)
     skill_result = (
         SkillDiscoveryResult(skills={}, failed_loads=[])
-        if private_hybrid_enabled
+        if disable_worker_tool_discovery
         else discover_skills(app_root)
     )
     mcp_names = list(mcp_result.servers)
@@ -149,6 +157,7 @@ def compose_aca_application(
         for spec in agent_specs
     ]
     validate_hybrid_application(global_config, resolved_agents)
+    validate_durable_loop_application(global_config, resolved_agents)
     validate_session_runtime(global_config, resolved_agents)
     from ..app import _fail_on_duplicate_slugs
 

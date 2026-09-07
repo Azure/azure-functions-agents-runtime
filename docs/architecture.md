@@ -26,6 +26,8 @@ flowchart LR
     H -.->|"handler closures + AgentCatalog"| K
     K -.->|"prompt + tools + session"| L["Microsoft Agent Framework"]
     K -.->|"private hybrid gate: one invocation lease"| M["experimental/hybrid_tools.py<br/>ACA Sandbox local tools"]
+    H -.->|"private durable-loop gate"| O["experimental/durable_loop_*<br/>Durable entity + explicit model/tool loop"]
+    O -.->|"one-step Agent; auto tools disabled"| L
     L -.->|"model + remote MCP only"| N["APIM"]
 ```
 
@@ -61,6 +63,37 @@ A few boundaries are worth calling out explicitly:
   polling its LRO, and closes clients. Confirmed deletion and the app-scoped reaper remain failure
   backstops. This path is distinct from the conversation-scoped
   `AcaSandboxExecutionBackend` and adds no public authoring surface.
+- **The durable agent loop is a separate private foundation.** When
+  `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_ENABLED=true`,
+  startup selects `DFApp`, skips worker-side customer-tool and executable-skill
+  discovery, registers one versioned Durable Entity/blueprint, and adds
+  authenticated private start/status/result/cancel/human-input routes. The
+  entity fences one active turn per owner/session and the orchestrator owns the
+  model-step/tool-step alternation. Each model activity rebuilds a fresh MAF
+  `Agent` on core `1.17.0` with automatic function invocation disabled; tool
+  calls remain ordered data until an approved `DurableToolDispatchPort`
+  activity executes them. The local foundation includes deterministic fake
+  model/tool/content/state adapters, replay receipts, clarification CAS/outbox
+  semantics, context compaction, and background-response state contracts.
+  Blank or incomplete provider results fail closed, provider identifiers are
+  hashed or kept behind content refs, cancellation is fenced against final
+  commit, ambiguous tool outcomes terminalize without model recovery, and
+  model-authored human-response schemas are restricted to a bounded local-only
+  subset without references or regular expressions. Admission freezes the
+  resolved model target, durable status exposes bounded token/cost/content and
+  parked-time counters, accepted answers and cancellations use durable delivery
+  outboxes, and the content journal requires an explicit dedicated Blob origin
+  rather than silently reusing host-storage settings. Provider, endpoint, API,
+  and deployment bindings are revalidated per activity; cost caps require
+  frozen pricing rates; per-call argument/result limits are enforced around
+  dispatch; terminal idempotency receipts are retained until explicit expiry;
+  and external protocol JSON rejects duplicate keys.
+  Layer 2 replaces the transport adapters with APIM model/MCP and ACA
+  single-call wave implementations; normal `runner.py` execution is unchanged
+  when the gate is absent. While the gate is present, legacy chat, streaming,
+  MCP-agent, declared-trigger, Dynamic Workflow, session-runtime, subagent, and
+  executable-skill paths fail closed so one session cannot cross the
+  process-local and Durable ownership models.
 
 ## 3. Module map
 
@@ -85,6 +118,15 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/registration/triggers.py` | Registers each agent trigger, dispatching between the runtime HTTP adapter and Azure Functions trigger decorators. Resolves an `http_trigger`'s inbound auth (nested `auth`, deprecated flat `auth_level`) into the shared `EndpointAuthConfig` and applies the `_auth` route `AuthLevel`. | `register_agent()` |
 | `azure_functions_agents/registration/endpoints.py` | Registers debug chat UI, REST chat, SSE streaming, and MCP tools for agents with built-in endpoints; every ACA path carries the resolved output validator. The shared ACA management route set uses that binding and preflights status before committing SSE headers. The built-in UI follows stream run headers, polls only same-origin status URLs, and waits for `phase=terminal` before reusing a session. | `register_builtin_endpoints()`, `register_sandbox_management_endpoints()` |
 | `azure_functions_agents/registration/_auth.py` | Enforces inbound endpoint auth: maps the configured `auth.mode` to a Functions `AuthLevel` (API key / anonymous) and enforces Entra ID identity by trusting the platform-validated Easy Auth `x-ms-client-principal` header (never validating tokens in-app), with optional tenant/audience/client-id allowlists. Because `entra` routes are anonymous, the header is trusted only with non-spoofable evidence Easy Auth is enforced (`WEBSITE_AUTH_ENABLED` / `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH`); fails closed (401) otherwise. FRD 0008 P3a also exposes a dormant typed owner-principal seam: function/admin-key auth resolves only an app marker (never key bytes/name), while Easy Auth ownership requires exactly one stable `tid` + immutable `oid` and fails closed with 401 when those are missing (no fallback to app-owned sessions). It is not wired into request execution yet. | `resolve_endpoint_auth_level()`, `authorize_entra_request()`, `resolve_owner_principal()` |
+| `azure_functions_agents/experimental/durable_loop_config.py` | Private fail-closed environment settings and startup compatibility guards for the durable loop. The gate is absent by default; limits cover model/tool steps, elapsed time, human waits, payloads, activity deadlines, polling, compaction, parallel reads, and generation rollover. | `DurableLoopSettings.from_environment()`, `validate_durable_loop_application()` |
+| `azure_functions_agents/experimental/durable_loop_protocol.py` | Strict Pydantic v2 schema-v1 contracts, canonical JSON/hashing, deterministic model/call/event keys, six run statuses, explicit ambiguous dispositions, MAF reasoning/call/result message bundles, working context, background operations, tool/human envelopes, checkpoints, and result/status projections. | `DurableRunIdentityV1`, `MAFMessageBundleV1`, `CheckpointStateV1`, `canonical_hash()` |
+| `azure_functions_agents/experimental/durable_loop.py` | Provider-neutral adaptive loop and local replay simulator. It owns deterministic budgets, ordered tool classification, policy-declared parallel reads, serialized writes, clarification repair, commit receipts, session continuity, cancellation, quiescent generation rollover, and fault-injection boundaries. | `DurableLoopRunner`, `DurableLoopPlan`, `create_run_identity()`, `build_tool_requests()` |
+| `azure_functions_agents/experimental/durable_loop_activities.py` | Activity-side one-step MAF adapter plus immutable content, compaction, resume, and background-response seams. `BlobDurableContentStore` uses commit-once block blobs and integrity refs; `MafOneStepModelProvider` constructs a fresh Agent with no session/history providers, forces `store=False` plus encrypted-reasoning capture, rejects continuation fields, and disables local function invocation before one inference. | `BlobDurableContentStore`, `MafOneStepModelProvider`, `BackgroundModelProvider`, `DeterministicContextCompactor` |
+| `azure_functions_agents/experimental/durable_loop_state.py` | Session admission/fencing, first-answer CAS, idempotent commit receipt, committed-context continuity, and deterministic activity receipt ports. The in-memory implementations are test adapters; cross-instance registration uses the Durable Entity. | `DurableLoopStatePort`, `InMemoryDurableLoopStateStore`, `InMemoryActivityJournal` |
+| `azure_functions_agents/experimental/durable_loop_tools.py` | Typed tool catalog/dispatch port with reserved runtime clarification provenance and deterministic local fakes for reads, mutations, idempotent writes, timeouts, failures, and dedupe. Customer tools are never imported by the worker under the durable gate. | `DurableToolRegistry`, `DurableToolDispatchPort`, `human_input_tool_descriptor()` |
+| `azure_functions_agents/experimental/durable_loop_registration.py` | Versioned Durable Entity plus refs-only model/tool/append/human/compaction activities and adaptive orchestrator. Durable inputs, outputs, custom status, activity envelopes, entity state, and external-event payloads contain only bounded IDs, hashes, classifications, and `ContentRefV1`; full messages, instructions, arguments, results, and answers stay in immutable content blobs. Entity transitions own admission, cancellation facts, first-answer/timeout CAS, idempotent commit receipts, committed context, and active-run release. | `register_durable_loop_blueprint()`, `apply_session_entity_operation()` |
+| `azure_functions_agents/experimental/durable_loop_http.py` | Private authenticated HTTP starter and management routes. A short unique admission orchestration obtains the authoritative entity result before the main run starts; raw prompt/answer content is persisted before any Durable boundary. Start returns `202` with status/result/cancel URLs, duplicate requests return the recorded run, conflicts return `409`, and authorized status/result projections dereference content without copying it into Durable history. | `register_durable_loop_http_routes()` |
+| `azure_functions_agents/experimental/durable_loop_observability.py` | Content-free durable-loop progress events and low-cardinality operation/duration metrics for run, model, tool, human wait, replay, compaction, background poll, cancellation, and commit. | `record_durable_loop_event()`, `DurableLoopTimer` |
 | `azure_functions_agents/session_state/_label_encoding.py` | Shared RFC 4648 base32 encoding (FRD 0008 Decision 106, precision in Decision 113) for every digest-derived label used by this package: lower-cases and strips `=` padding from a SHA-256 digest to a fixed 52-character payload, so `a1-`/`o1-`/`s1-` tokens are 55 characters total — inside ACA Sandbox's 63-character label limit — while preserving full 256-bit entropy (unlike truncating hex). One canonical shape is used everywhere: Table partition keys, manifests, paths, and ACA labels alike. | `encode_label_safe_digest()`, `LABEL_SAFE_PAYLOAD_PATTERN` |
 | `azure_functions_agents/session_state/identity.py` | Defines FRD 0008 P3a's pure, versioned Function App/slot and owner canonicalization: exact length-prefixed UTF-8 framing, portable `a1` identity (`subscription_id` + `site_name` + slot; no resource group / no SKU branches), `o1-` owner hashes (Decision 106: label-safe base32, not hex), historical-version verification without eager migration, fail-closed platform identity resolution, typed owner resolution (function/admin key ⇒ app-owned shared sessions; Easy Auth ⇒ per-user only when `tid`/`oid` are stable), server-minted IDs, and delimiter-safe durable row keys. App/agent rename changes identity space with no automatic migration in v1. It has no Azure SDK dependency and does not cross raw claims, function keys, or credentials into execution. | `resolve_function_app_identity()`, `resolve_owner_context()`, `compute_app_hash()`, `compute_owner_hash()`, `owner_partition()` |
 | `azure_functions_agents/session_state/session_models.py` | Defines FRD 0008's immutable Azure-SDK-neutral durable contract for the `AzureFunctionsAgentsSessions` table: owner partitions, session/run/hashed-idempotency rows, monotonic session operations, schema-v1 serialization, generation transition rules, per-status `active_run_id` lifecycle invariants, bounded snapshot-ID JSON, and same-partition EGT invariants. Every session stores `active_operation_id` (empty Table string means none) and a non-negative `operation_sequence`; either missing field fails closed. Each operation has one of three controller flow kinds, binds session/digest/generation/optional run and sandbox, and stores a stable provider label, token, lease schedule, and sanitized failure metadata. `state_store_fingerprint` is validated here as the same label-safe `s1-<52 base32>` shape (P3b/Decision 114 computes its actual bytes). P3b owns Table I/O/CAS/EGT; P4b captures/verifies the live sandbox manifest; P5a owns live region/current-storage-epoch freshness; P6 owns reconciliation. Renamed from `models.py` (P3b, mechanical `git mv`) to satisfy the repo-wide unique-intent-revealing-module-name convention shared with `transport/transport_models.py`. | `DurableSessionRecord`, `DurableRunRecord`, `DurableSessionOperation`, `SessionOperationTarget`, `ProvisionSubmitRecords`, `AdmissionRecords`, `encode_snapshot_ids()`, `validate_state_store_fingerprint()` |
@@ -422,6 +464,17 @@ owns node status and lineage, stops scheduling after cancellation, and treats an
 already-dispatched model call as best effort. Durable Activity delivery remains
 at-least-once, so specialist side effects must tolerate replay.
 
+### Durable agent loop vs. Dynamic Workflows
+
+The private durable agent loop (FRD 0010) is not a Dynamic Workflow mode.
+Dynamic Workflows execute one explicit DAG authored up front; the durable loop
+checkpoints an ordinary adaptive model/tool turn after every model decision and
+tool result so the model can change direction repeatedly. They share Durable
+registration patterns and deterministic scheduling rules, but have separate
+orchestrators, state contracts, capability policies, and management surfaces.
+The private durable-loop gate therefore rejects `workflows.enabled` rather than
+nesting one engine inside the other.
+
 ## 6. Key types
 
 These are the main "passport" objects that move through the pipeline:
@@ -502,7 +555,7 @@ This design keeps global config declarative: shared config says what exists, whi
 - **Built-in endpoints:** endpoint registration is a separate module so the trigger-registration path stays focused on Azure Function bindings rather than UI and chat surface concerns.
 - **Multi-agent delegation:** `subagents:` is itself an extension point of sorts — it lets an agent's own front matter opt other, already-registered agents into its tool set without any code changes. See Section 5.
 - **Internal token usage log:** `runner.py` writes a best-effort `Agent token usage: {json}` INFO record with exactly `event_name`, `agent_name`, `execution_role`, `provider`, `model`, `model_publisher`, `input_tokens`, and `output_tokens`; unavailable values are null, and logging does not affect agent responses or configuration.
-- **Observability:** telemetry is a cross-cutting concern rather than a pipeline stage. `_observability.py` is bootstrapped once from `create_function_app()`, and spans are emitted where the work happens — `registration/_handlers.py` (the `agent.run` parent span), `system_tools/sandbox.py` (the `dynamic_session.execute` span), `system_tools/web_request.py` (the `web_request` span, attributed by host only — never the full URL with query string or secrets), `runner.py`'s delegate adapter (the `af.delegate.*` attributes layered onto MAF's own nested `execute_tool delegate_<slug>` / `invoke_agent` spans), and the private `experimental/hybrid_*` path (low-cardinality sandbox/model/tool timing, package verification, cleanup metrics, and mechanically bounded content-free `hybrid.progress` span events). It intentionally holds the only Azure-Monitor/ACA-aware calls outside registration, because exporting telemetry and correlating an execution are *observing* the pipeline, not wiring agents into it. Attributes use the `af.` prefix, and content is gated behind `ENABLE_SENSITIVE_DATA` (default off).
+- **Observability:** telemetry is a cross-cutting concern rather than a pipeline stage. `_observability.py` is bootstrapped once from `create_function_app()`, and spans are emitted where the work happens — `registration/_handlers.py` (the `agent.run` parent span), `system_tools/sandbox.py` (the `dynamic_session.execute` span), `system_tools/web_request.py` (the `web_request` span, attributed by host only — never the full URL with query string or secrets), `runner.py`'s delegate adapter (the `af.delegate.*` attributes layered onto MAF's own nested `execute_tool delegate_<slug>` / `invoke_agent` spans), the private `experimental/hybrid_*` path (low-cardinality sandbox/model/tool timing, package verification, cleanup metrics, and mechanically bounded content-free `hybrid.progress` span events), and `experimental/durable_loop_observability.py` (bounded run/model/tool/human/replay/compaction/background/cancel/commit outcomes and durations). It intentionally holds the only Azure-Monitor/ACA-aware calls outside registration, because exporting telemetry and correlating an execution are *observing* the pipeline, not wiring agents into it. Attributes use the `af.` prefix, and content is gated behind `ENABLE_SENSITIVE_DATA` (default off).
 
 ## 8. Related docs
 

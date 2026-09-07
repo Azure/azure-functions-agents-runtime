@@ -20,6 +20,13 @@ small set of built-in tools that author and launch
 [Azure Durable Functions](https://learn.microsoft.com/azure/azure-functions/durable/)
 orchestrations of workflow-safe tool calls and durable timers.
 
+> [!IMPORTANT]
+> Dynamic Workflows are separate from the private FRD 0010 durable agent-loop
+> foundation. The private
+> `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_ENABLED` gate
+> checkpoints an adaptive model/tool turn; `workflows.enabled` executes an
+> explicit DAG. The runtime rejects enabling both engines in one app.
+
 ## Who this is for
 
 Dynamic workflows are a fit when an agent needs to:

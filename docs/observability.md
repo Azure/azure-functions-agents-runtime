@@ -78,7 +78,7 @@ The prefix:
 - keeps our attributes from colliding with MAF's `gen_ai.*` or OpenTelemetry semantic conventions,
 - makes them trivial to query — *everything we add starts with `af.`*.
 
-Four sub-namespaces group the detail, plus two cross-cutting attributes:
+Five sub-namespaces group the detail, plus two cross-cutting attributes:
 
 | Namespace | Used for |
 | --- | --- |
@@ -86,6 +86,7 @@ Four sub-namespaces group the detail, plus two cross-cutting attributes:
 | `af.dynamic_session.*` | attributes on the `dynamic_session.execute` (code sandbox) span |
 | `af.web_request.*` | attributes on the `web_request` (outbound HTTP tool) span |
 | `af.delegate.*` | attributes on the `execute_tool delegate_<slug>` span (chat-time sub-agent delegation) |
+| `af.durable_loop.*` | bounded private durable-loop phase/provenance/outcome metadata; never prompt, argument, answer, result, or identifier content |
 | `af.fault_domain`, `af.lifecycle_stage` | cross-cutting; may appear on any runtime span |
 
 Where a standard OpenTelemetry attribute already exists we reuse it instead of inventing an `af.`
@@ -146,6 +147,21 @@ runtime milestones rather than duplicating tool/model spans.
   failed schema validation; includes `af.fault_domain=app`.
 - `af.agent.invoke.completed` — `_run_agent(...)` returned successfully and the runtime is handling
   the final response contract.
+
+### Private durable-loop progress
+
+When the private FRD 0010 gate is enabled, the foundation adds
+`durable_loop.progress` events through
+`experimental/durable_loop_observability.py`. The fixed phase vocabulary is
+`run`, `model_step`, `tool_step`, `human_wait`, `replay`, `compaction`,
+`background_poll`, `cancellation`, and `commit`; outcomes are similarly bounded.
+Events may include elapsed milliseconds and a fixed tool provenance, but never
+run/session/call IDs, prompts, reasoning, tool arguments/results, human
+questions/answers, content refs, backend IDs, or exception text.
+The authorized polling status may additionally expose bounded numeric
+`input_tokens`, `output_tokens`, `reasoning_tokens`, `cost_microunits`,
+`external_content_bytes`, and `parked_seconds` counters. These values are not
+metric dimensions and contain no content or provider identifiers.
 
 ### Span `dynamic_session.execute`
 
@@ -256,6 +272,8 @@ Namespace `azure_functions_agents.*`:
 | `azure_functions_agents.web_request.errors` | Count that were blocked by the SSRF validator, timed out, or otherwise failed. |
 | `azure_functions_agents.delegate.calls` | Count of `delegate_<slug>` tool invocations (chat-time sub-agent delegation). |
 | `azure_functions_agents.delegate.errors` | Count that failed, raised, or timed out (specialist-side; sanitized before reaching the model). |
+| `azure_functions_agents.durable_loop.operations` | Private durable-loop operation count by bounded phase, outcome, and optional provenance. |
+| `azure_functions_agents.durable_loop.duration` | Private durable-loop elapsed seconds with the same bounded dimensions. |
 
 ## Sensitive data
 

@@ -134,7 +134,16 @@ class HybridApimClientManager(ClientManager):
             default_headers=headers,
             middleware=[HybridModelTimingMiddleware()],
         )
-        return client, InferenceTarget(provider="azure_openai_apim", model=resolved_model)
+        return client, self.resolve_inference_target(resolved_model)
+
+    def resolve_inference_target(self, model: str | None) -> InferenceTarget:
+        resolved_model = self.resolve_model(model)
+        return InferenceTarget(
+            provider="azure_openai_apim",
+            model=resolved_model,
+            endpoint=self._base_url.rstrip("/"),
+            api_version="responses-v1",
+        )
 
     def _token_provider(self) -> Callable[[], Awaitable[str]]:
         audience = self._audience

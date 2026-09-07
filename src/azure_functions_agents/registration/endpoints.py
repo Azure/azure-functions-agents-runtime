@@ -88,6 +88,12 @@ type ChatStreamHandler = Callable[[Request, Any | None], Awaitable[Response]]
 type McpAgentChatHandler = Callable[[str, Any | None], Awaitable[str]]
 
 
+def _private_durable_loop_enabled() -> bool:
+    from ..experimental.durable_loop_config import durable_loop_enabled
+
+    return durable_loop_enabled()
+
+
 def _format_exception_message(exc: Exception) -> str:
     message = str(exc)
     return message if message else f"{type(exc).__name__}: {exc!r}"
@@ -420,6 +426,11 @@ def _register_http_chat(
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     async def handle_chat(req: Request, durable_client: Any | None) -> Response:
+        if _private_durable_loop_enabled():
+            return _json_error(
+                "Legacy chat execution is disabled while the private durable agent loop is enabled.",
+                status_code=409,
+            )
         owner: OwnerPrincipal | None = None
         if session_runtime is not None:
             owner, auth_error = _resolve_session_owner(
@@ -653,6 +664,11 @@ def _register_http_chat_stream(
         req: Request,
         durable_client: Any | None,
     ) -> Response:
+        if _private_durable_loop_enabled():
+            return _sse_error_response(
+                "Legacy streaming execution is disabled while the private durable agent loop is enabled.",
+                status_code=409,
+            )
         try:
             owner, auth_error = _resolve_session_owner(
                 req.headers.get,
@@ -744,6 +760,15 @@ def _register_mcp_endpoint(
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     async def handle_mcp_agent_chat(context: str, durable_client: Any | None) -> str:
+        if _private_durable_loop_enabled():
+            return json.dumps(
+                {
+                    "error": (
+                        "Legacy MCP agent execution is disabled while the private "
+                        "durable agent loop is enabled."
+                    )
+                }
+            )
         # Same rationale as `handle_chat` above: this built-in MCP surface
         # calls `run_agent` directly, so nothing upstream opens an
         # `agent.run {name}` span for it — open one here to get the same

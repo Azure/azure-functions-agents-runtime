@@ -8,13 +8,13 @@ dynamic = ["version"]
 description = "A markdown-first programming model for building AI agents on Azure Functions, powered by the Microsoft Agent Framework."
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.15"
 dependencies = [
     "azure-functions>=2.1.0,<3",
     "azure-functions-durable>=1.2.10,<2",
-    "agent-framework-core==1.3.*",
-    "agent-framework-openai==1.3.*",
-    "agent-framework-foundry==1.3.*",
+    "agent-framework-core==1.17.0",
+    "agent-framework-openai==1.14.2",
+    "agent-framework-foundry==1.12.0",
     "pydantic>=2.13.4,<3",
     "python-frontmatter>=1.1.0,<2",
     "azurefunctions-extensions-http-fastapi>=1.0.1,<2",
@@ -69,6 +69,11 @@ dev = [
     "azure-storage-queue==12.13.*,<13",
     "jmespath>=1.0.1,<2",
 ]
+
+[tool.uv.sources]
+agent-framework-core = { url = "https://github.com/microsoft/agent-framework/releases/download/python-1.17.0/agent_framework_core-1.17.0-py3-none-any.whl" }
+agent-framework-openai = { url = "https://github.com/microsoft/agent-framework/releases/download/python-1.17.0/agent_framework_openai-1.14.2-py3-none-any.whl" }
+agent-framework-foundry = { url = "https://github.com/microsoft/agent-framework/releases/download/python-1.17.0/agent_framework_foundry-1.12.0-py3-none-any.whl" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

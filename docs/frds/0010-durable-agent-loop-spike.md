@@ -1559,12 +1559,14 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
 | 41 | Human wake-up terminal errors | Retry forever / discard silently / orphan accepted answer | Treat Durable client `404`/`410` as terminal outbox results, mark the answer orphaned, and expose typed `run_terminal`. | Agent review | 2026-09-04 |
 | 42 | Long-park model context | Fail after answer / exact replay only / exact replay plus controlled rehydration | Validate exact encrypted-reasoning replay; on recognized incompatibility rebuild working context from immutable audit without repeating tools. | Agent review | 2026-09-04 |
 | 43 | Architecture approval | Continue review / approve private spike / approve production support | Proceed with the private experimental spike under the recorded gates; this approval does not grant production support. | Human | 2026-09-04 |
+| 44 | Foundation implementation slice | Simulator only / private Durable foundation / include live transports | Implement exact MAF pins, strict contracts, local replay/HITL/tool fakes, Durable entity/blueprint/routes, and content-free telemetry now; defer APIM, remote MCP, and ACA live adapters to layer 2. | Human | 2026-09-04 |
+| 45 | Newly published MAF artifacts | Wait for proxy / local wheel paths / official release assets | Keep exact package pins and lock to the official `python-1.17.0` GitHub release wheels until the repository proxy mirrors them; cap runtime Python support to CI's 3.13-3.14 line. | Agent | 2026-09-04 |
 
 ## 6. Test plan
 
-- [ ] Contract: core `1.17.0` + OpenAI `1.14.2` one-step client exposes ordered
+- [x] Contract: core `1.17.0` + OpenAI `1.14.2` one-step client exposes ordered
   function-call contents and invokes no tool.
-- [ ] Dependency: core `1.17.0`, OpenAI `1.14.2`, and Foundry `1.12.0`
+- [x] Dependency: core `1.17.0`, OpenAI `1.14.2`, and Foundry `1.12.0`
   pass runner, APIM, MCP, telemetry, history, streaming, usage, and tool
   compatibility suites before reasoning mode is enabled.
 - [ ] Contract: the qualified reasoning Responses surface preserves normalized
@@ -1593,13 +1595,13 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
   continuation preserves roles/call IDs, validates the latest pending-call set,
   fences the whole turn, dedupes redelivery, and supports the extension's MAF
   version range.
-- [ ] Unit: strict versioned contracts, unknown-version rejection, canonical
+- [x] Unit: strict versioned contracts, unknown-version rejection, canonical
   request hashes, deterministic call keys/order, integrity refs, size/budget
   caps, error/ambiguity envelopes, and fail-closed policy drift.
-- [ ] Unit: pure orchestrator replay, stable fan-out/fan-in, retry selection,
+- [x] Unit: pure orchestrator replay, stable fan-out/fan-in, retry selection,
   approval/cancel event races, deadlines, continue-as-new, and cleanup
   scheduling.
-- [ ] Unit/integration: reserved clarification call validation, mixed-batch
+- [x] Unit/integration: reserved clarification call validation, mixed-batch
   rejection with one result per call ID, unique event names, early-event
   buffering, first-answer/close CAS interleavings, duplicate/conflict/stale
   handling, answer/timeout/cancel races, outbox wake-up retry and terminal
@@ -1608,7 +1610,7 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
 - [ ] Integration: a request parked for the configured maximum resumes through
   exact encrypted-reasoning replay or controlled `rehydrate_context_v1`, with
   frozen/retired deployment scenarios and no repeated tool effect.
-- [ ] Unit/integration: deterministic compaction trigger, immutable source-range
+- [x] Unit/integration: deterministic compaction trigger, immutable source-range
   hashes, atomic reasoning/call/result groups, summary replay, full-audit
   preservation, and compacted-context overflow failure.
 - [ ] Unit/integration: cross-process session admission, duplicate/conflicting
@@ -1642,10 +1644,10 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
 
 ## 7. Docs impact
 
-- [ ] `docs/architecture.md` - after implementation, add the private durable
+- [x] `docs/architecture.md` - after implementation, add the private durable
   runner, activity/content-ref boundaries, and its separation from Dynamic
   Workflows.
-- [ ] `docs/observability.md` - after implementation, document content-free
+- [x] `docs/observability.md` - after implementation, document content-free
   durable run/step/call telemetry and metric dimensions.
 - [x] `docs/frds/README.md` - index FRD 0010.
 - [ ] `docs/front-matter-spec.md` - no spike change; there is no public schema.
@@ -1674,3 +1676,36 @@ coordinate with a Durable session owner; mixed-mode admission fails closed.
   corrections are recorded in Decisions 18-42.
 - **Human sign-off:** larohra, 2026-09-04 — approved through explicit
   implementation request.
+- **Layer 1 implementation note:** the private locally testable durable-loop
+  foundation is implemented while this FRD remains `Finalized`. The slice pins
+  the exact MAF set, adds strict contracts and deterministic fakes, proves the
+  real public OpenAI Responses serializer/parser plus one-step Agent seam and
+  reasoning-message fidelity, and registers versioned refs-only Durable
+  entity/orchestrator/activity and management-route surfaces. Raw prompts,
+  instructions, reasoning, arguments, results, and answers are committed to
+  integrity-bound content refs before crossing Durable boundaries. Local and
+  deterministic Durable harnesses cover replay, admission/start ambiguity,
+  idempotent commit, immutable-audit compaction, cancellation facts, mixed-call
+  repair, and human first-answer/timeout CAS. The implementation also rejects
+  blank/incomplete model outcomes, hashes or externalizes provider identifiers,
+  records reasoning-token usage when available, fences cancellation against
+  final commit, terminalizes ambiguous tool outcomes without model recovery,
+  and restricts model-authored human-response schemas to a bounded local-only
+  subset without references or regular expressions. Admission freezes the
+  resolved configured model; active-execution budgets exclude authoritative
+  parked time; token, cost, and aggregate external-content counters are
+  enforced and exposed without content; raw provider call IDs stay in external
+  documents rather than Durable envelopes; answer and cancellation wakeups use
+  deadline-bound outboxes with history rollover; and the journal requires an
+  explicit dedicated Blob origin. Deterministic compaction preserves a
+  semantic summary while the immutable audit has its own larger bounded
+  envelope without elevating user/tool content to system authority. Every
+  activity revalidates the frozen provider/endpoint/API/model target, configured
+  per-call argument/result limits wrap dispatch, cost enforcement requires
+  explicit frozen pricing rates (otherwise the cap is disabled), terminal
+  idempotency receipts remain until their recorded expiry, and external
+  protocol documents reject duplicate JSON keys. APIM
+  model/background affinity,
+  remote MCP, ACA single-call workspace waves, and deployed multi-process/backend
+  qualification remain layer 2+ gates; the FRD does not become `Implemented`
+  until those deployed layers complete.

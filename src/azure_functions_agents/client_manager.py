@@ -47,6 +47,8 @@ class InferenceTarget:
 
     provider: str | None = None
     model: str | None = None
+    endpoint: str | None = None
+    api_version: str | None = None
 
 
 class ClientManager(ABC):
@@ -77,6 +79,13 @@ class ClientManager(ABC):
     ) -> tuple[Any, InferenceTarget]:
         """Construct a client and return any authoritative target metadata."""
         return self.build_chat_client(model), InferenceTarget()
+
+    def resolve_inference_target(self, model: str | None) -> InferenceTarget:
+        """Resolve stable target metadata without constructing a client."""
+        return InferenceTarget(
+            provider=self.name,
+            model=self.resolve_model(model),
+        )
 
     async def close(self) -> None:
         """Release any resources held by the manager. Default: no-op."""
@@ -176,8 +185,43 @@ class MAFClientManager(ClientManager):
         self, model: str | None
     ) -> tuple[Any, InferenceTarget]:
         if self._has_custom_chat_client_builder():
-            return self.build_chat_client(model), InferenceTarget()
+            return self.build_chat_client(model), self.resolve_inference_target(
+                model
+            )
         return self._build_maf_chat_client_with_target(model)
+
+    def resolve_inference_target(self, model: str | None) -> InferenceTarget:
+        provider = self._provider()
+        resolved = (
+            self.resolve_model(model)
+            if self._has_custom_model_resolver()
+            else self._resolve_model(model, provider)
+        )
+        return self._inference_target(provider, resolved)
+
+    @classmethod
+    def _inference_target(
+        cls,
+        provider: MAFProvider,
+        resolved_model: str,
+    ) -> InferenceTarget:
+        if provider is MAFProvider.OPENAI:
+            endpoint = "https://api.openai.com/v1"
+            api_version = "responses-v1"
+        elif provider is MAFProvider.AZURE_OPENAI:
+            endpoint = cls._env("AZURE_OPENAI_ENDPOINT")
+            api_version = cls._env("AZURE_OPENAI_API_VERSION") or "preview"
+        elif provider is MAFProvider.FOUNDRY:
+            endpoint = cls._env("FOUNDRY_PROJECT_ENDPOINT")
+            api_version = "responses-v1"
+        else:
+            raise AssertionError("Resolved MAF provider is unsupported.")
+        return InferenceTarget(
+            provider=provider.value,
+            model=resolved_model,
+            endpoint=endpoint.rstrip("/"),
+            api_version=api_version,
+        )
 
     def _has_custom_chat_client_builder(self) -> bool:
         """Return whether a subclass overrides the existing public builder hook."""
@@ -205,10 +249,7 @@ class MAFClientManager(ClientManager):
             client = self._build_foundry(resolved)
         else:
             raise AssertionError("Resolved MAF provider is unsupported.")
-        return client, InferenceTarget(
-            provider=provider.value,
-            model=resolved,
-        )
+        return client, self._inference_target(provider, resolved)
 
     # ------------------------------------------------------------------
     # Internals

@@ -218,7 +218,14 @@ def test_build_chat_client_with_target_matches_client_branch(
 
     assert built_client is client
     build.assert_called_once_with("model-one")
-    assert target == InferenceTarget(provider, "model-one")
+    expected_endpoint = endpoint or "https://api.openai.com/v1"
+    expected_api_version = "preview" if provider == "azure_openai" else "responses-v1"
+    assert target == InferenceTarget(
+        provider,
+        "model-one",
+        expected_endpoint.rstrip("/"),
+        expected_api_version,
+    )
     assert not hasattr(target, "inference_host")
 
 
@@ -266,7 +273,12 @@ def test_maf_target_preserves_custom_model_resolution(
 
     assert client is provider_client
     build.assert_called_once_with("custom-deployment")
-    assert target == InferenceTarget("openai", "custom-deployment")
+    assert target == InferenceTarget(
+        "openai",
+        "custom-deployment",
+        "https://api.openai.com/v1",
+        "responses-v1",
+    )
 
 
 def test_custom_manager_target_fallback_builds_client_once() -> None:
@@ -310,7 +322,12 @@ def test_maf_subclass_build_chat_client_override_keeps_virtual_dispatch(
     assert client == ("wrapped", provider_client)
     assert manager.calls == 1
     build.assert_called_once_with("model-one")
-    assert target == InferenceTarget()
+    assert target == InferenceTarget(
+        "openai",
+        "model-one",
+        "https://api.openai.com/v1",
+        "responses-v1",
+    )
 
 
 def test_anthropic_api_key_does_not_select_direct_transport(
