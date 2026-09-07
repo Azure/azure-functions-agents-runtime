@@ -1152,6 +1152,13 @@ def test_status_phase_selector_accepts_runtime_phases(phase: str) -> None:
     ) == {"phase": phase}
 
 
+def test_status_selector_accepts_human_answer_receipt() -> None:
+    assert select_response_fields(
+        b'{"status":"accepted"}',
+        ("status",),
+    ) == {"status": "accepted"}
+
+
 def test_metrics_outputs_are_content_free_and_refuse_repository_paths(
     tmp_path: Path,
 ) -> None:

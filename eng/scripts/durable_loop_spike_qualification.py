@@ -231,6 +231,8 @@ def _validated_human_request_id(value: Any) -> str:
 def _validated_status(value: Any) -> str:
     if not isinstance(value, str):
         raise QualificationRequestError("response_field_invalid:status")
+    if value == "accepted":
+        return value
     try:
         return _RunStatus(value).value
     except ValueError:
