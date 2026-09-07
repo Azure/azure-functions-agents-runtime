@@ -888,6 +888,12 @@ async def test_real_openai_client_continues_from_externalized_reasoning_and_tool
     assert "call_1" in serialized_second
     assert "function_call_output" in serialized_second
     assert serialized_second.index("cipher-step-1") < serialized_second.index("call_1")
+    function_call = next(
+        item
+        for item in requests[1]["input"]
+        if item.get("type") == "function_call"
+    )
+    assert function_call["arguments"] == '{"region":"westus3"}'
     assert serialized_second.index("call_1") < serialized_second.index(
         "function_call_output"
     )

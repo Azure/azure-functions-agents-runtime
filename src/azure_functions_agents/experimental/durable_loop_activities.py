@@ -711,7 +711,7 @@ class MafOneStepModelProvider:
             request.working_context.bundle.messages
         )
         messages = [
-            Message.from_dict(dict(message))
+            Message.from_dict(_maf_replay_message(message))
             for message in request.working_context.bundle.messages
         ]
         response = await Agent(
@@ -1105,6 +1105,31 @@ def _replace_working_messages(
             "estimated_tokens": max(1, len(canonical_json_bytes(messages)) // 4),
         }
     )
+
+
+def _maf_replay_message(message: Mapping[str, object]) -> dict[str, object]:
+    """Render function-call arguments in the string form required by Responses."""
+    rendered = dict(message)
+    contents = message.get("contents")
+    if not isinstance(contents, list | tuple):
+        return rendered
+    rendered_contents: list[object] = []
+    for content in contents:
+        if not isinstance(content, Mapping):
+            rendered_contents.append(content)
+            continue
+        rendered_content = dict(content)
+        arguments = rendered_content.get("arguments")
+        if (
+            rendered_content.get("type") == "function_call"
+            and isinstance(arguments, Mapping)
+        ):
+            rendered_content["arguments"] = canonical_json_bytes(arguments).decode(
+                "utf-8"
+            )
+        rendered_contents.append(rendered_content)
+    rendered["contents"] = rendered_contents
+    return rendered
 
 
 def _replace_bundle_messages(
