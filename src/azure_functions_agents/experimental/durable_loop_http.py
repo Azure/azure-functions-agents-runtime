@@ -900,12 +900,19 @@ async def _authorized_status(
     run_id = _path_parameter(req, "run_id")
     status = await client.get_status(run_id, show_input=True)
     if status is None:
+        logger.warning("durable-loop status lookup returned no instance")
         return _json_response({"error": "run_not_found"}, status_code=404)
     try:
         durable_input = _durable_status_input(status.input)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "durable-loop status input was rejected: input_type=%s error_type=%s",
+            type(status.input).__name__,
+            type(exc).__name__,
+        )
         return _json_response({"error": "run_not_found"}, status_code=404)
     if durable_input.identity.owner_hash != _owner_hash(owner):
+        logger.warning("durable-loop status owner binding did not match")
         return _json_response({"error": "run_not_found"}, status_code=404)
     return status, durable_input
 
