@@ -13,7 +13,7 @@
 > [Engineering Operations Hub](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/per-agent-workflows/README.md)
 > demonstrates two non-main workflow-enabled agents with independent policies in one app.
 > Larger features such as sub-orchestrations,
-> configurable retry policies, and MCP Tasks integration are tracked as v2
+> per-task timeouts, and MCP Tasks integration are tracked as v2
 > follow-up work.
 
 Dynamic workflows let a markdown agent author and run **distributed,
@@ -277,8 +277,9 @@ A workflow plan is a list of tasks with `depends_on` edges. Task types:
 - **`sub_agent`** — invoke one leaf specialist authorized by
   `workflows.subagents`, using `agent` and a self-contained `task`.
 
-v1 does not support per-task timeout or retry fields yet. Those are v2
-hardening controls.
+A `tool` or `sub_agent` task may carry an `execution.retry` policy; see
+[Task execution policy](#task-execution-policy). Per-task timeouts remain a v2
+hardening control.
 
 ```json
 {
@@ -502,7 +503,91 @@ iterated arrays bounded upstream. `max_parallelism` still caps how many ready
 instances run concurrently.
 
 Future v2 hardening adds configurable frontmatter caps, per-tool timeout
-caps, retry policy, storage hygiene, and large-output offloading.
+caps, storage hygiene, and large-output offloading.
+
+### Task execution policy
+
+A tool or Sub Agent task can opt into **Durable native retry** by declaring
+`execution.retry` in the workflow plan:
+
+```json
+{
+  "id": "reserve_inventory",
+  "type": "tool",
+  "tool": "reserve_inventory",
+  "args": {"order_id": "ORD-1001"},
+  "execution": {
+    "retry": {
+      "max_attempts": 3,
+      "backoff": {
+        "initial": "PT1S",
+        "multiplier": 2.0,
+        "max": "PT4S"
+      }
+    }
+  }
+}
+```
+
+Use retry only when repeating the task is safe. A workflow tool marks a
+transient application failure by raising the public exception:
+
+```python
+from azure_functions_agents import WorkflowRetryableError
+
+raise WorkflowRetryableError(
+    "inventory_temporarily_unavailable",
+    "Inventory reservation is temporarily unavailable.",
+)
+```
+
+| Field | Bounds |
+|---|---|
+| `retry.max_attempts` | 1–5, and includes the first attempt |
+| `retry.backoff` | required when `max_attempts > 1`, rejected when it is 1 |
+| `backoff.initial` | ISO-8601, `PT0.001S`–`PT5M` |
+| `backoff.multiplier` | 1.0–10.0 |
+| `backoff.max` | ISO-8601, up to `PT15M`, not below `initial` |
+
+The runtime uses a closed failure classification:
+
+- `WorkflowRetryableError` — transient. Durable schedules the next attempt.
+- A Workflow Sub Agent `TimeoutError` — transient. Durable schedules the next
+  attempt.
+- `WorkflowTerminalError` — terminal. The task fails immediately and preserves
+  the handler-owned stable `error_code`.
+- Any other tool or Sub Agent exception — terminal. The task fails immediately
+  with the runtime-owned `workflow_task_execution_unknown` code; no exception
+  detail reaches Durable history.
+
+`error_code` must match `^[a-z][a-z0-9_]{0,63}$` and may not start with
+`workflow_`, which is reserved for runtime-generated codes.
+
+Retries are **at-least-once deliveries of the same task**, so a handler with
+side effects needs a stable key. `current_workflow_task_context()` returns one
+that is identical across every attempt of a task instance and distinct for
+every other instance:
+
+```python
+from azure_functions_agents import current_workflow_task_context
+
+context = current_workflow_task_context()
+if context is not None:
+    reserve_once(key=context.idempotency_key)
+```
+
+The attempt number is deliberately not exposed: Durable owns the attempt
+budget, and a replayed orchestration cannot observe it.
+
+The sum of authored retry delays is capped at one hour during submission.
+Durable's finite `retry_timeout` is deliberately left unset because the SDK
+evaluates that timeout against wall-clock time while replaying history.
+Per-attempt timeouts and continuing a workflow past a failed task are not part
+of this release.
+
+Only tasks whose policy was frozen at submission time are dispatched with
+retry. Histories without persisted execution data keep the legacy Activity call
+and result envelope, so an upgrade does not disturb an in-flight workflow.
 
 ### Determinism contract
 
@@ -845,9 +930,10 @@ v1 includes:
 - Azure Storage and Durable Task Scheduler backends selected by
   `host.json`;
 - fixed v1 guardrails for plan size, parallelism, wait duration, active
-  workflows per session, and status-list result count.
+  workflows per session, and status-list result count;
+- Durable native retry declared on a tool or Sub Agent plan task.
 
 v2 follow-up work includes sub-orchestrations and bounded nested agents,
-configurable caps, retry and timeout policies, HMAC-backed workflow identity,
+configurable caps, per-task timeout policies, HMAC-backed workflow identity,
 blob-offloaded large outputs, an MCP Tasks bridge, richer error taxonomy, and
 storage hygiene.
