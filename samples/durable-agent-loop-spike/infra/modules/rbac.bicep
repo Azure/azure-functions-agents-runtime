@@ -2,6 +2,8 @@ param storageAccountName string
 param applicationInsightsName string
 param foundryAccountName string
 param sandboxGroupName string
+param durableTaskSchedulerName string
+param durableTaskHubName string
 param functionPrincipalId string
 param sandboxPrincipalId string
 param apimPrincipalId string
@@ -17,6 +19,7 @@ var monitoringMetricsPublisherRoleId = '3913510d-42f4-4e42-8a64-420c390055eb'
 var cognitiveServicesUserRoleId = 'a97b65f3-24c7-4388-baec-2e87135dc908'
 var cognitiveServicesOpenAiUserRoleId = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
 var sandboxGroupDataOwnerRoleId = 'c24cf47c-5077-412d-a19c-45202126392c'
+var durableTaskDataContributorRoleId = '0ad04412-c4d5-4796-b79c-f76d14c8d402'
 var readerRoleId = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
@@ -34,6 +37,15 @@ resource foundryAccount 'Microsoft.CognitiveServices/accounts@2025-10-01-preview
 #disable-next-line BCP081
 resource sandboxGroup 'Microsoft.App/sandboxGroups@2026-02-01-preview' existing = {
   name: sandboxGroupName
+}
+
+resource durableTaskScheduler 'Microsoft.DurableTask/schedulers@2026-05-01-preview' existing = {
+  name: durableTaskSchedulerName
+}
+
+resource durableTaskHub 'Microsoft.DurableTask/schedulers/taskHubs@2026-05-01-preview' existing = {
+  parent: durableTaskScheduler
+  name: durableTaskHubName
 }
 
 resource functionStorageBlobOwner 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
@@ -118,6 +130,19 @@ resource functionSandboxGroupDataOwner 'Microsoft.Authorization/roleAssignments@
   }
 }
 
+resource functionDurableTaskDataContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: assignmentNames.functionDurableTaskDataContributor
+  scope: durableTaskHub
+  properties: {
+    principalId: functionPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      durableTaskDataContributorRoleId
+    )
+  }
+}
+
 resource sandboxFoundryReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: assignmentNames.sandboxFoundryReader
   scope: foundryAccount
@@ -174,5 +199,18 @@ resource deployerSandboxGroupDataOwner 'Microsoft.Authorization/roleAssignments@
     principalId: deployerPrincipalId
     principalType: deployerPrincipalType
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', sandboxGroupDataOwnerRoleId)
+  }
+}
+
+resource deployerDurableTaskDataContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: assignmentNames.deployerDurableTaskDataContributor
+  scope: durableTaskHub
+  properties: {
+    principalId: deployerPrincipalId
+    principalType: deployerPrincipalType
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      durableTaskDataContributorRoleId
+    )
   }
 }

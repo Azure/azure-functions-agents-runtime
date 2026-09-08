@@ -1647,7 +1647,6 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
                 "status": DurableLoopRunStatus.FAILED.value,
             }
         if model_result.final_response_ref is not None:
-            yield from _cleanup_execution_plane(context, current)
             commit_key = canonical_hash(
                 {
                     "context_ref": model_result.run_document_ref.model_dump(
@@ -1679,6 +1678,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
                 completion_payload,
             )
             if completion.get("disposition") == "cancelled":
+                yield from _cleanup_execution_plane(context, current)
                 yield context.call_entity(
                     entity,
                     "abort",

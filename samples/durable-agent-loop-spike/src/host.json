@@ -9,9 +9,14 @@
   },
   "extensions": {
     "durableTask": {
+      "hubName": "%TASKHUB_NAME%",
       "tracing": {
         "distributedTracingEnabled": true,
         "version": "V2"
+      },
+      "storageProvider": {
+        "type": "azureManaged",
+        "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING"
       }
     }
   },

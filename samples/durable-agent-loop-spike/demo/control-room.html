@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Durable Agent Loop · Live Control Room</title>
+  <style>
+    :root {
+      --bg: #07111f;
+      --panel: #0d1b2c;
+      --panel2: #11263c;
+      --line: rgba(151, 190, 222, .17);
+      --ink: #f6f9fc;
+      --muted: #8da6bc;
+      --azure: #51b5ff;
+      --cyan: #4ad9c8;
+      --orange: #ffb357;
+      --green: #5ed18a;
+      --red: #ff7474;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink); }
+    body {
+      font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 82% 8%, rgba(40, 131, 205, .20), transparent 33%),
+        linear-gradient(145deg, #081423, #07111f 55%, #091827);
+    }
+    button { font: inherit; }
+    .shell { width: 100vw; height: 100vh; padding: 26px 34px 30px; display: grid; grid-template-rows: auto 1fr; gap: 22px; overflow: hidden; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 24px; }
+    .brand { display: flex; align-items: center; gap: 16px; }
+    .mark { width: 48px; height: 48px; border-radius: 15px; display: grid; place-items: center; font-size: 25px; font-weight: 800; background: linear-gradient(135deg, #168fe1, #30c6ba); box-shadow: 0 12px 38px rgba(41, 167, 219, .25); }
+    .eyebrow { color: var(--cyan); font-size: 12px; font-weight: 750; text-transform: uppercase; letter-spacing: .16em; }
+    h1 { margin: 4px 0 0; font-size: 25px; letter-spacing: -.02em; }
+    .live-strip { display: flex; gap: 9px; align-items: center; }
+    .chip { padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px; color: #bdd0e1; font-size: 12px; font-weight: 650; background: rgba(8, 20, 33, .58); }
+    .chip.live { color: var(--green); border-color: rgba(94, 209, 138, .35); }
+    .dot { display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 12px currentColor; }
+    main { min-height: 0; display: grid; grid-template-columns: 278px minmax(0, 1fr) 312px; gap: 18px; }
+    .panel { min-height: 0; border: 1px solid var(--line); border-radius: 18px; background: linear-gradient(145deg, rgba(16, 39, 62, .93), rgba(10, 25, 42, .96)); box-shadow: 0 20px 60px rgba(0, 0, 0, .18); overflow: hidden; }
+    .panel-title { padding: 18px 20px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; }
+    .panel-title strong { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
+    .scenario-list { padding: 12px; display: grid; gap: 10px; }
+    .scenario { width: 100%; text-align: left; padding: 14px 14px 13px; border-radius: 13px; border: 1px solid var(--line); background: rgba(7, 18, 31, .46); color: var(--ink); cursor: pointer; transition: .18s ease; }
+    .scenario:hover:not(:disabled) { transform: translateY(-1px); border-color: rgba(81, 181, 255, .48); background: rgba(25, 64, 98, .62); }
+    .scenario:disabled { opacity: .42; cursor: not-allowed; }
+    .scenario .num { color: var(--azure); font-family: Consolas, monospace; font-size: 12px; }
+    .scenario b { display: block; margin: 4px 0; font-size: 14px; }
+    .scenario span:last-child { display: block; color: var(--muted); font-size: 11px; line-height: 1.35; }
+    .center { display: grid; grid-template-rows: auto 1fr; gap: 16px; min-width: 0; }
+    .metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+    .metric { padding: 15px 16px; border: 1px solid var(--line); border-radius: 15px; background: rgba(11, 29, 47, .82); }
+    .metric label { display: block; color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .12em; }
+    .metric strong { display: block; margin-top: 6px; font-size: 21px; letter-spacing: -.03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .metric strong.status-running, .metric strong.status-waiting { color: var(--orange); }
+    .metric strong.status-completed { color: var(--green); }
+    .metric strong.status-failed { color: var(--red); }
+    .run-panel { display: grid; grid-template-rows: auto auto 1fr auto; min-height: 0; }
+    .run-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 20px 22px 15px; }
+    .run-heading { min-width: 0; }
+    .run-heading .title { font-size: 23px; font-weight: 720; letter-spacing: -.025em; }
+    .run-heading .subtitle { margin-top: 5px; color: var(--muted); font-size: 12px; }
+    .ids { display: flex; gap: 8px; }
+    .id { font: 12px Consolas, monospace; color: #c7e5fb; border: 1px solid rgba(81, 181, 255, .25); background: rgba(19, 63, 97, .38); padding: 8px 10px; border-radius: 9px; }
+    .step-flow { margin: 0 22px; padding: 13px 16px; display: grid; grid-template-columns: repeat(7, auto); gap: 7px; align-items: center; border: 1px solid var(--line); border-radius: 13px; background: rgba(5, 16, 28, .38); }
+    .step { color: #c0d3e4; font-size: 10px; text-align: center; }
+    .step b { display: block; margin-bottom: 3px; color: var(--azure); font-size: 15px; }
+    .arrow { color: var(--cyan); font-size: 17px; }
+    .timeline { min-height: 0; padding: 16px 22px; overflow: auto; }
+    .event { display: grid; grid-template-columns: 70px 15px 1fr auto; gap: 9px; align-items: center; min-height: 35px; color: #d9e7f3; font-size: 12px; }
+    .event time { color: #6f8aa2; font: 11px Consolas, monospace; }
+    .event .bullet { width: 8px; height: 8px; border: 2px solid var(--azure); border-radius: 50%; }
+    .event .detail { color: var(--muted); font: 11px Consolas, monospace; }
+    .event::after { content: ""; }
+    .empty { height: 100%; display: grid; place-items: center; text-align: center; color: var(--muted); }
+    .empty .icon { width: 72px; height: 72px; margin: 0 auto 16px; border: 1px solid rgba(74, 217, 200, .28); border-radius: 22px; display: grid; place-items: center; color: var(--cyan); font-size: 32px; background: rgba(74, 217, 200, .06); }
+    .human { display: none; margin: 0 22px 18px; padding: 15px 17px; border-radius: 13px; border: 1px solid rgba(255, 179, 87, .36); background: rgba(255, 179, 87, .08); }
+    .human.visible { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .human b { color: var(--orange); font-size: 13px; }
+    .choices { display: flex; gap: 8px; }
+    .choice { border: 1px solid rgba(255, 179, 87, .35); border-radius: 9px; padding: 8px 13px; background: rgba(255, 179, 87, .12); color: #ffe2bb; cursor: pointer; font-weight: 700; }
+    .right { display: grid; grid-template-rows: auto 1fr auto; }
+    .inventory { padding: 15px 16px; display: grid; gap: 10px; overflow: auto; align-content: start; }
+    .sandbox { padding: 14px; border-radius: 13px; background: rgba(5, 16, 28, .45); border: 1px solid var(--line); }
+    .sandbox-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .sandbox-id { font: 12px Consolas, monospace; color: #d8edfb; }
+    .sandbox-state { padding: 5px 8px; border-radius: 999px; font-size: 10px; font-weight: 750; background: rgba(94, 209, 138, .12); color: var(--green); }
+    .sandbox-state.stopped { color: var(--orange); background: rgba(255, 179, 87, .12); }
+    .policy { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .policy div { padding: 8px; border-radius: 9px; background: rgba(17, 45, 70, .55); }
+    .policy label { display: block; color: var(--muted); font-size: 9px; text-transform: uppercase; }
+    .policy strong { display: block; margin-top: 3px; font-size: 12px; }
+    .inventory-zero { color: var(--muted); text-align: center; padding: 40px 12px; }
+    .proof { padding: 14px 17px; border-top: 1px solid var(--line); background: rgba(7, 19, 31, .45); }
+    .proof b { display: block; color: var(--cyan); font-size: 12px; margin-bottom: 5px; }
+    .proof p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
+    .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%) translateY(16px); opacity: 0; padding: 10px 15px; border-radius: 10px; background: #10283e; border: 1px solid var(--line); color: #dceaf5; font-size: 12px; transition: .2s ease; pointer-events: none; }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div class="brand">
+        <div class="mark">∞</div>
+        <div><div class="eyebrow">Private live spike · capability control room</div><h1>Durable Agent Loop</h1></div>
+      </div>
+      <div class="live-strip">
+        <span class="chip live"><span class="dot"></span>LIVE AZURE</span>
+        <span class="chip">DTS · EAST US 2</span>
+        <span class="chip">SENSITIVE DATA OFF</span>
+      </div>
+    </header>
+    <main>
+      <section class="panel">
+        <div class="panel-title"><strong>Live scenarios</strong><span class="eyebrow">REAL E2E</span></div>
+        <div class="scenario-list">
+          <button class="scenario" data-scenario="retained_create"><span class="num">01</span><b>New retained session</b><span>Create sandbox, write marker, read checkpoint.</span></button>
+          <button class="scenario" data-scenario="retained_reuse" id="reuse" disabled><span class="num">02</span><b>Reuse same session</b><span>Resume sandbox and prove workspace continuity.</span></button>
+          <button class="scenario" data-scenario="fault_recovery"><span class="num">03</span><b>Recover injected fault</b><span>Retry one activity without restarting the loop.</span></button>
+          <button class="scenario" data-scenario="hitl"><span class="num">04</span><b>Pause for a human</b><span>Park on external event, answer, resume.</span></button>
+        </div>
+      </section>
+      <section class="center">
+        <div class="metrics">
+          <div class="metric"><label>Status</label><strong id="status">Ready</strong></div>
+          <div class="metric"><label>Phase</label><strong id="phase">—</strong></div>
+          <div class="metric"><label>Model steps</label><strong id="models">0</strong></div>
+          <div class="metric"><label>Tool calls</label><strong id="tools">0</strong></div>
+          <div class="metric"><label>Client observed</label><strong id="elapsed">0:00</strong></div>
+        </div>
+        <section class="panel run-panel">
+          <div class="run-header">
+            <div class="run-heading"><div class="title" id="runTitle">Choose a live scenario</div><div class="subtitle">The browser never receives a Function key. Only content-free control metadata is rendered.</div></div>
+            <div class="ids"><span class="id" id="runId">RUN —</span><span class="id" id="sessionId">SESSION —</span></div>
+          </div>
+          <div class="step-flow">
+            <span class="step"><b>ƒ</b>Discover</span><span class="arrow">→</span>
+            <span class="step"><b>◇</b>Model</span><span class="arrow">→</span>
+            <span class="step"><b>⌘</b>Classify</span><span class="arrow">→</span>
+            <span class="step"><b>▣</b>Activity</span><span class="arrow">→</span>
+            <span class="step"><b>□</b>Sandbox / MCP</span><span class="arrow">→</span>
+            <span class="step"><b>✓</b>Checkpoint</span><span class="arrow">→</span>
+            <span class="step"><b>↻</b>Next step</span>
+          </div>
+          <div class="timeline" id="timeline"><div class="empty"><div><div class="icon">◎</div><b>Ready for a real orchestration</b><p>No mock data is displayed.</p></div></div></div>
+          <div class="human" id="human"><div><b>Orchestration parked · awaiting external event</b><div class="subtitle">No model or tool compute continues during the wait.</div></div><div class="choices"><button class="choice">Alpha</button><button class="choice">Beta</button></div></div>
+        </section>
+      </section>
+      <section class="panel right">
+        <div class="panel-title"><strong>ACA sandbox inventory</strong><span class="eyebrow" id="sandboxCount">0 LIVE</span></div>
+        <div class="inventory" id="inventory"><div class="inventory-zero">No app-owned sandboxes</div></div>
+        <div class="proof"><b>Customer-owned isolated hands</b><p>Local tools run with customer-owned identity, deny-by-default egress, 5-minute auto-suspend, and 10-minute auto-delete.</p></div>
+      </section>
+    </main>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script>
+    const titles = {
+      retained_create: "New retained session · write + read checkpoint",
+      retained_reuse: "Existing session · same sandbox + workspace",
+      fault_recovery: "Injected activity acknowledgement loss · durable continuation",
+      hitl: "Human-in-the-loop · external event wait + resume"
+    };
+    let run = JSON.parse(localStorage.getItem("durableLoopDemoRun") || "null");
+    let retainedSession = localStorage.getItem("durableLoopDemoSession");
+    let startedAt = null;
+    let pollTimer = null;
+    let elapsedTimer = null;
+    let lastSignature = "";
+    const $ = id => document.getElementById(id);
+    const alias = (prefix, value) => value ? `${prefix} ${value.replace(/^run-/, "").slice(0, 8).toUpperCase()}` : `${prefix} —`;
+    const showToast = text => { $("toast").textContent = text; $("toast").classList.add("show"); setTimeout(() => $("toast").classList.remove("show"), 2200); };
+    function setStatus(value) {
+      $("status").textContent = value || "—";
+      $("status").className = `status-${String(value || "").toLowerCase()}`;
+    }
+    function addEvent(label, detail = "") {
+      const timeline = $("timeline");
+      const empty = timeline.querySelector(".empty");
+      if (empty) empty.remove();
+      const now = new Date();
+      const row = document.createElement("div");
+      row.className = "event";
+      row.innerHTML = `<time>${now.toLocaleTimeString([], {hour12:false})}</time><span class="bullet"></span><span>${label}</span><span class="detail">${detail}</span>`;
+      timeline.appendChild(row);
+      timeline.scrollTop = timeline.scrollHeight;
+    }
+    async function jsonFetch(url, options) {
+      const response = await fetch(url, options);
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      return body;
+    }
+    async function startScenario(scenario) {
+      clearInterval(pollTimer);
+      clearInterval(elapsedTimer);
+      document.querySelectorAll(".scenario").forEach(button => button.disabled = true);
+      $("human").classList.remove("visible");
+      $("timeline").innerHTML = "";
+      $("runTitle").textContent = titles[scenario];
+      setStatus("Starting");
+      $("phase").textContent = "admission";
+      $("models").textContent = "0";
+      $("tools").textContent = "0";
+      $("elapsed").textContent = "0:00";
+      startedAt = performance.now();
+      addEvent("Authenticated start accepted by local proxy", "key stays server-side");
+      const payload = {scenario};
+      if (scenario === "retained_reuse") payload.session_id = retainedSession;
+      try {
+        run = await jsonFetch("/api/start", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)});
+        localStorage.setItem("durableLoopDemoRun", JSON.stringify(run));
+        $("runId").textContent = alias("RUN", run.run_id);
+        $("sessionId").textContent = alias("SESSION", run.session_id);
+        addEvent("DTS orchestration instance created", alias("run", run.run_id));
+        lastSignature = "";
+        elapsedTimer = setInterval(updateElapsed, 500);
+        pollTimer = setInterval(pollRun, 2500);
+        await pollRun();
+      } catch (error) {
+        setStatus("Failed");
+        addEvent("Start failed", error.message);
+        unlock();
+      }
+    }
+    function updateElapsed() {
+      if (!startedAt) return;
+      const seconds = Math.floor((performance.now() - startedAt) / 1000);
+      $("elapsed").textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+    }
+    async function pollRun() {
+      if (!run) return;
+      try {
+        const status = await jsonFetch(`/api/run/${run.run_id}`);
+        setStatus(status.status);
+        $("phase").textContent = String(status.phase || "starting").replaceAll("_", " ");
+        $("models").textContent = status.model_steps ?? 0;
+        $("tools").textContent = status.tool_calls ?? 0;
+        const signature = JSON.stringify([status.status, status.phase, status.model_steps, status.tool_calls, status.human_waits, status.step_index]);
+        if (signature !== lastSignature) {
+          addEvent(`${status.status} · ${String(status.phase || "starting").replaceAll("_", " ")}`, `model ${status.model_steps ?? 0} · tools ${status.tool_calls ?? 0} · step ${status.step_index ?? 0}`);
+          lastSignature = signature;
+        }
+        if (status.status === "Waiting" && status.human_input) {
+          $("human").dataset.requestId = status.human_input.request_id;
+          $("human").classList.add("visible");
+        }
+        if (["Completed", "Failed", "Cancelled"].includes(status.status)) {
+          clearInterval(pollTimer);
+          clearInterval(elapsedTimer);
+          if (run.scenario === "retained_create" && status.status === "Completed") {
+            retainedSession = run.session_id;
+            localStorage.setItem("durableLoopDemoSession", retainedSession);
+            $("reuse").disabled = false;
+            showToast("Retained session ready for reuse");
+          } else {
+            unlock();
+          }
+        }
+      } catch (error) {
+        addEvent("Transient status response", "retrying safely");
+      }
+    }
+    function unlock() {
+      document.querySelectorAll(".scenario").forEach(button => button.disabled = false);
+      $("reuse").disabled = !retainedSession;
+    }
+    async function answerHuman(answer) {
+      const requestId = $("human").dataset.requestId;
+      if (!run || !requestId) return;
+      document.querySelectorAll(".choice").forEach(button => button.disabled = true);
+      try {
+        await jsonFetch("/api/human-answer", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({run_id:run.run_id, request_id:requestId, answer})});
+        $("human").classList.remove("visible");
+        addEvent("Authenticated human answer committed", "external event raised");
+        pollTimer = setInterval(pollRun, 2500);
+        await pollRun();
+      } catch (error) {
+        addEvent("Human answer failed", error.message);
+      } finally {
+        document.querySelectorAll(".choice").forEach(button => button.disabled = false);
+      }
+    }
+    async function refreshSandboxes() {
+      try {
+        const inventory = await jsonFetch("/api/sandboxes");
+        $("sandboxCount").textContent = `${inventory.count} LIVE`;
+        if (!inventory.items.length) {
+          $("inventory").innerHTML = `<div class="inventory-zero">No app-owned sandboxes<br><span class="eyebrow">clean baseline</span></div>`;
+          return;
+        }
+        $("inventory").innerHTML = inventory.items.map(item => `
+          <div class="sandbox">
+            <div class="sandbox-top"><span class="sandbox-id">${item.alias.toUpperCase()}</span><span class="sandbox-state ${String(item.state).toLowerCase()}">${item.state}</span></div>
+            <div class="policy"><div><label>Auto-suspend</label><strong>${item.auto_suspend_seconds}s</strong></div><div><label>Auto-delete</label><strong>${item.auto_delete_seconds}s</strong></div></div>
+          </div>`).join("");
+      } catch (error) {
+        $("sandboxCount").textContent = "RETRY";
+      }
+    }
+    document.querySelectorAll(".scenario").forEach(button => button.addEventListener("click", () => startScenario(button.dataset.scenario)));
+    document.querySelectorAll(".choice").forEach(button => button.addEventListener("click", () => answerHuman(button.textContent)));
+    refreshSandboxes();
+    $("reuse").disabled = !retainedSession;
+    if (run) {
+      $("runTitle").textContent = titles[run.scenario] || "Live durable orchestration";
+      $("runId").textContent = alias("RUN", run.run_id);
+      $("sessionId").textContent = alias("SESSION", run.session_id);
+      startedAt = performance.now();
+      addEvent("Resumed live control view", alias("run", run.run_id));
+      elapsedTimer = setInterval(updateElapsed, 500);
+      pollTimer = setInterval(pollRun, 2500);
+      pollRun();
+    }
+    setInterval(refreshSandboxes, 5000);
+  </script>
+</body>
+</html>

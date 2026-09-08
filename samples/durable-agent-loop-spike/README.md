@@ -32,6 +32,7 @@ deliberately separate:
 | Storage / containers | `stdurableloop0904e2` / `app-package-func-durable-loop-0904` / `durable-loop-content` |
 | Log Analytics / App Insights | `log-durable-loop-0904` / `appi-durable-loop-0904` |
 | Sandbox Group | `sbg-durable-loop-0904` |
+| Durable Task Scheduler / task hub | `dts-durable-loop-0904` / `durable-loop-demo` |
 | Flex app | `func-durable-loop-0904` |
 | Shared APIM | `larohra-ai-gateway` in `larohra-operations-agent-3p-rg` |
 | Model API | `https://larohra-ai-gateway.azure-api.net/durable-agent-loop-model/openai/v1` |
@@ -131,6 +132,25 @@ ID through the three
 The existing account-scoped Storage Blob Data Owner assignment grants the
 Function identity access without a connection string or storage key.
 
+Durable orchestration state uses the dedicated Consumption SKU Durable Task
+Scheduler `dts-durable-loop-0904` and task hub `durable-loop-demo`. The Function
+UAMI receives `Durable Task Data Contributor` only on that task hub. The app
+connects through managed identity using
+`DURABLE_TASK_SCHEDULER_CONNECTION_STRING`; `TASKHUB_NAME` selects the hub, and
+`src/host.json` selects the `azureManaged` Durable storage provider. The
+identity-based `AzureWebJobsStorage__*` settings remain unchanged for Functions
+host storage, session history, and a rollback to Azure Storage Durable.
+
+For local development, `local.settings.template.json` targets the official DTS
+emulator at `http://localhost:8080` and task hub `default`; its dashboard is at
+`http://localhost:8082`.
+
+Rollback is deliberately package-based rather than secret-based: redeploy the
+known storage-backed source package at commit
+`d205c4206b6ac539979aef518c4fb249818fd285`, remove only
+`DURABLE_TASK_SCHEDULER_CONNECTION_STRING` and `TASKHUB_NAME`, and restart the
+app. No storage key, connection string, or publishing profile is required.
+
 The application settings also pin
 `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_TOOL_BUNDLE_ROOT=sandbox_bundle`
 and
@@ -152,9 +172,15 @@ depending on process defaults:
 | `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RETAINED_SANDBOX_ENABLED` | `false` |
 | `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_FAULT_INJECTION_ENABLED` | `false` |
 | `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_MAX_APP_OWNED_SANDBOXES` | `10` |
-| `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RETAINED_SANDBOX_AUTO_DELETE_SECONDS` | `86400` |
+| `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RETAINED_SANDBOX_AUTO_DELETE_SECONDS` | `600` |
 | `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_SANDBOX_REAPER_AGE_SECONDS` | `600` |
 | `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS` | `aiohttp-client,httpx,requests,urllib,urllib3` |
+
+For a retained-session demo, a successful turn leaves its stopped sandbox
+available for the next turn. Each tool handoff applies the bounded ACA
+auto-delete policy, and the durable reaper remains a second deletion backstop.
+Failure and cancellation still schedule explicit cleanup before releasing the
+session fence.
 
 After the package is deployed and indexed with the main gate off, live
 qualification enables the main, background-model, retained-sandbox, and

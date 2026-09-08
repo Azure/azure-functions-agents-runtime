@@ -1,0 +1,102 @@
+{
+  "voice": "Microsoft Mark",
+  "rate": 0,
+  "volume": 100,
+  "segments": [
+    {
+      "id": "01-intro",
+      "scene": "card-intro",
+      "text": "Agents need powerful tools, but model-directed code should not execute inside the trusted Functions worker. This spike separates the trusted brain from isolated hands and adds durable recovery at every step."
+    },
+    {
+      "id": "02-architecture",
+      "scene": "card-architecture",
+      "text": "Azure Functions and Durable Task Scheduler own model steps, session fences, retries, checkpoints, and human waits. APIM governs model and privileged MCP traffic. Customer-owned ACA Sandbox runs local executable tools. Blob stores integrity-bound content by reference."
+    },
+    {
+      "id": "03-live",
+      "scene": "card-live",
+      "text": "The centerpiece uses the real deployed app. The browser never receives a Function key and renders only bounded status, counters, and safe aliases."
+    },
+    {
+      "id": "04-create-start",
+      "scene": "control-retained-create-start",
+      "text": "The first run creates a retained session. DTS starts the orchestration, and ACA creates a customer-owned sandbox for the local workspace tools."
+    },
+    {
+      "id": "05-create-complete",
+      "scene": "control-retained-create-complete",
+      "text": "The turn completes as three model steps and two tool calls, not one opaque full-agent activity. The workspace is exported as an integrity-bound checkpoint."
+    },
+    {
+      "id": "06-reuse-start",
+      "scene": "control-retained-reuse-start",
+      "text": "After inactivity, ACA stops the sandbox. The next turn uses the same session and resumes the same sandbox alias instead of creating a new one."
+    },
+    {
+      "id": "07-reuse-complete",
+      "scene": "control-retained-reuse-complete",
+      "text": "The resumed turn reads the exact marker written by the previous turn, proving same-sandbox reuse and durable workspace continuity across requests."
+    },
+    {
+      "id": "08-fault-start",
+      "scene": "control-fault-start",
+      "text": "Now the fixed fault profile loses one tool activity acknowledgement after the work is checkpointed. DTS retries that activity boundary rather than restarting the reasoning loop."
+    },
+    {
+      "id": "09-fault-complete",
+      "scene": "control-fault-complete",
+      "text": "The adaptive chain completes with seven model steps and six logical tool calls. Earlier acknowledged work was not replayed from step zero."
+    },
+    {
+      "id": "10-hitl-start",
+      "scene": "control-hitl-start",
+      "text": "For human clarification, the model emits the runtime-owned human-input tool by itself, and the orchestration advances to a durable waiting state."
+    },
+    {
+      "id": "11-hitl-resume",
+      "scene": "control-hitl-wait-resume",
+      "text": "While waiting, no model or tool compute continues. An authenticated answer commits, an external event wakes the same orchestration, and execution resumes from its checkpoint."
+    },
+    {
+      "id": "12-observability",
+      "scene": "card-observability",
+      "text": "The same safe run alias can be correlated across the control room, DTS, Application Insights, APIM, and ACA. Isolation and durability are independently observable."
+    },
+    {
+      "id": "13-dts",
+      "scene": "portal-dts-timeline",
+      "text": "The DTS dashboard exposes the orchestration timeline directly: entity fences, model activities, tool activities, attempts, waits, and completion."
+    },
+    {
+      "id": "14-insights",
+      "scene": "portal-app-insights-agents",
+      "text": "Application Insights recognizes the agent, model, tools, tokens, and operational metrics. Sensitive prompt and tool content remains disabled."
+    },
+    {
+      "id": "15-apim",
+      "scene": "portal-apim",
+      "text": "APIM separates model start, stable model-control polling, and Microsoft Learn MCP into dedicated governed APIs with body capture disabled."
+    },
+    {
+      "id": "16-aca",
+      "scene": "portal-aca-sandbox-group",
+      "text": "The Sandbox Group is customer-owned, with separate identity, deny-by-default egress, and bounded auto-suspend and auto-delete policies."
+    },
+    {
+      "id": "17-delete",
+      "scene": "control-sandbox-deleted",
+      "text": "The live inventory moved from running, to stopped, back to running on reuse, and finally to zero through the automatic inactivity policy."
+    },
+    {
+      "id": "18-results",
+      "scene": "card-results",
+      "text": "The bounded c-ten qualification completed ten of ten runs. A long adaptive chain completed eighteen model steps and seventeen tool calls. Latest service telemetry shows sandbox creation at nine hundred six milliseconds p-fifty and execution at fifty milliseconds p-fifty. These are private spike measurements, not an S L A."
+    },
+    {
+      "id": "19-close",
+      "scene": "card-close",
+      "text": "The spike proves architectural feasibility. The recommendation is a bounded productization design phase with explicit go or no-go gates, not a production launch."
+    }
+  ]
+}

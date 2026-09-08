@@ -24,6 +24,8 @@ param durableContentContainerName string = 'durable-loop-content'
 param logAnalyticsName string = 'log-durable-loop-0904'
 param applicationInsightsName string = 'appi-durable-loop-0904'
 param sandboxGroupName string = 'sbg-durable-loop-0904'
+param durableTaskSchedulerName string = 'dts-durable-loop-0904'
+param durableTaskHubName string = 'durable-loop-demo'
 param functionPlanName string = 'ASP-larohradurableagentloop-7c8a'
 param functionAppName string = 'func-durable-loop-0904'
 
@@ -65,11 +67,13 @@ param roleAssignmentNames object = {
   functionCognitiveServicesUser: 'f5bd3b1d-7436-4db2-bc17-7958f3353fdc'
   functionCognitiveServicesOpenAiUser: '36994145-3665-4faf-b0e0-439a66d2d86d'
   functionSandboxGroupDataOwner: '4e301a1d-0499-46df-ae5b-d74f3fd0003a'
+  functionDurableTaskDataContributor: '2cc2f2cb-7d79-4b5c-aa81-68014ee64363'
   sandboxFoundryReader: 'fbb65a30-6d98-4cac-ac1b-d2f940bc559e'
   apimCognitiveServicesOpenAiUser: 'aaaf4f95-61da-4b53-b1f1-40d228c9147d'
   deployerStorageBlobContributor: 'de7eec46-02c7-4b7a-ac7d-b2eecb81938a'
   deployerStorageBlobOwner: '43bbeeb1-fac2-4426-a550-197d99b32ee8'
   deployerSandboxGroupDataOwner: 'c1f2afbc-e13b-47a2-a1c9-aef769cddaa6'
+  deployerDurableTaskDataContributor: '9752a16f-5b21-4dec-b863-ad96a1816b34'
 }
 
 var workloadTags = {
@@ -154,6 +158,17 @@ module sandboxGroup './modules/sandbox-group.bicep' = {
   }
 }
 
+module durableTaskScheduler './modules/durable-task-scheduler.bicep' = {
+  name: 'durable-loop-durable-task-scheduler'
+  scope: workloadResourceGroup
+  params: {
+    location: location
+    schedulerName: durableTaskSchedulerName
+    taskHubName: durableTaskHubName
+    tags: workloadTags
+  }
+}
+
 module apim './modules/apim.bicep' = {
   name: 'durable-loop-apim-children'
   scope: sharedApimResourceGroup
@@ -190,6 +205,8 @@ module functionApp './modules/function-app.bicep' = {
     deploymentStorageContainerName: deploymentStorageContainerName
     durableContentBlobUri: 'https://${storageAccountName}.blob.${environment().suffixes.storage}'
     durableContentContainerName: durableContentContainerName
+    durableTaskSchedulerEndpoint: durableTaskScheduler.outputs.schedulerEndpoint
+    durableTaskHubName: durableTaskHubName
     applicationInsightsName: applicationInsightsName
     foundryProjectEndpoint: 'https://${foundryAccountName}.services.ai.azure.com/api/projects/${foundryProjectName}'
     foundryModelDeploymentName: foundryModelDeploymentName
@@ -219,6 +236,8 @@ module rbac './modules/rbac.bicep' = {
     applicationInsightsName: applicationInsightsName
     foundryAccountName: foundryAccountName
     sandboxGroupName: sandboxGroupName
+    durableTaskSchedulerName: durableTaskSchedulerName
+    durableTaskHubName: durableTaskHubName
     functionPrincipalId: identities.outputs.functionIdentityPrincipalId
     sandboxPrincipalId: identities.outputs.sandboxIdentityPrincipalId
     apimPrincipalId: sharedApimService.identity.principalId!
@@ -231,6 +250,7 @@ module rbac './modules/rbac.bicep' = {
     functionApp
     sandboxGroup
     storage
+    durableTaskScheduler
   ]
 }
 
@@ -243,3 +263,6 @@ output APIM_MODEL_BASE_URL string = 'https://${sharedApimServiceName}.azure-api.
 output APIM_MODEL_CONTROL_URL string = 'https://${sharedApimServiceName}.azure-api.net/${modelControlApiName}'
 output APIM_MCP_URL string = 'https://${sharedApimServiceName}.azure-api.net/${mcpApiName}'
 output SANDBOX_GROUP_RESOURCE_ID string = sandboxGroup.outputs.sandboxGroupResourceId
+output DURABLE_TASK_SCHEDULER_NAME string = durableTaskScheduler.outputs.schedulerName
+output DURABLE_TASK_HUB_NAME string = durableTaskScheduler.outputs.taskHubName
+output DURABLE_TASK_SCHEDULER_ENDPOINT string = durableTaskScheduler.outputs.schedulerEndpoint

@@ -40,6 +40,7 @@ from azure_functions_agents.experimental.durable_loop_protocol import (
     ModelOperationStatus,
     ModelOperationV1,
     ModelStepActivityResultV1,
+    SandboxExecutionProfile,
     ToolBehavior,
     ToolProvenance,
     ToolRequestV1,
@@ -58,6 +59,7 @@ from azure_functions_agents.experimental.durable_loop_receipts import (
 from azure_functions_agents.experimental.durable_loop_registration import (
     DURABLE_LOOP_APPEND_ACTIVITY_NAME,
     DURABLE_LOOP_CANCEL_DELIVERY_ORCHESTRATOR_NAME,
+    DURABLE_LOOP_CLEANUP_ACTIVITY_NAME,
     DURABLE_LOOP_COMPACTION_ACTIVITY_NAME,
     DURABLE_LOOP_FAULT_ACTIVITY_NAME,
     DURABLE_LOOP_HUMAN_ACTIVITY_NAME,
@@ -925,6 +927,49 @@ async def test_registered_orchestrator_completes_with_refs_only_output() -> None
         "is_cancelled",
         "complete",
     ]
+
+
+@pytest.mark.asyncio
+async def test_successful_retained_session_keeps_sandbox_for_next_turn() -> None:
+    registry = DurableToolRegistry()
+    catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
+    content = InMemoryDurableContentStore()
+    run_input = (await _run_input(content, catalog)).model_copy(
+        update={"sandbox_profile": SandboxExecutionProfile.RETAINED_SESSION}
+    )
+    final_ref = await content.put_text(
+        kind="final",
+        value="done",
+        retention_class="result",
+    )
+    model_result = ModelStepActivityResultV1(
+        run_document_ref=run_input.run_document_ref,
+        step_index=0,
+        final_response_ref=final_ref,
+    )
+    context = _OrchestrationContext(
+        run_input.model_dump(mode="json"),
+        activity_results={
+            DURABLE_LOOP_MODEL_ACTIVITY_NAME: model_result.model_dump(mode="json")
+        },
+    )
+    from azure_functions_agents.experimental.durable_loop_registration import (
+        _run_durable_loop,
+    )
+
+    output = _drive_to_completion(
+        _run_durable_loop(
+            context,
+            df.EntityId("durable_agent_session_entity_v1", "e" * 64),
+            run_input,
+        )
+    )
+
+    assert output["status"] == "Completed"  # type: ignore[index]
+    assert all(
+        name != DURABLE_LOOP_CLEANUP_ACTIVITY_NAME
+        for name, _ in context.activity_calls
+    )
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Durable Agent Loop Demo Scenes</title>
+  <style>
+    :root { --bg:#07111f; --ink:#f6f9fc; --muted:#8da6bc; --azure:#51b5ff; --cyan:#4ad9c8; --orange:#ffb357; --green:#5ed18a; }
+    * { box-sizing:border-box; } html,body { margin:0; width:100%; height:100%; overflow:hidden; }
+    body { font-family:"Segoe UI Variable","Segoe UI",sans-serif; color:var(--ink); background:radial-gradient(circle at 78% 12%,rgba(43,143,216,.22),transparent 33%),linear-gradient(145deg,#081423,var(--bg) 58%,#091827); }
+    .scene { display:none; width:100vw; height:100vh; padding:72px 86px; position:relative; }
+    .scene.active { display:flex; flex-direction:column; justify-content:center; }
+    .eyebrow { color:var(--cyan); font-weight:750; font-size:17px; letter-spacing:.16em; text-transform:uppercase; }
+    h1 { font-size:70px; line-height:1.03; max-width:1250px; letter-spacing:-.045em; margin:18px 0 22px; }
+    h2 { font-size:48px; letter-spacing:-.035em; margin:16px 0 22px; }
+    p { color:var(--muted); font-size:26px; line-height:1.45; max-width:1280px; margin:0; }
+    .accent { color:var(--azure); } .cyan { color:var(--cyan); } .orange { color:var(--orange); } .green { color:var(--green); }
+    .chips { margin-top:30px; display:flex; gap:12px; }
+    .chip { padding:10px 16px; border-radius:999px; background:rgba(81,181,255,.10); border:1px solid rgba(81,181,255,.25); color:#c5e8ff; font-size:17px; font-weight:650; }
+    .grid { display:grid; gap:18px; margin-top:34px; } .grid4 { grid-template-columns:repeat(4,1fr); } .grid3 { grid-template-columns:repeat(3,1fr); }
+    .card { min-height:190px; padding:24px; border:1px solid rgba(151,190,222,.18); border-radius:19px; background:linear-gradient(145deg,rgba(17,43,68,.94),rgba(9,24,40,.97)); box-shadow:0 22px 65px rgba(0,0,0,.18); }
+    .card b { display:block; color:var(--azure); font-size:23px; margin-bottom:12px; } .card p { font-size:19px; }
+    .metric { font-size:46px; font-weight:760; letter-spacing:-.04em; color:var(--green); }
+    .footer { position:absolute; left:86px; right:86px; bottom:30px; display:flex; justify-content:space-between; color:#647f98; font-size:14px; }
+    .flow { display:grid; grid-template-columns:1fr auto 1fr auto 1fr auto 1fr; align-items:center; gap:14px; margin-top:36px; }
+    .flow .card { min-height:230px; display:flex; flex-direction:column; justify-content:center; text-align:center; } .arrow { color:var(--cyan); font-size:44px; }
+    .quote { font-size:47px; line-height:1.28; color:#dceaf5; max-width:1250px; letter-spacing:-.025em; }
+    .fade { animation:fade .8s ease-out both; } .d1{animation-delay:.25s}.d2{animation-delay:.5s}.d3{animation-delay:.75s}
+    @keyframes fade { from{opacity:0;transform:translateY(14px)} to{opacity:1;transform:none} }
+  </style>
+</head>
+<body>
+  <section class="scene" data-scene="intro">
+    <div class="eyebrow fade">Azure Functions serverless agents · private live spike</div>
+    <h1 class="fade d1">Trusted brain. <span class="accent">Isolated hands.</span><br>Durable recovery.</h1>
+    <p class="fade d2">A step-level agent loop on Azure Functions, Durable Task Scheduler, APIM, and customer-owned ACA Sandbox.</p>
+    <div class="chips fade d3"><span class="chip">Real DTS backend</span><span class="chip">Real gpt-6-astra</span><span class="chip">Real ACA tools</span><span class="chip">Sensitive data off</span></div>
+    <div class="footer"><span>Leadership demo · 08 Sep 2026</span><span>No production claim</span></div>
+  </section>
+  <section class="scene" data-scene="architecture">
+    <div class="eyebrow">Architecture</div><h2>Four governed surfaces, one explicit loop</h2>
+    <div class="flow">
+      <div class="card"><b>Azure Functions + DTS</b><p>Model steps, session fences, retries, checkpoints, human waits.</p></div><div class="arrow">→</div>
+      <div class="card"><b>APIM / AI Gateway</b><p>Model start and poll, privileged MCP, stable routes, no body capture.</p></div><div class="arrow">→</div>
+      <div class="card"><b>ACA Sandbox</b><p>Customer-owned identity and isolation for local executable tools.</p></div><div class="arrow">→</div>
+      <div class="card"><b>Blob + Insights</b><p>Content by reference, integrity hashes, content-free traces and metrics.</p></div>
+    </div>
+    <div class="footer"><span>Durable history carries refs, hashes, counters, and fences</span><span>Prompts and tool bodies remain outside history</span></div>
+  </section>
+  <section class="scene" data-scene="live">
+    <div class="eyebrow">Live control room</div><h1>Four proofs on the <span class="cyan">real deployment</span></h1>
+    <div class="grid grid4">
+      <div class="card"><b>01 · Create</b><p>Retained sandbox writes and reads an exact workspace marker.</p></div>
+      <div class="card"><b>02 · Reuse</b><p>The stopped sandbox resumes with the same alias and marker.</p></div>
+      <div class="card"><b>03 · Recover</b><p>A lost tool acknowledgement retries one activity, not the whole turn.</p></div>
+      <div class="card"><b>04 · HITL</b><p>The orchestration parks for an external event and resumes its checkpoint.</p></div>
+    </div>
+    <div class="footer"><span>Function key remains in the loopback proxy process</span><span>Browser renders content-free metadata only</span></div>
+  </section>
+  <section class="scene" data-scene="observability">
+    <div class="eyebrow">Operational proof</div><h2>One safe run alias across every control surface</h2>
+    <div class="grid grid4">
+      <div class="card"><b>DTS dashboard</b><p>Orchestration timeline, activities, attempts, waits, completion.</p></div>
+      <div class="card"><b>App Insights</b><p>Agent metrics, model and tool telemetry, dependency timing.</p></div>
+      <div class="card"><b>APIM</b><p>Governed model/control/MCP APIs with content capture disabled.</p></div>
+      <div class="card"><b>ACA inventory</b><p>Running, stopped, resumed, and automatic deletion observed.</p></div>
+    </div>
+    <div class="footer"><span>Visibility is the product argument</span><span>Isolation is observable, not hidden</span></div>
+  </section>
+  <section class="scene" data-scene="results">
+    <div class="eyebrow">Measured evidence</div><h2>Feasibility is strong; these are not SLA claims</h2>
+    <div class="grid grid4">
+      <div class="card"><div class="metric">10 / 10</div><p>bounded c10 runs completed</p></div>
+      <div class="card"><div class="metric">18 / 17</div><p>model steps / tool calls in the long chain</p></div>
+      <div class="card"><div class="metric">906 ms</div><p>sandbox create p50; 1.924 s p95</p></div>
+      <div class="card"><div class="metric">50 ms</div><p>sandbox execute p50; 175 ms p95</p></div>
+    </div>
+    <div class="grid grid3">
+      <div class="card"><b>Model request</b><p>1.779 s p50 · 4.164 s p95</p></div>
+      <div class="card"><b>Model poll</b><p>673 ms p50 · 1.898 s p95</p></div>
+      <div class="card"><b>MCP through APIM</b><p>61 ms p50 · 190 ms p95</p></div>
+    </div>
+    <div class="footer"><span>Latest 24-hour service telemetry</span><span>Client c10 polling: 51.554 s p50 · 62.629 s p95</span></div>
+  </section>
+  <section class="scene" data-scene="close">
+    <div class="eyebrow">Recommendation</div>
+    <div class="quote">Advance from feasibility spike to a bounded <span class="green">productization design phase</span> with explicit go/no-go gates.</div>
+    <div class="chips"><span class="chip">Public authoring model</span><span class="chip">Side-effect contracts</span><span class="chip">Tenant isolation</span><span class="chip">Quotas + cost envelopes</span></div>
+    <div class="footer"><span>Architecture feasibility proven</span><span>Production readiness intentionally unproven</span></div>
+  </section>
+  <script>
+    const scene = new URLSearchParams(location.search).get("scene") || "intro";
+    document.querySelector(`[data-scene="${scene}"]`)?.classList.add("active");
+  </script>
+</body>
+</html>

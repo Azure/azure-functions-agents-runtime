@@ -441,7 +441,16 @@ class DurableAcaSandboxLane:
                 created = True
                 document = replacement
 
-        claimed = document.model_copy(update={"owner_call_key": request.call_key})
+        claimed = document.model_copy(
+            update={
+                "expires_at": datetime.now(UTC)
+                + timedelta(
+                    seconds=self._loop_settings.retained_sandbox_auto_delete_seconds
+                ),
+                "owner_call_key": request.call_key,
+                "run_id": request.run_id,
+            }
+        )
         if document.owner_call_key not in {None, request.call_key}:
             await lease.close(
                 retain=True,
@@ -921,7 +930,6 @@ def _verify_retained_bindings(
 ) -> None:
     if (
         document.session_id != request.session_id
-        or document.run_id != request.run_id
         or document.package_digest != package.digest
         or document.tool_manifest != manifest.model_dump(mode="json")
     ):

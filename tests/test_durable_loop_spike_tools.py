@@ -1386,7 +1386,7 @@ def _assert_private_runtime_settings(
         "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RETAINED_SANDBOX_ENABLED": "false",
         "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_FAULT_INJECTION_ENABLED": "false",
         "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_MAX_APP_OWNED_SANDBOXES": "10",
-        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RETAINED_SANDBOX_AUTO_DELETE_SECONDS": "86400",
+        "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RETAINED_SANDBOX_AUTO_DELETE_SECONDS": "600",
         "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_SANDBOX_REAPER_AGE_SECONDS": "600",
         "OTEL_PYTHON_DISABLED_INSTRUMENTATIONS": "aiohttp-client,httpx,requests,urllib,urllib3",
     }
@@ -1411,11 +1411,15 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
     local_settings = json.loads(
         (sample / "src/local.settings.template.json").read_text(encoding="utf-8")
     )
+    values = local_settings["Values"]
+    assert isinstance(values, dict)
     host = json.loads((sample / "src/host.json").read_text(encoding="utf-8"))
 
     for exact_name in (
         "larohra-durable-agent-loop",
         "aidurableloop0904e2",
+        "dts-durable-loop-0904",
+        "durable-loop-demo",
         "sbg-durable-loop-0904",
         "func-durable-loop-0904",
         "larohra-ai-gateway",
@@ -1475,6 +1479,19 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
         "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_CONTENT_CLIENT_ID:"
         " functionIdentityClientId" in function_app
     )
+    assert "DURABLE_TASK_SCHEDULER_CONNECTION_STRING:" in function_app
+    assert "TASKHUB_NAME: durableTaskHubName" in function_app
+    durable_task = host["extensions"]["durableTask"]
+    assert durable_task["hubName"] == "%TASKHUB_NAME%"
+    assert durable_task["storageProvider"] == {
+        "type": "azureManaged",
+        "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
+    }
+    assert (
+        values["DURABLE_TASK_SCHEDULER_CONNECTION_STRING"]
+        == "Endpoint=http://localhost:8080;TaskHub=default;Authentication=None"
+    )
+    assert values["TASKHUB_NAME"] == "default"
     _assert_private_runtime_settings(
         main=main,
         function_app=function_app,

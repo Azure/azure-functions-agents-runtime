@@ -205,6 +205,7 @@ def _settings() -> HybridSandboxSettings:
 def _request(
     *,
     call: int,
+    run_id: str = "run-1",
     workspace_ref=None,
     profile: SandboxExecutionProfile = SandboxExecutionProfile.PER_CALL,
     fault: DurableFaultProfile = DurableFaultProfile.NONE,
@@ -223,7 +224,7 @@ def _request(
         fault_profile=fault,
     )
     return ToolRequestV1(
-        run_id="run-1",
+        run_id=run_id,
         session_id="session-1",
         step_index=call - 1,
         call_ordinal=0,
@@ -537,6 +538,7 @@ async def test_retained_loss_recreates_from_last_checkpoint(
     second = await lane.dispatch(
         _request(
             call=2,
+            run_id="run-2",
             workspace_ref=first.workspace_ref,
             profile=SandboxExecutionProfile.RETAINED_SESSION,
         )
