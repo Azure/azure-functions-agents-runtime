@@ -28,6 +28,15 @@ from .schema import DurableRetryPolicyInput
 _FAILURE_VERSION = 1
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
 class DurableRetryableActivityError(Exception):
     """Private exception used only to ask Durable to retry a sanitized outcome."""
 
@@ -80,7 +89,10 @@ def decode_durable_retry_failure(
     if not error.details.is_caused_by(DurableRetryableActivityError):
         return None
     try:
-        payload: Any = json.loads(error.details.message)
+        payload: Any = json.loads(
+            error.details.message,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
     except (TypeError, ValueError):
         return None
     if (

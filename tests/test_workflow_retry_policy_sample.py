@@ -106,10 +106,7 @@ def test_retry_e2e_rejects_private_marker_nested_under_clean_failure_details() -
         "(inventory_temporarily_unavailable)"
     )
     raw_marker = (
-        f"{workflow_id}: Activity task #2 failed: "
-        '{"outcome":{"failure":{"error":"Inventory reservation is temporarily unavailable.",'
-        '"error_code":"inventory_temporarily_unavailable","kind":"handler_transient",'
-        '"retryable":true},"id":"reserve_inventory","ok":false},"version":1}'
+        'private retry metadata: {"outcome":{"ok":false},"version":1}'
     )
 
     with pytest.raises(AssertionError, match="private retry marker"):
@@ -118,7 +115,7 @@ def test_retry_e2e_rejects_private_marker_nested_under_clean_failure_details() -
                 "failureDetails": {
                     "errorMessage": decoded,
                     "innerFailure": {
-                        "errorType": "DurableRetryableActivityError",
+                        "errorType": "RuntimeError",
                         "errorMessage": raw_marker,
                     },
                 }

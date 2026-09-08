@@ -225,14 +225,19 @@ def _assert_decoded_exhaustion_failure(
         ):
             raise AssertionError(f"invalid terminal failureDetails: {failure_details!r}")
         failure_message = failure_details["errorMessage"]
-        serialized_failure_details = json.dumps(
-            _failure_details_chain(failure_details), sort_keys=True
+        chain = _failure_details_chain(failure_details)
+        for detail in chain:
+            nested_message = detail.get("errorMessage")
+            if not isinstance(nested_message, str):
+                raise AssertionError(f"invalid nested failureDetails: {detail!r}")
+            for marker in _PRIVATE_RETRY_MARKERS:
+                assert marker not in nested_message, (
+                    f"private retry marker {marker!r} leaked into terminal failureDetails: "
+                    f"{nested_message}"
+                )
+        assert len(chain) == 1, (
+            f"decoded terminal failureDetails must not contain innerFailure: {failure_details!r}"
         )
-        for marker in _PRIVATE_RETRY_MARKERS:
-            assert marker not in serialized_failure_details, (
-                f"private retry marker {marker!r} leaked into terminal failureDetails: "
-                f"{serialized_failure_details}"
-            )
     else:
         output = status.get("output")
         if output is not None:

@@ -403,6 +403,7 @@ _RETRYABLE_OUTCOME = {
         "retryable": True,
     },
 }
+_RETRYABLE_OUTCOME_JSON = json.dumps(_RETRYABLE_OUTCOME, separators=(",", ":"), sort_keys=True)
 
 
 @pytest.mark.parametrize(
@@ -434,6 +435,22 @@ _RETRYABLE_OUTCOME = {
                         "retryable": False,
                     },
                 }
+            ),
+        ),
+        (
+            "duplicate top-level version",
+            f'{{"version":1,"version":1,"outcome":{_RETRYABLE_OUTCOME_JSON}}}',
+        ),
+        (
+            "duplicate top-level outcome",
+            f'{{"version":1,"outcome":{_RETRYABLE_OUTCOME_JSON},'
+            f'"outcome":{_RETRYABLE_OUTCOME_JSON}}}',
+        ),
+        (
+            "duplicate nested failure field",
+            _private_failure_payload(_RETRYABLE_OUTCOME).replace(
+                '"retryable":true',
+                '"retryable":true,"retryable":true',
             ),
         ),
     ],

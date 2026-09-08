@@ -194,7 +194,9 @@ def _policy_duration_ms(value: str, *, field_name: str) -> int:
 class WorkflowRetryBackoff(BaseModel):
     """Bounded exponential backoff authored in a plan task execution policy."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, strict=True, hide_input_in_errors=True
+    )
 
     initial: str
     multiplier: float
@@ -218,7 +220,9 @@ class WorkflowRetryBackoff(BaseModel):
 class WorkflowRetryPolicy(BaseModel):
     """Bounded retry declaration; ``max_attempts`` includes the first attempt."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, strict=True, hide_input_in_errors=True
+    )
 
     max_attempts: int = Field(default=1, ge=1, le=MAX_POLICY_ATTEMPTS)
     backoff: WorkflowRetryBackoff | None = None
@@ -235,7 +239,9 @@ class WorkflowRetryPolicy(BaseModel):
 class WorkflowTaskExecution(BaseModel):
     """Authored bounded execution policy for a tool or Sub Agent task."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, strict=True, hide_input_in_errors=True
+    )
 
     retry: WorkflowRetryPolicy
 
@@ -510,7 +516,7 @@ def validate_plan(
     except ValidationError as exc:
         metadata = _schema_validation_metadata(raw, exc)
         raise PlanValidationError(
-            f"plan does not match schema: {exc}",
+            f"plan does not match schema: {_format_schema_validation_error(exc)}",
             **metadata,
         ) from exc
 
@@ -752,6 +758,18 @@ def _schema_validation_metadata(
             metadata["node_id"] = node_id
         return metadata
     return {}
+
+
+def _format_schema_validation_error(exc: ValidationError) -> str:
+    """Format schema failures without reflecting caller-authored input values."""
+    errors = exc.errors(include_input=False)
+    details = []
+    for error in errors:
+        location = ".".join(str(segment) for segment in error["loc"]) or "<root>"
+        details.append(f"{location}: {error['msg']} [type={error['type']}]")
+    count = len(details)
+    label = "error" if count == 1 else "errors"
+    return f"{count} validation {label} for {exc.title}\n" + "\n".join(details)
 
 
 def _detect_cycle(plan: WorkflowPlan) -> list[str] | None:

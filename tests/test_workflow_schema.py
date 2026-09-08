@@ -110,6 +110,21 @@ def test_rejects_unsupported_task_type():
         validate_plan(_plan(_task("a", type_="bogus")))
 
 
+def test_retry_schema_error_does_not_expose_invalid_input() -> None:
+    secret = "secret-like-retry-value"
+    task = _task("a")
+    task["execution"] = {"retry": {"max_attempts": secret}}
+
+    with pytest.raises(PlanValidationError) as raised:
+        validate_plan(_plan(task))
+
+    message = str(raised.value)
+    assert secret not in message
+    assert "tasks.0.execution.retry.max_attempts" in message
+    assert "Input should be a valid integer" in message
+    assert "type=int_type" in message
+
+
 def test_rejects_plans_over_max_nodes():
     tasks = [_task(f"t{i}") for i in range(MAX_NODES + 1)]
     with pytest.raises(PlanValidationError, match="per-plan limit"):
