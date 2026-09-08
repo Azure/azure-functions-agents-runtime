@@ -28,12 +28,6 @@ flowchart LR
     J["client_manager.py<br/>ClientManager"] -.->|"chat client"| K["runner.py<br/>run_agent<br/>run_agent_stream<br/>build_subagent_tools"]
     H -.->|"handler closures + AgentCatalog"| K
     K -.->|"prompt + tools + session"| L["Microsoft Agent Framework"]
-    A -->|"binding projection"| M["composition.py<br/>ProjectSnapshot"]
-    M -->|"BindingAgentEntry"| N["bindings.py<br/>markdown_agent / AiApp / DurableAiApp"]
-    N -->|"wrapped orchestrator context"| P["durable.py<br/>DurableAgentContext.call_agent"]
-    P -.->|"versioned activity payload"| N
-    N -.->|"cached AgentBlueprint"| O["hydration.py<br/>fresh Agent hydration"]
-    O -.->|"entered Agent per invocation"| L
 ```
 
 Read left to right: files on disk become typed config, typed config becomes a
@@ -54,17 +48,12 @@ A few boundaries are worth calling out explicitly:
   workflow runtime once, and registers agent surfaces (FRDs 0004 and 0007).
 - **Registration is Azure-specific.** This is the first stage that knows about `azure.functions.FunctionApp`, decorators, routes, and trigger bindings.
 - **Execution is deferred.** The runner is not part of startup registration; it is called later by handler closures when an HTTP route or trigger actually fires.
-- **Smart bindings are a parallel projection.** `composition.py` reads only binding-required front matter and reuses the root-keyed discovery caches. It does not feed `AgentSpec` or weaken declarative validation.
 
 ## 3. Module map
 
 | Package/module | Role | Key entry points |
 | --- | --- | --- |
-| `azure_functions_agents/app.py` | Top-level two-pass composition root. Before app mutation it builds the slug index, `AgentCatalog`, complete workflow-handler catalog, and immutable workflow-agent policy catalog. It chooses `DurableAiApp` when any agent enables workflows (otherwise `AiApp`), registers the workflow runtime once, then registers each agent. | `create_function_app()`, `_fail_on_duplicate_slugs()` |
-| `azure_functions_agents/composition.py` | Builds the immutable binding-only project snapshot and resolves a binding target by exact filename stem, then normalized slug. Requires only `name` and `description`, honors `substitute_variables` for those fields and markdown instructions, and discards all other per-agent front matter. | `load_project_snapshot()`, `compose_binding_target()` |
-| `azure_functions_agents/bindings.py` | Owns the smart callable wrapper, enhanced app classes, per-app blueprint registry, raw Agent injection into async Functions/customer-owned Durable activities, and one runtime-owned Agent activity per `DurableAiApp`. It uses public SDK decorators and signatures without mutating `FunctionBuilder` internals. | `markdown_agent()`, `AiApp`, `DurableAiApp` |
-| `azure_functions_agents/durable.py` | Owns the replay-safe `DurableAgentContext` proxy, strict JSON activity payload, and `call_agent()` scheduling contract. It performs no file, model, tool, or network I/O. | `DurableAgentContext`, `DurableAgentContext.call_agent()` |
-| `azure_functions_agents/hydration.py` | Owns immutable binding blueprints and fresh per-invocation MAF Agent construction and context management, including the internal persistent-history opt-out used by `call_agent()`. | `AgentBlueprint`, `open_agent()`, `run_blueprint()` |
+| `azure_functions_agents/app.py` | Top-level two-pass composition root. Before app mutation it builds the slug index, `AgentCatalog`, complete workflow-handler catalog, and immutable workflow-agent policy catalog. It chooses `DFApp` when any agent enables workflows, registers the workflow runtime once, then registers each agent. | `create_function_app()`, `_fail_on_duplicate_slugs()` |
 | `azure_functions_agents/config/paths.py` | Resolves the app root and the optional config/history directory. | `set_app_root()`, `get_app_root()`, `resolve_config_dir()` |
 | `azure_functions_agents/config/env.py` | Performs env-var substitution and bool coercion across config string values in YAML, JSON, front matter, and markdown body content. | `substitute_env_vars_in_value()`, `resolve_env_vars_in_data()`, `substitute_env_vars_in_text()`, `_to_bool()` |
 | `azure_functions_agents/config/schema.py` | Defines the Pydantic models for raw, global, and merged config, including independent object-only chat and workflow Sub Agent grants. | `AgentSpec`, `GlobalConfig`, `ResolvedAgent`, `TriggerSpec`, `BuiltinEndpointsConfig`, `SubagentRef`, `WorkflowConfig`, `WorkflowSubagentRef` |
@@ -102,7 +91,6 @@ A few boundaries are worth calling out explicitly:
 - `discovery/` answers **"what is available in this project folder?"**
 - `app.py`'s composition root answers **"is this configuration internally consistent app-wide?"** (unique slugs, valid `subagents:` references) — the one cross-agent question no single `ResolvedAgent` can answer by itself.
 - `registration/` answers **"which Azure Functions surfaces should exist for this agent?"**
-- `composition.py` and `bindings.py` answer **"which markdown agent should this customer-owned handler receive?"**
 - `system_tools/` answers **"which runtime-provided tools can be attached on demand?"**
 - `runner.py` and `client_manager.py` answer **"once invoked, how does an agent call the model and its tools — including any specialist it delegates to?"**
 - `_observability.py` (cross-cutting) answers **"what did the run do, and is a failure the app's, runtime's, platform's, or a delegated specialist's fault?"**
@@ -135,32 +123,6 @@ That ordering matters because registration does not re-parse YAML or front
 matter; it trusts typed resolved values and immutable catalogs. Steps 6-10 are
 pass 1 and side-effect-free. Steps 11-12 are pass 2 and own all Azure Functions
 mutation.
-
-### Smart binding startup and execution
-
-`AiApp.markdown_agent()` and the free `markdown_agent(app, ...)` decorator use a separate binding-only path. At import time, the innermost decorator loads a per-app `ProjectSnapshot`, checks binding identity, resolves the requested source stem or slug, removes the injected parameter from the worker-facing signature, and returns a normal callable for the outer Azure decorator. Existing declarative parsing remains unchanged.
-
-Function and activity handlers using `markdown_agent` must be coroutines. At invocation, each receives a raw `agent_framework.Agent` built from the app-owned immutable `AgentBlueprint`. The wrapper enters the Agent on the worker's current event loop and always closes it after the handler; the customer controls sessions, options, middleware, streaming, number of calls, and model-call timeout. Fresh chat clients, history providers, web/sandbox tools, MCP wrappers, mutable tool lists, and Agent contexts prevent state or lifecycle sharing across invocations of the same slug.
-
-Smart bindings discover app-level tools, skills, and MCP servers before global tool
-exclusions are applied; their minimal front matter has no per-agent capability
-filters. Asset discovery failures are therefore app-wide and fail binding registration
-at import time, even when only one agent definition is selected. Starting with a
-partial capability inventory would silently change the Agent's available behavior, so
-v1 requires the failing asset to be fixed or removed.
-
-`DurableAiApp` wraps each registered orchestrator's named context in
-`DurableAgentContext`. Its `call_agent()` method performs strict JSON validation and
-schedules the single indexed `azure_functions_agents_run_markdown_agent` activity; it
-does not resolve definitions or run Agent code during replay. The activity resolves the
-authored filename stem/slug, hydrates a fresh Agent with persistent history disabled,
-and returns only response text. Prior results must be passed explicitly through the
-orchestration. Optional `RetryOptions` repeats the complete stateless activity attempt.
-
-Explicit customer-owned activities remain supported through
-`DurableAiApp.markdown_agent()` when applications need custom names, structured
-results, sessions, transcript selection, or idempotency. Caller-owned `DFApp` instances
-use this explicit pattern. Durable Entity injection is not supported.
 
 ## 4. Pipeline stages
 

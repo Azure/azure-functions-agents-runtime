@@ -12,6 +12,10 @@ branch: hallvictoria/agent-binding
 
 # FRD 0009 — Python markdown agent binding
 
+> **Superseded before release by [FRD 0010](0010-pluggable-agent-extensions.md).**
+> The implementation owner moved from this runtime to independent, pluggable
+> Agent extension distributions. This document remains as design history.
+
 ## 1. Summary
 
 Add a Python `markdown_agent` decorator that lets an existing Azure Function resolve a

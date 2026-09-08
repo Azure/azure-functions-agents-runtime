@@ -37,7 +37,8 @@ The full lifecycle that produces an FRD lives in [`AGENTS.md`](https://github.co
 | [0006](0006-endpoint-authentication.md) | Endpoint & HTTP trigger authentication (API key / Entra ID) | Finalized |
 | [0007](0007-multi-agent-delegation.md) | Multi-agent delegation (agent-as-tool) | In review |
 | [0008](0008-harness-only-agent-configuration.md) | Harness-only agent configuration | Finalized |
-| [0009](0009-agent-input-binding.md) | Python markdown agent binding | Finalized |
+| [0009](0009-agent-input-binding.md) | Python markdown agent binding | Superseded |
+| [0010](0010-pluggable-agent-extensions.md) | Pluggable Python Agent extensions | Finalized |
 
 > `_template.md` is the template, not an FRD — the leading underscore keeps it
 > sorted first and excludes it from numbering.

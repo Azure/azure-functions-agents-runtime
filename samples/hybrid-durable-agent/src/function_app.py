@@ -46,6 +46,15 @@ def order_orchestrator(
         "prepare_order_activity",
         context.get_input(),
     )
+
+    # context.call_agent equivalent to the following commented-out code:
+    #
+    # @app.activity_trigger(input_name="payload")
+    # @app.markdown_agent(arg_name="agent", agent_name="order-fulfillment")
+    # async def process_order(payload: dict, agent: Agent[Any]) -> dict:
+    #     response = await agent.run(json.dumps(payload))
+    #     return {"text": response.text}
+
     assessment = yield context.call_agent(
         "order-fulfillment",
         {

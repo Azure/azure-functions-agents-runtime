@@ -42,23 +42,23 @@ async def process_order(
     )
 
 
-@app.queue_trigger(
-    arg_name="message",
-    queue_name="orders",
-    connection="AzureWebJobsStorage",
-)
-@app.markdown_agent(arg_name="order_agent", agent_name="order-fulfillment")
-async def process_order_event(
-    message: func.QueueMessage,
-    order_agent: Agent,
-) -> None:
-    event = json.loads(message.get_body().decode("utf-8"))
-    prepared_order = prepare_order_for_agent(event)
-    await order_agent.run(
-        json.dumps(
-            {
-                "order": prepared_order,
-                "task": "triage fulfillment exceptions using the trusted calculated fields",
-            }
-        )
-    )
+# @app.queue_trigger(
+#     arg_name="message",
+#     queue_name="orders",
+#     connection="AzureWebJobsStorage",
+# )
+# @app.markdown_agent(arg_name="order_agent", agent_name="order-fulfillment")
+# async def process_order_event(
+#     message: func.QueueMessage,
+#     order_agent: Agent,
+# ) -> None:
+#     event = json.loads(message.get_body().decode("utf-8"))
+#     prepared_order = prepare_order_for_agent(event)
+#     await order_agent.run(
+#         json.dumps(
+#             {
+#                 "order": prepared_order,
+#                 "task": "triage fulfillment exceptions using the trusted calculated fields",
+#             }
+#         )
+#     )
