@@ -13,7 +13,7 @@ from playwright.sync_api import BrowserContext, Page, sync_playwright
 
 _CONTROL_URL = "http://127.0.0.1:8765"
 _TENANT_ID = "72f988bf-86f1-41af-91ab-2d7cd011db47"
-_SUBSCRIPTION_ID = "2ac40cf6-193e-4a44-a55b-d7a17bdd5aee"
+_SUBSCRIPTION_ID = os.environ["DURABLE_LOOP_DEMO_SUBSCRIPTION_ID"]
 _DTS_URL = (
     "https://dashboard.durabletask.io/subscriptions/"
     f"{_SUBSCRIPTION_ID}/schedulers/dts-durable-loop-0904/taskhubs/"

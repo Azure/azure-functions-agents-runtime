@@ -18,7 +18,7 @@ from azure.identity import AzureCliCredential
 
 _BASE_URL = "https://func-durable-loop-0904.azurewebsites.net"
 _SANDBOX_ENDPOINT = "https://management.eastus2.azuredevcompute.io"
-_SUBSCRIPTION_ID = "2ac40cf6-193e-4a44-a55b-d7a17bdd5aee"
+_SUBSCRIPTION_ID = os.environ.get("DURABLE_LOOP_DEMO_SUBSCRIPTION_ID")
 _RESOURCE_GROUP = "larohra-durable-agent-loop"
 _SANDBOX_GROUP = "sbg-durable-loop-0904"
 _RUN_ID = re.compile(r"run-[0-9a-f]{32}")
@@ -166,6 +166,8 @@ def _safe_run_status(document: dict[str, Any]) -> dict[str, object]:
 
 
 def _sandbox_inventory() -> dict[str, object]:
+    if not _SUBSCRIPTION_ID:
+        raise RuntimeError("DURABLE_LOOP_DEMO_SUBSCRIPTION_ID is required")
     client = SandboxGroupClient(
         _SANDBOX_ENDPOINT,
         AzureCliCredential(),
@@ -316,6 +318,8 @@ def main() -> None:
     args = parser.parse_args()
     if not os.environ.get("DURABLE_LOOP_FUNCTION_KEY"):
         raise RuntimeError("DURABLE_LOOP_FUNCTION_KEY is required")
+    if not _SUBSCRIPTION_ID:
+        raise RuntimeError("DURABLE_LOOP_DEMO_SUBSCRIPTION_ID is required")
     server = ThreadingHTTPServer((args.host, args.port), ControlRoomHandler)
     print(f"http://{args.host}:{args.port}", flush=True)
     server.serve_forever()

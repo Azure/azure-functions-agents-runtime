@@ -7,6 +7,7 @@ The UI renders only bounded control metadata and hashed sandbox aliases.
 
 ```powershell
 $env:DURABLE_LOOP_FUNCTION_KEY = '<function-key>'
+$env:DURABLE_LOOP_DEMO_SUBSCRIPTION_ID = '<subscription-id>'
 uv run --extra aca_sandbox python `
   samples\durable-agent-loop-spike\demo\control_room.py
 ```
