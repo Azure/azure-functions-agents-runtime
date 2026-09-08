@@ -4,9 +4,9 @@ FRDs are lightweight, committed design records for **medium+ features** in this
 repo — think "ADR + requirements." They capture the problem, the proposed
 design, and an append-only **Decisions log** that records who decided what.
 
-The full lifecycle that produces an FRD lives in [`../../AGENTS.md`](../../AGENTS.md)
+The full lifecycle that produces an FRD lives in [`AGENTS.md`](https://github.com/Azure/azure-functions-agents-runtime/blob/main/AGENTS.md)
 §1 and is automated by the `add-feature` skill
-([`.github/skills/add-feature/SKILL.md`](../../.github/skills/add-feature/SKILL.md)).
+([`.github/skills/add-feature/SKILL.md`](https://github.com/Azure/azure-functions-agents-runtime/blob/main/.github/skills/add-feature/SKILL.md)).
 
 ## When do I need one?
 
@@ -32,7 +32,12 @@ The full lifecycle that produces an FRD lives in [`../../AGENTS.md`](../../AGENT
 | [0001](0001-agents-folder-indexing.md) | agents/ folder indexing | Finalized |
 | [0002](0002-skill-includes.md) | Skill file includes | Finalized |
 | [0003](0003-runtime-observability.md) | Runtime-owned observability (OpenTelemetry) | Finalized |
-| [0004](0004-obo-token-header-contract.md) | OBO token and header pass-through contract | Finalized |
+| [0004](0004-dynamic-workflows.md) | Dynamic workflows | Finalized |
+| [0005](0005-web-request-system-tool.md) | `web_request` system tool | In review |
+| [0006](0006-endpoint-authentication.md) | Endpoint & HTTP trigger authentication (API key / Entra ID) | Finalized |
+| [0007](0007-multi-agent-delegation.md) | Multi-agent delegation (agent-as-tool) | In review |
+| [0008](0008-harness-only-agent-configuration.md) | Harness-only agent configuration | Finalized |
+| [0009](0009-obo-token-header-contract.md) | OBO token and header pass-through contract | Finalized |
 
 > `_template.md` is the template, not an FRD — the leading underscore keeps it
 > sorted first and excludes it from numbering.

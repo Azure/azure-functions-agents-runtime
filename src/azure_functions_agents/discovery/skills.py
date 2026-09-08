@@ -14,6 +14,7 @@ read these files on demand at runtime (progressive disclosure).
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import frontmatter
@@ -33,6 +34,14 @@ _SKILL_FILE_NAME = "SKILL.md"
 _DISCOVERED_SKILLS_CACHE: dict[Path, dict[str, Path]] = {}
 
 
+@dataclass
+class SkillDiscoveryResult:
+    """Result of skill discovery including successes and failures."""
+
+    skills: dict[str, Path]  # {skill_name: skill_directory}
+    failed_loads: list[tuple[str, str]]  # [(skill_file, error_message), ...]
+
+
 def clear_skills_cache() -> None:
     """Clear cached skill discovery results."""
     _DISCOVERED_SKILLS_CACHE.clear()
@@ -47,8 +56,8 @@ def _resolve_skills_dir(app_root: Path) -> Path | None:
     return None
 
 
-def discover_skills(app_root: Path) -> dict[str, Path]:
-    """Return ``{skill_name: skill_directory}`` for every valid skill found.
+def discover_skills(app_root: Path) -> SkillDiscoveryResult:
+    """Return discovered skills and any failed skill loads.
 
     Walks ``{app_root}/skills/`` for ``SKILL.md`` files. Each file is parsed
     for YAML frontmatter; the ``name`` field becomes the dictionary key and
@@ -59,12 +68,12 @@ def discover_skills(app_root: Path) -> dict[str, Path]:
     resolved_root = Path(app_root).resolve()
     cached = _DISCOVERED_SKILLS_CACHE.get(resolved_root)
     if cached is not None:
-        return dict(cached)
+        return SkillDiscoveryResult(skills=dict(cached), failed_loads=[])
 
     skills_dir = _resolve_skills_dir(resolved_root)
     if skills_dir is None:
         _DISCOVERED_SKILLS_CACHE[resolved_root] = {}
-        return {}
+        return SkillDiscoveryResult(skills={}, failed_loads=[])
 
     skill_files = sorted(
         (p for p in skills_dir.rglob(_SKILL_FILE_NAME) if p.is_file()),
@@ -73,13 +82,16 @@ def discover_skills(app_root: Path) -> dict[str, Path]:
     if not skill_files:
         logger.info("No %s files found in %s", _SKILL_FILE_NAME, skills_dir)
         _DISCOVERED_SKILLS_CACHE[resolved_root] = {}
-        return {}
+        return SkillDiscoveryResult(skills={}, failed_loads=[])
 
     discovered: dict[str, Path] = {}
+    failed_loads: list[tuple[str, str]] = []
     for skill_file in skill_files:
         try:
             post = frontmatter.load(skill_file)
         except Exception as exc:
+            error_msg = f"{type(exc).__name__}: {exc}"
+            failed_loads.append((str(skill_file), error_msg))
             logger.warning("Failed to parse skill frontmatter %s: %s", skill_file, exc)
             continue
 
@@ -102,5 +114,7 @@ def discover_skills(app_root: Path) -> dict[str, Path]:
         discovered[name] = skill_file.parent
 
     logger.info("Discovered %d skill(s) under %s", len(discovered), skills_dir)
+    if failed_loads:
+        logger.warning("Failed to load %d skill file(s)", len(failed_loads))
     _DISCOVERED_SKILLS_CACHE[resolved_root] = discovered
-    return dict(discovered)
+    return SkillDiscoveryResult(skills=dict(discovered), failed_loads=failed_loads)

@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
+from azure_functions_agents.config.merge import compose
+from azure_functions_agents.registration._naming import allocate_unique_function_name
 
 
 def test_load_global_config_valid(tmp_path: Path) -> None:
@@ -62,10 +64,12 @@ def test_load_global_config_missing_returns_empty(tmp_path: Path) -> None:
     assert load_global_config(tmp_path) == load_global_config(tmp_path)
     assert load_global_config(tmp_path).model_dump() == {
         "auth": None,
+        "agent_configuration": None,
         "system_tools": None,
         "model": None,
         "timeout": None,
         "tools": None,
+        "http_auth": None,
     }
 
 
@@ -122,7 +126,10 @@ def test_load_agent_specs_reads_files_and_substitutes(
     assert report.source_file == str((tmp_path / "report.agent.md").resolve())
 
 
-def test_load_agent_specs_unknown_field_raises(tmp_path: Path) -> None:
+def test_load_agent_specs_unknown_field_raises(
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "main.agent.md"
     source.write_text(
         textwrap.dedent(
@@ -137,8 +144,16 @@ def test_load_agent_specs_unknown_field_raises(tmp_path: Path) -> None:
         ).lstrip(),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match=r"unknown_field"):
+    with caplog.at_level(logging.ERROR), pytest.raises(ValueError, match=r"unknown_field"):
         load_agent_specs(tmp_path, strict=True)
+
+    assert any(
+        "frontmatter_validation_error:" in record.getMessage()
+        and "field=unknown_field" in record.getMessage()
+        and "reason=" in record.getMessage()
+        and "schema=aka.ms/agents-front-matter-schema" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_load_agent_specs_resolves_frontmatter_strings(
@@ -165,6 +180,66 @@ def test_load_agent_specs_resolves_frontmatter_strings(
     [spec] = load_agent_specs(tmp_path)
     assert spec.model == "gpt-4.1-mini"
     assert spec.response_example == '{"status":"ok"}'
+
+
+def test_load_global_and_agent_configuration_with_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("CONTEXT_LIMIT", "8192")
+    monkeypatch.setenv("OUTPUT_LIMIT", "4096")
+    (tmp_path / "agents.config.yaml").write_text(
+        "agent_configuration:\n"
+        "  max_output_tokens: $OUTPUT_LIMIT\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.agent.md").write_text(
+        "---\n"
+        "name: Main\n"
+        "description: Main agent\n"
+        "agent_configuration:\n"
+        "  agent_framework:\n"
+        "    compaction:\n"
+        "      max_context_window_tokens: $CONTEXT_LIMIT\n"
+        "---\n"
+        "Hello\n",
+        encoding="utf-8",
+    )
+
+    config = load_global_config(tmp_path)
+    [spec] = load_agent_specs(tmp_path, strict=True)
+    assert config.agent_configuration is not None
+    assert config.agent_configuration.max_output_tokens == 4096
+    assert spec.agent_configuration is not None
+    assert spec.agent_configuration.max_output_tokens is None
+    assert spec.agent_configuration.agent_framework is not None
+    assert spec.agent_configuration.agent_framework.compaction is not None
+    assert spec.agent_configuration.agent_framework.compaction.max_context_window_tokens == 8192
+    resolved = compose(spec, config)
+    assert resolved.agent_configuration.max_output_tokens == 4096
+    assert resolved.agent_configuration.agent_framework is not None
+    assert resolved.agent_configuration.agent_framework.compaction is not None
+    assert resolved.agent_configuration.agent_framework.compaction.max_context_window_tokens == 8192
+
+
+def test_compose_rejects_invalid_effective_agent_configuration(tmp_path: Path) -> None:
+    (tmp_path / "main.agent.md").write_text(
+        "---\n"
+        "name: Main\n"
+        "description: Main agent\n"
+        "agent_configuration:\n"
+        "  max_output_tokens: 4096\n"
+        "  agent_framework:\n"
+        "    compaction:\n"
+        "      max_context_window_tokens: 4096\n"
+        "---\n"
+        "Hello\n",
+        encoding="utf-8",
+    )
+
+    [spec] = load_agent_specs(tmp_path, strict=True)
+    with pytest.raises(ValueError, match="must be less than"):
+        compose(spec, load_global_config(tmp_path))
 
 
 def test_load_agent_specs_substitute_variables_false_skips_frontmatter_and_body(
@@ -256,7 +331,7 @@ def test_load_global_config_non_mapping_root_raises(tmp_path: Path) -> None:
     message = str(exc_info.value)
     assert str(source) in message
     assert "mapping" in message
-    assert "docs/front-matter-spec.md" in message
+    assert "aka.ms/agents-front-matter-schema" in message
 
 
 def test_load_global_config_invalid_field_type_raises(tmp_path: Path) -> None:
@@ -268,7 +343,7 @@ def test_load_global_config_invalid_field_type_raises(tmp_path: Path) -> None:
     message = str(exc_info.value)
     assert str(source) in message
     assert "timeout" in message
-    assert "docs/front-matter-spec.md" in message
+    assert "aka.ms/agents-front-matter-schema" in message
 
 
 def test_load_global_config_rejects_top_level_mcp_field(tmp_path: Path) -> None:
@@ -279,7 +354,7 @@ def test_load_global_config_rejects_top_level_mcp_field(tmp_path: Path) -> None:
         load_global_config(tmp_path)
     message = str(exc_info.value)
     assert "field `mcp`" in message
-    assert "docs/front-matter-spec.md" in message
+    assert "aka.ms/agents-front-matter-schema" in message
 
 
 def test_load_global_config_resolves_numeric_and_bool_values(
@@ -366,7 +441,9 @@ def test_load_agent_specs_skips_malformed_file_and_logs_warning(
     assert len(specs) == 1
     assert specs[0].name == "Main"
     assert any(str(bad_source) in record.getMessage() for record in caplog.records)
-    assert any("Skipping malformed agent file" in record.getMessage() for record in caplog.records)
+    assert any(
+        "Skipping agent during indexing" in record.getMessage() for record in caplog.records
+    )
 
 
 def test_load_agent_specs_strict_reraises_first_failure(tmp_path: Path) -> None:
@@ -612,3 +689,134 @@ def test_load_agent_specs_sorting_across_locations(tmp_path: Path) -> None:
     names = [spec.name for spec in specs]
     # agents/alpha.agent.md < beta.agent.md < zebra.agent.md (lexicographic by path)
     assert names == ["Alpha", "Beta", "Zebra"]
+
+
+# flexible naming discovery tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _write_valid_agent_markdown(path: Path, *, name: str, description: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        textwrap.dedent(
+            f"""
+            ---
+            name: {name}
+            description: {description}
+            ---
+            {name} instructions.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    ("filename", "location", "expected_source_name", "expected_is_main", "expected_slug"),
+    [
+        pytest.param("agent.md", "top-level", "agent.md", True, "main", id="bare-agent"),
+        pytest.param("Agent.md", "top-level", "Agent.md", True, "main", id="bare-agent-mixed-case"),
+        pytest.param("AGENT.MD", "top-level", "AGENT.MD", True, "main", id="bare-agent-uppercase"),
+        pytest.param("CLAUDE.md", "top-level", "CLAUDE.md", True, "main", id="bare-claude-uppercase"),
+        pytest.param("Claude.md", "top-level", "Claude.md", True, "main", id="bare-claude-mixed-case"),
+        pytest.param("claude.md", "top-level", "claude.md", True, "main", id="bare-claude-lowercase"),
+        pytest.param("agent.md", "agents", "agent.md", True, "main", id="bare-agent-in-agents-folder"),
+        pytest.param("CLAUDE.md", "agents", "CLAUDE.md", True, "main", id="bare-claude-in-agents-folder"),
+        pytest.param("report.claude.md", "top-level", "report.claude.md", False, "report", id="prefixed-claude"),
+        pytest.param("Report.Claude.md", "top-level", "Report.Claude.md", False, "Report", id="prefixed-claude-mixed-case"),
+        pytest.param("summarizer.CLAUDE.md", "agents", "summarizer.CLAUDE.md", False, "summarizer", id="prefixed-claude-uppercase-in-agents-folder"),
+        pytest.param("info.Claude.MD", "agents", "info.Claude.MD", False, "info", id="prefixed-claude-mixed-case-in-agents-folder"),
+        pytest.param("report.AGENT.md", "top-level", "report.AGENT.md", False, "report", id="agent-suffix-uppercase"),
+        pytest.param("data.Agent.MD", "top-level", "data.Agent.MD", False, "data", id="agent-suffix-mixed-case"),
+    ],
+)
+def test_load_agent_specs_flexible_naming_normalizes_and_marks_main(
+    tmp_path: Path,
+    filename: str,
+    location: str,
+    expected_source_name: str,
+    expected_is_main: bool,
+    expected_slug: str,
+) -> None:
+    target_dir = tmp_path if location == "top-level" else tmp_path / "agents"
+    name = f"{expected_slug.title()} Agent"
+    _write_valid_agent_markdown(
+        target_dir / filename,
+        name=name,
+        description=f"{filename} in {location}",
+    )
+
+    specs = load_agent_specs(tmp_path)
+
+    assert len(specs) == 1
+    assert specs[0].name == name
+    assert Path(specs[0].source_file).name == expected_source_name
+    assert specs[0].is_main is expected_is_main
+    assert allocate_unique_function_name(specs[0].source_file, specs[0].name, set()) == expected_slug
+
+
+def test_load_agent_specs_flexible_naming_variants_coexist(tmp_path: Path) -> None:
+    """Standard, bare alias, prefixed claude, and case-variant files coexist."""
+    _write_valid_agent_markdown(
+        tmp_path / "helper.agent.md",
+        name="Helper Agent",
+        description="Standard .agent.md file",
+    )
+    _write_valid_agent_markdown(
+        tmp_path / "Agent.md",
+        name="Default Agent",
+        description="Bare agent alias",
+    )
+    _write_valid_agent_markdown(
+        tmp_path / "Report.Claude.md",
+        name="Report Agent",
+        description="Prefixed claude variant",
+    )
+    _write_valid_agent_markdown(
+        tmp_path / "data.Agent.MD",
+        name="Data Agent",
+        description="Case-variant agent suffix",
+    )
+
+    specs = load_agent_specs(tmp_path)
+
+    assert len(specs) == 4
+    specs_by_name = {spec.name: spec for spec in specs}
+    assert set(specs_by_name) == {"Default Agent", "Helper Agent", "Report Agent", "Data Agent"}
+    assert specs_by_name["Default Agent"].is_main is True
+    assert specs_by_name["Helper Agent"].is_main is False
+    assert specs_by_name["Report Agent"].is_main is False
+    assert specs_by_name["Data Agent"].is_main is False
+    assert Path(specs_by_name["Default Agent"].source_file).name == "Agent.md"
+    assert Path(specs_by_name["Report Agent"].source_file).name == "Report.Claude.md"
+    assert Path(specs_by_name["Data Agent"].source_file).name == "data.Agent.MD"
+
+
+def test_load_agent_specs_bare_agent_md_is_alias_for_main(tmp_path: Path) -> None:
+    """agent.md and main.agent.md are aliases: both normalise to main.agent.md (slug 'main').
+
+    load_agent_specs loads both files successfully. They produce the same slug
+    so the app-level _fail_on_duplicate_slugs() check would reject the combination
+    at startup — but that is tested at the app layer, not here.
+    Note: agent.md and CLAUDE.md are both aliases for main.agent.md and must
+    not coexist in the same app for the same reason.
+    """
+    _write_valid_agent_markdown(
+        tmp_path / "agent.md",
+        name="Default Agent",
+        description="Bare agent alias",
+    )
+    _write_valid_agent_markdown(
+        tmp_path / "main.agent.md",
+        name="Main Agent",
+        description="Explicit main agent",
+    )
+
+    specs = load_agent_specs(tmp_path)
+
+    assert len(specs) == 2
+    assert {spec.name for spec in specs} == {"Default Agent", "Main Agent"}
+    assert {spec.name for spec in specs if spec.is_main} == {"Default Agent", "Main Agent"}
+    assert Path(next(spec for spec in specs if spec.name == "Default Agent").source_file).name == "agent.md"
+    assert Path(next(spec for spec in specs if spec.name == "Main Agent").source_file).name == "main.agent.md"
+

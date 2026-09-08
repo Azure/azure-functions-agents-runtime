@@ -2,9 +2,32 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
+
+type EndpointAuthMode = Literal["function", "admin", "anonymous", "entra"]
+
+
+def _reject_boolean_token_limit(value: object) -> object:
+    if isinstance(value, bool):
+        raise ValueError("token limits must be integers")
+    return value
+
+
+type PositiveTokenLimit = Annotated[
+    int,
+    BeforeValidator(_reject_boolean_token_limit),
+    Field(gt=0),
+]
 
 
 class McpFilter(BaseModel):
@@ -31,6 +54,41 @@ class ToolsFilter(BaseModel):
     exclude: list[str] = Field(default_factory=list)
 
 
+class EntraAuthConfig(BaseModel):
+    """Entra ID (Azure AD) validation settings for built-in endpoint auth.
+
+    Every field is optional. To keep secrets out of source, reference an
+    environment variable inline with the runtime's ``$VAR`` / ``%VAR%``
+    substitution (e.g. ``tenant_id: $MY_TENANT_ID``); the placeholder is
+    resolved at load time so frontmatter stays the single source of truth. A
+    configured allow-list must contain the caller's matching claim; an
+    empty/unset allow-list skips that check.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str | None = None
+    allowed_audiences: list[str] = Field(default_factory=list)
+    allowed_client_ids: list[str] = Field(default_factory=list)
+
+
+class EndpointAuthConfig(BaseModel):
+    """Inbound authentication policy for an agent's built-in endpoints."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: EndpointAuthMode = "function"
+    entra: EntraAuthConfig | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_shorthand(cls, value: Any) -> Any:
+        # Accept a bare string shorthand, e.g. ``http_auth: entra`` -> ``{mode: entra}``.
+        if isinstance(value, str):
+            return {"mode": value}
+        return value
+
+
 class BuiltinEndpointsConfig(BaseModel):
     """Concrete built-in endpoint toggles for debug chat UI, chat API, and MCP exposure."""
 
@@ -39,6 +97,22 @@ class BuiltinEndpointsConfig(BaseModel):
     debug_chat_ui: bool = False
     chat_api: bool = False
     mcp: bool = False
+    http_auth: EndpointAuthConfig = Field(
+        default_factory=EndpointAuthConfig,
+        description=(
+            "Inbound authentication policy for the HTTP chat API endpoints "
+            "(chat_api / debug_chat_ui). Applies only to HTTP endpoints and does "
+            "not affect the MCP endpoint. Modes: function (API key, default), "
+            "admin (master key), anonymous, entra (Entra ID)."
+        ),
+    )
+
+    @field_validator("http_auth", mode="before")
+    @classmethod
+    def _default_http_auth(cls, value: Any) -> Any:
+        if value is None:
+            return EndpointAuthConfig()
+        return value
 
     @model_validator(mode="after")
     def debug_chat_ui_requires_chat_api(self) -> BuiltinEndpointsConfig:
@@ -64,6 +138,63 @@ class TriggerSpec(BaseModel):
         return trimmed
 
 
+class _SubagentRefBase(BaseModel):
+    """Shared fields and normalization for Sub Agent capability grants."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    agent: str
+    when: str | None = None
+
+    @field_validator("agent")
+    @classmethod
+    def validate_agent(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("agent must be non-empty")
+        return trimmed
+
+    @field_validator("when")
+    @classmethod
+    def validate_when(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class SubagentRef(_SubagentRefBase):
+    """A coordinator's reference to one specialist agent it may delegate to.
+
+    Object form only (no string shorthand) — see FRD 0007 §5 Decision #16.
+    ``agent`` is the specialist's identity slug (its file stem, sanitized;
+    see :mod:`azure_functions_agents._slug`). ``when`` is an optional
+    routing hint surfaced to the coordinator model as the ``delegate_<slug>``
+    tool's description; if omitted, the specialist's own ``description`` is
+    used instead (resolved once the specialist is known, not here).
+    """
+
+class WorkflowSubagentRef(_SubagentRefBase):
+    """A workflow-enabled agent's authorization grant for one leaf specialist."""
+
+
+class WorkflowConfig(BaseModel):
+    """Dynamic Workflow enablement and agent-specific capability grants."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: StrictBool = False
+    exclude: tuple[str, ...] = ()
+    subagents: tuple[WorkflowSubagentRef, ...] = ()
+
+    @field_validator("exclude")
+    @classmethod
+    def validate_exclude(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(item.strip() for item in value)
+        if any(not item for item in normalized):
+            raise ValueError("exclude entries must be non-empty")
+        return normalized
+
+
 class DynamicSessionsCodeInterpreterConfig(BaseModel):
     """Configuration for the ACA Dynamic Sessions-backed code interpreter."""
 
@@ -73,12 +204,30 @@ class DynamicSessionsCodeInterpreterConfig(BaseModel):
     client_id: str | None = None
 
 
+class WebRequestConfig(BaseModel):
+    """Configuration for the built-in, default-on ``web_request`` system tool.
+
+    v1 is intentionally minimal: an exact-host allowlist plus operator caps.
+    See ``docs/frds/0005-web-request-system-tool.md`` for the full (future)
+    surface — per-host auth, wildcard hosts, and redirect following are v2.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allowed_hosts: list[str] | None = None
+    require_https: bool = True
+    timeout_seconds: float | None = None
+    max_response_bytes: int | None = None
+    max_request_bytes: int | None = None
+
+
 class SystemToolsConfig(BaseModel):
     """Global system tool configuration shared across agents."""
 
     model_config = ConfigDict(extra="forbid")
 
     dynamic_sessions_code_interpreter: DynamicSessionsCodeInterpreterConfig | None = None
+    web_request: WebRequestConfig | bool | None = None
 
 
 class SystemToolsAgentOverride(BaseModel):
@@ -87,6 +236,32 @@ class SystemToolsAgentOverride(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     dynamic_sessions_code_interpreter: bool | None = None
+    web_request: bool | None = None
+
+
+class AgentFrameworkCompactionConfig(BaseModel):
+    """Microsoft Agent Framework conversation-compaction settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_context_window_tokens: PositiveTokenLimit | None = None
+
+
+class AgentFrameworkConfiguration(BaseModel):
+    """Microsoft Agent Framework-specific agent configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    compaction: AgentFrameworkCompactionConfig | None = None
+
+
+class AgentConfiguration(BaseModel):
+    """Portable and framework-specific agent configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_output_tokens: PositiveTokenLimit | None = None
+    agent_framework: AgentFrameworkConfiguration | None = None
 
 
 class OboConfig(BaseModel):
@@ -132,10 +307,20 @@ class GlobalConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     auth: AuthConfig | None = None
+    agent_configuration: AgentConfiguration | None = None
     system_tools: SystemToolsConfig | None = None
     model: str | None = None
     timeout: float | None = None
     tools: ToolsFilter | None = None
+    http_auth: EndpointAuthConfig | None = Field(
+        default=None,
+        description=(
+            "App-wide default inbound HTTP authentication policy inherited by every "
+            "agent's built-in HTTP endpoints. A per-agent builtin_endpoints.http_auth "
+            "overrides it. Applies only to HTTP endpoints and does not affect MCP. "
+            "Modes: function (API key, default), admin (master key), anonymous, entra (Entra ID)."
+        ),
+    )
 
 
 class AgentSpec(BaseModel):
@@ -145,6 +330,7 @@ class AgentSpec(BaseModel):
 
     name: str
     description: str
+    agent_configuration: AgentConfiguration | None = None
     trigger: TriggerSpec | None = None
     builtin_endpoints: bool | BuiltinEndpointsConfig | None = None
     model: str | None = None
@@ -155,6 +341,8 @@ class AgentSpec(BaseModel):
     mcp: bool | McpFilter | None = None
     skills: bool | SkillsFilter | None = None
     tools: bool | ToolsFilter | None = None
+    workflows: WorkflowConfig | None = None
+    subagents: list[SubagentRef] | None = None
     input_schema: dict[str, Any] | None = None
     response_schema: dict[str, Any] | None = None
     response_example: str | None = None
@@ -170,6 +358,11 @@ class ResolvedAgent(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     name: str
+    # Identity slug (derived from source_file's stem; see _slug.py). Defaulted
+    # rather than required because many tests construct ResolvedAgent directly,
+    # bypassing config.merge.compose(), which is the only code path that
+    # actually computes it.
+    slug: str = ""
     description: str
     trigger: TriggerSpec | None
     instructions: str
@@ -183,18 +376,171 @@ class ResolvedAgent(BaseModel):
     skills_exclude_names: list[str] = Field(default_factory=list)
     tool_exclude_names: list[str] = Field(default_factory=list)
     tool_filter: ToolsFilter
+    workflows: WorkflowConfig | None = None
+    subagents: list[SubagentRef] = Field(default_factory=list)
     tools_disabled: bool = False
     skills_disabled: bool = False
     mcp_disabled: bool = False
     sandbox_config: DynamicSessionsCodeInterpreterConfig | None
+    web_request_config: WebRequestConfig | None = None
     input_schema: dict[str, Any] | None
     response_schema: dict[str, Any] | None
     response_example: str | None
     substitute_variables: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
     source_file: str | None = None
+    agent_configuration: AgentConfiguration = Field(default_factory=AgentConfiguration)
 
 
 GlobalConfig.model_rebuild()
 AgentSpec.model_rebuild()
 ResolvedAgent.model_rebuild()
+
+
+# Trigger type documentation metadata
+# Used by eng/scripts/generate_config_reference.py for generating trigger reference docs.
+# Each trigger type maps to its field specifications and optional notes.
+# Format: "trigger_type": {"fields": {field_name: (type, required, default, description)}, "note": "..."}
+TRIGGER_TYPES: dict[str, dict[str, Any]] = {
+    "http_trigger": {
+        "fields": {
+            "route": ("string", True, "N/A", "URL path for the HTTP endpoint"),
+            "methods": ("string[]", False, '`["POST"]`', "Array of HTTP methods (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)"),
+            "auth_level": ("string", False, '`"function"`', "One of: `anonymous`, `function`, `admin`"),
+        }
+    },
+    "timer_trigger": {
+        "fields": {
+            "schedule": ("string", True, "N/A", "NCRONTAB expression (6 fields or 5 fields with seconds prepended)"),
+        }
+    },
+    "queue_trigger": {
+        "fields": {
+            "queue_name": ("string", True, "N/A", "Azure Queue Storage queue name"),
+            "connection": ("string", True, "N/A", "App setting or setting collection for connection"),
+        }
+    },
+    "blob_trigger": {
+        "fields": {
+            "path": ("string", True, "N/A", 'Blob path pattern (e.g., `"uploads/{name}.txt"`)'),
+            "connection": ("string", False, '`"AzureWebJobsStorage"`', "App setting name for connection string"),
+        }
+    },
+    "event_grid_trigger": {
+        "fields": {},
+        "note": "No configuration properties. Receives Event Grid events.",
+    },
+    "service_bus_queue_trigger": {
+        "fields": {
+            "queue_name": ("string", True, "N/A", "Service Bus queue name"),
+            "connection": ("string", True, "N/A", "App setting or setting collection for connection"),
+        }
+    },
+    "service_bus_topic_trigger": {
+        "fields": {
+            "topic_name": ("string", True, "N/A", "Service Bus topic name"),
+            "subscription_name": ("string", True, "N/A", "Service Bus subscription name"),
+            "connection": ("string", True, "N/A", "App setting or setting collection for connection"),
+        }
+    },
+    "connector_trigger": {
+        "fields": {},
+        "note": "No configuration properties. Receives Connector events.",
+    },
+}
+
+
+# Field description metadata for documentation generation
+# Used by eng/scripts/generate_config_reference.py to enhance generated docs.
+# These descriptions complement or override Pydantic field metadata and may include
+# markdown formatting and internal document links.
+
+GLOBAL_CONFIG_DESCRIPTIONS: dict[str, str] = {
+    "agent_configuration": "Portable and SDK-specific defaults inherited by every agent. [Details](./front-matter-spec.md#agent_configuration)",
+    "system_tools": "System-level tools configuration. [Details](#global-system_tools)",
+    "model": "Default LLM model identifier for all agents",
+    "timeout": "Default execution timeout in seconds",
+    "tools": "Global tool filtering configuration. [Details](#global-tools)",
+}
+
+GLOBAL_CONFIG_DEFAULTS: dict[str, str] = {
+    "agent_configuration": "`null`",
+    "system_tools": "`{}`",
+    "model": "Resolved from env/provider",
+    "timeout": "`900`",
+    "tools": "`{}`",
+}
+
+SYSTEM_TOOLS_CONFIG_DESCRIPTIONS: dict[str, str] = {
+    "dynamic_sessions_code_interpreter": "ACA Dynamic Sessions code interpreter configuration. [Details](#global-system_toolsdynamic_sessions_code_interpreter)",
+    "web_request": "Outbound HTTP request tool configuration. Enabled by default; set to `false` to disable app-wide. [Details](#global-system_toolsweb_request)",
+}
+
+DYNAMIC_SESSIONS_DESCRIPTIONS: dict[str, str] = {
+    "endpoint": "ACA session pool endpoint URL. Supports env var substitution.",
+    "client_id": "Optional managed identity client ID for multi-identity Function Apps",
+}
+
+TOOLS_FILTER_DESCRIPTIONS: dict[str, str] = {
+    "exclude": "Tool names to exclude globally from all agents",
+}
+
+AGENT_SPEC_REQUIRED_DESCRIPTIONS: dict[str, str] = {
+    "name": "Display name for the agent. Does not control function name or route.",
+    "description": "Brief description of the agent's purpose",
+    "trigger": "Required unless at least one `builtin_endpoints` value is enabled. [Details](#agent-trigger)",
+}
+
+AGENT_SPEC_OPTIONAL_DESCRIPTIONS: dict[str, str] = {
+    "agent_configuration": "Portable and SDK-specific execution settings. Recursively inherits global values. [Details](./front-matter-spec.md#agent_configuration)",
+    "builtin_endpoints": "Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints)",
+    "model": "Override LLM model for this agent",
+    "timeout": "Override execution timeout (seconds) for this agent",
+    "logger": "Enable/disable response logging for triggered agents",
+    "substitute_variables": "Enable/disable environment variable substitution",
+    "system_tools": "Opt out of system tools. [Details](#agent-system_tools)",
+    "mcp": "MCP server filtering. [Details](#agent-mcp)",
+    "skills": "Skill filtering. [Details](#agent-skills)",
+    "tools": "Custom tool filtering. [Details](#agent-tools)",
+    "workflows": "Dynamic Workflow enablement and filtering. [Details](./front-matter-spec.md#workflows)",
+    "input_schema": "JSON Schema for HTTP request validation",
+    "response_schema": "JSON Schema for response validation",
+    "response_example": "Example response structure (multiline string)",
+    "metadata": "Additional metadata for organization. Free-form.",
+}
+
+TRIGGER_SPEC_DESCRIPTIONS: dict[str, str] = {
+    "type": "Trigger type identifier. See [Supported Trigger Types](#supported-trigger-types)",
+    "args": "Type-specific configuration. See [Supported Trigger Types](#supported-trigger-types)",
+}
+
+BUILTIN_ENDPOINTS_DESCRIPTIONS: dict[str, str] = {
+    "debug_chat_ui": "Enable browser-based chat UI at `/agents/{slug}/` plus backing chat APIs",
+    "chat_api": "Enable REST API endpoints (`/agents/{slug}/chat`, `/agents/{slug}/chatstream`)",
+    "mcp": "Expose agent as MCP tool on shared runtime MCP transport",
+}
+
+SYSTEM_TOOLS_AGENT_DESCRIPTIONS: dict[str, str] = {
+    "dynamic_sessions_code_interpreter": "Set to `false` to opt out of code execution capabilities",
+    "web_request": "Set to `false` to opt out of the default-on `web_request` tool for this agent",
+}
+
+MCP_FILTER_DESCRIPTIONS: dict[str, str] = {
+    "exclude": "MCP server names to exclude. Must match servers in `mcp.json`.",
+}
+
+SKILLS_FILTER_DESCRIPTIONS: dict[str, str] = {
+    "exclude": "Skill names to exclude. Matched against `SKILL.md` `name` field.",
+}
+
+AGENT_TOOLS_FILTER_DESCRIPTIONS: dict[str, str] = {
+    "exclude": "Tool names to exclude (in addition to global excludes)",
+}
+
+WEB_REQUEST_DESCRIPTIONS: dict[str, str] = {
+    "allowed_hosts": "Exact-match allowlist of hostnames the tool may call. Omit to allow any public host (still subject to the SSRF floor).",
+    "require_https": "Require `https://` URLs. Set to `false` to also allow `http://`.",
+    "timeout_seconds": "Per-request timeout in seconds, clamped to a runtime-defined ceiling (120 s).",
+    "max_response_bytes": "Maximum response body size read before truncating, clamped to a runtime-defined ceiling (10 MB).",
+    "max_request_bytes": "Maximum request body size accepted, clamped to a runtime-defined ceiling (10 MB).",
+}

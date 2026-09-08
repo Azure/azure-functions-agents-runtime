@@ -30,6 +30,7 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "__version__",
         "create_function_app",
         "create_sandbox_tools",
+        "create_web_request_tools",
         "get_client_manager",
         "resolve_config_dir",
         "run_agent",
@@ -38,6 +39,7 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "set_client_manager",
         "shutdown_client_manager",
         "tool",
+        "workflow_tool",
     ]
     assert not hasattr(azure_functions_agents, "run_copilot_agent")
     assert not hasattr(azure_functions_agents, "run_copilot_agent_stream")

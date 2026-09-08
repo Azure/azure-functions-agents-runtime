@@ -1,0 +1,4 @@
+# Repository-level uv defaults for environments where direct TLS to PyPI is blocked.
+# Contributors can override these via CLI flags or UV_* environment variables.
+index-url = "https://packagefeedproxy.microsoft.io/pypi/simple/"
+native-tls = true

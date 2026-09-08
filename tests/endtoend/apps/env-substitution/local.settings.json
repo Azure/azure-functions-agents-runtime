@@ -1,0 +1,14 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "DEFAULT_MODEL": "gpt-4o-mini",
+    "AGENT_MODEL": "gpt-4o-mini",
+    "DEPLOY_REGION": "westus2",
+    "ALERT_CHANNEL": "oncall",
+    "CONTACT_EMAIL": "team@example.test",
+    "TEAM": "platform",
+    "LEARN_MCP_URL": "https://learn.microsoft.com/api/mcp"
+  }
+}

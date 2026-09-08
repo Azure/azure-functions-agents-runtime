@@ -23,6 +23,23 @@ Architecture
   existing SSE vocabulary (``session`` / ``delta`` / ``message`` /
   ``intermediate`` / ``tool_start`` / ``tool_end`` / ``done`` / ``error``)
   so the chat UI doesn't change.
+* Chat-time sub-agent delegation (FRD 0007): when the resolved agent
+  declares ``subagents``, :func:`build_subagent_tools` builds one
+  hand-written ``delegate_<slug>`` :class:`~agent_framework.FunctionTool`
+  per reference (the same ``@tool(schema=...)`` pattern as the
+  ``web_request``/``execute_python`` system tools — see
+  :mod:`.system_tools.web_request` — not MAF's ``BaseAgent.as_tool()``) and
+  appends it to that agent's own tool list, so the coordinator can call a
+  specialist from inside its normal ``agent.run()`` tool-calling loop. A
+  delegate only ever needs the specialist's final answer as a single
+  string, so its handler builds a FRESH specialist :class:`agent_framework.
+  Agent`, in the isolated *delegated* execution role — see
+  :func:`_build_delegated_agent` — on every call and awaits its
+  non-streaming ``agent.run(task)`` directly. Building fresh per call (not
+  once per request) means concurrent calls, including repeated calls to the
+  *same* specialist, never share a live agent instance, so no per-specialist
+  lock is needed. Specialists never expand their own ``subagents`` (single-
+  level delegation).
 
 Concurrency
 -----------
@@ -40,27 +57,68 @@ ordering across instances is still the caller's responsibility.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
-import re
-from collections.abc import AsyncIterator
+import sys
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
+
+from pydantic import BaseModel, Field
 
 from ._blob_history import build_blob_provider_from_environment
+from ._function_tool import FunctionTool, tool
 from ._logger import logger
-from .client_manager import get_client_manager
+from ._observability import (
+    FaultDomain,
+    LifecycleStage,
+    RuntimeSpan,
+    current_span,
+    record_delegate_call,
+    start_span,
+)
+from ._session_id import SESSION_ID_PATTERN
+from ._slug import delegate_tool_name
+from .client_manager import InferenceTarget, get_client_manager
+from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
 from .config.paths import get_app_root, resolve_config_dir
+from .config.schema import AgentConfiguration
 from .discovery.mcp import (
+    MCPTool,
     discover_mcp_servers,
     reset_current_user_context,
     set_current_user_context,
 )
 from .discovery.tools import discover_user_tools
 
+# `_handlers` is always fully imported as a side effect of the
+# `.registration.*` imports above, so importing this shared tool-error
+# heuristic here (rather than duplicating it) creates no new import cycle:
+# `_handlers.py` has no module-level dependency back on `runner.py` (its own
+# need for `run_agent`/`run_agent_stream` uses a lazy, call-time import).
+from .registration._handlers import _looks_like_tool_error
+from .registration.capabilities import AgentCapabilities
+from .registration.catalog import AgentCatalog, CatalogEntry
+
 if TYPE_CHECKING:
+    # Type-only: the runtime values are always obtained via the lazy,
+    # call-time `from agent_framework import ...` imports below (this
+    # module's established pattern for the heavier agent-construction
+    # symbols), so this adds no import-time cost.
+    from agent_framework import (
+        Agent,
+        AgentResponse,
+        HistoryProvider,
+        SupportsChatGetResponse,
+    )
+
     from ._obo import UserContext
+    from .workflows.schema import WorkflowPlanPolicy
+
+type AgentFunctionTool = FunctionTool | Callable[..., Any]
+type AgentTool = AgentFunctionTool | MCPTool
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -84,8 +142,104 @@ DEFAULT_TIMEOUT = _runtime_timeout_default()
 DEFAULT_MODEL: str | None = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL") or None
 
 # Validated session-id pattern. The id is used as a filename component, so
-# refuse anything that could escape the session directory.
-_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+# refuse anything that could escape the session directory. Shared with the
+# endpoint layer via ``_session_id`` so the two never drift.
+_SESSION_ID_PATTERN = SESSION_ID_PATTERN
+
+type _AgentExecutionRole = Literal["primary", "delegate", "workflow_subagent"]
+
+_USAGE_FIELD_NAMES: dict[str, str] = {
+    "input_token_count": "input_tokens",
+    "output_token_count": "output_tokens",
+}
+_FINAL_USAGE_TIMEOUT_SECONDS = 1.0
+
+
+@contextlib.contextmanager
+def _user_context_scope(user_context: UserContext | None) -> Iterator[None]:
+    """Expose request identity to MCP tools for exactly one agent run."""
+    token = set_current_user_context(user_context)
+    try:
+        yield
+    finally:
+        reset_current_user_context(token)
+
+
+def _normalize_usage_details(usage_details: Any) -> dict[str, int]:
+    """Return the valid canonical token counts reported by MAF."""
+    if not isinstance(usage_details, Mapping):
+        return {}
+
+    normalized: dict[str, int] = {}
+    for source_name, record_name in _USAGE_FIELD_NAMES.items():
+        value = usage_details.get(source_name)
+        if (
+            record_name not in normalized
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+        ):
+            normalized[record_name] = value
+    return normalized
+
+
+def _response_usage_details(response: Any) -> Any:
+    try:
+        return getattr(response, "usage_details", None)
+    except Exception:
+        return None
+
+
+def _model_publisher(provider: str | None) -> str | None:
+    return "openai" if provider in {"openai", "azure_openai"} else None
+
+
+async def _stream_usage_details(stream: Any, *, remaining_timeout: float) -> Any:
+    try:
+        get_final_response = getattr(stream, "get_final_response", None)
+        if not callable(get_final_response) or remaining_timeout <= 0:
+            return None
+        response = await asyncio.wait_for(
+            get_final_response(),
+            timeout=min(remaining_timeout, _FINAL_USAGE_TIMEOUT_SECONDS),
+        )
+        return _response_usage_details(response)
+    except Exception:
+        return None
+
+
+@dataclass
+class _AgentUsageRecorder:
+    """Attempt at most one internal token-usage record for a MAF invocation."""
+
+    agent_name: str
+    execution_role: _AgentExecutionRole
+    inference_target: InferenceTarget = field(default_factory=InferenceTarget)
+    _emission_attempted: bool = field(default=False, init=False)
+
+    def emit(self, usage_details: Any = None) -> None:
+        if self._emission_attempted:
+            return
+        self._emission_attempted = True
+
+        try:
+            usage = _normalize_usage_details(usage_details)
+            payload: dict[str, Any] = {
+                "agent_name": self.agent_name,
+                "event_name": "agent_token_usage",
+                "execution_role": self.execution_role,
+                "input_tokens": usage.get("input_tokens"),
+                "model": self.inference_target.model,
+                "model_publisher": _model_publisher(self.inference_target.provider),
+                "output_tokens": usage.get("output_tokens"),
+                "provider": self.inference_target.provider,
+            }
+            logger.info(
+                "Agent token usage: %s",
+                json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+            )
+        except Exception:
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +259,28 @@ async def _get_session_lock(session_id: str) -> asyncio.Lock:
         return lock
 
 
+@contextlib.asynccontextmanager
+async def _session_lock_bounded_by(session_id: str, deadline: float) -> AsyncIterator[None]:
+    """Acquire the per-session lock with the wait bounded by ``deadline``, and always release.
+
+    A concurrent turn on the same session id can hold the lock for a while,
+    so the acquire *wait* must be bounded by the caller's own absolute
+    deadline too — otherwise total wall-clock time could exceed the
+    caller's timeout by however long that wait took. `TimeoutError` from
+    the bounded acquire propagates to the caller: the lock was never
+    acquired, so `release()` is neither reachable nor needed on that path.
+    Once acquired, `release()` always runs in `finally`, including on
+    cancellation.
+    """
+    lock = await _get_session_lock(session_id)
+    loop = asyncio.get_running_loop()
+    await asyncio.wait_for(lock.acquire(), timeout=max(0.0, deadline - loop.time()))
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
@@ -120,6 +296,12 @@ class AgentResult:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     reasoning: str | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
+    # Delegate (``delegate_<slug>``) calls that failed or timed out this run.
+    # Tracked separately from ``tool_calls`` because a specialist failure is
+    # sanitized to free text (FRD 0007 Decision #12) and wouldn't be
+    # recognized by ``_looks_like_tool_error``'s JSON heuristic — see
+    # ``registration._handlers._total_tool_error_count``.
+    delegate_error_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -180,55 +362,476 @@ def _build_chat_options_from_environment() -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
-# Agent + session construction
+# Chat-time sub-agent delegation (FRD 0007)
 # ---------------------------------------------------------------------------
+#
+# A coordinator agent that declares ``subagents:`` gets one hand-written
+# ``delegate_<slug>`` function tool per reference (:func:`_build_delegate_tool`
+# — the same ``@tool(schema=...)`` pattern as the ``web_request``/
+# ``execute_python`` system tools, not MAF's ``BaseAgent.as_tool()``) and run
+# inside the coordinator's normal ``agent.run()`` tool-calling loop — no
+# ``HandoffBuilder``, no HITL (out of scope for v1; see FRD 0007 §2).
+#
+# Delegation is single-level (Decision #6): a specialist built here is always
+# built in the *delegated* execution role (:func:`_build_delegated_agent`),
+# which never reads ``resolved.subagents`` and therefore can never itself gain
+# ``delegate_*`` tools. This is a structural guarantee, not a runtime depth
+# counter — there is no code path through which a delegated agent's own
+# ``build_subagent_tools`` could ever run.
 
 
-def _build_skills_provider(skill_paths: list[Path] | None) -> Any:
-    """Return a :class:`SkillsProvider` for the given skill directories, or ``None``."""
-    if not skill_paths:
-        return None
-    # ``SkillsProvider`` is marked experimental in MAF; constructing it emits an
-    # ``ExperimentalWarning``. We acknowledge the experimental status — it is
-    # the documented integration point for SKILL.md-based progressive disclosure —
-    # and suppress just that one warning so cold-start logs stay quiet.
+class _DelegateErrorTracker:
+    """Per-request counter of *recoverable* ``delegate_<slug>`` failures.
+
+    Shared by every delegate tool for one coordinator run;
+    ``AgentResult.delegate_error_count`` reads :attr:`count` when the run
+    completes. Only recovered failures count — a propagated cancellation
+    never reaches ``record_error`` (Decision #12).
+    """
+
+    __slots__ = ("count",)
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    def record_error(self) -> None:
+        self.count += 1
+
+
+def _assemble_agent_inputs(
+    *,
+    instructions: str | None,
+    tools: list[AgentFunctionTool] | None,
+    mcp_tools: list[MCPTool] | None,
+    sandbox_tools: list[FunctionTool] | None,
+    web_request_tools: list[FunctionTool] | None,
+    system_addendum: str | None,
+    workflow_enabled: bool,
+    workflow_durable_client: Any | None,
+    workflow_agent_slug: str | None,
+    agent_name: str | None,
+    resolved_id: str | None,
+    delegate_tools: list[FunctionTool] | None,
+    workflow_policy: WorkflowPlanPolicy | None,
+) -> tuple[list[AgentTool], str | None]:
+    """Assemble tools and system instructions shared by all agent roles."""
+    app_root = get_app_root()
+    resolved_tools: list[AgentTool] = []
+    resolved_tools.extend(discover_user_tools(app_root).tools if tools is None else tools)
+
+    if sandbox_tools:
+        resolved_tools.extend(sandbox_tools)
+
+    if web_request_tools:
+        resolved_tools.extend(web_request_tools)
+
+    if workflow_enabled:
+        from .workflows.tools import build_workflow_tools
+
+        resolved_tools.extend(
+            build_workflow_tools(
+                session_id=resolved_id or "",
+                workflow_agent_slug=workflow_agent_slug or agent_name or "main",
+                agent_name=agent_name or "main",
+                durable_client=workflow_durable_client,
+                policy=workflow_policy,
+            )
+        )
+
+    resolved_mcp_tools = (
+        list(discover_mcp_servers(app_root).servers.values()) if mcp_tools is None else list(mcp_tools)
+    )
+    if resolved_mcp_tools:
+        resolved_tools.extend(resolved_mcp_tools)
+
+    if delegate_tools:
+        resolved_tools.extend(delegate_tools)
+
+    effective_instructions = instructions.strip() if instructions and instructions.strip() else None
+    if system_addendum:
+        effective_instructions = (effective_instructions or "") + system_addendum
+
+    return resolved_tools, effective_instructions
+
+
+def _build_role_agent(
+    chat_client: SupportsChatGetResponse[Any],
+    *,
+    agent_instructions: str | None,
+    tools: list[AgentTool],
+    skill_paths: list[Path] | None,
+    agent_name: str | None,
+    history_provider: HistoryProvider | None,
+    agent_configuration: AgentConfiguration,
+) -> Agent[Any]:
+    """Build one conservatively configured MAF harness agent for any role."""
     import warnings
 
-    from agent_framework import SkillsProvider
+    from agent_framework import SkillsProvider, create_harness_agent
     from agent_framework._feature_stage import ExperimentalWarning
+
+    skills_provider = (
+        SkillsProvider.from_paths(
+            skill_paths,
+            disable_load_skill_approval=True,
+            disable_read_skill_resource_approval=True,
+            disable_run_skill_script_approval=True,
+        )
+        if skill_paths
+        else None
+    )
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=ExperimentalWarning)
-        return SkillsProvider.from_paths(list(skill_paths))
+        return create_harness_agent(
+            chat_client,
+            name=agent_name,
+            harness_instructions="",
+            agent_instructions=agent_instructions,
+            tools=tools,
+            history_provider=history_provider,
+            skills_provider=skills_provider,
+            disable_tool_auto_approval=True,
+            disable_web_search=True,
+            disable_todo=True,
+            disable_mode=True,
+            max_context_window_tokens=_max_context_window_tokens(agent_configuration),
+            max_output_tokens=agent_configuration.max_output_tokens,
+            disable_file_memory=True,
+            default_options={"store": False},
+        )
 
 
-async def _build_agent_session_history(
+def _max_context_window_tokens(config: AgentConfiguration) -> int | None:
+    if config.agent_framework is None or config.agent_framework.compaction is None:
+        return None
+    return config.agent_framework.compaction.max_context_window_tokens
+
+
+def _build_delegated_agent(
+    resolved: ResolvedAgent, capabilities: AgentCapabilities
+) -> tuple[Agent[Any], InferenceTarget]:
+    """Build one specialist in its resolved mode for a stateless leaf role.
+
+    Runs as itself: own instructions, model, and static tools, but never a
+    per-request sandbox or main-only Dynamic-Workflow tools (naturally
+    absent — never passed to :func:`_build_role_agent`, not stripped).
+    ``resolved.subagents`` is deliberately never read — the structural
+    enforcement of single-level delegation (Decision #6).
+    """
+    client_manager = get_client_manager()
+    chat_client, inference_target = client_manager.build_chat_client_with_target(resolved.model)
+    resolved_tools, effective_instructions = _assemble_agent_inputs(
+        instructions=resolved.instructions,
+        tools=list(capabilities.filtered_user_tools or []),
+        mcp_tools=list(capabilities.filtered_mcp_tools or []),
+        sandbox_tools=None,
+        web_request_tools=capabilities.web_request_tools,
+        system_addendum=None,
+        workflow_enabled=False,
+        workflow_durable_client=None,
+        workflow_agent_slug=None,
+        agent_name=resolved.slug,
+        resolved_id=None,
+        delegate_tools=None,
+        workflow_policy=None,
+    )
+    agent = _build_role_agent(
+        chat_client,
+        agent_instructions=effective_instructions,
+        tools=resolved_tools,
+        skill_paths=capabilities.enabled_skill_paths,
+        agent_name=resolved.slug,
+        history_provider=None,
+        agent_configuration=resolved.agent_configuration,
+    )
+    return agent, inference_target
+
+
+async def run_leaf_agent_task(
+    resolved: ResolvedAgent,
+    capabilities: AgentCapabilities,
+    task: str,
+    *,
+    timeout: float,
+    execution_role: Literal["delegate", "workflow_subagent"],
+) -> str:
+    """Run one fresh stateless specialist and return its response text."""
+    specialist_agent, inference_target = _build_delegated_agent(resolved, capabilities)
+    usage_recorder = _AgentUsageRecorder(
+        agent_name=resolved.slug,
+        execution_role=execution_role,
+        inference_target=inference_target,
+    )
+    try:
+        response = await asyncio.wait_for(specialist_agent.run(task), timeout=timeout)
+    except asyncio.CancelledError:
+        usage_recorder.emit()
+        raise
+    except TimeoutError:
+        usage_recorder.emit()
+        raise
+    except Exception:
+        usage_recorder.emit()
+        raise
+    usage_recorder.emit(_response_usage_details(response))
+    return response.text
+
+
+def _sanitize_delegate_failure(slug: str, exc: BaseException) -> str:
+    """Sanitized, model-facing message for a recovered delegate failure.
+
+    Deliberately generic and class-independent — never varies by exception
+    type, so the coordinator's model learns nothing about the specialist's
+    internals from wording alone. Real exception detail goes only to
+    telemetry (Decision #12).
+    """
+    return (
+        f"The '{slug}' specialist could not complete this task. "
+        "Consider trying again, rephrasing the request, or proceeding without it."
+    )
+
+
+async def _finalize_maf_stream(stream: Any, exc: BaseException) -> None:
+    """Best-effort finalize a MAF ``ResponseStream`` chain on cancel/timeout.
+
+    ``ResponseStream.__anext__`` only runs its cleanup hooks (closing the
+    OTel span, flushing usage) on success/ordinary-exception, never on
+    cancellation — so this force-runs them so spans close deterministically
+    instead of via GC. Used by ``run_agent_stream`` only; the non-streaming
+    delegate path doesn't need it (FRD 0007 §5 Decision #20). Known gap: one
+    chat-level span MAF never exposes externally can only close via GC — no
+    workaround exists. Defensive throughout: safe if ``stream`` is ``None``.
+    """
+    while stream is not None:
+        # Read `_inner_stream` before running this level's cleanup hooks
+        # (which may, defensively, mutate this object's state) so the next
+        # hop is captured regardless of what this level's hooks do.
+        next_stream = getattr(stream, "_inner_stream", None)
+        run_cleanup_hooks = getattr(stream, "_run_cleanup_hooks", None)
+        if callable(run_cleanup_hooks):
+            with contextlib.suppress(Exception):
+                has_stream_error_slot = hasattr(stream, "_stream_error")
+                if has_stream_error_slot and stream._stream_error is None:
+                    # Mirrors what `ResponseStream.__anext__`'s own `except
+                    # Exception` branch does on a normal failure: stash the
+                    # error so the registered cleanup hook (MAF's
+                    # `_finalize_stream`, see `agent_framework.observability`)
+                    # can `capture_exception` it on the span instead of
+                    # silently treating this as a clean finish.
+                    stream._stream_error = exc
+                    try:
+                        await run_cleanup_hooks()
+                    finally:
+                        stream._stream_error = None
+                else:
+                    await run_cleanup_hooks()
+        stream = next_stream
+
+
+def _record_generic_delegate_failure(
+    span: RuntimeSpan, tracker: _DelegateErrorTracker, slug: str, exc: BaseException
+) -> str:
+    """Record a recoverable delegate failure and return the sanitized model-facing string."""
+    tracker.record_error()
+    record_delegate_call(error=True)
+    span.set_attribute("af.delegate.outcome", "error")
+    # `record_exception` also sets error status + fault domain, preserving
+    # the real exception type/detail in telemetry instead of a flattened
+    # string.
+    span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
+    return _sanitize_delegate_failure(slug, exc)
+
+
+def _record_delegate_timeout(
+    span: RuntimeSpan, tracker: _DelegateErrorTracker, slug: str, effective_timeout: float, exc: BaseException
+) -> str:
+    """Record a recoverable delegate timeout (deadline or specialist-raised) and return the model-facing string."""
+    tracker.record_error()
+    record_delegate_call(error=True)
+    span.set_attribute("af.delegate.outcome", "timeout")
+    span.set_attribute("af.delegate.timeout_seconds", effective_timeout)
+    span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
+    return (
+        f"The '{slug}' specialist did not respond in time and was "
+        "stopped. Consider a narrower request, trying again, or "
+        "proceeding without it."
+    )
+
+
+class _DelegateTaskParams(BaseModel):
+    """Argument schema for a ``delegate_<slug>`` tool call: a single ``task`` string."""
+
+    task: str = Field(
+        description=(
+            "A complete, self-contained instruction for the specialist. The "
+            "specialist does not see the coordinator's conversation history "
+            "or any other context — include every fact, detail, and "
+            "requirement the specialist needs to complete the task."
+        )
+    )
+
+
+def _build_delegate_tool(
+    ref: SubagentRef,
+    entry: CatalogEntry,
+    *,
+    coordinator_deadline: float,
+    tracker: _DelegateErrorTracker,
+) -> FunctionTool:
+    """Build one ``delegate_<slug>`` ``FunctionTool`` for the reference ``ref``.
+
+    A hand-written ``@tool(schema=...)`` function tool (not MAF's
+    ``BaseAgent.as_tool()`` — see FRD 0007 §5 Decision #20): the handler
+    builds a fresh specialist :class:`agent_framework.Agent` per call and
+    awaits its plain, non-streaming ``run(task)`` directly, so no lock,
+    monkeypatch, or stream capture is needed.
+    """
+    resolved = entry.resolved
+    capabilities = entry.capabilities
+    slug = ref.agent
+    tool_name = delegate_tool_name(slug)
+    description = ref.when or resolved.description
+    specialist_timeout = resolved.timeout
+
+    @tool(
+        name=tool_name,
+        description=description,
+        schema=_DelegateTaskParams,
+        approval_mode="never_require",
+    )
+    async def delegate(params: _DelegateTaskParams) -> str:
+        loop = asyncio.get_running_loop()
+        task_text = params.task
+
+        span = current_span()
+        span.set_attribute("af.delegate.specialist", slug)
+        span.set_attribute("af.delegate.task_bytes", len(task_text))
+        span.set_content("af.delegate.task", task_text)
+
+        # effective_timeout = min(specialist, coordinator remaining) per
+        # Decision #12. Checked before building the specialist `Agent` at
+        # all — a run that can never be attempted shouldn't be built either.
+        remaining = max(0.0, coordinator_deadline - loop.time())
+        effective_timeout = min(specialist_timeout, remaining)
+        if effective_timeout <= 0:
+            exc = TimeoutError(f"delegate_{slug}: coordinator budget exhausted before dispatch")
+            return _record_delegate_timeout(span, tracker, slug, effective_timeout, exc)
+
+        try:
+            # Building the specialist `Agent` is inside this `try` too, so a
+            # construction failure (e.g. a misconfigured specialist model)
+            # is just as recoverable as a run failure, instead of
+            # propagating unhandled and aborting the coordinator turn.
+            result = await run_leaf_agent_task(
+                resolved,
+                capabilities,
+                task_text,
+                timeout=effective_timeout,
+                execution_role="delegate",
+            )
+        except asyncio.CancelledError:
+            # Parent/request cancellation — never a recoverable delegate
+            # error (Decision #12), but still a dispatched call, so it's
+            # counted in the call metric (not the error metric) before
+            # re-raising to propagate and abort the run.
+            record_delegate_call(error=False)
+            span.set_attribute("af.delegate.outcome", "cancelled")
+            raise
+        except TimeoutError as exc:
+            # Covers both a genuine `wait_for` deadline expiry and any
+            # `TimeoutError` the specialist's own code happens to raise —
+            # both are recoverable specialist-side timeouts either way.
+            return _record_delegate_timeout(span, tracker, slug, effective_timeout, exc)
+        except Exception as exc:
+            return _record_generic_delegate_failure(span, tracker, slug, exc)
+
+        record_delegate_call(error=False)
+        span.set_attribute("af.delegate.outcome", "success")
+        span.set_attribute("af.delegate.response_bytes", len(result))
+        span.set_content("af.delegate.result", result)
+        return result
+
+    return delegate
+
+
+async def build_subagent_tools(
+    subagents: list[SubagentRef] | None,
+    catalog: AgentCatalog | None,
+    *,
+    coordinator_deadline: float,
+) -> tuple[list[FunctionTool], _DelegateErrorTracker]:
+    """Build one ``delegate_<slug>`` tool per ``subagents`` reference.
+
+    The tool wrapper (schema/closure) is built once per reference, here.
+    The specialist's ``Agent`` object is different: each call builds a
+    FRESH one in the *delegated* role (:func:`_build_delegated_agent`) — not
+    once here — reusing the process-wide ``ClientManager`` but never a
+    cached agent instance. MAF's ``Agent.run()`` self-mutates, so per-call
+    construction is required; it also means concurrent calls to the same
+    specialist need no lock (Decision #20).
+
+    Returns ``(tools, tracker)``; ``tracker`` counts recoverable delegate
+    failures (see :class:`_DelegateErrorTracker`).
+    """
+    tracker = _DelegateErrorTracker()
+    tools: list[FunctionTool] = []
+    if not subagents:
+        return tools, tracker
+    # Guarded for a hand-rolled call site; app.py's composition root always
+    # threads a real catalog whenever any agent declares subagents.
+    assert catalog is not None, "subagents declared but no AgentCatalog was provided"
+
+    for ref in subagents:
+        entry = catalog.get(ref.agent)
+        # Guarded for a hand-rolled call site; validate_subagent_references
+        # already rejects unknown references at startup.
+        assert entry is not None, f"subagents reference `{ref.agent}` was not found in the AgentCatalog"
+        tools.append(
+            _build_delegate_tool(
+                ref,
+                entry,
+                coordinator_deadline=coordinator_deadline,
+                tracker=tracker,
+            )
+        )
+    return tools, tracker
+
+
+async def _build_agent_session(
     *,
     instructions: str | None,
     session_id: str | None,
-    tools: list[Any] | None,
-    mcp_tools: list[Any] | None,
+    tools: list[AgentFunctionTool] | None,
+    mcp_tools: list[MCPTool] | None,
     skill_paths: list[Path] | None,
     model: str | None,
-    sandbox_tools: list[Any] | None,
-) -> tuple[Any, Any, str]:
-    """Construct the chat client, agent, AgentSession, and history provider.
+    sandbox_tools: list[FunctionTool] | None,
+    system_addendum: str | None,
+    workflow_enabled: bool,
+    workflow_durable_client: Any | None,
+    workflow_agent_slug: str | None = None,
+    agent_name: str | None,
+    web_request_tools: list[FunctionTool] | None = None,
+    agent_configuration: AgentConfiguration | None = None,
+    subagents: list[SubagentRef] | None = None,
+    catalog: AgentCatalog | None = None,
+    coordinator_deadline: float | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
+) -> tuple[Any, Any, str, _DelegateErrorTracker | None, InferenceTarget]:
+    """Construct an agent/session using MAF's ``create_harness_agent``.
 
-    Returns ``(agent, session, resolved_session_id)``.
+    Returns ``(agent, session, resolved_session_id, delegate_error_tracker,
+    inference_target)``; ``delegate_error_tracker`` is ``None`` unless
+    ``subagents`` is non-empty.
     """
-    # Imported here so a missing optional dependency surfaces only when actually
-    # needed (e.g. tests that don't run the runtime path).
-    from agent_framework import (
-        Agent,
-        AgentSession,
-    )
+    resolved_config = agent_configuration or AgentConfiguration()
 
-    # Build the chat client first so configuration errors surface BEFORE any
-    # filesystem state is created.
+    from agent_framework import AgentSession
+
     client_manager = get_client_manager()
-    chat_client = client_manager.build_chat_client(model)
+    chat_client, inference_target = client_manager.build_chat_client_with_target(model)
 
-    # Validate / generate session id.
     validated_id = _validate_session_id(session_id)
     if validated_id is None:
         session = AgentSession()
@@ -239,36 +842,45 @@ async def _build_agent_session_history(
 
     history_provider = _build_history_provider()
 
-    # Tool list: resolved user tools + per-call sandbox tools + resolved MCP
-    # tools.
-    app_root = get_app_root()
-    resolved_tools: list[Any] = (
-        list(discover_user_tools(app_root)) if tools is None else list(tools)
+    delegate_tools: list[FunctionTool] | None = None
+    delegate_error_tracker: _DelegateErrorTracker | None = None
+    if subagents:
+        effective_deadline = (
+            coordinator_deadline
+            if coordinator_deadline is not None
+            else asyncio.get_running_loop().time() + DEFAULT_TIMEOUT
+        )
+        delegate_tools, delegate_error_tracker = await build_subagent_tools(
+            subagents, catalog, coordinator_deadline=effective_deadline
+        )
+
+    resolved_tools, effective_instructions = _assemble_agent_inputs(
+        instructions=instructions,
+        tools=tools,
+        mcp_tools=mcp_tools,
+        sandbox_tools=sandbox_tools,
+        web_request_tools=web_request_tools,
+        system_addendum=system_addendum,
+        workflow_enabled=workflow_enabled,
+        workflow_durable_client=workflow_durable_client,
+        workflow_agent_slug=workflow_agent_slug,
+        agent_name=agent_name,
+        resolved_id=resolved_id,
+        delegate_tools=delegate_tools,
+        workflow_policy=workflow_policy,
     )
 
-    if sandbox_tools:
-        resolved_tools.extend(sandbox_tools)
-
-    resolved_mcp_tools = (
-        list(discover_mcp_servers(app_root).values()) if mcp_tools is None else list(mcp_tools)
-    )
-    if resolved_mcp_tools:
-        # MAF's Agent.tools accepts a heterogeneous list of FunctionTool and MCP tools.
-        resolved_tools.extend(resolved_mcp_tools)
-
-    context_providers: list[Any] = [history_provider]
-    skills_provider = _build_skills_provider(skill_paths)
-    if skills_provider is not None:
-        context_providers.append(skills_provider)
-
-    agent = Agent(
+    agent = _build_role_agent(
         chat_client,
-        instructions=instructions.strip() if instructions and instructions.strip() else None,
+        agent_instructions=effective_instructions,
         tools=resolved_tools,
-        context_providers=context_providers,
+        skill_paths=skill_paths,
+        agent_name=agent_name,
+        history_provider=history_provider,
+        agent_configuration=resolved_config,
     )
 
-    return agent, session, resolved_id
+    return agent, session, resolved_id, delegate_error_tracker, inference_target
 
 
 # ---------------------------------------------------------------------------
@@ -338,13 +950,23 @@ async def run_agent(
     *,
     instructions: str | None = None,
     timeout: float | None = None,
-    tools: list[Any] | None = None,
-    mcp_tools: list[Any] | None = None,
+    tools: list[AgentFunctionTool] | None = None,
+    mcp_tools: list[MCPTool] | None = None,
     skill_paths: list[Path] | None = None,
     model: str | None = None,
     session_id: str | None = None,
-    sandbox_tools: list[Any] | None = None,
+    sandbox_tools: list[FunctionTool] | None = None,
     user_context: UserContext | None = None,
+    system_addendum: str | None = None,
+    workflow_enabled: bool = False,
+    workflow_durable_client: Any | None = None,
+    workflow_agent_slug: str | None = None,
+    agent_name: str | None = None,
+    web_request_tools: list[FunctionTool] | None = None,
+    agent_configuration: AgentConfiguration | None = None,
+    subagents: list[SubagentRef] | None = None,
+    catalog: AgentCatalog | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> AgentResult:
     """Execute a single prompt against the configured agent backend.
 
@@ -386,41 +1008,97 @@ async def run_agent(
         Optional user context carrying the authenticated user's identity.
         When provided with OBO configuration, enables downstream API calls
         to be made on behalf of the user rather than using managed identity.
+    web_request_tools:
+        Optional list of tools created via :func:`create_web_request_tools` —
+        a dedicated channel parallel to ``sandbox_tools``, built once per
+        agent at registration (stateless, no per-session binding needed).
+        ``None``/``[]`` adds no ``web_request`` tool.
+    subagents:
+        Optional ``subagents:`` references resolved from this agent's front
+        matter (FRD 0007). Each reference gets a ``delegate_<slug>`` tool
+        appended to this agent's tool list, built from ``catalog`` — see
+        :func:`build_subagent_tools`. ``None``/``[]`` adds no delegation
+        tools.
+    catalog:
+        The process-wide :class:`AgentCatalog` (slug -> resolved specialist +
+        capabilities) used to build any ``subagents`` reference. Required
+        whenever ``subagents`` is non-empty; ignored otherwise.
 
     Notes
     -----
     To fully disable all tools from a direct API call, pass
-    ``tools=[], mcp_tools=[], sandbox_tools=None``.
+    ``tools=[], mcp_tools=[], sandbox_tools=None, web_request_tools=None``.
     """
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
+    # Computed before building the agent so a delegate tool's adapter can cap
+    # its own specialist timeout at "however much of *this* run's budget is
+    # left" (FRD 0007 Decision #12: "effective timeout = min(specialist,
+    # coordinator remaining)"). `loop` is reused below (M1) to bound the
+    # session-lock wait itself by this same absolute deadline.
+    loop = asyncio.get_running_loop()
+    coordinator_deadline = loop.time() + timeout
 
-    agent, session, resolved_id = await _build_agent_session_history(
-        instructions=instructions,
-        session_id=session_id,
-        tools=tools,
-        mcp_tools=mcp_tools,
-        skill_paths=skill_paths,
-        model=model,
-        sandbox_tools=sandbox_tools,
+    agent, session, resolved_id, delegate_error_tracker, inference_target = (
+        await _build_agent_session(
+            instructions=instructions,
+            session_id=session_id,
+            tools=tools,
+            mcp_tools=mcp_tools,
+            skill_paths=skill_paths,
+            model=model,
+            sandbox_tools=sandbox_tools,
+            system_addendum=system_addendum,
+            workflow_enabled=workflow_enabled,
+            workflow_durable_client=workflow_durable_client,
+            workflow_agent_slug=workflow_agent_slug,
+            agent_name=agent_name,
+            web_request_tools=web_request_tools,
+            agent_configuration=agent_configuration,
+            subagents=subagents,
+            catalog=catalog,
+            coordinator_deadline=coordinator_deadline,
+            workflow_policy=workflow_policy,
+        )
     )
 
     # Set user context for OBO-enabled MCP servers
     context_token = set_current_user_context(user_context)
-
-    lock = await _get_session_lock(resolved_id)
     try:
-        async with lock:
-            try:
-                response = await asyncio.wait_for(
-                    agent.run(
-                        prompt,
-                        session=session,
-                        options=_build_chat_options_from_environment(),
-                    ),
-                    timeout=timeout,
+        try:
+            async with _session_lock_bounded_by(resolved_id, coordinator_deadline):
+                # Re-derive the remaining budget *after* the lock wait instead of
+                # reusing the original full `timeout` — otherwise a long lock
+                # wait plus a full fresh `timeout` window could run well past
+                # `coordinator_deadline`.
+                remaining_after_lock = max(0.0, coordinator_deadline - loop.time())
+                if remaining_after_lock <= 0:
+                    raise TimeoutError
+                usage_recorder = _AgentUsageRecorder(
+                    agent_name=agent_name or "main",
+                    execution_role="primary",
+                    inference_target=inference_target,
                 )
-            except TimeoutError:
-                raise RuntimeError(f"Agent run timed out after {timeout}s") from None
+                try:
+                    response: AgentResponse[Any] = await asyncio.wait_for(
+                        agent.run(
+                            prompt,
+                            session=session,
+                            options=_build_chat_options_from_environment(),
+                        ),
+                        timeout=remaining_after_lock,
+                    )
+                except asyncio.CancelledError:
+                    usage_recorder.emit()
+                    raise
+                except TimeoutError:
+                    usage_recorder.emit()
+                    raise
+                except Exception:
+                    usage_recorder.emit()
+                    raise
+                usage_recorder.emit(_response_usage_details(response))
+        except TimeoutError:
+            raise RuntimeError(f"Agent run timed out after {timeout}s") from None
     finally:
         # Reset user context after agent run
         reset_current_user_context(context_token)
@@ -428,13 +1106,13 @@ async def run_agent(
     # Extract assistant text from the final response.
     text = ""
     try:
-        text = str(getattr(response, "text", "") or "")
+        text = response.text
     except Exception:
         text = ""
     if not text:
         # Fallback: walk messages → contents and pick out text items.
         try:
-            for msg in getattr(response, "messages", None) or []:
+            for msg in response.messages:
                 for item in getattr(msg, "contents", None) or []:
                     if _content_type(item) == "text":
                         text += _content_text(item)
@@ -444,7 +1122,7 @@ async def run_agent(
     # Walk content items for tool-call records (best-effort metadata for callers).
     tool_calls: list[dict[str, Any]] = []
     try:
-        for msg in getattr(response, "messages", None) or []:
+        for msg in response.messages:
             for item in getattr(msg, "contents", None) or []:
                 ctype = _content_type(item)
                 if ctype == "function_call":
@@ -465,6 +1143,7 @@ async def run_agent(
         session_id=resolved_id,
         content=text,
         tool_calls=tool_calls,
+        delegate_error_count=delegate_error_tracker.count if delegate_error_tracker else 0,
     )
 
 
@@ -478,13 +1157,24 @@ async def run_agent_stream(
     *,
     instructions: str | None = None,
     timeout: float | None = None,
-    tools: list[Any] | None = None,
-    mcp_tools: list[Any] | None = None,
+    tools: list[AgentFunctionTool] | None = None,
+    mcp_tools: list[MCPTool] | None = None,
     skill_paths: list[Path] | None = None,
     model: str | None = None,
     session_id: str | None = None,
-    sandbox_tools: list[Any] | None = None,
+    sandbox_tools: list[FunctionTool] | None = None,
     user_context: UserContext | None = None,
+    system_addendum: str | None = None,
+    workflow_enabled: bool = False,
+    workflow_durable_client: Any | None = None,
+    workflow_agent_slug: str | None = None,
+    agent_name: str | None = None,
+    display_name: str | None = None,
+    web_request_tools: list[FunctionTool] | None = None,
+    agent_configuration: AgentConfiguration | None = None,
+    subagents: list[SubagentRef] | None = None,
+    catalog: AgentCatalog | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> AsyncIterator[str]:
     """SSE-formatted async generator yielding ``data: {...}\\n\\n`` lines.
 
@@ -497,12 +1187,23 @@ async def run_agent_stream(
       from ``mcp.json``; pass ``[]`` to disable MCP tools.
     * ``sandbox_tools`` separately controls sandbox tools. ``None`` adds no
       sandbox tools; pass a list to enable them.
+    * ``web_request_tools`` separately controls the ``web_request`` tool —
+      a dedicated channel parallel to ``sandbox_tools``. ``None`` adds no
+      ``web_request`` tool; pass a list to enable it.
     * ``skill_paths`` enables MAF's :class:`SkillsProvider` for the listed
       directories. ``None`` or ``[]`` disables skills.
     * ``user_context`` carries the authenticated user's identity for OBO
       token flow to downstream APIs.
+    * ``subagents``/``catalog`` add ``delegate_<slug>`` tools (FRD 0007), one
+      per reference — see :func:`run_agent`. Delegate calls surface through
+      the same ``tool_start``/``tool_end`` events as any other tool call; the
+      per-run delegate-error count is not surfaced in the SSE vocabulary
+      itself (only in :class:`AgentResult` for the non-streaming path), but
+      it IS applied to this run's own ``agent.run {name}`` span as
+      ``af.agent.tool_error_count`` once the stream completes, mirroring
+      what the non-streaming path does for :class:`AgentResult`.
     * To fully disable all tools from a direct API call, pass
-      ``tools=[], mcp_tools=[], sandbox_tools=None``.
+      ``tools=[], mcp_tools=[], sandbox_tools=None, web_request_tools=None``.
 
     Event vocabulary (kept stable for the chat UI):
 
@@ -517,13 +1218,16 @@ async def run_agent_stream(
     * ``error``        — terminal error message
     """
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
-
-    # Set user context for OBO-enabled MCP servers
-    context_token = set_current_user_context(user_context)
+    # Computed before building the agent (see run_agent) so a delegate tool's
+    # adapter can cap its own specialist timeout at this run's remaining
+    # budget. Reused, unchanged, as `deadline` further down for the existing
+    # per-update stream timeout check.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
 
     try:
-        try:
-            agent, session, resolved_id = await _build_agent_session_history(
+        agent, session, resolved_id, delegate_error_tracker, inference_target = (
+            await _build_agent_session(
                 instructions=instructions,
                 session_id=session_id,
                 tools=tools,
@@ -531,110 +1235,309 @@ async def run_agent_stream(
                 skill_paths=skill_paths,
                 model=model,
                 sandbox_tools=sandbox_tools,
+                system_addendum=system_addendum,
+                workflow_enabled=workflow_enabled,
+                workflow_durable_client=workflow_durable_client,
+                workflow_agent_slug=workflow_agent_slug,
+                agent_name=agent_name,
+                web_request_tools=web_request_tools,
+                agent_configuration=agent_configuration,
+                subagents=subagents,
+                catalog=catalog,
+                coordinator_deadline=deadline,
+                workflow_policy=workflow_policy,
             )
-        except Exception as exc:
-            logger.error("Failed to build agent session: %s", exc, exc_info=True)
-            yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
-            return
+        )
+    except Exception as exc:
+        logger.error("Failed to build agent session: %s", exc, exc_info=True)
+        yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+        return
 
-        yield f"data: {json.dumps({'type': 'session', 'session_id': resolved_id})}\n\n"
+    yield f"data: {json.dumps({'type': 'session', 'session_id': resolved_id})}\n\n"
 
-        lock = await _get_session_lock(resolved_id)
-        async with lock:
-            loop = asyncio.get_event_loop()
-            deadline = loop.time() + timeout
-            pending_tool_calls: dict[str, dict[str, Any]] = {}
-            emitted_tool_calls: set[str] = set()
+    # `run_agent_stream` opens its *own* run-level span rather than relying on
+    # a caller-provided one (B3): unlike the non-streaming path — where
+    # `run_agent` returns synchronously and callers such as
+    # `registration/_handlers.py`/`registration/endpoints.py` wrap the whole
+    # call in an `agent.run {name}` span before it returns — a caller of this
+    # generator (e.g. `handle_chat_stream`) typically just constructs the
+    # generator and hands it to a `StreamingResponse` without ever driving it
+    # itself, so no ambient span from the caller is active while this body
+    # actually runs. Opening one here ensures delegate-error accounting (and
+    # timeout/exception outcomes) always lands somewhere for the streaming
+    # surface too, matching the non-streaming path's `AgentResult.delegate_error_count`.
+    with start_span(
+        f"agent.run {agent_name or 'agent'}",
+        lifecycle_stage=LifecycleStage.AGENT_RUN,
+        attributes={
+            "af.agent.name": agent_name,
+            # S1b: mirrors what `registration/endpoints.py`'s own
+            # `agent.run {name}` spans already set (`af.agent.name` = slug,
+            # `af.agent.display_name` = human-readable name) for the
+            # non-streaming/MCP surfaces. Those surfaces open their own span
+            # around `run_agent`, which has none of its own — but nothing
+            # upstream of *this* function does the same for the streaming
+            # surface (see the comment above), so this span is the only
+            # place `af.agent.display_name` can be recorded here.
+            "af.agent.display_name": display_name,
+            "af.agent.trigger_type": "stream",
+            "af.agent.session_id": resolved_id,
+            "af.agent.model": model,
+        },
+    ) as span:
+        ordinary_tool_error_count = 0
+        try:
+            async with _session_lock_bounded_by(resolved_id, deadline):
+                pending_tool_calls: dict[str, dict[str, Any]] = {}
+                emitted_tool_calls: set[str] = set()
 
-            def buffer_function_call(item: Any) -> tuple[str | None, dict[str, Any]]:
-                event = _function_call_event(item)
-                call_id = event.get("tool_call_id")
-                if not isinstance(call_id, str) or not call_id:
-                    return None, event
+                def buffer_function_call(item: Any) -> tuple[str | None, dict[str, Any]]:
+                    event = _function_call_event(item)
+                    call_id = event.get("tool_call_id")
+                    if not isinstance(call_id, str) or not call_id:
+                        return None, event
 
-                pending = pending_tool_calls.setdefault(
-                    call_id,
-                    {
-                        "type": "tool_start",
-                        "tool_call_id": call_id,
-                        "tool_name": event.get("tool_name"),
-                        "arguments": None,
-                    },
-                )
-                if event.get("tool_name"):
-                    pending["tool_name"] = event["tool_name"]
-                pending["arguments"] = _merge_tool_arguments(
-                    pending.get("arguments"),
-                    event.get("arguments"),
-                )
-                return call_id, pending
+                    pending = pending_tool_calls.setdefault(
+                        call_id,
+                        {
+                            "type": "tool_start",
+                            "tool_call_id": call_id,
+                            "tool_name": event.get("tool_name"),
+                            "arguments": None,
+                        },
+                    )
+                    if event.get("tool_name"):
+                        pending["tool_name"] = event["tool_name"]
+                    pending["arguments"] = _merge_tool_arguments(
+                        pending.get("arguments"),
+                        event.get("arguments"),
+                    )
+                    return call_id, pending
 
-            async def emit_tool_start_if_ready(
-                call_id: str, event: dict[str, Any]
-            ) -> AsyncIterator[str]:
-                if call_id in emitted_tool_calls:
-                    return
-                if not _is_complete_json_argument(event.get("arguments")):
-                    return
-                emitted_tool_calls.add(call_id)
-                yield f"data: {json.dumps(event)}\n\n"
-
-            async def emit_tool_start_before_result(call_id: str | None) -> AsyncIterator[str]:
-                if call_id is None or call_id in emitted_tool_calls:
-                    return
-                event = pending_tool_calls.get(call_id)
-                if event is None:
-                    return
-                emitted_tool_calls.add(call_id)
-                yield f"data: {json.dumps(event)}\n\n"
-
-            try:
-                stream = agent.run(
-                    prompt,
-                    stream=True,
-                    session=session,
-                    options=_build_chat_options_from_environment(),
-                )
-                async for update in stream:
-                    if loop.time() > deadline:
-                        yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
+                async def emit_tool_start_if_ready(
+                    call_id: str, event: dict[str, Any]
+                ) -> AsyncIterator[str]:
+                    if call_id in emitted_tool_calls:
                         return
-                    for item in getattr(update, "contents", None) or []:
-                        ctype = _content_type(item)
-                        if ctype == "text":
-                            text = _content_text(item)
-                            if text:
-                                yield f"data: {json.dumps({'type': 'delta', 'content': text})}\n\n"
-                        elif ctype == "text_reasoning":
-                            text = _content_text(item)
-                            if text:
-                                yield f"data: {json.dumps({'type': 'intermediate', 'content': text})}\n\n"
-                        elif ctype == "function_call":
-                            call_id, event = buffer_function_call(item)
-                            if call_id is None:
-                                yield f"data: {json.dumps(event)}\n\n"
-                            else:
-                                async for output in emit_tool_start_if_ready(call_id, event):
+                    if not _is_complete_json_argument(event.get("arguments")):
+                        return
+                    emitted_tool_calls.add(call_id)
+                    yield f"data: {json.dumps(event)}\n\n"
+
+                async def emit_tool_start_before_result(call_id: str | None) -> AsyncIterator[str]:
+                    if call_id is None or call_id in emitted_tool_calls:
+                        return
+                    event = pending_tool_calls.get(call_id)
+                    if event is None:
+                        return
+                    emitted_tool_calls.add(call_id)
+                    yield f"data: {json.dumps(event)}\n\n"
+
+                # B2b: `stream`/`stream_settled` are declared here, outside
+                # the `try:` below, so the `finally:` clause added at the
+                # bottom of this block can always safely reference `stream`
+                # (even if `agent.run(...)` itself never got a chance to
+                # assign it) and can tell whether some *other* branch already
+                # finalized it. `stream_settled` becomes `True` the moment
+                # any branch below (the inner per-`__anext__()` handler, the
+                # normal-completion path, or either outer `except`) has
+                # either finalized the stream itself or reached a point where
+                # finalization is not this generator's responsibility.
+                stream: Any = None
+                stream_settled = False
+                usage_recorder: _AgentUsageRecorder | None = None
+                try:
+                    usage_recorder = _AgentUsageRecorder(
+                        agent_name=agent_name or "main",
+                        execution_role="primary",
+                        inference_target=inference_target,
+                    )
+                    stream = agent.run(
+                        prompt,
+                        stream=True,
+                        session=session,
+                        options=_build_chat_options_from_environment(),
+                    )
+                    # Each iteration's wait for the *next* update is itself
+                    # bounded by the coordinator's remaining budget (B1): the
+                    # previous code only checked `loop.time() > deadline`
+                    # *after* `async for` had already yielded an update, so a
+                    # hung tool/model call producing no update at all could
+                    # block past the deadline indefinitely. Wrapping
+                    # `__anext__()` in `asyncio.wait_for` bounds that wait
+                    # directly, so a stalled generator cannot exceed the
+                    # absolute deadline either.
+                    stream_iter = stream.__aiter__()
+                    while True:
+                        try:
+                            # B2a: the `remaining <= 0` pre-check now lives
+                            # *inside* this same `try` (it used to `raise`
+                            # one level up, before this `try` even started) so
+                            # a deadline that is already exhausted at the
+                            # *top* of an iteration is finalized identically
+                            # to one that expires *while* awaiting
+                            # `__anext__()`, instead of bypassing this handler
+                            # entirely and reaching the outer
+                            # `except TimeoutError` below still unfinalized.
+                            remaining = max(0.0, deadline - loop.time())
+                            if remaining <= 0:
+                                raise TimeoutError
+                            with _user_context_scope(user_context):
+                                update = await asyncio.wait_for(
+                                    stream_iter.__anext__(), timeout=remaining
+                                )
+                        except StopAsyncIteration:
+                            break
+                        except (TimeoutError, asyncio.CancelledError) as exc:
+                            # `ResponseStream.__anext__` (agent_framework._types)
+                            # only runs its registered cleanup hooks — which
+                            # close the underlying OTel span, flush usage
+                            # stats, and invoke provider callbacks — from its
+                            # own `except StopAsyncIteration`/`except
+                            # Exception` branches, never on a `BaseException`
+                            # such as `asyncio.CancelledError`, which is
+                            # exactly what `asyncio.wait_for` injects into
+                            # this `__anext__()` call on timeout/cancellation.
+                            # Finalize the stream explicitly so MAF's own
+                            # span/usage bookkeeping still completes (M2).
+                            await _finalize_maf_stream(stream, exc)
+                            stream_settled = True
+                            raise
+                        for item in getattr(update, "contents", None) or []:
+                            ctype = _content_type(item)
+                            if ctype == "text":
+                                text = _content_text(item)
+                                if text:
+                                    yield f"data: {json.dumps({'type': 'delta', 'content': text})}\n\n"
+                            elif ctype == "text_reasoning":
+                                text = _content_text(item)
+                                if text:
+                                    yield (
+                                        f"data: {json.dumps({'type': 'intermediate', 'content': text})}\n\n"
+                                    )
+                            elif ctype == "function_call":
+                                call_id, event = buffer_function_call(item)
+                                if call_id is None:
+                                    yield f"data: {json.dumps(event)}\n\n"
+                                else:
+                                    async for output in emit_tool_start_if_ready(call_id, event):
+                                        yield output
+                            elif ctype == "function_result":
+                                call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+                                async for output in emit_tool_start_before_result(
+                                    call_id if isinstance(call_id, str) else None
+                                ):
                                     yield output
-                        elif ctype == "function_result":
-                            call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
-                            async for output in emit_tool_start_before_result(
-                                call_id if isinstance(call_id, str) else None
-                            ):
-                                yield output
-                            yield f"data: {json.dumps(_function_result_event(item), default=str)}\n\n"
-                        # Unknown content types are intentionally ignored — the
-                        # SSE vocabulary is fixed and the UI doesn't render them.
-                for call_id, event in pending_tool_calls.items():
-                    if call_id not in emitted_tool_calls:
-                        emitted_tool_calls.add(call_id)
-                        yield f"data: {json.dumps(event)}\n\n"
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
-            except TimeoutError:
-                yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
-            except Exception as exc:
-                logger.error("Agent stream failed: %s", exc, exc_info=True)
-                yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
-    finally:
-        # Reset user context after streaming completes
-        reset_current_user_context(context_token)
+                                result_event = _function_result_event(item)
+                                if _looks_like_tool_error(result_event.get("result")):
+                                    ordinary_tool_error_count += 1
+                                yield f"data: {json.dumps(result_event, default=str)}\n\n"
+                            # Unknown content types are intentionally ignored — the
+                            # SSE vocabulary is fixed and the UI doesn't render them.
+                    for call_id, event in pending_tool_calls.items():
+                        if call_id not in emitted_tool_calls:
+                            emitted_tool_calls.add(call_id)
+                            yield f"data: {json.dumps(event)}\n\n"
+                    span.set_attribute("af.agent.outcome", "success")
+                    stream_settled = True
+                    try:
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    finally:
+                        usage_details = None
+                        try:
+                            usage_details = await _stream_usage_details(
+                                stream,
+                                remaining_timeout=max(0.0, deadline - loop.time()),
+                            )
+                        finally:
+                            usage_recorder.emit(usage_details)
+                except TimeoutError as exc:
+                    if usage_recorder is not None:
+                        usage_recorder.emit()
+                    if not stream_settled:
+                        # Reached when the deadline/cancellation surfaced
+                        # from somewhere the inner handler above didn't cover
+                        # (B2b) — e.g. `agent.run(...)` itself raising before
+                        # the pull loop ever started. Finalize here too
+                        # rather than assuming it already happened.
+                        await _finalize_maf_stream(stream, exc)
+                        stream_settled = True
+                    span.set_attribute("af.agent.outcome", "error")
+                    span.record_exception(
+                        TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
+                    )
+                    yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
+                except asyncio.CancelledError:
+                    if usage_recorder is not None:
+                        usage_recorder.emit()
+                    raise
+                except Exception as exc:
+                    if usage_recorder is not None:
+                        usage_recorder.emit()
+                    if not stream_settled:
+                        # Same reasoning as the `TimeoutError` branch above:
+                        # an ordinary exception that reached here without
+                        # passing through the inner per-`__anext__()` handler
+                        # (e.g. raised directly by `agent.run(...)`, or by
+                        # the per-update content processing) still needs the
+                        # underlying MAF stream finalized (B2b).
+                        await _finalize_maf_stream(stream, exc)
+                        stream_settled = True
+                    logger.error("Agent stream failed: %s", exc, exc_info=True)
+                    span.set_attribute("af.agent.outcome", "error")
+                    span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                    yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+                finally:
+                    if not stream_settled:
+                        # B2b: reached only when this async generator itself
+                        # is torn down while suspended at one of the
+                        # `yield`s above — e.g. the ASGI/HTTP layer closing
+                        # the generator on client disconnect (`aclose()`), or
+                        # the enclosing task being cancelled while suspended
+                        # at a `yield` rather than while awaiting
+                        # `__anext__()`. Python's async-generator protocol
+                        # delivers `GeneratorExit`/cancellation *at* that
+                        # suspension point — a different code path entirely
+                        # from the `except` clauses above, neither of which
+                        # catches `BaseException` subclasses such as
+                        # `GeneratorExit` — so without this, `stream` would
+                        # never be finalized here at all, only ever via a
+                        # nondeterministic GC-timed safety net.
+                        # `sys.exc_info()` reliably reflects that in-flight
+                        # exception in this specific branch precisely
+                        # *because* nothing above matched/handled it (once an
+                        # `except` above runs, it sets `stream_settled = True`
+                        # itself, so this branch is never reached for those
+                        # cases); it is only `None` here if the generator is
+                        # being torn down with no active exception at all
+                        # (e.g. a bare `.aclose()` with nothing in flight), in
+                        # which case a generic `CancelledError` is a
+                        # reasonable stand-in for the finalize hook.
+                        exc_at_teardown = sys.exc_info()[1] or asyncio.CancelledError(
+                            "run_agent_stream torn down before completion"
+                        )
+                        await _finalize_maf_stream(stream, exc_at_teardown)
+                        if usage_recorder is not None:
+                            usage_recorder.emit()
+        except TimeoutError:
+            span.set_attribute("af.agent.outcome", "error")
+            span.record_exception(
+                TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
+            )
+            yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
+        finally:
+            # Retained through generator completion regardless of outcome
+            # (success/timeout/error) so the streaming surface's delegate
+            # errors are always accounted for, matching what
+            # `AgentResult.delegate_error_count` does for the non-streaming
+            # path (B3). Ordinary (non-delegate) tool-call failures detected
+            # in the `function_result` handling above are folded in too
+            # (M3): the delegate tracker only counts specialist-delegation
+            # failures, so a failed sandbox/web_request tool call with no
+            # delegate failure at all would otherwise report zero even
+            # though a tool genuinely failed.
+            span.set_attribute(
+                "af.agent.tool_error_count",
+                (delegate_error_tracker.count if delegate_error_tracker else 0)
+                + ordinary_tool_error_count,
+            )

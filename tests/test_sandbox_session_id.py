@@ -18,7 +18,7 @@ def _sandbox_config() -> dict[str, str]:
 def _capture_aca_session_ids(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    fallback_session_id: str | None | object = ...,
+    fallback_session_id: str | object | None = ...,
 ) -> list[str]:
     aca_session_ids: list[str] = []
 

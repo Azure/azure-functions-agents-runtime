@@ -10,6 +10,8 @@
 *.userosscache
 *.sln.docstates
 *.env
+.worktrees
+.worktrees/
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
@@ -436,3 +438,11 @@ __azurite_*
 __blobstorage__/
 **/local.settings.json
 .tmp-validation/
+
+samples/harness-chat/*
+# MkDocs build output
+site/
+
+# E2E customer-dependency layout (created by the E2E pipeline)
+.e2e-python-packages/
+.python_packages/

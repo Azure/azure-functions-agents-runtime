@@ -233,6 +233,183 @@
 			background: #dce7ff;
 		}
 
+		/* Auto-notification bubble (chat-client-injected workflow completion).
+		 * Deliberately subtler than the user/copilot bubbles: this is an
+		 * out-of-band, system-injected turn, not part of the user's typed
+		 * conversation, so it should fade into the page rather than compete
+		 * with surrounding chat content. */
+		.bubble-wrap.auto { justify-content: center; }
+		.bubble.auto {
+			max-width: 70%;
+			padding: 4px 10px;
+			border-radius: 8px;
+			background: #faf8ff;
+			border: 1px solid #ebe5f7;
+			color: #6b5e8a;
+			font-size: 12px;
+			line-height: 1.35;
+			box-shadow: none;
+			/* Override base .bubble's `pre-wrap`: this bubble's children are
+			 * structured (span + inline <details>), so we don't want the
+			 * template literal's indentation rendering as visible whitespace. */
+			white-space: normal;
+		}
+		.auto-notification-body {
+			color: inherit;
+		}
+		.auto-notification-body code {
+			font-size: 11px;
+			padding: 1px 4px;
+			background: #f1ecf9;
+			border-radius: 3px;
+			color: #5a4d80;
+		}
+		.auto-notification-raw {
+			display: inline;
+			font-size: 11px;
+		}
+		.auto-notification-raw summary {
+			display: inline;
+			cursor: pointer;
+			color: #8674b0;
+			user-select: none;
+			margin-left: 6px;
+		}
+		.auto-notification-raw summary::-webkit-details-marker { display: none; }
+		.auto-notification-raw summary::marker { content: ""; }
+		.auto-notification-raw summary::before {
+			content: "▸ ";
+			font-size: 9px;
+			vertical-align: 1px;
+		}
+		.auto-notification-raw[open] summary::before {
+			content: "▾ ";
+		}
+		.auto-notification-raw pre {
+			display: block;
+			margin: 4px 0 0;
+			padding: 6px 8px;
+			background: #f3eefa;
+			border-radius: 4px;
+			white-space: pre-wrap;
+			word-break: break-word;
+			color: #4c3d6e;
+			font-size: 11px;
+		}
+
+		.workflow-card {
+			max-width: 85%;
+			padding: 10px 12px;
+			border-radius: 12px;
+			border-bottom-left-radius: 4px;
+			background: #f3f5fb;
+			border: 1px solid var(--border);
+			font-size: 13px;
+			line-height: 1.45;
+			color: var(--text);
+		}
+
+		.workflow-card.terminal-Completed { background: #e8f5ec; border-color: #b7dcc2; }
+		.workflow-card.terminal-Failed { background: #fbe9e9; border-color: #e7b2b2; }
+		.workflow-card.terminal-Terminated,
+		.workflow-card.terminal-Canceled { background: #f1eee4; border-color: #ddd4b6; }
+
+		.workflow-card-header {
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			font-weight: 600;
+			margin-bottom: 4px;
+		}
+
+		.workflow-card-chip {
+			display: inline-flex;
+			align-items: center;
+			gap: 6px;
+			padding: 2px 8px;
+			border-radius: 999px;
+			font-size: 11px;
+			font-weight: 600;
+			background: #dbe4f6;
+			color: #1e3a8a;
+		}
+
+		.workflow-card.terminal-Completed .workflow-card-chip { background: #c6e7d1; color: #14532d; }
+		.workflow-card.terminal-Failed .workflow-card-chip { background: #f3c6c6; color: #7f1d1d; }
+		.workflow-card.terminal-Terminated .workflow-card-chip,
+		.workflow-card.terminal-Canceled .workflow-card-chip { background: #e3dabb; color: #5b4a1a; }
+
+		.workflow-card-spinner {
+			width: 10px;
+			height: 10px;
+			border: 2px solid currentColor;
+			border-right-color: transparent;
+			border-radius: 50%;
+			animation: wf-spin 0.9s linear infinite;
+		}
+
+		@keyframes wf-spin { to { transform: rotate(360deg); } }
+
+		.workflow-card-id {
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+			font-size: 11px;
+			color: var(--muted);
+			font-weight: 400;
+		}
+
+		.workflow-card-custom-status {
+			color: var(--muted);
+			margin-bottom: 4px;
+		}
+
+		.workflow-card-output {
+			margin: 6px 0 0 0;
+			padding: 8px;
+			background: #fff;
+			border: 1px solid var(--border);
+			border-radius: 8px;
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+			font-size: 11px;
+			white-space: pre-wrap;
+			overflow-x: auto;
+			max-height: 240px;
+		}
+
+		.workflow-card-tasks {
+			list-style: none;
+			margin: 6px 0 0 0;
+			padding: 0;
+			display: flex;
+			flex-direction: column;
+			gap: 4px;
+		}
+
+		.workflow-card-tasks li {
+			display: flex;
+			align-items: baseline;
+			gap: 8px;
+			padding: 4px 8px;
+			background: #fff;
+			border: 1px solid var(--border);
+			border-radius: 6px;
+			font-size: 12px;
+		}
+
+		.workflow-task-id {
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+			font-size: 11px;
+			font-weight: 600;
+			color: #1e3a8a;
+			flex: 0 0 auto;
+		}
+
+		.workflow-task-result {
+			color: var(--text);
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+			font-size: 11px;
+			overflow-wrap: anywhere;
+		}
+
 		.meta {
 			margin-top: 4px;
 			font-size: 11px;
@@ -284,6 +461,39 @@
 		}
 
 		.status.error { color: var(--danger); }
+
+		.session-bar {
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			padding: 0 12px 10px 12px;
+			font-size: 12px;
+			color: var(--muted);
+		}
+
+		.session-bar[hidden] { display: none; }
+
+		.session-bar-label { flex: none; }
+
+		.session-id-value {
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+			font-size: 12px;
+			color: var(--text);
+			background: #f3f4f6;
+			border: 1px solid var(--border);
+			border-radius: 6px;
+			padding: 2px 6px;
+			max-width: 260px;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		.session-copy-btn {
+			flex: none;
+			padding: 3px 8px;
+			font-size: 12px;
+		}
 
 		.typing {
 			display: inline-flex;
@@ -357,6 +567,50 @@
 		}
 
 		input:focus { border-color: #93c5fd; }
+		input.input-error { border-color: var(--danger); }
+
+		.field-error {
+			margin: 0;
+			font-size: 12px;
+			color: var(--danger);
+		}
+
+		.field-error[hidden] { display: none; }
+
+		.recent-sessions {
+			display: grid;
+			gap: 6px;
+		}
+
+		.recent-sessions[hidden] { display: none; }
+
+		.recent-sessions select {
+			width: 100%;
+			border: 1px solid var(--border);
+			border-radius: 10px;
+			padding: 9px 10px;
+			font-size: 14px;
+			background: #fff;
+			outline: none;
+		}
+
+		.recent-sessions select:focus { border-color: #93c5fd; }
+
+		.recent-actions {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 8px;
+		}
+
+		.recent-actions button { padding: 5px 10px; font-size: 12px; }
+
+		.recent-empty {
+			margin: 0;
+			font-size: 12px;
+			color: var(--muted);
+		}
+
+		.recent-empty[hidden] { display: none; }
 
 		.settings-actions {
 			display: flex;
@@ -465,6 +719,11 @@
 		</form>
 
 		<div id="status" class="status"></div>
+		<div id="sessionBar" class="session-bar" hidden>
+			<span class="session-bar-label">Session</span>
+			<code id="sessionIdValue" class="session-id-value" title="Active session ID"></code>
+			<button id="copySessionBtn" class="session-copy-btn" type="button" aria-label="Copy session ID">Copy</button>
+		</div>
 	</main>
 
 	<div id="settingsBackdrop" class="settings-backdrop" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
@@ -478,6 +737,23 @@
 			<div class="field">
 				<label for="keyInput">Function key</label>
 				<input id="keyInput" type="password" placeholder="Enter your key (optional on localhost)" />
+			</div>
+			<div class="field">
+				<label for="sessionIdInput">Session ID (optional)</label>
+				<input id="sessionIdInput" type="text" placeholder="Paste an ID to resume a conversation" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+				<p id="sessionIdError" class="field-error" hidden></p>
+			</div>
+			<div class="field" id="recentSessionsField">
+				<label for="recentSessionsSelect">Recent sessions</label>
+				<div class="recent-sessions" id="recentSessionsControls" hidden>
+					<select id="recentSessionsSelect" aria-label="Recent sessions"></select>
+					<div class="recent-actions">
+						<button id="recentRenameBtn" type="button">Rename</button>
+						<button id="recentRemoveBtn" type="button">Remove</button>
+						<button id="recentClearBtn" type="button">Clear recent</button>
+					</div>
+				</div>
+				<p id="recentEmpty" class="recent-empty">No recent sessions.</p>
 			</div>
 			<div class="settings-actions">
 				<button id="cancelSettingsBtn" type="button">Cancel</button>
@@ -499,7 +775,10 @@
 	<script>
 		const STORAGE_KEYS = {
 			baseUrl: "chat.baseUrl",
-			key: "chat.key"
+			key: "chat.key",
+			sessionId: "chat.sessionId",
+			sessionIdSource: "chat.sessionIdSource",
+			recentSessions: "chat.recentSessions"
 		};
 
 		const chatEl = document.getElementById("chat");
@@ -509,10 +788,22 @@
 		const statusEl = document.getElementById("status");
 		const newSessionBtnEl = document.getElementById("newSessionBtn");
 		const settingsBtnEl = document.getElementById("settingsBtn");
+		const sessionBarEl = document.getElementById("sessionBar");
+		const sessionIdValueEl = document.getElementById("sessionIdValue");
+		const copySessionBtnEl = document.getElementById("copySessionBtn");
 
 		const settingsBackdropEl = document.getElementById("settingsBackdrop");
 		const baseUrlInputEl = document.getElementById("baseUrlInput");
 		const keyInputEl = document.getElementById("keyInput");
+		const sessionIdInputEl = document.getElementById("sessionIdInput");
+		const sessionIdErrorEl = document.getElementById("sessionIdError");
+		const recentSessionsFieldEl = document.getElementById("recentSessionsField");
+		const recentSessionsControlsEl = document.getElementById("recentSessionsControls");
+		const recentSessionsSelectEl = document.getElementById("recentSessionsSelect");
+		const recentRenameBtnEl = document.getElementById("recentRenameBtn");
+		const recentRemoveBtnEl = document.getElementById("recentRemoveBtn");
+		const recentClearBtnEl = document.getElementById("recentClearBtn");
+		const recentEmptyEl = document.getElementById("recentEmpty");
 		const saveSettingsBtnEl = document.getElementById("saveSettingsBtn");
 		const cancelSettingsBtnEl = document.getElementById("cancelSettingsBtn");
 		const detailsBackdropEl = document.getElementById("detailsBackdrop");
@@ -553,6 +844,934 @@
 			loadingTimer: null,
 			loadingSeconds: 0
 		};
+
+		const TERMINAL_WORKFLOW_STATES = new Set(["Completed", "Failed", "Canceled", "Terminated"]);
+		const WORKFLOW_POLL_INTERVAL_MS = 3000;
+		const WORKFLOW_POLL_FAILURE_WARN_AT = 3;
+		const workflowCards = new Map();
+		let workflowPollTimer = null;
+		let workflowPollInFlight = false;
+		let workflowProbeInFlight = false;
+		let workflowPollFailureCount = 0;
+		// "unknown" until probed; once "unsupported" we never poll, persist, or
+		// claim reconnect for this base URL. Set by either the explicit probe
+		// at boot or the first 404/501 from the polling endpoint.
+		let workflowsCapability = "unknown";
+		// Bumped whenever the app or active session identity changes. Workflow
+		// polls capture it and discard responses after a switch.
+		let workflowEpoch = 0;
+
+		// --- Workflow auto-notification (terminal-state -> synthetic
+		// `<workflow-notification>` user message into the chat). The
+		// queue carries enough identity for drain-time checks to drop
+		// items belonging to a session/app the user has since moved away
+		// from. The drain is single-flight and waits for `state.loading`
+		// to fall to false so it never races the user's own turn or a
+		// previous auto-notification still streaming.
+		const pendingCompletionQueue = [];   // Array<{epoch, baseUrl, sessionId, workflowId, status}>
+		let completionDrainInFlight = false;
+		// Restored localStorage value held separately from state.sessionId
+		// so it doesn't ride along on chat requests for non-workflow apps
+		// (where the probe will eventually return 404 and we drop it). Only
+		// promoted into state.sessionId after the probe confirms support.
+		let restoredSessionIdCandidate = null;
+		// Tracks whether the current state.sessionId came from a fresh
+		// chatstream `session` event vs. being restored from localStorage.
+		// The "Reconnected" greeting / persistence guards branch on this.
+		let sessionWasFromServer = false;
+		// Set when the user supplies/resumes a session id via Settings.
+		// Explicit ids are authoritative: persisted to localStorage
+		// unconditionally and restored on reload without waiting for the
+		// workflow probe, so resume works for plain (non-workflow) apps too.
+		let sessionIdIsExplicit = false;
+		// The session id prefilled into Settings the last time it opened,
+		// used on save to tell an untouched field from a real resume.
+		let settingsSessionIdPrefill = "";
+		let restoredGreetingContent = null;
+		// The most recent user message text, captured on submit so the
+		// server-assigned `session` SSE event can title a fresh id after
+		// the fact (the id doesn't exist yet when the message is sent).
+		let lastSentUserMessage = "";
+		// Every history request captures this generation. Any newer replay or
+		// chat activity increments it so a delayed response cannot replace
+		// bubbles rendered after that request began.
+		let historyReplayGeneration = 0;
+		let historyReplayInFlight = false;
+
+		// Mirror the server-side rule enforced by _validate_session_id in
+		// runner.py (SESSION_ID_PATTERN in _session_id.py) so the UI never
+		// sends an id the server would reject with a 400.
+		const SESSION_ID_MAX_LENGTH = 128;
+		const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+
+		function isValidSessionId(value) {
+			return typeof value === "string" && SESSION_ID_PATTERN.test(value);
+		}
+
+		function buildAuthQuery() {
+			return state.key ? `?code=${encodeURIComponent(state.key)}` : "";
+		}
+
+		function workflowsAreSupported() {
+			return workflowsCapability === "supported";
+		}
+
+		function markWorkflowsUnsupported() {
+			if (workflowsCapability === "unsupported") return;
+			workflowsCapability = "unsupported";
+			stopWorkflowPolling();
+			// An explicitly-resumed id stays active even without workflow
+			// support — plain chat apps honor x-ms-session-id too — so keep
+			// it and its stored copy intact.
+			if (sessionIdIsExplicit) return;
+			restoredSessionIdCandidate = null;
+			// Drop any speculatively-restored session id from storage so we
+			// don't claim reconnect on the next reload of an app that has
+			// no workflow endpoint.
+			try { localStorage.removeItem(storageKeyForSessionId()); } catch (_e) {}
+		}
+
+		function markWorkflowsSupported() {
+			if (workflowsCapability === "supported") return;
+			workflowsCapability = "supported";
+			// Promote the restored candidate (if any) only now that we
+			// know it's safe to attribute to this app.
+			if (!state.sessionId && restoredSessionIdCandidate) {
+				state.sessionId = restoredSessionIdCandidate;
+				sessionWasFromServer = false;
+			}
+			restoredSessionIdCandidate = null;
+			persistSessionId();
+			updateSessionBar();
+			if (state.sessionId) recordSessionActivity(state.sessionId, "");
+			startWorkflowPolling();
+		}
+
+		// Cheap non-cryptographic hash — this is just a namespace.
+		function hashString(str) {
+			let h = 0;
+			for (let i = 0; i < str.length; i++) {
+				h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+			}
+			return (h >>> 0).toString(36);
+		}
+
+		// Namespace localStorage by BOTH the target base URL and the specific
+		// agent path (e.g. /agents/foo), so multiple deployments — and multiple
+		// agents served from the same host — don't collide on chat.sessionId,
+		// its source marker, or the Recent Sessions list.
+		function storageNamespace() {
+			if (!state.baseUrl) return "default";
+			return hashString(`${state.baseUrl}|${getApiBasePath()}`);
+		}
+
+		function storageKeyForSessionId() {
+			const ns = storageNamespace();
+			return `${STORAGE_KEYS.sessionId}.${ns}`;
+		}
+
+		function storageKeyForSessionIdSource() {
+			const ns = storageNamespace();
+			return `${STORAGE_KEYS.sessionIdSource}.${ns}`;
+		}
+
+		// ---- Recent sessions (per-{baseUrl, agent} MRU list) -------------
+		// A purely client-side convenience: the runtime has no session
+		// directory or title concept, so this list lives only in this
+		// browser's localStorage, namespaced like the active-id keys above.
+		const RECENT_SESSIONS_MAX = 8;
+		const SESSION_TITLE_MAX_LENGTH = 40;
+		// Defensive cap so a corrupt/oversized value can't be parsed.
+		const RECENT_SESSIONS_MAX_BYTES = 50000;
+
+		function storageKeyForRecentSessions() {
+			const ns = storageNamespace();
+			return `${STORAGE_KEYS.recentSessions}.${ns}`;
+		}
+
+		function collapseWhitespace(text) {
+			return String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+		}
+
+		function deriveSessionTitle(text) {
+			const clean = collapseWhitespace(text);
+			if (!clean) return "";
+			if (clean.length <= SESSION_TITLE_MAX_LENGTH) return clean;
+			return `${clean.slice(0, SESSION_TITLE_MAX_LENGTH - 1).trimEnd()}\u2026`;
+		}
+
+		function shortSessionId(id) {
+			return id.length > 8 ? `${id.slice(0, 8)}\u2026` : id;
+		}
+
+		function recentSessionLabel(entry) {
+			const title = entry && typeof entry.title === "string" ? entry.title : "";
+			return title ? `${title} \u2014 ${shortSessionId(entry.id)}` : shortSessionId(entry.id);
+		}
+
+		// Read + sanitize the MRU list. Never throws: malformed, oversized,
+		// or wrong-shape data yields an empty list. Every id must pass the
+		// same validator we use before an id can enter state.
+		function readRecentSessions() {
+			try {
+				const raw = localStorage.getItem(storageKeyForRecentSessions());
+				if (!raw || raw.length > RECENT_SESSIONS_MAX_BYTES) return [];
+				const parsed = JSON.parse(raw);
+				if (!Array.isArray(parsed)) return [];
+				const seen = new Set();
+				const list = [];
+				for (const item of parsed) {
+					if (!item || typeof item !== "object") continue;
+					const id = item.id;
+					if (!isValidSessionId(id) || seen.has(id)) continue;
+					seen.add(id);
+					list.push({
+						id,
+						title: typeof item.title === "string" ? item.title : "",
+						lastUsed: Number.isFinite(item.lastUsed) ? item.lastUsed : 0
+					});
+				}
+				list.sort((a, b) => b.lastUsed - a.lastUsed);
+				return list.slice(0, RECENT_SESSIONS_MAX);
+			} catch (_e) {
+				return [];
+			}
+		}
+
+		function writeRecentSessions(list) {
+			try {
+				const trimmed = list.slice(0, RECENT_SESSIONS_MAX);
+				localStorage.setItem(storageKeyForRecentSessions(), JSON.stringify(trimmed));
+			} catch (_e) {
+				// Storage full / disabled — the MRU list is best-effort.
+			}
+		}
+
+		// Record that `id` is active or just took a turn. Local only: this
+		// never promotes an id into state or bypasses the workflow probe.
+		// Titles are set from the first message and never overwritten, so
+		// an explicit rename sticks.
+		function recordSessionActivity(id, messageText) {
+			if (!isValidSessionId(id)) return;
+			const list = readRecentSessions();
+			const now = Date.now();
+			const idx = list.findIndex((e) => e.id === id);
+			if (idx === -1) {
+				list.unshift({ id, title: deriveSessionTitle(messageText), lastUsed: now });
+			} else {
+				const entry = list[idx];
+				if (!entry.title) {
+					const title = deriveSessionTitle(messageText);
+					if (title) entry.title = title;
+				}
+				entry.lastUsed = now;
+			}
+			list.sort((a, b) => b.lastUsed - a.lastUsed);
+			writeRecentSessions(list);
+			renderRecentSessions();
+		}
+
+		function renameRecentSession(id, title) {
+			const list = readRecentSessions();
+			const entry = list.find((e) => e.id === id);
+			if (!entry) return;
+			entry.title = collapseWhitespace(title).slice(0, 80);
+			writeRecentSessions(list);
+		}
+
+		function removeRecentSession(id) {
+			writeRecentSessions(readRecentSessions().filter((e) => e.id !== id));
+		}
+
+		function clearRecentSessions() {
+			try {
+				localStorage.removeItem(storageKeyForRecentSessions());
+			} catch (_e) {}
+		}
+
+		// One-time seed: if the active-id keys exist from before this list
+		// was introduced (or from Phase 1), surface that id in the list so
+		// it isn't invisible. Leaves the active-id keys untouched.
+		function migrateRecentSessions() {
+			try {
+				if (localStorage.getItem(storageKeyForRecentSessions()) != null) return;
+				const stored = (localStorage.getItem(storageKeyForSessionId()) || "").trim();
+				if (isValidSessionId(stored)) {
+					writeRecentSessions([{ id: stored, title: "", lastUsed: Date.now() }]);
+				}
+			} catch (_e) {}
+		}
+
+		// Rebuild the Recent-sessions <select>. `selectedId` keeps a given
+		// entry highlighted (used after rename); otherwise it resets to the
+		// placeholder so a re-open doesn't silently re-arm a resume.
+		function renderRecentSessions(selectedId = "") {
+			if (!recentSessionsSelectEl) return;
+			const list = readRecentSessions();
+			recentSessionsSelectEl.textContent = "";
+			const placeholder = document.createElement("option");
+			placeholder.value = "";
+			placeholder.textContent = "Select a recent session\u2026";
+			recentSessionsSelectEl.appendChild(placeholder);
+			for (const entry of list) {
+				const option = document.createElement("option");
+				option.value = entry.id;
+				option.textContent = recentSessionLabel(entry);
+				recentSessionsSelectEl.appendChild(option);
+			}
+			const hasEntries = list.length > 0;
+			if (recentSessionsControlsEl) recentSessionsControlsEl.hidden = !hasEntries;
+			if (recentEmptyEl) recentEmptyEl.hidden = hasEntries;
+			recentSessionsSelectEl.value = selectedId && list.some((e) => e.id === selectedId)
+				? selectedId
+				: "";
+		}
+
+		function loadRestoredSessionCandidate() {
+			// Called after BOTH loadSettings() and loadSettingsFromHash()
+			// have finalized state.baseUrl, so the namespace key matches
+			// the app we're actually about to talk to.
+			try {
+				const stored = (localStorage.getItem(storageKeyForSessionId()) || "").trim();
+				const source = localStorage.getItem(storageKeyForSessionIdSource());
+				if (stored && source === "explicit" && isValidSessionId(stored)) {
+					// A user-supplied id is authoritative and durable for
+					// every app type, so activate it immediately instead of
+					// waiting for the workflow probe to promote a candidate.
+					state.sessionId = stored;
+					sessionIdIsExplicit = true;
+					sessionWasFromServer = false;
+					restoredSessionIdCandidate = null;
+					recordSessionActivity(stored, "");
+				} else {
+					restoredSessionIdCandidate = stored && isValidSessionId(stored) ? stored : null;
+				}
+			} catch (_e) {
+				restoredSessionIdCandidate = null;
+			}
+			updateSessionBar();
+		}
+
+		// Reflect the active session id in the always-visible bar under the
+		// status line so users can see and copy the id at any time.
+		function updateSessionBar() {
+			if (!sessionBarEl || !sessionIdValueEl) return;
+			if (state.sessionId) {
+				sessionIdValueEl.textContent = state.sessionId;
+				sessionIdValueEl.title = state.sessionId;
+				sessionBarEl.hidden = false;
+			} else {
+				sessionIdValueEl.textContent = "";
+				sessionBarEl.hidden = true;
+			}
+		}
+
+		async function copySessionId() {
+			if (!state.sessionId) return;
+			const id = state.sessionId;
+			let copied = false;
+			try {
+				if (navigator.clipboard && navigator.clipboard.writeText) {
+					await navigator.clipboard.writeText(id);
+					copied = true;
+				}
+			} catch (_e) {
+				copied = false;
+			}
+			if (!copied) {
+				// Fallback for non-secure contexts / older browsers where
+				// the async clipboard API is unavailable.
+				try {
+					const ta = document.createElement("textarea");
+					ta.value = id;
+					ta.setAttribute("readonly", "");
+					ta.style.position = "absolute";
+					ta.style.left = "-9999px";
+					document.body.appendChild(ta);
+					ta.select();
+					copied = document.execCommand("copy");
+					document.body.removeChild(ta);
+				} catch (_e) {
+					copied = false;
+				}
+			}
+			setStatus(
+				copied
+					? "Session ID copied to clipboard."
+					: "Copy failed — select the ID and copy it manually.",
+				!copied
+			);
+		}
+
+		// Per-{baseUrl, sessionId} record of workflow ids we've already
+		// notified the agent about. Persisted in sessionStorage so a page
+		// refresh after a workflow completed (and the agent already
+		// summarized) does not re-fire the synthetic notification turn.
+		// `notifiedWorkflowsStorageKey()` returns null until both
+		// state.baseUrl and state.sessionId are set; callers tolerate that
+		// (no-op load returns empty, no-op persist drops the write).
+		function notifiedWorkflowsStorageKey() {
+			if (!state.baseUrl || !state.sessionId) return null;
+			return `chat.notifiedWorkflows.${storageNamespace()}.${state.sessionId}`;
+		}
+
+		function loadNotifiedWorkflowIds() {
+			const key = notifiedWorkflowsStorageKey();
+			if (!key) return new Set();
+			try {
+				const raw = sessionStorage.getItem(key);
+				if (!raw) return new Set();
+				const arr = JSON.parse(raw);
+				return new Set(Array.isArray(arr) ? arr : []);
+			} catch (_e) {
+				return new Set();
+			}
+		}
+
+		function persistNotifiedWorkflowId(workflowId) {
+			const key = notifiedWorkflowsStorageKey();
+			if (!key) return;
+			try {
+				const set = loadNotifiedWorkflowIds();
+				set.add(workflowId);
+				// Cap to bound storage growth across long-lived sessions.
+				const arr = Array.from(set).slice(-200);
+				sessionStorage.setItem(key, JSON.stringify(arr));
+			} catch (_e) { /* quota exceeded — non-fatal */ }
+		}
+
+		function truncateId(id) {
+			if (!id) return "";
+			return id.length > 14 ? `${id.slice(0, 6)}…${id.slice(-4)}` : id;
+		}
+
+		function renderTaskResults(results) {
+			if (!results || typeof results !== "object") return "";
+			const entries = Object.entries(results);
+			if (!entries.length) return "";
+			const rows = entries.map(([taskId, result]) => {
+				const summary = typeof result === "string"
+					? result
+					: JSON.stringify(result);
+				const truncated = summary.length > 120 ? `${summary.slice(0, 117)}…` : summary;
+				return `<li><span class="workflow-task-id">${escapeHtml(taskId)}</span> <span class="workflow-task-result">${escapeHtml(truncated)}</span></li>`;
+			}).join("");
+			return `<ul class="workflow-card-tasks">${rows}</ul>`;
+		}
+
+		// Format a workflow's `custom_status` for the card's status line.
+		// Two shapes are accepted during the experimental compatibility
+		// window (see docs/workflows.md "Status envelope"):
+		//   - schema version 1: a legacy free-form string, returned verbatim.
+		//   - schema version 2: a structured snapshot object rendered as a
+		//     concise counts + per-node state summary.
+		// Returns a plain string (never HTML). The caller is responsible for
+		// escaping it. Never throws: unknown/object shapes degrade to JSON or
+		// an empty string so a future or malformed status can't break polling.
+		function formatWorkflowStatus(customStatus) {
+			// Legacy v1 static plans keep returning a free-form string; pass
+			// it through unchanged so their cards render exactly as before.
+			if (typeof customStatus === "string") return customStatus;
+			if (customStatus === null || typeof customStatus !== "object") return "";
+			try {
+				if (customStatus.schema_version === 2) {
+					return formatDynamicWorkflowStatus(customStatus);
+				}
+				// Unknown object shape (e.g. a future schema_version): degrade
+				// to compact JSON rather than the "[object Object]" you'd get
+				// from String(...).
+				return JSON.stringify(customStatus);
+			} catch (_e) {
+				// A formatter or serialization error must never bubble up into
+				// the poll loop; fall back to empty.
+				return "";
+			}
+		}
+
+		// Render a schema_version=2 structured status object into one concise
+		// line: aggregate counts, then a per-logical-node state list. For
+		// `for_each` nodes it also surfaces the expanded instance progress so
+		// expanded / running / skipped / aggregated states are all visible.
+		function formatDynamicWorkflowStatus(status) {
+			const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+			const counts = (status.counts && typeof status.counts === "object") ? status.counts : {};
+			const completed = num(counts.completed);
+			const materialized = num(counts.materialized_total);
+			const logicalTotal = num(counts.logical_total);
+			const running = num(counts.running);
+			const skipped = num(counts.skipped);
+			// Prefer the materialized denominator (it includes expanded
+			// instances); fall back to the logical count for plans that
+			// never expanded a collection.
+			const denom = materialized || logicalTotal;
+			const parts = [`${completed}/${denom} done`];
+			if (running) parts.push(`${running} running`);
+			if (skipped) parts.push(`${skipped} skipped`);
+			let summary = parts.join(" · ");
+
+			const nodes = (status.nodes && typeof status.nodes === "object") ? status.nodes : null;
+			if (nodes) {
+				const nodeBits = [];
+				for (const [nodeId, node] of Object.entries(nodes)) {
+					if (!node || typeof node !== "object") continue;
+					const state = typeof node.state === "string" ? node.state : "unknown";
+					let bit = `${nodeId}: ${state}`;
+					if (typeof node.expanded_count === "number") {
+						const insts = (node.instances && typeof node.instances === "object")
+							? Object.values(node.instances)
+							: [];
+						const done = insts.filter(
+							(i) => i && typeof i === "object" && i.state === "completed"
+						).length;
+						bit += ` (${done}/${node.expanded_count})`;
+					}
+					nodeBits.push(bit);
+				}
+				if (nodeBits.length) summary += ` — ${nodeBits.join(", ")}`;
+			}
+			return summary;
+		}
+
+		function renderWorkflowCard(entry, envelope) {
+			const status = String(envelope.runtime_status || "Pending");
+			const terminal = TERMINAL_WORKFLOW_STATES.has(status);
+			const card = entry.card;
+
+			// Whitelist class suffixes so a stray runtime_status from a
+			// future Durable version can't poison our class name.
+			const knownStatuses = new Set([
+				"Pending", "Running", "Completed", "Failed",
+				"Canceled", "Terminated", "ContinuedAsNew", "Suspended"
+			]);
+			const statusClass = knownStatuses.has(status) ? status : "Unknown";
+			card.className = `workflow-card terminal-${statusClass}`;
+
+			const custom = formatWorkflowStatus(envelope.custom_status);
+			const taskResults = envelope.output && typeof envelope.output === "object"
+				? envelope.output.results
+				: null;
+			const tasksHtml = renderTaskResults(taskResults);
+			const rawOutputText = !tasksHtml && envelope.output !== undefined && envelope.output !== null
+				? JSON.stringify(envelope.output, null, 2)
+				: "";
+
+			const chipIcon = terminal
+				? (status === "Completed" ? "✓" : status === "Failed" ? "✕" : "⏹")
+				: '<span class="workflow-card-spinner" aria-hidden="true"></span>';
+
+			card.innerHTML = `
+				<div class="workflow-card-header">
+					<span class="workflow-card-chip">${chipIcon} ${escapeHtml(status)}</span>
+					<span>Workflow</span>
+					<span class="workflow-card-id">${escapeHtml(truncateId(envelope.workflow_id))}</span>
+				</div>
+				${custom ? `<div class="workflow-card-custom-status">${escapeHtml(custom)}</div>` : ""}
+				${tasksHtml}
+				${rawOutputText ? `<pre class="workflow-card-output">${escapeHtml(rawOutputText)}</pre>` : ""}
+			`;
+
+			entry.status = status;
+			entry.terminal = terminal;
+		}
+
+		function upsertWorkflowCard(envelope) {
+			const wid = envelope.workflow_id;
+			if (!wid) return;
+			let entry = workflowCards.get(wid);
+			if (!entry) {
+				const wrap = document.createElement("div");
+				wrap.className = "bubble-wrap copilot";
+				const card = document.createElement("div");
+				card.className = "workflow-card";
+				card.setAttribute("role", "status");
+				card.setAttribute("aria-live", "polite");
+				wrap.appendChild(card);
+				chatEl.appendChild(wrap);
+				entry = { wrap, card, status: null, terminal: false, lastUpdated: null, notifyState: "unseen" };
+				workflowCards.set(wid, entry);
+				// If this workflow is in our persisted notified-set
+				// (e.g. user refreshed after the summary turn already
+				// landed), pre-mark as 'sent' so we don't re-fire the
+				// notification. A fast workflow that started+finished
+				// within one 3s poll will NOT be in the set yet, so it
+				// still gets a notification — that's the case we care
+				// about.
+				if (loadNotifiedWorkflowIds().has(wid)) {
+					entry.notifyState = "sent";
+				}
+			}
+			const status = String(envelope.runtime_status || "Pending");
+			const terminal = TERMINAL_WORKFLOW_STATES.has(status);
+			// Idempotent render: skip when nothing visibly changed AND
+			// we've already settled the notify state for this entry.
+			if (
+				entry.terminal &&
+				entry.lastUpdated === envelope.last_updated_time &&
+				entry.notifyState !== "unseen"
+			) {
+				return;
+			}
+			entry.lastUpdated = envelope.last_updated_time;
+			renderWorkflowCard(entry, envelope);
+
+			// Auto-notification: enqueue once per workflow, the first time
+			// we see it in a terminal state. The persisted notified-set
+			// (above) guards against re-firing on page refresh; the
+			// `unseen` -> `queued` transition guards against re-enqueueing
+			// across multiple poll cycles within a single page lifetime.
+			if (terminal && entry.notifyState === "unseen") {
+				entry.notifyState = "queued";
+				pendingCompletionQueue.push({
+					epoch: workflowEpoch,
+					baseUrl: state.baseUrl,
+					sessionId: state.sessionId,
+					workflowId: wid,
+					status
+				});
+				drainCompletionQueueIfIdle();
+			}
+		}
+
+		function workflowIdentityIsCurrent(epoch, baseUrl, sessionId) {
+			return epoch === workflowEpoch
+				&& baseUrl === state.baseUrl
+				&& sessionId === state.sessionId;
+		}
+
+		function resetWorkflowStateForSessionChange() {
+			workflowEpoch += 1;
+			stopWorkflowPolling();
+			resetWorkflowCards();
+			workflowPollFailureCount = 0;
+		}
+
+		async function pollWorkflowsOnce() {
+			if (workflowPollInFlight) return;
+			if (workflowsCapability !== "supported") return;
+			if (!state.sessionId || !state.baseUrl) return;
+			if (document.visibilityState !== "visible") return;
+			workflowPollInFlight = true;
+			const epoch = workflowEpoch;
+			const baseUrl = state.baseUrl;
+			const sessionId = state.sessionId;
+			try {
+				const headers = { "x-ms-session-id": sessionId };
+				const resp = await fetch(`${baseUrl}${getApiBasePath()}/workflows${buildAuthQuery()}`, { headers });
+				// Discard stale responses from a prior app or session.
+				if (!workflowIdentityIsCurrent(epoch, baseUrl, sessionId)) return;
+				// 404 / 405 / 501 → endpoint genuinely not present. Stop forever.
+				if (resp.status === 404 || resp.status === 405 || resp.status === 501) {
+					markWorkflowsUnsupported();
+					return;
+				}
+				if (!resp.ok) {
+					workflowPollFailureCount += 1;
+					if (workflowPollFailureCount === WORKFLOW_POLL_FAILURE_WARN_AT) {
+						console.warn(`workflow polling: ${workflowPollFailureCount} consecutive non-OK responses (last status ${resp.status})`);
+					}
+					return;
+				}
+				workflowPollFailureCount = 0;
+				const body = await resp.json();
+				if (!workflowIdentityIsCurrent(epoch, baseUrl, sessionId)) return;
+				const workflows = Array.isArray(body?.workflows) ? body.workflows : [];
+				for (const wf of workflows) {
+					upsertWorkflowCard(wf);
+				}
+			} catch (err) {
+				if (!workflowIdentityIsCurrent(epoch, baseUrl, sessionId)) return;
+				workflowPollFailureCount += 1;
+				if (workflowPollFailureCount === WORKFLOW_POLL_FAILURE_WARN_AT) {
+					console.warn(`workflow polling: ${workflowPollFailureCount} consecutive failures`, err);
+				}
+			} finally {
+				workflowPollInFlight = false;
+			}
+		}
+
+		function startWorkflowPolling() {
+			// Hard gates: don't run a useless timer for non-workflow apps,
+			// don't run before capability is confirmed, don't run without a
+			// session, and don't run on a hidden tab.
+			if (workflowsCapability !== "supported") return;
+			if (!state.sessionId) return;
+			if (historyReplayInFlight) return;
+			if (workflowPollTimer !== null) return;
+			if (document.visibilityState !== "visible") return;
+			pollWorkflowsOnce();
+			workflowPollTimer = setInterval(pollWorkflowsOnce, WORKFLOW_POLL_INTERVAL_MS);
+		}
+
+		function stopWorkflowPolling() {
+			if (workflowPollTimer !== null) {
+				clearInterval(workflowPollTimer);
+				workflowPollTimer = null;
+			}
+		}
+
+		function resetWorkflowCards() {
+			// Remove DOM nodes alongside the map entries; a bare clear()
+			// would leave stale workflow cards visible after a session
+			// reset / base-URL change.
+			for (const entry of workflowCards.values()) {
+				if (entry.wrap && entry.wrap.parentNode) {
+					entry.wrap.parentNode.removeChild(entry.wrap);
+				}
+			}
+			workflowCards.clear();
+			// Drop any queued auto-notifications. If a notification was
+			// in-flight, the drain function's epoch/identity guards
+			// already prevent it from mutating the new session's state.
+			pendingCompletionQueue.length = 0;
+			completionDrainInFlight = false;
+		}
+
+		// --- Auto-notification: drain & send ---
+		// When a workflow we're tracking transitions to a terminal state,
+		// `upsertWorkflowCard` enqueues a notification record.
+		// `drainCompletionQueueIfIdle` waits for the chat to be idle
+		// (no in-flight user turn or earlier auto-notification turn) and
+		// then synthesizes a `<workflow-notification>` user turn against
+		// the current agent chatstream endpoint, batching all currently-queued completions
+		// for the active session into one prompt. Identity (epoch,
+		// baseUrl, sessionId) is checked at drain time so a queued item
+		// from a previous session/app is dropped silently — never sent.
+
+		function dropStaleQueueEntries() {
+			for (let i = pendingCompletionQueue.length - 1; i >= 0; i--) {
+				const it = pendingCompletionQueue[i];
+				if (
+					it.epoch !== workflowEpoch ||
+					it.baseUrl !== state.baseUrl ||
+					it.sessionId !== state.sessionId
+				) {
+					pendingCompletionQueue.splice(i, 1);
+				}
+			}
+		}
+
+		function drainCompletionQueueIfIdle() {
+			if (completionDrainInFlight) return;
+			if (state.loading) return;
+			if (!state.sessionId || !state.baseUrl) return;
+			if (workflowsCapability !== "supported") return;
+			dropStaleQueueEntries();
+			if (pendingCompletionQueue.length === 0) return;
+
+			// Batch all currently-queued items into one synthetic turn.
+			const batch = pendingCompletionQueue.splice(0, pendingCompletionQueue.length);
+			for (const it of batch) {
+				const entry = workflowCards.get(it.workflowId);
+				if (entry) entry.notifyState = "inflight";
+			}
+			completionDrainInFlight = true;
+			sendCompletionNotification(batch).finally(() => {
+				completionDrainInFlight = false;
+				// If more landed during the turn, drain them too.
+				drainCompletionQueueIfIdle();
+			});
+		}
+
+		function buildCompletionNotificationPrompt(batch) {
+			// Informational, not instructional. The system-prompt addendum
+			// owns the contract (summary-only, race handling, etc.). Per
+			// turn we just hand the model the data — matching the claurst
+			// project's `<task-notification>` shape
+			// (https://github.com/Kuberwastaken/claurst) — and one short
+			// reminder of how to fetch the result.
+			const envelopes = batch.map(it => (
+				"<workflow-notification>\n" +
+				`  <workflow-id>${escapeXml(it.workflowId)}</workflow-id>\n` +
+				`  <status>${escapeXml(it.status)}</status>\n` +
+				`  <summary>Workflow ${escapeXml(it.workflowId)} finished with status ${escapeXml(it.status)}.</summary>\n` +
+				"</workflow-notification>"
+			));
+			const reminder = batch.length === 1
+				? "Call `get_workflow_status` to retrieve the final result."
+				: "Call `get_workflow_status` for each `<workflow-id>` to retrieve the final result(s).";
+			return envelopes.join("\n") + "\n\n" + reminder;
+		}
+
+		function escapeXml(value) {
+			return String(value)
+				.replace(/&/g, "&amp;")
+				.replace(/</g, "&lt;")
+				.replace(/>/g, "&gt;");
+		}
+
+		function renderAutoNotificationBubble(batch, rawPrompt) {
+			const wrap = document.createElement("div");
+			wrap.className = "bubble-wrap auto";
+			const bubble = document.createElement("div");
+			bubble.className = "bubble auto";
+			const summary = batch.length === 1
+				? `⚙ Workflow <code>${escapeHtml(truncateId(batch[0].workflowId))}</code> finished (${escapeHtml(batch[0].status)}) — notifying the assistant`
+				: `⚙ ${batch.length} workflows finished — notifying the assistant`;
+			// Single-line layout: body text + inline disclosure trigger.
+			// The <pre> only appears (as a block) when the user opens it.
+			bubble.innerHTML = `<span class="auto-notification-body">${summary}</span><details class="auto-notification-raw"><summary>show prompt</summary><pre>${escapeHtml(rawPrompt)}</pre></details>`;
+			wrap.appendChild(bubble);
+			chatEl.appendChild(wrap);
+			scrollChatToBottom();
+			return { wrap, bubble };
+		}
+
+		async function sendCompletionNotification(batch) {
+			// Capture identity at send time. If anything moves under us
+			// while the synthetic turn streams, the response handlers
+			// will still complete normally — we just won't persist into
+			// stale namespaces (notifiedWorkflowsStorageKey() reads the
+			// current state, so a session-flip mid-flight would write
+			// to the new namespace; that's tolerable since the only
+			// observable effect is one extra notification on the
+			// previous app, which we already dropped from the DOM).
+			const prompt = buildCompletionNotificationPrompt(batch);
+			invalidateHistoryReplay();
+			startWorkflowPolling();
+			renderAutoNotificationBubble(batch, prompt);
+
+			setLoading(true, { showWaitingBubble: false });
+			const streamingBubble = renderBubble("copilot", "", "Copilot • streaming...");
+			const liveDetails = { responseIntermediate: [], toolCalls: [] };
+
+			try {
+				let currentToolCount = 0;
+				let currentIntermediateCount = 0;
+				const updateStreamingMeta = () => {
+					const segments = ["Copilot", "streaming..."];
+					if (currentToolCount > 0) {
+						segments.push(`${currentToolCount} tool call${currentToolCount === 1 ? "" : "s"}`);
+					}
+					if (currentIntermediateCount > 0) {
+						segments.push(`${currentIntermediateCount} intermediate${currentIntermediateCount === 1 ? "" : "s"}`);
+					}
+					setBubbleMeta(streamingBubble.bubble, segments.join(" • "));
+				};
+
+				const result = await sendMessage(prompt, {
+					onDelta: (text) => {
+						setBubbleText(streamingBubble.bubble, "copilot", text);
+						scrollChatToBottom();
+					},
+					onToolCount: (count) => {
+						currentToolCount = count;
+						updateStreamingMeta();
+					},
+					onIntermediate: (count, responses) => {
+						currentIntermediateCount = count;
+						updateStreamingMeta();
+						setBubbleIntermediates(streamingBubble.bubble, responses);
+						scrollChatToBottom();
+					},
+					onDetailsUpdate: (snap) => {
+						const normalizedLive = normalizeDetails(snap);
+						liveDetails.responseIntermediate = normalizedLive.responseIntermediate;
+						liveDetails.toolCalls = normalizedLive.toolCalls;
+						attachBubbleDetails(streamingBubble.bubble, liveDetails);
+						refreshOpenDetails(liveDetails);
+					}
+				});
+				const copilotMeta = hasDetails(result.details)
+					? "Copilot • click bubble for details"
+					: "Copilot";
+				setBubbleText(streamingBubble.bubble, "copilot", result.text);
+				setBubbleIntermediates(streamingBubble.bubble, []);
+				setBubbleMeta(streamingBubble.bubble, copilotMeta);
+				liveDetails.responseIntermediate = result.details.responseIntermediate;
+				liveDetails.toolCalls = result.details.toolCalls;
+				attachBubbleDetails(streamingBubble.bubble, liveDetails);
+				refreshOpenDetails(liveDetails);
+
+				// Persist + mark each batch item as 'sent'. Persist is
+				// keyed on the *current* {baseUrl, sessionId}; if those
+				// changed mid-stream the write either fails (no key) or
+				// writes into the new namespace, which is fine — we
+				// already dropped the cards from the DOM.
+				for (const it of batch) {
+					const entry = workflowCards.get(it.workflowId);
+					if (entry) entry.notifyState = "sent";
+					persistNotifiedWorkflowId(it.workflowId);
+				}
+				if (result.sessionId) {
+					setStatus(`Connected • Session ${result.sessionId}`);
+				} else {
+					setStatus("Connected");
+				}
+			} catch (error) {
+				setBubbleText(streamingBubble.bubble, "copilot", `Auto-notification failed. ${error.message}`);
+				setBubbleIntermediates(streamingBubble.bubble, []);
+				setBubbleMeta(streamingBubble.bubble, "Copilot");
+				attachBubbleDetails(streamingBubble.bubble, null);
+				for (const it of batch) {
+					const entry = workflowCards.get(it.workflowId);
+					if (entry) entry.notifyState = "failed";
+				}
+				setStatus(error.message, true);
+			} finally {
+				setLoading(false);
+				promptInputEl.focus();
+			}
+		}
+
+		// One-shot capability probe: tries the workflows endpoint to learn
+		// whether the server registered the route. Status code distinguishes
+		// "endpoint exists" (200) from "feature off" (404/405/501). We
+		// deliberately don't drain the response body here — we just settle
+		// the capability flag and let the immediately-following call to
+		// pollWorkflowsOnce() do the drain using whichever session id is
+		// authoritative by then. That removes a race where a server-fresh
+		// session arrives during the probe and the probe's response body
+		// would otherwise paint cards for the now-discarded candidate.
+		// Single-flight via workflowProbeInFlight.
+		async function probeWorkflowsCapability() {
+			if (!state.baseUrl) return;
+			if (workflowsCapability !== "unknown") return;
+			if (workflowProbeInFlight) return;
+			workflowProbeInFlight = true;
+			const baseUrl = state.baseUrl;
+			// Send the candidate header so the server can short-circuit
+			// auth checks identically to a real poll. The body is ignored.
+			const probeSessionId = state.sessionId || restoredSessionIdCandidate;
+			try {
+				const headers = probeSessionId ? { "x-ms-session-id": probeSessionId } : {};
+				const resp = await fetch(`${baseUrl}${getApiBasePath()}/workflows${buildAuthQuery()}`, { headers });
+				// Capability belongs to the app, not a session. A session switch
+				// can reuse this result; a base-URL switch cannot.
+				if (baseUrl !== state.baseUrl) return;
+				if (resp.status === 404 || resp.status === 405 || resp.status === 501) {
+					markWorkflowsUnsupported();
+					return;
+				}
+				if (!resp.ok) {
+					// Ambiguous (auth, 500, etc.) — leave capability "unknown"
+					// so the next user action can re-trigger probing.
+					return;
+				}
+				const hadCandidateButNoServerSession =
+					!state.sessionId && Boolean(restoredSessionIdCandidate);
+				markWorkflowsSupported();
+				if (hadCandidateButNoServerSession && state.sessionId && !sessionWasFromServer) {
+					setStatus("Reconnected to existing session.");
+					if (restoredGreetingContent) {
+						restoredGreetingContent.textContent =
+							"Welcome back — reconnected to your previous session. Active workflows will appear below within a few seconds.";
+					}
+				}
+			} catch (_err) {
+				// Network error during probe — leave capability "unknown" so
+				// the next user action can re-trigger it.
+			} finally {
+				workflowProbeInFlight = false;
+			}
+		}
+
+		document.addEventListener("visibilitychange", () => {
+			if (document.visibilityState === "visible") {
+				startWorkflowPolling();
+			} else {
+				stopWorkflowPolling();
+			}
+		});
 
 		function escapeHtml(value) {
 			return value
@@ -961,6 +2180,96 @@
 			return { wrap, bubble, contentEl, intermediatesEl };
 		}
 
+		function invalidateHistoryReplay() {
+			historyReplayGeneration += 1;
+			historyReplayInFlight = false;
+		}
+
+		// Fetch and repaint a session's prior transcript from the server so a
+		// resumed/restored session shows its history instead of an empty
+		// window. Best-effort: older servers (no /history route), storage that
+		// isn't configured, and network errors all leave the window as-is.
+		async function loadSessionHistory(sessionId, options = {}) {
+			const { announce = true, replaceView = false } = options;
+			const requestedId = typeof sessionId === "string" ? sessionId.trim() : "";
+			if (!requestedId || !isValidSessionId(requestedId) || !state.baseUrl) return;
+
+			const generation = ++historyReplayGeneration;
+			historyReplayInFlight = true;
+			// Keep workflow cards from racing the transcript repaint. A current
+			// replay restarts polling in finally; session switches separately
+			// invalidate any poll already in flight.
+			stopWorkflowPolling();
+			try {
+				// Optionally blank the transcript up-front so a resumed session
+				// never shows the previous session's bubbles while the request
+				// is in flight.
+				if (replaceView) {
+					chatEl.innerHTML = "";
+					restoredGreetingContent = null;
+					hideDetails();
+				}
+
+				const endpoint = `${state.baseUrl}${getApiBasePath()}/history${buildAuthQuery()}`;
+				let payload;
+				try {
+					const resp = await fetch(endpoint, {
+						method: "GET",
+						headers: { "x-ms-session-id": requestedId, "Accept": "application/json" },
+					});
+					// A 404 means this server predates the history endpoint —
+					// stay silent and leave whatever is already on screen.
+					if (!resp.ok) return;
+					payload = await resp.json();
+				} catch (_e) {
+					return;
+				}
+
+				// The active session or transcript may have changed while the
+				// fetch was pending. Never replace newer user/streaming bubbles.
+				if (
+					state.sessionId !== requestedId
+					|| generation !== historyReplayGeneration
+				) return;
+
+				const messages = Array.isArray(payload && payload.messages) ? payload.messages : [];
+				const rendered = messages.filter(
+					(m) => m && (m.role === "user" || m.role === "assistant")
+						&& typeof m.text === "string" && m.text.length > 0
+				);
+				if (rendered.length === 0) return;
+
+				chatEl.innerHTML = "";
+				restoredGreetingContent = null;
+				hideDetails();
+				if (payload?.truncated === true) {
+					renderBubble(
+						"copilot",
+						`Showing the ${rendered.length} most recent messages. Older messages are not displayed.`,
+						"History"
+					);
+				}
+				for (const message of rendered) {
+					const isUser = message.role === "user";
+					renderBubble(isUser ? "you" : "assistant", message.text, isUser ? "You" : "Assistant");
+				}
+				scrollChatToBottom();
+				if (announce) {
+					const count = rendered.length;
+					const qualifier = payload?.truncated === true ? " most recent" : " previous";
+					const suffix = payload?.truncated === true ? " Older messages were omitted." : "";
+					setStatus(
+						`Loaded ${count}${qualifier} message${count === 1 ? "" : "s"} for session ${shortSessionId(requestedId)}.${suffix}`
+					);
+				}
+			} finally {
+				if (generation === historyReplayGeneration) {
+					historyReplayInFlight = false;
+					startWorkflowPolling();
+				}
+			}
+		}
+
 		function renderWaitingBubble() {
 			const wrap = document.createElement("div");
 			wrap.className = "bubble-wrap assistant";
@@ -1010,9 +2319,27 @@
 			}
 		}
 
+		function clearSessionIdError() {
+			if (!sessionIdErrorEl) return;
+			sessionIdErrorEl.textContent = "";
+			sessionIdErrorEl.hidden = true;
+			if (sessionIdInputEl) sessionIdInputEl.classList.remove("input-error");
+		}
+
+		function showSessionIdError(message) {
+			if (!sessionIdErrorEl) return;
+			sessionIdErrorEl.textContent = message;
+			sessionIdErrorEl.hidden = false;
+			if (sessionIdInputEl) sessionIdInputEl.classList.add("input-error");
+		}
+
 		function showSettings(force = false) {
 			baseUrlInputEl.value = state.baseUrl || defaultBaseUrl;
 			keyInputEl.value = state.key || "";
+			settingsSessionIdPrefill = state.sessionId || "";
+			if (sessionIdInputEl) sessionIdInputEl.value = settingsSessionIdPrefill;
+			clearSessionIdError();
+			renderRecentSessions();
 			cancelSettingsBtnEl.style.display = force ? "none" : "inline-block";
 			settingsBackdropEl.classList.add("open");
 			baseUrlInputEl.focus();
@@ -1025,6 +2352,38 @@
 		function loadSettings() {
 			state.baseUrl = (localStorage.getItem(STORAGE_KEYS.baseUrl) || "").trim();
 			state.key = (localStorage.getItem(STORAGE_KEYS.key) || "").trim();
+			// IMPORTANT: do NOT restore state.sessionId here. We can't read
+			// the right namespaced localStorage key until
+			// loadSettingsFromHash() has had a chance to override baseUrl,
+			// and an auto-assigned id must not ride along on chat requests
+			// for an app whose workflow support hasn't been confirmed yet
+			// (would break the "non-workflow apps unchanged" invariant).
+			// loadRestoredSessionCandidate() runs later to load that
+			// candidate — and to immediately re-activate a user-supplied
+			// (explicit) id, which is durable for every app type.
+		}
+
+		function persistSessionId(force = false) {
+			// Only persist auto-assigned ids once workflow support has been
+			// confirmed for this base URL; otherwise we'd be silently
+			// introducing session continuity for plain (non-workflow) chat
+			// apps. Explicit resumes pass force=true to bypass that gate.
+			if (!force && !workflowsAreSupported()) return;
+			try {
+				if (state.sessionId) {
+					localStorage.setItem(storageKeyForSessionId(), state.sessionId);
+					if (sessionIdIsExplicit) {
+						localStorage.setItem(storageKeyForSessionIdSource(), "explicit");
+					} else {
+						localStorage.removeItem(storageKeyForSessionIdSource());
+					}
+				} else {
+					localStorage.removeItem(storageKeyForSessionId());
+					localStorage.removeItem(storageKeyForSessionIdSource());
+				}
+			} catch (_e) {
+				// Storage quota or disabled — non-fatal.
+			}
 		}
 
 		function loadSettingsFromHash() {
@@ -1077,24 +2436,85 @@
 		}
 
 		function saveSettings() {
-			state.baseUrl = baseUrlInputEl.value.trim().replace(/\/+$/, "");
-			state.key = keyInputEl.value.trim();
+			const previousBaseUrl = state.baseUrl;
+			const nextBaseUrl = baseUrlInputEl.value.trim().replace(/\/+$/, "");
+			const nextKey = keyInputEl.value.trim();
 
-			if (!state.baseUrl) {
+			if (!nextBaseUrl) {
 				setStatus("Base URL is required.", true);
 				baseUrlInputEl.focus();
 				return false;
 			}
 
-			if (requiresFunctionKey(state.baseUrl) && !state.key) {
+			if (requiresFunctionKey(nextBaseUrl) && !nextKey) {
 				setStatus("Key is required for non-localhost URLs.", true);
 				keyInputEl.focus();
 				return false;
 			}
 
+			// Validate the optional session id BEFORE mutating any state so
+			// an invalid value blocks the whole save with an inline error.
+			const sessionIdRaw = sessionIdInputEl ? sessionIdInputEl.value.trim() : "";
+			if (sessionIdRaw && !isValidSessionId(sessionIdRaw)) {
+				showSessionIdError(
+					`Use 1–${SESSION_ID_MAX_LENGTH} characters: letters, digits, dot (.), underscore (_) or hyphen (-).`
+				);
+				if (sessionIdInputEl) sessionIdInputEl.focus();
+				return false;
+			}
+			clearSessionIdError();
+
+			state.baseUrl = nextBaseUrl;
+			state.key = nextKey;
 			localStorage.setItem(STORAGE_KEYS.baseUrl, state.baseUrl);
 			localStorage.setItem(STORAGE_KEYS.key, state.key);
-			setStatus("Settings saved.");
+
+			// If the user pointed the UI at a different deployment, drop
+			// all session/workflow state — the previous session id is
+			// scoped to the previous app and would be misleading at best,
+			// silently authenticated against the new app at worst. The
+			// epoch bump invalidates any in-flight probe/poll responses
+			// that haven't resolved yet so they can't mutate new-app state.
+			const baseUrlChanged = previousBaseUrl && previousBaseUrl !== state.baseUrl;
+			if (baseUrlChanged) {
+				invalidateHistoryReplay();
+				resetWorkflowStateForSessionChange();
+				state.sessionId = null;
+				sessionWasFromServer = false;
+				sessionIdIsExplicit = false;
+				restoredSessionIdCandidate = null;
+				workflowsCapability = "unknown";
+				migrateRecentSessions();
+				loadRestoredSessionCandidate();
+				probeWorkflowsCapability();
+			}
+
+			// Apply an explicit resume. An empty field is left as-is (the
+			// New session button is the way to clear an id). An untouched
+			// field is ignored so simply re-saving settings never relabels
+			// an auto-assigned id — and never carries the previous app's id
+			// onto a newly-entered base URL.
+			const sessionFieldUntouched = sessionIdRaw === (settingsSessionIdPrefill || "").trim();
+			let statusMessage = "Settings saved.";
+			if (sessionIdRaw && !sessionFieldUntouched && sessionIdRaw !== state.sessionId) {
+				invalidateHistoryReplay();
+				resetWorkflowStateForSessionChange();
+				state.sessionId = sessionIdRaw;
+				sessionIdIsExplicit = true;
+				sessionWasFromServer = false;
+				restoredSessionIdCandidate = null;
+				persistSessionId(true);
+				recordSessionActivity(state.sessionId, "");
+				// Repaint the resumed session's prior transcript. Covers both a
+				// pasted id and a Recent-sessions pick (which fills this field
+				// and re-runs this branch on Save). replaceView clears the pane
+				// immediately so the old session's bubbles don't linger.
+				void loadSessionHistory(state.sessionId, { announce: true, replaceView: true });
+				statusMessage = `Resuming session ${sessionIdRaw}. Your next message will continue it.`;
+			}
+
+			updateSessionBar();
+			setStatus(statusMessage);
 			hideSettings();
 			promptInputEl.focus();
 			return true;
@@ -1213,7 +2633,31 @@
 				const type = event?.type;
 
 				if (type === "session" && typeof event.session_id === "string" && event.session_id.trim()) {
-					state.sessionId = event.session_id;
+					if (sessionIdIsExplicit && event.session_id === state.sessionId) {
+						// The server echoed back the id we resumed with — keep
+						// it flagged explicit so it stays durable and isn't
+						// dropped if this app has no workflow endpoint.
+					} else {
+						state.sessionId = event.session_id;
+						sessionWasFromServer = true;
+						sessionIdIsExplicit = false;
+					}
+					// Drop any restore-candidate now that we have a real
+					// server session — they may not match.
+					restoredSessionIdCandidate = null;
+					persistSessionId();
+					updateSessionBar();
+					recordSessionActivity(state.sessionId, lastSentUserMessage);
+					// If we already know workflows are supported, start
+					// polling now. If still "unknown", trigger the probe
+					// instead — never blindly fire polling against an
+					// endpoint we haven't confirmed exists. If "unsupported",
+					// neither call has any effect.
+					if (workflowsCapability === "supported") {
+						startWorkflowPolling();
+					} else if (workflowsCapability === "unknown") {
+						probeWorkflowsCapability();
+					}
 					return;
 				}
 
@@ -1383,6 +2827,15 @@
 			const prompt = promptInputEl.value.trim();
 			if (!prompt || state.loading) return;
 
+			invalidateHistoryReplay();
+			startWorkflowPolling();
+			// Capture for the title-on-first-message logic. If an id is
+			// already active (continuing/resumed), record now; a brand-new
+			// id is titled from this text when the server assigns it in the
+			// `session` SSE event.
+			lastSentUserMessage = prompt;
+			if (state.sessionId) recordSessionActivity(state.sessionId, prompt);
+
 			renderBubble("you", prompt, "You");
 			promptInputEl.value = "";
 			setLoading(true, { showWaitingBubble: false });
@@ -1453,6 +2906,9 @@
 			} finally {
 				setLoading(false);
 				promptInputEl.focus();
+				// If a workflow completed while the user's turn was
+				// streaming, drain the queue now that we're idle.
+				drainCompletionQueueIfIdle();
 			}
 		});
 
@@ -1464,7 +2920,19 @@
 		});
 
 		newSessionBtnEl.addEventListener("click", () => {
+			invalidateHistoryReplay();
+			resetWorkflowStateForSessionChange();
 			state.sessionId = null;
+			sessionWasFromServer = false;
+			sessionIdIsExplicit = false;
+			restoredSessionIdCandidate = null;
+			// Always clear the stored session id + source marker, regardless
+			// of capability, and reset the resume input.
+			try { localStorage.removeItem(storageKeyForSessionId()); } catch (_e) {}
+			try { localStorage.removeItem(storageKeyForSessionIdSource()); } catch (_e) {}
+			if (sessionIdInputEl) sessionIdInputEl.value = "";
+			clearSessionIdError();
+			updateSessionBar();
 			chatEl.innerHTML = "";
 			hideDetails();
 			setStatus("Started a new session. Next message will not send a session id.");
@@ -1475,6 +2943,69 @@
 			showSettings(false);
 			setStatus("Editing connection settings.");
 		});
+
+		copySessionBtnEl.addEventListener("click", () => {
+			copySessionId();
+		});
+
+		if (sessionIdInputEl) {
+			sessionIdInputEl.addEventListener("input", () => {
+				clearSessionIdError();
+			});
+		}
+
+		if (recentSessionsSelectEl) {
+			// Selecting an entry fills the resume input; Save then applies
+			// it through the existing explicit-resume path (no second path).
+			recentSessionsSelectEl.addEventListener("change", () => {
+				const id = recentSessionsSelectEl.value;
+				if (!id || !sessionIdInputEl) return;
+				sessionIdInputEl.value = id;
+				clearSessionIdError();
+			});
+		}
+
+		if (recentRenameBtnEl) {
+			recentRenameBtnEl.addEventListener("click", () => {
+				const id = recentSessionsSelectEl ? recentSessionsSelectEl.value : "";
+				if (!id) {
+					setStatus("Pick a recent session to rename.", true);
+					return;
+				}
+				const entry = readRecentSessions().find((e) => e.id === id);
+				const next = window.prompt("Rename session", entry && entry.title ? entry.title : "");
+				if (next === null) return;
+				renameRecentSession(id, next);
+				renderRecentSessions(id);
+			});
+		}
+
+		if (recentRemoveBtnEl) {
+			recentRemoveBtnEl.addEventListener("click", () => {
+				const id = recentSessionsSelectEl ? recentSessionsSelectEl.value : "";
+				if (!id) {
+					setStatus("Pick a recent session to remove.", true);
+					return;
+				}
+				removeRecentSession(id);
+				if (sessionIdInputEl && sessionIdInputEl.value === id) sessionIdInputEl.value = "";
+				renderRecentSessions();
+				setStatus("Removed session from the recent list.");
+			});
+		}
+
+		if (recentClearBtnEl) {
+			recentClearBtnEl.addEventListener("click", () => {
+				if (!readRecentSessions().length) {
+					setStatus("No recent sessions to clear.");
+					return;
+				}
+				if (!window.confirm("Clear the list of recent sessions in this browser?")) return;
+				clearRecentSessions();
+				renderRecentSessions();
+				setStatus("Cleared recent sessions.");
+			});
+		}
 
 		saveSettingsBtnEl.addEventListener("click", () => {
 			saveSettings();
@@ -1509,13 +3040,29 @@
 
 		loadSettings();
 		loadSettingsFromHash();
+		// Read the per-baseUrl namespaced session candidate AFTER both
+		// settings sources have had their say.
+		migrateRecentSessions();
+		loadRestoredSessionCandidate();
 		if (!state.baseUrl || (requiresFunctionKey(state.baseUrl) && !state.key)) {
 			state.baseUrl = state.baseUrl || defaultBaseUrl;
 			showSettings(true);
 			setStatus("Enter your base URL and key to begin.");
 		} else {
+			// Always show the baseline greeting. probeWorkflowsCapability
+			// upgrades it in place if (a) workflows are supported AND
+			// (b) we had a session candidate to reconnect with.
 			setStatus("Ready.");
-			renderBubble("assistant", "Hi! Send a message to start chatting.", "assistant");
+			const greeting = renderBubble("copilot", "Hi! Send a message to start chatting.", "Copilot");
+			restoredGreetingContent = greeting?.contentEl || null;
+			// If this reload restored an explicitly-resumed session, repaint its
+			// transcript. The greeting stays as a fallback (replaceView:false)
+			// until — and only if — history actually arrives.
+			if (state.sessionId && sessionIdIsExplicit) {
+				void loadSessionHistory(state.sessionId, { announce: false, replaceView: false });
+			}
+			// Probe asynchronously; this is the gate on persistence + polling.
+			probeWorkflowsCapability();
 			promptInputEl.focus();
 		}
 	</script>

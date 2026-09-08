@@ -1,0 +1,81 @@
+parameters:
+  - name: artifactFeed
+    type: string
+    default: 'public/PythonSDK_PublicPackages'
+  - name: PoolName
+    type: string
+    default: '1es-pool-azfunc'
+
+jobs:
+  - job: "E2ETests"
+    displayName: 'Run Azure Functions Agent Runtime E2E Tests'
+
+    pool:
+      name: ${{ parameters.PoolName }}
+      image: 1es-ubuntu-22.04
+      os: linux
+
+    strategy:
+      matrix:
+        Python313:
+          PYTHON_VERSION: '3.13'
+        Python314:
+          PYTHON_VERSION: '3.14'
+
+    steps:
+      - task: PipAuthenticate@1
+        displayName: 'Pip Authenticate'
+        inputs:
+          artifactFeeds: ${{ parameters.artifactFeed }}
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: $(PYTHON_VERSION)
+      - bash: |
+          python --version
+        displayName: 'Check python version'
+      - bash: |
+          python -m pip install --upgrade pip
+          python -m pip install -U -e .[dev]
+          python eng/scripts/install_e2e_dependencies.py
+        displayName: 'Install dependencies for $(PYTHON_VERSION)'
+
+      - template: /eng/templates/install-core-tools.yml@self
+
+      - bash: |
+          docker run -d --name azurite \
+            -p 10000:10000 -p 10001:10001 -p 10002:10002 \
+            mcr.microsoft.com/azure-storage/azurite \
+            azurite --skipApiVersionCheck \
+              --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
+          echo "Waiting for Azurite to start..."
+          for i in $(seq 1 30); do
+            if curl -s http://127.0.0.1:10000/ > /dev/null; then
+              echo "Azurite is up."
+              break
+            fi
+            sleep 1
+          done
+        displayName: 'Start Azurite'
+
+      # Run under AzureCLI@2 so the task performs `az login` as the service
+      # connection's identity. The `func` host and its Python worker are child
+      # processes that inherit AZURE_CONFIG_DIR, so DefaultAzureCredential's
+      # AzureCliCredential reuses that login when the agents call Foundry.
+      # The connection's identity must hold "Cognitive Services User" (or
+      # "Azure AI User" where available) on the target Foundry (AIServices)
+      # account so it can create/run agents (agents/write). See the RBAC command
+      # in the PR / repo notes.
+      - task: AzureCLI@2
+        displayName: 'Run E2E tests'
+        inputs:
+          azureSubscription: 'saf-foundry-connection'
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            python -m pytest -m e2e tests/endtoend -v
+        env:
+          AzureWebJobsStorage: 'UseDevelopmentStorage=true'
+          FUNCTIONS_WORKER_RUNTIME: 'python'
+          AZURE_TOKEN_CREDENTIALS: 'dev'
+          FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
+          FOUNDRY_MODEL: $(FOUNDRY_MODEL)

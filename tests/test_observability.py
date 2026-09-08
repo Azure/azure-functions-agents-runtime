@@ -3,12 +3,15 @@ from __future__ import annotations
 import logging
 import types
 
+import pytest
+
 import azure_functions_agents._observability as obs
 
 
 def _clear_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     for name in (
         "APPLICATIONINSIGHTS_CONNECTION_STRING",
+        "APPLICATIONINSIGHTS_AUTHENTICATION_STRING",
         "ENABLE_SENSITIVE_DATA",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -149,13 +152,15 @@ def test_otel_provider_already_configured_false_for_proxy_provider(monkeypatch) 
 def test_configure_azure_monitor_skips_when_provider_already_configured(  # type: ignore[no-untyped-def]
     monkeypatch, caplog
 ) -> None:
+    pytest.importorskip("azure.monitor.opentelemetry")
     import logging
 
     from azure.monitor import opentelemetry as azure_monitor_opentelemetry
 
+    _clear_env(monkeypatch)
     called = {"count": 0}
 
-    def _fake_configure_azure_monitor(*, connection_string: str) -> None:
+    def _fake_configure_azure_monitor(*, connection_string: str, **_kwargs) -> None:
         called["count"] += 1
 
     monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: True)
@@ -173,12 +178,15 @@ def test_configure_azure_monitor_skips_when_provider_already_configured(  # type
 
 
 def test_configure_azure_monitor_calls_when_provider_not_configured(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    pytest.importorskip("azure.monitor.opentelemetry")
     from azure.monitor import opentelemetry as azure_monitor_opentelemetry
 
-    called = {"connection_string": None}
+    _clear_env(monkeypatch)
+    called: dict[str, object] = {}
 
-    def _fake_configure_azure_monitor(*, connection_string: str) -> None:
+    def _fake_configure_azure_monitor(*, connection_string: str, **kwargs) -> None:
         called["connection_string"] = connection_string
+        called["kwargs"] = kwargs
 
     monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: False)
     monkeypatch.setattr(
@@ -190,6 +198,44 @@ def test_configure_azure_monitor_calls_when_provider_not_configured(monkeypatch)
     obs._configure_azure_monitor("InstrumentationKey=abc")
 
     assert called["connection_string"] == "InstrumentationKey=abc"
+    # No AAD auth string configured: Live Metrics is left at its default (enabled).
+    assert "enable_live_metrics" not in called["kwargs"]
+
+
+def test_configure_azure_monitor_disables_live_metrics_when_aad_auth_configured(  # type: ignore[no-untyped-def]
+    monkeypatch,
+) -> None:
+    """QuickPulse/Live Metrics doesn't honor APPLICATIONINSIGHTS_AUTHENTICATION_STRING (upstream
+    gap: the exporter only accepts an explicit ``credential=`` kwarg, never falling back to the
+    env var like the trace/log/metric exporters do). On an Application Insights resource that
+    requires AAD, this makes Live Metrics fail every ~1s with a 401. When AAD auth is configured
+    via the env var, the runtime disables Live Metrics rather than emitting non-stop 401 noise.
+    """
+    pytest.importorskip("azure.monitor.opentelemetry")
+    from azure.monitor import opentelemetry as azure_monitor_opentelemetry
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv(
+        "APPLICATIONINSIGHTS_AUTHENTICATION_STRING",
+        "Authorization=AAD;ClientId=00000000-0000-0000-0000-000000000000",
+    )
+    called: dict[str, object] = {}
+
+    def _fake_configure_azure_monitor(*, connection_string: str, **kwargs) -> None:
+        called["connection_string"] = connection_string
+        called["kwargs"] = kwargs
+
+    monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: False)
+    monkeypatch.setattr(
+        azure_monitor_opentelemetry,
+        "configure_azure_monitor",
+        _fake_configure_azure_monitor,
+    )
+
+    obs._configure_azure_monitor("InstrumentationKey=abc")
+
+    assert called["connection_string"] == "InstrumentationKey=abc"
+    assert called["kwargs"] == {"enable_live_metrics": False}
 
 
 def test_start_span_is_safe_and_records(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -236,7 +282,9 @@ def test_record_sandbox_execution_gated_when_disabled(monkeypatch) -> None:  # t
     calls: list[str] = []
     monkeypatch.setattr(obs, "_metrics_ready", True)
     monkeypatch.setattr(
-        obs, "_sandbox_execution_counter", types.SimpleNamespace(add=lambda *a, **k: calls.append("x"))
+        obs,
+        "_sandbox_execution_counter",
+        types.SimpleNamespace(add=lambda *a, **k: calls.append("x")),
     )
     monkeypatch.setattr(
         obs, "_sandbox_error_counter", types.SimpleNamespace(add=lambda *a, **k: calls.append("e"))
@@ -261,6 +309,69 @@ def test_bounded_content_truncates() -> None:
 def test_record_sandbox_execution_is_safe() -> None:
     obs.record_sandbox_execution(error=False)
     obs.record_sandbox_execution(error=True)
+
+
+# --- delegation (FRD 0007) observability --------------------------------------------------------
+
+
+def test_fault_domain_delegate_value() -> None:
+    assert obs.FaultDomain.DELEGATE == "delegate"
+
+
+def test_current_span_is_noop_when_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(obs, "_enabled", False)
+    span = obs.current_span()
+    assert span._span is None
+    # No-op span must stay safe to call even though it wraps nothing.
+    span.set_attribute("af.delegate.specialist", "billing")
+    span.set_error("boom", fault_domain=obs.FaultDomain.DELEGATE)
+
+
+def test_current_span_wraps_active_span_when_enabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(obs, "_enabled", True)
+    with obs.start_span("unit.test.parent", lifecycle_stage=obs.LifecycleStage.AGENT_RUN):
+        span = obs.current_span()
+        assert span._span is not None  # wraps the already-active span, not a new one
+
+
+def test_record_delegate_call_gated_when_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[str] = []
+    monkeypatch.setattr(obs, "_metrics_ready", True)
+    monkeypatch.setattr(
+        obs, "_delegate_call_counter", types.SimpleNamespace(add=lambda *a, **k: calls.append("c"))
+    )
+    monkeypatch.setattr(
+        obs, "_delegate_error_counter", types.SimpleNamespace(add=lambda *a, **k: calls.append("e"))
+    )
+
+    monkeypatch.setattr(obs, "_enabled", False)
+    obs.record_delegate_call(error=True)
+    assert calls == []  # gated when disabled
+
+    monkeypatch.setattr(obs, "_enabled", True)
+    obs.record_delegate_call(error=True)
+    assert calls == ["c", "e"]  # emitted when enabled
+
+
+def test_record_delegate_call_only_increments_error_counter_when_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[str] = []
+    monkeypatch.setattr(obs, "_metrics_ready", True)
+    monkeypatch.setattr(
+        obs, "_delegate_call_counter", types.SimpleNamespace(add=lambda *a, **k: calls.append("c"))
+    )
+    monkeypatch.setattr(
+        obs, "_delegate_error_counter", types.SimpleNamespace(add=lambda *a, **k: calls.append("e"))
+    )
+    monkeypatch.setattr(obs, "_enabled", True)
+
+    obs.record_delegate_call(error=False)
+
+    assert calls == ["c"]  # call counter always increments; error counter only when error=True
+
+
+def test_record_delegate_call_is_safe() -> None:
+    obs.record_delegate_call(error=False)
+    obs.record_delegate_call(error=True)
 
 
 def test_quiet_noisy_loggers_raises_unset_levels() -> None:

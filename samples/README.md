@@ -1,17 +1,28 @@
 # Samples
 
-Each subdirectory is a standalone Azure Functions app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd).
+Each subdirectory in the runnable samples table is a standalone Azure Functions
+app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd).
 
 | Sample | Trigger | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
 |---|---|---|---|---|---|---|---|
 | [basic-chat](basic-chat/) | HTTP | | | | | ✅ | ✅ |
-| [multi-agent-folder](multi-agent-folder/) | HTTP | | | | | | ✅ |
+| [multi-agent-delegation](multi-agent-delegation/) | HTTP | | | | | | ✅ |
 | [outlook-reply-agent](outlook-reply-agent/) | Office 365 Outlook | | ✅ Office 365 Outlook | ✅ Office 365 Outlook | | ✅ | |
 | [daily-tech-news-email](daily-tech-news-email/) | Timer | | ✅ Office 365 Outlook | ✅ Office 365 Outlook | | ✅ | |
 | [daily-azure-report](daily-azure-report/) | Timer + HTTP | ✅ azure_rest | ✅ Office 365 Outlook | ✅ MS Learn + Office 365 Outlook | ✅ azure-resources | | ✅ |
 | [skill-includes-demo](skill-includes-demo/) | HTTP | | | | ✅ (with includes) | | ✅ |
 | [obo-e2e](obo-e2e/) | HTTP | | | ✅ (custom OBO target) | | | |
 | [obo-whoami-mcp-server](obo-whoami-mcp-server/) | MCP (streamable HTTP) | | | | | | |
+| [workflow-incident-triage](workflow-incident-triage/) | HTTP | | | | | | ✅ |
+| [workflow-queue-p0-report](workflow-queue-p0-report/) | Queue | ✅ workflow-safe | | | | | |
+| [per-agent-workflows](per-agent-workflows/) | HTTP | ✅ workflow-safe | | | | | ✅ |
+| [workflow-subagents-preview](workflow-subagents-preview/) | Queue | ✅ workflow-safe | | | ✅ | | |
+| [secured-endpoints](secured-endpoints/) | HTTP + MCP | | | | | | |
+
+[`per-agent-workflows`](per-agent-workflows/) is the Engineering Operations Hub:
+two non-main workflow-enabled agents share one Durable engine while retaining
+separate policies. Run it locally with Azurite and use either agent's browser
+chat UI to start and observe an independent workflow.
 
 ## Run Locally (optional)
 
@@ -131,15 +142,7 @@ If you see an exception like `System.ArgumentException: Destination is too short
 
 1. Verify Python 3.13+ is available.
 
-**Bash:**
-
 ```bash
-python --version
-```
-
-**PowerShell:**
-
-```powershell
 python --version
 ```
 

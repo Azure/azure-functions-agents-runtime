@@ -36,7 +36,7 @@ import hashlib
 import os
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ._logger import logger
 
@@ -242,7 +242,7 @@ class OboTokenProvider:
             logger.error("OBO: Token exchange failed for scope %s: %s", scope, error_description)
             raise OboError(error, error_description)
 
-        access_token = result["access_token"]
+        access_token = cast(str, result["access_token"])
         expires_in = result.get("expires_in", 3600)
         expires_on = int(time.time()) + expires_in
 

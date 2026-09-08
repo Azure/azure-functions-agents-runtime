@@ -14,13 +14,22 @@ import pytest
 
 import azure_functions_agents.discovery.mcp as mcp_discovery
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
+from azure_functions_agents.config.merge import compose
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     McpFilter,
     SkillsFilter,
+    SubagentRef,
     ToolsFilter,
 )
+from azure_functions_agents.config.validation import (
+    validate_resolved_agent,
+    validate_subagent_references,
+    validate_workflow_subagent_references,
+)
 from azure_functions_agents.discovery.mcp import clear_mcp_cache, discover_mcp_servers
+from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
+from azure_functions_agents.registration.capabilities import build_capabilities
 
 FIXTURES_ROOT = Path(__file__).resolve().parent / "fixtures" / "config_scenarios"
 
@@ -306,6 +315,9 @@ def test_builtin_endpoint_variants() -> None:
     assert mixed.builtin_endpoints.debug_chat_ui is True
     assert mixed.builtin_endpoints.chat_api is True
     assert mixed.builtin_endpoints.mcp is False
+    assert mixed.builtin_endpoints.http_auth.mode == "entra"
+    assert mixed.builtin_endpoints.http_auth.entra is not None
+    assert mixed.builtin_endpoints.http_auth.entra.allowed_audiences == ["api://agents"]
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +424,8 @@ def test_mcp_json_env_substitution(monkeypatch: pytest.MonkeyPatch) -> None:
 
     clear_mcp_cache()
     try:
-        servers = discover_mcp_servers(fixture)
+        result = discover_mcp_servers(fixture)
+        servers = result.servers
     finally:
         clear_mcp_cache()
 
@@ -511,3 +524,308 @@ def test_agents_folder_hybrid_discovery() -> None:
     assert report.source_file.lower().replace("\\", "/").split("/")[-2] == "agents"
     assert report.trigger is not None
     assert report.trigger.type == "timer_trigger"
+
+
+# ---------------------------------------------------------------------------
+# 14 — web_request system tool (default-on, per-agent opt-out)
+# ---------------------------------------------------------------------------
+
+
+def test_web_request_fixture() -> None:
+    """Global web_request config is honored by default; an agent can opt out."""
+    fixture = FIXTURES_ROOT / "14_web_request"
+
+    global_config = load_global_config(fixture)
+    specs = load_agent_specs(fixture, strict=True)
+    by_name = _specs_by_name(specs)
+
+    assert global_config.system_tools is not None
+    global_web_request = global_config.system_tools.web_request
+    assert global_web_request is not None
+    assert global_web_request is not False
+    assert global_web_request.allowed_hosts == ["api.example.test"]
+    assert global_web_request.timeout_seconds == 10
+    assert global_web_request.max_response_bytes == 1000000
+    assert global_web_request.max_request_bytes == 200000
+
+    default_spec = by_name["Default Web Agent"]
+    resolved_default = compose(default_spec, global_config)
+    assert resolved_default.web_request_config is not None
+    assert resolved_default.web_request_config.allowed_hosts == ["api.example.test"]
+
+    opted_out_spec = by_name["Opted Out Agent"]
+    assert opted_out_spec.system_tools is not None
+    assert opted_out_spec.system_tools.web_request is False
+    resolved_opted_out = compose(opted_out_spec, global_config)
+    assert resolved_opted_out.web_request_config is None
+
+
+# ---------------------------------------------------------------------------
+# 15 — multi-agent delegation: coordinator + specialists via `subagents:`
+# (FRD 0007). One specialist (billing) is independently runnable; the other
+# (shipping) is endpoint-less and reachable only as an internal specialist.
+# ---------------------------------------------------------------------------
+
+
+def test_multi_agent_delegation_fixture() -> None:
+    fixture = FIXTURES_ROOT / "15_multi_agent_delegation"
+
+    global_config = load_global_config(fixture)
+    specs = load_agent_specs(fixture, strict=True)
+    by_name = _specs_by_name(specs)
+
+    assert len(specs) == 3
+    assert set(by_name) == {"Support Coordinator", "Billing Specialist", "Shipping Specialist"}
+
+    coordinator_spec = by_name["Support Coordinator"]
+    assert coordinator_spec.subagents == [
+        SubagentRef(agent="billing", when="Route billing, invoicing, and payment questions here."),
+        SubagentRef(agent="shipping"),
+    ]
+
+    coordinator = compose(coordinator_spec, global_config)
+    billing = compose(by_name["Billing Specialist"], global_config)
+    shipping = compose(by_name["Shipping Specialist"], global_config)
+
+    # Identity slugs are derived from the file stem, independent of display name.
+    assert coordinator.slug == "coordinator"
+    assert billing.slug == "billing"
+    assert shipping.slug == "shipping"
+    assert coordinator.subagents == [
+        SubagentRef(agent="billing", when="Route billing, invoicing, and payment questions here."),
+        SubagentRef(agent="shipping"),
+    ]
+
+    known_slugs = {coordinator.slug, billing.slug, shipping.slug}
+
+    # Every subagents: reference on the coordinator resolves to a known,
+    # non-self, non-duplicate slug.
+    validate_subagent_references(coordinator, known_slugs=known_slugs)
+    # Specialists themselves declare no subagents, so this is a no-op for them.
+    validate_subagent_references(billing, known_slugs=known_slugs)
+    validate_subagent_references(shipping, known_slugs=known_slugs)
+
+    # Coordinator and billing are independently runnable (builtin_endpoints.chat_api).
+    validate_resolved_agent(coordinator, discovered_mcp_names=[], discovered_skills=[])
+    validate_resolved_agent(billing, discovered_mcp_names=[], discovered_skills=[])
+
+    # Shipping has no trigger and no builtin_endpoints: on its own this is an
+    # error, but once it is known to be referenced as a subagent the
+    # requirement relaxes (FRD 0007 Decision #18).
+    with pytest.raises(ValueError, match="field `trigger`"):
+        validate_resolved_agent(shipping, discovered_mcp_names=[], discovered_skills=[])
+    validate_resolved_agent(
+        shipping,
+        discovered_mcp_names=[],
+        discovered_skills=[],
+        is_referenced_as_subagent=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 16 — pre-FRD-0007-style multi-agent fixture with NO ``subagents:`` anywhere.
+#
+# Regression coverage for the two-pass composition introduced by FRD 0007:
+# a fixture that declares zero delegation must load, compose, and validate
+# identically to how a single-pass pipeline would have handled it, and one
+# agent's ``tools: false`` must only ever affect that agent's own capability
+# set (not bleed into its siblings' discovered tools).
+# ---------------------------------------------------------------------------
+
+
+def test_no_subagent_regression_fixture() -> None:
+    fixture = FIXTURES_ROOT / "16_no_subagent_regression"
+
+    global_config = load_global_config(fixture)
+    assert global_config.model == "gpt-4o"
+    assert global_config.timeout == 300
+
+    specs = load_agent_specs(fixture, strict=True)
+    by_name = _specs_by_name(specs)
+
+    assert len(specs) == 3
+    assert set(by_name) == {"Main Chat", "Nightly Report", "Resource Summary"}
+
+    # None of these specs declare `subagents:` — this fixture predates (in
+    # spirit) FRD 0007 delegation and must be unaffected by it.
+    for spec in specs:
+        assert not spec.subagents
+
+    main = compose(by_name["Main Chat"], global_config)
+    nightly_report = compose(by_name["Nightly Report"], global_config)
+    resource_summary = compose(by_name["Resource Summary"], global_config)
+
+    # Identity slugs are derived from the file stem, independent of display name.
+    assert main.slug == "main"
+    assert nightly_report.slug == "nightly_report"
+    assert resource_summary.slug == "resource_summary"
+    assert main.subagents == []
+    assert nightly_report.subagents == []
+    assert resource_summary.subagents == []
+
+    known_slugs = {main.slug, nightly_report.slug, resource_summary.slug}
+
+    # No subagents: declared anywhere, so reference validation is a no-op for
+    # all three — same as it always was pre-FRD-0007.
+    validate_subagent_references(main, known_slugs=known_slugs)
+    validate_subagent_references(nightly_report, known_slugs=known_slugs)
+    validate_subagent_references(resource_summary, known_slugs=known_slugs)
+
+    # Every agent here is independently runnable (trigger or builtin_endpoints)
+    # and none of them are referenced as a subagent, so none of them need (or
+    # get) the FRD 0007 Decision #18 endpoint-less relaxation.
+    validate_resolved_agent(main, discovered_mcp_names=[], discovered_skills=[])
+    validate_resolved_agent(nightly_report, discovered_mcp_names=[], discovered_skills=[])
+    validate_resolved_agent(resource_summary, discovered_mcp_names=[], discovered_skills=[])
+
+    # --- Tool assembly: `tools: false` must be scoped to its own agent only ---
+    #
+    # The fixture's tools/ directory contains exactly one real discoverable
+    # tool (get_region_status). main and nightly_report do not disable tools,
+    # so build_capabilities() must retain it for them; resource_summary sets
+    # `tools: false`, so build_capabilities() must force it to an empty list
+    # for that agent alone, regardless of what was discovered on disk.
+    clear_tool_discovery_cache()
+    try:
+        discovered = discover_user_tools(fixture)
+    finally:
+        clear_tool_discovery_cache()
+
+    assert discovered.failed_loads == []
+    assert [t.name for t in discovered.tools] == ["get_region_status"]
+
+    assert resource_summary.tools_disabled is True
+    assert main.tools_disabled is False
+    assert nightly_report.tools_disabled is False
+
+    main_caps = build_capabilities(
+        main,
+        discovered_user_tools=discovered.tools,
+        discovered_mcp_tools={},
+        discovered_skills={},
+    )
+    nightly_report_caps = build_capabilities(
+        nightly_report,
+        discovered_user_tools=discovered.tools,
+        discovered_mcp_tools={},
+        discovered_skills={},
+    )
+    resource_summary_caps = build_capabilities(
+        resource_summary,
+        discovered_user_tools=discovered.tools,
+        discovered_mcp_tools={},
+        discovered_skills={},
+    )
+
+    assert main_caps.filtered_user_tools == discovered.tools
+    assert nightly_report_caps.filtered_user_tools == discovered.tools
+    assert resource_summary_caps.filtered_user_tools == []
+
+
+# ---------------------------------------------------------------------------
+# 17 — independent Dynamic Workflow Sub Agent grants
+# ---------------------------------------------------------------------------
+
+
+def test_dynamic_workflow_subagents_fixture() -> None:
+    fixture = FIXTURES_ROOT / "17_dynamic_workflow_subagents"
+    specs = load_agent_specs(fixture, strict=True)
+    resolved = [compose(spec, load_global_config(fixture)) for spec in specs]
+    by_slug = {agent.slug: agent for agent in resolved}
+
+    assert set(by_slug) == {
+        "main",
+        "pr_status_analyst",
+        "actionable_report_writer",
+    }
+    main = by_slug["main"]
+    assert main.workflows is not None
+    assert main.workflows.enabled is True
+    assert main.workflows.exclude == ("private_publisher",)
+    assert [
+        (ref.agent, ref.when) for ref in main.workflows.subagents
+    ] == [
+        ("pr_status_analyst", "Review one pull request"),
+        ("actionable_report_writer", None),
+    ]
+    assert main.subagents == []
+
+    known_slugs = set(by_slug)
+    validate_workflow_subagent_references(main, known_slugs=known_slugs)
+    for slug in ("pr_status_analyst", "actionable_report_writer"):
+        validate_resolved_agent(
+            by_slug[slug],
+            discovered_mcp_names=[],
+            discovered_skills=[],
+            is_referenced_as_subagent=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# 18 — multiple workflow-enabled agents with distinct policies
+# ---------------------------------------------------------------------------
+
+
+def test_multi_owner_workflows_fixture() -> None:
+    fixture = FIXTURES_ROOT / "18_multi_owner_workflows"
+    specs = load_agent_specs(fixture, strict=True)
+    resolved = [compose(spec, load_global_config(fixture)) for spec in specs]
+    by_slug = {agent.slug: agent for agent in resolved}
+
+    assert set(by_slug) == {
+        "incident_commander",
+        "release_manager",
+        "incident_analyst",
+        "release_reviewer",
+    }
+    assert not any(agent.is_main for agent in resolved)
+
+    incident = by_slug["incident_commander"]
+    release = by_slug["release_manager"]
+    assert incident.workflows is not None
+    assert incident.workflows.exclude == ("release_evidence",)
+    assert [ref.agent for ref in incident.workflows.subagents] == ["incident_analyst"]
+    assert release.workflows is not None
+    assert release.workflows.exclude == ("incident_evidence",)
+    assert [ref.agent for ref in release.workflows.subagents] == ["release_reviewer"]
+
+    known_slugs = set(by_slug)
+    validate_workflow_subagent_references(incident, known_slugs=known_slugs)
+    validate_workflow_subagent_references(release, known_slugs=known_slugs)
+
+
+# ---------------------------------------------------------------------------
+# 19 — inheritable agent configuration
+# ---------------------------------------------------------------------------
+
+
+def test_agent_configuration_fixture() -> None:
+    fixture = FIXTURES_ROOT / "19_agent_configuration"
+    global_config = load_global_config(fixture)
+    specs = load_agent_specs(fixture, strict=True)
+    by_slug = {compose(spec, global_config).slug: (spec, compose(spec, global_config)) for spec in specs}
+
+    assert set(by_slug) == {
+        "context_override",
+        "empty_override",
+        "explicit_null",
+        "inherited",
+    }
+    _, inherited = by_slug["inherited"]
+    _, empty_override = by_slug["empty_override"]
+    for resolved in (inherited, empty_override):
+        assert resolved.agent_configuration.max_output_tokens == 4096
+        assert resolved.agent_configuration.agent_framework is not None
+        assert resolved.agent_configuration.agent_framework.compaction is not None
+        assert resolved.agent_configuration.agent_framework.compaction.max_context_window_tokens == 8192
+
+    _, context_override = by_slug["context_override"]
+    assert context_override.agent_configuration.max_output_tokens == 4096
+    assert context_override.agent_configuration.agent_framework is not None
+    assert context_override.agent_configuration.agent_framework.compaction is not None
+    assert context_override.agent_configuration.agent_framework.compaction.max_context_window_tokens == 16384
+
+    explicit_null_spec, explicit_null = by_slug["explicit_null"]
+    assert explicit_null_spec.agent_configuration is None
+    assert explicit_null.agent_configuration.max_output_tokens is None
+    assert explicit_null.agent_configuration.agent_framework is None

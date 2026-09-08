@@ -16,7 +16,9 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - Custom tools (auto-discovered from `tools/` directory)
 - System tools (`system_tools`)
   - Code execution sandbox configuration
+  - Outbound web request tool (`web_request`) — enabled by default, SSRF-guarded
 - Default runtime settings (model, timeout)
+- Harness-only Microsoft Agent Framework execution with optional token-budget conversation-history compaction
 
 **MCP server discovery:**
 - MCP servers (defined in `mcp.json`), including connector-backed MCP servers
@@ -25,6 +27,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - **Inherits all discovered capabilities by default**
 - Can apply **exclude lists** to filter out unwanted MCP servers, skills, or tools
 - Can **override** runtime settings (model, timeout)
+- Can enable Dynamic Workflows on any agent
 - Must define **trigger** (how the agent is invoked)
 - Can enable **HTTP/MCP endpoints** for testing and composition
 
@@ -44,8 +47,8 @@ For capabilities (MCP, skills, tools):
 
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
-| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools` |
-| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
+| **Global** (`agents.config.yaml`) | None (entire file is optional) | `agent_configuration`, `system_tools`, `model`, `timeout`, `tools`, `http_auth` |
+| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `agent_configuration`, `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `workflows`, `subagents`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
 ---
@@ -58,11 +61,14 @@ Optional file in the root directory that defines shared infrastructure and runti
 **Required properties:** None (entire file is optional)
 
 **Supported properties:**
+- `agent_configuration` — Portable and Microsoft Agent Framework-specific execution defaults inherited by agents
 - `system_tools` — Object containing system-level tools configuration
   - `dynamic_sessions_code_interpreter` — Object with ACA Dynamic Sessions code interpreter configuration
+  - `web_request` — Object or boolean configuring the built-in outbound HTTP request tool (enabled by default; `false` disables app-wide)
 - `model` — String specifying default LLM model identifier
 - `timeout` — Number specifying default execution timeout in seconds
 - `tools` — Object for tool filtering configuration
+- `http_auth` — String or object specifying the app-wide default inbound HTTP authentication policy (same model as `builtin_endpoints.http_auth`). Every agent's built-in HTTP endpoints inherit this value unless the agent authors its own `builtin_endpoints.http_auth`, which always overrides. When omitted, endpoints default to `function`. Applies only to HTTP endpoints and does not affect the MCP endpoint. Example: `http_auth: entra` requires every agent's chat API to use Entra ID by default.
 
 **Note:** MCP servers (from `mcp.json`), skills (from `skills/` directory), and custom tools (from `tools/` directory) are automatically discovered. Agents can filter them out using exclude lists.
 
@@ -78,6 +84,7 @@ YAML front matter at the top of each agent file.
 
 **Optional properties:**
 - `builtin_endpoints` — Object or boolean for enabling built-in chat UI, chat API, and MCP tool endpoints
+- `agent_configuration` — Portable and Microsoft Agent Framework-specific execution settings; recursively inherits global values
 - `model` — String to override global default model
 - `timeout` — Number to override global default timeout
 - `logger` — Boolean to enable/disable response logging for triggered agents
@@ -86,6 +93,8 @@ YAML front matter at the top of each agent file.
 - `mcp` — Boolean or object to inherit, disable, or exclude MCP servers
 - `skills` — Object with exclude lists or false to filter skills
 - `tools` — Object with exclude lists or false to filter tools
+- `workflows` — Object to enable Dynamic Workflows on an agent
+- `subagents` — Array of `{agent, when?}` references to specialist agents this agent may delegate to at chat time
 - `input_schema` — Object, JSON Schema for HTTP request validation
 - `response_schema` — Object, JSON Schema for response validation
 - `response_example` — String, example response for documentation
@@ -105,7 +114,27 @@ YAML front matter at the top of each agent file.
   ...
 ```
 
-Agent markdown files (`*.agent.md`) can be placed at the app root or in an `agents/` folder. The folder name is case-insensitive (`agents/` or `Agents/`). Files from both locations are combined and sorted by path for deterministic ordering. `main.agent.md` in either location is marked as the main agent.
+Agent markdown files (`*.agent.md`) can be placed at the app root or in an
+`agents/` folder. The folder name is case-insensitive (`agents/` or `Agents/`).
+Files from both locations are combined and sorted by path for deterministic
+ordering. `main.agent.md` in either location is marked as the main agent for
+compatibility, but neither its filename nor its directory determines whether an
+agent is directly invokable, a coordinator, workflow-enabled, or a specialist.
+
+### Agent roles and reachability
+
+Roles come from invocation surfaces and references, not file placement:
+
+| Role | How it is identified |
+| --- | --- |
+| Directly invokable agent | Defines a `trigger` or enables at least one `builtin_endpoints` value. |
+| Chat coordinator | Declares top-level `subagents`; each reference becomes a `delegate_<slug>` tool during direct invocation. |
+| Chat Sub Agent | Is referenced by another agent's top-level `subagents`. It may omit its own trigger/endpoints when it is internal-only. |
+| Workflow-enabled agent | Sets `workflows.enabled: true`. |
+| Workflow Sub Agent | Is referenced by a workflow-enabled agent's `workflows.subagents`. It does not need `workflows.enabled` and may omit its own trigger/endpoints when it is internal-only. |
+
+These roles can overlap. For example, an agent can have its own HTTP trigger and
+also be referenced as another agent's Chat or Workflow Sub Agent.
 
 ---
 
@@ -119,17 +148,21 @@ Fields are organized into categories based on how they can be used:
 - `mcp` — MCP servers discovered from `mcp.json`, filtered in agents
 - `skills` — Auto-discovered from `skills/` directory, exclude lists (agent only)
 - `tools` — Auto-discovered from `tools/` directory, exclude lists (agent only)
+- `workflows` — Dynamic Workflow enablement, workflow-tool excludes, and workflow Sub Agent grants
 - `system_tools` — System-level tools and capabilities (global configuration, agent opt-out)
   - `dynamic_sessions_code_interpreter` — ACA Dynamic Sessions code interpreter
+  - `web_request` — Built-in outbound HTTP request tool (default-on, SSRF-guarded)
 
 **Runtime Settings (Global defaults, overridable in agents):**
 - `model` — LLM selection
 - `timeout` — Execution time limit
+- `agent_configuration` — Output-token limit and Microsoft Agent Framework conversation-compaction settings
 
 **Agent-Specific (Agent front matter only):**
 - `name`, `description` — Agent identity (required)
-- `trigger` — Invocation method (required unless at least one built-in endpoint is enabled)
+- `trigger` — Invocation method (required unless at least one built-in endpoint is enabled, or the agent is referenced as an internal specialist via another agent's `subagents` or `workflows.subagents`)
 - `builtin_endpoints` — Built-in chat UI, chat API, and MCP tool endpoints
+- `subagents` — Chat-time delegation to specialist agents (`delegate_<slug>` tools; see [`subagents`](#subagents))
 - `logger`, `substitute_variables` — Agent runtime behavior switches
 - `input_schema`, `response_schema`, `response_example` — HTTP validation
 - `metadata` — Organizational metadata
@@ -138,7 +171,10 @@ Fields are organized into categories based on how they can be used:
 
 ### Required Fields (Agent Front Matter Only)
 
-**Summary:** Every `.agent.md` file must have `name` and `description`. It must also have either a `trigger` or at least one enabled `builtin_endpoints` value.
+**Summary:** Every `.agent.md` file must have `name` and `description`. It must
+also have either a `trigger` or at least one enabled `builtin_endpoints` value,
+unless another agent references it through `subagents` or
+`workflows.subagents` as an internal specialist.
 
 #### `name`
 - **Type:** `string`
@@ -156,6 +192,54 @@ Fields are organized into categories based on how they can be used:
 
 ### Optional Fields
 
+#### `agent_configuration`
+- **Type:** `object | null`
+- **Typical location:** Global defaults in `agents.config.yaml`; optional recursive overrides in agent front matter
+- **Default:** Empty configuration; Microsoft Agent Framework is the runtime invariant
+- **Description:** Configures a portable model output limit and framework-specific execution
+  settings. All agents execute through the harness-agent mechanism, whether or not this object is
+  present.
+
+```yaml
+# agents.config.yaml
+agent_configuration:
+  max_output_tokens: 4096
+  agent_framework:
+    compaction:
+      max_context_window_tokens: 8192
+
+# .agent.md front matter: override one inherited leaf
+agent_configuration:
+  agent_framework:
+    compaction:
+      max_context_window_tokens: 16384
+```
+
+Agent configuration inherits recursively by authored field. An omitted field or empty object keeps
+the global value; an explicit `null` clears the inherited leaf or subtree. Setting the whole per-agent
+`agent_configuration: null` clears all global agent configuration for that agent. Specialists inherit
+only their own resolved global-plus-agent configuration, never a coordinator's overrides.
+
+`max_output_tokens` is a positive integer and may be configured without compaction. When
+`max_context_window_tokens` is configured, the effective output limit must also be present and must
+be smaller than the context limit. Environment substitution runs before schema parsing and effective
+validation.
+
+Harness execution applies whenever an agent runs directly, as a chat-time delegated specialist, or
+as a Workflow Sub Agent. Direct runs retain authoritative full Blob/File history while compaction
+bounds only the message context sent to the model. Specialist runs remain fresh, single-task leaf
+executions with no nested delegation or persistent history. Harness instructions are empty, and the
+runtime disables todo, plan/execute mode, file memory, web search, and automatic tool approval;
+these controls are intentionally not author-configurable. For configured skills, the runtime allows
+`load_skill`, `read_skill_resource`, and `run_skill_script` without approval so autonomous turns can
+continue.
+
+`max_context_window_tokens` is the budget used by compaction and may be lower than the model's
+physical context window. The default strategy begins truncating older non-system message groups at
+80% of the input budget, where input budget is `max_context_window_tokens - max_output_tokens`.
+
+Existing top-level `model` and `timeout` fields remain unchanged.
+
 #### `trigger`
 - **Type:** `object`
 - **Typical location:** Agent only
@@ -171,18 +255,38 @@ trigger:
   args:
     route: string          # Required. URL path for the endpoint
     methods: string[]      # Optional. Array of HTTP methods. Defaults to ["POST"]
-    auth_level: string     # Optional. One of: anonymous, function, admin. Defaults to function
+    http_auth:             # Optional. Inbound auth policy (same model as builtin_endpoints.http_auth).
+                           #   String shorthand: function | admin | anonymous | entra
+                           #   Object form: { mode: <mode>, entra: { tenant_id, allowed_audiences, allowed_client_ids } }
+                           #   Defaults to function.
+    auth_level: string     # Deprecated. Use `http_auth` instead. One of: anonymous, function, admin.
+                           #   If both are set, `http_auth` wins and this is ignored with a warning.
 ```
 
-**Example:**
+**Example (default key auth):**
 ```yaml
 trigger:
   type: http_trigger
   args:
     route: "resource-summary"
     methods: ["POST"]
-    auth_level: function
+    http_auth: function
 ```
+
+**Example (Entra ID enforcement):**
+```yaml
+trigger:
+  type: http_trigger
+  args:
+    route: "secured"
+    http_auth:
+      mode: entra
+      entra:
+        tenant_id: "<tenant-guid>"
+        allowed_audiences: ["api://my-app"]
+```
+
+`http_trigger` `http_auth` reuses the same [`http_auth` endpoint-authentication model](#http_auth--endpoint-authentication) as the built-in chat endpoints. `entra` mode registers the route anonymous at the Functions key layer and enforces the App Service Authentication (Easy Auth) `x-ms-client-principal` header in-app, rejecting requests without a validated principal before the agent runs. The legacy flat `auth_level` string remains supported for backward compatibility but is deprecated.
 
 #### **Timer Trigger**
 ```yaml
@@ -239,9 +343,6 @@ trigger:
 ```yaml
 trigger:
   type: connector_trigger
-  args:
-    connection_name: string      # Required by connector binding configuration
-    trigger_identifier: string   # Required by connector binding configuration
 ```
 
 ---
@@ -259,9 +360,36 @@ builtin_endpoints:
   debug_chat_ui: boolean   # Enable chat UI plus chat/chatstream APIs
   chat_api: boolean  # Enable REST API endpoints even without the chat UI
   mcp: boolean       # Enable MCP tool registration for agent-to-agent calls
+  http_auth: string | object  # Inbound HTTP authentication policy (see below); default "function"
 ```
 
 `debug_chat_ui: true` automatically enables `chat_api: true` because the built-in UI calls the chat API. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints: `debug_chat_ui`, `chat_api`, and `mcp`.
+
+##### `http_auth` — Endpoint authentication
+
+Controls how the HTTP chat API (`/agents/{slug}/chat`, `/agents/{slug}/chatstream`) authenticates inbound requests. Applies only to HTTP endpoints and does not affect the MCP endpoint. Accepts a shorthand string (`http_auth: entra`) or an object.
+
+```yaml
+builtin_endpoints:
+  chat_api: true
+  http_auth:
+    mode: entra          # function | admin | anonymous | entra
+    entra:               # only used when mode == "entra"
+      tenant_id: "<tenant-guid>"           # optional; inline value or a $VAR/%VAR% placeholder
+      allowed_audiences: ["api://agents"]  # optional; placeholders are resolved at load time
+      allowed_client_ids: ["<app-id>"]     # optional
+```
+
+| Mode | Behavior |
+| --- | --- |
+| `function` (default) | API key required — a valid function/host key (`AuthLevel.FUNCTION`). |
+| `admin` | Master key required (`AuthLevel.ADMIN` maps to the Functions `_master` key — the most privileged app credential, distinct from an extension system key). |
+| `anonymous` | No auth — open endpoint (`AuthLevel.ANONYMOUS`). |
+| `entra` | Entra ID (Azure AD). Routes are registered as anonymous at the Functions key layer; each request is then enforced against the platform-injected Easy Auth `x-ms-client-principal` header (App Service Authentication validates the token — the runtime never validates JWTs itself). Optional `tenant_id`/`allowed_audiences`/`allowed_client_ids` allowlists are enforced (401 on missing/invalid principal, 403 on allowlist mismatch); reference environment variables inline with `$VAR`/`%VAR%` substitution to keep secrets out of source. **Requires Easy Auth to be enabled** — because the route is anonymous, the runtime only trusts the injected principal when it has non-spoofable evidence Easy Auth is enforced (`WEBSITE_AUTH_ENABLED`, or the `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH` app setting), and otherwise fails closed (401). |
+
+**App-wide default:** You can set a top-level `http_auth` in `agents.config.yaml` to apply one policy to every agent (see [Global Configuration](#global-configuration-agentsconfigyaml)). Resolution precedence is: the agent's own `builtin_endpoints.http_auth` → the global `agents.config.yaml` `http_auth` → the built-in `function` default. An agent authoring its own `http_auth` always wins, even if it is weaker than the app-wide default.
+
+**HTTP only:** `http_auth` applies only to the agent's HTTP endpoints (the chat API and any `http_trigger` routes). It does not affect the MCP endpoint (`/runtime/webhooks/mcp`), which is owned by the Functions MCP extension and always requires the MCP extension **system key** (`x-functions-key`).
 
 **Endpoint Details:**
 
@@ -391,6 +519,12 @@ system_tools:
   dynamic_sessions_code_interpreter:      # ACA Dynamic Sessions code interpreter
     endpoint: string
     client_id: string | null
+  web_request:                            # Outbound HTTP request tool (default-on)
+    allowed_hosts: string[] | null
+    require_https: boolean
+    timeout_seconds: number | null
+    max_response_bytes: integer | null
+    max_request_bytes: integer | null
 ```
 
 ---
@@ -424,6 +558,61 @@ system_tools:
 
 ---
 
+##### `system_tools.web_request`
+- **Type:** `object` or `boolean` (global), `boolean` (agent)
+- **Description:** Configures the built-in `web_request` tool, which lets an agent make a single outbound HTTP(S) request to a public host. Unlike the sandbox, **it requires no Azure resource and is enabled by default** for every agent — no configuration is needed to turn it on. An always-on SSRF security floor validates every request (blocking loopback/private/link-local/CGNAT/metadata-service addresses, etc.) regardless of configuration.
+
+**All fields are optional** and clamped to runtime-defined ceilings (not operator-configurable):
+
+| Field | Default | Ceiling | Notes |
+|-------|---------|---------|-------|
+| `allowed_hosts` | `null` (any public host) | — | Exact hostname match only — no wildcards or suffix matching in v1 |
+| `require_https` | `true` | — | Set `false` to also allow `http://` |
+| `timeout_seconds` | `30` | `120` s | Per-request timeout |
+| `max_response_bytes` | `5,000,000` | `10,000,000` (10 MB) | Response is truncated (not an error) past this size |
+| `max_request_bytes` | `1,000,000` | `10,000,000` (10 MB) | Request body size cap |
+
+**Default behavior (no configuration needed):**
+```yaml
+# web_request is already available to every agent with these defaults —
+# no agents.config.yaml entry required.
+```
+
+**Global configuration — restrict to specific hosts (in `agents.config.yaml`):**
+```yaml
+system_tools:
+  web_request:
+    allowed_hosts:
+      - api.example.com
+      - api.github.com
+    require_https: true
+    timeout_seconds: 15
+    max_response_bytes: 2000000
+```
+
+**Disable app-wide (in `agents.config.yaml`):**
+```yaml
+system_tools:
+  web_request: false
+```
+
+**Agent opt-out (in agent front matter):**
+```yaml
+---
+name: Offline Agent
+description: An agent that must not make outbound network calls
+
+system_tools:
+  web_request: false
+---
+```
+
+**Model-facing tool surface:** `web_request(method, url, headers?, query?, body?|json?)` — `method` defaults to `GET`; `body` (raw string) and `json` (arbitrary JSON) are mutually exclusive. Timeouts and size limits are operator configuration, not model-controlled parameters. The tool never follows redirects (`redirect_count` is always `0` in v1) and strips query strings/userinfo from the echoed `url` in its response.
+
+**Note:** Per-host credential injection (`auth`), redirect following, wildcard/suffix host matching, and a per-agent override *object* (as opposed to a plain boolean) are planned for a future version — see [FRD 0005](./frds/0005-web-request-system-tool.md) for the full target design. v1 is intentionally exact-host-only and unauthenticated.
+
+---
+
 #### `tools`
 - **Type:** `object`
 - **Location:** Global (`agents.config.yaml`) for configuration, Agent (front matter) for filtering
@@ -448,6 +637,114 @@ tools: false
 ```
 
 **Note:** Agents inherit all globally available custom tools by default. Use `exclude` to filter out unwanted tools.
+
+---
+
+#### `workflows`
+- **Type:** `object`
+- **Location:** Agent front matter (any agent)
+- **Description:** Enables Dynamic Workflows, filters discovered workflow tools, and
+  grants access to leaf specialists for workflow tasks.
+
+```yaml
+workflows:
+  enabled: true
+  exclude: ["expensive_diagnostics"]  # Optional
+  subagents:
+    - agent: pr_status_analyst
+      when: Review one pull request and summarize its current status
+    - agent: actionable_report_writer
+      when: Combine pull-request summaries into an HTML portfolio report
+```
+
+`workflows.enabled` is a strict boolean. When true, it injects
+workflow-management tools (`start_workflow`, `get_workflow_status`,
+`list_workflows`, `cancel_workflow`, `terminate_workflow`) and exposes the
+agent-allowed public `@workflow_tool` handlers discovered from `tools/*.py` as
+workflow task targets. No new role or starter fields are required; workflow
+identity comes from the agent's canonical slug.
+The v1 runtime currently requires workflow tool handlers to be synchronous,
+accept one dictionary argument, and return JSON-serializable values. This is an
+implementation constraint of the v1 registry and Activity runner, not a Durable
+Functions requirement.
+
+Normal custom tools keep their existing behavior. Plain public functions and `@tool`/`FunctionTool` values in `tools/*.py` are normal MAF tools; `@workflow_tool` marks a callable for workflow execution. Use both decorators when a callable should be available both directly in chat and inside workflow tasks. Use `_`-prefixed helpers for functions that should be neither normal tools nor workflow tools.
+
+`workflows.exclude` filters only that agent's workflow Activity targets; it does
+not affect normal tools or another agent's workflow policy. Conversely,
+`tools.exclude` filters normal MAF tools and does not hide workflow tools.
+
+Any agent may enable workflows. Invocation remains governed independently by its
+configured trigger and built-in endpoints. `builtin_endpoints.debug_chat_ui`
+automatically enables its backing chat API.
+
+`workflows.subagents` is independent from top-level [`subagents`](#subagents).
+It is deny-by-default: only listed specialist slugs can appear in a workflow
+`sub_agent` node. Each frontmatter entry must be an object containing `agent` and optionally
+`when`; unknown fields, duplicate references, self references, and unknown slugs
+fail startup. The `when` hint is shown to the workflow authoring model; if
+omitted or blank, the specialist's `description` is used. The generated DAG node
+is separate and contains `id`, `type: "sub_agent"`, `agent`, `task`, and optional
+`depends_on`. Workflow specialists run with
+a fresh context and their own instructions, model, normal tools, MCP servers,
+skills, `web_request` setting, and timeout. They receive no parent conversation
+history, request-scoped sandbox, workflow-management tools, or `delegate_*`
+tools.
+
+See [Dynamic workflows](./workflows.md#workflow-sub-agents) for task examples and
+[`WorkflowConfig`](./front-matter-reference.md#workflowconfig) for the complete
+field reference.
+
+---
+
+#### `subagents`
+- **Type:** `array` of objects
+- **Location:** Agent front matter (any independently runnable agent — one with its own `trigger` and/or enabled `builtin_endpoints`; not limited to `main.agent.md`)
+- **Description:** Declares specialist agents this agent (the "coordinator") may delegate to at chat time. Each declared specialist is exposed to the coordinator's model as a hand-written `delegate_<slug>` function tool whose handler calls the specialist's plain, non-streaming `agent_framework.Agent.run(task)`. This runs entirely inside the coordinator's normal `agent.run()` tool-calling loop — there is no hand-off, no human-in-the-loop, and no `Workflow` involved.
+
+```yaml
+subagents:
+  - agent: string   # Required. The specialist's identity slug (its source file stem; see File Naming Conventions)
+    when: string    # Optional. A routing hint used as the delegate_<slug> tool description.
+                    # Omitted -> the specialist's own `description` is used instead.
+```
+
+**Example (from FRD 0007):**
+```yaml
+# agents/coordinator.agent.md
+---
+name: Support Coordinator
+description: Routes customer questions to the right specialist
+builtin_endpoints: true
+subagents:
+  - agent: billing                 # references billing.agent.md by its slug
+    when: Invoices, charges, refunds, or subscription questions   # -> becomes delegate_billing's tool description
+  - agent: tech                    # when omitted -> uses tech's own `description`
+---
+You are a support coordinator. Use the billing and tech specialists when
+relevant, then give the customer a single consolidated answer.
+```
+
+**Object-only entries — no shorthand:** Every entry must be an object with an `agent` key. There is no bare-string shorthand (`subagents: [billing]` is rejected) and no `id` or `tool_name` field — the tool is always named `delegate_<slug>`, derived automatically from the referenced agent's slug.
+
+**Identity and uniqueness:** `agent` is the referenced specialist's file-stem slug — the same identity used for its Azure Function name and built-in endpoint route. Agent slugs are **globally unique across the whole app**; a collision (including two files whose stems sanitize to the same slug, e.g. `daily-report.agent.md` and `daily_report.agent.md`) fails app startup with an actionable rename error — see the breaking-change note under [File Naming Conventions](#file-naming-conventions).
+
+**Reference validation (fails fast at startup):**
+- Unknown reference — `agent:` must name a slug that exists in the app.
+- Duplicate reference — the same `agent:` cannot appear twice in one agent's `subagents:` list.
+- Self-reference — an agent cannot declare itself as its own specialist.
+- Tool-name collision — the derived `delegate_<slug>` name must not collide with any of the coordinator's other tools (custom/user tools, MCP tools, sandbox, workflow-management tools, or another specialist's `delegate_<slug>`).
+
+**Delegated execution ("runs as itself"):** A specialist invoked through delegation uses its own instructions, model, and static tools (its own user tools, MCP servers, and skills) exactly as if it had been triggered directly — same identity, same configuration. What differs is context and role:
+- **Context isolation:** the specialist receives a single self-contained string argument, `task` (`propagate_session=False`) — it does not see the coordinator's conversation history or share session state.
+- **No per-request sandbox or Dynamic Workflow tools:** these are naturally absent for a delegated specialist (not stripped) because both capabilities belong to the top-level direct invocation, not the delegated execution role.
+- **No recursive delegation:** delegation is single-level. A specialist invoked through `subagents:` never gets its own `delegate_*` tools, even if it declares `subagents:` of its own — its references are simply not wired for that call. This is enforced structurally (the specialist-building code path never reads a delegated agent's own `subagents`), not with a runtime depth counter, so mutual `A` ↔ `B` references are harmless.
+
+**Trust boundary:** `subagents` is an explicit **capability grant** from the app author. A delegated call runs in-process and does not pass through the specialist's own endpoint authorization (`auth_level`, etc.) — treat one deployed app as one trust domain, and only delegate to specialists you are comfortable exposing to anyone who can reach the coordinator.
+
+**Concurrency:** There is no hard cap on the number of declared specialists (Microsoft Agent Framework's own tool-calling loop is the only per-turn bound). Each delegate call builds its own specialist instance, so different specialists — and repeated or concurrent calls to the *same* specialist — all run independently and in parallel; there is no per-specialist lock or serialization.
+
+**Failure handling:** A specialist failure or specialist-local timeout is recoverable — the coordinator receives a sanitized error string and continues (it does not abort the whole request). Parent/request cancellation still propagates and aborts normally. See [`docs/observability.md`](./observability.md) for how delegated calls are traced and how errors are attributed.
 
 ---
 
@@ -954,6 +1251,57 @@ Help the user explore resources in subscription $SUBSCRIPTION_ID.
 
 This uses explicit built-in chat UI and chat APIs, inherited capabilities, and model resolution from environment/provider defaults.
 
+### Example 6: Coordinator with Delegated Specialists
+
+This example shows chat-time delegation: a coordinator declares two specialists via `subagents:`. One specialist (`billing`) is also independently runnable via its own trigger; the other (`tech`) is reachable only through delegation.
+
+**Coordinator (`main.agent.md`):**
+```yaml
+---
+name: Support Coordinator
+description: Routes customer questions to the right specialist
+
+builtin_endpoints: true
+
+subagents:
+  - agent: billing
+    when: Invoices, charges, refunds, or subscription questions
+  - agent: tech
+---
+
+You are a support coordinator. Use the billing and tech specialists when
+relevant, then give the customer a single consolidated answer.
+```
+
+**Billing Specialist (`agents/billing.agent.md`):**
+```yaml
+---
+name: Billing Specialist
+description: Answers invoice, payment, refund, and subscription questions
+
+trigger:
+  type: http_trigger
+  args:
+    route: billing
+---
+
+Answer billing questions precisely. Ask a clarifying question if you are
+missing information (such as an invoice number) rather than guessing.
+```
+
+**Tech Specialist (`agents/tech.agent.md`):**
+```yaml
+---
+name: Tech Support Specialist
+description: Answers technical troubleshooting and "how do I..." questions
+---
+
+Help with troubleshooting and "how do I..." questions with clear,
+step-by-step answers.
+```
+
+*Note: `tech` has neither `trigger` nor `builtin_endpoints`, which would normally be invalid — it is valid here only because `main.agent.md` references it in `subagents:`. This registers `delegate_billing` and `delegate_tech` tools on the coordinator; `billing` remains independently reachable at its own `/billing` endpoint, and `tech` is reachable only through the coordinator.* See [`samples/multi-agent-delegation/`](../samples/multi-agent-delegation/) for the runnable version of this example.
+
 ---
 
 ## Validation Rules
@@ -963,7 +1311,7 @@ This uses explicit built-in chat UI and chat APIs, inherited capabilities, and m
 **Agent Front Matter (`.agent.md`):**
 1. **`name`** — Must always be present (string)
 2. **`description`** — Must always be present (string)
-3. **`trigger` or `builtin_endpoints`** — A trigger is required unless at least one built-in endpoint is enabled
+3. **`trigger` or `builtin_endpoints`** — A trigger is required unless at least one built-in endpoint is enabled, **or** the agent is referenced as an internal specialist through another agent's `subagents` or `workflows.subagents` (see "Internal specialist agents" under [File Naming Conventions](#file-naming-conventions) below)
 
 **Global Configuration (`agents.config.yaml`):**
 - **No required properties** — The entire file is optional
@@ -973,6 +1321,7 @@ This uses explicit built-in chat UI and chat APIs, inherited capabilities, and m
 **Global Configuration (`agents.config.yaml`) — Exact property names:**
 - `system_tools` (object)
   - `dynamic_sessions_code_interpreter` (object)
+  - `web_request` (object or boolean)
 - `model` (string)
 - `timeout` (number)
 - `tools` (object)
@@ -994,6 +1343,7 @@ This uses explicit built-in chat UI and chat APIs, inherited capabilities, and m
 11. **Tool references:** Tools in `tools.exclude` are best-effort validated; unknown tool names produce warnings during config validation
 12. **MCP server references:** Servers in `mcp.exclude` must be defined in MCP configuration discovered from `mcp.json`
 13. **Skill references:** Skills in `skills.exclude` are best-effort validated; unknown skill names produce warnings during config validation
+14. **Subagent references:** Every `subagents[].agent` must name a slug that exists in the app; duplicate and self-references within the same agent's `subagents:` list are rejected; the derived `delegate_<slug>` tool name must not collide with any other tool available to the coordinator (custom/user tools, MCP tools, sandbox, workflow-management tools, or another specialist's `delegate_<slug>`)
 15. **Configuration file location:** `agents.config.yaml` must be in the same directory as agent `.md` files
 
 ---
@@ -1015,29 +1365,68 @@ For agents, two related identifiers are derived from the source filename. The fr
     - Replace characters outside `[A-Za-z0-9_]` with `_`
     - Trim leading/trailing underscores
     - Prefix `fn_` if the result would otherwise start with a digit
-  - If another agent in the same `create_function_app()` call already uses that sanitized name, append `_2`, `_3`, and so on until the name is unique.
-  - Example: `daily-report.agent.md` → `daily_report`; if `daily_report.agent.md` also exists, the second Azure Function name becomes `daily_report_2`.
+  - This sanitized name is also the agent's **identity slug** — the same value used for the built-in endpoint route and, since FRD 0007, the `delegate_<slug>` tool name generated by another agent's `subagents:` reference. Slugs must be **globally unique across the app**.
+  - **If another agent in the same `create_function_app()` call already uses that sanitized name, app startup fails fast** with an actionable error naming both colliding files; rename one of their source files to resolve it. **Breaking change:** prior to FRD 0007, a colliding name was silently disambiguated by appending `_2`, `_3`, and so on. That auto-suffix behavior has been removed — see the note below.
+  - Example: `daily-report.agent.md` → `daily_report`; if `daily_report.agent.md` also exists, app startup now fails with a duplicate-slug error instead of silently registering the second file as `daily_report_2`. Rename one of the files (e.g. `daily_report_v2.agent.md`) to resolve it.
 
 - **Built-in endpoint slug** (used for `/agents/{slug}/`, `/agents/{slug}/chat`, `/agents/{slug}/chatstream`, and the MCP tool name exposed when `builtin_endpoints: true` or `builtin_endpoints.mcp: true`):
-  - Uses the same filename sanitization rules.
-  - Uses the same collision handling as Azure Function names: if another agent in the same `create_function_app()` call already uses that sanitized slug, append `_2`, `_3`, and so on until the slug is unique.
-  - In practice, the built-in endpoint slug stays paired with the allocated Azure Function name for the same agent (for example, `daily_report_2` maps to `/agents/daily_report_2/`).
-  - Example: `daily-report.agent.md` → `/agents/daily_report/`; if `daily_report.agent.md` also exists, the second built-in endpoint slug becomes `/agents/daily_report_2/`.
+  - Uses the same filename sanitization rules, and is the same value as the identity slug above.
+  - Uses the same fail-fast collision handling as Azure Function names: if another agent in the same `create_function_app()` call already uses that sanitized slug, app startup fails with a duplicate-slug error instead of registering an alternate route.
+  - Example: `daily-report.agent.md` → `/agents/daily_report/`; if `daily_report.agent.md` also exists, app startup now fails instead of allocating `/agents/daily_report_2/`.
+
+#### Flexible filename conventions
+
+In addition to the standard `<name>.agent.md` pattern, the runtime recognises two alternative conventions:
+
+**Bare single-agent aliases** — `agent.md` (any casing: `Agent.md`, `AGENT.MD`) and `CLAUDE.md` (any casing: `Claude.md`, `claude.md`) are treated as aliases for `main.agent.md` internally. Both produce slug `main` and are marked `is_main=True`. Use them when your function app contains exactly one agent and a simpler filename is preferable:
+
+```markdown
+---
+name: My Assistant
+description: A helpful assistant
+builtin_endpoints: true
+---
+You are a helpful assistant.
+```
+_(saved as `agent.md` — available at `/agents/main/chat`, same endpoint as `main.agent.md`)_
+
+> **Note:** `agent.md`, `CLAUDE.md`, and `main.agent.md` all produce slug `main` and **must not coexist in the same app**. App startup fails with a duplicate-slug error if more than one is present.
+
+**`*.claude.md` prefix pattern** — `summarizer.claude.md` is equivalent to `summarizer.agent.md`: the prefix becomes the slug (`summarizer`). Use whichever suffix fits your workflow.
+
+**Case-insensitive suffix matching** — `.agent.md` and `.claude.md` suffix detection is case-insensitive: `Report.AGENT.md` produces slug `report`, same as `report.agent.md`. Two filenames that produce the same slug collide and will fail startup.
+
+> **Not supported:** `*.agents.md` (plural) is **not** a recognised pattern. Files named e.g. `report.agents.md` are silently ignored by the loader. Use the singular `.agent.md` or `.claude.md` suffix.
+
+> **Breaking change (FRD 0007):** Duplicate agent slugs — including two file stems that *sanitize* to the same value (for example `daily-report.agent.md` and `daily_report.agent.md`), and duplicates across the root and an `agents/` subfolder — now fail app startup instead of silently auto-suffixing. This unifies agent-slug collision handling with the pre-existing duplicate-skill and duplicate-workflow-tool checks, and is required because a slug is now also a prompt-visible identity (the `delegate_<slug>` tool name); a silently renamed agent could otherwise leave a `subagents:` reference pointing at the wrong agent, or leave two different agents indistinguishable to a coordinator's model. If you relied on the old auto-suffix behavior, rename the colliding file(s) so every agent slug is unique.
 
 In other words, the display `name:` field is never used to derive registered Azure Function names, routes, or runtime identifiers; it is presentation-only. See also [`name`](#name).
 
 **Endpoint-only agents:**
 Any `.agent.md` file, including `main.agent.md`, may omit `trigger` when at least one built-in endpoint is enabled. For example, `main.agent.md` with `builtin_endpoints: true` is available at `/agents/main/`, `/agents/main/chat`, and `/agents/main/chatstream`, and registers an MCP tool named `main` on the shared runtime MCP transport.
 
-Agents with neither `trigger` nor enabled `builtin_endpoints` are invalid.
+**Internal specialist agents:** An agent may also omit both `trigger` and
+`builtin_endpoints` if — and only if — another agent references it through
+top-level `subagents` or `workflows.subagents`. Such an agent has no endpoint of
+its own. A top-level reference makes it reachable through a `delegate_<slug>`
+tool; a workflow reference makes it reachable as a workflow `sub_agent` node.
+See [`subagents`](#subagents),
+[`workflows`](#workflows), and
+[Example 6](#example-6-coordinator-with-delegated-specialists) above.
+
+Agents with neither `trigger` nor enabled `builtin_endpoints`, and that are not
+referenced by any other agent's `subagents` or `workflows.subagents`, are
+invalid.
 
 **Example project structure:**
 ```
 /
   agents.config.yaml           # Global configuration
-  main.agent.md             # Optional chat agent convention; enable builtin_endpoints explicitly
+  agent.md                  # Bare alias for main.agent.md → slug "main" (is_main=true)
+                            # Alternatives: main.agent.md or CLAUDE.md → same slug "main"
+                            #   (agent.md, CLAUDE.md, and main.agent.md are aliases; only one per app)
   daily_report.agent.md     # Timer-triggered agent
-  resource_summary.agent.md # Custom HTTP agent
+  resource_summary.claude.md # *.claude.md is equivalent to *.agent.md — prefix becomes slug
   function_app.py           # Python Functions entry point
   host.json
   requirements.txt

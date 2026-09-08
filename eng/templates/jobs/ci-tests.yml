@@ -14,13 +14,13 @@ jobs:
           PYTHON_VERSION: '3.14'
 
     steps:
-      - task: UsePythonVersion@0
-        inputs:
-          versionSpec: $(PYTHON_VERSION)
       - task: PipAuthenticate@1
         displayName: 'Pip Authenticate'
         inputs:
           artifactFeeds: ${{ parameters.artifactFeed }}
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: $(PYTHON_VERSION)
       - bash: |
           python -m pip install --upgrade pip
           python -m pip install -U -e .[dev]
@@ -31,6 +31,9 @@ jobs:
       - bash: |
           python -m mypy src
         displayName: 'Type check with mypy'
+      - bash: |
+          python eng/scripts/generate_config_reference.py --check
+        displayName: 'Verify config reference docs are up to date'
       - bash: |
           python -m pytest --cache-clear --cov=./src/azure_functions_agents --cov-report=xml --cov-branch tests
         displayName: 'Test with pytest'

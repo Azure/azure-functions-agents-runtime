@@ -7,26 +7,36 @@ import pytest
 
 from azure_functions_agents.config.merge import (
     DEFAULT_TIMEOUT,
+    _resolve_agent_configuration,
     _resolve_builtin_endpoints,
     _resolve_model,
     _resolve_sandbox,
     _resolve_timeout,
+    _resolve_web_request,
     apply_mcp_filter,
     apply_skills_filter,
     apply_tools_filter,
     compose,
 )
 from azure_functions_agents.config.schema import (
+    AgentConfiguration,
+    AgentFrameworkCompactionConfig,
+    AgentFrameworkConfiguration,
     AgentSpec,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
+    EndpointAuthConfig,
     GlobalConfig,
     McpFilter,
     SkillsFilter,
+    SubagentRef,
     SystemToolsAgentOverride,
     SystemToolsConfig,
     ToolsFilter,
     TriggerSpec,
+    WebRequestConfig,
+    WorkflowConfig,
+    WorkflowSubagentRef,
 )
 from azure_functions_agents.config.validation import validate_resolved_agent
 
@@ -55,22 +65,76 @@ def test_resolve_timeout_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_resolve_builtin_endpoints() -> None:
+    empty = GlobalConfig()
     assert _resolve_builtin_endpoints(
-        AgentSpec(name="A", description="B", is_main=True)
+        AgentSpec(name="A", description="B", is_main=True), empty
     ) == BuiltinEndpointsConfig()
-    assert _resolve_builtin_endpoints(AgentSpec(name="A", description="B", is_main=False)) == BuiltinEndpointsConfig()
     assert _resolve_builtin_endpoints(
-        AgentSpec(name="A", description="B", builtin_endpoints=True)
+        AgentSpec(name="A", description="B", is_main=False), empty
+    ) == BuiltinEndpointsConfig()
+    assert _resolve_builtin_endpoints(
+        AgentSpec(name="A", description="B", builtin_endpoints=True), empty
     ) == BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=True)
     assert _resolve_builtin_endpoints(
-        AgentSpec(name="A", description="B", builtin_endpoints=BuiltinEndpointsConfig(chat_api=True))
+        AgentSpec(name="A", description="B", builtin_endpoints=BuiltinEndpointsConfig(chat_api=True)),
+        empty,
     ) == BuiltinEndpointsConfig(chat_api=True)
 
 
 def test_resolve_builtin_endpoints_shorthand_is_not_main_special_cased() -> None:
     assert _resolve_builtin_endpoints(
-        AgentSpec(name="A", description="B", builtin_endpoints=True, is_main=True)
+        AgentSpec(name="A", description="B", builtin_endpoints=True, is_main=True), GlobalConfig()
     ) == BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=True)
+
+
+def test_app_wide_auth_is_inherited_by_agents() -> None:
+    """A top-level agents.config.yaml `http_auth` becomes each agent's default."""
+    global_config = GlobalConfig(http_auth=EndpointAuthConfig(mode="entra"))
+    resolved = _resolve_builtin_endpoints(
+        AgentSpec(name="A", description="B", builtin_endpoints=BuiltinEndpointsConfig(chat_api=True)),
+        global_config,
+    )
+    assert resolved.http_auth.mode == "entra"
+
+
+def test_app_wide_auth_inherited_for_shorthand_builtin_endpoints() -> None:
+    """`builtin_endpoints: true` still inherits the app-wide auth default."""
+    global_config = GlobalConfig(http_auth=EndpointAuthConfig(mode="anonymous"))
+    resolved = _resolve_builtin_endpoints(
+        AgentSpec(name="A", description="B", builtin_endpoints=True), global_config
+    )
+    assert resolved.http_auth.mode == "anonymous"
+
+
+def test_app_wide_auth_shorthand_string_is_coerced() -> None:
+    """A bare-string `http_auth: entra` at the global level is coerced and inherited."""
+    global_config = GlobalConfig.model_validate({"http_auth": "admin"})
+    resolved = _resolve_builtin_endpoints(
+        AgentSpec(name="A", description="B", builtin_endpoints=True), global_config
+    )
+    assert resolved.http_auth.mode == "admin"
+
+
+def test_per_agent_auth_overrides_app_wide_default() -> None:
+    """An explicit per-agent auth wins over the app-wide default, even if weaker."""
+    global_config = GlobalConfig(http_auth=EndpointAuthConfig(mode="entra"))
+    spec = AgentSpec.model_validate(
+        {
+            "name": "A",
+            "description": "B",
+            "builtin_endpoints": {"chat_api": True, "http_auth": "function"},
+        }
+    )
+    resolved = _resolve_builtin_endpoints(spec, global_config)
+    assert resolved.http_auth.mode == "function"
+
+
+def test_no_app_wide_auth_keeps_default_function() -> None:
+    """Without a global auth, agents keep the built-in `function` default."""
+    resolved = _resolve_builtin_endpoints(
+        AgentSpec(name="A", description="B", builtin_endpoints=True), GlobalConfig()
+    )
+    assert resolved.http_auth.mode == "function"
 
 
 def test_resolve_sandbox() -> None:
@@ -185,6 +249,39 @@ def test_compose_preserves_substitute_variables_flag() -> None:
     assert resolved.substitute_variables is False
 
 
+def test_compose_preserves_typed_workflow_subagent_grant() -> None:
+    workflow_config = WorkflowConfig(
+        enabled=True,
+        subagents=(
+            WorkflowSubagentRef(
+                agent="pr_status_analyst",
+                when="Analyze one pull request.",
+            ),
+        ),
+    )
+
+    resolved = compose(
+        AgentSpec(
+            name="Coordinator",
+            description="Coordinates PR reporting.",
+            workflows=workflow_config,
+        ),
+        GlobalConfig(),
+    )
+
+    assert resolved.workflows == workflow_config
+    assert resolved.metadata["workflows"] == {
+        "enabled": True,
+        "exclude": [],
+        "subagents": [
+            {
+                "agent": "pr_status_analyst",
+                "when": "Analyze one pull request.",
+            }
+        ],
+    }
+
+
 def test_compose_defers_warning_only_validation(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -223,7 +320,7 @@ def test_resolve_builtin_endpoints_explicit_false() -> None:
     """Defensive: explicit builtin_endpoints: false returns an all-disabled BuiltinEndpointsConfig
     (keeps built-in endpoints disabled even for main.agent.md)."""
     spec = AgentSpec(name="Main", description="d", builtin_endpoints=False, is_main=True)
-    debug = _resolve_builtin_endpoints(spec)
+    debug = _resolve_builtin_endpoints(spec, GlobalConfig())
     assert debug.debug_chat_ui is False
     assert debug.chat_api is False
     assert debug.mcp is False
@@ -244,6 +341,138 @@ def test_resolve_sandbox_no_global_returns_none() -> None:
     """Defensive: when the global config has no system_tools block, sandbox is None."""
     spec = AgentSpec(name="A", description="d")
     assert _resolve_sandbox(spec, GlobalConfig()) is None
+
+
+def test_resolve_web_request_default_on_absent() -> None:
+    """Default-on: no system_tools block anywhere -> enabled with default config."""
+    spec = AgentSpec(name="A", description="B")
+    assert _resolve_web_request(spec, GlobalConfig()) == WebRequestConfig()
+
+
+def test_resolve_web_request_default_on_global_none() -> None:
+    """Default-on: global system_tools present but web_request unset (None) -> still enabled."""
+    spec = AgentSpec(name="A", description="B")
+    global_config = GlobalConfig(system_tools=SystemToolsConfig())
+    assert _resolve_web_request(spec, global_config) == WebRequestConfig()
+
+
+def test_resolve_web_request_default_on_global_true() -> None:
+    """Default-on: global web_request explicitly True -> enabled with default config."""
+    spec = AgentSpec(name="A", description="B")
+    global_config = GlobalConfig(system_tools=SystemToolsConfig(web_request=True))
+    assert _resolve_web_request(spec, global_config) == WebRequestConfig()
+
+
+def test_resolve_web_request_global_false_disables_app_wide() -> None:
+    """global system_tools.web_request: false disables it for every agent."""
+    spec = AgentSpec(name="A", description="B")
+    global_config = GlobalConfig(system_tools=SystemToolsConfig(web_request=False))
+    assert _resolve_web_request(spec, global_config) is None
+
+
+def test_resolve_web_request_per_agent_false_opts_out() -> None:
+    """Per-agent `web_request: false` opts out even when globally enabled."""
+    spec = AgentSpec(
+        name="A", description="B", system_tools=SystemToolsAgentOverride(web_request=False)
+    )
+    assert _resolve_web_request(spec, GlobalConfig()) is None
+
+
+def test_resolve_web_request_per_agent_true_or_absent_inherits_global() -> None:
+    """Per-agent `web_request: true`/absent inherits whatever the global config resolves to."""
+    global_config = GlobalConfig(
+        system_tools=SystemToolsConfig(web_request=WebRequestConfig(require_https=False))
+    )
+    spec_absent = AgentSpec(name="A", description="B")
+    spec_true = AgentSpec(
+        name="A", description="B", system_tools=SystemToolsAgentOverride(web_request=True)
+    )
+    assert _resolve_web_request(spec_absent, global_config) == WebRequestConfig(
+        require_https=False
+    )
+    assert _resolve_web_request(spec_true, global_config) == WebRequestConfig(require_https=False)
+
+
+def test_compose_derives_slug_from_source_file_stem() -> None:
+    """Identity slug = sanitized file stem, same derivation as function/endpoint names (FRD 0007 §4.2)."""
+    spec = AgentSpec(
+        name="Billing Specialist",
+        description="d",
+        source_file=str(Path("agents") / "billing-specialist.agent.md"),
+    )
+    resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.slug == "billing_specialist"
+
+
+def test_compose_slug_matches_function_name_derivation() -> None:
+    """The slug must equal exactly what `_naming.py`'s function-name allocator would compute
+    for the same source file — this equivalence is load-bearing for FRD 0007 Decision #17."""
+    from azure_functions_agents._slug import _function_name_from_source
+
+    spec = AgentSpec(
+        name="Weird Name!!",
+        description="d",
+        source_file=str(Path(r"C:\agents\my-cool.agent.md")),
+    )
+    resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.slug == _function_name_from_source(resolved.source_file, resolved.name)
+
+
+def test_compose_slug_missing_source_file_does_not_warn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Directly-constructed AgentSpecs (common in tests) may omit source_file; compose() must
+    silently fall back rather than warn (validation-time concerns belong elsewhere)."""
+    spec = AgentSpec(name="No Source File", description="d")
+    with caplog.at_level(logging.WARNING):
+        resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.slug == "No_Source_File"
+    assert caplog.records == []
+
+
+def test_compose_normalizes_subagents() -> None:
+    spec = AgentSpec(
+        name="Coordinator",
+        description="d",
+        subagents=[
+            SubagentRef(agent="billing-specialist", when="Billing questions."),
+            SubagentRef(agent="shipping-specialist"),
+        ],
+    )
+    resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.subagents == [
+        SubagentRef(agent="billing-specialist", when="Billing questions."),
+        SubagentRef(agent="shipping-specialist"),
+    ]
+
+
+def test_compose_subagents_defaults_to_empty_list() -> None:
+    spec = AgentSpec(name="Coordinator", description="d")
+    resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.subagents == []
+
+
+def test_compose_normalized_subagents_are_independent_copies() -> None:
+    """`compose()` must copy SubagentRef entries, not alias the spec's own list/objects."""
+    ref = SubagentRef(agent="billing-specialist")
+    spec = AgentSpec(name="Coordinator", description="d", subagents=[ref])
+    resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.subagents[0] == ref
+    assert resolved.subagents[0] is not ref
+    assert resolved.subagents is not spec.subagents
+
+
+def test_resolve_web_request_global_object_is_used_verbatim() -> None:
+    """A configured global WebRequestConfig object is returned as-is (not defaulted)."""
+    configured = WebRequestConfig(
+        allowed_hosts=["api.example.com"],
+        timeout_seconds=5,
+        max_response_bytes=1000,
+        max_request_bytes=500,
+    )
+    global_config = GlobalConfig(system_tools=SystemToolsConfig(web_request=configured))
+    spec = AgentSpec(name="A", description="B")
+    assert _resolve_web_request(spec, global_config) is configured
 
 
 def test_apply_tools_filter_inherits_global_when_agent_unset() -> None:
@@ -271,6 +500,233 @@ def test_apply_tools_filter_no_global_no_agent_returns_empty_filter() -> None:
     effective, disabled = apply_tools_filter(None, None)
     assert disabled is False
     assert effective.exclude == []
+
+
+# ---------------------------------------------------------------------------
+# _resolve_agent_configuration
+# ---------------------------------------------------------------------------
+
+
+def _agent_configuration(
+    *,
+    max_output_tokens: int | None = None,
+    max_context_window_tokens: int | None = None,
+) -> AgentConfiguration:
+    agent_framework = (
+        AgentFrameworkConfiguration(
+            compaction=AgentFrameworkCompactionConfig(
+                max_context_window_tokens=max_context_window_tokens
+            )
+        )
+        if max_context_window_tokens is not None
+        else None
+    )
+    return AgentConfiguration(
+        max_output_tokens=max_output_tokens,
+        agent_framework=agent_framework,
+    )
+
+
+def test_resolve_agent_configuration_defaults_empty() -> None:
+    resolved = _resolve_agent_configuration(
+        AgentSpec(name="A", description="B"), GlobalConfig()
+    )
+    assert resolved == AgentConfiguration()
+
+
+def test_resolve_agent_configuration_inherits_global_tree() -> None:
+    global_value = _agent_configuration(
+        max_output_tokens=4096,
+        max_context_window_tokens=8192,
+    )
+    resolved = _resolve_agent_configuration(
+        AgentSpec(name="A", description="B"),
+        GlobalConfig(agent_configuration=global_value),
+    )
+    assert resolved == global_value
+    assert resolved is not global_value
+
+
+def test_resolve_agent_configuration_deep_merges_agent_leaves() -> None:
+    global_value = _agent_configuration(
+        max_output_tokens=4096,
+        max_context_window_tokens=8192,
+    )
+    spec = AgentSpec.model_validate(
+        {
+            "name": "A",
+            "description": "B",
+            "agent_configuration": {
+                "max_output_tokens": 2048,
+                "agent_framework": {},
+            },
+        }
+    )
+    resolved = _resolve_agent_configuration(
+        spec, GlobalConfig(agent_configuration=global_value)
+    )
+    assert resolved.max_output_tokens == 2048
+    assert resolved.agent_framework == global_value.agent_framework
+
+
+def test_resolve_agent_configuration_empty_object_inherits() -> None:
+    global_value = _agent_configuration(max_output_tokens=4096)
+    spec = AgentSpec.model_validate(
+        {"name": "A", "description": "B", "agent_configuration": {}}
+    )
+    assert _resolve_agent_configuration(
+        spec, GlobalConfig(agent_configuration=global_value)
+    ) == global_value
+
+
+def test_resolve_agent_configuration_null_clears_all() -> None:
+    global_value = _agent_configuration(
+        max_output_tokens=4096,
+        max_context_window_tokens=8192,
+    )
+    spec = AgentSpec.model_validate(
+        {"name": "A", "description": "B", "agent_configuration": None}
+    )
+    assert _resolve_agent_configuration(
+        spec, GlobalConfig(agent_configuration=global_value)
+    ) == AgentConfiguration()
+
+
+def test_resolve_agent_configuration_null_leaf_clears_output() -> None:
+    global_value = _agent_configuration(max_output_tokens=4096)
+    spec = AgentSpec.model_validate(
+        {
+            "name": "A",
+            "description": "B",
+            "agent_configuration": {"max_output_tokens": None},
+        }
+    )
+    assert _resolve_agent_configuration(
+        spec, GlobalConfig(agent_configuration=global_value)
+    ) == AgentConfiguration()
+
+
+def test_resolve_agent_configuration_null_agent_framework_clears_subtree_only() -> None:
+    global_value = _agent_configuration(
+        max_output_tokens=4096,
+        max_context_window_tokens=8192,
+    )
+    spec = AgentSpec.model_validate(
+        {
+            "name": "A",
+            "description": "B",
+            "agent_configuration": {"agent_framework": None},
+        }
+    )
+    resolved = _resolve_agent_configuration(
+        spec, GlobalConfig(agent_configuration=global_value)
+    )
+    assert resolved == AgentConfiguration(max_output_tokens=4096)
+
+
+@pytest.mark.parametrize(
+    "agent_framework_override",
+    [
+        {"compaction": None},
+        {"compaction": {"max_context_window_tokens": None}},
+    ],
+    ids=["compaction-subtree", "context-leaf"],
+)
+def test_resolve_agent_configuration_nested_null_clears_compaction_only(
+    agent_framework_override: dict[str, object],
+) -> None:
+    global_value = _agent_configuration(
+        max_output_tokens=4096,
+        max_context_window_tokens=8192,
+    )
+    spec = AgentSpec.model_validate(
+        {
+            "name": "A",
+            "description": "B",
+            "agent_configuration": {
+                "agent_framework": agent_framework_override,
+            },
+        }
+    )
+    resolved = _resolve_agent_configuration(
+        spec, GlobalConfig(agent_configuration=global_value)
+    )
+    assert resolved == AgentConfiguration(max_output_tokens=4096)
+
+
+def test_resolve_agent_configuration_output_only_is_valid() -> None:
+    resolved = _resolve_agent_configuration(
+        AgentSpec.model_validate(
+            {
+                "name": "A",
+                "description": "B",
+                "agent_configuration": {"max_output_tokens": 4096},
+            }
+        ),
+        GlobalConfig(),
+    )
+    assert resolved == AgentConfiguration(max_output_tokens=4096)
+
+
+def test_resolve_agent_configuration_context_inherits_output() -> None:
+    spec = AgentSpec.model_validate(
+        {
+            "name": "A",
+            "description": "B",
+            "agent_configuration": {
+                "agent_framework": {
+                    "compaction": {"max_context_window_tokens": 8192}
+                }
+            },
+        }
+    )
+    resolved = _resolve_agent_configuration(
+        spec,
+        GlobalConfig(
+            agent_configuration=AgentConfiguration(max_output_tokens=4096)
+        ),
+    )
+    assert resolved == _agent_configuration(
+        max_output_tokens=4096,
+        max_context_window_tokens=8192,
+    )
+
+
+@pytest.mark.parametrize(
+    ("max_output_tokens", "max_context_window_tokens", "message"),
+    [
+        (None, 8192, "max_output_tokens is required"),
+        (8192, 8192, "must be less than"),
+        (9000, 8192, "must be less than"),
+    ],
+)
+def test_resolve_agent_configuration_rejects_invalid_effective_limits(
+    max_output_tokens: int | None,
+    max_context_window_tokens: int,
+    message: str,
+) -> None:
+    spec = AgentSpec(
+        name="A",
+        description="B",
+        agent_configuration=_agent_configuration(
+            max_output_tokens=max_output_tokens,
+            max_context_window_tokens=max_context_window_tokens,
+        ),
+    )
+    with pytest.raises(ValueError, match=message):
+        _resolve_agent_configuration(spec, GlobalConfig())
+
+
+def test_compose_wires_resolved_agent_configuration() -> None:
+    config = _agent_configuration(
+        max_output_tokens=4096,
+        max_context_window_tokens=8192,
+    )
+    resolved = compose(
+        AgentSpec(name="A", description="desc", agent_configuration=config),
+        GlobalConfig(),
+    )
+    assert resolved.agent_configuration == config
 
 
 def test_compose_enables_all_discovered_mcp_when_no_per_agent_filter() -> None:

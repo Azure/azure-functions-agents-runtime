@@ -18,7 +18,7 @@ def set_app_root(path: Path) -> None:
 
 
 def get_app_root() -> Path:
-    """Return the root directory of the user's agent project."""
+    """Return the app root: explicit override > ``AZURE_FUNCTIONS_AGENTS_APP_ROOT`` > ``AzureWebJobsScriptRoot`` > cwd."""
     if _app_root is not None:
         return _app_root
     explicit = os.environ.get("AZURE_FUNCTIONS_AGENTS_APP_ROOT")
