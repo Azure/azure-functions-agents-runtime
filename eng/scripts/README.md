@@ -66,14 +66,16 @@ inputs. Guest model-only, no-state/no-group RBAC is an IaC/operations
 prerequisite; the real model turn is positive access proof, not a negative
 role-assignment attestation.
 
-The retained `aca_deployed_qualification.py` and deployed suite helpers are
-manual/local assets only pending the separate post-main qualification work.
+`aca_deployed_qualification.py` and the deployed suite helpers run in the
+post-main `AcaQualification` stage of `eng/ci/e2e-tests.yml`; they also remain
+available for trusted manual/local diagnostics.
 
 ### `aca_qualification_pipeline.py`
 
 Packages, deploys, and verifies the deployed ACA qualification fixture
-(`tests/live/apps/aca-qualification/`). Every command is run by hand; this
-repository contains no pipeline wiring for it.
+(`tests/live/apps/aca-qualification/`). The post-main `AcaQualification` matrix
+uses `install-tooling`, `assemble`, and `deploy` before running the combined
+deployed suite. Operators can invoke the same commands by hand.
 
 | Command | Purpose |
 | --- | --- |

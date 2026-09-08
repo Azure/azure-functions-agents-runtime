@@ -35,8 +35,9 @@ site, or endpoint appears in this directory.
 The operator supplies those settings as app settings on the target Function
 App before deployment. The deploy command sets only the required Sandbox Group
 region; the group resource ID, model deployment, storage, and Entra values must
-already be configured. This layer adds no pipeline wiring — the deploy is
-driven by `eng/scripts/aca_qualification_pipeline.py` by hand.
+already be configured. The post-main `AcaQualification` stage drives deployment
+with `eng/scripts/aca_qualification_pipeline.py` for independent Python 3.13 and
+3.14 jobs. The same tooling remains runnable by hand.
 
 Configure `AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL` as either the
 HTTPS site origin or that origin plus `/api`; the client normalizes a pathless
