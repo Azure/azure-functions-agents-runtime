@@ -815,6 +815,7 @@ async def _persist_run_input(
 ) -> DurableOrchestrationInputV1:
     runtime = get_durable_loop_activity_runtime()
     prior_messages: tuple[dict[str, object], ...] = ()
+    prior_workspace_ref: ContentRefV1 | None = None
     if committed_context_ref is not None:
         previous = await get_protocol_model(
             runtime.content,
@@ -835,6 +836,7 @@ async def _persist_run_input(
                 "committed session context is incompatible with the requested binding"
             )
         prior_messages = previous.checkpoint.working_context.bundle.messages
+        prior_workspace_ref = previous.checkpoint.workspace_ref
     user_message: dict[str, object] = {
         "contents": [{"text": prompt, "type": "text"}],
         "role": "user",
@@ -868,6 +870,7 @@ async def _persist_run_input(
         committed_session_generation=committed_generation,
         continue_as_new_generation=0,
         checkpoints_in_generation=0,
+        workspace_ref=prior_workspace_ref,
     )
     document_ref = await put_protocol_model(
         runtime.content,

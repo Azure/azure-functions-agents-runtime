@@ -24,7 +24,11 @@ from azure_functions_agents.experimental.durable_loop_config import (
     DURABLE_LOOP_FAULT_INJECTION_ENABLED_ENV,
     DURABLE_LOOP_RETAINED_SANDBOX_ENABLED_ENV,
 )
-from azure_functions_agents.experimental.durable_loop_http import _status_projection
+from azure_functions_agents.experimental.durable_loop_http import (
+    _persist_run_input,
+    _RunMetadata,
+    _status_projection,
+)
 from azure_functions_agents.experimental.durable_loop_protocol import (
     DurableFaultProfile,
     DurableOrchestrationInputV1,
@@ -404,6 +408,67 @@ async def test_start_route_returns_202_urls_and_deduplicates(
         }
     )
     assert durable_input.identity.execution_binding_hash is not None
+
+
+@pytest.mark.asyncio
+async def test_next_turn_carries_committed_workspace_reference(
+    durable_app: df.DFApp,
+) -> None:
+    start = _registered_function(durable_app, "durable_agent_run_start_v1")
+    client = _Client()
+    accepted = await start(
+        _Request(
+            body={"prompt": "first", "request_id": "request-1"},
+            headers={"x-ms-session-id": "session-1"},
+        ),
+        client,
+    )
+    first_run_id = json.loads(accepted.body)["run_id"]
+    first_input = DurableOrchestrationInputV1.model_validate_json(
+        json.dumps(client.statuses[first_run_id].input)
+    )
+    runtime = get_durable_loop_activity_runtime()
+    first_document = await get_protocol_model(
+        runtime.content,
+        first_input.run_document_ref,
+        DurableRunDocumentV1,
+    )
+    workspace_ref = await runtime.content.put_bytes(
+        kind="workspace-checkpoint",
+        payload=b"workspace",
+        media_type="application/zip",
+        retention_class="run",
+    )
+    committed_ref = await put_protocol_model(
+        runtime.content,
+        kind="run-document",
+        model=first_document.model_copy(
+            update={
+                "checkpoint": first_document.checkpoint.model_copy(
+                    update={"workspace_ref": workspace_ref}
+                )
+            }
+        ),
+    )
+    next_input = await _persist_run_input(
+        _RunMetadata(
+            identity=first_document.checkpoint.identity.model_copy(
+                update={"run_id": "run-" + "b" * 32}
+            ),
+            plan=first_document.plan,
+            session_entity_key=first_input.session_entity_key,
+        ),
+        prompt="second",
+        committed_context_ref=committed_ref,
+        committed_generation=1,
+    )
+    next_document = await get_protocol_model(
+        runtime.content,
+        next_input.run_document_ref,
+        DurableRunDocumentV1,
+    )
+
+    assert next_document.checkpoint.workspace_ref == workspace_ref
 
 
 @pytest.mark.asyncio
