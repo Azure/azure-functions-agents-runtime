@@ -700,6 +700,7 @@ class DurableAcaSandboxLane:
                 ),
                 package=package,
                 resume=True,
+                restart_executor=summary.state == "Stopped",
                 provider_factory=self._provider_factory,
             ),
             None,

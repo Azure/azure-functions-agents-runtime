@@ -180,13 +180,14 @@ class _Provider:
         region="eastus2",
     )
 
-    def __init__(self, *, present: bool) -> None:
+    def __init__(self, *, present: bool, state: str = "Stopped") -> None:
         self.present = present
+        self.state = state
         self.closed = 0
 
     async def get_sandbox_summary(self, _sandbox_id: str):
         return (
-            SimpleNamespace(state="Stopped", created_at="2026-09-08T00:00:00Z")
+            SimpleNamespace(state=self.state, created_at="2026-09-08T00:00:00Z")
             if self.present
             else None
         )
@@ -570,20 +571,28 @@ async def test_retained_loss_recreates_from_last_checkpoint(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sandbox_state", "expected_restart"),
+    (("Stopped", True), ("Running", False)),
+)
 async def test_retained_session_resumes_existing_inventory_without_restore(
     monkeypatch: pytest.MonkeyPatch,
+    sandbox_state: str,
+    expected_restart: bool,
 ) -> None:
     catalog_lease = _Lease(0)
     first_lease = _Lease(1)
     resumed_lease = _Lease(1)
     leases = [catalog_lease, first_lease]
     maximum_run_seconds: list[float | None] = []
+    restart_executor: list[bool | None] = []
 
     async def acquire(_cls, *_args, **kwargs):
         maximum_run_seconds.append(kwargs.get("maximum_run_seconds"))
         return leases.pop(0)
 
-    async def attach(_cls, *_args, **_kwargs):
+    async def attach(_cls, *_args, **kwargs):
+        restart_executor.append(kwargs.get("restart_executor"))
         return resumed_lease
 
     monkeypatch.setattr(
@@ -597,12 +606,12 @@ async def test_retained_session_resumes_existing_inventory_without_restore(
         classmethod(attach),
     )
     receipts = InMemoryDurableKeyedDocumentStore()
-    providers = [_Provider(present=True)]
+    providers = [_Provider(present=True, state=sandbox_state)]
 
     async def provider_factory():
         if providers:
             return providers.pop(0)
-        return _Provider(present=True)
+        return _Provider(present=True, state=sandbox_state)
 
     content = InMemoryDurableContentStore()
     lane = DurableAcaSandboxLane(
@@ -633,6 +642,7 @@ async def test_retained_session_resumes_existing_inventory_without_restore(
     assert resumed_lease.restored == []
     assert resumed_lease.retained == 1
     assert maximum_run_seconds == [None, 300]
+    assert restart_executor == [expected_restart]
     assert not leases
 
     inspection = await lane.inspect_retained_sandbox(
@@ -644,7 +654,7 @@ async def test_retained_session_resumes_existing_inventory_without_restore(
         f"sandbox-{canonical_hash({'sandbox_id': 'sandbox-1'})[:8]}"
     )
     assert inspection.generation == 1
-    assert inspection.state == "Stopped"
+    assert inspection.state == sandbox_state
     assert inspection.workspace_checkpoint_present is True
 
     assert (

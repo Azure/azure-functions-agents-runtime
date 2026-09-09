@@ -48,6 +48,7 @@ from azure_functions_agents.experimental.hybrid_tools import (
     _poll_startup_file,
     _post_run_delete_seconds,
     _provisioning_labels,
+    _restart_executor,
     open_hybrid_invocation,
 )
 from azure_functions_agents.session_state import AppIdentityResolutionError
@@ -282,6 +283,54 @@ def test_hybrid_package_root_defaults_to_function_app(
     )
 
     assert _hybrid_package_root(_settings()) == tmp_path
+
+
+@pytest.mark.asyncio
+async def test_executor_restart_preserves_workspace_and_journals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+    expected = _manifest()
+
+    class _RestartHandle:
+        async def exec(
+            self,
+            command: str,
+            *,
+            timeout_seconds: float,
+        ) -> SimpleNamespace:
+            commands.append(command)
+            assert timeout_seconds == 5
+            return SimpleNamespace(exit_code=0)
+
+    async def start_and_discover(
+        handle: object,
+        timeout_seconds: float,
+        app_digest: str,
+    ) -> HybridToolManifest:
+        assert isinstance(handle, _RestartHandle)
+        assert timeout_seconds == 5
+        assert app_digest == "sha256:" + "a" * 64
+        return expected
+
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.hybrid_tools._start_and_discover",
+        start_and_discover,
+    )
+
+    observed = await _restart_executor(
+        _RestartHandle(),  # type: ignore[arg-type]
+        5,
+        "sha256:" + "a" * 64,
+    )
+
+    [command] = commands
+    assert "/application" in command
+    assert "/journal/manifest.json" in command
+    assert "/journal/requests" not in command
+    assert "/journal/results" not in command
+    assert "/workspace" not in command
+    assert observed == expected
 
 
 @pytest.mark.asyncio

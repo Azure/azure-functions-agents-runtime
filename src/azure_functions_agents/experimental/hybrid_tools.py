@@ -368,6 +368,7 @@ class InvocationSandboxLease(ToolExecutionBackend):
         manifest: HybridToolManifest,
         package: CapturedContentPackage,
         resume: bool,
+        restart_executor: bool = False,
         provider_factory: Callable[[], Awaitable[SandboxSessionProvider]] | None = None,
     ) -> InvocationSandboxLease:
         """Attach or resume one retained sandbox after authoritative inventory proof."""
@@ -389,9 +390,17 @@ class InvocationSandboxLease(ToolExecutionBackend):
                     expected_manifest,
                     readiness_timeout_seconds=settings.ready_timeout_seconds,
                 )
-            observed = parse_hybrid_tool_manifest(
-                await handle.read_file(
-                    f"{_JOURNAL_PATH}/{HYBRID_TOOL_MANIFEST_FILENAME}"
+            observed = (
+                await _restart_executor(
+                    handle,
+                    settings.ready_timeout_seconds,
+                    package.digest,
+                )
+                if restart_executor
+                else parse_hybrid_tool_manifest(
+                    await handle.read_file(
+                        f"{_JOURNAL_PATH}/{HYBRID_TOOL_MANIFEST_FILENAME}"
+                    )
                 )
             )
             try:
@@ -1160,6 +1169,38 @@ async def _start_and_discover(
     )
     record_hybrid_duration(HybridMetric.DISCOVERY_DURATION, discovery_started)
     return manifest
+
+
+async def _restart_executor(
+    handle: SandboxSessionHandle,
+    timeout_seconds: float,
+    app_digest: str,
+) -> HybridToolManifest:
+    startup_paths = (
+        f"{_JOURNAL_PATH}/{HYBRID_TOOL_PACKAGE_VERIFICATION_FILENAME}",
+        f"{_JOURNAL_PATH}/{HYBRID_TOOL_READINESS_FILENAME}",
+        f"{_JOURNAL_PATH}/{HYBRID_TOOL_STARTUP_FAILURE_FILENAME}",
+        f"{_JOURNAL_PATH}/{HYBRID_TOOL_MANIFEST_FILENAME}",
+        f"{_JOURNAL_PATH}/{HYBRID_TOOL_PID_FILENAME}",
+        f"{_JOURNAL_PATH}/{HYBRID_TOOL_SHUTDOWN_FILENAME}",
+    )
+    command = " ".join(
+        (
+            "rm",
+            "-rf",
+            "--",
+            shlex.quote(_EXTRACTION_PATH),
+            "&&",
+            "rm",
+            "-f",
+            "--",
+            *(shlex.quote(path) for path in startup_paths),
+        )
+    )
+    result = await handle.exec(command, timeout_seconds=min(timeout_seconds, 10.0))
+    if result.exit_code != 0:
+        raise RuntimeError("Hybrid executor restart preparation failed.")
+    return await _start_and_discover(handle, timeout_seconds, app_digest)
 
 
 async def _poll_startup_file(
