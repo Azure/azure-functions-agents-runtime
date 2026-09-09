@@ -156,6 +156,9 @@ then P6a/P6b/P6c atomic storage/admission/managed polling, P7 recovery,
 P8 distributed readers/SSE, P9a cancellation, P9b continuation, and P10 qualification.
 Atomic publication belongs to P6a; bounds ship with each affected surface.
 Internal tested components do not create unused public APIs or early card claims.
+PV is a standalone compatibility-validation PR after P3 for any runtime-wide MAF
+core/provider upgrade. It is outside this capability sequence and does not block
+P4/P5 or P1/P2 unless a later slice deliberately adopts MAF 1.15+ runtime APIs.
 
 ## 5. Decisions log
 
@@ -185,6 +188,7 @@ Entries marked Agent are recommendations, not human architecture approval.
 | 20 | Define card publication and authentication | Infer Host / anonymous card / same auth and configured URL | Require `builtin_endpoints.a2a.url` as the trusted external JSON-RPC URL (absolute HTTPS, with HTTP allowed only for loopback development); never infer it from request Host/forwarding headers. Serve the per-agent card at `agents/{slug}/.well-known/agent-card.json` with the same resolved `http_auth` as JSON-RPC. Advertise JSON-RPC 1.0, one agent-derived A2A skill, text/plain input/output, streaming false, push notifications false, and the matching function-key or Entra security scheme. Materialize the immutable card lazily on its async GET route through the public MAF adapter. Clients must configure this card URL or SDK `card_path`; no domain-root discovery is implied. | Agent, closing P3 architecture review blocker | 2026-09-08 |
 | 21 | Set P3 resource and error bounds | Configurable/unbounded / fixed conservative P3 limits | Per agent, allow at most 32 in-flight A2A executions. Bound raw JSON request bodies to 256 KiB, Messages to 16 Parts, each text Part to 32 KiB, aggregate input text to 64 KiB, and direct response text to 256 KiB. Reject file/data/structured Parts. Use SDK JSON-RPC errors with the request ID when parsing reached an envelope; use HTTP 400/413 only when no valid bounded envelope can be dispatched. Do not return reasoning, tool arguments, tool results, or arbitrary metadata. | Agent, closing P3 architecture review blocker | 2026-09-08 |
 | 22 | Preserve app/runtime composition | Dedicated A2A agent invocation / existing runner and app policy | Register A2A only for an explicit object declaration; `builtin_endpoints: true` remains chat/UI/MCP only. Reuse the non-streaming runner with its tools, skills, policies, timeouts, sessions, and workflow integration. Simple A2A alone keeps a plain `FunctionApp`; workflows plus A2A share the existing single `DFApp` and unchanged workflow bindings. | Human direction, confirmed by architecture review | 2026-09-08 |
+| 23 | Validate with the opinionated MAF client without upgrading the runtime | Upgrade the root MAF tuple in P3 / use only raw HTTP / isolate a client-only environment | Make `agent-framework-a2a==1.0.0b260821` and its MAF core 1.15+ closure the sample's primary caller in a separate client virtual environment. It fetches the explicit per-agent card and selects JSONRPC 1.0 across HTTP; the P3 server retains core 1.13 and its verified hosting tuple. Preserve the raw HTTP client for wire inspection. Any runtime-wide core/OpenAI/Foundry upgrade is PV: a standalone compatibility PR with full workflow/Durable, telemetry, middleware/context-provider, runner/session/tools/streaming, and resolver/wheel-matrix regression gates, not part of P3/P4/P5 or optional-Durable work. | Human, explicit P3 follow-up authorization | 2026-09-08 |
 
 ## 6. Test plan
 
@@ -211,7 +215,9 @@ slices.
   two subscribers, cancellation races, restart, interrupted continuation, scoped
   listing, retention expiry, and slow readers.
 - [x] Run existing lint/type/test gates for P3 and a deterministic real-host E2E
-  covering Agent Card fetch and a direct Message over HTTP. Later slices retain
+  covering explicit Agent Card fetch and a direct Message through the public MAF
+  `A2AAgent.run()` client in an isolated core 1.15+ environment. Preserve raw HTTP
+  protocol coverage for correlation and envelope inspection. Later slices retain
   their own host E2E coverage
   for binding annotations and streaming lifetime; mocks alone cannot prove these.
 
@@ -235,8 +241,9 @@ installation instructions together with package metadata.
   restrictions are explicit review gates in the companion design. A separate P3
   review on 2026-09-08 confirmed the discover/translate/register/execute
   boundaries and required Decisions 17-22 before product code.
-- **Human sign-off:** P3 only was explicitly authorized on 2026-09-08. P4/P5,
-  distributed execution, and the durable design remain in review and require
-  separate human authorization.
+- **Human sign-off:** P3 only was explicitly authorized on 2026-09-08, including
+  its client-only MAF 1.15+ interoperability follow-up. P4/P5, a runtime-wide MAF
+  upgrade, distributed execution, and the durable design remain separate work
+  requiring their own authorization and gates.
 - **Implementation:** P3 is authorized to proceed. No later capability or
   production-readiness claim is approved by this status.

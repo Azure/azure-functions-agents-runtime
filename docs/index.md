@@ -41,6 +41,6 @@ azurefunctions-agents-runtime
 - [Triggers](triggers.md) — supported trigger types and payload shapes
 - [Observability](observability.md) — tracing and telemetry
 - [Dynamic workflows](workflows.md) — experimental durable DAG execution
-- [A2A incident triage sample](https://github.com/Azure/azure-functions-agents-runtime/tree/main/samples/a2a-incident-triage) — runnable A2A 1.0 card and Message walkthrough
+- [A2A incident triage sample](https://github.com/Azure/azure-functions-agents-runtime/tree/main/samples/a2a-incident-triage) — runnable A2A 1.0 walkthrough with isolated MAF and raw JSON-RPC clients
 
 Source code and issues live on GitHub: [Azure/azure-functions-agents-runtime](https://github.com/Azure/azure-functions-agents-runtime).

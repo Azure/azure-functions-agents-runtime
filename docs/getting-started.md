@@ -132,9 +132,11 @@ builtin_endpoints:
 The P3 surface accepts A2A 1.0 text Messages and returns one non-streaming
 Message. See the
 [`a2a-incident-triage` sample](https://github.com/Azure/azure-functions-agents-runtime/tree/main/samples/a2a-incident-triage)
-for Agent Card discovery, a modifiable JSON-RPC client, model credentials, and
-the current experimental limitations. Use function-key or Entra auth rather
-than anonymous access before deployment.
+for explicit Agent Card resolution, an isolated MAF `A2AAgent` caller, a raw
+JSON-RPC inspection client, model credentials, and the current experimental
+limitations. The client-only MAF 1.15+ environment communicates with the pinned
+core 1.13 server over HTTP rather than changing its runtime dependencies. Use
+function-key or Entra auth rather than anonymous access before deployment.
 
 ## Where to go next
 

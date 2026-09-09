@@ -490,7 +490,9 @@ the wire.
 See the complete field definitions in
 [the generated reference](front-matter-reference.md#agent-builtin_endpointsa2a)
 and the runnable
-[`a2a-incident-triage` sample](../samples/a2a-incident-triage/).
+[`a2a-incident-triage` sample](../samples/a2a-incident-triage/), which keeps its
+MAF 1.15+ `A2AAgent` caller in a separate environment from the core 1.13 server
+and preserves a raw JSON-RPC client for protocol inspection.
 
 **Examples:**
 

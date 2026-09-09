@@ -33,6 +33,7 @@ consumers. Bounds and security ship with each first affected surface, not at P10
 | --- | --- | --- | --- |
 | D0 | Approve FRD, architecture, library tuple, and staged contract | None | R1-R12 |
 | P3 | Deliver working non-SSE MAF A2A server/sample for design validation | D0 + library gate within P3 | R1-R3, R5, R11 |
+| PV | Validate a runtime-wide MAF core/provider upgrade in a standalone PR | P3 evidence; otherwise independent | Compatibility gate only; no new A2A capability |
 | P4 | Extract private typed runner events with unchanged chat output | P3 | R5 |
 | P5a | Deliver bounded local task lifecycle with internal tests | P4 | R4, R11 |
 | P5b | Deliver local SSE adapter and deployment guard | P5a | R4-R5, R11-R12 |
@@ -51,6 +52,13 @@ This is a sequencing proposal, not simultaneous branches. Branch each slice
 in its own worktree; normally wait for its dependency to merge. Stack only when
 explicitly approved. Reverting a later capability must leave earlier modes and
 existing workflow/chat behavior usable.
+
+PV is not part of the capability chain and does not block P4/P5 or P1/P2.
+Run it before any later slice that deliberately needs MAF 1.15+ runtime APIs.
+It must validate the core/OpenAI/Foundry tuple together across workflows and
+Durable bindings, telemetry, middleware and context providers, runner sessions,
+tools, streaming, and the clean resolver/wheel matrix. Do not bundle it with
+P3/P4/P5 or optional-Durable work.
 
 ## D0 - Design and compatibility approval
 
@@ -78,10 +86,15 @@ Include generated reference and authoring/onboarding docs.
 Reuse existing non-streaming runner policy rather than build a parallel agent path.
 
 **Acceptance:** the sample serves an authorized direct Message through the real
-MAF hosting/SDK and Functions response bridge, using a fresh `[a2a]` installation
-that still includes the baseline mandatory Durable dependency. Without workflows,
-it neither executes Durable work nor registers Durable bindings. Durable-free
-installation/import validation belongs to P1/P2, not this PR. Verify
+MAF hosting/SDK and Functions response bridge, using a fresh `[a2a]` server
+installation that still includes the baseline mandatory Durable dependency.
+Its primary client uses public `A2ACardResolver` and `A2AAgent.run()` APIs from
+an isolated client-only `agent-framework-a2a==1.0.0b260821` environment. The
+client fetches the explicit per-agent card path and negotiates JSONRPC 1.0; it
+does not install the editable runtime or change the server's core 1.13 tuple.
+Without workflows, the server neither executes Durable work nor registers
+Durable bindings. Durable-free installation/import validation belongs to P1/P2,
+not this PR. Verify
 version negotiation, explicitly configured card URL/SDK `card_path` (not automatic
 domain-root discovery), JSON-RPC correlation and SDK error shapes,
 supported input parts, unknown IDs, oversized requests, unsupported task methods,
@@ -96,8 +109,10 @@ in the FRD before P4/P5. Validate assumptions with this implementation rather
 than front-loading dependency refactors.
 
 **Non-goals / exposure:** streaming false; no Task persistence, subscribe/cancel,
-outbound A2A client tools, REST, or durable execution. Pinning changes to the
-existing MAF trio require their own compatibility explanation and regression gate.
+outbound A2A client tools, REST, or durable execution. Preserve the raw HTTP
+sample client for wire-contract inspection. Pinning changes to the runtime's
+existing MAF trio belong in standalone PV with its full compatibility matrix,
+not in P3 or a later capability/optional-Durable slice.
 
 **Finalized P3 contract:** `[a2a]` uses hosting-a2a and hosting
 `1.0.0a260730` plus SDK `[http-server]` `1.1.2`, without upgrading the existing

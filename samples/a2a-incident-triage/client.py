@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
-import uuid
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
+from a2a.client import A2ACardResolver
+from agent_framework import AgentSession
+from agent_framework.a2a import A2AAgent, A2AServiceSessionId
+from google.protobuf.json_format import MessageToDict
+
+CARD_PATH = "/agents/main/.well-known/agent-card.json"
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Fetch the incident-triage Agent Card and send one A2A 1.0 Message."
+        description="Call the incident-triage A2A server through Microsoft Agent Framework."
     )
     parser.add_argument(
         "prompt",
@@ -34,6 +41,11 @@ def _parser() -> argparse.ArgumentParser:
         "--function-key",
         help="Optional x-functions-key value when http_auth.mode is function.",
     )
+    parser.add_argument(
+        "--json-output",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -44,57 +56,83 @@ def _headers(function_key: str | None) -> dict[str, str]:
     return headers
 
 
-def main() -> None:
-    args = _parser().parse_args()
-    base_url = args.base_url.rstrip("/")
-    card_url = f"{base_url}/agents/main/.well-known/agent-card.json"
-    request_id = f"review-{uuid.uuid4().hex[:8]}"
-    headers = _headers(args.function_key)
-
-    with httpx.Client(timeout=120) as client:
-        card_response = client.get(card_url, headers=headers)
-        card_response.raise_for_status()
-        card: dict[str, Any] = card_response.json()
-        interface = next(
+def _select_jsonrpc_1_0(card: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return next(
             item
             for item in card["supportedInterfaces"]
             if item["protocolBinding"] == "JSONRPC"
             and item["protocolVersion"] == "1.0"
         )
+    except (KeyError, StopIteration) as exc:
+        raise RuntimeError("The Agent Card does not advertise a JSONRPC 1.0 interface.") from exc
 
-        payload = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": "SendMessage",
-            "params": {
-                "message": {
-                    "messageId": uuid.uuid4().hex,
-                    "contextId": args.context_id,
-                    "role": "ROLE_USER",
-                    "parts": [{"text": args.prompt}],
-                },
-                "configuration": {
-                    "acceptedOutputModes": ["text/plain"],
-                    "returnImmediately": False,
-                },
-            },
-        }
-        rpc_response = client.post(interface["url"], headers=headers, json=payload)
-        rpc_response.raise_for_status()
-        envelope: dict[str, Any] = rpc_response.json()
 
-    print("Agent Card:")
-    print(json.dumps(card, indent=2))
-    print("\nJSON-RPC response:")
-    print(json.dumps(envelope, indent=2))
-    if envelope.get("id") != request_id:
-        raise RuntimeError("The JSON-RPC response did not preserve the request id.")
-    if "error" in envelope:
-        raise RuntimeError(f"A2A request failed: {envelope['error']}")
+async def _run(args: argparse.Namespace) -> dict[str, Any]:
+    base_url = args.base_url.rstrip("/")
+    card_url = f"{base_url}{CARD_PATH}"
+    headers = _headers(args.function_key)
 
-    message = envelope["result"]["message"]
-    print(f"\nIncident brief ({message['contextId']}):")
-    print(" ".join(part["text"] for part in message["parts"]))
+    async with httpx.AsyncClient(timeout=120, headers=headers) as http_client:
+        resolver = A2ACardResolver(
+            http_client,
+            base_url,
+            agent_card_path=CARD_PATH,
+        )
+        agent_card = await resolver.get_agent_card()
+        card = MessageToDict(agent_card)
+        interface = _select_jsonrpc_1_0(card)
+
+        agent = A2AAgent(
+            agent_card=agent_card,
+            http_client=http_client,
+            supported_protocol_bindings=["JSONRPC"],
+        )
+        session = AgentSession(
+            service_session_id=A2AServiceSessionId(
+                context_id=args.context_id,
+                task_id=None,
+                task_state=None,
+            )
+        )
+        response = await agent.run(args.prompt, session=session)
+
+    service_session_id = session.service_session_id
+    response_context_id = (
+        service_session_id.get("context_id")
+        if isinstance(service_session_id, Mapping)
+        else None
+    )
+    if response_context_id != args.context_id:
+        raise RuntimeError(
+            f"The A2A response changed contextId from {args.context_id!r} "
+            f"to {response_context_id!r}."
+        )
+
+    return {
+        "cardUrl": card_url,
+        "interface": interface,
+        "contextId": response_context_id,
+        "responseText": response.text,
+    }
+
+
+def main() -> None:
+    args = _parser().parse_args()
+    result = asyncio.run(_run(args))
+    if args.json_output:
+        print(json.dumps(result))
+        return
+
+    print(f"Agent Card: {result['cardUrl']}")
+    print(
+        "Selected interface: "
+        f"{result['interface']['protocolBinding']} "
+        f"{result['interface']['protocolVersion']} "
+        f"{result['interface']['url']}"
+    )
+    print(f"\nIncident brief ({result['contextId']}):")
+    print(result["responseText"])
 
 
 if __name__ == "__main__":

@@ -177,7 +177,10 @@ subscribe/cancel, push notifications, REST binding, or distributed/durable
 execution. See
 [`docs/front-matter-spec.md#a2a-simple-server`](docs/front-matter-spec.md#a2a-simple-server)
 and the runnable
-[`samples/a2a-incident-triage/`](samples/a2a-incident-triage/).
+[`samples/a2a-incident-triage/`](samples/a2a-incident-triage/), whose primary
+caller is an isolated Microsoft Agent Framework `A2AAgent` client. The separate
+client environment keeps its MAF 1.15+ closure out of this runtime's pinned
+core 1.13 process; a raw JSON-RPC client remains available for wire inspection.
 
 ### Agent configuration
 

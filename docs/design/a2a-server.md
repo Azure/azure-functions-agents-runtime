@@ -46,7 +46,7 @@ boundary. Source review distinguishes two server-capable choices:
 
 | MAF option | Verified behavior | Decision |
 | --- | --- | --- |
-| `agent-framework-a2a==1.0.0b260821`, `A2AExecutor` | Creates/updates Task, creates a MAF session from task context, directly calls its agent, forbids `session`/`stream` in run kwargs, and its cancel method updates task status rather than implementing this design's distributed cancellation. Requires core >=1.15,<2. | Not a drop-in for direct Message MVP, existing runtime policy, or durable ownership. Do not confuse its name with `A2AAgentExecutor`. |
+| `agent-framework-a2a==1.0.0b260821`, `A2AExecutor` and `A2AAgent` | The executor creates/updates Task, creates a MAF session from task context, directly calls its agent, forbids `session`/`stream` in run kwargs, and its cancel method updates task status rather than implementing this design's distributed cancellation. The client-side `A2AAgent` can consume a supplied card over JSONRPC and map a direct Message from `run()`. Requires core >=1.15,<2. | The executor is not a drop-in for direct Message MVP, existing runtime policy, or durable ownership. The client is approved only in the isolated P3 sample/client E2E across HTTP; it is not a runtime dependency. Do not confuse `A2AExecutor` with `A2AAgentExecutor`. |
 | `agent-framework-hosting-a2a==1.0.0a260730` | Alpha public `AgentA2AAdapter`, `a2a_to_run`, `a2a_from_run`, and workflow converters. Deliberately supplies no executor, task lifecycle/store, queues, HTTP routes, sessions, auth, or deployment. Requires core >=1.13,<2, SDK >=1,<2 and hosting `1.0.0a260730`. | Recommended: use its actual conversions while the runtime owns policy and the SDK handles protocol dispatch/models. Alpha adoption needs explicit approval. |
 
 The published candidate tuple is hosting-a2a `1.0.0a260730`, hosting
@@ -80,6 +80,15 @@ HTTP dispatcher needs Starlette/SSE dependencies; `[fastapi]` adds FastAPI too.
 Do not default to `[all]`. GitHub SDK tag `v1.1.3` existed during research but its
 public PyPI version endpoint returned 404; **1.1.2 is the published candidate**,
 not an unverified promise to install 1.1.3.
+
+The P3 reviewer client is deliberately a separate environment containing only
+`agent-framework-a2a==1.0.0b260821` and its closure (MAF core 1.15+). It uses
+public `A2ACardResolver` plus `A2AAgent`, fetches the explicitly configured
+per-agent card path, and restricts transport negotiation to JSONRPC. HTTP is the
+version boundary: the server remains on the verified core 1.13 hosting tuple.
+Any runtime-wide core/OpenAI/Foundry upgrade belongs in standalone plan slice PV,
+with full workflow/Durable, telemetry, middleware/context-provider,
+runner/session/tools/streaming, and resolver/wheel-matrix compatibility gates.
 
 The protocol target is [A2A v1.0.1](https://github.com/a2aproject/A2A/tree/3303592588e388e62e0f69f701af531d2f4e3991),
 whose wire version is `1.0`. These are three independent values: normative spec
@@ -417,7 +426,9 @@ this is evidence of a binding compatibility choice, not a reason to broaden the
 initial JSON-RPC scope.
 
 P3 has settled its library/wire tuple, scoped simple context, card URL/auth
-policy, and conservative first-surface limits above. Before any later human
+policy, conservative first-surface limits, and isolated MAF `A2AAgent` client
+interoperability above. The client-only 1.15+ closure does not change the
+runtime's 1.13 tuple or block P4/P5 and P1/P2. Before any later human
 finalization, settle the local SSE operations and deployment guard, storage
 atomicity/partition design, durable identity/authorization policy,
 retry-artifact policy, and distributed resource limits. P3 approval is not
