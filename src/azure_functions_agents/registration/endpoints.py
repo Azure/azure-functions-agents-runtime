@@ -14,12 +14,25 @@ from azure.durable_functions import DurableFunctionsClient
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
 from .._logger import logger
+from .._obo import (
+    InteractionRequiredError,
+    UserContext,
+    create_user_context,
+    extract_forwardable_headers,
+    extract_hooks_session_token_from_headers,
+    extract_user_id_from_headers,
+    extract_user_token_from_headers,
+)
 from .._observability import FaultDomain, LifecycleStage, start_span
 from .._session_id import SESSION_ID_PATTERN
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
 from ._auth import authorize_entra_request, resolve_endpoint_auth_level
-from ._handlers import _set_run_result_attributes, build_sandbox_tools_for_session
+from ._handlers import (
+    _set_run_result_attributes,
+    build_sandbox_tools_for_session,
+    get_handler_obo_provider,
+)
 from ._naming import _function_name_from_source, _safe_function_name
 from .capabilities import AgentCapabilities
 from .catalog import AgentCatalog
@@ -94,6 +107,23 @@ def _resolve_builtin_endpoints_session_id(session_id: str | None) -> str:
     return session_id or uuid.uuid4().hex
 
 
+async def _build_user_context_from_request(req: Request) -> UserContext:
+    """Extract user context from HTTP request headers."""
+    headers = getattr(req, "headers", {})
+    access_token = extract_user_token_from_headers(headers)
+    hooks_session_token = extract_hooks_session_token_from_headers(headers)
+    user_id = extract_user_id_from_headers(headers)
+    forwardable_headers = extract_forwardable_headers(headers)
+
+    return create_user_context(
+        access_token=access_token,
+        hooks_session_token=hooks_session_token,
+        user_id=user_id,
+        obo_provider=get_handler_obo_provider(),
+        forwardable_headers=forwardable_headers,
+    )
+
+
 def _chat_handler_with_client(
     handle_chat: ChatHandler,
 ) -> Callable[[Request, DurableFunctionsClient], Awaitable[Response]]:
@@ -154,6 +184,7 @@ async def _run_builtin_agent(
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
     session_id: str | None,
+    user_context: UserContext | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     durable_client: Any | None = None,
@@ -173,6 +204,7 @@ async def _run_builtin_agent(
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
         skill_paths=capabilities.enabled_skill_paths,
+        user_context=user_context,
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
@@ -191,6 +223,7 @@ def _run_builtin_agent_stream(
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
     session_id: str | None,
+    user_context: UserContext | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     durable_client: Any | None = None,
@@ -210,6 +243,7 @@ def _run_builtin_agent_stream(
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
         skill_paths=capabilities.enabled_skill_paths,
+        user_context=user_context,
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
@@ -240,6 +274,41 @@ def _json_error(message: str, status_code: int = 500) -> Response:
         content=json.dumps({"error": message}),
         status_code=status_code,
         media_type="application/json",
+    )
+
+
+def _interaction_required_error(exc: InteractionRequiredError) -> Response:
+    """Build HTTP 401 response for OBO interaction required errors.
+
+    When downstream APIs require user interaction (MFA, consent, etc.),
+    we return HTTP 401 with WWW-Authenticate header containing the claims
+    challenge. The client must re-authenticate with these claims.
+    """
+    headers: dict[str, str] = {}
+
+    # Build WWW-Authenticate header with error info and claims
+    www_auth_parts = [f'Bearer error="{exc.error}"']
+    if exc.error_description:
+        # Escape quotes in description
+        desc = exc.error_description.replace('"', '\\"')
+        www_auth_parts.append(f'error_description="{desc}"')
+    if exc.claims:
+        # Claims should be base64-encoded for the header
+        import base64
+        claims_b64 = base64.b64encode(exc.claims.encode()).decode()
+        www_auth_parts.append(f'claims="{claims_b64}"')
+
+    headers["WWW-Authenticate"] = ", ".join(www_auth_parts)
+
+    return Response(
+        content=json.dumps({
+            "error": exc.error,
+            "error_description": exc.error_description,
+            "claims": exc.claims,
+        }),
+        status_code=401,
+        media_type="application/json",
+        headers=headers,
     )
 
 
@@ -320,6 +389,7 @@ def _register_http_chat(
                     span.set_attribute("af.agent.outcome", "error")
                     span.set_error(auth_error.message, fault_domain=FaultDomain.APP)
                     return _json_error(auth_error.message, status_code=auth_error.status_code)
+                user_context = await _build_user_context_from_request(req)
                 body = await req.json()
                 prompt = _extract_prompt_from_body(body)
                 result = await _run_builtin_agent(
@@ -327,6 +397,7 @@ def _register_http_chat(
                     resolved=resolved,
                     capabilities=capabilities,
                     session_id=resolved_session_id,
+                    user_context=user_context,
                     workflows_enabled=workflows_enabled,
                     workflow_system_addendum=workflow_system_addendum,
                     durable_client=durable_client,
@@ -350,6 +421,15 @@ def _register_http_chat(
                 span.set_attribute("af.agent.outcome", "error")
                 span.set_error(str(exc), fault_domain=FaultDomain.APP)
                 return _json_error(str(exc), status_code=400)
+            except InteractionRequiredError as exc:
+                span.set_attribute("af.agent.outcome", "error")
+                span.set_error(exc.error_description or exc.error, fault_domain=FaultDomain.APP)
+                logger.warning(
+                    "Built-in chat API OBO interaction required for '%s': %s",
+                    resolved.name,
+                    exc.error_description,
+                )
+                return _interaction_required_error(exc)
             except Exception as exc:
                 span.set_attribute("af.agent.outcome", "error")
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
@@ -400,6 +480,7 @@ def _register_http_chat_stream(
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
             session_id = req.headers.get("x-ms-session-id")
+            user_context = await _build_user_context_from_request(req)
 
             def run_stream(durable_client: DurableFunctionsClient | None) -> AsyncIterator[str]:
                 return _run_builtin_agent_stream(
@@ -407,6 +488,7 @@ def _register_http_chat_stream(
                     resolved=resolved,
                     capabilities=capabilities,
                     session_id=session_id,
+                    user_context=user_context,
                     workflows_enabled=workflows_enabled,
                     workflow_system_addendum=workflow_system_addendum,
                     durable_client=durable_client,
@@ -435,6 +517,13 @@ def _register_http_chat_stream(
             )
         except ValueError as exc:
             return _sse_error_response(str(exc), status_code=400)
+        except InteractionRequiredError as exc:
+            logger.warning(
+                "Built-in chat stream OBO interaction required for '%s': %s",
+                resolved.name,
+                exc.error_description,
+            )
+            return _interaction_required_error(exc)
         except Exception as exc:
             error_msg = _format_exception_message(exc)
             logger.error(

@@ -1,0 +1,44 @@
+@baseUrl = https://<your-function-app>.azurewebsites.net
+@agentName = main
+@contentType = application/json
+
+# Paste a real user access token here for User A
+@userAToken = <paste-user-a-token>
+
+# Paste a real user access token here for User B
+@userBToken = <paste-user-b-token>
+
+### User A -> downstream should see User A identity
+POST {{baseUrl}}/agents/{{agentName}}/chat
+Content-Type: {{contentType}}
+X-MS-TOKEN-AAD-ACCESS-TOKEN: {{userAToken}}
+
+{
+  "prompt": "Call the downstream whoami MCP tool and return raw JSON"
+}
+
+### User B -> downstream should see User B identity
+POST {{baseUrl}}/agents/{{agentName}}/chat
+Content-Type: {{contentType}}
+X-MS-TOKEN-AAD-ACCESS-TOKEN: {{userBToken}}
+
+{
+  "prompt": "Call the downstream whoami MCP tool and return raw JSON"
+}
+
+### No user token -> managed identity fallback expected
+POST {{baseUrl}}/agents/{{agentName}}/chat
+Content-Type: {{contentType}}
+
+{
+  "prompt": "Call the downstream whoami MCP tool and return raw JSON"
+}
+
+### Claims challenge check (if consent/MFA required by downstream)
+POST {{baseUrl}}/agents/{{agentName}}/chat
+Content-Type: {{contentType}}
+X-MS-TOKEN-AAD-ACCESS-TOKEN: {{userAToken}}
+
+{
+  "prompt": "Call the protected MCP tool that requires additional consent or MFA"
+}

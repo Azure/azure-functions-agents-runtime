@@ -1,0 +1,14 @@
+{
+  "servers": {
+    "whoami-api": {
+      "url": "https://<downstream-mcp-endpoint>/mcp",
+      "auth": {
+        "type": "obo",
+        "scope": "api://<downstream-api-app-id>/.default"
+      },
+      "headers": {
+        "x-client": "azure-functions-agents-runtime"
+      }
+    }
+  }
+}

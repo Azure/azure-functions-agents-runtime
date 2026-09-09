@@ -1,0 +1,8 @@
+auth:
+  obo:
+    enabled: true
+    client_id: $AZURE_CLIENT_ID
+    client_secret: $AZURE_CLIENT_SECRET
+    tenant_id: $AZURE_TENANT_ID
+    downstream_scopes:
+      whoami_api: "api://<downstream-api-app-id>/.default"

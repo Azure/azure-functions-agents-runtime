@@ -60,7 +60,7 @@ import asyncio
 import contextlib
 import json
 import sys
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -85,7 +85,12 @@ from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
 from .config.paths import get_app_root, resolve_config_dir
 from .config.schema import AgentConfiguration
-from .discovery.mcp import MCPTool, discover_mcp_servers
+from .discovery.mcp import (
+    MCPTool,
+    discover_mcp_servers,
+    reset_current_user_context,
+    set_current_user_context,
+)
 from .discovery.tools import discover_user_tools
 
 # `_handlers` is always fully imported as a side effect of the
@@ -109,6 +114,7 @@ if TYPE_CHECKING:
         SupportsChatGetResponse,
     )
 
+    from ._obo import UserContext
     from .workflows.schema import WorkflowPlanPolicy
 
 type AgentFunctionTool = FunctionTool | Callable[..., Any]
@@ -147,6 +153,16 @@ _USAGE_FIELD_NAMES: dict[str, str] = {
     "output_token_count": "output_tokens",
 }
 _FINAL_USAGE_TIMEOUT_SECONDS = 1.0
+
+
+@contextlib.contextmanager
+def _user_context_scope(user_context: UserContext | None) -> Iterator[None]:
+    """Expose request identity to MCP tools for exactly one agent run."""
+    token = set_current_user_context(user_context)
+    try:
+        yield
+    finally:
+        reset_current_user_context(token)
 
 
 def _normalize_usage_details(usage_details: Any) -> dict[str, int]:
@@ -940,6 +956,7 @@ async def run_agent(
     model: str | None = None,
     session_id: str | None = None,
     sandbox_tools: list[FunctionTool] | None = None,
+    user_context: UserContext | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: Any | None = None,
@@ -987,6 +1004,10 @@ async def run_agent(
         bound to a specific ACA session pool. ``None`` adds no sandbox tools;
         pass a list to enable them. Per-call because the ACA session id is
         baked into each tool's closure.
+    user_context:
+        Optional user context carrying the authenticated user's identity.
+        When provided with OBO configuration, enables downstream API calls
+        to be made on behalf of the user rather than using managed identity.
     web_request_tools:
         Optional list of tools created via :func:`create_web_request_tools` —
         a dedicated channel parallel to ``sandbox_tools``, built once per
@@ -1040,41 +1061,47 @@ async def run_agent(
         )
     )
 
+    # Set user context for OBO-enabled MCP servers
+    context_token = set_current_user_context(user_context)
     try:
-        async with _session_lock_bounded_by(resolved_id, coordinator_deadline):
-            # Re-derive the remaining budget *after* the lock wait instead of
-            # reusing the original full `timeout` — otherwise a long lock
-            # wait plus a full fresh `timeout` window could run well past
-            # `coordinator_deadline`.
-            remaining_after_lock = max(0.0, coordinator_deadline - loop.time())
-            if remaining_after_lock <= 0:
-                raise TimeoutError
-            usage_recorder = _AgentUsageRecorder(
-                agent_name=agent_name or "main",
-                execution_role="primary",
-                inference_target=inference_target,
-            )
-            try:
-                response: AgentResponse[Any] = await asyncio.wait_for(
-                    agent.run(
-                        prompt,
-                        session=session,
-                        options=_build_chat_options_from_environment(),
-                    ),
-                    timeout=remaining_after_lock,
+        try:
+            async with _session_lock_bounded_by(resolved_id, coordinator_deadline):
+                # Re-derive the remaining budget *after* the lock wait instead of
+                # reusing the original full `timeout` — otherwise a long lock
+                # wait plus a full fresh `timeout` window could run well past
+                # `coordinator_deadline`.
+                remaining_after_lock = max(0.0, coordinator_deadline - loop.time())
+                if remaining_after_lock <= 0:
+                    raise TimeoutError
+                usage_recorder = _AgentUsageRecorder(
+                    agent_name=agent_name or "main",
+                    execution_role="primary",
+                    inference_target=inference_target,
                 )
-            except asyncio.CancelledError:
-                usage_recorder.emit()
-                raise
-            except TimeoutError:
-                usage_recorder.emit()
-                raise
-            except Exception:
-                usage_recorder.emit()
-                raise
-            usage_recorder.emit(_response_usage_details(response))
-    except TimeoutError:
-        raise RuntimeError(f"Agent run timed out after {timeout}s") from None
+                try:
+                    response: AgentResponse[Any] = await asyncio.wait_for(
+                        agent.run(
+                            prompt,
+                            session=session,
+                            options=_build_chat_options_from_environment(),
+                        ),
+                        timeout=remaining_after_lock,
+                    )
+                except asyncio.CancelledError:
+                    usage_recorder.emit()
+                    raise
+                except TimeoutError:
+                    usage_recorder.emit()
+                    raise
+                except Exception:
+                    usage_recorder.emit()
+                    raise
+                usage_recorder.emit(_response_usage_details(response))
+        except TimeoutError:
+            raise RuntimeError(f"Agent run timed out after {timeout}s") from None
+    finally:
+        # Reset user context after agent run
+        reset_current_user_context(context_token)
 
     # Extract assistant text from the final response.
     text = ""
@@ -1136,6 +1163,7 @@ async def run_agent_stream(
     model: str | None = None,
     session_id: str | None = None,
     sandbox_tools: list[FunctionTool] | None = None,
+    user_context: UserContext | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: Any | None = None,
@@ -1164,6 +1192,8 @@ async def run_agent_stream(
       ``web_request`` tool; pass a list to enable it.
     * ``skill_paths`` enables MAF's :class:`SkillsProvider` for the listed
       directories. ``None`` or ``[]`` disables skills.
+    * ``user_context`` carries the authenticated user's identity for OBO
+      token flow to downstream APIs.
     * ``subagents``/``catalog`` add ``delegate_<slug>`` tools (FRD 0007), one
       per reference — see :func:`run_agent`. Delegate calls surface through
       the same ``tool_start``/``tool_end`` events as any other tool call; the
@@ -1352,7 +1382,10 @@ async def run_agent_stream(
                             remaining = max(0.0, deadline - loop.time())
                             if remaining <= 0:
                                 raise TimeoutError
-                            update = await asyncio.wait_for(stream_iter.__anext__(), timeout=remaining)
+                            with _user_context_scope(user_context):
+                                update = await asyncio.wait_for(
+                                    stream_iter.__anext__(), timeout=remaining
+                                )
                         except StopAsyncIteration:
                             break
                         except (TimeoutError, asyncio.CancelledError) as exc:
