@@ -66,6 +66,7 @@ POLL_INTERVAL_SECONDS = 0.05
 MAX_WORKSPACE_ARCHIVE_BYTES = 32 * 1024 * 1024
 MAX_WORKSPACE_FILE_BYTES = 8 * 1024 * 1024
 MAX_WORKSPACE_MEMBERS = 8192
+SANDBOX_WORKSPACE_ROOT_ENV = "AZURE_FUNCTIONS_AGENTS_SANDBOX_WORKSPACE_ROOT"
 
 _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 _APP_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -1323,6 +1324,7 @@ def run_executor(
     securely_extract_application_archive(app_zip, extraction_root)
     workspace_root.mkdir(parents=True, exist_ok=True)
     workspace_root = workspace_root.resolve(strict=True)
+    os.environ[SANDBOX_WORKSPACE_ROOT_ENV] = str(workspace_root)
     requests = journal_root / REQUEST_DIRECTORY
     results = journal_root / RESULT_DIRECTORY
     requests.mkdir(parents=True, exist_ok=True)

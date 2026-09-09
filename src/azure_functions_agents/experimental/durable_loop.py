@@ -1283,6 +1283,7 @@ def create_run_identity(
     policy_hash: str,
     settings: DurableLoopSettings,
     execution_binding_hash: str | None = None,
+    orchestration_version: str = "durable_agent_turn_orchestrator_v1",
     now: datetime | None = None,
     run_id: str | None = None,
 ) -> DurableRunIdentityV1:
@@ -1301,7 +1302,7 @@ def create_run_identity(
         execution_binding_hash=execution_binding_hash,
         tool_package_hash=tool_package_hash,
         policy_hash=policy_hash,
-        orchestration_version="durable_agent_turn_orchestrator_v1",
+        orchestration_version=orchestration_version,
         created_at=created,
         active_deadline=created + timedelta(seconds=settings.max_elapsed_seconds),
         absolute_deadline=created + timedelta(seconds=settings.max_run_wait_seconds),

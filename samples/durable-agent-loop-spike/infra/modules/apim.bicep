@@ -10,6 +10,7 @@ param subscriptionName string
 param loggerName string
 param instrumentationKeyNamedValueName string
 param tokensPerMinute int
+param faultInjectionEnabled bool
 
 var modelBackendUrl = 'https://${foundryAccountName}.services.ai.azure.com/'
 var mcpBackendUrl = 'https://learn.microsoft.com/api/mcp'
@@ -91,6 +92,19 @@ resource responsesCreateOperation 'Microsoft.ApiManagement/service/apis/operatio
   }
 }
 
+resource faultInjectionNamedValue 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apimService
+  name: 'durable-agent-loop-fault-injection-enabled'
+  properties: {
+    displayName: 'durable-agent-loop-fault-injection-enabled'
+    secret: false
+    tags: [
+      'durable-agent-loop'
+    ]
+    value: string(faultInjectionEnabled)
+  }
+}
+
 resource modelApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = {
   parent: modelApi
   name: 'policy'
@@ -98,10 +112,36 @@ resource modelApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-0
     format: 'rawxml'
     value: replace(
       replace(
-        '''
+        replace(
+          '''
       <policies>
         <inbound>
           <base />
+          <set-variable name="afOperationId" value="@(context.Request.Headers.GetValueOrDefault(&quot;x-af-operation-id&quot;, &quot;&quot;))" />
+          <set-variable name="afDemoFault" value="@(context.Request.Headers.GetValueOrDefault(&quot;x-af-demo-fault&quot;, &quot;&quot;))" />
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty((string)context.Variables[&quot;afOperationId&quot;]) &amp;&amp; !System.Text.RegularExpressions.Regex.IsMatch((string)context.Variables[&quot;afOperationId&quot;], &quot;^op-[0-9a-f]{32}$&quot;))">
+              <return-response>
+                <set-status code="400" reason="Invalid operation identifier" />
+              </return-response>
+            </when>
+            <when condition="@(!string.IsNullOrEmpty((string)context.Variables[&quot;afDemoFault&quot;]) &amp;&amp; (context.Operation.Id != &quot;responses-create&quot; || !bool.Parse(&quot;{{__FAULT_GATE_NAMED_VALUE__}}&quot;) || (string)context.Variables[&quot;afDemoFault&quot;] != &quot;model-429-once&quot; || !System.Text.RegularExpressions.Regex.IsMatch((string)context.Variables[&quot;afOperationId&quot;], &quot;^op-[0-9a-f]{32}$&quot;)))">
+              <return-response>
+                <set-status code="400" reason="Invalid demo fault request" />
+              </return-response>
+            </when>
+            <when condition="@((string)context.Variables[&quot;afDemoFault&quot;] == &quot;model-429-once&quot;)">
+              <return-response>
+                <set-status code="429" reason="Too Many Requests" />
+                <set-header name="Retry-After" exists-action="override">
+                  <value>1</value>
+                </set-header>
+                <set-body>{"error":{"message":"Private demo throttle","type":"rate_limit_error","param":null,"code":"rate_limit_exceeded"}}</set-body>
+              </return-response>
+            </when>
+          </choose>
+          <set-header name="x-af-demo-fault" exists-action="delete" />
+          <set-header name="x-af-operation-id" exists-action="delete" />
           <set-header name="api-key" exists-action="delete" />
           <set-query-parameter name="subscription-key" exists-action="delete" />
           <set-backend-service backend-id="__MODEL_BACKEND_NAME__" />
@@ -123,6 +163,9 @@ resource modelApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-0
         </on-error>
       </policies>
     ''',
+          '__FAULT_GATE_NAMED_VALUE__',
+          faultInjectionNamedValue.name
+        ),
         '__MODEL_BACKEND_NAME__',
         modelBackend.name
       ),

@@ -11,6 +11,9 @@
     "featureGateEnabled": {
       "value": false
     },
+    "faultInjectionEnabled": {
+      "value": false
+    },
     "enableSensitiveData": {
       "value": false
     }

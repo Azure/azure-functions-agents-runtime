@@ -42,6 +42,7 @@ from azure_functions_agents.experimental.durable_loop_protocol import (
     ModelStepActivityResultV1,
     SandboxExecutionProfile,
     ToolBehavior,
+    ToolDispatchRefV1,
     ToolProvenance,
     ToolRequestV1,
     ToolResultRefV1,
@@ -65,9 +66,11 @@ from azure_functions_agents.experimental.durable_loop_registration import (
     DURABLE_LOOP_HUMAN_ACTIVITY_NAME,
     DURABLE_LOOP_HUMAN_DELIVERY_ACTIVITY_NAME,
     DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME,
+    DURABLE_LOOP_MCP_TOOL_ACTIVITY_NAME,
     DURABLE_LOOP_MODEL_ACTIVITY_NAME,
     DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME,
     DURABLE_LOOP_ORCHESTRATOR_NAME,
+    DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME,
     DURABLE_LOOP_TOOL_ACTIVITY_NAME,
     DurableLoopActivityRuntime,
     apply_session_entity_operation,
@@ -1297,6 +1300,76 @@ async def test_registered_orchestrator_terminalizes_ambiguous_tool_outcome() -> 
         DURABLE_LOOP_TOOL_ACTIVITY_NAME,
         DURABLE_LOOP_APPEND_ACTIVITY_NAME,
     ]
+
+
+@pytest.mark.parametrize(
+    ("provenance", "activity_name"),
+    [
+        (ToolProvenance.LOCAL, DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME),
+        (ToolProvenance.REMOTE, DURABLE_LOOP_MCP_TOOL_ACTIVITY_NAME),
+    ],
+)
+def test_v2_schedules_tool_activity_by_persisted_provenance(
+    provenance: ToolProvenance,
+    activity_name: str,
+) -> None:
+    request_ref = ContentRefV1(
+        object_id="request",
+        byte_length=1,
+        media_type="application/json",
+        sha256="a" * 64,
+        encryption_version="none",
+        retention_class="run",
+    )
+    result_ref = ContentRefV1(
+        object_id="result",
+        byte_length=1,
+        media_type="application/json",
+        sha256="b" * 64,
+        encryption_version="none",
+        retention_class="run",
+    )
+    call = ToolDispatchRefV1(
+        request_ref=request_ref,
+        call_ordinal=0,
+        call_key="c" * 64,
+        request_hash="d" * 64,
+        tool_name="demo_tool",
+        provenance=provenance,
+        behavior=ToolBehavior.READ_ONLY,
+        parallel_safe=False,
+    )
+    result = ToolResultRefV1(
+        result_ref=result_ref,
+        call_ordinal=0,
+        call_key=call.call_key,
+        request_hash=call.request_hash,
+        tool_name=call.tool_name,
+        status=ToolResultStatus.SUCCEEDED,
+    )
+    context = _OrchestrationContext(
+        {},
+        activity_results={activity_name: result.model_dump(mode="json")},
+    )
+    from azure_functions_agents.experimental.durable_loop_registration import (
+        _provenance_tool_activity_name,
+        _schedule_tool_refs,
+    )
+
+    results, cancelled = _drive_to_completion(
+        _schedule_tool_refs(
+            context,
+            df.EntityId("durable_agent_session_entity_v1", "e" * 64),
+            "run-1",
+            (call,),
+            1,
+            _provenance_tool_activity_name,
+        )
+    )
+
+    assert results == (result,)
+    assert cancelled == ()
+    assert [name for name, _ in context.activity_calls] == [activity_name]
 
 
 @pytest.mark.asyncio

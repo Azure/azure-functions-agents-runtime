@@ -633,9 +633,14 @@ class MafOneStepModelProvider:
     async def run_one_step(
         self,
         request: OneStepModelRequest,
+        *,
+        client_kwargs: Mapping[str, object] | None = None,
     ) -> ModelDecisionEnvelopeV1:
         """Rebuild a fresh Agent and perform exactly one explicit inference."""
-        response = await self.run_agent_response(request)
+        response = await self.run_agent_response(
+            request,
+            client_kwargs=client_kwargs,
+        )
         if response.continuation_token is not None:
             raise DurableLoopModelError(
                 "foreground one-step inference returned a continuation token"
@@ -647,6 +652,7 @@ class MafOneStepModelProvider:
         request: OneStepModelRequest,
         *,
         background: bool = False,
+        client_kwargs: Mapping[str, object] | None = None,
     ) -> Any:
         """Run the fresh one-step Agent and return its public response object."""
         _require_target_maf_versions()
@@ -723,6 +729,7 @@ class MafOneStepModelProvider:
         ).run(
             messages,
             session=None,
+            client_kwargs=client_kwargs,
         )
         return response
 

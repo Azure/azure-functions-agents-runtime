@@ -52,6 +52,10 @@ from .durable_loop_receipts import (
     read_activity_receipt,
     replace_activity_receipt,
 )
+from .durable_loop_tools import (
+    DurableRetainedSandboxInspection,
+    DurableToolInspectionError,
+)
 from .hybrid_config import HybridSandboxSettings
 from .hybrid_protocol import (
     HybridInvocationStatus,
@@ -66,7 +70,7 @@ _DURABLE_WAVE_OWNER_KIND = "durable_loop_wave"
 _DURABLE_RETAINED_OWNER_KIND = "durable_loop_retained"
 
 
-class DurableSandboxError(RuntimeError):
+class DurableSandboxError(DurableToolInspectionError):
     """The durable ACA lane could not safely complete one call."""
 
 
@@ -333,6 +337,50 @@ class DurableAcaSandboxLane:
         await self._receipts.delete(key, revision=current.revision)
         timer.finish(DurableLoopOutcome.COMPLETED)
 
+    async def inspect_retained_sandbox(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+    ) -> DurableRetainedSandboxInspection | None:
+        """Return content-free state for the exact retained sandbox."""
+        current = await self._receipts.get(_retained_key(session_id))
+        if current is None:
+            return None
+        try:
+            document = _RetainedSandboxV1.model_validate_json(current.payload)
+        except Exception as exc:
+            raise DurableToolInspectionError(
+                "retained sandbox inspection unavailable"
+            ) from exc
+        _validated_inspection_manifest(
+            document,
+            run_id=run_id,
+            session_id=session_id,
+        )
+        try:
+            provider = await self._provider_factory()
+            try:
+                summary = await provider.get_sandbox_summary(document.sandbox_id)
+            finally:
+                await provider.close()
+        except DurableToolInspectionError:
+            raise
+        except Exception as exc:
+            raise DurableToolInspectionError(
+                "retained sandbox inspection unavailable"
+            ) from exc
+        if summary is None:
+            return None
+        return DurableRetainedSandboxInspection(
+            sandbox_instance_alias=(
+                f"sandbox-{canonical_hash({'sandbox_id': document.sandbox_id})[:8]}"
+            ),
+            generation=document.generation,
+            state=summary.state or "Unknown",
+            workspace_checkpoint_present=document.workspace_ref is not None,
+        )
+
     async def _dispatch_per_call(
         self,
         request: ToolRequestV1,
@@ -566,56 +614,7 @@ class DurableAcaSandboxLane:
             )
             return lease, new_document
         _verify_retained_bindings(document, request, manifest, package)
-        expected = ExpectedSandboxManifestBinding.create(
-            manifest_version=_required_int(
-                document.expected_manifest,
-                "manifest_version",
-            ),
-            protocol_version=_required_string(
-                document.expected_manifest,
-                "protocol_version",
-            ),
-            session_id=_required_string(
-                document.expected_manifest,
-                "session_id",
-            ),
-            owner_hash_version=_required_string(
-                document.expected_manifest,
-                "owner_hash_version",
-            ),
-            owner_hash=_required_string(
-                document.expected_manifest,
-                "owner_hash",
-            ),
-            app_hash=_required_string(
-                document.expected_manifest,
-                "app_hash",
-            ),
-            sandbox_group_resource_id=_required_string(
-                document.expected_manifest,
-                "sandbox_group_resource_id",
-            ),
-            sandbox_id=_required_string(
-                document.expected_manifest,
-                "sandbox_id",
-            ),
-            generation=_required_int(
-                document.expected_manifest,
-                "generation",
-            ),
-            digest_kind=_required_string(
-                document.expected_manifest,
-                "digest_kind",
-            ),
-            digest=_required_string(
-                document.expected_manifest,
-                "digest",
-            ),
-            state_store_fingerprint=_required_string(
-                document.expected_manifest,
-                "state_store_fingerprint",
-            ),
-        )
+        expected = _expected_manifest(document)
         persisted = PersistedSandboxBinding.create(
             document.sandbox_id,
             SandboxGroupBinding.create(
@@ -967,6 +966,81 @@ def _required_int(value: dict[str, object], name: str) -> int:
     if isinstance(observed, bool) or not isinstance(observed, int) or observed < 0:
         raise DurableSandboxError("retained sandbox manifest is invalid")
     return observed
+
+
+def _expected_manifest(
+    document: _RetainedSandboxV1,
+) -> ExpectedSandboxManifestBinding:
+    return ExpectedSandboxManifestBinding.create(
+        manifest_version=_required_int(
+            document.expected_manifest,
+            "manifest_version",
+        ),
+        protocol_version=_required_string(
+            document.expected_manifest,
+            "protocol_version",
+        ),
+        session_id=_required_string(
+            document.expected_manifest,
+            "session_id",
+        ),
+        owner_hash_version=_required_string(
+            document.expected_manifest,
+            "owner_hash_version",
+        ),
+        owner_hash=_required_string(
+            document.expected_manifest,
+            "owner_hash",
+        ),
+        app_hash=_required_string(
+            document.expected_manifest,
+            "app_hash",
+        ),
+        sandbox_group_resource_id=_required_string(
+            document.expected_manifest,
+            "sandbox_group_resource_id",
+        ),
+        sandbox_id=_required_string(
+            document.expected_manifest,
+            "sandbox_id",
+        ),
+        generation=_required_int(
+            document.expected_manifest,
+            "generation",
+        ),
+        digest_kind=_required_string(
+            document.expected_manifest,
+            "digest_kind",
+        ),
+        digest=_required_string(
+            document.expected_manifest,
+            "digest",
+        ),
+        state_store_fingerprint=_required_string(
+            document.expected_manifest,
+            "state_store_fingerprint",
+        ),
+    )
+
+
+def _validated_inspection_manifest(
+    document: _RetainedSandboxV1,
+    *,
+    run_id: str,
+    session_id: str,
+) -> ExpectedSandboxManifestBinding:
+    del run_id
+    if document.session_id != session_id:
+        raise DurableSandboxError("retained sandbox inspection fence changed")
+    expected = _expected_manifest(document)
+    if (
+        expected.sandbox_id != document.sandbox_id
+        or expected.generation != document.generation
+        or expected.session_id != document.session_id
+        or expected.sandbox_group_resource_id != document.group_resource_id
+    ):
+        raise DurableSandboxError("retained sandbox inspection binding changed")
+    return expected
 
 
 def _provider_factory(

@@ -182,6 +182,35 @@ auto-delete policy, and the durable reaper remains a second deletion backstop.
 Failure and cancellation still schedule explicit cleanup before releasing the
 session fence.
 
+### Focused Chat + DTS demo
+
+`demo/focused/` contains a machine-local Chat UI for the private durable
+surface. Its loopback proxy keeps the Function key server-side, gives the
+browser opaque handles and friendly run/session aliases, polls durable status,
+renders inline human input, and opens the official DTS dashboard in a separate
+window. Runs use `retained_session` so the UI can show the same sandbox-instance
+alias and workspace checkpoint across turns.
+
+The sample tools `prepare_demo_workspace` and `read_demo_workspace` provide a
+deterministic local-tool proof: ACA creates `demo-context.txt`, records one
+allowed `www.example.com` request in Network Audit, and exports the workspace
+checkpoint. Remote Microsoft Learn MCP remains worker-side through the
+dedicated APIM MCP API and does not create an ACA sandbox. The private
+`model_apim_429_once` scenario sends an attempt-local fault header to APIM;
+APIM returns one OpenAI-compatible 429, then the bounded retry succeeds.
+
+Start the proxy with credentials only in process environment:
+
+```powershell
+$env:DURABLE_LOOP_FUNCTION_URL = 'https://func-durable-loop-0904.azurewebsites.net'
+$env:DURABLE_LOOP_FUNCTION_KEY = '<function-key>'
+$env:DTS_TASK_HUB_DASHBOARD_URL = '<credential-free DTS dashboard URL>'
+uv run python samples\durable-agent-loop-spike\demo\focused\proxy.py `
+  --host 127.0.0.1 --port 8765
+```
+
+The focused UI is demo support, not a deployed customer surface.
+
 After the package is deployed and indexed with the main gate off, live
 qualification enables the main, background-model, retained-sandbox, and
 fault-injection gates together through a secure app-setting update.

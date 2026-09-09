@@ -174,6 +174,46 @@ def test_otel_provider_already_configured_false_for_proxy_provider(monkeypatch) 
     assert obs._otel_provider_already_configured() is False
 
 
+def test_function_trace_context_attaches_worker_traceparent() -> None:
+    class TraceContext:
+        trace_parent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+        trace_state = ""
+
+    function_context = types.SimpleNamespace(trace_context=TraceContext())
+
+    assert obs.current_operation_id() is None
+    with obs.use_function_trace_context(function_context):
+        assert obs.current_operation_id() == "0123456789abcdef0123456789abcdef"
+    assert obs.current_operation_id() is None
+
+
+def test_function_trace_context_preserves_existing_context() -> None:
+    from opentelemetry import context as otel_context
+    from opentelemetry import propagate
+
+    current = propagate.extract(
+        {
+            "traceparent": (
+                "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
+            )
+        }
+    )
+    token = otel_context.attach(current)
+    function_context = types.SimpleNamespace(
+        trace_context=types.SimpleNamespace(
+            trace_parent=(
+                "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+            ),
+            trace_state="",
+        )
+    )
+    try:
+        with obs.use_function_trace_context(function_context):
+            assert obs.current_operation_id() == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    finally:
+        otel_context.detach(token)
+
+
 def test_configure_azure_monitor_skips_when_provider_already_configured(  # type: ignore[no-untyped-def]
     monkeypatch, caplog
 ) -> None:

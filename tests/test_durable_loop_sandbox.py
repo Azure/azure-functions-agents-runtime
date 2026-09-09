@@ -177,7 +177,11 @@ class _Provider:
         self.closed = 0
 
     async def get_sandbox_summary(self, _sandbox_id: str):
-        return SimpleNamespace() if self.present else None
+        return (
+            SimpleNamespace(state="Stopped", created_at="2026-09-08T00:00:00Z")
+            if self.present
+            else None
+        )
 
     async def delete_sandbox(self, _sandbox_id: str) -> None:
         return None
@@ -605,6 +609,7 @@ async def test_retained_session_resumes_existing_inventory_without_restore(
     second = await lane.dispatch(
         _request(
             call=2,
+            run_id="run-2",
             workspace_ref=first.workspace_ref,
             profile=SandboxExecutionProfile.RETAINED_SESSION,
         )
@@ -615,6 +620,26 @@ async def test_retained_session_resumes_existing_inventory_without_restore(
     assert resumed_lease.retained == 1
     assert maximum_run_seconds == [None, 300]
     assert not leases
+
+    inspection = await lane.inspect_retained_sandbox(
+        run_id="run-2",
+        session_id="session-1",
+    )
+    assert inspection is not None
+    assert inspection.sandbox_instance_alias == (
+        f"sandbox-{canonical_hash({'sandbox_id': 'sandbox-1'})[:8]}"
+    )
+    assert inspection.generation == 1
+    assert inspection.state == "Stopped"
+    assert inspection.workspace_checkpoint_present is True
+
+    assert (
+        await lane.inspect_retained_sandbox(
+            run_id="run-2",
+            session_id="session-forged",
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio

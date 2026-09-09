@@ -56,6 +56,9 @@ from .durable_loop_receipts import (
 from .hybrid_apim import HybridApimClientManager
 
 _PROVIDER_RESPONSE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_MODEL_OPERATION_ID = re.compile(r"^op-[0-9a-f]{32}$")
+_DEMO_FAULT_HEADER = "x-af-demo-fault"
+_DEMO_MODEL_429_VALUE = "model-429-once"
 _MAX_PROVIDER_BODY_BYTES = 8 * 1024 * 1024
 _TRANSIENT_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 
@@ -100,6 +103,8 @@ class MafAgentResponseAdapter(Protocol):
     async def run_one_step(
         self,
         request: OneStepModelRequest,
+        *,
+        client_kwargs: Mapping[str, object] | None = None,
     ) -> ModelDecisionEnvelopeV1:
         """Run one terminal foreground step."""
 
@@ -108,6 +113,7 @@ class MafAgentResponseAdapter(Protocol):
         request: OneStepModelRequest,
         *,
         background: bool = False,
+        client_kwargs: Mapping[str, object] | None = None,
     ) -> Any:
         """Return one public Agent response, including continuation state."""
 
@@ -213,11 +219,26 @@ class ApimMafResponsesProvider(OneStepModelProvider, BackgroundModelProvider):
             for attempt in range(1, 4):
                 try:
                     await self._inject_model_fault(request, attempt)
-                    decision = await self._foreground.run_one_step(request)
-                except Exception as exc:
+                    decision = await self._foreground.run_one_step(
+                        request,
+                        client_kwargs=await self._model_client_kwargs(
+                            request,
+                            attempt,
+                        ),
+                    )
+                except Exception as raw_exc:
+                    exc = _normalized_model_exception(raw_exc)
                     if not _retryable_exception(exc) or attempt == 3:
-                        raise
-                    await self._retry_delay(request, attempt, None)
+                        raise exc from None
+                    await self._retry_delay(
+                        request,
+                        attempt,
+                        (
+                            exc.retry_after_seconds
+                            if isinstance(exc, ApimResponsesError)
+                            else None
+                        ),
+                    )
                     continue
                 timer.finish(DurableLoopOutcome.COMPLETED)
                 return decision.model_copy(update={"attempts": attempt})
@@ -269,20 +290,32 @@ class ApimMafResponsesProvider(OneStepModelProvider, BackgroundModelProvider):
                     response = await self._foreground.run_agent_response(
                         request,
                         background=True,
+                        client_kwargs=await self._model_client_kwargs(
+                            request,
+                            attempt,
+                        ),
                     )
                     break
-                except ApimResponsesError as exc:
-                    if exc.status_code != 429 or attempt == 3:
-                        raise
+                except Exception as raw_exc:
+                    exc = _normalized_model_exception(raw_exc)
+                    if not _retryable_exception(exc) or attempt == 3:
+                        raise exc from None
                     await self._retry_delay(
                         request,
                         attempt,
-                        exc.retry_after_seconds,
+                        (
+                            exc.retry_after_seconds
+                            if isinstance(exc, ApimResponsesError)
+                            else None
+                        ),
                     )
             response = _require_background_response(response)
             raw_body_ref = await self._persist_raw_response(response)
             if response.continuation_token is None:
-                decision = self._foreground.parse_agent_response(request, response)
+                decision = self._foreground.parse_agent_response(
+                    request,
+                    response,
+                ).model_copy(update={"attempts": attempt})
                 decision_ref = await put_protocol_model(
                     self._content,
                     kind="model-decision",
@@ -516,24 +549,30 @@ class ApimMafResponsesProvider(OneStepModelProvider, BackgroundModelProvider):
         if await self._faults.consume(
             request.fault_profile,
             run_id=request.identity.run_id,
+            point="model_timeout",
+        ):
+            raise TimeoutError("injected model timeout")
+
+    async def _model_client_kwargs(
+        self,
+        request: OneStepModelRequest,
+        attempt: int,
+    ) -> dict[str, object]:
+        headers = {
+            "x-af-operation-id": _model_operation_id(request),
+        }
+        if attempt == 1 and await self._faults.consume(
+            request.fault_profile,
+            run_id=request.identity.run_id,
             point="model_apim_429",
         ):
+            headers[_DEMO_FAULT_HEADER] = _DEMO_MODEL_429_VALUE
             record_durable_loop_event(
                 DurableLoopPhase.RETRY,
                 DurableLoopOutcome.WAITING,
                 provenance="apim_429",
             )
-            raise ApimResponsesError(
-                "model_throttled",
-                status_code=429,
-                retry_after_seconds=0.01,
-            )
-        if await self._faults.consume(
-            request.fault_profile,
-            run_id=request.identity.run_id,
-            point="model_timeout",
-        ):
-            raise TimeoutError("injected model timeout")
+        return {"extra_headers": headers}
 
     async def _retry_delay(
         self,
@@ -1071,6 +1110,21 @@ def _validate_response_id(value: object) -> str:
     return value
 
 
+def _model_operation_id(request: OneStepModelRequest) -> str:
+    value = (
+        "op-"
+        + canonical_hash(
+            {
+                "run_id": request.identity.run_id,
+                "step_index": request.step_index,
+            }
+        )[:32]
+    )
+    if _MODEL_OPERATION_ID.fullmatch(value) is None:
+        raise DurableLoopModelError("model operation identifier is invalid")
+    return value
+
+
 def _validate_control_base(value: str) -> str:
     parsed = urlsplit(value)
     if (
@@ -1085,10 +1139,42 @@ def _validate_control_base(value: str) -> str:
     return value.rstrip("/")
 
 
+def _normalized_model_exception(exc: Exception) -> Exception:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status = getattr(current, "status_code", None)
+        response = getattr(current, "response", None)
+        if not isinstance(status, int) and response is not None:
+            status = getattr(response, "status_code", None)
+        if isinstance(status, int):
+            response_headers = getattr(response, "headers", {})
+            headers = (
+                dict(response_headers)
+                if isinstance(response_headers, Mapping)
+                else {}
+            )
+            return ApimResponsesError(
+                "model_throttled" if status == 429 else "model_request_failed",
+                status_code=status,
+                retry_after_seconds=_retry_after(headers),
+            )
+        inner = getattr(current, "inner_exception", None)
+        current = (
+            inner
+            if isinstance(inner, BaseException)
+            else current.__cause__
+        )
+    return exc
+
+
 def _retryable_exception(exc: Exception) -> bool:
     if isinstance(exc, TimeoutError):
         return True
     if isinstance(exc, ApimResponsesError):
+        if exc.ambiguous:
+            return False
         return exc.status_code in _TRANSIENT_STATUS_CODES or exc.status_code is None
     status = getattr(exc, "status_code", None)
     return isinstance(status, int) and status in _TRANSIENT_STATUS_CODES

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Durable Agent Chat</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div>
+        <h1>Durable Agent Chat</h1>
+        <p>Focused retained-session demo</p>
+      </div>
+      <div class="topbar-actions">
+        <button id="dtsBtn" type="button" disabled>Open/focus DTS</button>
+        <button id="newSessionBtn" type="button">New session</button>
+      </div>
+    </header>
+
+    <section id="runStrip" class="run-strip" aria-label="Current durable run">
+      <span><small>Run</small><strong id="runAlias">—</strong></span>
+      <button id="copyRunBtn" class="copy" type="button" disabled>Copy</button>
+      <span><small>Session</small><strong id="sessionAlias">NEW</strong></span>
+      <span><small>Sandbox</small><strong id="sandboxAlias">—</strong></span>
+      <span><small>State</small><strong id="sandboxState">—</strong></span>
+      <span><small>Status</small><strong id="runStatus">Ready</strong></span>
+      <span><small>Phase</small><strong id="runPhase">—</strong></span>
+      <span><small>Model steps</small><strong id="modelSteps">0</strong></span>
+      <span><small>Tool calls</small><strong id="toolCalls">0</strong></span>
+    </section>
+
+    <section class="proof-flow" aria-label="Durable execution path">
+      <div class="proof-step trusted">
+        <small>Trusted brain</small>
+        <strong>DTS orchestrator</strong>
+        <span id="proofOrchestrator">Ready</span>
+      </div>
+      <div class="proof-arrow" aria-hidden="true">→</div>
+      <div class="proof-step trusted">
+        <small>Model boundary</small>
+        <strong>One model step</strong>
+        <span id="proofModel">Not scheduled</span>
+      </div>
+      <div class="proof-arrow" aria-hidden="true">→</div>
+      <div class="proof-step isolated">
+        <small>Isolated hands</small>
+        <strong>ACA sandbox tool</strong>
+        <span id="proofTool">Not scheduled</span>
+      </div>
+      <div class="proof-arrow" aria-hidden="true">→</div>
+      <div class="proof-step checkpoint">
+        <small>Durable state</small>
+        <strong>Workspace checkpoint</strong>
+        <span id="proofCheckpoint">Waiting</span>
+      </div>
+    </section>
+
+    <div class="workspace">
+      <aside class="sessions">
+        <h2>Recent sessions</h2>
+        <p id="sessionsEmpty">No sessions yet.</p>
+        <div id="sessionsList"></div>
+      </aside>
+
+      <section class="chat-shell">
+        <div id="chat" class="chat" aria-live="polite">
+          <div class="welcome">
+            <h2>Start a durable turn</h2>
+            <p>Runs use a retained sandbox by default. Raw service identifiers stay in the local proxy.</p>
+          </div>
+        </div>
+
+        <section id="humanCard" class="human-card" hidden>
+          <strong>Agent needs your input</strong>
+          <p id="humanQuestion"></p>
+          <div id="humanChoices" class="human-choices"></div>
+          <form id="humanForm" hidden>
+            <input id="humanAnswer" type="text" maxlength="16000" autocomplete="off">
+            <button type="submit">Answer</button>
+          </form>
+        </section>
+
+        <form id="composer" class="composer">
+          <label>
+            <span class="sr-only">Scenario</span>
+            <select id="scenario">
+              <option value="normal">Normal</option>
+              <option value="model_apim_429_once">AI Gateway 429 once</option>
+            </select>
+          </label>
+          <textarea id="prompt" placeholder="Ask the durable agent…" required maxlength="12000"></textarea>
+          <button id="sendBtn" class="send" type="submit">Send</button>
+        </form>
+        <p id="statusLine" class="status-line" role="status">Ready for a new retained session.</p>
+      </section>
+    </div>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

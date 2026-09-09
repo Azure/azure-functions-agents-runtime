@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from agent_framework.exceptions import ChatClientException
 
 from azure_functions_agents.experimental.durable_loop_activities import (
     DurableLoopModelError,
@@ -111,10 +112,18 @@ def _request(
 class _Foreground:
     def __init__(self, request: OneStepModelRequest) -> None:
         self.calls = 0
+        self.client_kwargs: list[object] = []
         self.decision = ScriptedModelStep(final_text="done").build(request)
 
-    async def run_one_step(self, _request: OneStepModelRequest):
+    async def run_one_step(
+        self,
+        _request: OneStepModelRequest,
+        *,
+        client_kwargs=None,
+    ):
         self.calls += 1
+        self.client_kwargs.append(client_kwargs)
+        _raise_demo_429(client_kwargs)
         return self.decision
 
     async def run_agent_response(
@@ -122,9 +131,12 @@ class _Foreground:
         _request: OneStepModelRequest,
         *,
         background: bool = False,
+        client_kwargs=None,
     ):
         assert background is True
         self.calls += 1
+        self.client_kwargs.append(client_kwargs)
+        _raise_demo_429(client_kwargs)
         return SimpleNamespace(
             continuation_token={"response_id": "resp_1"},
             raw_representation={"id": "resp_1", "status": "queued"},
@@ -132,6 +144,34 @@ class _Foreground:
 
     def parse_agent_response(self, _request: OneStepModelRequest, _response: object):
         return self.decision
+
+
+def _raise_demo_429(client_kwargs: object) -> None:
+    if (
+        isinstance(client_kwargs, dict)
+        and isinstance(client_kwargs.get("extra_headers"), dict)
+        and client_kwargs["extra_headers"].get("x-af-demo-fault")
+        == "model-429-once"
+    ):
+        raise ApimResponsesError(
+            "model_throttled",
+            status_code=429,
+            retry_after_seconds=0.01,
+        )
+
+
+class _Gateway429Error(Exception):
+    def __init__(self) -> None:
+        super().__init__("gateway throttled")
+        self.status_code = 429
+        self.response = SimpleNamespace(headers={"Retry-After": "0.01"})
+
+
+def _wrapped_gateway_429_error() -> ChatClientException:
+    inner = _Gateway429Error()
+    outer = ChatClientException("wrapped")
+    outer.__cause__ = inner
+    return outer
 
 
 class _Transport:
@@ -183,6 +223,9 @@ async def test_background_start_receipt_prevents_second_provider_response() -> N
     assert replay.disposition is BackgroundStartDisposition.ACCEPTED
     assert replay.operation == first.operation
     assert foreground.calls == 1
+    headers = foreground.client_kwargs[0]["extra_headers"]
+    assert "x-af-demo-fault" not in headers
+    assert headers["x-af-operation-id"].startswith("op-")
     assert "resp_1" not in first.model_dump_json()
 
 
@@ -198,7 +241,9 @@ async def test_ambiguous_background_start_never_reissues_provider_request() -> N
             _request: OneStepModelRequest,
             *,
             background: bool = False,
+            client_kwargs=None,
         ):
+            del client_kwargs
             assert background is True
             self.calls += 1
             raise ApimResponsesError(
@@ -255,7 +300,12 @@ async def test_background_start_retries_only_injected_429() -> None:
     result = await provider.start(request)
 
     assert result.disposition is BackgroundStartDisposition.ACCEPTED
-    assert foreground.calls == 1
+    assert foreground.calls == 2
+    first_headers = foreground.client_kwargs[0]["extra_headers"]
+    second_headers = foreground.client_kwargs[1]["extra_headers"]
+    assert first_headers["x-af-demo-fault"] == "model-429-once"
+    assert "x-af-demo-fault" not in second_headers
+    assert first_headers["x-af-operation-id"] == second_headers["x-af-operation-id"]
 
 
 @pytest.mark.asyncio
@@ -388,9 +438,56 @@ async def test_synchronous_apim_429_fault_retries_once_without_content() -> None
 
     assert decision.final_text == "done"
     assert decision.attempts == 2
-    assert foreground.calls == 1
+    assert foreground.calls == 2
+    first_headers = foreground.client_kwargs[0]["extra_headers"]
+    second_headers = foreground.client_kwargs[1]["extra_headers"]
+    assert first_headers["x-af-demo-fault"] == "model-429-once"
+    assert "x-af-demo-fault" not in second_headers
+    assert first_headers["x-af-operation-id"] == second_headers["x-af-operation-id"]
     assert request.fault_profile is DurableFaultProfile.MODEL_APIM_429_ONCE
     assert SandboxExecutionProfile.PER_CALL.value not in decision.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_wrapped_gateway_429_is_normalized_and_retried() -> None:
+    request = _request(fault_profile=DurableFaultProfile.MODEL_APIM_429_ONCE)
+    receipts = InMemoryDurableKeyedDocumentStore()
+
+    class WrappedForeground(_Foreground):
+        async def run_one_step(
+            self,
+            _request: OneStepModelRequest,
+            *,
+            client_kwargs=None,
+        ):
+            self.calls += 1
+            self.client_kwargs.append(client_kwargs)
+            headers = client_kwargs["extra_headers"]
+            if headers.get("x-af-demo-fault") == "model-429-once":
+                raise _wrapped_gateway_429_error()
+            return self.decision
+
+    foreground = WrappedForeground(request)
+    provider = ApimMafResponsesProvider(
+        _manager(),
+        content=InMemoryDurableContentStore(),
+        receipts=receipts,
+        settings=DurableLoopSettings(fault_injection_enabled=True),
+        control_base_url="https://gateway.test/model-control",
+        faults=DurableOneShotFaults(receipts, enabled=True),
+        foreground=foreground,
+    )
+
+    decision = await provider.run_one_step(request)
+
+    assert decision.attempts == 2
+    assert foreground.calls == 2
+    assert foreground.client_kwargs[0]["extra_headers"][
+        "x-af-demo-fault"
+    ] == "model-429-once"
+    assert "x-af-demo-fault" not in foreground.client_kwargs[1][
+        "extra_headers"
+    ]
 
 
 @pytest.mark.asyncio

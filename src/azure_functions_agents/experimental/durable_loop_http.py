@@ -52,11 +52,15 @@ from .durable_loop_registration import (
     DURABLE_LOOP_CONTROL_ORCHESTRATOR_NAME,
     DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME,
     DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME,
-    DURABLE_LOOP_ORCHESTRATOR_NAME,
+    DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
     configure_durable_loop_execution_binding,
     get_durable_loop_activity_runtime,
 )
-from .durable_loop_tools import DurableToolCatalogPort
+from .durable_loop_tools import (
+    DurableRetainedSandboxInspectionPort,
+    DurableToolCatalogPort,
+    DurableToolInspectionError,
+)
 
 _ROUTE_BASE = "experimental/durable-agent-runs"
 _SHORT_WAIT_SECONDS = 30.0
@@ -224,7 +228,7 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
             return _json_response({"error": "content_persistence_failed"}, status_code=503)
         try:
             await client.start_new(
-                DURABLE_LOOP_ORCHESTRATOR_NAME,
+                DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
                 instance_id=run_id,
                 client_input=durable_input.model_dump(mode="json"),
             )
@@ -314,6 +318,49 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
                 "status": DurableLoopRunStatus.COMPLETED.value,
             }
         )
+
+    async def get_sandbox(
+        req: Request,
+        client: df.DurableOrchestrationClient,
+    ) -> Response:
+        authorized = await _authorized_status(req, client, auth)
+        if isinstance(authorized, Response):
+            return authorized
+        status, durable_input = authorized
+        if (
+            durable_input.sandbox_profile
+            is not SandboxExecutionProfile.RETAINED_SESSION
+        ):
+            return _json_response(
+                {"error": "retained_sandbox_not_configured"},
+                status_code=404,
+            )
+        runtime = get_durable_loop_activity_runtime()
+        if not isinstance(
+            runtime.tools,
+            DurableRetainedSandboxInspectionPort,
+        ):
+            return _json_response(
+                {"error": "retained_sandbox_inspection_unavailable"},
+                status_code=503,
+            )
+        try:
+            inspection = await runtime.tools.inspect_retained_sandbox(
+                run_id=status.instance_id,
+                session_id=durable_input.identity.session_id,
+            )
+        except DurableToolInspectionError:
+            logger.exception("durable-loop retained sandbox inspection failed")
+            return _json_response(
+                {"error": "retained_sandbox_inspection_unavailable"},
+                status_code=503,
+            )
+        if inspection is None:
+            return _json_response(
+                {"error": "retained_sandbox_not_found"},
+                status_code=404,
+            )
+        return _json_response(asdict(inspection))
 
     async def cancel_run(
         req: Request,
@@ -673,6 +720,14 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
     )
     _register_route(
         app,
+        "durable_agent_run_sandbox_v1",
+        f"{_ROUTE_BASE}/{{run_id}}/sandbox",
+        ["GET"],
+        auth_level,
+        get_sandbox,
+    )
+    _register_route(
+        app,
         "durable_agent_run_cancel_v1",
         f"{_ROUTE_BASE}/{{run_id}}/cancel",
         ["POST"],
@@ -775,6 +830,7 @@ async def _run_metadata(
         tool_package_hash=snapshot.package_hash,
         policy_hash=catalog.policy_hash,
         settings=settings,
+        orchestration_version=DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
         execution_binding_hash=canonical_hash(
             {
                 "catalog_hash": catalog.catalog_hash,

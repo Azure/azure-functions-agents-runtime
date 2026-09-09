@@ -30,10 +30,13 @@ from azure_functions_agents.experimental.durable_loop_registration import (
     DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME,
     DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME,
     DURABLE_LOOP_HUMAN_RESULT_ACTIVITY_NAME,
+    DURABLE_LOOP_MCP_TOOL_ACTIVITY_NAME,
     DURABLE_LOOP_MODEL_ACTIVITY_NAME,
     DURABLE_LOOP_MODEL_CANCEL_ACTIVITY_NAME,
     DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME,
     DURABLE_LOOP_ORCHESTRATOR_NAME,
+    DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
+    DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME,
     DURABLE_LOOP_SESSION_ENTITY_NAME,
     DURABLE_LOOP_TOOL_ACTIVITY_NAME,
     _deliver_event_with_durable_client,
@@ -94,6 +97,9 @@ def test_private_gate_registers_one_versioned_durable_blueprint(
         "orchestrationTrigger"
     ]
     assert functions[DURABLE_LOOP_ORCHESTRATOR_NAME] == ["orchestrationTrigger"]
+    assert functions[DURABLE_LOOP_ORCHESTRATOR_V2_NAME] == [
+        "orchestrationTrigger"
+    ]
     assert functions[DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME] == [
         "orchestrationTrigger"
     ]
@@ -112,6 +118,10 @@ def test_private_gate_registers_one_versioned_durable_blueprint(
     assert functions[DURABLE_LOOP_CLEANUP_ACTIVITY_NAME] == ["activityTrigger"]
     assert functions[DURABLE_LOOP_FAULT_ACTIVITY_NAME] == ["activityTrigger"]
     assert functions[DURABLE_LOOP_TOOL_ACTIVITY_NAME] == ["activityTrigger"]
+    assert functions[DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME] == [
+        "activityTrigger"
+    ]
+    assert functions[DURABLE_LOOP_MCP_TOOL_ACTIVITY_NAME] == ["activityTrigger"]
     assert functions[DURABLE_LOOP_APPEND_ACTIVITY_NAME] == ["activityTrigger"]
     assert functions[DURABLE_LOOP_HUMAN_ACTIVITY_NAME] == ["activityTrigger"]
     assert functions[DURABLE_LOOP_HUMAN_RESULT_ACTIVITY_NAME] == [
@@ -126,6 +136,7 @@ def test_private_gate_registers_one_versioned_durable_blueprint(
         DURABLE_LOOP_SESSION_ENTITY_NAME,
         DURABLE_LOOP_ADMISSION_ORCHESTRATOR_NAME,
         DURABLE_LOOP_ORCHESTRATOR_NAME,
+        DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
         DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME,
         DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME,
         DURABLE_LOOP_CANCEL_DELIVERY_ORCHESTRATOR_NAME,
@@ -136,6 +147,8 @@ def test_private_gate_registers_one_versioned_durable_blueprint(
         DURABLE_LOOP_CLEANUP_ACTIVITY_NAME,
         DURABLE_LOOP_FAULT_ACTIVITY_NAME,
         DURABLE_LOOP_TOOL_ACTIVITY_NAME,
+        DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME,
+        DURABLE_LOOP_MCP_TOOL_ACTIVITY_NAME,
         DURABLE_LOOP_APPEND_ACTIVITY_NAME,
         DURABLE_LOOP_HUMAN_ACTIVITY_NAME,
         DURABLE_LOOP_HUMAN_RESULT_ACTIVITY_NAME,
@@ -161,6 +174,8 @@ def test_registered_durable_binding_annotations_are_worker_compatible(
         DURABLE_LOOP_CLEANUP_ACTIVITY_NAME,
         DURABLE_LOOP_FAULT_ACTIVITY_NAME,
         DURABLE_LOOP_TOOL_ACTIVITY_NAME,
+        DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME,
+        DURABLE_LOOP_MCP_TOOL_ACTIVITY_NAME,
         DURABLE_LOOP_APPEND_ACTIVITY_NAME,
         DURABLE_LOOP_HUMAN_ACTIVITY_NAME,
         DURABLE_LOOP_HUMAN_RESULT_ACTIVITY_NAME,

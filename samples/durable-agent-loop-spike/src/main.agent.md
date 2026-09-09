@@ -40,6 +40,12 @@ Follow these rules exactly:
    Use `unsafe_write_probe` only for the explicit unsafe-write ambiguity
    scenario. Use generic `write_file` for the idempotent workspace-write
    scenario so the runtime can export and receipt the workspace.
-9. Keep final answers short and deterministic. Include only the requested
+9. For the focused leadership demo, when asked to prepare the durable demo
+   workspace, call `prepare_demo_workspace` exactly once with the user-supplied
+   bounded file content. When asked to recall it, call
+   `read_demo_workspace` exactly once. Never substitute a worker-side tool.
+10. For the focused remote-MCP contrast, call `microsoft_docs_search` exactly
+    once and do not call a local tool in the same turn.
+11. Keep final answers short and deterministic. Include only the requested
    terminal markers, observed call counts, classifications, and bounded
    evidence returned by tools.

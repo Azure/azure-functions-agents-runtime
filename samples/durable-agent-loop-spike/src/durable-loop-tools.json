@@ -36,6 +36,16 @@
       "behavior": "read_only",
       "parallel_safe": true
     },
+    "prepare_demo_workspace": {
+      "provenance": "local",
+      "behavior": "idempotent_write",
+      "parallel_safe": false
+    },
+    "read_demo_workspace": {
+      "provenance": "local",
+      "behavior": "read_only",
+      "parallel_safe": false
+    },
     "read_file": {
       "provenance": "local",
       "behavior": "read_only",

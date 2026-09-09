@@ -42,6 +42,7 @@ param apimTokensPerMinute int = 250000
 
 @description('Private runtime gate. Infrastructure is provisioned with the gate disabled by default.')
 param featureGateEnabled bool = false
+param faultInjectionEnabled bool = false
 
 @description('Sensitive prompt, answer, argument, result, and response telemetry remains disabled.')
 param enableSensitiveData bool = false
@@ -185,6 +186,7 @@ module apim './modules/apim.bicep' = {
     loggerName: apimLoggerName
     instrumentationKeyNamedValueName: apimInstrumentationKeyNamedValueName
     tokensPerMinute: apimTokensPerMinute
+    faultInjectionEnabled: faultInjectionEnabled
   }
   dependsOn: [
     foundry
@@ -218,6 +220,7 @@ module functionApp './modules/function-app.bicep' = {
     sandboxRegion: location
     featureGateSettingName: featureGateSettingName
     featureGateEnabled: featureGateEnabled
+    faultInjectionEnabled: faultInjectionEnabled
     enableSensitiveData: enableSensitiveData
   }
   dependsOn: [

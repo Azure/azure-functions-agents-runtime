@@ -334,6 +334,38 @@ def current_operation_id() -> str | None:
     return None
 
 
+@contextmanager
+def use_function_trace_context(function_context: Any | None) -> Iterator[None]:
+    """Attach the Functions invocation trace when the worker did not make it current."""
+    if function_context is None or current_operation_id() is not None:
+        yield
+        return
+
+    token: Any | None = None
+    try:
+        trace_context = function_context.trace_context
+        trace_parent = trace_context.trace_parent
+        if trace_parent:
+            from opentelemetry import context as otel_context
+            from opentelemetry import propagate
+
+            carrier = {"traceparent": trace_parent}
+            if trace_context.trace_state:
+                carrier["tracestate"] = trace_context.trace_state
+            token = otel_context.attach(propagate.extract(carrier))
+    except Exception:  # pragma: no cover - defensive
+        token = None
+
+    try:
+        yield
+    finally:
+        if token is not None:
+            with suppress(Exception):  # pragma: no cover - defensive
+                from opentelemetry import context as otel_context
+
+                otel_context.detach(token)
+
+
 def bounded_content(value: str) -> str:
     """Trim content attached to telemetry so cost/PII blast radius stays capped."""
     if len(value) <= _CONTENT_ATTR_MAX_CHARS:

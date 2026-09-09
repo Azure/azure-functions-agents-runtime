@@ -1393,12 +1393,57 @@ def _assert_private_runtime_settings(
     values = local_settings["Values"]
     assert isinstance(values, dict)
     for setting, value in expected.items():
-        assert f"{setting}: '{value}'" in function_app
+        if setting.endswith("_FAULT_INJECTION_ENABLED"):
+            assert f"{setting}: string(faultInjectionEnabled)" in function_app
+        else:
+            assert f"{setting}: '{value}'" in function_app
         assert values[setting] == value
     assert "param featureGateEnabled bool = false" in main
     assert "'${featureGateSettingName}': string(featureGateEnabled)" in function_app
     assert "FUNCTIONS_WORKER_RUNTIME:" not in function_app
     assert host["functionTimeout"] == "00:30:00"
+
+
+def _assert_private_fault_policy(*, main: str, apim: str) -> None:
+    assert "param faultInjectionEnabled bool = false" in main
+    assert "faultInjectionEnabled: faultInjectionEnabled" in main
+    assert "param faultInjectionEnabled bool" in apim
+    assert "durable-agent-loop-fault-injection-enabled" in apim
+    assert 'name="x-af-demo-fault" exists-action="delete"' in apim
+    assert "^op-[0-9a-f]{32}$" in apim
+    assert "model-429-once" in apim
+    assert '<set-status code="429" reason="Too Many Requests" />' in apim
+    assert "Private demo throttle" in apim
+    assert "'x-af-demo-fault'" not in apim.split("var diagnosticProperties", 1)[1]
+
+
+def _assert_apim_security_contract(apim: str) -> None:
+    assert "urlTemplate: '/*'" not in apim
+    assert "name: 'responses-get'" not in apim
+    assert "name: 'responses-delete'" not in apim
+    assert "name: 'responses-poll'" in apim
+    assert "urlTemplate: '/responses'" in apim
+    assert "urlTemplate: '/responses/cancel'" in apim
+    assert 'name="x-af-response-id"' in apim
+    assert "^resp_[A-Za-z0-9]{16,160}$" in apim
+    assert 'exists-action="delete"' in apim
+    assert apim.count('<set-header name="api-key" exists-action="delete" />') == 3
+    assert (
+        apim.count(
+            '<set-query-parameter name="subscription-key" exists-action="delete" />'
+        )
+        == 3
+    )
+    assert "${modelBackend.name}" not in apim
+    assert apim.count("__MODEL_BACKEND_NAME__") == 4
+    assert "resource modelControlAzureMonitorDiagnostic" in apim
+    assert "loggerId: azureMonitorLogger.id" in apim
+    assert "percentage: 0" in apim
+    assert "resource modelControlDiagnostic" not in apim
+    assert apim.count("dataMasking:") == 4
+    assert apim.count("value: '*'") == 4
+    assert "primaryKey:" not in apim
+    assert "secondaryKey:" not in apim
 
 
 def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
@@ -1434,27 +1479,7 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
     assert "@secure()\nparam apimSubscriptionKey string" in function_app
     assert "AZURE_FUNCTIONS_AGENTS_APIM_MODEL_CONTROL_URL" in function_app
     assert "disableLocalAuth: true" in foundry
-    assert "urlTemplate: '/*'" not in apim
-    assert "name: 'responses-get'" not in apim
-    assert "name: 'responses-delete'" not in apim
-    assert "name: 'responses-poll'" in apim
-    assert "urlTemplate: '/responses'" in apim
-    assert "urlTemplate: '/responses/cancel'" in apim
-    assert 'name="x-af-response-id"' in apim
-    assert "^resp_[A-Za-z0-9]{16,160}$" in apim
-    assert 'exists-action="delete"' in apim
-    assert apim.count('<set-header name="api-key" exists-action="delete" />') == 3
-    assert apim.count('<set-query-parameter name="subscription-key" exists-action="delete" />') == 3
-    assert "${modelBackend.name}" not in apim
-    assert apim.count("__MODEL_BACKEND_NAME__") == 4
-    assert "resource modelControlAzureMonitorDiagnostic" in apim
-    assert "loggerId: azureMonitorLogger.id" in apim
-    assert "percentage: 0" in apim
-    assert "resource modelControlDiagnostic" not in apim
-    assert apim.count("dataMasking:") == 4
-    assert apim.count("value: '*'") == 4
-    assert "primaryKey:" not in apim
-    assert "secondaryKey:" not in apim
+    _assert_apim_security_contract(apim)
     assert "SCM_DO_BUILD_DURING_DEPLOYMENT" not in function_app
     assert (
         "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_ALLOWED_HOSTS:"
@@ -1492,6 +1517,7 @@ def test_infrastructure_contract_uses_exact_names_and_secure_key_flow() -> None:
         == "Endpoint=http://localhost:8080;TaskHub=default;Authentication=None"
     )
     assert values["TASKHUB_NAME"] == "default"
+    _assert_private_fault_policy(main=main, apim=apim)
     _assert_private_runtime_settings(
         main=main,
         function_app=function_app,

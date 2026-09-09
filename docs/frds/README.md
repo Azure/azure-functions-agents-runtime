@@ -41,6 +41,7 @@ The full lifecycle that produces an FRD lives in [`../../AGENTS.md`](../../AGENT
 | [0008](0008-aca-sandbox-session-runtime.md) | ACA Sandbox session runtime | Finalized |
 | [0009](0009-hybrid-sandbox-tool-execution-spike.md) | Hybrid ACA Sandbox tool execution spike | Finalized |
 | [0010](0010-durable-agent-loop-spike.md) | Durable agent loop spike | In review |
+| [0011](0011-focused-durable-chat-demo.md) | Focused durable Chat UI demo | Finalized |
 
 > `_template.md` is the template, not an FRD — the leading underscore keeps it
 > sorted first and excludes it from numbering.

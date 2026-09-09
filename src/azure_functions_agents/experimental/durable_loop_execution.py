@@ -30,6 +30,8 @@ from .durable_loop_protocol import (
 from .durable_loop_receipts import DurableKeyedDocumentStore
 from .durable_loop_sandbox import DurableAcaSandboxLane
 from .durable_loop_tools import (
+    DurableRetainedSandboxInspection,
+    DurableRetainedSandboxInspectionPort,
     DurableToolCatalogSnapshot,
     DurableToolCleanupPort,
     DurableToolDispatchPort,
@@ -49,6 +51,7 @@ class DurableLoopExecutionBinding:
 class DurableExecutionPlaneRouter(
     DurableToolDispatchPort,
     DurableToolCleanupPort,
+    DurableRetainedSandboxInspectionPort,
 ):
     """Route privileged remote calls to MCP and customer code to ACA."""
 
@@ -155,6 +158,18 @@ class DurableExecutionPlaneRouter(
             session_id=session_id,
             profile=sandbox_profile,
             fault_profile=fault_profile,
+        )
+
+    async def inspect_retained_sandbox(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+    ) -> DurableRetainedSandboxInspection | None:
+        """Return the safe retained ACA projection for one durable run."""
+        return await self._local.inspect_retained_sandbox(
+            run_id=run_id,
+            session_id=session_id,
         )
 
 

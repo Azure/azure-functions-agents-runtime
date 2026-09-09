@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -12,6 +12,7 @@ import azure.durable_functions as df
 import azure.functions as func
 
 from .._logger import logger
+from .._observability import use_function_trace_context
 from ..client_manager import get_client_manager
 from ..strict_json import canonical_json_bytes
 from .durable_loop import DurableLoopPlan, build_tool_requests
@@ -56,6 +57,7 @@ from .durable_loop_protocol import (
     SandboxExecutionProfile,
     ToolBehavior,
     ToolDispatchRefV1,
+    ToolProvenance,
     ToolRequestV1,
     ToolResultRefV1,
     ToolResultStatus,
@@ -74,6 +76,7 @@ from .durable_loop_tools import (
 
 DURABLE_LOOP_ADMISSION_ORCHESTRATOR_NAME = "durable_agent_admission_v1"
 DURABLE_LOOP_ORCHESTRATOR_NAME = "durable_agent_turn_orchestrator_v1"
+DURABLE_LOOP_ORCHESTRATOR_V2_NAME = "durable_agent_turn_orchestrator_v2"
 DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME = "durable_agent_human_input_outbox_v1"
 DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME = (
     "durable_agent_human_delivery_outbox_v1"
@@ -85,6 +88,8 @@ DURABLE_LOOP_CONTROL_ORCHESTRATOR_NAME = "durable_agent_control_v1"
 DURABLE_LOOP_SESSION_ENTITY_NAME = "durable_agent_session_entity_v1"
 DURABLE_LOOP_MODEL_ACTIVITY_NAME = "durable_agent_model_step_v1"
 DURABLE_LOOP_TOOL_ACTIVITY_NAME = "durable_agent_tool_step_v1"
+DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME = "durable_agent_sandbox_tool_v1"
+DURABLE_LOOP_MCP_TOOL_ACTIVITY_NAME = "durable_agent_mcp_tool_v1"
 DURABLE_LOOP_APPEND_ACTIVITY_NAME = "durable_agent_append_results_v1"
 DURABLE_LOOP_HUMAN_ACTIVITY_NAME = "durable_agent_human_request_v1"
 DURABLE_LOOP_HUMAN_RESULT_ACTIVITY_NAME = "durable_agent_human_result_v1"
@@ -155,6 +160,23 @@ class DurableLoopActivityRuntime:
 
 
 type ActivityRuntimeFactory = Callable[[], DurableLoopActivityRuntime]
+type TraceableActivity = Callable[[dict], Awaitable[dict[str, object]]]  # type: ignore[type-arg]
+
+
+def _with_function_trace_context(
+    activity: TraceableActivity,
+) -> Callable[[dict, func.Context], Awaitable[dict[str, object]]]:  # type: ignore[type-arg]
+    async def traced_activity(
+        payload: dict,  # type: ignore[type-arg]
+        context: func.Context = None,  # type: ignore[assignment]
+    ) -> dict[str, object]:
+        with use_function_trace_context(context):
+            return await activity(payload)
+
+    traced_activity.__name__ = activity.__name__
+    traced_activity.__qualname__ = activity.__qualname__
+    traced_activity.__doc__ = activity.__doc__
+    return traced_activity
 
 
 def _default_activity_runtime() -> DurableLoopActivityRuntime:
@@ -429,37 +451,199 @@ def register_durable_loop_blueprint(app: func.FunctionApp) -> None:
     def durable_agent_turn_orchestrator_v1(
         context: df.DurableOrchestrationContext,
     ) -> Any:
-        payload = DurableOrchestrationInputV1.model_validate_json(
-            canonical_json_bytes(context.get_input())
-        )
-        entity = df.EntityId(
-            DURABLE_LOOP_SESSION_ENTITY_NAME,
-            payload.session_entity_key,
-        )
-        try:
-            return (yield from _run_durable_loop(context, entity, payload))
-        except Exception:
-            yield from _cleanup_execution_plane(context, payload)
-            yield context.call_entity(
-                entity,
-                "abort",
-                {
-                    "context_ref": payload.run_document_ref.model_dump(mode="json"),
-                    "error": "orchestration_failed",
-                    "run_id": payload.identity.run_id,
-                    "status": DurableLoopRunStatus.FAILED.value,
-                },
+        return (
+            yield from _run_registered_durable_loop(
+                context,
+                tool_activity_name_for_call=_generic_tool_activity_name,
             )
-            raise
+        )
+
+    @blueprint.orchestration_trigger(  # type: ignore[untyped-decorator]
+        context_name="context",
+        orchestration=DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
+    )
+    def durable_agent_turn_orchestrator_v2(
+        context: df.DurableOrchestrationContext,
+    ) -> Any:
+        return (
+            yield from _run_registered_durable_loop(
+                context,
+                tool_activity_name_for_call=_provenance_tool_activity_name,
+            )
+        )
 
     app.register_blueprint(blueprint)
 
 
+def _run_registered_durable_loop(
+    context: df.DurableOrchestrationContext,
+    *,
+    tool_activity_name_for_call: Callable[[ToolDispatchRefV1], str],
+) -> Any:
+    payload = DurableOrchestrationInputV1.model_validate_json(
+        canonical_json_bytes(context.get_input())
+    )
+    entity = df.EntityId(
+        DURABLE_LOOP_SESSION_ENTITY_NAME,
+        payload.session_entity_key,
+    )
+    try:
+        return (
+            yield from _run_durable_loop(
+                context,
+                entity,
+                payload,
+                tool_activity_name_for_call=tool_activity_name_for_call,
+            )
+        )
+    except Exception:
+        yield from _cleanup_execution_plane(context, payload)
+        yield context.call_entity(
+            entity,
+            "abort",
+            {
+                "context_ref": payload.run_document_ref.model_dump(mode="json"),
+                "error": "orchestration_failed",
+                "run_id": payload.identity.run_id,
+                "status": DurableLoopRunStatus.FAILED.value,
+            },
+        )
+        raise
+
+
+def _generic_tool_activity_name(_call: ToolDispatchRefV1) -> str:
+    return DURABLE_LOOP_TOOL_ACTIVITY_NAME
+
+
+def _provenance_tool_activity_name(call: ToolDispatchRefV1) -> str:
+    if call.provenance is ToolProvenance.LOCAL:
+        return DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME
+    if call.provenance is ToolProvenance.REMOTE:
+        return DURABLE_LOOP_MCP_TOOL_ACTIVITY_NAME
+    raise RuntimeError("runtime control tools cannot reach a transport activity")
+
+
 def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
+    async def execute_tool_activity(
+        payload: dict,  # type: ignore[type-arg]
+        *,
+        expected_provenance: ToolProvenance | None,
+    ) -> dict[str, object]:
+        runtime = get_durable_loop_activity_runtime()
+        request_ref = ContentRefV1.model_validate(payload["request_ref"])
+        request = await get_protocol_model(
+            runtime.content,
+            request_ref,
+            ToolRequestV1,
+        )
+        if (
+            expected_provenance is not None
+            and request.provenance is not expected_provenance
+        ):
+            raise RuntimeError("durable tool activity provenance changed")
+        remaining = (
+            request.deadline.astimezone(UTC) - datetime.now(UTC)
+        ).total_seconds()
+        try:
+            if (
+                len(canonical_json_bytes(request.arguments))
+                > request.argument_byte_limit
+            ):
+                result = _tool_limit_result(
+                    request,
+                    code="tool_arguments_too_large",
+                )
+            else:
+                async with asyncio.timeout(max(0.001, remaining)):
+                    result = await runtime.tools.dispatch(request)
+                if _tool_result_size(result) > request.result_byte_limit:
+                    result = _tool_limit_result(
+                        request,
+                        code="tool_result_too_large",
+                    )
+        except TimeoutError:
+            result = ToolResultV1(
+                run_id=request.run_id,
+                step_index=request.step_index,
+                call_ordinal=request.call_ordinal,
+                provider_call_id=request.provider_call_id,
+                call_key=request.call_key,
+                request_hash=request.request_hash,
+                tool_name=request.tool_name,
+                status=ToolResultStatus.TIMED_OUT,
+                elapsed_ms=max(0.0, remaining * 1000.0),
+                error=ErrorEnvelopeV1(
+                    code="tool_timeout",
+                    classification="timeout",
+                    retryable=request.behavior is ToolBehavior.READ_ONLY,
+                    phase="tool_step",
+                    step_index=request.step_index,
+                    call_key=request.call_key,
+                ),
+            )
+        if runtime.faults is not None and await runtime.faults.consume(
+            request.fault_profile,
+            run_id=request.run_id,
+            point="tool_activity_ack_loss",
+        ):
+            if (
+                request.behavior is ToolBehavior.MUTATING
+                and result.status is ToolResultStatus.SUCCEEDED
+            ):
+                result = ToolResultV1(
+                    run_id=request.run_id,
+                    step_index=request.step_index,
+                    call_ordinal=request.call_ordinal,
+                    provider_call_id=request.provider_call_id,
+                    call_key=request.call_key,
+                    request_hash=request.request_hash,
+                    tool_name=request.tool_name,
+                    status=ToolResultStatus.AMBIGUOUS,
+                    elapsed_ms=result.elapsed_ms,
+                    error=ErrorEnvelopeV1(
+                        code="tool_acknowledgement_lost",
+                        classification="tool",
+                        retryable=False,
+                        disposition=ErrorDisposition.AMBIGUOUS,
+                        possibly_committed=True,
+                        phase="tool_step",
+                        step_index=request.step_index,
+                        call_key=request.call_key,
+                    ),
+                )
+            else:
+                result = await runtime.tools.dispatch(request)
+        result_ref = await put_protocol_model(
+            runtime.content,
+            kind="tool-result",
+            model=result,
+        )
+        written_bytes = result_ref.byte_length
+        if result.workspace_ref is not None:
+            workspace = await get_protocol_model(
+                runtime.content,
+                result.workspace_ref,
+                WorkspaceArtifactV1,
+            )
+            written_bytes += (
+                result.workspace_ref.byte_length
+                + workspace.archive_ref.byte_length
+            )
+        return ToolResultRefV1(
+            result_ref=result_ref,
+            call_ordinal=result.call_ordinal,
+            call_key=result.call_key,
+            request_hash=result.request_hash,
+            tool_name=result.tool_name,
+            status=result.status,
+            written_bytes=written_bytes,
+        ).model_dump(mode="json")
+
     @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
         input_name="payload",
         activity=DURABLE_LOOP_MODEL_ACTIVITY_NAME,
     )
+    @_with_function_trace_context
     async def durable_agent_model_step_v1(
         payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
@@ -569,6 +753,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         input_name="payload",
         activity=DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME,
     )
+    @_with_function_trace_context
     async def durable_agent_model_poll_v1(
         payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
@@ -629,6 +814,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         input_name="payload",
         activity=DURABLE_LOOP_MODEL_CANCEL_ACTIVITY_NAME,
     )
+    @_with_function_trace_context
     async def durable_agent_model_cancel_v1(
         payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
@@ -657,6 +843,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         input_name="payload",
         activity=DURABLE_LOOP_CLEANUP_ACTIVITY_NAME,
     )
+    @_with_function_trace_context
     async def durable_agent_cleanup_v1(
         payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
@@ -722,113 +909,40 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         input_name="payload",
         activity=DURABLE_LOOP_TOOL_ACTIVITY_NAME,
     )
+    @_with_function_trace_context
     async def durable_agent_tool_step_v1(
         payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
-        runtime = get_durable_loop_activity_runtime()
-        request_ref = ContentRefV1.model_validate(payload["request_ref"])
-        request = await get_protocol_model(
-            runtime.content,
-            request_ref,
-            ToolRequestV1,
+        return await execute_tool_activity(
+            payload,
+            expected_provenance=None,
         )
-        remaining = (
-            request.deadline.astimezone(UTC) - datetime.now(UTC)
-        ).total_seconds()
-        try:
-            if (
-                len(canonical_json_bytes(request.arguments))
-                > request.argument_byte_limit
-            ):
-                result = _tool_limit_result(
-                    request,
-                    code="tool_arguments_too_large",
-                )
-            else:
-                async with asyncio.timeout(max(0.001, remaining)):
-                    result = await runtime.tools.dispatch(request)
-                if _tool_result_size(result) > request.result_byte_limit:
-                    result = _tool_limit_result(
-                        request,
-                        code="tool_result_too_large",
-                    )
-        except TimeoutError:
-            result = ToolResultV1(
-                run_id=request.run_id,
-                step_index=request.step_index,
-                call_ordinal=request.call_ordinal,
-                provider_call_id=request.provider_call_id,
-                call_key=request.call_key,
-                request_hash=request.request_hash,
-                tool_name=request.tool_name,
-                status=ToolResultStatus.TIMED_OUT,
-                elapsed_ms=max(0.0, remaining * 1000.0),
-                error=ErrorEnvelopeV1(
-                    code="tool_timeout",
-                    classification="timeout",
-                    retryable=request.behavior is ToolBehavior.READ_ONLY,
-                    phase="tool_step",
-                    step_index=request.step_index,
-                    call_key=request.call_key,
-                ),
-            )
-        if runtime.faults is not None and await runtime.faults.consume(
-            request.fault_profile,
-            run_id=request.run_id,
-            point="tool_activity_ack_loss",
-        ):
-            if (
-                request.behavior is ToolBehavior.MUTATING
-                and result.status is ToolResultStatus.SUCCEEDED
-            ):
-                result = ToolResultV1(
-                    run_id=request.run_id,
-                    step_index=request.step_index,
-                    call_ordinal=request.call_ordinal,
-                    provider_call_id=request.provider_call_id,
-                    call_key=request.call_key,
-                    request_hash=request.request_hash,
-                    tool_name=request.tool_name,
-                    status=ToolResultStatus.AMBIGUOUS,
-                    elapsed_ms=result.elapsed_ms,
-                    error=ErrorEnvelopeV1(
-                        code="tool_acknowledgement_lost",
-                        classification="tool",
-                        retryable=False,
-                        disposition=ErrorDisposition.AMBIGUOUS,
-                        possibly_committed=True,
-                        phase="tool_step",
-                        step_index=request.step_index,
-                        call_key=request.call_key,
-                    ),
-                )
-            else:
-                result = await runtime.tools.dispatch(request)
-        result_ref = await put_protocol_model(
-            runtime.content,
-            kind="tool-result",
-            model=result,
+
+    @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
+        input_name="payload",
+        activity=DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME,
+    )
+    @_with_function_trace_context
+    async def durable_agent_sandbox_tool_v1(
+        payload: dict,  # type: ignore[type-arg]
+    ) -> dict[str, object]:
+        return await execute_tool_activity(
+            payload,
+            expected_provenance=ToolProvenance.LOCAL,
         )
-        written_bytes = result_ref.byte_length
-        if result.workspace_ref is not None:
-            workspace = await get_protocol_model(
-                runtime.content,
-                result.workspace_ref,
-                WorkspaceArtifactV1,
-            )
-            written_bytes += (
-                result.workspace_ref.byte_length
-                + workspace.archive_ref.byte_length
-            )
-        return ToolResultRefV1(
-            result_ref=result_ref,
-            call_ordinal=result.call_ordinal,
-            call_key=result.call_key,
-            request_hash=result.request_hash,
-            tool_name=result.tool_name,
-            status=result.status,
-            written_bytes=written_bytes,
-        ).model_dump(mode="json")
+
+    @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
+        input_name="payload",
+        activity=DURABLE_LOOP_MCP_TOOL_ACTIVITY_NAME,
+    )
+    @_with_function_trace_context
+    async def durable_agent_mcp_tool_v1(
+        payload: dict,  # type: ignore[type-arg]
+    ) -> dict[str, object]:
+        return await execute_tool_activity(
+            payload,
+            expected_provenance=ToolProvenance.REMOTE,
+        )
 
     @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
         input_name="payload",
@@ -1365,6 +1479,10 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
     context: df.DurableOrchestrationContext,
     entity: df.EntityId,
     payload: DurableOrchestrationInputV1,
+    *,
+    tool_activity_name_for_call: Callable[[ToolDispatchRefV1], str] = (
+        _generic_tool_activity_name
+    ),
 ) -> Any:
     admission = yield context.call_entity(
         entity,
@@ -1990,6 +2108,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
             current.identity.run_id,
             model_result.tool_calls,
             current.identity.budget.max_parallel_reads,
+            tool_activity_name_for_call,
         )
         appended = yield context.call_activity(
             DURABLE_LOOP_APPEND_ACTIVITY_NAME,
@@ -2122,6 +2241,7 @@ def _schedule_tool_refs(
     run_id: str,
     calls: tuple[ToolDispatchRefV1, ...],
     max_parallel_reads: int,
+    tool_activity_name_for_call: Callable[[ToolDispatchRefV1], str],
 ) -> Any:
     results: list[ToolResultRefV1] = []
     index = 0
@@ -2147,7 +2267,7 @@ def _schedule_tool_refs(
             raw = yield context.task_all(
                 [
                     context.call_activity(
-                        DURABLE_LOOP_TOOL_ACTIVITY_NAME,
+                        tool_activity_name_for_call(item),
                         {"request_ref": item.request_ref.model_dump(mode="json")},
                     )
                     for item in batch
@@ -2159,7 +2279,7 @@ def _schedule_tool_refs(
             )
             continue
         raw = yield context.call_activity(
-            DURABLE_LOOP_TOOL_ACTIVITY_NAME,
+            tool_activity_name_for_call(call),
             {"request_ref": call.request_ref.model_dump(mode="json")},
         )
         results.append(

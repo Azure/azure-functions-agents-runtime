@@ -44,7 +44,7 @@ from azure_functions_agents.experimental.durable_loop_registration import (
     DURABLE_LOOP_CONTROL_ORCHESTRATOR_NAME,
     DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME,
     DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME,
-    DURABLE_LOOP_ORCHESTRATOR_NAME,
+    DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
     DurableLoopActivityRuntime,
     apply_session_entity_operation,
     get_durable_loop_activity_runtime,
@@ -52,6 +52,7 @@ from azure_functions_agents.experimental.durable_loop_registration import (
     set_durable_loop_activity_runtime_factory,
 )
 from azure_functions_agents.experimental.durable_loop_tools import (
+    DurableRetainedSandboxInspection,
     DurableToolRegistry,
 )
 
@@ -253,7 +254,7 @@ class _Client:
                 runtime_status=SimpleNamespace(name="Completed"),
             )
             return instance_id
-        if name == DURABLE_LOOP_ORCHESTRATOR_NAME and self.fail_run_starts:
+        if name == DURABLE_LOOP_ORCHESTRATOR_V2_NAME and self.fail_run_starts:
             self.fail_run_starts -= 1
             raise RuntimeError("injected start acknowledgement loss")
         self.statuses[instance_id] = SimpleNamespace(
@@ -315,6 +316,10 @@ def test_private_http_routes_register_auth_and_durable_client(
             "GET",
             "experimental/durable-agent-runs/{run_id}/result",
         ),
+        "durable_agent_run_sandbox_v1": (
+            "GET",
+            "experimental/durable-agent-runs/{run_id}/sandbox",
+        ),
         "durable_agent_run_cancel_v1": (
             "POST",
             "experimental/durable-agent-runs/{run_id}/cancel",
@@ -338,6 +343,87 @@ def test_private_http_routes_register_auth_and_durable_client(
         assert bindings[1]["route"] == route
         assert method in [str(item) for item in bindings[1]["methods"]]
         assert str(bindings[1]["authLevel"]).lower() == "function"
+
+
+@pytest.mark.asyncio
+async def test_retained_sandbox_route_returns_only_safe_projection(
+    durable_app: df.DFApp,
+) -> None:
+    inspections: list[tuple[str, str]] = []
+
+    class Tools:
+        async def freeze_catalog(self, **_kwargs):
+            return await DurableToolRegistry().build_dispatcher().freeze_catalog(
+                policy_hash="0" * 64,
+                sandbox_profile=SandboxExecutionProfile.RETAINED_SESSION,
+            )
+
+        async def dispatch(self, _request):
+            raise AssertionError("not used")
+
+        async def cleanup(self, **_kwargs):
+            return None
+
+        async def inspect_retained_sandbox(self, *, run_id: str, session_id: str):
+            inspections.append((run_id, session_id))
+            return DurableRetainedSandboxInspection(
+                sandbox_instance_alias="sandbox-1234abcd",
+                generation=2,
+                state="Stopped",
+                workspace_checkpoint_present=True,
+            )
+
+    runtime = DurableLoopActivityRuntime(
+        model=ScriptedOneStepModelProvider([]),
+        tools=Tools(),  # type: ignore[arg-type]
+        compactor=DeterministicContextCompactor(),
+        content=InMemoryDurableContentStore(),
+    )
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    client = _Client()
+    start = _registered_function(durable_app, "durable_agent_run_start_v1")
+    started = await start(
+        _Request(
+            body={
+                "prompt": "hello",
+                "request_id": "request-inspection",
+            },
+            headers={"x-ms-session-id": "session-1"},
+        ),
+        client,
+    )
+    run_id = json.loads(started.body)["run_id"]
+    durable_input = DurableOrchestrationInputV1.model_validate_json(
+        json.dumps(client.statuses[run_id].input)
+    ).model_copy(
+        update={"sandbox_profile": SandboxExecutionProfile.RETAINED_SESSION}
+    )
+    client.statuses[run_id] = SimpleNamespace(
+        custom_status={"phase": "completed"},
+        input=durable_input.model_dump(mode="json"),
+        input_=durable_input.model_dump(mode="json"),
+        instance_id=run_id,
+        output={"status": "Completed"},
+        runtime_status=SimpleNamespace(name="Completed"),
+    )
+    handler = _registered_function(
+        durable_app,
+        "durable_agent_run_sandbox_v1",
+    )
+
+    response = await handler(
+        _Request(path_params={"run_id": run_id}),
+        client,
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.body) == {
+        "generation": 2,
+        "sandbox_instance_alias": "sandbox-1234abcd",
+        "state": "Stopped",
+        "workspace_checkpoint_present": True,
+    }
+    assert inspections == [(run_id, "session-1")]
 
 
 @pytest.mark.asyncio
@@ -384,7 +470,7 @@ async def test_start_route_returns_202_urls_and_deduplicates(
     assert body["cancel_url"].endswith(f"{body['run_id']}/cancel")
     assert [item[0] for item in client.starts] == [
         DURABLE_LOOP_ADMISSION_ORCHESTRATOR_NAME,
-        DURABLE_LOOP_ORCHESTRATOR_NAME,
+        DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
         DURABLE_LOOP_ADMISSION_ORCHESTRATOR_NAME,
     ]
     assert "hello" not in json.dumps(client.starts)
@@ -649,7 +735,7 @@ async def test_purged_completed_duplicate_returns_terminal_receipt_without_relau
     assert completed["disposition"] == "completed"
     client.statuses.pop(run_id)
     starts_before = len(
-        [item for item in client.starts if item[0] == DURABLE_LOOP_ORCHESTRATOR_NAME]
+        [item for item in client.starts if item[0] == DURABLE_LOOP_ORCHESTRATOR_V2_NAME]
     )
 
     replay = await start(request, client)
@@ -661,7 +747,7 @@ async def test_purged_completed_duplicate_returns_terminal_receipt_without_relau
             [
                 item
                 for item in client.starts
-                if item[0] == DURABLE_LOOP_ORCHESTRATOR_NAME
+                if item[0] == DURABLE_LOOP_ORCHESTRATOR_V2_NAME
             ]
         )
         == starts_before

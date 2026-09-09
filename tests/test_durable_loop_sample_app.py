@@ -20,6 +20,8 @@ CUSTOM_TOOLS = {
     "chain_probe",
     "customer_probe",
     "delayed_probe",
+    "prepare_demo_workspace",
+    "read_demo_workspace",
     "unsafe_write_probe",
 }
 GENERIC_TOOLS = {"read_file", "run_shell", "search_files", "write_file"}
@@ -94,6 +96,9 @@ def test_sample_application_config_is_explicit_and_private() -> None:
         "Emit it as the only tool call",
         "Never mix it with another call",
         "generic `write_file`",
+        "`prepare_demo_workspace` exactly once",
+        "`read_demo_workspace` exactly once",
+        "`microsoft_docs_search` exactly once",
     )
     for term in required_instruction_terms:
         assert term in normalized_instructions
@@ -171,9 +176,11 @@ def test_tool_policy_is_complete_strict_and_fail_closed() -> None:
     assert tools["read_file"]["behavior"] == "read_only"
     assert tools["search_files"]["behavior"] == "read_only"
     assert tools["write_file"]["behavior"] == "idempotent_write"
+    assert tools["prepare_demo_workspace"]["behavior"] == "idempotent_write"
+    assert tools["read_demo_workspace"]["behavior"] == "read_only"
     assert tools["run_shell"]["behavior"] == "mutating"
     assert tools["unsafe_write_probe"]["behavior"] == "mutating"
-    for name in CUSTOM_TOOLS - {"unsafe_write_probe"}:
+    for name in CUSTOM_TOOLS - {"prepare_demo_workspace", "unsafe_write_probe"}:
         assert tools[name]["behavior"] == "read_only"
 
 
@@ -225,6 +232,22 @@ def test_probe_sources_pin_bounded_deterministic_protocols() -> None:
     assert "1 <= repeat <= 20" in customer
     assert '"sandbox_marker": True' in customer
     assert '"process_id": os.getpid()' in customer
+
+    prepare = (TOOLS_DIR / "prepare_demo_workspace.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"demo-context.txt"' in prepare
+    assert '"www.example.com"' in prepare
+    assert '"durable-demo-tool-process"' in prepare
+    assert "time.sleep(180)" in prepare
+    assert "start_new_session=True" in prepare
+    assert "1 <= len(content) <= 512" in prepare
+
+    read = (TOOLS_DIR / "read_demo_workspace.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"demo-context.txt"' in read
+    assert '"content": content' in read
 
 
 def test_bundle_contains_no_deployment_or_credential_material() -> None:

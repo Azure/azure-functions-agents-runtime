@@ -41,6 +41,10 @@ class DurableToolAmbiguousError(DurableToolDispatchError):
     """A write may have committed before its acknowledgement was lost."""
 
 
+class DurableToolInspectionError(RuntimeError):
+    """Retained execution state could not be safely inspected."""
+
+
 @runtime_checkable
 class DurableToolDispatchPort(Protocol):
     """Layer-2 transport seam for one request-hash-bound tool call."""
@@ -83,6 +87,29 @@ class DurableToolCleanupPort(Protocol):
         fault_profile: DurableFaultProfile,
     ) -> None:
         """Converge app-owned execution resources toward zero."""
+
+
+@dataclass(frozen=True, slots=True)
+class DurableRetainedSandboxInspection:
+    """Content-free projection of one retained sandbox instance."""
+
+    sandbox_instance_alias: str
+    generation: int
+    state: str
+    workspace_checkpoint_present: bool
+
+
+@runtime_checkable
+class DurableRetainedSandboxInspectionPort(Protocol):
+    """Read-only inspection seam for one owner-authorized retained session."""
+
+    async def inspect_retained_sandbox(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+    ) -> DurableRetainedSandboxInspection | None:
+        """Return safe retained-sandbox state or ``None`` when none exists."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +207,16 @@ class RegistryToolDispatcher:
     ) -> None:
         """No-op cleanup for the deterministic in-memory dispatcher."""
         del run_id, session_id, sandbox_profile, fault_profile
+
+    async def inspect_retained_sandbox(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+    ) -> DurableRetainedSandboxInspection | None:
+        """Return no external sandbox for the in-memory dispatcher."""
+        del run_id, session_id
+        return None
 
     async def dispatch(self, request: ToolRequestV1) -> ToolResultV1:
         """Execute one fake/local handler with request-bound deduplication."""
