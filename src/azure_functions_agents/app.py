@@ -65,7 +65,10 @@ def _serialize_capabilities_for_log(
 
 def _builtin_endpoints_enabled(builtin_endpoints: Any) -> bool:
     return bool(
-        builtin_endpoints.debug_chat_ui or builtin_endpoints.chat_api or builtin_endpoints.mcp
+        builtin_endpoints.debug_chat_ui
+        or builtin_endpoints.chat_api
+        or builtin_endpoints.mcp
+        or builtin_endpoints.a2a is not None
     )
 
 
@@ -305,6 +308,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 endpoints.append("chat_api")
             if resolved.builtin_endpoints.mcp:
                 endpoints.append("mcp")
+            if resolved.builtin_endpoints.a2a is not None:
+                endpoints.append("a2a")
             agent_info["builtin_endpoints"] = endpoints
         if workflows_enabled:
             agent_info["workflows"] = "enabled"

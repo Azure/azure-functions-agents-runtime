@@ -6,6 +6,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -67,6 +68,18 @@ def _run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
 # the heavy ``runner`` module.
 _SAFE_SESSION_ID_PATTERN = SESSION_ID_PATTERN
 _MAX_HISTORY_REPLAY_MESSAGES = 200
+
+
+def _ensure_a2a_dependencies() -> None:
+    """Fail startup with installation guidance when an A2A declaration lacks its extra."""
+    try:
+        import_module("a2a.server.context")
+        import_module("agent_framework_hosting_a2a")
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Native A2A endpoints require the optional A2A dependencies. "
+            "Install 'azurefunctions-agents-runtime[a2a]'."
+        ) from exc
 
 
 def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
@@ -746,7 +759,7 @@ def register_builtin_endpoints(
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
-    """Register built-in debug chat UI, REST chat, and MCP endpoints for one agent."""
+    """Register built-in chat, MCP, and native A2A endpoints for one agent."""
 
     slug = slug or _function_name_from_source(resolved.source_file, resolved.name)
     builtin_endpoints = resolved.builtin_endpoints
@@ -812,6 +825,21 @@ def register_builtin_endpoints(
             capabilities,
             tool_name=slug,
             function_name=f"{base_function_name}_mcp",
+            workflows_enabled=workflows_enabled,
+            workflow_system_addendum=workflow_system_addendum,
+            catalog=catalog,
+            workflow_policy=workflow_policy,
+        )
+
+    if builtin_endpoints.a2a is not None:
+        _ensure_a2a_dependencies()
+        from .a2a import register_a2a_endpoints
+
+        register_a2a_endpoints(
+            app,
+            resolved,
+            capabilities,
+            slug=slug,
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
             catalog=catalog,

@@ -37,6 +37,11 @@ dependencies = [
 monitor = [
     "azure-monitor-opentelemetry==1.8.8",
 ]
+a2a = [
+    "agent-framework-hosting-a2a==1.0.0a260730",
+    "agent-framework-hosting==1.0.0a260730",
+    "a2a-sdk[http-server]==1.1.2",
+]
 dev = [
     "ruff>=0.15.22,<1",
     "mypy>=2.1.0,<3",
@@ -49,6 +54,11 @@ dev = [
     # azure.monitor.opentelemetry) and mypy on src still resolve it. Keep in sync with the pin in the
     # [monitor] extra above.
     "azure-monitor-opentelemetry==1.8.8",
+    # Keep the P3 A2A tuple in the default development environment so strict
+    # type-checking and protocol tests exercise the same public SDK hooks as [a2a].
+    "agent-framework-hosting-a2a==1.0.0a260730",
+    "agent-framework-hosting==1.0.0a260730",
+    "a2a-sdk[http-server]==1.1.2",
     # Extra runtime dependencies used by sample apps, needed so the E2E `func start` tests can boot
     # every sample against the editable repo install (no per-sample requirements.txt install).
     # daily-azure-report:

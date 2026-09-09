@@ -29,7 +29,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - Can **override** runtime settings (model, timeout)
 - Can enable Dynamic Workflows on any agent
 - Must define **trigger** (how the agent is invoked)
-- Can enable **HTTP/MCP endpoints** for testing and composition
+- Can enable **HTTP/MCP/A2A endpoints** for testing and composition
 
 ### Configuration Precedence
 
@@ -48,7 +48,7 @@ For capabilities (MCP, skills, tools):
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
 | **Global** (`agents.config.yaml`) | None (entire file is optional) | `agent_configuration`, `system_tools`, `model`, `timeout`, `tools`, `http_auth` |
-| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `agent_configuration`, `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `workflows`, `subagents`, `input_schema`, `response_schema`, `response_example`, `metadata` |
+| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `builtin_endpoints`, `agent_configuration`, `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `workflows`, `subagents`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
 ---
@@ -83,7 +83,7 @@ YAML front matter at the top of each agent file.
 - `trigger` — Object defining how the agent is invoked (optional only when at least one `builtin_endpoints` value is enabled)
 
 **Optional properties:**
-- `builtin_endpoints` — Object or boolean for enabling built-in chat UI, chat API, and MCP tool endpoints
+- `builtin_endpoints` — Object or boolean for enabling built-in chat UI, chat API, MCP tool, and native A2A endpoints
 - `agent_configuration` — Portable and Microsoft Agent Framework-specific execution settings; recursively inherits global values
 - `model` — String to override global default model
 - `timeout` — Number to override global default timeout
@@ -161,7 +161,7 @@ Fields are organized into categories based on how they can be used:
 **Agent-Specific (Agent front matter only):**
 - `name`, `description` — Agent identity (required)
 - `trigger` — Invocation method (required unless at least one built-in endpoint is enabled, or the agent is referenced as an internal specialist via another agent's `subagents` or `workflows.subagents`)
-- `builtin_endpoints` — Built-in chat UI, chat API, and MCP tool endpoints
+- `builtin_endpoints` — Built-in chat UI, chat API, MCP tool, and native A2A endpoints
 - `subagents` — Chat-time delegation to specialist agents (`delegate_<slug>` tools; see [`subagents`](#subagents))
 - `logger`, `substitute_variables` — Agent runtime behavior switches
 - `input_schema`, `response_schema`, `response_example` — HTTP validation
@@ -360,14 +360,23 @@ builtin_endpoints:
   debug_chat_ui: boolean   # Enable chat UI plus chat/chatstream APIs
   chat_api: boolean  # Enable REST API endpoints even without the chat UI
   mcp: boolean       # Enable MCP tool registration for agent-to-agent calls
+  a2a:                # Optional; explicit object required
+    mode: simple      # P3 non-streaming, direct-Message profile
+    url: https://agents.example.com/agents/triage/a2a
   http_auth: string | object  # Inbound HTTP authentication policy (see below); default "function"
 ```
 
-`debug_chat_ui: true` automatically enables `chat_api: true` because the built-in UI calls the chat API. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints: `debug_chat_ui`, `chat_api`, and `mcp`.
+`debug_chat_ui: true` automatically enables `chat_api: true` because the built-in
+UI calls the chat API. For compatibility, `builtin_endpoints: true` enables only
+the established `debug_chat_ui`, `chat_api`, and `mcp` surfaces. Native A2A is
+never implicit; it requires the object form with both `mode` and `url`.
 
 ##### `http_auth` — Endpoint authentication
 
-Controls how the HTTP chat API (`/agents/{slug}/chat`, `/agents/{slug}/chatstream`) authenticates inbound requests. Applies only to HTTP endpoints and does not affect the MCP endpoint. Accepts a shorthand string (`http_auth: entra`) or an object.
+Controls how the HTTP chat API (`/agents/{slug}/chat`,
+`/agents/{slug}/chatstream`) and A2A card/JSON-RPC routes authenticate inbound
+requests. Applies only to HTTP endpoints and does not affect the MCP endpoint.
+Accepts a shorthand string (`http_auth: entra`) or an object.
 
 ```yaml
 builtin_endpoints:
@@ -389,7 +398,10 @@ builtin_endpoints:
 
 **App-wide default:** You can set a top-level `http_auth` in `agents.config.yaml` to apply one policy to every agent (see [Global Configuration](#global-configuration-agentsconfigyaml)). Resolution precedence is: the agent's own `builtin_endpoints.http_auth` → the global `agents.config.yaml` `http_auth` → the built-in `function` default. An agent authoring its own `http_auth` always wins, even if it is weaker than the app-wide default.
 
-**HTTP only:** `http_auth` applies only to the agent's HTTP endpoints (the chat API and any `http_trigger` routes). It does not affect the MCP endpoint (`/runtime/webhooks/mcp`), which is owned by the Functions MCP extension and always requires the MCP extension **system key** (`x-functions-key`).
+**HTTP only:** `http_auth` applies only to the agent's HTTP endpoints (the chat
+API, A2A routes, and any `http_trigger` routes). It does not affect the MCP
+endpoint (`/runtime/webhooks/mcp`), which is owned by the Functions MCP extension
+and always requires the MCP extension **system key** (`x-functions-key`).
 
 **Endpoint Details:**
 
@@ -419,9 +431,70 @@ builtin_endpoints:
 - **Route behavior:** Does not create a per-agent `/agents/{slug}` MCP route; it registers a tool on the shared runtime MCP transport
 - **Use case:** Enable agent-to-agent communication — other agents can invoke this agent as a tool
 
+##### A2A simple server
+
+`builtin_endpoints.a2a` exposes an experimental, standards-based A2A 1.0
+JSON-RPC surface. Install the optional dependency extra:
+
+```text
+azurefunctions-agents-runtime[a2a]
+```
+
+```yaml
+---
+name: Incident Triage Specialist
+description: Turns production symptoms into a focused incident brief.
+builtin_endpoints:
+  a2a:
+    mode: simple
+    url: https://agents.example.com/agents/incident-triage/a2a
+  http_auth:
+    mode: entra
+    entra:
+      tenant_id: "<tenant-guid>"
+      allowed_audiences: ["api://incident-agents"]
+---
+```
+
+The `url` is the trusted, externally reachable JSON-RPC URL published in the
+Agent Card. It must be absolute HTTPS; `http://localhost` and other loopback
+hosts are accepted only for local development. Its path must end in the route
+for this filename-derived slug, `/agents/{slug}/a2a`. The runtime does not infer
+the URL from request `Host` or forwarding headers.
+
+| Route | Method | Purpose |
+| --- | --- | --- |
+| `/agents/{slug}/.well-known/agent-card.json` | `GET` | Per-agent Agent Card; clients configure this path explicitly rather than assuming domain-root discovery. |
+| `/agents/{slug}/a2a` | `POST` | A2A 1.0 JSON-RPC `SendMessage`. |
+
+Both routes inherit the resolved `http_auth` policy. Function/admin/anonymous
+requests share one app trust scope for conversation context; Entra context is
+scoped to the validated tenant and caller identity. A caller-supplied
+`contextId` continues the runtime session only within that scope.
+
+P3 accepts only a non-streaming user Message containing text Parts and returns
+one direct agent Message. Every protocol request must send `A2A-Version: 1.0`;
+an absent header means 0.3 and is rejected. Both `returnImmediately` values are
+valid but have no effect for a direct Message. Streaming, Tasks, `taskId`
+continuation, subscribe/cancel, push notifications, REST binding, file/data
+Parts, and arbitrary Message extensions are explicitly unsupported. The Agent
+Card advertises `streaming: false` and `pushNotifications: false`.
+
+Fixed P3 safety bounds are 256 KiB per raw request, 16 Parts, 32 KiB per text
+Part, 64 KiB total input text, 256 KiB response text, and 32 concurrent
+executions per agent process. Over-capacity and unsupported operations use the
+SDK's correlated JSON-RPC `-32004` error. Responses expose text only; reasoning,
+tool arguments, tool results, and arbitrary runtime metadata are not copied to
+the wire.
+
+See the complete field definitions in
+[the generated reference](front-matter-reference.md#agent-builtin_endpointsa2a)
+and the runnable
+[`a2a-incident-triage` sample](../samples/a2a-incident-triage/).
+
 **Examples:**
 
-**Enable all built-in endpoints:**
+**Enable all established built-in endpoints (A2A remains off):**
 ```yaml
 trigger:
   type: timer_trigger
@@ -456,7 +529,7 @@ builtin_endpoints:
   mcp: true   # Expose as tool for other agents to call
 ```
 
-**Shorthand for enabling all built-in endpoints:**
+**Shorthand for enabling all established built-in endpoints (A2A remains off):**
 ```yaml
 builtin_endpoints: true   # Equivalent to debug_chat_ui: true, chat_api: true, and mcp: true
 ```

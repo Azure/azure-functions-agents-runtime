@@ -14,11 +14,13 @@ from azure.durable_functions import DurableFunctionsClient
 
 from azure_functions_agents._session_id import SESSION_ID_PATTERN
 from azure_functions_agents.config.schema import (
+    A2AConfig,
     BuiltinEndpointsConfig,
     EndpointAuthConfig,
     ResolvedAgent,
     ToolsFilter,
 )
+from azure_functions_agents.registration import endpoints as endpoint_registration
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
     _MAX_HISTORY_REPLAY_MESSAGES,
@@ -151,6 +153,28 @@ def _resolved_agent(
 def _response_text(response: func.HttpResponse) -> str:
     body = response.body
     return body.decode("utf-8") if isinstance(body, bytes) else str(body)
+
+
+def test_a2a_declaration_without_extra_fails_with_install_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing_a2a_dependency(name: str) -> Any:
+        raise ModuleNotFoundError(name=name)
+
+    monkeypatch.setattr(endpoint_registration, "import_module", missing_a2a_dependency)
+    resolved = _resolved_agent(
+        name="A2A Agent",
+        is_main=True,
+        builtin_endpoints=BuiltinEndpointsConfig(
+            a2a=A2AConfig(url="http://localhost:7071/agents/main/a2a")
+        ),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"azurefunctions-agents-runtime\[a2a\]",
+    ):
+        register_builtin_endpoints(FakeFunctionApp(), resolved, AgentCapabilities())
 
 
 class _CapturedSpan:

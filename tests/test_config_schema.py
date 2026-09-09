@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from azure_functions_agents.config.schema import (
+    A2AConfig,
     AgentConfiguration,
     AgentFrameworkCompactionConfig,
     AgentFrameworkConfiguration,
@@ -49,6 +50,36 @@ def test_builtin_endpoints_debug_chat_ui_enables_chat_api() -> None:
     config = BuiltinEndpointsConfig(debug_chat_ui=True)
     assert config.debug_chat_ui is True
     assert config.chat_api is True
+
+
+def test_builtin_endpoints_parses_explicit_a2a_object() -> None:
+    config = BuiltinEndpointsConfig.model_validate(
+        {
+            "a2a": {
+                "mode": "simple",
+                "url": "https://agents.example.test/api/agents/triage/a2a",
+            }
+        }
+    )
+
+    assert config.a2a == A2AConfig(
+        mode="simple",
+        url="https://agents.example.test/api/agents/triage/a2a",
+    )
+
+
+@pytest.mark.parametrize(
+    "a2a",
+    [
+        True,
+        {},
+        {"mode": "basic", "url": "https://agents.example.test/agents/triage/a2a"},
+        {"mode": "simple", "url": "   "},
+    ],
+)
+def test_builtin_endpoints_rejects_invalid_a2a_shape(a2a: object) -> None:
+    with pytest.raises(ValidationError):
+        BuiltinEndpointsConfig.model_validate({"a2a": a2a})
 
 
 def test_builtin_endpoints_auth_defaults_to_function() -> None:

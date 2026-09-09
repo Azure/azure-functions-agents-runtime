@@ -34,6 +34,7 @@ AgentSpec = schema.AgentSpec
 AgentConfiguration = schema.AgentConfiguration
 AgentFrameworkCompactionConfig = schema.AgentFrameworkCompactionConfig
 AgentFrameworkConfiguration = schema.AgentFrameworkConfiguration
+A2AConfig = schema.A2AConfig
 BuiltinEndpointsConfig = schema.BuiltinEndpointsConfig
 DynamicSessionsCodeInterpreterConfig = schema.DynamicSessionsCodeInterpreterConfig
 GlobalConfig = schema.GlobalConfig
@@ -58,6 +59,7 @@ AGENT_SPEC_REQUIRED_DESCRIPTIONS = schema.AGENT_SPEC_REQUIRED_DESCRIPTIONS
 AGENT_SPEC_OPTIONAL_DESCRIPTIONS = schema.AGENT_SPEC_OPTIONAL_DESCRIPTIONS
 TRIGGER_SPEC_DESCRIPTIONS = schema.TRIGGER_SPEC_DESCRIPTIONS
 BUILTIN_ENDPOINTS_DESCRIPTIONS = schema.BUILTIN_ENDPOINTS_DESCRIPTIONS
+A2A_CONFIG_DESCRIPTIONS = schema.A2A_CONFIG_DESCRIPTIONS
 SYSTEM_TOOLS_AGENT_DESCRIPTIONS = schema.SYSTEM_TOOLS_AGENT_DESCRIPTIONS
 MCP_FILTER_DESCRIPTIONS = schema.MCP_FILTER_DESCRIPTIONS
 SKILLS_FILTER_DESCRIPTIONS = schema.SKILLS_FILTER_DESCRIPTIONS
@@ -308,7 +310,7 @@ AGENT_SPEC_REQUIRED_DESCRIPTIONS = {
 
 AGENT_SPEC_OPTIONAL_DESCRIPTIONS = {
     "agent_configuration": "Portable and framework-specific execution settings. Recursively inherits global values. [Details](./front-matter-spec.md#agent_configuration)",
-    "builtin_endpoints": "Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints)",
+    "builtin_endpoints": "Enable built-in chat UI, chat API, MCP tool, and/or native A2A endpoints. [Details](#agent-builtin_endpoints)",
     "model": "Override LLM model for this agent",
     "timeout": "Override execution timeout (seconds) for this agent",
     "logger": "Enable/disable response logging for triggered agents",
@@ -347,6 +349,12 @@ BUILTIN_ENDPOINTS_DESCRIPTIONS = {
     "debug_chat_ui": "Enable browser-based chat UI at `/agents/{slug}/` plus backing chat APIs",
     "chat_api": "Enable REST API endpoints (`/agents/{slug}/chat`, `/agents/{slug}/chatstream`)",
     "mcp": "Expose agent as MCP tool on shared runtime MCP transport",
+    "a2a": "Experimental native A2A 1.0 JSON-RPC endpoint configuration. [Details](./front-matter-spec.md#a2a-simple-server)",
+}
+
+A2A_CONFIG_DESCRIPTIONS = {
+    "mode": "A2A execution profile. P3 supports only `simple` (non-streaming direct Message).",
+    "url": "Trusted external JSON-RPC URL published in the Agent Card. HTTPS is required except for loopback development.",
 }
 
 SYSTEM_TOOLS_AGENT_DESCRIPTIONS = {
@@ -492,7 +500,7 @@ def generate_markdown() -> str:
         "",
         "Enable built-in endpoints for interactive testing, programmatic access, and agent composition.",
         "",
-        "**When set to `true`:** Enables all built-in endpoints (`debug_chat_ui`, `chat_api`, `mcp`)",
+        "**When set to `true`:** Enables the established endpoints (`debug_chat_ui`, `chat_api`, `mcp`); A2A still requires an explicit object",
         "",
         "**When set to `false`:** Disables all built-in endpoints (default)",
         "",
@@ -505,6 +513,14 @@ def generate_markdown() -> str:
         "**Note:** `debug_chat_ui: true` automatically enables `chat_api: true`",
         "",
         "**See:** [Front Matter Spec - builtin_endpoints](./front-matter-spec.md#builtin_endpoints)",
+        "",
+        "#### Agent: `builtin_endpoints.a2a`",
+        "",
+    ])
+    lines.extend(generate_model_table(A2AConfig, descriptions=A2A_CONFIG_DESCRIPTIONS))
+    lines.extend([
+        "",
+        "**See:** [Front Matter Spec - A2A simple server](./front-matter-spec.md#a2a-simple-server)",
         "",
     ])
 

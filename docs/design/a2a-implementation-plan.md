@@ -2,8 +2,9 @@
 
 > Proposed delivery for [FRD 0009](../frds/0009-a2a-server.md).
 > [Architecture and invariants](a2a-server.md) govern each slice.
-> This first review PR is documentation-only; no implementation or dependency
-> changes are included. Human architecture sign-off precedes product work.
+> The bottom review PR is documentation-only. P3 alone is now authorized for
+> implementation on its own stacked branch; P4 and every later capability still
+> require separate human sign-off.
 
 ## Review strategy
 
@@ -97,6 +98,28 @@ than front-loading dependency refactors.
 **Non-goals / exposure:** streaming false; no Task persistence, subscribe/cancel,
 outbound A2A client tools, REST, or durable execution. Pinning changes to the
 existing MAF trio require their own compatibility explanation and regression gate.
+
+**Finalized P3 contract:** `[a2a]` uses hosting-a2a and hosting
+`1.0.0a260730` plus SDK `[http-server]` `1.1.2`, without upgrading the existing
+MAF trio. The narrow extra supplies the SDK's public Starlette JSON-RPC route
+hook; `[fastapi]` and `[all]` are not used. The only method is native wire-1.0
+`SendMessage`; a missing `A2A-Version` header means 0.3 and is rejected.
+Supplied `taskId`, Task operations, streaming, and non-text Parts are rejected
+with SDK-shaped JSON-RPC errors. Optional `contextId` is scoped and hashed
+before it becomes a runner session ID; the response echoes the context and
+carries a new Message ID.
+
+`builtin_endpoints.a2a.url` is the required trusted external JSON-RPC URL.
+The card is served at the per-agent
+`agents/{slug}/.well-known/agent-card.json` path with the same resolved auth as
+the RPC route, advertises JSON-RPC 1.0, text/plain, streaming false, push
+notifications false, and matching security metadata. Clients configure that
+exact URL or SDK `card_path`; no root discovery is implied.
+
+P3 fixes conservative limits per agent: 32 in-flight executions, 256 KiB raw
+JSON request, 16 Parts, 32 KiB per text Part, 64 KiB aggregate text input, and
+256 KiB response text. It never publishes reasoning, tool arguments/results,
+or arbitrary runtime metadata.
 
 ## P4 - Chat-preserving typed execution events
 

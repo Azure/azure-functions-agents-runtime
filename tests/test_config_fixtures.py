@@ -16,6 +16,7 @@ import azure_functions_agents.discovery.mcp as mcp_discovery
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
 from azure_functions_agents.config.merge import compose
 from azure_functions_agents.config.schema import (
+    A2AConfig,
     BuiltinEndpointsConfig,
     McpFilter,
     SkillsFilter,
@@ -829,3 +830,29 @@ def test_agent_configuration_fixture() -> None:
     assert explicit_null_spec.agent_configuration is None
     assert explicit_null.agent_configuration.max_output_tokens is None
     assert explicit_null.agent_configuration.agent_framework is None
+
+
+# ---------------------------------------------------------------------------
+# 20 — explicit A2A simple server authoring
+# ---------------------------------------------------------------------------
+
+
+def test_a2a_simple_server_fixture() -> None:
+    fixture = FIXTURES_ROOT / "20_a2a_simple"
+
+    [spec] = load_agent_specs(fixture, strict=True)
+    resolved = compose(spec, load_global_config(fixture))
+
+    assert spec.builtin_endpoints is not None
+    assert spec.builtin_endpoints is not True
+    assert spec.builtin_endpoints.a2a == A2AConfig(
+        mode="simple",
+        url="http://localhost:7071/api/agents/main/a2a",
+    )
+    assert resolved.slug == "main"
+    assert resolved.builtin_endpoints.a2a == spec.builtin_endpoints.a2a
+    validate_resolved_agent(
+        resolved,
+        discovered_mcp_names=[],
+        discovered_skills=[],
+    )

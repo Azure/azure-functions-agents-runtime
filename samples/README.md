@@ -1,11 +1,13 @@
 # Samples
 
 Each subdirectory in the runnable samples table is a standalone Azure Functions
-app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd).
+app. Samples that include `azure.yaml` are also deployable with
+[`azd up`](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd).
 
 | Sample | Trigger | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
 |---|---|---|---|---|---|---|---|
 | [basic-chat](basic-chat/) | HTTP | | | | | ✅ | ✅ |
+| [a2a-incident-triage](a2a-incident-triage/) | A2A 1.0 JSON-RPC | | | | | | |
 | [multi-agent-delegation](multi-agent-delegation/) | HTTP | | | | | | ✅ |
 | [outlook-reply-agent](outlook-reply-agent/) | Office 365 Outlook | | ✅ Office 365 Outlook | ✅ Office 365 Outlook | | ✅ | |
 | [daily-tech-news-email](daily-tech-news-email/) | Timer | | ✅ Office 365 Outlook | ✅ Office 365 Outlook | | ✅ | |
