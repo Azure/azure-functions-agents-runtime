@@ -84,7 +84,12 @@ def _manifest() -> HybridToolManifest:
 
 
 class _Lease:
-    def __init__(self, generation: int) -> None:
+    def __init__(
+        self,
+        generation: int,
+        *,
+        invoke_error: BaseException | None = None,
+    ) -> None:
         self.manifest = _manifest()
         self.package = _package()
         self.expected_manifest = ExpectedSandboxManifestBinding.create(
@@ -115,6 +120,7 @@ class _Lease:
         self.deleted = 0
         self.retained = 0
         self.invocations = 0
+        self.invoke_error = invoke_error
 
     async def restore_workspace(self, archive: bytes, digest: str) -> None:
         assert digest == "sha256:" + hashlib.sha256(archive).hexdigest()
@@ -126,6 +132,8 @@ class _Lease:
 
     async def invoke(self, **kwargs: object) -> HybridToolInvocationResult:
         self.invocations += 1
+        if self.invoke_error is not None:
+            raise self.invoke_error
         return HybridToolInvocationResult(
             protocol_version=HYBRID_TOOL_PROTOCOL_VERSION,
             call_id=str(kwargs["call_id"]),
@@ -213,12 +221,18 @@ def _request(
     workspace_ref=None,
     profile: SandboxExecutionProfile = SandboxExecutionProfile.PER_CALL,
     fault: DurableFaultProfile = DurableFaultProfile.NONE,
+    behavior: ToolBehavior = ToolBehavior.IDEMPOTENT_WRITE,
+    tool_name: str = "write_file",
 ) -> ToolRequestV1:
-    arguments = {"path": "value.txt", "content": str(call)}
+    arguments = (
+        {"path": "value.txt"}
+        if behavior is ToolBehavior.READ_ONLY
+        else {"path": "value.txt", "content": str(call)}
+    )
     request_hash = tool_request_hash(
-        tool_name="write_file",
+        tool_name=tool_name,
         arguments=arguments,
-        behavior=ToolBehavior.IDEMPOTENT_WRITE,
+        behavior=behavior,
         provenance=ToolProvenance.LOCAL,
         policy_hash="a" * 64,
         catalog_hash="b" * 64,
@@ -234,9 +248,9 @@ def _request(
         call_ordinal=0,
         provider_call_id=f"provider-{call}",
         call_key=canonical_hash({"call": call}),
-        tool_name="write_file",
+        tool_name=tool_name,
         provenance=ToolProvenance.LOCAL,
-        behavior=ToolBehavior.IDEMPOTENT_WRITE,
+        behavior=behavior,
         arguments=arguments,
         request_hash=request_hash,
         policy_hash="a" * 64,
@@ -640,6 +654,142 @@ async def test_retained_session_resumes_existing_inventory_without_restore(
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_failed_retained_read_releases_claim_for_next_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog_lease = _Lease(0)
+    failed_lease = _Lease(1, invoke_error=RuntimeError("read failed"))
+    resumed_lease = _Lease(1)
+    leases = [catalog_lease, failed_lease]
+
+    async def acquire(_cls, *_args, **_kwargs):
+        return leases.pop(0)
+
+    async def attach(_cls, *_args, **_kwargs):
+        return resumed_lease
+
+    monkeypatch.setattr(
+        InvocationSandboxLease,
+        "acquire",
+        classmethod(acquire),
+    )
+    monkeypatch.setattr(
+        InvocationSandboxLease,
+        "attach",
+        classmethod(attach),
+    )
+    receipts = InMemoryDurableKeyedDocumentStore()
+    lane = DurableAcaSandboxLane(
+        settings=_settings(),
+        loop_settings=DurableLoopSettings(retained_sandbox_enabled=True),
+        content=InMemoryDurableContentStore(),
+        receipts=receipts,
+        provider_factory=lambda: _provider(True),
+        package_factory=lambda _root: _async_value(_package()),
+    )
+    first_request = _request(
+        call=1,
+        profile=SandboxExecutionProfile.RETAINED_SESSION,
+        behavior=ToolBehavior.READ_ONLY,
+        tool_name="read_file",
+    )
+
+    with pytest.raises(RuntimeError, match="read failed"):
+        await lane.dispatch(first_request)
+
+    retained = await receipts.get(
+        f"retained-sandboxes/{canonical_hash({'session_id': 'session-1'})}"
+    )
+    assert retained is not None
+    retained_payload = json.loads(retained.payload)
+    assert retained_payload["owner_call_key"] is None
+    assert retained_payload["sandbox_id"] == "sandbox-1"
+    assert retained_payload["generation"] == 1
+    assert retained_payload["workspace_ref"] is None
+
+    second = await lane.dispatch(
+        _request(
+            call=2,
+            run_id="run-2",
+            profile=SandboxExecutionProfile.RETAINED_SESSION,
+            behavior=ToolBehavior.READ_ONLY,
+            tool_name="read_file",
+        )
+    )
+
+    assert second.status is ToolResultStatus.SUCCEEDED
+    assert failed_lease.retained == 1
+    assert resumed_lease.invocations == 1
+    assert not leases
+
+
+@pytest.mark.asyncio
+async def test_failed_retained_mutation_keeps_claim_fenced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog_lease = _Lease(0)
+    failed_lease = _Lease(1, invoke_error=RuntimeError("mutation failed"))
+    attached_lease = _Lease(1)
+    leases = [catalog_lease, failed_lease]
+
+    async def acquire(_cls, *_args, **_kwargs):
+        return leases.pop(0)
+
+    async def attach(_cls, *_args, **_kwargs):
+        return attached_lease
+
+    monkeypatch.setattr(
+        InvocationSandboxLease,
+        "acquire",
+        classmethod(acquire),
+    )
+    monkeypatch.setattr(
+        InvocationSandboxLease,
+        "attach",
+        classmethod(attach),
+    )
+    receipts = InMemoryDurableKeyedDocumentStore()
+    lane = DurableAcaSandboxLane(
+        settings=_settings(),
+        loop_settings=DurableLoopSettings(retained_sandbox_enabled=True),
+        content=InMemoryDurableContentStore(),
+        receipts=receipts,
+        provider_factory=lambda: _provider(True),
+        package_factory=lambda _root: _async_value(_package()),
+    )
+    first_request = _request(
+        call=1,
+        profile=SandboxExecutionProfile.RETAINED_SESSION,
+        behavior=ToolBehavior.MUTATING,
+    )
+
+    with pytest.raises(RuntimeError, match="mutation failed"):
+        await lane.dispatch(first_request)
+
+    retained = await receipts.get(
+        f"retained-sandboxes/{canonical_hash({'session_id': 'session-1'})}"
+    )
+    assert retained is not None
+    assert json.loads(retained.payload)["owner_call_key"] == first_request.call_key
+
+    with pytest.raises(Exception, match="already has an active call"):
+        await lane.dispatch(
+            _request(
+                call=2,
+                run_id="run-2",
+                profile=SandboxExecutionProfile.RETAINED_SESSION,
+                behavior=ToolBehavior.READ_ONLY,
+                tool_name="read_file",
+            )
+        )
+
+    assert failed_lease.retained == 1
+    assert attached_lease.invocations == 0
+    assert attached_lease.retained == 1
+    assert not leases
 
 
 @pytest.mark.asyncio

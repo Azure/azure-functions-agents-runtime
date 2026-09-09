@@ -11,6 +11,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .._logger import logger
 from ..config.paths import get_app_root
 from ..controller.package import CapturedContentPackage, get_content_package
 from ..strict_json import canonical_json_bytes
@@ -580,13 +581,79 @@ class DurableAcaSandboxLane:
                 )
             return result
         except BaseException:
+            await self._handle_failed_retained_dispatch(
+                key,
+                request,
+                claimed,
+                claimed_revision=claimed_state.revision,
+                lease=lease,
+            )
+            raise
+
+    async def _handle_failed_retained_dispatch(
+        self,
+        key: str,
+        request: ToolRequestV1,
+        claimed: _RetainedSandboxV1,
+        *,
+        claimed_revision: str,
+        lease: InvocationSandboxLease,
+    ) -> None:
+        await self._release_failed_read_claim(
+            key,
+            request,
+            claimed,
+            claimed_revision=claimed_revision,
+        )
+        try:
             await lease.close(
                 retain=True,
                 retain_auto_delete_seconds=(
                     self._loop_settings.retained_sandbox_auto_delete_seconds
                 ),
             )
-            raise
+        except BaseException:
+            logger.warning(
+                "Durable retained sandbox close failed after tool failure.",
+                exc_info=True,
+            )
+
+    async def _release_failed_read_claim(
+        self,
+        key: str,
+        request: ToolRequestV1,
+        claimed: _RetainedSandboxV1,
+        *,
+        claimed_revision: str,
+    ) -> None:
+        if request.behavior is not ToolBehavior.READ_ONLY:
+            return
+        try:
+            current = await self._receipts.get(key)
+            if current is None or current.revision != claimed_revision:
+                return
+            document = _RetainedSandboxV1.model_validate_json(current.payload)
+            if (
+                document.sandbox_id != claimed.sandbox_id
+                or document.session_id != claimed.session_id
+                or document.generation != claimed.generation
+                or document.owner_call_key != request.call_key
+            ):
+                return
+            released = document.model_copy(update={"owner_call_key": None})
+            if not await self._receipts.replace(
+                key,
+                canonical_json_bytes(released),
+                revision=claimed_revision,
+            ):
+                logger.warning(
+                    "Durable retained read claim changed before failure release."
+                )
+        except BaseException:
+            logger.warning(
+                "Durable retained read claim release failed.",
+                exc_info=True,
+            )
 
     async def _attach_or_recreate(
         self,
