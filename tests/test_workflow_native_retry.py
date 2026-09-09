@@ -40,6 +40,7 @@ from azure_functions_agents.workflows.schema import (
     WorkflowTask,
     WorkflowTaskExecution,
     WorkflowToolExecutionPolicy,
+    freeze_workflow_tool_execution_policies,
     native_retry_delays_ceiling_ms,
     plan_to_activity_inputs,
     resolve_workflow_task_execution,
@@ -1179,9 +1180,9 @@ async def test_start_workflow_persists_tool_declared_retry() -> None:
         session,
         policy=WorkflowPlanPolicy(
             allowed_tools=frozenset({"publish"}),
-            tool_execution={
-                "publish": WorkflowToolExecutionPolicy(retry=catalog["publish"].retry)
-            },
+            tool_execution=freeze_workflow_tool_execution_policies(
+                {"publish": WorkflowToolExecutionPolicy(retry=catalog["publish"].retry)}
+            ),
         ),
     )
 
@@ -1223,7 +1224,9 @@ async def test_start_workflow_rejects_explicit_null_execution_with_tool_retry() 
         ),
         policy=WorkflowPlanPolicy(
             allowed_tools=frozenset({"publish"}),
-            tool_execution={"publish": WorkflowToolExecutionPolicy(retry=_RETRY)},
+            tool_execution=freeze_workflow_tool_execution_policies(
+                {"publish": WorkflowToolExecutionPolicy(retry=_RETRY)}
+            ),
         ),
     )
 

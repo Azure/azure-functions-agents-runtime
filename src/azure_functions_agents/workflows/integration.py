@@ -36,7 +36,11 @@ from azure_functions_agents.registration.catalog import AgentCatalog
 
 from . import registry
 from .engine import register_workflows
-from .schema import WorkflowPlanPolicy, WorkflowToolExecutionPolicy
+from .schema import (
+    WorkflowPlanPolicy,
+    WorkflowToolExecutionPolicy,
+    freeze_workflow_tool_execution_policies,
+)
 from .tools import build_workflow_tools
 
 type WorkflowAgentPolicyCatalog = Mapping[str, WorkflowPlanPolicy]
@@ -442,7 +446,7 @@ def _build_plan_policy(
         allowed_tools=allowed_tools,
         allowed_subagents=frozenset(ref.agent for ref in workflow_subagents),
         subagent_guidance=tuple(guidance),
-        tool_execution=tool_execution,
+        tool_execution=freeze_workflow_tool_execution_policies(tool_execution),
     )
 
 

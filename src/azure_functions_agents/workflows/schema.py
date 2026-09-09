@@ -144,8 +144,11 @@ class WorkflowToolExecutionPolicy:
     retry: WorkflowRetryPolicy | None = None
 
 
-def _empty_tool_execution_policies() -> Mapping[str, WorkflowToolExecutionPolicy]:
-    return MappingProxyType({})
+def freeze_workflow_tool_execution_policies(
+    policies: Mapping[str, WorkflowToolExecutionPolicy] | None = None,
+) -> Mapping[str, WorkflowToolExecutionPolicy]:
+    """Return an immutable snapshot of workflow-tool execution declarations."""
+    return MappingProxyType(dict(policies or {}))
 
 
 @dataclass(frozen=True)
@@ -156,15 +159,8 @@ class WorkflowPlanPolicy:
     allowed_subagents: frozenset[str] = frozenset()
     subagent_guidance: tuple[tuple[str, str], ...] = ()
     tool_execution: Mapping[str, WorkflowToolExecutionPolicy] = field(
-        default_factory=_empty_tool_execution_policies,
+        default_factory=freeze_workflow_tool_execution_policies,
     )
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "tool_execution",
-            MappingProxyType(dict(self.tool_execution)),
-        )
 
 
 type JsonScalar = str | int | float | bool | None
