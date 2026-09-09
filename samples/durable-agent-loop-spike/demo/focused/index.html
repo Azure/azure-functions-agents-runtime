@@ -75,8 +75,16 @@
         <section id="humanCard" class="human-card" hidden>
           <strong>Agent needs your input</strong>
           <p id="humanQuestion"></p>
-          <div id="humanChoices" class="human-choices"></div>
-          <form id="humanForm" hidden>
+          <form id="humanChoicesForm" class="human-choices-form" hidden>
+            <fieldset>
+              <legend class="sr-only">Choose one option</legend>
+              <div id="humanChoices" class="human-choices"></div>
+            </fieldset>
+            <button id="humanChoiceSubmit" class="human-choice-submit" type="submit" disabled>
+              Continue with selection
+            </button>
+          </form>
+          <form id="humanForm" class="human-free-form" hidden>
             <input id="humanAnswer" type="text" maxlength="16000" autocomplete="off">
             <button type="submit">Answer</button>
           </form>

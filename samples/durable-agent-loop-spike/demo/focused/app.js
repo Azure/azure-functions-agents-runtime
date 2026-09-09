@@ -35,7 +35,9 @@ const elements = {
   proofCheckpoint: document.getElementById("proofCheckpoint"),
   humanCard: document.getElementById("humanCard"),
   humanQuestion: document.getElementById("humanQuestion"),
+  humanChoicesForm: document.getElementById("humanChoicesForm"),
   humanChoices: document.getElementById("humanChoices"),
+  humanChoiceSubmit: document.getElementById("humanChoiceSubmit"),
   humanForm: document.getElementById("humanForm"),
   humanAnswer: document.getElementById("humanAnswer"),
 };
@@ -223,13 +225,28 @@ async function showHumanInput(runHandle, humanHandle) {
   state.shownHumanHandle = humanHandle;
   elements.humanQuestion.textContent = body.question;
   elements.humanChoices.replaceChildren();
-  for (const choice of body.choices) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = choice;
-    button.addEventListener("click", () => answerHuman(runHandle, humanHandle, choice));
-    elements.humanChoices.appendChild(button);
+  elements.humanChoiceSubmit.disabled = true;
+  for (const [index, choice] of body.choices.entries()) {
+    const choiceId = `human-choice-${index}`;
+    const label = document.createElement("label");
+    label.className = "human-choice-card";
+    label.htmlFor = choiceId;
+    const input = document.createElement("input");
+    input.id = choiceId;
+    input.type = "radio";
+    input.name = "human-choice";
+    input.value = choice;
+    input.addEventListener("change", () => {
+      elements.humanChoiceSubmit.disabled = false;
+    });
+    const text = document.createElement("span");
+    text.textContent = choice;
+    label.append(input, text);
+    elements.humanChoices.appendChild(label);
   }
+  elements.humanChoicesForm.hidden = body.choices.length === 0;
+  elements.humanChoicesForm.dataset.runHandle = runHandle;
+  elements.humanChoicesForm.dataset.humanHandle = humanHandle;
   elements.humanForm.hidden = !body.allow_free_text;
   elements.humanForm.dataset.runHandle = runHandle;
   elements.humanForm.dataset.humanHandle = humanHandle;
@@ -270,6 +287,20 @@ function showError(error) {
   setStatus(error instanceof Error ? error.message : String(error), true);
   elements.send.disabled = false;
 }
+
+elements.humanChoicesForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const selected = elements.humanChoicesForm.querySelector(
+    'input[name="human-choice"]:checked',
+  );
+  if (!selected) return;
+  elements.humanChoiceSubmit.disabled = true;
+  answerHuman(
+    elements.humanChoicesForm.dataset.runHandle,
+    elements.humanChoicesForm.dataset.humanHandle,
+    selected.value,
+  ).catch(showError);
+});
 
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();

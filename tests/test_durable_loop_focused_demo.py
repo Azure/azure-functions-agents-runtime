@@ -336,6 +336,21 @@ def test_aliases_and_browser_responses_never_expose_raw_identifiers_or_key() -> 
         assert b"test-function-key" not in sessions
 
 
+def test_human_choices_use_accessible_radio_cards() -> None:
+    index = (FOCUSED_DIR / "index.html").read_text(encoding="utf-8")
+    app = (FOCUSED_DIR / "app.js").read_text(encoding="utf-8")
+    styles = (FOCUSED_DIR / "styles.css").read_text(encoding="utf-8")
+
+    assert "<fieldset>" in index
+    assert 'id="humanChoicesForm"' in index
+    assert 'id="humanChoiceSubmit"' in index
+    assert 'input.type = "radio"' in app
+    assert "label.htmlFor = choiceId" in app
+    assert 'input.name = "human-choice"' in app
+    assert ".human-choice-card:focus-within" in styles
+    assert ".human-choice-card:has(input:checked)" in styles
+
+
 def test_start_resume_human_and_sandbox_requests_project_only_fixed_fields() -> None:
     raw_run = "run-upstream-123"
     raw_session = "session-upstream-456"
