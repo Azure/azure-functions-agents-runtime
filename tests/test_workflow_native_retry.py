@@ -1191,3 +1191,43 @@ async def test_start_workflow_persists_tool_declared_retry() -> None:
         "max_attempts": 3,
         "durable_retry_policy": _DURABLE_POLICY,
     }
+
+
+@pytest.mark.asyncio
+async def test_start_workflow_rejects_explicit_null_execution_with_tool_retry() -> None:
+    from azure_functions_agents.workflows import tools as workflow_tools
+
+    class _UnexpectedClient:
+        async def get_status_all(self) -> list[Any]:
+            raise AssertionError("validation must fail before Durable scheduling")
+
+    response = await workflow_tools.start_workflow(
+        workflow_tools.StartWorkflowParams.model_validate(
+            {
+                "tasks": [
+                    {
+                        "id": "work",
+                        "type": "tool",
+                        "tool": "publish",
+                        "args": {},
+                        "execution": None,
+                    }
+                ]
+            }
+        ),
+        workflow_tools.WorkflowSessionContext(
+            workflow_agent_slug="coordinator",
+            session_id="session-1",
+            agent_name="main",
+            durable_client=_UnexpectedClient(),  # type: ignore[arg-type]
+        ),
+        policy=WorkflowPlanPolicy(
+            allowed_tools=frozenset({"publish"}),
+            tool_execution={"publish": WorkflowToolExecutionPolicy(retry=_RETRY)},
+        ),
+    )
+
+    error = json.loads(response)
+    assert error["error_code"] == "workflow_retry_policy_invalid"
+    assert error["node_id"] == "work"
+    assert error["path"] == "execution"

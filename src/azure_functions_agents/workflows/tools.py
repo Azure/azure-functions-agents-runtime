@@ -434,8 +434,20 @@ async def start_workflow(
                 allowed_tools=frozenset(allowed_tools),
                 allowed_subagents=frozenset(),
             )
+        plan_payload = params.model_dump(exclude_unset=True)
+        for input_task, serialized_task in zip(
+            params.tasks,
+            plan_payload["tasks"],
+            strict=True,
+        ):
+            if (
+                isinstance(input_task, (_ToolTaskSpec, _SubAgentTaskSpec))
+                and "execution" in input_task.model_fields_set
+                and input_task.execution is None
+            ):
+                serialized_task["execution"] = None
         plan = validate_plan(
-            params.model_dump(exclude_unset=True),
+            plan_payload,
             policy=policy,
         )
         for task in plan.tasks:
