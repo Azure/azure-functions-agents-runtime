@@ -22,6 +22,9 @@ from ..strict_json import (
 )
 
 DURABLE_LOOP_SCHEMA_VERSION: Literal["1"] = "1"
+DURABLE_LOOP_ORCHESTRATOR_V1_NAME = "durable_agent_turn_orchestrator_v1"
+DURABLE_LOOP_ORCHESTRATOR_V2_NAME = "durable_agent_turn_orchestrator_v2"
+DURABLE_LOOP_ORCHESTRATOR_V3_NAME = "durable_agent_turn_orchestrator_v3"
 MAX_DURABLE_ENVELOPE_BYTES = 32 * 1024
 MAX_MAF_BUNDLE_BYTES = 32 * 1024 * 1024
 MAX_MAF_BUNDLE_MESSAGES = 4096

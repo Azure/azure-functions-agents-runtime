@@ -53,6 +53,7 @@ from .durable_loop_registration import (
     DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME,
     DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME,
     DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
+    DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
     configure_durable_loop_execution_binding,
     get_durable_loop_activity_runtime,
 )
@@ -228,7 +229,7 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
             return _json_response({"error": "content_persistence_failed"}, status_code=503)
         try:
             await client.start_new(
-                DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
+                metadata.identity.orchestration_version,
                 instance_id=run_id,
                 client_input=durable_input.model_dump(mode="json"),
             )
@@ -790,6 +791,11 @@ async def _run_metadata(
     api_version = target.api_version or "responses-v1"
     sandbox_profile = _sandbox_profile(body, settings)
     fault_profile = _fault_profile(body, settings)
+    orchestration_version = (
+        DURABLE_LOOP_ORCHESTRATOR_V3_NAME
+        if fault_profile is DurableFaultProfile.MODEL_APIM_429_ONCE
+        else DURABLE_LOOP_ORCHESTRATOR_V2_NAME
+    )
     base_policy_hash = canonical_hash(
         {
             "agent": resolved.slug,
@@ -830,7 +836,7 @@ async def _run_metadata(
         tool_package_hash=snapshot.package_hash,
         policy_hash=catalog.policy_hash,
         settings=settings,
-        orchestration_version=DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
+        orchestration_version=orchestration_version,
         execution_binding_hash=canonical_hash(
             {
                 "catalog_hash": catalog.catalog_hash,

@@ -31,9 +31,11 @@ from .durable_loop_observability import (
     record_durable_loop_event,
 )
 from .durable_loop_protocol import (
+    DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
     BackgroundPollResultV1,
     BackgroundStartDisposition,
     BackgroundStartResultV1,
+    DurableFaultProfile,
     ErrorDisposition,
     ErrorEnvelopeV1,
     ModelDecisionEnvelopeV1,
@@ -217,18 +219,24 @@ class ApimMafResponsesProvider(OneStepModelProvider, BackgroundModelProvider):
         timer = DurableLoopTimer(DurableLoopPhase.MODEL_STEP, provenance="apim")
         try:
             for attempt in range(1, 4):
+                client_kwargs: Mapping[str, object] = {}
                 try:
                     await self._inject_model_fault(request, attempt)
+                    client_kwargs = await self._model_client_kwargs(
+                        request,
+                        attempt,
+                    )
                     decision = await self._foreground.run_one_step(
                         request,
-                        client_kwargs=await self._model_client_kwargs(
-                            request,
-                            attempt,
-                        ),
+                        client_kwargs=client_kwargs,
                     )
                 except Exception as raw_exc:
                     exc = _normalized_model_exception(raw_exc)
-                    if not _retryable_exception(exc) or attempt == 3:
+                    if (
+                        _cross_activity_429(request, client_kwargs, exc)
+                        or not _retryable_exception(exc)
+                        or attempt == 3
+                    ):
                         raise exc from None
                     await self._retry_delay(
                         request,
@@ -285,20 +293,26 @@ class ApimMafResponsesProvider(OneStepModelProvider, BackgroundModelProvider):
         try:
             response = None
             for attempt in range(1, 4):
+                client_kwargs: Mapping[str, object] = {}
                 try:
                     await self._inject_model_fault(request, attempt)
+                    client_kwargs = await self._model_client_kwargs(
+                        request,
+                        attempt,
+                    )
                     response = await self._foreground.run_agent_response(
                         request,
                         background=True,
-                        client_kwargs=await self._model_client_kwargs(
-                            request,
-                            attempt,
-                        ),
+                        client_kwargs=client_kwargs,
                     )
                     break
                 except Exception as raw_exc:
                     exc = _normalized_model_exception(raw_exc)
-                    if not _retryable_exception(exc) or attempt == 3:
+                    if (
+                        _cross_activity_429(request, client_kwargs, exc)
+                        or not _retryable_exception(exc)
+                        or attempt == 3
+                    ):
                         raise exc from None
                     await self._retry_delay(
                         request,
@@ -1123,6 +1137,23 @@ def _model_operation_id(request: OneStepModelRequest) -> str:
     if _MODEL_OPERATION_ID.fullmatch(value) is None:
         raise DurableLoopModelError("model operation identifier is invalid")
     return value
+
+
+def _cross_activity_429(
+    request: OneStepModelRequest,
+    client_kwargs: Mapping[str, object],
+    error: Exception,
+) -> bool:
+    headers = client_kwargs.get("extra_headers")
+    return (
+        request.identity.orchestration_version
+        == DURABLE_LOOP_ORCHESTRATOR_V3_NAME
+        and request.fault_profile is DurableFaultProfile.MODEL_APIM_429_ONCE
+        and isinstance(error, ApimResponsesError)
+        and error.status_code == 429
+        and isinstance(headers, Mapping)
+        and headers.get(_DEMO_FAULT_HEADER) == _DEMO_MODEL_429_VALUE
+    )
 
 
 def _validate_control_base(value: str) -> str:

@@ -4,7 +4,7 @@ title: Focused durable Chat UI demo
 status: Finalized
 author: larohra
 created: 2026-09-08
-updated: 2026-09-08
+updated: 2026-09-09
 issues: []
 pull_requests: []
 branch: larohra/durable-loop-leadership-demo
@@ -108,10 +108,13 @@ The Azure-hosted dashboard remains a separate authenticated browser window.
 Recording automation places Chat UI and DTS side-by-side and navigates DTS to
 the returned run ID with auto-refresh enabled.
 
-The runtime preserves `durable_agent_turn_orchestrator_v1` and its generic
-`durable_agent_tool_step_v1` behavior for every existing history. Newly
-admitted runs use `durable_agent_turn_orchestrator_v2`, which selects an
-activity name only from the already-persisted `ToolDispatchRefV1.provenance`.
+The runtime preserves `durable_agent_turn_orchestrator_v1` and
+`durable_agent_turn_orchestrator_v2` for every existing history. Ordinary new
+runs use v2, which selects an activity name only from the already-persisted
+`ToolDispatchRefV1.provenance`. Only new fixed `model_apim_429_once` demo runs
+use `durable_agent_turn_orchestrator_v3`; it preserves v2 tool decisions and
+schedules the failed first model activity, a one-second durable timer, and a
+second model activity as three explicit orchestration decisions.
 The runtime registers:
 
 - `durable_agent_sandbox_tool_v1` for local tools; and
@@ -190,12 +193,13 @@ labels the event **workspace restored into replacement sandbox**.
 
 ### 4.6 Real APIM 429 recovery
 
-The current fault is pre-transport. For this private scenario,
+For this private scenario,
 `MafOneStepModelProvider` accepts per-call client kwargs and attempt one adds an
 exact bounded fault header through the real model request. It never mutates
-shared manager/client default headers. The foreground and background-start
-paths both use the same attempt-local behavior because the deployed sample
-enables background model operations.
+shared manager/client default headers. V3 selects the foreground model path and
+makes the exact injected 429 escape before the provider retry loop. The
+recovery activity and all V1/V2 calls retain their existing bounded provider
+retry behavior.
 
 The APIM model policy accepts the header only when an APIM-specific Boolean
 named value is enabled, only on the `responses-create` operation, and only when
@@ -207,10 +211,12 @@ Both attempts emit a bounded `x-af-operation-id` derived from run plus model
 step, not a raw identifier. APIM validates its shape before diagnostics. The
 fault header is not in the diagnostic allowlist. The pinned MAF/OpenAI
 exception chain is normalized to `ApimResponsesError` with only the HTTP status
-and bounded `Retry-After`; no provider body is surfaced. The demo shows
-uninterrupted DTS orchestration plus APIM/Application Insights evidence of
-exactly one 429 then one success with the same operation identifier. Arbitrary
-fault values remain rejected.
+and bounded `Retry-After`; no provider body is surfaced. The first V3 model
+activity therefore fails visibly in DTS. After the fixed one-second durable
+timer, the orchestrator schedules a second model activity; the one-shot receipt
+has already been consumed, so that activity reaches the backend. APIM and
+Application Insights show exactly one 429 then one success with the same
+operation identifier. Arbitrary fault values remain rejected.
 
 ### 4.7 Loopback proxy security
 
@@ -236,11 +242,11 @@ The demo proxy is machine-local and not deployed as a customer endpoint.
 ### Compatibility
 
 Ordinary agents, the shared built-in Chat UI, existing durable HTTP contracts,
-v1 durable histories, and Azure Storage rollback settings remain unchanged.
-The old v1 orchestrator and generic tool activity remain registered and
-deterministic. Only newly admitted private runs use v2 and provenance-specific
-names. The real APIM fault behavior is active only for the existing fixed
-profile when both the Function and APIM private gates are enabled.
+v1/v2 durable histories, and Azure Storage rollback settings remain unchanged.
+The old orchestrators and generic/provenance-specific tool activities remain
+registered and deterministic. Ordinary new private runs use v2; only new fixed
+model-429 demo runs use v3. The real APIM fault behavior is active only when
+both the Function and APIM private gates are enabled.
 
 ## 5. Decisions log
 
@@ -262,6 +268,7 @@ profile when both the Function and APIM private gates are enabled.
 | 14 | Internal portal context | Blanket masking / Show normal context / Show credentials | Show operator, tenant/subscription, resource names, and useful sandbox ID; continue excluding secrets and sensitive payloads. | Human | 2026-09-08 |
 | 15 | Architecture approval | Continue design / Implement revised design | Implement; replay, alias, APIM, and proxy refinements preserve the approved Chat UI + DTS experience while closing correctness gaps. | Human | 2026-09-08 |
 | 16 | Remote MCP proof | Mention in slides / Separate live turn / Combine with local tool | Separate live turn; DTS and APIM show MCP while ACA inventory remains unchanged. | Human | 2026-09-08 |
+| 17 | Recovery activity boundary | Provider retry / Durable retry action / Explicit V3 activities | Explicit V3 activities with a durable timer; DTS must show a real failed model activity followed by a successful model activity while V1/V2 replay stays unchanged. | Human | 2026-09-09 |
 
 ## 6. Test plan
 
@@ -286,6 +293,8 @@ profile when both the Function and APIM private gates are enabled.
 - [ ] Unit: the model-429 fault header appears only on attempt one, concurrent
   ordinary calls receive no header, a wrapped real 429 preserves bounded
   `Retry-After`, attempt two succeeds, and arbitrary values fail closed.
+- [ ] Unit: only fixed model-429 admissions select v3; v3 schedules two explicit
+  model activities around a durable timer and retains one operation identifier.
 - [ ] APIM: disabled gate, wrong operation, wrong value, correlation regex,
   OpenAI-compatible 429 body, no forwarding, and diagnostic header allowlist.
 - [ ] Regression: ordinary durable runs and existing generic activity

@@ -21,11 +21,14 @@ from azure_functions_agents.experimental.durable_loop_activities import (
     get_protocol_model,
     put_protocol_model,
 )
+from azure_functions_agents.experimental.durable_loop_apim import ApimResponsesError
 from azure_functions_agents.experimental.durable_loop_config import (
     DURABLE_LOOP_ENABLED_ENV,
     DurableLoopSettings,
 )
 from azure_functions_agents.experimental.durable_loop_protocol import (
+    DURABLE_LOOP_ORCHESTRATOR_V1_NAME,
+    DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
     CheckpointStateV1,
     ContentRefV1,
     DurableFaultProfile,
@@ -219,6 +222,10 @@ def _settings() -> DurableLoopSettings:
 async def _run_input(
     content: InMemoryDurableContentStore,
     catalog,
+    *,
+    orchestration_version: str = DURABLE_LOOP_ORCHESTRATOR_V1_NAME,
+    fault_profile: DurableFaultProfile = DurableFaultProfile.NONE,
+    model_settings: dict[str, object] | None = None,
 ) -> DurableOrchestrationInputV1:
     settings = _settings()
     identity = create_run_identity(
@@ -234,6 +241,7 @@ async def _run_input(
         tool_package_hash=catalog.package_hash,
         policy_hash=catalog.policy_hash,
         settings=settings,
+        orchestration_version=orchestration_version,
         now=datetime(2026, 9, 4, tzinfo=UTC),
     )
     messages: tuple[dict[str, object], ...] = (
@@ -275,12 +283,13 @@ async def _run_input(
         plan=DurableLoopPlanDocumentV1(
             instructions="sensitive instructions",
             catalog=catalog,
-            model_settings={},
+            model_settings=model_settings or {},
             maf_core_version="1.17.0",
             provider="fake",
             model="model",
             api_version="responses-v1",
             settings=asdict(settings),
+            fault_profile=fault_profile,
         ),
         checkpoint=checkpoint,
     )
@@ -453,6 +462,55 @@ async def test_model_activity_returns_typed_incomplete_without_final_response(
     assert result.final_response_ref is None
     assert result.tool_calls == ()
     assert result.usage.reasoning_tokens == 12000
+
+
+@pytest.mark.asyncio
+async def test_v3_model_429_escapes_activity_and_bypasses_background_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ThrottledProvider:
+        async def run_one_step(self, _request):
+            raise ApimResponsesError("model_throttled", status_code=429)
+
+    class UnexpectedBackgroundProvider:
+        async def start(self, _request):
+            raise AssertionError("v3 fixed-429 run used background start")
+
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    registry = DurableToolRegistry()
+    catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
+    content = InMemoryDurableContentStore()
+    runtime = DurableLoopActivityRuntime(
+        model=ThrottledProvider(),
+        background_model=UnexpectedBackgroundProvider(),
+        tools=registry.build_dispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=content,
+    )
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    assert isinstance(app, df.DFApp)
+    run_input = await _run_input(
+        content,
+        catalog,
+        orchestration_version=DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+        fault_profile=DurableFaultProfile.MODEL_APIM_429_ONCE,
+        model_settings={"background": True},
+    )
+    try:
+        activity = _registered(app, DURABLE_LOOP_MODEL_ACTIVITY_NAME)
+        with pytest.raises(ApimResponsesError, match="model_throttled"):
+            await activity(
+                {
+                    "run_document_ref": run_input.run_document_ref.model_dump(
+                        mode="json"
+                    )
+                }
+            )
+    finally:
+        reset_durable_loop_activity_runtime_factory()
 
 
 @pytest.mark.asyncio

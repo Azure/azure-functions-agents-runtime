@@ -18,6 +18,8 @@ from azure_functions_agents.experimental.durable_loop_apim import (
 )
 from azure_functions_agents.experimental.durable_loop_config import DurableLoopSettings
 from azure_functions_agents.experimental.durable_loop_protocol import (
+    DURABLE_LOOP_ORCHESTRATOR_V1_NAME,
+    DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
     BackgroundStartDisposition,
     DurableFaultProfile,
     DurableLoopBudgetV1,
@@ -39,6 +41,7 @@ from azure_functions_agents.experimental.hybrid_apim import HybridApimClientMana
 def _request(
     *,
     fault_profile: DurableFaultProfile = DurableFaultProfile.NONE,
+    orchestration_version: str = DURABLE_LOOP_ORCHESTRATOR_V1_NAME,
 ) -> OneStepModelRequest:
     now = datetime.now(UTC)
     identity = DurableRunIdentityV1(
@@ -60,7 +63,7 @@ def _request(
         ),
         tool_package_hash="f" * 64,
         policy_hash="1" * 64,
-        orchestration_version="durable_agent_turn_orchestrator_v1",
+        orchestration_version=orchestration_version,
         created_at=now,
         active_deadline=now + timedelta(hours=1),
         absolute_deadline=now + timedelta(days=1),
@@ -446,6 +449,60 @@ async def test_synchronous_apim_429_fault_retries_once_without_content() -> None
     assert first_headers["x-af-operation-id"] == second_headers["x-af-operation-id"]
     assert request.fault_profile is DurableFaultProfile.MODEL_APIM_429_ONCE
     assert SandboxExecutionProfile.PER_CALL.value not in decision.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_v3_apim_429_escapes_then_next_activity_attempt_succeeds() -> None:
+    request = _request(
+        fault_profile=DurableFaultProfile.MODEL_APIM_429_ONCE,
+        orchestration_version=DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+    )
+    receipts = InMemoryDurableKeyedDocumentStore()
+
+    class RecoveryForeground(_Foreground):
+        async def run_one_step(
+            self,
+            _request: OneStepModelRequest,
+            *,
+            client_kwargs=None,
+        ):
+            self.calls += 1
+            self.client_kwargs.append(client_kwargs)
+            _raise_demo_429(client_kwargs)
+            if self.calls == 2:
+                raise ApimResponsesError(
+                    "model_request_failed",
+                    status_code=503,
+                    retry_after_seconds=0.01,
+                )
+            return self.decision
+
+    foreground = RecoveryForeground(request)
+    provider = ApimMafResponsesProvider(
+        _manager(),
+        content=InMemoryDurableContentStore(),
+        receipts=receipts,
+        settings=DurableLoopSettings(fault_injection_enabled=True),
+        control_base_url="https://gateway.test/model-control",
+        faults=DurableOneShotFaults(receipts, enabled=True),
+        foreground=foreground,
+    )
+
+    with pytest.raises(ApimResponsesError, match="model_throttled"):
+        await provider.run_one_step(request)
+    decision = await provider.run_one_step(request)
+
+    assert decision.final_text == "done"
+    assert decision.attempts == 2
+    assert foreground.calls == 3
+    first_headers = foreground.client_kwargs[0]["extra_headers"]
+    second_headers = foreground.client_kwargs[1]["extra_headers"]
+    third_headers = foreground.client_kwargs[2]["extra_headers"]
+    assert first_headers["x-af-demo-fault"] == "model-429-once"
+    assert "x-af-demo-fault" not in second_headers
+    assert "x-af-demo-fault" not in third_headers
+    assert first_headers["x-af-operation-id"] == second_headers["x-af-operation-id"]
+    assert first_headers["x-af-operation-id"] == third_headers["x-af-operation-id"]
 
 
 @pytest.mark.asyncio

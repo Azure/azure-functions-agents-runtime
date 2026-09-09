@@ -15,6 +15,7 @@ from .._logger import logger
 from .._observability import use_function_trace_context
 from ..client_manager import get_client_manager
 from ..strict_json import canonical_json_bytes
+from . import durable_loop_protocol as _protocol
 from .durable_loop import DurableLoopPlan, build_tool_requests
 from .durable_loop_activities import (
     BackgroundModelProvider,
@@ -75,8 +76,9 @@ from .durable_loop_tools import (
 )
 
 DURABLE_LOOP_ADMISSION_ORCHESTRATOR_NAME = "durable_agent_admission_v1"
-DURABLE_LOOP_ORCHESTRATOR_NAME = "durable_agent_turn_orchestrator_v1"
-DURABLE_LOOP_ORCHESTRATOR_V2_NAME = "durable_agent_turn_orchestrator_v2"
+DURABLE_LOOP_ORCHESTRATOR_NAME = _protocol.DURABLE_LOOP_ORCHESTRATOR_V1_NAME
+DURABLE_LOOP_ORCHESTRATOR_V2_NAME = _protocol.DURABLE_LOOP_ORCHESTRATOR_V2_NAME
+DURABLE_LOOP_ORCHESTRATOR_V3_NAME = _protocol.DURABLE_LOOP_ORCHESTRATOR_V3_NAME
 DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME = "durable_agent_human_input_outbox_v1"
 DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME = (
     "durable_agent_human_delivery_outbox_v1"
@@ -472,6 +474,21 @@ def register_durable_loop_blueprint(app: func.FunctionApp) -> None:
             )
         )
 
+    @blueprint.orchestration_trigger(  # type: ignore[untyped-decorator]
+        context_name="context",
+        orchestration=DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+    )
+    def durable_agent_turn_orchestrator_v3(
+        context: df.DurableOrchestrationContext,
+    ) -> Any:
+        return (
+            yield from _run_registered_durable_loop(
+                context,
+                tool_activity_name_for_call=_provenance_tool_activity_name,
+                retry_first_model_activity=True,
+            )
+        )
+
     app.register_blueprint(blueprint)
 
 
@@ -479,6 +496,7 @@ def _run_registered_durable_loop(
     context: df.DurableOrchestrationContext,
     *,
     tool_activity_name_for_call: Callable[[ToolDispatchRefV1], str],
+    retry_first_model_activity: bool = False,
 ) -> Any:
     payload = DurableOrchestrationInputV1.model_validate_json(
         canonical_json_bytes(context.get_input())
@@ -494,6 +512,7 @@ def _run_registered_durable_loop(
                 entity,
                 payload,
                 tool_activity_name_for_call=tool_activity_name_for_call,
+                retry_first_model_activity=retry_first_model_activity,
             )
         )
     except Exception:
@@ -670,12 +689,22 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
             ),
         )
         background_written_bytes = 0
+        background_model = (
+            None
+            if (
+                checkpoint.identity.orchestration_version
+                == DURABLE_LOOP_ORCHESTRATOR_V3_NAME
+                and plan.fault_profile
+                is DurableFaultProfile.MODEL_APIM_429_ONCE
+            )
+            else runtime.background_model
+        )
         try:
             async with asyncio.timeout(plan.settings.activity_timeout_seconds):
-                if runtime.background_model is None:
+                if background_model is None:
                     decision = await runtime.model.run_one_step(request)
                 else:
-                    started = await runtime.background_model.start(request)
+                    started = await background_model.start(request)
                     background_written_bytes = started.written_bytes
                     if started.operation is not None:
                         operation_ref = await put_protocol_model(
@@ -1475,6 +1504,45 @@ def _register_short_orchestrators(blueprint: df.Blueprint) -> None:
         return (yield from _call_session_entity(context, operation))
 
 
+def _call_model_activity(
+    context: df.DurableOrchestrationContext,
+    current: DurableOrchestrationInputV1,
+    *,
+    retry_once: bool,
+) -> Any:
+    activity_input = {
+        "run_document_ref": current.run_document_ref.model_dump(mode="json")
+    }
+    if not retry_once:
+        return (
+            yield context.call_activity(
+                DURABLE_LOOP_MODEL_ACTIVITY_NAME,
+                activity_input,
+            )
+        )
+    try:
+        return (
+            yield context.call_activity(
+                DURABLE_LOOP_MODEL_ACTIVITY_NAME,
+                activity_input,
+            )
+        )
+    except Exception:
+        retry_at = context.current_utc_datetime + timedelta(seconds=1)
+        active_deadline = current.identity.active_deadline + timedelta(
+            seconds=current.parked_seconds
+        )
+        if retry_at > min(active_deadline, current.identity.absolute_deadline):
+            raise
+        yield context.create_timer(retry_at)
+        return (
+            yield context.call_activity(
+                DURABLE_LOOP_MODEL_ACTIVITY_NAME,
+                activity_input,
+            )
+        )
+
+
 def _run_durable_loop(  # noqa: PLR0912, PLR0915
     context: df.DurableOrchestrationContext,
     entity: df.EntityId,
@@ -1483,6 +1551,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
     tool_activity_name_for_call: Callable[[ToolDispatchRefV1], str] = (
         _generic_tool_activity_name
     ),
+    retry_first_model_activity: bool = False,
 ) -> Any:
     admission = yield context.call_entity(
         entity,
@@ -1597,13 +1666,12 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
                 "step_index": current.next_model_step,
             }
         )
-        model_result_data = yield context.call_activity(
-            DURABLE_LOOP_MODEL_ACTIVITY_NAME,
-            {
-                "run_document_ref": current.run_document_ref.model_dump(
-                    mode="json"
-                )
-            },
+        model_result_data = yield from _call_model_activity(
+            context,
+            current,
+            retry_once=(
+                retry_first_model_activity and current.next_model_step == 0
+            ),
         )
         model_result = ModelStepActivityResultV1.model_validate_json(
             canonical_json_bytes(model_result_data)

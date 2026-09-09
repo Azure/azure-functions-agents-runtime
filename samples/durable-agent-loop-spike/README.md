@@ -198,8 +198,10 @@ deterministic local-tool proof: ACA creates `demo-context.txt`, records one
 allowed `www.example.com` request in Network Audit, and exports the workspace
 checkpoint. Remote Microsoft Learn MCP remains worker-side through the
 dedicated APIM MCP API and does not create an ACA sandbox. The private
-`model_apim_429_once` scenario sends an attempt-local fault header to APIM;
-APIM returns one OpenAI-compatible 429, then the bounded retry succeeds.
+`model_apim_429_once` scenario sends an attempt-local fault header to APIM.
+APIM returns one OpenAI-compatible 429, the first model activity fails visibly
+in DTS, and a V3 orchestration timer schedules a second model activity that
+succeeds with the same bounded operation correlation.
 
 Start the proxy with credentials only in process environment:
 

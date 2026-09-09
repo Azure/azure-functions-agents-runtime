@@ -20,6 +20,7 @@ from azure_functions_agents.experimental.durable_loop_activities import (
     put_protocol_model,
 )
 from azure_functions_agents.experimental.durable_loop_config import (
+    DURABLE_LOOP_BACKGROUND_MODEL_ENABLED_ENV,
     DURABLE_LOOP_ENABLED_ENV,
     DURABLE_LOOP_FAULT_INJECTION_ENABLED_ENV,
     DURABLE_LOOP_RETAINED_SANDBOX_ENABLED_ENV,
@@ -45,6 +46,7 @@ from azure_functions_agents.experimental.durable_loop_registration import (
     DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME,
     DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME,
     DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
+    DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
     DurableLoopActivityRuntime,
     apply_session_entity_operation,
     get_durable_loop_activity_runtime,
@@ -600,6 +602,7 @@ async def test_private_start_profiles_are_strict_and_gate_controlled(
     assert rejected_unknown.status_code == 400
 
     reset_durable_loop_activity_runtime_factory()
+    monkeypatch.setenv(DURABLE_LOOP_BACKGROUND_MODEL_ENABLED_ENV, "true")
     monkeypatch.setenv(DURABLE_LOOP_RETAINED_SANDBOX_ENABLED_ENV, "true")
     monkeypatch.setenv(DURABLE_LOOP_FAULT_INJECTION_ENABLED_ENV, "true")
     enabled_root = tmp_path / "enabled"
@@ -644,6 +647,17 @@ async def test_private_start_profiles_are_strict_and_gate_controlled(
         durable_input.fault_profile
         is DurableFaultProfile.MODEL_APIM_429_ONCE
     )
+    assert (
+        durable_input.identity.orchestration_version
+        == DURABLE_LOOP_ORCHESTRATOR_V3_NAME
+    )
+    assert client.starts[-1][0] == DURABLE_LOOP_ORCHESTRATOR_V3_NAME
+    document = await get_protocol_model(
+        runtime.content,
+        durable_input.run_document_ref,
+        DurableRunDocumentV1,
+    )
+    assert document.plan.model_settings["background"] is True
 
 
 @pytest.mark.asyncio
