@@ -174,13 +174,15 @@ depending on process defaults:
 | `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_MAX_APP_OWNED_SANDBOXES` | `10` |
 | `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RETAINED_SANDBOX_AUTO_DELETE_SECONDS` | `86400` |
 | `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_SANDBOX_REAPER_AGE_SECONDS` | `86400` |
+| `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_READY_TIMEOUT_SECONDS` | `120` |
 | `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS` | `aiohttp-client,httpx,requests,urllib,urllib3` |
 
 For a retained-session demo, a successful turn leaves its stopped sandbox
 available for the next turn. Each tool handoff applies the bounded ACA
 auto-delete policy, and the durable reaper remains a second deletion backstop.
 Failure and cancellation still schedule explicit cleanup before releasing the
-session fence.
+session fence. The demo allows up to 120 seconds for the retained sandbox data
+plane and persisted manifest to become readable after a Disk resume.
 
 ### Focused Chat + DTS demo
 

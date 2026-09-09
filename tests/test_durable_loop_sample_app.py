@@ -13,6 +13,7 @@ from azure_functions_agents.config.loader import load_agent_specs, load_global_c
 SAMPLE_SRC = (
     Path(__file__).resolve().parents[1] / "samples" / "durable-agent-loop-spike" / "src"
 )
+SAMPLE_ROOT = SAMPLE_SRC.parent
 TOOLS_DIR = SAMPLE_SRC / "sandbox_bundle" / "tools"
 
 CUSTOM_TOOLS = {
@@ -125,6 +126,21 @@ def test_global_config_has_only_supported_background_settings() -> None:
     }
     assert forbidden.isdisjoint(raw)
     assert forbidden.isdisjoint(metadata)
+
+
+def test_retained_demo_pins_resume_readiness_budget() -> None:
+    local_settings = json.loads(
+        (SAMPLE_SRC / "local.settings.template.json").read_text(encoding="utf-8")
+    )["Values"]
+    setting = "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_HYBRID_READY_TIMEOUT_SECONDS"
+
+    assert local_settings[setting] == "120"
+    assert f"{setting}: '120'" in (
+        SAMPLE_ROOT / "infra" / "modules" / "function-app.bicep"
+    ).read_text(encoding="utf-8")
+    assert f"| `{setting}` | `120` |" in (SAMPLE_ROOT / "README.md").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_microsoft_learn_mcp_is_remote_http_only() -> None:
