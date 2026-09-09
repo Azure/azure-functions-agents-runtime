@@ -192,6 +192,16 @@ def test_register_workflow_tool_rejects_non_callable():
         registry.register_workflow_tool("badtool", "no", "not a callable")  # type: ignore[arg-type]
 
 
+def test_register_workflow_tool_rejects_invalid_retry_type() -> None:
+    with pytest.raises(ValueError, match="retry must be a WorkflowRetryPolicy"):
+        registry.register_workflow_tool(
+            "badretry",
+            "no",
+            _noop,
+            retry="three attempts",  # type: ignore[arg-type]
+        )
+
+
 def test_register_workflow_tool_rejects_blank_name():
     with pytest.raises(ValueError, match="non-empty string"):
         registry.register_workflow_tool("", "no", _noop)
@@ -275,8 +285,9 @@ def _workflow_tool(
     handler=_noop,
     *,
     public: bool = True,
+    retry: schema.WorkflowRetryPolicy | None = None,
 ) -> WorkflowTool:
-    return WorkflowTool(name, description, handler, public=public)
+    return WorkflowTool(name, description, handler, public=public, retry=retry)
 
 
 def _agent_catalog(**descriptions: str):
@@ -322,6 +333,68 @@ def test_integration_exclude_filters_public_workflow_tools():
     assert "alpha" in result.chat_system_addendum
     assert "beta" not in result.chat_system_addendum
     assert registry.get_app_config() == frozenset({"alpha"})
+
+
+def test_integration_freezes_allowed_tool_retry_declarations() -> None:
+    retry = schema.WorkflowRetryPolicy(
+        max_attempts=3,
+        backoff=schema.WorkflowRetryBackoff(
+            initial="PT1S",
+            multiplier=2.0,
+            max="PT4S",
+        ),
+    )
+    result = integration.build_workflow_integration(
+        _FakeApp(),
+        _enable_metadata(exclude=["excluded"]),
+        workflow_tools=[
+            _workflow_tool("allowed", "Allowed", retry=retry),
+            _workflow_tool("excluded", "Excluded", retry=retry),
+            _workflow_tool("private", "Private", public=False, retry=retry),
+        ],
+    )
+
+    assert result.plan_policy is not None
+    assert result.plan_policy.tool_execution["allowed"].retry == retry
+    assert set(result.plan_policy.tool_execution) == {"allowed"}
+    with pytest.raises(TypeError):
+        result.plan_policy.tool_execution["other"] = schema.WorkflowToolExecutionPolicy(  # type: ignore[index]
+            retry=retry
+        )
+
+
+def test_agent_policy_catalog_keeps_retry_only_for_allowed_public_tools() -> None:
+    retry = schema.WorkflowRetryPolicy(
+        max_attempts=3,
+        backoff=schema.WorkflowRetryBackoff(
+            initial="PT1S",
+            multiplier=2.0,
+            max="PT4S",
+        ),
+    )
+    allowed = _workflow_tool("allowed", "Allowed", retry=retry)
+    private = _workflow_tool("private", "Private", public=False, retry=retry)
+    handler_catalog = integration.build_workflow_handler_catalog([allowed, private])
+    catalog = build_catalog(
+        {
+            "coordinator": CatalogEntry(
+                SimpleNamespace(  # type: ignore[arg-type]
+                    workflows=SimpleNamespace(enabled=True, subagents=[]),
+                ),
+                AgentCapabilities(filtered_workflow_tools=[allowed, private]),
+            )
+        }
+    )
+
+    policies = integration.build_workflow_agent_policy_catalog(
+        catalog,
+        handler_catalog,
+    )
+
+    policy = policies["coordinator"]
+    assert policy.allowed_tools == frozenset({"allowed"})
+    assert set(policy.tool_execution) == {"allowed"}
+    assert policy.tool_execution["allowed"].retry == retry
 
 
 def test_integration_malformed_exclude_fails_at_app_start():

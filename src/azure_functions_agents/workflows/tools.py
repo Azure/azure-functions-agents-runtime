@@ -439,7 +439,15 @@ async def start_workflow(
             policy=policy,
         )
         for task in plan.tasks:
-            effective = resolve_workflow_task_execution(task)
+            declaration = (
+                policy.tool_execution.get(task.tool or "")
+                if task.type == "tool"
+                else None
+            )
+            effective = resolve_workflow_task_execution(
+                task,
+                decorator_retry=declaration.retry if declaration is not None else None,
+            )
             if effective is not None:
                 effective_policies[task.id] = effective
     except PlanValidationError as exc:

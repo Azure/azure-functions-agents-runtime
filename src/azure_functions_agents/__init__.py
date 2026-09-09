@@ -133,6 +133,8 @@ from .workflows.context import (  # noqa: E402
 )
 from .workflows.schema import (  # noqa: E402
     WorkflowRetryableError,
+    WorkflowRetryBackoff,
+    WorkflowRetryPolicy,
     WorkflowTerminalError,
 )
 
@@ -142,6 +144,8 @@ __all__ = [
     "AgentResult",
     "ClientManager",
     "MAFClientManager",
+    "WorkflowRetryBackoff",
+    "WorkflowRetryPolicy",
     "WorkflowRetryableError",
     "WorkflowTaskContext",
     "WorkflowTerminalError",

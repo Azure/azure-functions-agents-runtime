@@ -9,29 +9,24 @@ before succeeding on its third attempt.
 |---|---|---|---|---|---|---|
 | HTTP | ✅ (workflow-safe) | | | | | ✅ |
 
-## Author retry in the workflow plan
+## Declare retry on the workflow tool
 
-The agent adds retry only to the task whose transient failures are safe to
-repeat:
+The tool author declares retry where the knowledge that repeating the operation
+is safe lives:
 
-```json
-{
-  "id": "reserve_inventory",
-  "type": "tool",
-  "tool": "reserve_inventory",
-  "args": {"order": "${load_order.result}"},
-  "depends_on": ["load_order"],
-  "execution": {
-    "retry": {
-      "max_attempts": 3,
-      "backoff": {
-        "initial": "PT1S",
-        "multiplier": 2.0,
-        "max": "PT4S"
-      }
-    }
-  }
-}
+```python
+@workflow_tool(
+    retry=WorkflowRetryPolicy(
+        max_attempts=3,
+        backoff=WorkflowRetryBackoff(
+            initial="PT1S",
+            multiplier=2.0,
+            max="PT4S",
+        ),
+    )
+)
+def reserve_inventory(args: dict[str, Any]) -> dict[str, Any]:
+    ...
 ```
 
 When the dependency is temporarily unavailable, the handler raises the public
@@ -44,8 +39,9 @@ raise WorkflowRetryableError(
 )
 ```
 
-The runtime validates and persists this policy when the workflow starts. Tasks
-without `execution.retry` retain their policy-free behavior. See
+The runtime validates and persists the effective policy when the workflow
+starts. A tool declaration overrides plan-authored `execution.retry`; tasks
+without either declaration retain their policy-free behavior. See
 [Workflow task execution policy](../../docs/workflows.md#task-execution-policy).
 
 ## Sample-only failure simulation

@@ -19,8 +19,6 @@ from azure_functions_agents.workflows.context import (
 from azure_functions_agents.workflows.schema import (
     WorkflowPlanPolicy,
     WorkflowRetryableError,
-    WorkflowRetryBackoff,
-    WorkflowRetryPolicy,
     resolve_workflow_task_execution,
     validate_plan,
 )
@@ -40,12 +38,12 @@ order_tools = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(order_tools)
 
 
-def test_sample_agent_authors_the_retry_policy() -> None:
+def test_sample_agent_relies_on_the_tool_retry_policy() -> None:
     agent_text = (_SAMPLE_SRC / "main.agent.md").read_text(encoding="utf-8")
 
     assert "start_workflow" in agent_text
-    assert "execution.retry" in agent_text
-    assert "max_attempts: 3" in agent_text
+    assert "execution.retry" not in agent_text
+    assert "tool owns its retry policy" in agent_text
 
 
 def _terminal_host_output(workflow_id: str, failure_message: str) -> str:
@@ -125,19 +123,26 @@ def test_retry_e2e_rejects_private_marker_nested_under_clean_failure_details() -
         )
 
 
-def test_sample_tools_are_discoverable_without_retry_metadata() -> None:
+def test_sample_tools_declare_retry_only_on_inventory_reservation() -> None:
     clear_tool_discovery_cache()
     discovered = discover_project_tools(_SAMPLE_SRC)
 
     by_name = {tool.name: tool for tool in discovered.workflow_tools}
     assert set(by_name) == {"load_order", "reserve_inventory", "confirm_order"}
+    assert by_name["load_order"].retry is None
+    assert by_name["confirm_order"].retry is None
+    retry = by_name["reserve_inventory"].retry
+    assert retry is not None
+    assert retry.max_attempts == 3
 
 
-def test_sample_plan_freezes_its_authored_retry() -> None:
-    retry = WorkflowRetryPolicy(
-        max_attempts=3,
-        backoff=WorkflowRetryBackoff(initial="PT1S", multiplier=2.0, max="PT4S"),
-    )
+def test_sample_plan_freezes_its_tool_declared_retry() -> None:
+    clear_tool_discovery_cache()
+    discovered = discover_project_tools(_SAMPLE_SRC)
+    retry = {
+        tool.name: tool.retry for tool in discovered.workflow_tools
+    }["reserve_inventory"]
+    assert retry is not None
     plan = validate_plan(
         {
             "tasks": [
@@ -146,14 +151,16 @@ def test_sample_plan_freezes_its_authored_retry() -> None:
                     "type": "tool",
                     "tool": "reserve_inventory",
                     "args": {},
-                    "execution": {"retry": retry.model_dump()},
                 }
             ]
         },
         policy=WorkflowPlanPolicy(allowed_tools=frozenset({"reserve_inventory"})),
     )
 
-    effective = resolve_workflow_task_execution(plan.tasks[0])
+    effective = resolve_workflow_task_execution(
+        plan.tasks[0],
+        decorator_retry=retry,
+    )
 
     assert effective == {
         "max_attempts": 3,

@@ -16,7 +16,5 @@ these workflow tools in order:
 3. `confirm_order` using the complete `reserve_inventory` result.
 
 Set each task's `depends_on` relationship and use workflow result references for
-the two downstream arguments. On `reserve_inventory`, set `execution.retry` to
-`max_attempts: 3` with backoff `initial: PT1S`, `multiplier: 2.0`, and
-`max: PT4S`. Do not add execution policy to the other tasks. Report the workflow
-id and do not poll.
+the two downstream arguments. The `reserve_inventory` tool owns its retry policy,
+so do not add execution policy to any task. Report the workflow id and do not poll.

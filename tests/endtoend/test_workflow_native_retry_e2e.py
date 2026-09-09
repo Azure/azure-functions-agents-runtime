@@ -26,10 +26,9 @@ from typing import Any
 
 import pytest
 
+from azure_functions_agents.discovery.tools import discover_project_tools
 from azure_functions_agents.workflows.schema import (
     WorkflowPlanPolicy,
-    WorkflowRetryBackoff,
-    WorkflowRetryPolicy,
     plan_to_activity_inputs,
     resolve_workflow_task_execution,
     validate_plan,
@@ -74,15 +73,13 @@ pytestmark = [
     pytest.mark.skipif(shutil.which("func") is None, reason="Azure Functions Core Tools not found"),
 ]
 
-# Mirrors the plan-authored policy in the sample agent instructions.
-SAMPLE_RETRY = WorkflowRetryPolicy(
-    max_attempts=MAX_ATTEMPTS,
-    backoff=WorkflowRetryBackoff(initial="PT1S", multiplier=2.0, max="PT4S"),
-)
-
-
 def _order_recovery_payload() -> dict[str, Any]:
     """Build the orchestration input exactly as ``start_workflow`` would."""
+    retry_by_tool = {
+        tool.name: tool.retry for tool in discover_project_tools(SAMPLE_APP).workflow_tools
+    }
+    sample_retry = retry_by_tool["reserve_inventory"]
+    assert sample_retry is not None
     plan = validate_plan(
         {
             "tasks": [
@@ -98,7 +95,6 @@ def _order_recovery_payload() -> dict[str, Any]:
                     "tool": "reserve_inventory",
                     "args": {"order": "${load_order.result}"},
                     "depends_on": ["load_order"],
-                    "execution": {"retry": SAMPLE_RETRY.model_dump()},
                 },
                 {
                     "id": "confirm_order",
@@ -117,7 +113,13 @@ def _order_recovery_payload() -> dict[str, Any]:
         task.id: policy
         for task in plan.tasks
         if task.id == "reserve_inventory"
-        and (policy := resolve_workflow_task_execution(task)) is not None
+        and (
+            policy := resolve_workflow_task_execution(
+                task,
+                decorator_retry=sample_retry,
+            )
+        )
+        is not None
     }
     assert "durable_retry_policy" in effective["reserve_inventory"]
     return {

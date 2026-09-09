@@ -117,9 +117,6 @@ explicitly opt a function into the Durable Activity execution path.
 - Automatically promoting every compatible plain function into a workflow tool.
 - General-purpose expressions, arbitrary code evaluation, loops other than bounded
   array iteration, or a visual workflow designer.
-- Declaring retry through `@workflow_tool(...)`, including any precedence over
-  plan-authored retry. That authoring integration remains in PR #185 after the
-  plan-authored execution foundation is extracted.
 - Configurable resource ceilings and large-result offload; those are tracked by
   planning issue #1279.
 
@@ -188,8 +185,8 @@ later slice and is bounded only by the Functions host until then.
 
 | Slice | Purpose | Scope | Dependencies | Compatibility | Review focus |
 | --- | --- | --- | --- | --- | --- |
-| Execution foundation (this PR) | Make plan-authored `execution.retry` usable for tool and stateless Workflow Sub Agent tasks | Retry schema and bounds; persisted effective policy; failure classification; Activity envelope; idempotency context; Durable mapping; static and dynamic dispatch; exhaustion sanitization; tests, docs, sample, and real-host E2E | Durable Functions Python 2.x migration PR #189 (merged) | Tasks without persisted execution data retain legacy dispatch and `{"id","result"}` history; no decorator or catalog surface is introduced | Persisted-input replay selection, failure trust boundary, bounded schedules, Sub Agent timeout behavior |
-| `@workflow_tool` integration (PR #185 after rebase) | Allow tool declarations to provide retry and define decorator-over-plan precedence | Decorator metadata, discovery, registry/catalog propagation, submission-time precedence, focused tests and docs | Execution foundation | Additive at submission; reuses the same persisted effective policy and does not change replay | Metadata propagation and precedence |
+| Execution foundation (PR #193) | Make plan-authored `execution.retry` usable for tool and stateless Workflow Sub Agent tasks | Retry schema and bounds; persisted effective policy; failure classification; Activity envelope; idempotency context; Durable mapping; static and dynamic dispatch; exhaustion sanitization; tests, docs, sample, and real-host E2E | Durable Functions Python 2.x migration PR #189 (merged) | Tasks without persisted execution data retain legacy dispatch and `{"id","result"}` history; no decorator or catalog surface is introduced | Persisted-input replay selection, failure trust boundary, bounded schedules, Sub Agent timeout behavior |
+| `@workflow_tool` integration (current slice) | Allow tool declarations to provide retry and define decorator-over-plan precedence | Decorator metadata, discovery, registry/catalog propagation, submission-time precedence, focused tests and docs | Execution foundation (PR #193, merged) | Additive at submission; reuses the same persisted effective policy and does not change replay | Metadata propagation and precedence |
 | Timeout and continuation | Add per-attempt timeout and continue-on-error | Plan schema, scheduler semantics, tests, and docs | Execution foundation | New optional task policy | Attempt cancellation and DAG continuation |
 | Observability and status | Expose retry/timeout lifecycle telemetry and structured status | Telemetry, status contract, UI/docs | Earlier execution-policy slices | Additive status version | Stable external lifecycle vocabulary |
 
@@ -1126,6 +1123,7 @@ results remain unchanged.
 | 78 | Retry authoring surface in the first slice | Ship decorator and plan together / plan-authored first / decorator only | Ship plan-authored `execution.retry` only. It is complete through validate, persist, dispatch, and exhaust without discovery or registration changes; retain `@workflow_tool(retry=...)` and decorator-over-plan precedence for the rebased remainder of PR #185 | Human (TsuyoshiUshio) | 2026-09-02 |
 | 79 | Workflow Sub Agent retry classification | Retry every leaf failure / reject Sub Agent retry / retry only a closed transient set | Treat a leaf `TimeoutError` as transient and retryable; classify all other leaf exceptions as terminal unless a future reviewed mapping proves they are safe to replay | Agent, architecture review | 2026-09-02 |
 | 80 | Retry schedule time bound | Set Durable `retry_timeout` / validate an authored delay-sum cap only | Validate the one-hour delay-sum cap before start and leave Durable `retry_timeout` unset. The SDK compares that timeout to real wall-clock time while replaying old failure events, so a finite value can change historical scheduling after enough time passes | Agent, final review | 2026-09-02 |
+| 81 | Rebase strategy for decorator retry | Rebase the full PR #185 branch / port only the approved residual slice | Port only `@workflow_tool(retry=...)` metadata propagation and submission precedence onto current `main`; rebasing the stale full branch would reintroduce already-merged foundation changes and enlarge review scope | Human + Agent | 2026-09-08 |
 
 ## 6. Test plan
 
@@ -1398,3 +1396,11 @@ results remain unchanged.
   identified Durable's wall-clock evaluation of finite `retry_timeout` during
   history replay. Decision 80 removes that nondeterministic input while retaining
   the submission-time retry-delay bound. FRD status remains `Finalized`.
+- **Decorator retry integration approval:** TsuyoshiUshio, 2026-09-08. Requested
+  the smallest current-main change equivalent to the rebased remainder of PR
+  #185 after PR #193 merged.
+- **Decorator retry architecture review:** An independent review on 2026-09-08
+  rejected rebasing the stale full branch because it would regress PR #193
+  contracts, and approved a residual-only port preserving persisted-input replay
+  behavior, filtered immutable policy catalogs, and decorator-over-plan
+  precedence. Decision 81 records the resulting scope.

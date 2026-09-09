@@ -11,6 +11,8 @@ from azure.core.exceptions import ResourceExistsError, ResourceModifiedError
 from azure.storage.blob import BlobClient, BlobServiceClient
 
 from azure_functions_agents import (
+    WorkflowRetryBackoff,
+    WorkflowRetryPolicy,
     WorkflowRetryableError,
     current_workflow_task_context,
     workflow_tool,
@@ -97,7 +99,11 @@ def load_order(args: dict[str, Any]) -> dict[str, Any]:
         "Reserve inventory for a loaded order. Args: {order: <load_order result>}. "
         "Reads the simulated inventory incident from Azure Blob Storage. "
         "Returns {order_id, sku, reserved, transient_failures_observed}."
-    )
+    ),
+    retry=WorkflowRetryPolicy(
+        max_attempts=3,
+        backoff=WorkflowRetryBackoff(initial="PT1S", multiplier=2.0, max="PT4S"),
+    ),
 )
 def reserve_inventory(args: dict[str, Any]) -> dict[str, Any]:
     order = args.get("order")

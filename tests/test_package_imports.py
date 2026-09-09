@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import get_type_hints
 
-from azure_functions_agents._function_tool import tool
+from azure_functions_agents._function_tool import WorkflowTool, WorkflowToolMetadata, tool
 
 
 def test_package_imports_resolve_to_real_init() -> None:
@@ -27,6 +28,8 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "AgentResult",
         "ClientManager",
         "MAFClientManager",
+        "WorkflowRetryBackoff",
+        "WorkflowRetryPolicy",
         "WorkflowRetryableError",
         "WorkflowTaskContext",
         "WorkflowTerminalError",
@@ -51,3 +54,11 @@ def test_public_exports_include_only_supported_preview_api() -> None:
 
 def test_tool_shim_is_callable() -> None:
     assert callable(tool)
+
+
+def test_workflow_retry_annotations_resolve_at_runtime() -> None:
+    from azure_functions_agents import WorkflowRetryPolicy, workflow_tool
+
+    assert get_type_hints(WorkflowToolMetadata)["retry"] == WorkflowRetryPolicy | None
+    assert get_type_hints(WorkflowTool)["retry"] == WorkflowRetryPolicy | None
+    assert get_type_hints(workflow_tool)["retry"] == WorkflowRetryPolicy | None

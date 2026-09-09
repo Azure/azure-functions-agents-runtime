@@ -25,9 +25,10 @@ import json
 import math
 import re
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
+from types import MappingProxyType
 from typing import Any, Literal, NotRequired, TypedDict, cast
 
 from pydantic import (
@@ -137,12 +138,33 @@ SUPPORTED_TASK_TYPES: frozenset[str] = frozenset({
 
 
 @dataclass(frozen=True)
+class WorkflowToolExecutionPolicy:
+    """Immutable workflow-tool declarations used at submission time."""
+
+    retry: WorkflowRetryPolicy | None = None
+
+
+def _empty_tool_execution_policies() -> Mapping[str, WorkflowToolExecutionPolicy]:
+    return MappingProxyType({})
+
+
+@dataclass(frozen=True)
 class WorkflowPlanPolicy:
     """Immutable per-agent authorization boundary for workflow plans."""
 
     allowed_tools: frozenset[str]
     allowed_subagents: frozenset[str] = frozenset()
     subagent_guidance: tuple[tuple[str, str], ...] = ()
+    tool_execution: Mapping[str, WorkflowToolExecutionPolicy] = field(
+        default_factory=_empty_tool_execution_policies,
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "tool_execution",
+            MappingProxyType(dict(self.tool_execution)),
+        )
 
 
 type JsonScalar = str | int | float | bool | None
@@ -419,24 +441,37 @@ class WorkflowTask(BaseModel):
 
 def resolve_workflow_task_execution(
     task: WorkflowTask,
+    *,
+    decorator_retry: WorkflowRetryPolicy | None = None,
 ) -> EffectiveWorkflowTaskExecution | None:
-    """Freeze a plan-authored retry policy for one task at submission time.
+    """Freeze the effective retry policy for one task at submission time.
 
-    ``None`` means the task is policy-free, and no execution payload may be
-    persisted for it. This keeps histories written by earlier runtime versions
-    on the legacy dispatch path during replay.
+    A workflow-tool declaration overrides a plan-authored policy. ``None`` means
+    the task is policy-free, and no execution payload may be persisted for it.
+    This keeps earlier histories on the legacy dispatch path during replay.
     """
     authored = "execution" in task.model_fields_set
-    if not authored:
+    if not authored and decorator_retry is None:
         return None
-    if task.execution is None:
+    if authored and task.execution is None:
         raise PlanValidationError(
             f"task {task.id!r}: 'execution' must contain a retry policy",
             error_code="workflow_retry_policy_invalid",
             node_id=task.id,
             path="execution",
         )
-    retry = task.execution.retry
+    if decorator_retry is not None and task.type != TOOL_TASK_TYPE:
+        raise PlanValidationError(
+            f"task {task.id!r}: workflow tool retry is only valid on type=tool tasks",
+            error_code="workflow_retry_policy_invalid",
+            node_id=task.id,
+            path="execution.retry",
+        )
+    if decorator_retry is not None:
+        retry = decorator_retry
+    else:
+        assert task.execution is not None
+        retry = task.execution.retry
     # Currently unreachable with per-field bounds (5 attempts and <= 15m max
     # backoff, ~50m worst case); kept as defense in depth if bounds widen.
     if sum(native_retry_delays_ceiling_ms(retry)) > MAX_POLICY_ELAPSED_MS:
@@ -1388,6 +1423,7 @@ __all__ = [
     "WorkflowTask",
     "WorkflowTaskExecution",
     "WorkflowTerminalError",
+    "WorkflowToolExecutionPolicy",
     "durable_retry_policy_input",
     "evaluate_condition",
     "native_retry_delays_ceiling_ms",
