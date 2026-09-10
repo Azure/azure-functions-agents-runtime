@@ -507,8 +507,27 @@ caps, storage hygiene, and large-output offloading.
 
 ### Task execution policy
 
-A tool or Sub Agent task can opt into **Durable native retry** by declaring
-`execution.retry` in the workflow plan:
+A workflow tool can opt into **Durable native retry** in its decorator:
+
+```python
+from azure_functions_agents import (
+    WorkflowRetryBackoff,
+    WorkflowRetryPolicy,
+    workflow_tool,
+)
+
+
+@workflow_tool(
+    retry=WorkflowRetryPolicy(
+        max_attempts=3,
+        backoff=WorkflowRetryBackoff(initial="PT1S", multiplier=2.0, max="PT4S"),
+    )
+)
+def reserve_inventory(args: dict[str, Any]) -> dict[str, Any]:
+    ...
+```
+
+A plan may also declare `execution.retry` for a tool or Sub Agent task:
 
 ```json
 {
@@ -528,6 +547,10 @@ A tool or Sub Agent task can opt into **Durable native retry** by declaring
   }
 }
 ```
+
+For tool tasks, the decorator declaration is authoritative and overrides a
+plan-authored policy. The runtime freezes only the effective policy into
+orchestration input, so later deployments cannot change replay behavior.
 
 Use retry only when repeating the task is safe. A workflow tool marks a
 transient application failure by raising the public exception:

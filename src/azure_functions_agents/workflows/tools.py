@@ -434,12 +434,32 @@ async def start_workflow(
                 allowed_tools=frozenset(allowed_tools),
                 allowed_subagents=frozenset(),
             )
+        plan_payload = params.model_dump(exclude_unset=True)
+        for input_task, serialized_task in zip(
+            params.tasks,
+            plan_payload["tasks"],
+            strict=True,
+        ):
+            if (
+                isinstance(input_task, (_ToolTaskSpec, _SubAgentTaskSpec))
+                and "execution" in input_task.model_fields_set
+                and input_task.execution is None
+            ):
+                serialized_task["execution"] = None
         plan = validate_plan(
-            params.model_dump(exclude_unset=True),
+            plan_payload,
             policy=policy,
         )
         for task in plan.tasks:
-            effective = resolve_workflow_task_execution(task)
+            declaration = (
+                policy.tool_execution.get(task.tool or "")
+                if task.type == "tool"
+                else None
+            )
+            effective = resolve_workflow_task_execution(
+                task,
+                decorator_retry=declaration.retry if declaration is not None else None,
+            )
             if effective is not None:
                 effective_policies[task.id] = effective
     except PlanValidationError as exc:

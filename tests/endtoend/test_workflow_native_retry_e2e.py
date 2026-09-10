@@ -16,6 +16,7 @@ Two behaviours are asserted against a real host:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import shutil
@@ -26,14 +27,14 @@ from typing import Any
 
 import pytest
 
-from azure_functions_agents.workflows.schema import (
-    WorkflowPlanPolicy,
-    WorkflowRetryBackoff,
-    WorkflowRetryPolicy,
-    plan_to_activity_inputs,
-    resolve_workflow_task_execution,
-    validate_plan,
-)
+from azure_functions_agents.config.loader import load_agent_specs, load_global_config
+from azure_functions_agents.config.merge import compose
+from azure_functions_agents.discovery.tools import discover_project_tools
+from azure_functions_agents.registration.capabilities import build_capabilities
+from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
+from azure_functions_agents.workflows import integration
+from azure_functions_agents.workflows import tools as workflow_tools
+from azure_functions_agents.workflows.schema import WorkflowPlanPolicy
 from tests.endtoend._func_host import running_host
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -74,16 +75,59 @@ pytestmark = [
     pytest.mark.skipif(shutil.which("func") is None, reason="Azure Functions Core Tools not found"),
 ]
 
-# Mirrors the plan-authored policy in the sample agent instructions.
-SAMPLE_RETRY = WorkflowRetryPolicy(
-    max_attempts=MAX_ATTEMPTS,
-    backoff=WorkflowRetryBackoff(initial="PT1S", multiplier=2.0, max="PT4S"),
-)
+def _sample_workflow_policy() -> WorkflowPlanPolicy:
+    """Build the sample policy through the production composition stages."""
+    global_config = load_global_config(SAMPLE_APP)
+    discovered = discover_project_tools(SAMPLE_APP)
+    entries: dict[str, CatalogEntry] = {}
+    for spec in load_agent_specs(SAMPLE_APP):
+        resolved = compose(
+            spec,
+            global_config,
+            discovered_mcp_names=[],
+            discovered_skill_names=[],
+        )
+        entries[resolved.slug] = CatalogEntry(
+            resolved,
+            build_capabilities(
+                resolved,
+                discovered_user_tools=discovered.user_tools,
+                discovered_workflow_tools=discovered.workflow_tools,
+                discovered_mcp_tools={},
+                discovered_skills={},
+            ),
+        )
+    catalog = build_catalog(entries)
+    handler_catalog = integration.build_workflow_handler_catalog(
+        discovered.workflow_tools
+    )
+    return integration.build_workflow_agent_policy_catalog(
+        catalog,
+        handler_catalog,
+    )["main"]
 
 
-def _order_recovery_payload() -> dict[str, Any]:
-    """Build the orchestration input exactly as ``start_workflow`` would."""
-    plan = validate_plan(
+def _order_recovery_submission() -> tuple[str, dict[str, Any]]:
+    """Capture input produced by the production ``start_workflow`` path."""
+    captured: dict[str, Any] = {}
+
+    class _CapturingClient:
+        async def get_status_all(self) -> list[Any]:
+            return []
+
+        async def schedule_new_orchestration(
+            self,
+            name: str,
+            *,
+            instance_id: str,
+            input: Any,
+            tags: dict[str, str],
+        ) -> str:
+            assert name == _ORCHESTRATOR_NAME
+            captured.update(input)
+            return instance_id
+
+    params = workflow_tools.StartWorkflowParams.model_validate(
         {
             "tasks": [
                 {
@@ -98,7 +142,6 @@ def _order_recovery_payload() -> dict[str, Any]:
                     "tool": "reserve_inventory",
                     "args": {"order": "${load_order.result}"},
                     "depends_on": ["load_order"],
-                    "execution": {"retry": SAMPLE_RETRY.model_dump()},
                 },
                 {
                     "id": "confirm_order",
@@ -108,31 +151,33 @@ def _order_recovery_payload() -> dict[str, Any]:
                     "depends_on": ["reserve_inventory"],
                 },
             ]
-        },
-        policy=WorkflowPlanPolicy(
-            allowed_tools=frozenset({"load_order", "reserve_inventory", "confirm_order"})
-        ),
+        }
     )
-    effective = {
-        task.id: policy
-        for task in plan.tasks
-        if task.id == "reserve_inventory"
-        and (policy := resolve_workflow_task_execution(task)) is not None
-    }
-    assert "durable_retry_policy" in effective["reserve_inventory"]
-    return {
-        "tasks": plan_to_activity_inputs(plan, effective),
+    response = json.loads(
+        asyncio.run(
+            workflow_tools.start_workflow(
+                params,
+                workflow_tools.WorkflowSessionContext(
+                    workflow_agent_slug="main",
+                    session_id="retry-e2e",
+                    agent_name="main",
+                    durable_client=_CapturingClient(),  # type: ignore[arg-type]
+                ),
+                policy=_sample_workflow_policy(),
+            )
+        )
+    )
+    workflow_id = response["workflow_id"]
+    retry_task = next(
+        task for task in captured["tasks"] if task["id"] == "reserve_inventory"
+    )
+    assert "durable_retry_policy" in retry_task["execution"]
+    assert captured["workflow_agent"] == {
         "workflow_agent_slug": "main",
-        "workflow_agent": {
-            "workflow_agent_slug": "main",
-            "session_id": "retry-e2e",
-            "agent_name": "main",
-        },
-        "policy": {
-            "allowed_tools": ["confirm_order", "load_order", "reserve_inventory"],
-            "allowed_subagents": [],
-        },
+        "session_id": "retry-e2e",
+        "agent_name": "main",
     }
+    return workflow_id, captured
 
 
 def _incident_blob(workflow_id: str) -> Any:
@@ -148,11 +193,11 @@ def _incident_blob(workflow_id: str) -> Any:
     return container.get_blob_client(f"orders/{ORDER_ID}/incidents/{incident_id}.json")
 
 
-def _start_workflow(base_url: str, workflow_id: str) -> None:
+def _start_workflow(base_url: str, workflow_id: str, payload: dict[str, Any]) -> None:
     request = urllib.request.Request(
         f"{base_url}/runtime/webhooks/durabletask/orchestrators"
         f"/agents_workflow_orchestrator/{workflow_id}",
-        data=json.dumps(_order_recovery_payload()).encode(),
+        data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -265,8 +310,8 @@ def retry_sample_host() -> Any:
 def test_transient_tool_failures_are_retried_and_the_workflow_completes(
     retry_sample_host: Any,
 ) -> None:
-    workflow_id = f"e2eretryok{int(time.time())}"
-    _start_workflow(retry_sample_host.base_url, workflow_id)
+    workflow_id, payload = _order_recovery_submission()
+    _start_workflow(retry_sample_host.base_url, workflow_id, payload)
     status = _await_terminal(retry_sample_host.base_url, workflow_id)
 
     assert status["runtimeStatus"] == "Completed", status
@@ -281,7 +326,7 @@ def test_transient_tool_failures_are_retried_and_the_workflow_completes(
 def test_exhausted_retry_fails_with_the_application_error_code(
     retry_sample_host: Any,
 ) -> None:
-    workflow_id = f"e2eretryfail{int(time.time())}"
+    workflow_id, payload = _order_recovery_submission()
     blob = _incident_blob(workflow_id)
     # Never let the simulated dependency recover, so every attempt fails.
     blob.upload_blob(
@@ -297,7 +342,7 @@ def test_exhausted_retry_fails_with_the_application_error_code(
     )
 
     log_start = len(retry_sample_host.read_output())
-    _start_workflow(retry_sample_host.base_url, workflow_id)
+    _start_workflow(retry_sample_host.base_url, workflow_id, payload)
     status = _await_terminal(retry_sample_host.base_url, workflow_id)
 
     assert status["runtimeStatus"] == "Failed", status
