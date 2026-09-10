@@ -46,7 +46,7 @@ boundary. Source review distinguishes two server-capable choices:
 
 | MAF option | Verified behavior | Decision |
 | --- | --- | --- |
-| `agent-framework-a2a==1.0.0b260821`, `A2AExecutor` | Creates/updates Task, creates a MAF session from task context, directly calls its agent, forbids `session`/`stream` in run kwargs, and its cancel method updates task status rather than implementing this design's distributed cancellation. Requires core >=1.15,<2. | Not a drop-in for direct Message MVP, existing runtime policy, or durable ownership. Do not confuse its name with `A2AAgentExecutor`. |
+| `agent-framework-a2a==1.0.0b260821`, `A2AExecutor` and `A2AAgent` | The executor creates/updates Task, creates a MAF session from task context, directly calls its agent, forbids `session`/`stream` in run kwargs, and its cancel method updates task status rather than implementing this design's distributed cancellation. The client-side `A2AAgent` can consume a supplied card over JSONRPC and map a direct Message from `run()`. Requires core >=1.15,<2. | The executor is not a drop-in for direct Message MVP, existing runtime policy, or durable ownership. The client is approved only in the isolated P3 sample/client E2E across HTTP; it is not a runtime dependency. Do not confuse `A2AExecutor` with `A2AAgentExecutor`. |
 | `agent-framework-hosting-a2a==1.0.0a260730` | Alpha public `AgentA2AAdapter`, `a2a_to_run`, `a2a_from_run`, and workflow converters. Deliberately supplies no executor, task lifecycle/store, queues, HTTP routes, sessions, auth, or deployment. Requires core >=1.13,<2, SDK >=1,<2 and hosting `1.0.0a260730`. | Recommended: use its actual conversions while the runtime owns policy and the SDK handles protocol dispatch/models. Alpha adoption needs explicit approval. |
 
 The published candidate tuple is hosting-a2a `1.0.0a260730`, hosting
@@ -81,6 +81,15 @@ Do not default to `[all]`. GitHub SDK tag `v1.1.3` existed during research but i
 public PyPI version endpoint returned 404; **1.1.2 is the published candidate**,
 not an unverified promise to install 1.1.3.
 
+The P3 reviewer client is deliberately a separate environment containing only
+`agent-framework-a2a==1.0.0b260821` and its closure (MAF core 1.15+). It uses
+public `A2ACardResolver` plus `A2AAgent`, fetches the explicitly configured
+per-agent card path, and restricts transport negotiation to JSONRPC. HTTP is the
+version boundary: the server remains on the verified core 1.13 hosting tuple.
+Any runtime-wide core/OpenAI/Foundry upgrade belongs in standalone plan slice PV,
+with full workflow/Durable, telemetry, middleware/context-provider,
+runner/session/tools/streaming, and resolver/wheel-matrix compatibility gates.
+
 The protocol target is [A2A v1.0.1](https://github.com/a2aproject/A2A/tree/3303592588e388e62e0f69f701af531d2f4e3991),
 whose wire version is `1.0`. These are three independent values: normative spec
 tag, wire version, and Python distribution version.
@@ -107,7 +116,11 @@ such as status-event `final` into 1.0. Set push notifications false unless shipp
 Keep REST out of the first chain, including the spec/proto disagreement over
 subscribe's verb, until a separate binding-conformance decision.
 
-**Gate:** approve the Alpha tuple and resolve its optional dependencies; exercise
+**P3 gate (closed 2026-09-08):** the Alpha tuple is approved for P3 after
+published metadata and wheels resolved against the existing core 1.13 pin.
+Use `a2a-sdk[http-server]==1.1.2`: the narrow extra supplies Starlette and
+SSE-Starlette for the SDK's public `create_jsonrpc_routes` hook. Do not install
+the broader `[fastapi]` or `[all]` extras. Exercise
 actual public native-1.0 models, handler interfaces, serialization, and card output.
 If the package only supports 0.3, either approve a separately labeled 0.3 first
 release or upgrade/extend through supported upstream APIs for 1.0. A hand-written
@@ -161,6 +174,46 @@ not inferred from model streaming support. The library gate covers this bridge.
 The FRD's per-agent card route requires an explicitly configured card URL or SDK
 `card_path`; it is not domain-root well-known auto-discovery. A root singleton or
 agent-selection convention is deferred.
+
+### Finalized P3 simple profile
+
+`builtin_endpoints.a2a` is an explicit object and is never enabled by the
+boolean `builtin_endpoints: true` shorthand. Its `mode` is `simple`; its
+required `url` is the trusted externally reachable JSON-RPC URL placed in the
+Agent Card. It must be absolute HTTPS, except that HTTP loopback URLs are valid
+for local development. Registration never derives this value from Host or
+forwarding headers.
+
+The card route is `agents/{slug}/.well-known/agent-card.json`; JSON-RPC is
+`agents/{slug}/a2a`. Both inherit the resolved built-in `http_auth`. The card
+advertises native JSON-RPC `1.0`, text/plain input and output, one A2A AgentSkill
+derived from the resolved agent name/description, `streaming: false`,
+`pushNotifications: false`, and a matching `x-functions-key` or Entra security
+scheme. The card is materialized lazily on its async GET route through the
+public MAF adapter. Client examples configure this exact card URL or an
+equivalent SDK `card_path`; the route is not domain-root discovery.
+
+The only supported operation is wire-1.0 `SendMessage`. Missing
+`A2A-Version` means 0.3 and is rejected. The 0.3 aliases, `SendStreamingMessage`,
+Task get/list/cancel/subscribe, supplied `taskId`, and file/data/structured Parts
+are unsupported. Both values of `configuration.returnImmediately` have no
+effect: the request waits and returns one direct Message.
+
+An optional client `contextId` is accepted for conversation continuity; one is
+generated when absent and echoed by the response. The runtime hashes auth scope,
+agent slug, and context ID into a safe runner session ID, so client input never
+becomes a history filename. Function/admin/anonymous modes are one trust domain;
+Entra scope uses the already validated tenant and object/client identity. The
+response has a fresh `messageId`; the SDK envelope independently preserves the
+JSON-RPC request `id`.
+
+P3 enforces, per agent, at most 32 in-flight executions, a 256 KiB raw JSON
+request, 16 Parts, 32 KiB per text Part, 64 KiB aggregate input text, and
+256 KiB direct response text. Once a bounded JSON-RPC envelope exists, failures
+use SDK-shaped JSON-RPC errors correlated to its ID; pre-dispatch malformed or
+oversized HTTP uses 400/413. Output includes only converted assistant text:
+reasoning, tool arguments/results, and arbitrary runtime metadata are not
+published.
 
 ## 4. Capability profiles and protocol mapping
 
@@ -372,8 +425,11 @@ registry. SDK 1.1.2 also registers
 this is evidence of a binding compatibility choice, not a reason to broaden the
 initial JSON-RPC scope.
 
-Before human finalization: settle the library/wire tuple, supported local SSE
-operations and deployment guard, trusted principal scope and card URL policy,
-storage atomicity/partition design, retry-artifact policy, and concrete resource
-limits. These decisions constrain implementation; they are not reasons to change
-dependencies or advertise capabilities in this documentation-only work.
+P3 has settled its library/wire tuple, scoped simple context, card URL/auth
+policy, conservative first-surface limits, and isolated MAF `A2AAgent` client
+interoperability above. The client-only 1.15+ closure does not change the
+runtime's 1.13 tuple or block P4/P5 and P1/P2. Before any later human
+finalization, settle the local SSE operations and deployment guard, storage
+atomicity/partition design, durable identity/authorization policy,
+retry-artifact policy, and distributed resource limits. P3 approval is not
+approval to advertise or implement those later capabilities.

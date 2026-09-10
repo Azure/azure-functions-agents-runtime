@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from azure_functions_agents.config.schema import (
+    A2AConfig,
     BuiltinEndpointsConfig,
     ResolvedAgent,
     SubagentRef,
@@ -88,6 +89,11 @@ def test_validate_resolved_agent_requires_trigger_when_no_builtin_endpoints(
         BuiltinEndpointsConfig(debug_chat_ui=True),
         BuiltinEndpointsConfig(chat_api=True),
         BuiltinEndpointsConfig(mcp=True),
+        BuiltinEndpointsConfig(
+            a2a=A2AConfig(
+                url="http://localhost:7071/api/agents/endpoint/a2a"
+            )
+        ),
     ],
 )
 def test_validate_resolved_agent_allows_missing_trigger_with_builtin_endpoints(
@@ -97,6 +103,7 @@ def test_validate_resolved_agent_allows_missing_trigger_with_builtin_endpoints(
     source = tmp_path / "endpoint.agent.md"
     resolved = ResolvedAgent(
         name="Endpoint Agent",
+        slug="endpoint",
         description="desc",
         trigger=None,
         instructions="x",
@@ -116,6 +123,57 @@ def test_validate_resolved_agent_allows_missing_trigger_with_builtin_endpoints(
     )
 
     validate_resolved_agent(resolved, discovered_mcp_names=[], discovered_skills=[])
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://agents.example.test/api/agents/agent/a2a",
+        "ftp://agents.example.test/api/agents/agent/a2a",
+        "https://user:password@agents.example.test/api/agents/agent/a2a",
+        "https://agents.example.test/api/agents/other/a2a",
+        "https://agents.example.test/api/agents/agent/a2a?token=secret",
+        "https://agents.example.test/api/agents/agent/a2a#fragment",
+    ],
+)
+def test_validate_resolved_agent_rejects_unsafe_or_mismatched_a2a_url(
+    url: str,
+) -> None:
+    resolved = _make_resolved(
+        builtin_endpoints=BuiltinEndpointsConfig(a2a=A2AConfig(url=url))
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"field `builtin_endpoints\.a2a\.url`",
+    ):
+        validate_resolved_agent(
+            resolved,
+            discovered_mcp_names=[],
+            discovered_skills=[],
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://agents.example.test/api/agents/agent/a2a",
+        "http://127.0.0.1:7071/api/agents/agent/a2a",
+        "http://[::1]:7071/api/agents/agent/a2a/",
+    ],
+)
+def test_validate_resolved_agent_accepts_secure_and_loopback_a2a_urls(
+    url: str,
+) -> None:
+    resolved = _make_resolved(
+        builtin_endpoints=BuiltinEndpointsConfig(a2a=A2AConfig(url=url))
+    )
+
+    validate_resolved_agent(
+        resolved,
+        discovered_mcp_names=[],
+        discovered_skills=[],
+    )
 
 
 @pytest.mark.parametrize(

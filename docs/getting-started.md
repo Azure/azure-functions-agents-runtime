@@ -113,6 +113,31 @@ func start
 
 Your agent is now running at `http://localhost:7071/agents/main/` with a built-in chat UI, HTTP API (`/agents/main/chat`, `/agents/main/chatstream`), and MCP tool exposed through the Functions MCP endpoint (`/runtime/webhooks/mcp`).
 
+## Try the experimental A2A server
+
+Native A2A is an explicit opt-in rather than part of the
+`builtin_endpoints: true` shorthand. Install
+`azurefunctions-agents-runtime[a2a]`, then configure a trusted external
+JSON-RPC URL:
+
+```yaml
+builtin_endpoints:
+  a2a:
+    mode: simple
+    url: http://localhost:7071/agents/main/a2a
+  http_auth:
+    mode: anonymous
+```
+
+The P3 surface accepts A2A 1.0 text Messages and returns one non-streaming
+Message. See the
+[`a2a-incident-triage` sample](https://github.com/Azure/azure-functions-agents-runtime/tree/main/samples/a2a-incident-triage)
+for explicit Agent Card resolution, an isolated MAF `A2AAgent` caller, a raw
+JSON-RPC inspection client, model credentials, and the current experimental
+limitations. The client-only MAF 1.15+ environment communicates with the pinned
+core 1.13 server over HTTP rather than changing its runtime dependencies. Use
+function-key or Entra auth rather than anonymous access before deployment.
+
 ## Where to go next
 
 - [Front matter spec](front-matter-spec.md) — full `.agent.md` field reference, triggers, built-in endpoints, subagents, and environment variable substitution, with narrative examples

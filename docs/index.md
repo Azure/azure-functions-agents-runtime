@@ -11,6 +11,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Build custom tools in plain Python** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and pull in any package you need
 - **Run agents on durable workflows** *(experimental, see [Dynamic workflows](workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
+- **Native A2A server** *(experimental)* — expose an explicit per-agent A2A 1.0 Agent Card and non-streaming JSON-RPC Message endpoint
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
 - **Harness-only execution controls** — set portable output limits and optional Microsoft Agent Framework token-budget conversation compaction
@@ -22,6 +23,9 @@ The package is published on PyPI as **`azurefunctions-agents-runtime`**.
 ```bash
 pip install azurefunctions-agents-runtime
 ```
+
+Install `azurefunctions-agents-runtime[a2a]` for the experimental native A2A
+server.
 
 Add it to your function app's `requirements.txt`:
 
@@ -37,5 +41,6 @@ azurefunctions-agents-runtime
 - [Triggers](triggers.md) — supported trigger types and payload shapes
 - [Observability](observability.md) — tracing and telemetry
 - [Dynamic workflows](workflows.md) — experimental durable DAG execution
+- [A2A incident triage sample](https://github.com/Azure/azure-functions-agents-runtime/tree/main/samples/a2a-incident-triage) — runnable A2A 1.0 walkthrough with isolated MAF and raw JSON-RPC clients
 
 Source code and issues live on GitHub: [Azure/azure-functions-agents-runtime](https://github.com/Azure/azure-functions-agents-runtime).

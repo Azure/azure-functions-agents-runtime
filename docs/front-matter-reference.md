@@ -72,7 +72,7 @@ YAML front matter at the top of each agent markdown file.
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `agent_configuration` | object | No | `null` | Portable and framework-specific execution settings. Recursively inherits global values. [Details](./front-matter-spec.md#agent_configuration) |
-| `builtin_endpoints` | boolean \| object | No | `false` | Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints) |
+| `builtin_endpoints` | boolean \| object | No | `false` | Enable built-in chat UI, chat API, MCP tool, and/or native A2A endpoints. [Details](#agent-builtin_endpoints) |
 | `model` | string | No | Inherited from global | Override LLM model for this agent |
 | `timeout` | number | No | Inherited from global | Override execution timeout (seconds) for this agent |
 | `logger` | boolean | No | `true` | Enable/disable response logging for triggered agents |
@@ -110,7 +110,7 @@ trigger:
 
 Enable built-in endpoints for interactive testing, programmatic access, and agent composition.
 
-**When set to `true`:** Enables all built-in endpoints (`debug_chat_ui`, `chat_api`, `mcp`)
+**When set to `true`:** Enables the established endpoints (`debug_chat_ui`, `chat_api`, `mcp`); A2A still requires an explicit object
 
 **When set to `false`:** Disables all built-in endpoints (default)
 
@@ -121,11 +121,21 @@ Enable built-in endpoints for interactive testing, programmatic access, and agen
 | `debug_chat_ui` | boolean | No | `false` | Enable browser-based chat UI at `/agents/{slug}/` plus backing chat APIs |
 | `chat_api` | boolean | No | `false` | Enable REST API endpoints (`/agents/{slug}/chat`, `/agents/{slug}/chatstream`) |
 | `mcp` | boolean | No | `false` | Expose agent as MCP tool on shared runtime MCP transport |
-| `http_auth` | object | No | `{}` | Inbound authentication policy for the HTTP chat API endpoints (chat_api / debug_chat_ui). Applies only to HTTP endpoints and does not affect the MCP endpoint. Modes: function (API key, default), admin (master key), anonymous, entra (Entra ID). |
+| `a2a` | A2AConfig | No | `null` | Experimental native A2A 1.0 JSON-RPC endpoint configuration. [Details](./front-matter-spec.md#a2a-simple-server) |
+| `http_auth` | object | No | `{}` | Inbound authentication policy for the HTTP chat API and A2A endpoints (chat_api / debug_chat_ui / a2a). Applies only to HTTP endpoints and does not affect the MCP endpoint. Modes: function (API key, default), admin (master key), anonymous, entra (Entra ID). |
 
 **Note:** `debug_chat_ui: true` automatically enables `chat_api: true`
 
 **See:** [Front Matter Spec - builtin_endpoints](./front-matter-spec.md#builtin_endpoints)
+
+#### Agent: `builtin_endpoints.a2a`
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `mode` | A2AMode | No | `"simple"` | A2A execution profile. P3 supports only `simple` (non-streaming direct Message). |
+| `url` | string | **Yes** | N/A | Trusted external JSON-RPC URL published in the Agent Card. HTTPS is required except for loopback development. |
+
+**See:** [Front Matter Spec - A2A simple server](./front-matter-spec.md#a2a-simple-server)
 
 ### Global and agent: `agent_configuration`
 

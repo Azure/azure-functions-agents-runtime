@@ -13,6 +13,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Build custom tools in plain Python** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and pull in any package you need
 - **Run agents on durable workflows** *(experimental, see [`docs/workflows.md`](docs/workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
+- **Native A2A server** *(experimental)* — expose an explicit per-agent A2A 1.0 Agent Card and non-streaming JSON-RPC Message endpoint
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
 - **Harness-only execution controls** — set portable output limits and optional Microsoft Agent Framework token-budget conversation compaction
@@ -153,9 +154,33 @@ Any `.agent.md` file can opt into built-in endpoints with `builtin_endpoints`. T
 - **Debug chat UI** — built-in single-page web interface at `/agents/{slug}/`
 - **HTTP APIs** — `POST /agents/{slug}/chat` (JSON) and `POST /agents/{slug}/chatstream` (SSE)
 - **MCP tool** — optional tool exposed through `/runtime/webhooks/mcp` for VS Code, Claude Desktop, etc.
+- **A2A simple server** *(experimental)* — `GET /agents/{slug}/.well-known/agent-card.json` plus A2A 1.0 JSON-RPC `POST /agents/{slug}/a2a`
 - **Session persistence** — multi-turn conversations stored in Azure Blob Storage via the runtime's `BlobHistoryProvider`, reusing the function app's `AzureWebJobsStorage` account
 
-If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint-only agents as well as triggered agents that also expose a chat UI or API. `builtin_endpoints.debug_chat_ui: true` automatically enables the backing chat APIs. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints, including the MCP tool. See [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
+If any built-in endpoint is enabled, `trigger` is optional. This allows
+endpoint-only agents as well as triggered agents that expose another surface.
+`builtin_endpoints.debug_chat_ui: true` automatically enables the backing chat
+APIs. For compatibility, `builtin_endpoints: true` enables the established
+chat/UI/MCP surfaces only; A2A requires an explicit object and the
+`azurefunctions-agents-runtime[a2a]` extra:
+
+```yaml
+builtin_endpoints:
+  a2a:
+    mode: simple
+    url: https://agents.example.com/agents/incident-triage/a2a
+```
+
+The P3 A2A profile supports native wire version 1.0 and one non-streaming text
+Message response. It does not implement Tasks, streaming, continuation,
+subscribe/cancel, push notifications, REST binding, or distributed/durable
+execution. See
+[`docs/front-matter-spec.md#a2a-simple-server`](docs/front-matter-spec.md#a2a-simple-server)
+and the runnable
+[`samples/a2a-incident-triage/`](samples/a2a-incident-triage/), whose primary
+caller is an isolated Microsoft Agent Framework `A2AAgent` client. The separate
+client environment keeps its MAF 1.15+ closure out of this runtime's pinned
+core 1.13 process; a raw JSON-RPC client remains available for wire inspection.
 
 ### Agent configuration
 
