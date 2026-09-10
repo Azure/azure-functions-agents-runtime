@@ -1,0 +1,63 @@
+sequenceDiagram
+    autonumber
+    actor User as User or trigger
+    participant HTTP as Function HTTP API
+    participant Entity as Session Entity
+    participant DTS as DTS turn orchestrator
+    participant Model as MAF model-step activity
+    participant APIM as APIM model/control
+    participant Foundry as Foundry model
+    participant Tool as DTS tool activity
+    participant ACA as Customer ACA Sandbox
+    participant MCP as APIM remote MCP
+    participant Blob as Customer Blob content
+
+    User->>HTTP: Start durable run
+    HTTP->>Entity: Admit owner + agent + session + request
+    Entity-->>HTTP: Active fence + committed context ref
+    HTTP->>Blob: Save prompt and initial run document
+    HTTP->>DTS: Start orchestration with refs only
+
+    loop Until the model returns a final answer
+        DTS->>Model: Run one model inference
+        Model->>Blob: Read verified context refs
+        Blob-->>Model: Messages + encrypted reasoning
+        Model->>APIM: Responses create / poll
+        APIM->>Foundry: Governed model request
+        Foundry-->>APIM: Answer or ordered tool calls
+        APIM-->>Model: Provider response
+        Model->>Blob: Save decision + reasoning
+        Model-->>DTS: Decision ref + bounded counters
+
+        alt Local or customer tool
+            DTS->>Tool: durable_agent_sandbox_tool_v1
+            Tool->>ACA: Create, attach, or resume
+            ACA->>ACA: Execute shell, file, or custom tool
+            ACA-->>Tool: Tool result + workspace archive
+            Tool->>Blob: Save result + workspace checkpoint
+            Tool-->>DTS: Result refs
+        else Privileged remote MCP
+            DTS->>Tool: durable_agent_mcp_tool_v1
+            Tool->>MCP: Call governed APIM MCP route
+            MCP-->>Tool: MCP result
+            Tool->>Blob: Save result
+            Tool-->>DTS: Result ref
+        else Human input required
+            DTS-->>HTTP: Waiting + owner-authorized detail URL
+            HTTP-->>User: Question and choices
+            User->>HTTP: Submit answer
+            HTTP->>DTS: Durable external event
+        else Final answer
+            DTS->>Blob: Save final response
+        end
+
+        Note over DTS,Blob: DTS history carries refs, hashes, counters, and statuses
+    end
+
+    DTS->>Entity: Commit context ref + next generation
+    Entity-->>DTS: Idempotent commit receipt
+    DTS-->>HTTP: Terminal status + response ref
+    HTTP->>Blob: Read integrity-checked final response
+    Blob-->>HTTP: Final response
+    HTTP-->>User: Result
+

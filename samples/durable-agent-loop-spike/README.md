@@ -215,6 +215,21 @@ uv run python samples\durable-agent-loop-spike\demo\focused\proxy.py `
 
 The focused UI is demo support, not a deployed customer surface.
 
+### Request flow
+
+The complete request path is shown below. Functions and DTS remain the trusted
+brain, APIM governs model and remote MCP traffic, and local executable tools run
+inside the customer-owned ACA Sandbox. Large messages, reasoning, tool results,
+and workspace checkpoints are stored in the dedicated customer Blob container;
+DTS history carries only bounded state and integrity references.
+
+![Durable agent loop request flow](../../docs/diagrams/durable-agent-loop-request-flow.svg)
+
+See the
+[editable Mermaid source](../../docs/diagrams/durable-agent-loop-request-flow.mmd)
+or the
+[PNG export](../../docs/diagrams/durable-agent-loop-request-flow.png).
+
 After the package is deployed and indexed with the main gate off, live
 qualification enables the main, background-model, retained-sandbox, and
 fault-injection gates together through a secure app-setting update.

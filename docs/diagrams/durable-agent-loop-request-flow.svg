@@ -1,0 +1,161 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2048" height="1500" viewBox="0 0 2048 1500">
+<defs><marker id="a" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#59748E"/></marker><marker id="r" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#7A8FA3"/></marker></defs>
+<rect width="2048" height="1500" fill="#F7F9FC"/>
+<text x="55" y="63.2" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="700" fill="#102033">Durable Agent Loop - request sequence</text>
+<text x="55" y="97.6" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="19" font-weight="400" fill="#52667A">One durable turn, one model decision or tool result per activity boundary.</text>
+<rect x="8" y="135" width="184" height="70" rx="13" fill="#FFFFFF" stroke="#AFC0D1" stroke-width="2"/>
+<text x="100" y="172.1" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="16" font-weight="600" fill="#102033">User / trigger</text>
+<line x1="100" y1="205" x2="100" y2="1435" stroke="#AEC0D1" stroke-width="2" stroke-dasharray="10 8"/>
+<rect x="238" y="135" width="184" height="70" rx="13" fill="#EAF3FF" stroke="#5E9DE6" stroke-width="2"/>
+<text x="330" y="172.1" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="16" font-weight="600" fill="#102033">Function HTTP API</text>
+<line x1="330" y1="205" x2="330" y2="1435" stroke="#AEC0D1" stroke-width="2" stroke-dasharray="10 8"/>
+<rect x="468" y="135" width="184" height="70" rx="13" fill="#EAF3FF" stroke="#5E9DE6" stroke-width="2"/>
+<text x="560" y="172.1" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="16" font-weight="600" fill="#102033">Session Entity</text>
+<line x1="560" y1="205" x2="560" y2="1435" stroke="#AEC0D1" stroke-width="2" stroke-dasharray="10 8"/>
+<rect x="698" y="135" width="184" height="70" rx="13" fill="#EAF3FF" stroke="#5E9DE6" stroke-width="2"/>
+<text x="790" y="172.1" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="16" font-weight="600" fill="#102033">DTS orchestrator</text>
+<line x1="790" y1="205" x2="790" y2="1435" stroke="#AEC0D1" stroke-width="2" stroke-dasharray="10 8"/>
+<rect x="928" y="135" width="184" height="70" rx="13" fill="#EAF3FF" stroke="#5E9DE6" stroke-width="2"/>
+<text x="1020" y="172.1" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="16" font-weight="600" fill="#102033">MAF model activity</text>
+<line x1="1020" y1="205" x2="1020" y2="1435" stroke="#AEC0D1" stroke-width="2" stroke-dasharray="10 8"/>
+<rect x="1158" y="135" width="184" height="70" rx="13" fill="#F1ECFF" stroke="#8E6CDD" stroke-width="2"/>
+<text x="1250" y="172.1" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="16" font-weight="600" fill="#102033">APIM + Foundry</text>
+<line x1="1250" y1="205" x2="1250" y2="1435" stroke="#AEC0D1" stroke-width="2" stroke-dasharray="10 8"/>
+<rect x="1388" y="135" width="184" height="70" rx="13" fill="#EAF3FF" stroke="#5E9DE6" stroke-width="2"/>
+<text x="1480" y="172.1" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="16" font-weight="600" fill="#102033">DTS tool activity</text>
+<line x1="1480" y1="205" x2="1480" y2="1435" stroke="#AEC0D1" stroke-width="2" stroke-dasharray="10 8"/>
+<rect x="1618" y="135" width="184" height="70" rx="13" fill="#FFF1DF" stroke="#D99A3E" stroke-width="2"/>
+<text x="1710" y="172.1" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="16" font-weight="600" fill="#102033">ACA / remote MCP</text>
+<line x1="1710" y1="205" x2="1710" y2="1435" stroke="#AEC0D1" stroke-width="2" stroke-dasharray="10 8"/>
+<rect x="1848" y="135" width="184" height="70" rx="13" fill="#E9F8F1" stroke="#43A978" stroke-width="2"/>
+<text x="1940" y="172.1" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="16" font-weight="600" fill="#102033">Customer Blob</text>
+<line x1="1940" y1="205" x2="1940" y2="1435" stroke="#AEC0D1" stroke-width="2" stroke-dasharray="10 8"/>
+<rect x="323" y="235" width="14" height="175" fill="#DCEBFA" stroke="#9FBCE0"/>
+<rect x="553" y="265" width="14" height="70" fill="#DCEBFA" stroke="#9FBCE0"/>
+<rect x="783" y="385" width="14" height="1015" fill="#DCEBFA" stroke="#9FBCE0"/>
+<line x1="100" y1="245" x2="330" y2="245" stroke="#59748E" stroke-width="3"/>
+<line x1="100" y1="245" x2="330" y2="245" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="151.5" y="220" width="127.0" height="21" rx="5" fill="#F7F9FC"/><text x="215.0" y="233" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">POST durable run</text>
+<line x1="330" y1="285" x2="560" y2="285" stroke="#59748E" stroke-width="3"/>
+<line x1="330" y1="285" x2="560" y2="285" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="339.5" y="260" width="211.0" height="21" rx="5" fill="#F7F9FC"/><text x="445.0" y="273" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">admit owner + agent + session</text>
+<line x1="560" y1="325" x2="330" y2="325" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8"/>
+<line x1="560" y1="325" x2="330" y2="325" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#r)"/>
+<rect x="341.0" y="300" width="208.0" height="21" rx="5" fill="#F7F9FC"/><text x="445.0" y="313" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#7A8FA3">fence + committed context ref</text>
+<line x1="330" y1="365" x2="1940" y2="365" stroke="#59748E" stroke-width="3"/>
+<line x1="330" y1="365" x2="1940" y2="365" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="1035.5" y="340" width="199.0" height="21" rx="5" fill="#F7F9FC"/><text x="1135.0" y="353" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">save prompt + run document</text>
+<line x1="330" y1="405" x2="790" y2="405" stroke="#59748E" stroke-width="3"/>
+<line x1="330" y1="405" x2="790" y2="405" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="460.5" y="380" width="199.0" height="21" rx="5" fill="#F7F9FC"/><text x="560.0" y="393" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">start orchestration (refs only)</text>
+<rect x="1013" y="445" width="14" height="325" fill="#DCEBFA" stroke="#9FBCE0"/>
+<rect x="1243" y="565" width="14" height="90" fill="#DCEBFA" stroke="#9FBCE0"/>
+<line x1="790" y1="455" x2="1020" y2="455" stroke="#59748E" stroke-width="3"/>
+<line x1="790" y1="455" x2="1020" y2="455" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="820.5" y="430" width="169.0" height="21" rx="5" fill="#F7F9FC"/><text x="905.0" y="443" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">run one model inference</text>
+<line x1="1020" y1="500" x2="1940" y2="500" stroke="#59748E" stroke-width="3"/>
+<line x1="1020" y1="500" x2="1940" y2="500" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="1394.0" y="475" width="172.0" height="21" rx="5" fill="#F7F9FC"/><text x="1480.0" y="488" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">read verified context refs</text>
+<line x1="1940" y1="540" x2="1020" y2="540" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8"/>
+<line x1="1940" y1="540" x2="1020" y2="540" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#r)"/>
+<rect x="1370.0" y="515" width="220.0" height="21" rx="5" fill="#F7F9FC"/><text x="1480.0" y="528" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#7A8FA3">messages + encrypted reasoning</text>
+<line x1="1020" y1="580" x2="1250" y2="580" stroke="#59748E" stroke-width="3"/>
+<line x1="1020" y1="580" x2="1250" y2="580" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="1054.5" y="555" width="161.0" height="21" rx="5" fill="#F7F9FC"/><text x="1135.0" y="568" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">Responses create / poll</text>
+<line x1="1250" y1="625" x2="1020" y2="625" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8"/>
+<line x1="1250" y1="625" x2="1020" y2="625" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#r)"/>
+<rect x="1040.0" y="600" width="190.0" height="21" rx="5" fill="#F7F9FC"/><text x="1135.0" y="613" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#7A8FA3">answer or ordered tool calls</text>
+<line x1="1020" y1="675" x2="1940" y2="675" stroke="#59748E" stroke-width="3"/>
+<line x1="1020" y1="675" x2="1940" y2="675" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="1391.0" y="650" width="178.0" height="21" rx="5" fill="#F7F9FC"/><text x="1480.0" y="663" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">save decision + reasoning</text>
+<line x1="1020" y1="725" x2="790" y2="725" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8"/>
+<line x1="1020" y1="725" x2="790" y2="725" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#r)"/>
+<rect x="795.0" y="700" width="220.0" height="21" rx="5" fill="#F7F9FC"/><text x="905.0" y="713" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#7A8FA3">decision ref + bounded counters</text>
+<rect x="45" y="790" width="1950" height="580" fill="#FCFDFE" stroke="#B9C8D8" stroke-width="2"/>
+<rect x="45" y="790" width="190" height="35" rx="0" fill="#EAF3FF" stroke="#5E9DE6" stroke-width="1"/>
+<text x="60" y="810.3" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="15" font-weight="600" fill="#102033">Decision branch</text>
+<line x1="45" y1="935" x2="1995" y2="935" stroke="#B9C8D8" stroke-width="2"/>
+<line x1="45" y1="1080" x2="1995" y2="1080" stroke="#B9C8D8" stroke-width="2"/>
+<line x1="45" y1="1205" x2="1995" y2="1205" stroke="#B9C8D8" stroke-width="2"/>
+<rect x="62" y="835" width="173" height="33" rx="6" fill="#FFF1DF" stroke="#D99A3E" stroke-width="1"/>
+<text x="75" y="853.5" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#102033">Local / customer tool</text>
+<rect x="1473" y="855" width="14" height="70" fill="#DCEBFA" stroke="#9FBCE0"/>
+<rect x="1703" y="885" width="14" height="40" fill="#DCEBFA" stroke="#9FBCE0"/>
+<line x1="790" y1="865" x2="1480" y2="865" stroke="#59748E" stroke-width="3"/>
+<line x1="790" y1="865" x2="1480" y2="865" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="1061.0" y="840" width="148.0" height="21" rx="5" fill="#F7F9FC"/><text x="1135.0" y="853" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">sandbox tool activity</text>
+<line x1="1480" y1="900" x2="1710" y2="900" stroke="#59748E" stroke-width="3"/>
+<line x1="1480" y1="900" x2="1710" y2="900" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="1512.0" y="875" width="166.0" height="21" rx="5" fill="#F7F9FC"/><text x="1595.0" y="888" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">create / attach / resume</text>
+<line x1="1710" y1="925" x2="1480" y2="925" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8"/>
+<line x1="1710" y1="925" x2="1480" y2="925" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#r)"/>
+<rect x="1527.5" y="900" width="135.0" height="21" rx="5" fill="#F7F9FC"/><text x="1595.0" y="913" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#7A8FA3">result + workspace</text>
+<line x1="1480" y1="955" x2="1940" y2="955" stroke="#59748E" stroke-width="3"/>
+<line x1="1480" y1="955" x2="1940" y2="955" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="1627.0" y="930" width="166.0" height="21" rx="5" fill="#F7F9FC"/><text x="1710.0" y="943" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">save result + workspace</text>
+<line x1="1480" y1="985" x2="790" y2="985" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8"/>
+<line x1="1480" y1="985" x2="790" y2="985" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#r)"/>
+<rect x="1013.0" y="960" width="244.0" height="21" rx="5" fill="#F7F9FC"/><text x="1135.0" y="973" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#7A8FA3">result refs; schedule next model step</text>
+<rect x="62" y="955" width="143" height="33" rx="6" fill="#F1ECFF" stroke="#8E6CDD" stroke-width="1"/>
+<text x="75" y="973.5" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#102033">Remote MCP</text>
+<rect x="1473" y="1000" width="14" height="60" fill="#DCEBFA" stroke="#9FBCE0"/>
+<rect x="1243" y="1015" width="14" height="35" fill="#DCEBFA" stroke="#9FBCE0"/>
+<rect x="1703" y="1030" width="14" height="20" fill="#DCEBFA" stroke="#9FBCE0"/>
+<line x1="790" y1="1010" x2="1480" y2="1010" stroke="#59748E" stroke-width="3"/>
+<line x1="790" y1="1010" x2="1480" y2="1010" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="1072.0" y="985" width="126.0" height="21" rx="5" fill="#F7F9FC"/><text x="1135.0" y="998" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">MCP tool activity</text>
+<line x1="1480" y1="1035" x2="1250" y2="1035" stroke="#59748E" stroke-width="3"/>
+<line x1="1480" y1="1035" x2="1250" y2="1035" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="1298.0" y="1010" width="134.0" height="21" rx="5" fill="#F7F9FC"/><text x="1365.0" y="1023" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">APIM MCP request</text>
+<line x1="1250" y1="1060" x2="1710" y2="1060" stroke="#59748E" stroke-width="3"/>
+<line x1="1250" y1="1060" x2="1710" y2="1060" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="1406.0" y="1035" width="148.0" height="21" rx="5" fill="#F7F9FC"/><text x="1480.0" y="1048" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">governed remote call</text>
+<line x1="1710" y1="1085" x2="1480" y2="1085" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8"/>
+<line x1="1710" y1="1085" x2="1480" y2="1085" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#r)"/>
+<rect x="1552.5" y="1060" width="85.0" height="21" rx="5" fill="#F7F9FC"/><text x="1595.0" y="1073" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#7A8FA3">MCP result</text>
+<line x1="1480" y1="1110" x2="1940" y2="1110" stroke="#59748E" stroke-width="3"/>
+<line x1="1480" y1="1110" x2="1940" y2="1110" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="1669.0" y="1085" width="82.0" height="21" rx="5" fill="#F7F9FC"/><text x="1710.0" y="1098" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">save result</text>
+<line x1="1480" y1="1135" x2="790" y2="1135" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8"/>
+<line x1="1480" y1="1135" x2="790" y2="1135" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#r)"/>
+<rect x="1016.0" y="1110" width="238.0" height="21" rx="5" fill="#F7F9FC"/><text x="1135.0" y="1123" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#7A8FA3">result ref; schedule next model step</text>
+<rect x="62" y="1095" width="148" height="33" rx="6" fill="#E9F8F1" stroke="#43A978" stroke-width="1"/>
+<text x="75" y="1113.5" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#102033">Human input</text>
+<line x1="790" y1="1150" x2="330" y2="1150" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8"/>
+<line x1="790" y1="1150" x2="330" y2="1150" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#r)"/>
+<rect x="485.5" y="1125" width="149.0" height="21" rx="5" fill="#F7F9FC"/><text x="560.0" y="1138" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#7A8FA3">Waiting + detail URL</text>
+<line x1="330" y1="1175" x2="100" y2="1175" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8"/>
+<line x1="330" y1="1175" x2="100" y2="1175" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#r)"/>
+<rect x="147.5" y="1150" width="135.0" height="21" rx="5" fill="#F7F9FC"/><text x="215.0" y="1163" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#7A8FA3">question + choices</text>
+<line x1="100" y1="1200" x2="330" y2="1200" stroke="#59748E" stroke-width="3"/>
+<line x1="100" y1="1200" x2="330" y2="1200" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="161.0" y="1175" width="108.0" height="21" rx="5" fill="#F7F9FC"/><text x="215.0" y="1188" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">submit answer</text>
+<line x1="330" y1="1225" x2="790" y2="1225" stroke="#59748E" stroke-width="3"/>
+<line x1="330" y1="1225" x2="790" y2="1225" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="482.5" y="1200" width="155.0" height="21" rx="5" fill="#F7F9FC"/><text x="560.0" y="1213" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">durable external event</text>
+<rect x="62" y="1220" width="93" height="33" rx="6" fill="#EAF3FF" stroke="#5E9DE6" stroke-width="1"/>
+<text x="75" y="1238.5" text-anchor="start" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#102033">Final</text>
+<line x1="790" y1="1260" x2="1940" y2="1260" stroke="#59748E" stroke-width="3"/>
+<line x1="790" y1="1260" x2="1940" y2="1260" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="1298.0" y="1235" width="134.0" height="21" rx="5" fill="#F7F9FC"/><text x="1365.0" y="1248" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">save final response</text>
+<line x1="790" y1="1295" x2="560" y2="1295" stroke="#59748E" stroke-width="3"/>
+<line x1="790" y1="1295" x2="560" y2="1295" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="564.5" y="1270" width="221.0" height="21" rx="5" fill="#F7F9FC"/><text x="675.0" y="1283" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">commit context ref + generation</text>
+<line x1="560" y1="1325" x2="790" y2="1325" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8"/>
+<line x1="560" y1="1325" x2="790" y2="1325" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#r)"/>
+<rect x="581.5" y="1300" width="187.0" height="21" rx="5" fill="#F7F9FC"/><text x="675.0" y="1313" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#7A8FA3">idempotent commit receipt</text>
+<line x1="790" y1="1355" x2="330" y2="1355" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8"/>
+<line x1="790" y1="1355" x2="330" y2="1355" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#r)"/>
+<rect x="458.5" y="1330" width="203.0" height="21" rx="5" fill="#F7F9FC"/><text x="560.0" y="1343" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#7A8FA3">terminal status + response ref</text>
+<line x1="330" y1="1390" x2="1940" y2="1390" stroke="#59748E" stroke-width="3"/>
+<line x1="330" y1="1390" x2="1940" y2="1390" stroke="#59748E" stroke-width="3" marker-end="url(#a)"/>
+<rect x="1027.0" y="1365" width="216.0" height="21" rx="5" fill="#F7F9FC"/><text x="1135.0" y="1378" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#59748E">read integrity-checked response</text>
+<line x1="1940" y1="1420" x2="330" y2="1420" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8"/>
+<line x1="1940" y1="1420" x2="330" y2="1420" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#r)"/>
+<rect x="1083.5" y="1395" width="103.0" height="21" rx="5" fill="#F7F9FC"/><text x="1135.0" y="1408" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#7A8FA3">final response</text>
+<line x1="330" y1="1450" x2="100" y2="1450" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8"/>
+<line x1="330" y1="1450" x2="100" y2="1450" stroke="#7A8FA3" stroke-width="3" stroke-dasharray="10 8" marker-end="url(#r)"/>
+<rect x="189.5" y="1425" width="51.0" height="21" rx="5" fill="#F7F9FC"/><text x="215.0" y="1438" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#7A8FA3">result</text>
+<rect x="55" y="1465" width="1935" height="27" rx="8" fill="#E9F8F1" stroke="#43A978" stroke-width="1"/>
+<text x="1022" y="1479.5" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="600" fill="#256E51">DTS history: refs, hashes, counters, statuses | Blob: raw messages, reasoning, results, workspaces | ACA: isolated executable tools</text>
+</svg>

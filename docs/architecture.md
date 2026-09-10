@@ -118,6 +118,22 @@ A few boundaries are worth calling out explicitly:
   executable-skill paths fail closed so one session cannot cross the
   process-local and Durable ownership models.
 
+### Durable agent loop request flow
+
+The request path separates trusted orchestration, governed model and MCP
+traffic, isolated local execution, and customer-owned content storage. DTS
+coordinates one model decision or tool result at a time; it does not carry raw
+prompts, reasoning, tool payloads, or workspace archives in orchestration
+history.
+
+![Durable agent loop request flow](diagrams/durable-agent-loop-request-flow.svg)
+
+The editable source is
+[`durable-agent-loop-request-flow.mmd`](diagrams/durable-agent-loop-request-flow.mmd);
+a raster export is available as
+[`durable-agent-loop-request-flow.png`](diagrams/durable-agent-loop-request-flow.png)
+for slides and documents.
+
 ## 3. Module map
 
 | Package/module | Role | Key entry points |
