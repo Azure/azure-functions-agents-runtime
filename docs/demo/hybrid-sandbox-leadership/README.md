@@ -18,6 +18,9 @@ result, and native Application Insights Agent Trace.
 | `record_scenes.py` | Reproducible supporting-scene recorder |
 | `narration.json` | Narration source |
 | `manifest.json` | Correlation window, claims, provenance, integrity, and paths |
+| `request-flow.mmd` | Authoritative editable Mermaid sequence diagram |
+| `evidence/hybrid-request-flow.svg` | Vector request-flow export for docs and inspection |
+| `evidence/hybrid-request-flow.png` | 1920×1080 request-flow export used by the deck |
 | `evidence/live-chat-tool-calls.png` | Expanded three-tool details plus one running sandbox |
 | `evidence/live-chat-final-v4.png` | Returned MCP takeaway plus `ALPHA_COMPLETE` and `BETA_COMPLETE` |
 | `evidence/live-sandbox-active.png` | Synchronized read-only ACA inventory during execution |
@@ -25,32 +28,66 @@ result, and native Application Insights Agent Trace.
 | `evidence/appinsights-agent-trace.png` | Telemetry-derived trace visualization retained as analysis |
 | `evidence/apim-foundry-mcp.png` | Live APIM policy configuration for model and MCP lanes |
 
-The final MP4, silent master, contact sheet, raw Playwright recording, and
-redacted telemetry exports are intentionally kept out of git:
+## Detailed request flow
 
-```text
-C:\Users\larohra\.copilot\session-state\e29c49e0-41eb-4fab-be8c-6e9a671f8008\files\hybrid-sandbox-leadership-video\live-flow-v4\
+[![Hybrid request flow](evidence/hybrid-request-flow.png)](evidence/hybrid-request-flow.svg)
+
+The [Mermaid source](request-flow.mmd) is authoritative because the diagram
+describes a temporal request lifecycle rather than a static component map. The
+[SVG export](evidence/hybrid-request-flow.svg) preserves crisp text and lines
+for documentation and inspection; the
+[1920×1080 PNG](evidence/hybrid-request-flow.png) is the predictable,
+portable asset embedded in the PowerPoint appendix. The grouped colors mark
+client, trusted Functions control plane, governed external services, customer
+isolation, and observability trust zones.
+
+The exports were generated locally with Mermaid CLI 11.12.0 and FFmpeg, without
+adding a repository dependency or contacting Azure. From the repository root
+in PowerShell, with `mmdc` 11.12.0, `ffmpeg`, and Chrome on `PATH`:
+
+```powershell
+$root = "docs\demo\hybrid-sandbox-leadership"
+$source = "$root\request-flow.mmd"
+$mermaidConfig = "$root\request-flow-mermaid-config.json"
+$puppeteerConfig = "$root\request-flow-puppeteer-config.json"
+$svg = "$root\evidence\hybrid-request-flow.svg"
+$naturalPng = Join-Path $env:TEMP "hybrid-request-flow-natural.png"
+$png = "$root\evidence\hybrid-request-flow.png"
+$env:PUPPETEER_EXECUTABLE_PATH = (Get-Command chrome -ErrorAction Stop).Source
+
+mmdc -i $source -o $svg `
+  -c $mermaidConfig -p $puppeteerConfig `
+  -b "#0B1220" -w 1920 -H 1080
+mmdc -i $source -o $naturalPng `
+  -c $mermaidConfig -p $puppeteerConfig `
+  -b "#0B1220" -w 1920 -H 1080 -s 2
+ffmpeg -y -v error -i $naturalPng `
+  -vf "scale=1920:1080:force_original_aspect_ratio=decrease:flags=lanczos,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=0x0B1220" `
+  -frames:v 1 $png
 ```
 
-Open `hybrid-sandbox-leadership-live-e2e-v4.mp4` for the leadership cut.
+The Mermaid render is intentionally padded rather than cropped so the PNG
+retains every numbered interaction and note at a fixed 16:9 deck resolution.
+
+The final MP4, silent master, contact sheet, raw Playwright recording, and
+redacted telemetry exports are intentionally kept outside git. The external
+artifact filenames and integrity hashes are recorded in `manifest.json`
+without publishing a workstation path.
 
 ## Correlated live run
 
-The bounded capture invocation started at `2026-09-04T17:43:16.2144452Z` and
-completed with HTTP 200 at `2026-09-04T17:44:25.1028758Z`.
+The bounded retained capture completed with HTTP 200. Exact live timestamps,
+operation identifiers, resource names, and endpoints are intentionally omitted
+from the public package.
 
-- Function request operation: `b4ea9ff6bea845d373dceada288512df`
-- Runtime trace operation: `a34b1843f6dc8321c646cf8bb772f10c`
 - Function duration: 68.888 seconds
 - Runtime span duration: 68.810 seconds
 - Tool results: one Microsoft Learn MCP takeaway, `ALPHA_COMPLETE`, and
   `BETA_COMPLETE`
 - Expanded details: `microsoft_docs_search`, `run_shell`, and `run_shell`
-  surfaced at `2026-09-04T17:43:25Z`
-- Active inventory: one `Running` sandbox observed at
-  `2026-09-04T17:43:25.674400Z`
-- Final typed inventory: zero at `2026-09-04T17:45:20.5636273Z`; no operator
-  cleanup was used
+  surfaced during the active request
+- Active inventory: one `Running` sandbox
+- Final typed inventory: zero; no operator cleanup was used
 
 The model surfaced three tool calls in one plan. The two local calls shared one
 invocation sandbox and were safely queued by the same-sandbox file journal.
@@ -71,7 +108,7 @@ held for 25 seconds so the recorder could observe the active sandbox. The
 | One fresh sandbox was cleaned up | Same-run create/delete spans and final typed inventory of zero |
 | The product exposes an Agent Trace view | `appinsights-agent-trace-portal.png`, captured from an earlier retained live agent run |
 | The new capture is inspectable as one runtime lifecycle | `appinsights-agent-trace.png` plus the separately correlated runtime trace |
-| The latest complete fallback-qualified path reduced measured runtime by 35.5% | The 2026-09-05 `fd6589e` qualification in `docs/decisions/0009-hybrid-sandbox-tool-execution-results.json` and the demo-results scene |
+| The latest complete fallback-qualified path reduced measured runtime by 35.5% | The exact-source `fd6589e` qualification in `docs/decisions/0009-hybrid-sandbox-tool-execution-results.json` and the demo-results scene |
 
 The capture window contains successful model and MCP traffic through APIM,
 including two successful model `POST` requests. Expected MCP close/teardown
@@ -79,7 +116,7 @@ probes are not treated as request failures. No request or response bodies were
 queried or recorded.
 
 The demo's performance headline now uses the exact-source, quiet-boundary
-2026-09-05 qualification. A 2026-09-04 streaming rerun was aborted after an inventory
+qualification. An earlier streaming rerun was aborted after an inventory
 safety-gate failure and is recorded as operational evidence, not as a
 replacement benchmark.
 
@@ -95,12 +132,13 @@ completed exactly 21 nonstream requests with zero inventory at every boundary.
 The repository scene source, narration, and deck carry the new measurement.
 The external v4 final video is not regenerated because its live-capture workflow
 would send prohibited additional Function requests; it retains the historical
-2026-09-03 qualification and is labeled accordingly in the manifest.
+qualification and is labeled accordingly in the manifest.
 
 ## Recording provenance and limitations
 
 - The Hosted Skills interaction is an actual 1920×1080 Playwright recording
-  against `func-hybrid-sbx-0902`; it is not a mock or reconstructed animation.
+  against the retained hybrid Functions app; it is not a mock or reconstructed
+  animation.
 - The recorder expanded the exact `3 tool calls` bubble and synchronized the
   typed ACA inventory observation with that UI state.
 - The Function key was held only in process memory and injected after page
@@ -114,9 +152,8 @@ would send prohibited additional Function requests; it retains the historical
   68.8-second capture run did not appear as an `invoke_agent` row in the
   Agents (Preview) index, so the video explicitly separates the native product
   surface from the new run's telemetry-derived analysis.
-- The dedicated profile is outside git at
-  `%LOCALAPPDATA%\ms-playwright-demo-video\hybrid-sandbox-azure-portal`. It
-  contains sensitive authenticated state and must not be copied or committed.
+- The dedicated browser profile is outside git. It contains sensitive
+  authenticated state and must not be copied or committed.
 
 ## Safe rerun
 
@@ -135,9 +172,9 @@ The command below reads the existing resource IDs and key without printing the
 key or placing it on the command line:
 
 ```powershell
-$rg = "larohra-test-adc-tools-hosted-skill"
-$functionApp = "func-hybrid-sbx-0902"
-$sandboxGroup = "sbg-hybrid-tools-0902"
+$rg = "<resource-group>"
+$functionApp = "<function-app>"
+$sandboxGroup = "<sandbox-group>"
 $output = Join-Path $env:TEMP "hybrid-sandbox-live-flow"
 $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
 $groupId = az resource show `
@@ -155,7 +192,7 @@ try {
     --output-root $output `
     --chrome $chrome `
     --sandbox-group $groupId `
-    --region westus2
+    --region <azure-region>
 } finally {
   Remove-Item Env:\HYBRID_SPIKE_FUNCTION_KEY -ErrorAction SilentlyContinue
   Remove-Variable groupId -ErrorAction SilentlyContinue
@@ -185,7 +222,7 @@ $env:AGENT_TRACE_URL = "<selected redacted-capture source URL>"
 try {
   uv run --with playwright python `
     docs\demo\hybrid-sandbox-leadership\record_agent_trace.py `
-    --profile-dir "$env:LOCALAPPDATA\ms-playwright-demo-video\hybrid-sandbox-azure-portal" `
+    --profile-dir "<authenticated-profile-outside-repository>" `
     --trace-url $env:AGENT_TRACE_URL `
     --output-root "$env:TEMP\hybrid-sandbox-agent-trace"
 } finally {

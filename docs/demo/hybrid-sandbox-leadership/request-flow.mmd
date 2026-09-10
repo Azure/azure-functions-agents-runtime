@@ -1,0 +1,76 @@
+%% Authoritative editable source for the hybrid request-flow diagram.
+sequenceDiagram
+    autonumber
+
+    box rgb(17,40,65) Client
+        participant U as User / client
+    end
+    box rgb(18,52,46) Trusted orchestration / control plane
+        participant F as Hosted Skill + worker
+        participant S as Hybrid setup
+        participant A as MAF agent
+        participant W as Local-tool middleware
+    end
+    box rgb(16,52,82) Governed external services
+        participant G as APIM AI Gateway
+        participant M as Foundry model
+        participant R as Remote MCP
+    end
+    box rgb(43,43,36) Customer isolation boundary
+        participant X as ACA sandbox<br/>journal + executor + tools
+    end
+    box rgb(36,35,63) Observability
+        participant I as Application Insights
+    end
+
+    U->>F: POST agent request
+    activate F
+    F->>S: Begin top-level hybrid invocation
+    activate S
+    S->>X: Create one fresh customer sandbox
+    S->>X: Prepare package, executor, and manifest
+    Note over S,X: Upload selected app or explicit bundle<br/>Verify SHA-256, start persistent executor, discover exact manifest
+    X-->>F: Manifest returned, build inert stubs + provenance
+    deactivate S
+
+    F->>A: Construct MAF agent and start turn
+    activate A
+    A->>G: Responses API planning
+    G->>M: Managed-identity model call
+    M-->>A: Tool plan returned through APIM
+
+    par Remote MCP stays worker-side
+        A->>G: Remote MCP tool request
+        G->>R: Governed MCP operation
+        R-->>A: Read-only result returned through APIM
+    and Exact local stubs enter sandbox lane
+        A->>W: Invoke exact sandbox-generated stub
+        activate W
+        W->>X: Execute through no-ingress file journal
+        Note over W,X: Strict JSON + idempotent call_id<br/>One shared executor queues tool, shell, file, and search calls
+        X-->>A: Result + timings returned through middleware
+        deactivate W
+    end
+    Note over A,X: One turn may select MCP + local calls, local calls share one queued executor
+
+    A->>G: Responses API final synthesis
+    G->>M: Managed-identity model call
+    M-->>A: Final answer returned through APIM
+    deactivate A
+
+    F->>X: Stop, drain, shutdown marker, terminal 300/600 lifecycle
+    F->>X: Request handle delete with 5s acceptance bound
+    alt Accepted or already absent
+        X-->>F: Accepted / NotFound, do not await LRO
+    else Pre-acceptance stall or failure
+        F->>X: Bounded exact-ID provider delete fallback
+        X-->>F: Confirmed deletion / NotFound
+    end
+    X-->>F: Final typed inventory = 0
+    F-->>U: Return completed agent response
+    deactivate F
+
+    Note over F,I: W3C correlation spans Functions + APIM<br/>Content-free hybrid progress and metrics flow to Application Insights
+    Note over F,A: Model/MCP credentials and clients stay in Functions
+    Note over X: Customer identity, deny-by-default egress, no public ingress
+    Note over F,X: Only local executables enter ACA, lifecycle + reaper remain backstops

@@ -1,7 +1,7 @@
 {
   "schema_version": "3.0",
   "package": "hybrid-sandbox-leadership-live-e2e",
-  "generated_at": "2026-09-05T00:41:00Z",
+  "generated_at": "2026-09-10",
   "safety": {
     "existing_resources_only": true,
     "bounded_demo_invocations_in_package": 2,
@@ -13,33 +13,29 @@
     "credentials_recorded": false
   },
   "resources": {
-    "resource_group": "larohra-test-adc-tools-hosted-skill",
-    "function_app": "func-hybrid-sbx-0902",
-    "sandbox_group": "sbg-hybrid-tools-0902",
-    "application_insights": "appi-hybrid-sbx-0902",
-    "log_analytics": "log-hybrid-sbx-0902",
-    "api_management": "larohra-ai-gateway",
-    "region": "westus2"
+    "public_identifiers_redacted": true,
+    "resource_group": "<resource-group>",
+    "function_app": "<function-app>",
+    "sandbox_group": "<sandbox-group>",
+    "application_insights": "<application-insights>",
+    "log_analytics": "<log-analytics-workspace>",
+    "api_management": "<api-management-service>",
+    "region": "<azure-region>"
   },
   "capture_invocation": {
     "prompt_id": "parallel-shell-mcp-active-sandbox-demo",
     "purpose": "Hold both local tools for 25 seconds so active sandbox inventory can be captured.",
     "performance_use": "The capture duration is not a service benchmark.",
     "window": {
-      "request_start_utc": "2026-09-04T17:43:16.2144452Z",
-      "request_end_utc": "2026-09-04T17:44:25.1028758Z",
-      "telemetry_query_start_utc": "2026-09-04T17:41:16Z",
-      "telemetry_query_end_utc": "2026-09-04T17:47:16Z",
-      "active_sandbox_observed_utc": "2026-09-04T17:43:25.674400Z",
-      "final_inventory_observed_utc": "2026-09-04T17:45:20.5636273Z"
+      "public_exact_timestamps_redacted": true
     },
     "function_request": {
-      "operation_id": "b4ea9ff6bea845d373dceada288512df",
+      "operation_id": "<redacted>",
       "http_status": 200,
       "duration_ms": 68888.4306
     },
     "runtime_trace": {
-      "operation_id": "a34b1843f6dc8321c646cf8bb772f10c",
+      "operation_id": "<redacted>",
       "root_span": "hybrid.invocation",
       "duration_ms": 68810,
       "role": "hybrid-sandbox-spike",
@@ -81,7 +77,7 @@
     }
   },
   "same_window_apim": {
-    "role": "larohra-ai-gateway West US",
+    "role": "APIM AI Gateway",
     "successful_model_posts": 2,
     "successful_mcp_posts_minimum": 1,
     "expected_mcp_close_probes_excluded_from_failures": true,
@@ -90,7 +86,6 @@
   },
   "portal_agent_trace_capture": {
     "literal_agent_trace_blade_captured": true,
-    "captured_at_utc": "2026-09-04T18:15:23.374821Z",
     "source": "Application Insights Agents (Preview) Agent Trace blade",
     "source_run_relationship": "Earlier retained live agent run; not the 68.8-second capture invocation.",
     "visible_span_types": [
@@ -113,7 +108,7 @@
   },
   "qualification_baseline": {
     "source": "../../decisions/0009-hybrid-sandbox-tool-execution-results.json",
-    "measured_at_utc": "2026-09-05T01:27:50.202439Z",
+    "measurement_date": "2026-09-05",
     "status": "latest_complete_qualification",
     "source_commit": "fd6589eb0df88be39c8777caa807946fc513d8d2",
     "runtime_reduction_percent": 35.5,
@@ -131,7 +126,7 @@
   },
   "latest_rerun_attempt": {
     "source": "../../decisions/0009-hybrid-sandbox-tool-execution-results.json#latest_rerun_attempt",
-    "started_at_utc": "2026-09-04T23:24:38.8305347Z",
+    "attempt_date": "2026-09-04",
     "status": "aborted_at_inventory_safety_gate",
     "completed_requests": 4,
     "requested_requests": 21,
@@ -144,7 +139,7 @@
   },
   "latest_nonstream_rerun_attempt": {
     "source": "../../decisions/0009-hybrid-sandbox-tool-execution-results.json#latest_nonstream_rerun_attempt",
-    "started_at_utc": "2026-09-05T00:13:34.000808Z",
+    "attempt_date": "2026-09-05",
     "status": "blocked_by_delete_endpoint_timeout",
     "completed_requests": 1,
     "requested_requests": 21,
@@ -158,7 +153,7 @@
   },
   "mixed_deployment_rerun_attempt": {
     "source": "../../decisions/0009-hybrid-sandbox-tool-execution-results.json#mixed_deployment_rerun_attempt",
-    "started_at_utc": "2026-09-05T01:09:27.283569Z",
+    "attempt_date": "2026-09-05",
     "status": "provenance_contaminated_not_authoritative",
     "completed_requests": 21,
     "requested_requests": 21,
@@ -168,9 +163,9 @@
   },
   "latest_result_scene_regeneration": {
     "source": "demo.html#demo-results",
-    "generated_at_utc": "2026-09-05T01:46:50.8892541Z",
+    "generated_date": "2026-09-05",
     "repository_asset": false,
-    "path": "C:\\Users\\larohra\\.copilot\\session-state\\d11d7a47-d9ab-4d6b-9095-e7ba11bd93b3\\files\\hybrid-latest-rerun\\demo-result-scene-fd6589e\\raw\\demo-results.webm",
+    "path": "demo-results.webm",
     "bytes": 2073557,
     "sha256": "b501b235d31a9b94e6fa99320b779117c8988c42a0d09c5f5ad086bf40c560aa",
     "duration_seconds": 18.2,
@@ -178,7 +173,54 @@
     "height": 1080,
     "video_codec": "vp8",
     "final_video_regenerated": false,
-    "reason": "The repository scene and deck use the 2026-09-05 measurement. The external live-capture video retains the historical 2026-09-03 qualification because regeneration would send prohibited additional Function requests."
+    "reason": "The repository scene and deck use the latest exact-source measurement. The external live-capture video retains the historical qualification because regeneration would send prohibited additional Function requests."
+  },
+  "request_flow_diagram": {
+    "purpose": "Authoritative leadership-readable temporal flow for the hybrid Functions/APIM/ACA request lifecycle.",
+    "rendered_date": "2026-09-10",
+    "source": {
+      "path": "request-flow.mmd",
+      "format": "Mermaid sequence diagram",
+      "bytes": 3099,
+      "sha256": "54ce68bb0a3dc5fc11a0920121aaffe5aff6f1788134551a12eda8df2b8f5fa2"
+    },
+    "renderer": {
+      "mermaid_cli_version": "11.12.0",
+      "node_version": "26.8.2",
+      "mermaid_config": {
+        "path": "request-flow-mermaid-config.json",
+        "bytes": 1244,
+        "sha256": "991304c0d346ed1411c46ac9ddc219c80bd14e4410e586a639b2fb00dd49d47f"
+      },
+      "puppeteer_config": {
+        "path": "request-flow-puppeteer-config.json",
+        "bytes": 80,
+        "sha256": "9ca96d3d188095b333fb35fb52c1099b1f14ddbcf80851993ab39b1f343f9eeb"
+      },
+      "raster_postprocess": "FFmpeg Lanczos contain-and-pad to exact 1920x1080 on #0B1220"
+    },
+    "svg": {
+      "path": "evidence/hybrid-request-flow.svg",
+      "width": 2493,
+      "height": 1683,
+      "bytes": 51191,
+      "sha256": "c0894742646807cd27734167d8886445e345e1bdeeaeaa18435e2f7fd40923bb"
+    },
+    "png": {
+      "path": "evidence/hybrid-request-flow.png",
+      "width": 1920,
+      "height": 1080,
+      "bytes": 465752,
+      "sha256": "d426d13169cebafe28d30659cbd36f5adc3b3a0eeac8b9c4e613c7303b888b9c"
+    },
+    "provenance": {
+      "azure_calls": 0,
+      "function_requests": 0,
+      "deployments": 0,
+      "resource_changes": 0,
+      "project_dependency_added": false,
+      "authoritative_source": "request-flow.mmd"
+    }
   },
   "claims": [
     {
@@ -232,7 +274,7 @@
       ]
     },
     {
-      "claim": "The latest complete exact-source qualification, measured on 2026-09-05, reduced runtime by 35.50 percent and recovered all 17 handle stalls through bounded provider fallback.",
+      "claim": "The latest complete exact-source qualification reduced runtime by 35.50 percent and recovered all 17 handle stalls through bounded provider fallback.",
       "evidence": [
         "qualification_baseline"
       ]
@@ -262,6 +304,47 @@
     {
       "path": "narration.json",
       "kind": "narration_source"
+    },
+    {
+      "path": "request-flow.mmd",
+      "kind": "authoritative_mermaid_sequence_source",
+      "bytes": 3099,
+      "sha256": "54ce68bb0a3dc5fc11a0920121aaffe5aff6f1788134551a12eda8df2b8f5fa2"
+    },
+    {
+      "path": "request-flow-mermaid-config.json",
+      "kind": "mermaid_render_config",
+      "bytes": 1244,
+      "sha256": "991304c0d346ed1411c46ac9ddc219c80bd14e4410e586a639b2fb00dd49d47f"
+    },
+    {
+      "path": "request-flow-puppeteer-config.json",
+      "kind": "mermaid_puppeteer_config",
+      "bytes": 80,
+      "sha256": "9ca96d3d188095b333fb35fb52c1099b1f14ddbcf80851993ab39b1f343f9eeb"
+    },
+    {
+      "path": "evidence/hybrid-request-flow.svg",
+      "kind": "request_flow_vector_export",
+      "width": 2493,
+      "height": 1683,
+      "bytes": 51191,
+      "sha256": "c0894742646807cd27734167d8886445e345e1bdeeaeaa18435e2f7fd40923bb"
+    },
+    {
+      "path": "evidence/hybrid-request-flow.png",
+      "kind": "request_flow_deck_export",
+      "width": 1920,
+      "height": 1080,
+      "bytes": 465752,
+      "sha256": "d426d13169cebafe28d30659cbd36f5adc3b3a0eeac8b9c4e613c7303b888b9c"
+    },
+    {
+      "path": "hybrid-sandbox-leadership-demo.pptx",
+      "kind": "seven_slide_leadership_deck_with_request_flow_appendix",
+      "slides": 7,
+      "bytes": 5287504,
+      "sha256": "a6560c98fd706981de6142003f4ae910684748a0e3d24ba0895e40bc87f23326"
     },
     {
       "path": "evidence/live-chat-tool-calls.png",
@@ -313,7 +396,7 @@
     }
   ],
   "external_artifacts": {
-    "root": "C:\\Users\\larohra\\.copilot\\session-state\\e29c49e0-41eb-4fab-be8c-6e9a671f8008\\files\\hybrid-sandbox-leadership-video\\live-flow-v4",
+    "root": "<external-artifact-directory>",
     "final_video": {
       "path": "hybrid-sandbox-leadership-live-e2e-v4.mp4",
       "bytes": 14094370,
@@ -359,7 +442,7 @@
     }
   },
   "authenticated_profile": {
-    "path": "%LOCALAPPDATA%\\ms-playwright-demo-video\\hybrid-sandbox-azure-portal",
+    "path": "<authenticated-profile-outside-repository>",
     "repository_asset": false,
     "contains_sensitive_authenticated_state": true,
     "copy_or_commit": false

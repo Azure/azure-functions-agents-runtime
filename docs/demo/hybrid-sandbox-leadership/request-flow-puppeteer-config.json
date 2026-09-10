@@ -1,0 +1,6 @@
+{
+  "args": [
+    "--disable-gpu",
+    "--font-render-hinting=none"
+  ]
+}
