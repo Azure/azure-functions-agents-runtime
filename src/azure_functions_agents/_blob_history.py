@@ -11,8 +11,9 @@ multi-instance support.
 Wire format
 -----------
 
-One blob per session, named ``{blob_prefix}{session_id}.jsonl`` inside a
-single container (default: ``azure-functions-agents``). Blobs are
+One blob per agent/session pair, named
+``{blob_prefix}{agent_slug}/{session_id}.jsonl`` inside a single container
+(default: ``azure-functions-agents``). Blobs are
 **Append Blobs**: every call to :meth:`save_messages` appends the JSON Lines
 serialization of just the new messages from the current turn — this matches
 the contract that MAF's :meth:`HistoryProvider.after_run` only ever passes
@@ -53,8 +54,15 @@ from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar
 
 from agent_framework import HistoryProvider, Message
-from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from azure.core.exceptions import (
+    HttpResponseError,
+    ResourceExistsError,
+    ResourceNotFoundError,
+    ServiceRequestError,
+    ServiceResponseError,
+)
 
+from ._history_identity import validate_agent_slug, warn_legacy_history_detected
 from ._logger import logger
 
 # ---------------------------------------------------------------------------
@@ -95,9 +103,9 @@ _ENSURED_CONTAINERS_LOCK = asyncio.Lock()
 class BlobHistoryProvider(HistoryProvider):
     """Append-blob-backed :class:`HistoryProvider`.
 
-    Each session is stored as a single Append Blob named
-    ``{blob_prefix}{session_id}.jsonl``. Messages are written as JSON Lines —
-    one ``Message.to_dict()`` payload per line.
+    Each agent/session pair is stored as a single Append Blob named
+    ``{blob_prefix}{agent_slug}/{session_id}.jsonl``. Messages are written as
+    JSON Lines — one ``Message.to_dict()`` payload per line.
     """
 
     DEFAULT_SOURCE_ID: ClassVar[str] = DEFAULT_SOURCE_ID
@@ -105,6 +113,7 @@ class BlobHistoryProvider(HistoryProvider):
     def __init__(
         self,
         *,
+        agent_slug: str,
         connection_string: str | None = None,
         blob_service_url: str | None = None,
         credential: Any | None = None,
@@ -130,6 +139,7 @@ class BlobHistoryProvider(HistoryProvider):
             raise ValueError(
                 "BlobHistoryProvider requires either 'connection_string' or 'blob_service_url'."
             )
+        self._agent_slug = validate_agent_slug(agent_slug)
         self.skip_excluded = skip_excluded
         self._connection_string = connection_string
         self._blob_service_url = blob_service_url
@@ -158,6 +168,7 @@ class BlobHistoryProvider(HistoryProvider):
             downloader = await blob_client.download_blob(encoding="utf-8")
             content = await downloader.readall()
         except ResourceNotFoundError:
+            await self._detect_legacy_blob(session_id)
             return []
 
         text = content if isinstance(content, str) else content.decode("utf-8")
@@ -222,6 +233,10 @@ class BlobHistoryProvider(HistoryProvider):
 
     def _blob_name(self, session_id: str | None) -> str:
         stem = session_id or "default"
+        return f"{self._blob_prefix}{self._agent_slug}/{stem}.jsonl"
+
+    def _legacy_blob_name(self, session_id: str | None) -> str:
+        stem = session_id or "default"
         return f"{self._blob_prefix}{stem}.jsonl"
 
     async def _get_blob_client(self, session_id: str | None) -> Any:
@@ -230,6 +245,35 @@ class BlobHistoryProvider(HistoryProvider):
         return service_client.get_blob_client(
             container=self._container_name,
             blob=self._blob_name(session_id),
+        )
+
+    async def _detect_legacy_blob(self, session_id: str | None) -> None:
+        service_client = await self._get_service_client()
+        legacy_client = service_client.get_blob_client(
+            container=self._container_name,
+            blob=self._legacy_blob_name(session_id),
+        )
+        try:
+            await legacy_client.get_blob_properties()
+        except ResourceNotFoundError:
+            return
+        except (
+            HttpResponseError,
+            ServiceRequestError,
+            ServiceResponseError,
+            TimeoutError,
+        ) as exc:
+            logger.debug(
+                "Could not check the legacy unscoped blob history path "
+                "(agent_slug=%s error=%s).",
+                self._agent_slug,
+                type(exc).__name__,
+                exc_info=True,
+            )
+            return
+        warn_legacy_history_detected(
+            agent_slug=self._agent_slug,
+            backend="blob",
         )
 
     async def _get_service_client(self) -> Any:
@@ -330,6 +374,7 @@ def _build_service_client(
 
 def build_blob_provider_from_environment(
     *,
+    agent_slug: str,
     container_name: str | None = None,
 ) -> BlobHistoryProvider | None:
     """Construct a :class:`BlobHistoryProvider` from ``AzureWebJobsStorage`` env vars.
@@ -353,13 +398,21 @@ def build_blob_provider_from_environment(
             "BlobHistoryProvider: using AzureWebJobsStorage connection string (container=%s).",
             container or DEFAULT_CONTAINER_NAME,
         )
-        return BlobHistoryProvider(connection_string=conn, **kwargs)
+        return BlobHistoryProvider(
+            agent_slug=agent_slug,
+            connection_string=conn,
+            **kwargs,
+        )
     logger.info(
         "BlobHistoryProvider: using AzureWebJobsStorage__blobServiceUri=%s (container=%s).",
         uri,
         container or DEFAULT_CONTAINER_NAME,
     )
-    return BlobHistoryProvider(blob_service_url=uri, **kwargs)
+    return BlobHistoryProvider(
+        agent_slug=agent_slug,
+        blob_service_url=uri,
+        **kwargs,
+    )
 
 
 def reset_caches_for_testing() -> None:

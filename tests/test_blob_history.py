@@ -13,7 +13,13 @@ import json
 from typing import Any, ClassVar
 
 import pytest
-from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from azure.core.exceptions import (
+    HttpResponseError,
+    ResourceExistsError,
+    ResourceNotFoundError,
+    ServiceRequestError,
+    ServiceResponseError,
+)
 
 from azure_functions_agents import _blob_history
 from azure_functions_agents._blob_history import (
@@ -50,9 +56,19 @@ class _FakeBlobClient:
         return (self._container, self._blob)
 
     async def download_blob(self, *, encoding: str | None = None) -> _FakeDownloader:
+        self._account.download_calls.append(self._key)
         if self._key not in self._account.blobs:
             raise ResourceNotFoundError("blob not found")
         return _FakeDownloader(self._account.blobs[self._key])
+
+    async def get_blob_properties(self) -> object:
+        self._account.properties_calls.append(self._key)
+        error = self._account.properties_errors.get(self._key)
+        if error is not None:
+            raise error
+        if self._key not in self._account.blobs:
+            raise ResourceNotFoundError("blob not found")
+        return object()
 
     async def create_append_blob(self) -> None:
         if self._key in self._account.blobs:
@@ -99,6 +115,9 @@ class _FakeAccount:
         self.append_calls: list[tuple[tuple[str, str], bytes]] = []
         self.create_calls: list[tuple[str, str]] = []
         self.container_create_calls: list[str] = []
+        self.download_calls: list[tuple[str, str]] = []
+        self.properties_calls: list[tuple[str, str]] = []
+        self.properties_errors: dict[tuple[str, str], BaseException] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +185,16 @@ def test_service_client_cache_key_hashes_connection_string() -> None:
 
 def test_requires_connection_or_url() -> None:
     with pytest.raises(ValueError, match="connection_string"):
-        BlobHistoryProvider()
+        BlobHistoryProvider(agent_slug="billing")
+
+
+@pytest.mark.parametrize("agent_slug", ["", ".", "..", "billing/support", "billing support"])
+def test_rejects_invalid_agent_slug(agent_slug: str) -> None:
+    with pytest.raises(ValueError, match="agent_slug"):
+        BlobHistoryProvider(
+            agent_slug=agent_slug,
+            connection_string="UseDevelopmentStorage=true",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +203,10 @@ def test_requires_connection_or_url() -> None:
 
 
 def test_get_messages_returns_empty_when_blob_missing(fake_account: _FakeAccount) -> None:
-    provider = BlobHistoryProvider(connection_string="UseDevelopmentStorage=true")
+    provider = BlobHistoryProvider(
+        agent_slug="billing",
+        connection_string="UseDevelopmentStorage=true",
+    )
     result = asyncio.run(provider.get_messages("sess-1"))
     assert result == []
     # Container must have been ensured.
@@ -186,30 +217,39 @@ def test_get_messages_parses_jsonl(fake_account: _FakeAccount) -> None:
     from agent_framework import Message
 
     msgs = [Message(role="user", contents=["hi"]), Message(role="assistant", contents=["hello"])]
-    blob_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}sess-1.jsonl")
+    blob_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}billing/sess-1.jsonl")
     fake_account.blobs[blob_key] = (
         "".join(f"{json.dumps(m.to_dict())}\n" for m in msgs).encode("utf-8")
     )
 
-    provider = BlobHistoryProvider(connection_string="UseDevelopmentStorage=true")
+    provider = BlobHistoryProvider(
+        agent_slug="billing",
+        connection_string="UseDevelopmentStorage=true",
+    )
     result = asyncio.run(provider.get_messages("sess-1"))
     assert [m.text for m in result] == ["hi", "hello"]
     assert [str(m.role) for m in result] == ["user", "assistant"]
 
 
 def test_get_messages_raises_on_invalid_json(fake_account: _FakeAccount) -> None:
-    blob_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}sess-1.jsonl")
+    blob_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}billing/sess-1.jsonl")
     fake_account.blobs[blob_key] = b"{not json}\n"
-    provider = BlobHistoryProvider(connection_string="UseDevelopmentStorage=true")
+    provider = BlobHistoryProvider(
+        agent_slug="billing",
+        connection_string="UseDevelopmentStorage=true",
+    )
     with pytest.raises(ValueError, match="Failed to deserialize"):
         asyncio.run(provider.get_messages("sess-1"))
 
 
 def test_get_messages_skips_blank_lines(fake_account: _FakeAccount) -> None:
     msg = _make_message("hi")
-    blob_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}sess-1.jsonl")
+    blob_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}billing/sess-1.jsonl")
     fake_account.blobs[blob_key] = f"\n{json.dumps(msg.to_dict())}\n\n".encode()
-    provider = BlobHistoryProvider(connection_string="UseDevelopmentStorage=true")
+    provider = BlobHistoryProvider(
+        agent_slug="billing",
+        connection_string="UseDevelopmentStorage=true",
+    )
     result = asyncio.run(provider.get_messages("sess-1"))
     assert len(result) == 1
     assert result[0].text == "hi"
@@ -223,11 +263,14 @@ def test_get_messages_skips_blank_lines(fake_account: _FakeAccount) -> None:
 def test_save_messages_creates_then_appends_on_first_write(
     fake_account: _FakeAccount,
 ) -> None:
-    provider = BlobHistoryProvider(connection_string="UseDevelopmentStorage=true")
+    provider = BlobHistoryProvider(
+        agent_slug="billing",
+        connection_string="UseDevelopmentStorage=true",
+    )
     msgs = [_make_message("hi"), _make_message("there", role="assistant")]
     asyncio.run(provider.save_messages("sess-1", msgs))
 
-    blob_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}sess-1.jsonl")
+    blob_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}billing/sess-1.jsonl")
     assert blob_key in fake_account.blobs
     assert fake_account.create_calls == [blob_key]
     # Two append calls: one failed (before create) + one succeeded (after create).
@@ -240,9 +283,12 @@ def test_save_messages_creates_then_appends_on_first_write(
 def test_save_messages_appends_without_recreating_when_blob_exists(
     fake_account: _FakeAccount,
 ) -> None:
-    blob_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}sess-1.jsonl")
+    blob_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}billing/sess-1.jsonl")
     fake_account.blobs[blob_key] = b""  # blob already exists
-    provider = BlobHistoryProvider(connection_string="UseDevelopmentStorage=true")
+    provider = BlobHistoryProvider(
+        agent_slug="billing",
+        connection_string="UseDevelopmentStorage=true",
+    )
     asyncio.run(provider.save_messages("sess-1", [_make_message("hi")]))
     # Single successful append; no create call.
     assert fake_account.create_calls == []
@@ -255,7 +301,7 @@ def test_save_messages_handles_concurrent_create_race(
     account = _FakeAccount()
     # Pre-create the blob to simulate another instance winning the race
     # between our first failed append and our create_append_blob call.
-    blob_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}sess-1.jsonl")
+    blob_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}billing/sess-1.jsonl")
 
     original_blob_cls = _FakeBlobClient
     original_append = original_blob_cls.append_block
@@ -279,7 +325,10 @@ def test_save_messages_handles_concurrent_create_race(
         lambda **_: _FakeServiceClient(account),
     )
 
-    provider = BlobHistoryProvider(connection_string="UseDevelopmentStorage=true")
+    provider = BlobHistoryProvider(
+        agent_slug="billing",
+        connection_string="UseDevelopmentStorage=true",
+    )
     # Should NOT raise even though create_append_blob raises ResourceExistsError.
     asyncio.run(provider.save_messages("sess-1", [_make_message("hi")]))
     assert blob_key in account.blobs
@@ -288,7 +337,10 @@ def test_save_messages_handles_concurrent_create_race(
 
 
 def test_save_messages_noop_for_empty_input(fake_account: _FakeAccount) -> None:
-    provider = BlobHistoryProvider(connection_string="UseDevelopmentStorage=true")
+    provider = BlobHistoryProvider(
+        agent_slug="billing",
+        connection_string="UseDevelopmentStorage=true",
+    )
     asyncio.run(provider.save_messages("sess-1", []))
     assert fake_account.append_calls == []
     assert fake_account.create_calls == []
@@ -300,7 +352,10 @@ def test_save_messages_noop_for_empty_input(fake_account: _FakeAccount) -> None:
 
 
 def test_round_trip_save_then_get(fake_account: _FakeAccount) -> None:
-    provider = BlobHistoryProvider(connection_string="UseDevelopmentStorage=true")
+    provider = BlobHistoryProvider(
+        agent_slug="billing",
+        connection_string="UseDevelopmentStorage=true",
+    )
     msgs = [_make_message("first"), _make_message("second", role="assistant")]
     asyncio.run(provider.save_messages("sess-1", msgs))
 
@@ -317,16 +372,174 @@ def test_round_trip_save_then_get(fake_account: _FakeAccount) -> None:
 
 
 def test_blob_name_uses_default_stem_for_none_session() -> None:
-    provider = BlobHistoryProvider(connection_string="UseDevelopmentStorage=true")
-    assert provider._blob_name(None) == f"{DEFAULT_BLOB_PREFIX}default.jsonl"
+    provider = BlobHistoryProvider(
+        agent_slug="billing",
+        connection_string="UseDevelopmentStorage=true",
+    )
+    assert provider._blob_name(None) == f"{DEFAULT_BLOB_PREFIX}billing/default.jsonl"
 
 
 def test_blob_name_uses_custom_prefix() -> None:
     provider = BlobHistoryProvider(
+        agent_slug="billing",
         connection_string="UseDevelopmentStorage=true",
         blob_prefix="custom",
     )
-    assert provider._blob_name("sess-1") == "custom/sess-1.jsonl"
+    assert provider._blob_name("sess-1") == "custom/billing/sess-1.jsonl"
+
+
+def test_same_session_id_remains_independent_across_agent_slugs(
+    fake_account: _FakeAccount,
+) -> None:
+    billing = BlobHistoryProvider(
+        agent_slug="billing",
+        connection_string="UseDevelopmentStorage=true",
+    )
+    support = BlobHistoryProvider(
+        agent_slug="support",
+        connection_string="UseDevelopmentStorage=true",
+    )
+
+    asyncio.run(billing.save_messages("shared-session", [_make_message("billing reply")]))
+    asyncio.run(support.save_messages("shared-session", [_make_message("support reply")]))
+
+    assert [message.text for message in asyncio.run(billing.get_messages("shared-session"))] == [
+        "billing reply"
+    ]
+    assert [message.text for message in asyncio.run(support.get_messages("shared-session"))] == [
+        "support reply"
+    ]
+    assert (
+        DEFAULT_CONTAINER_NAME,
+        f"{DEFAULT_BLOB_PREFIX}billing/shared-session.jsonl",
+    ) in fake_account.blobs
+    assert (
+        DEFAULT_CONTAINER_NAME,
+        f"{DEFAULT_BLOB_PREFIX}support/shared-session.jsonl",
+    ) in fake_account.blobs
+
+
+def test_legacy_unscoped_blob_is_not_loaded_and_warning_omits_path_details(
+    caplog: pytest.LogCaptureFixture,
+    fake_account: _FakeAccount,
+) -> None:
+    session_id = "legacy-session"
+    second_session_id = "another-legacy-session"
+    legacy_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}{session_id}.jsonl")
+    second_legacy_key = (
+        DEFAULT_CONTAINER_NAME,
+        f"{DEFAULT_BLOB_PREFIX}{second_session_id}.jsonl",
+    )
+    legacy_content = b'{"message":"legacy record"}\n'
+    fake_account.blobs[legacy_key] = legacy_content
+    fake_account.blobs[second_legacy_key] = legacy_content
+    provider = BlobHistoryProvider(
+        agent_slug="blob_warning_agent",
+        connection_string="UseDevelopmentStorage=true",
+    )
+
+    with caplog.at_level("WARNING", logger="azure.functions.AgentRuntime"):
+        assert asyncio.run(provider.get_messages(session_id)) == []
+        assert asyncio.run(provider.get_messages(second_session_id)) == []
+
+    scoped_key = (
+        DEFAULT_CONTAINER_NAME,
+        f"{DEFAULT_BLOB_PREFIX}blob_warning_agent/{session_id}.jsonl",
+    )
+    assert scoped_key not in fake_account.blobs
+    assert fake_account.blobs[legacy_key] == legacy_content
+    assert legacy_key not in fake_account.download_calls
+    assert fake_account.properties_calls == [legacy_key, second_legacy_key]
+    warning_text = caplog.text
+    assert warning_text.count("Legacy unscoped chat history path detected") == 1
+    assert "agent_slug=blob_warning_agent backend=blob" in warning_text
+    for omitted_detail in (
+        session_id,
+        second_session_id,
+        "legacy record",
+        DEFAULT_BLOB_PREFIX,
+        "UseDevelopmentStorage",
+    ):
+        assert omitted_detail not in warning_text
+
+    asyncio.run(provider.save_messages(session_id, [_make_message("new scoped message")]))
+    assert fake_account.blobs[legacy_key] == legacy_content
+    assert scoped_key in fake_account.blobs
+    assert b"new scoped message" in fake_account.blobs[scoped_key]
+
+
+def test_missing_scoped_and_legacy_blobs_emit_no_warning(
+    caplog: pytest.LogCaptureFixture,
+    fake_account: _FakeAccount,
+) -> None:
+    provider = BlobHistoryProvider(
+        agent_slug="missing_blob_warning_agent",
+        connection_string="UseDevelopmentStorage=true",
+    )
+
+    with caplog.at_level("WARNING", logger="azure.functions.AgentRuntime"):
+        assert asyncio.run(provider.get_messages("missing-session")) == []
+    assert "Legacy unscoped chat history path detected" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "probe_error",
+    [
+        HttpResponseError(message="service rejected properties request"),
+        ServiceRequestError("request transport failed"),
+        ServiceResponseError("response transport failed"),
+        TimeoutError("properties request timed out"),
+    ],
+)
+def test_legacy_probe_failure_keeps_missing_scoped_history_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fake_account: _FakeAccount,
+    probe_error: BaseException,
+) -> None:
+    session_id = "legacy-probe-failure"
+    legacy_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}{session_id}.jsonl")
+    legacy_content = b'{"message":"legacy record"}\n'
+    fake_account.blobs[legacy_key] = legacy_content
+    fake_account.properties_errors[legacy_key] = probe_error
+    provider = BlobHistoryProvider(
+        agent_slug="billing",
+        connection_string="UseDevelopmentStorage=true",
+    )
+
+    with caplog.at_level("DEBUG", logger="azure.functions.AgentRuntime"):
+        assert asyncio.run(provider.get_messages(session_id)) == []
+
+    scoped_key = (
+        DEFAULT_CONTAINER_NAME,
+        f"{DEFAULT_BLOB_PREFIX}billing/{session_id}.jsonl",
+    )
+    assert fake_account.blobs[legacy_key] == legacy_content
+    assert scoped_key not in fake_account.blobs
+    assert fake_account.download_calls == [scoped_key]
+    assert fake_account.properties_calls == [legacy_key]
+    assert fake_account.append_calls == []
+    assert fake_account.create_calls == []
+    [record] = [
+        record
+        for record in caplog.records
+        if "Could not check the legacy unscoped blob history path" in record.message
+    ]
+    assert record.exc_info is not None
+    assert record.exc_info[0] is type(probe_error)
+
+
+def test_legacy_probe_preserves_cancellation(fake_account: _FakeAccount) -> None:
+    session_id = "legacy-probe-cancelled"
+    legacy_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}{session_id}.jsonl")
+    fake_account.properties_errors[legacy_key] = asyncio.CancelledError()
+    provider = BlobHistoryProvider(
+        agent_slug="billing",
+        connection_string="UseDevelopmentStorage=true",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(provider.get_messages(session_id))
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +552,7 @@ def test_build_from_environment_returns_none_when_unset(
 ) -> None:
     monkeypatch.delenv("AzureWebJobsStorage", raising=False)
     monkeypatch.delenv("AzureWebJobsStorage__blobServiceUri", raising=False)
-    assert build_blob_provider_from_environment() is None
+    assert build_blob_provider_from_environment(agent_slug="billing") is None
 
 
 def test_build_from_environment_prefers_connection_string(
@@ -349,10 +562,11 @@ def test_build_from_environment_prefers_connection_string(
     monkeypatch.setenv(
         "AzureWebJobsStorage__blobServiceUri", "https://acct.blob.core.windows.net/"
     )
-    provider = build_blob_provider_from_environment()
+    provider = build_blob_provider_from_environment(agent_slug="billing")
     assert provider is not None
     assert provider._connection_string == "UseDevelopmentStorage=true"
     assert provider._blob_service_url is None
+    assert provider._agent_slug == "billing"
 
 
 def test_build_from_environment_uses_blob_service_uri(
@@ -362,7 +576,7 @@ def test_build_from_environment_uses_blob_service_uri(
     monkeypatch.setenv(
         "AzureWebJobsStorage__blobServiceUri", "https://acct.blob.core.windows.net/"
     )
-    provider = build_blob_provider_from_environment()
+    provider = build_blob_provider_from_environment(agent_slug="billing")
     assert provider is not None
     assert provider._blob_service_url == "https://acct.blob.core.windows.net/"
     assert provider._connection_string is None
@@ -373,7 +587,7 @@ def test_build_from_environment_honors_container_override(
 ) -> None:
     monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER", "my-container")
-    provider = build_blob_provider_from_environment()
+    provider = build_blob_provider_from_environment(agent_slug="billing")
     assert provider is not None
     assert provider._container_name == "my-container"
 
@@ -383,7 +597,7 @@ def test_build_from_environment_empty_string_treated_as_unset(
 ) -> None:
     monkeypatch.setenv("AzureWebJobsStorage", "   ")
     monkeypatch.setenv("AzureWebJobsStorage__blobServiceUri", "")
-    assert build_blob_provider_from_environment() is None
+    assert build_blob_provider_from_environment(agent_slug="billing") is None
 
 
 # ---------------------------------------------------------------------------
@@ -402,14 +616,20 @@ def test_service_client_cached_across_calls(
         return original_build(**kwargs)
 
     monkeypatch.setattr(_blob_history, "_build_service_client", counting_build)
-    provider = BlobHistoryProvider(connection_string="UseDevelopmentStorage=true")
+    provider = BlobHistoryProvider(
+        agent_slug="billing",
+        connection_string="UseDevelopmentStorage=true",
+    )
     asyncio.run(provider.get_messages("sess-1"))
     asyncio.run(provider.get_messages("sess-2"))
     assert len(build_calls) == 1
 
 
 def test_container_create_called_once(fake_account: _FakeAccount) -> None:
-    provider = BlobHistoryProvider(connection_string="UseDevelopmentStorage=true")
+    provider = BlobHistoryProvider(
+        agent_slug="billing",
+        connection_string="UseDevelopmentStorage=true",
+    )
     asyncio.run(provider.get_messages("sess-1"))
     asyncio.run(provider.save_messages("sess-1", [_make_message("a")]))
     asyncio.run(provider.get_messages("sess-2"))
