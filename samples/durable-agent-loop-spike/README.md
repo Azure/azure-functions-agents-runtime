@@ -215,6 +215,113 @@ uv run python samples\durable-agent-loop-spike\demo\focused\proxy.py `
 
 The focused UI is demo support, not a deployed customer surface.
 
+### Standalone PowerShell client
+
+`scripts\Invoke-DurableAgentLoop.ps1` is a PowerShell 7+ client for the same
+private routes. It produces structured objects, sends the Function key only in
+the `x-functions-key` header, and rejects a base URL containing a query,
+fragment, credentials, or path. HTTPS is required except when the explicit
+`-AllowInsecureLocalHttp` test switch is used with a loopback mock.
+
+There is no session-creation endpoint. `-NewLogicalSession` generates the
+32-character logical session ID locally; the first `-StartRun` using that ID
+creates the server-side session state. A continuation is a separate start
+request with the same ID and a new request ID, so wait for the prior turn to
+reach `Completed` before sending it.
+
+```powershell
+$client = '.\samples\durable-agent-loop-spike\scripts\Invoke-DurableAgentLoop.ps1'
+$key = Read-Host -AsSecureString 'Function key'
+
+# This makes no HTTP request.
+$session = & $client -NewLogicalSession
+
+# First turn: creates the logical session remotely and selects retained ACA tools.
+$first = & $client -StartRun `
+  -SessionId $session.session_id `
+  -Prompt 'Use the approved local tool and return the bounded result.' `
+  -SandboxProfile retained_session `
+  -FunctionKey $key
+$first
+
+# Polls until Completed, Waiting, Failed, or Cancelled. Failed/Cancelled throw
+# by default; add -AllowNonSuccessTerminal to receive their status object.
+$firstComplete = & $client -WaitRun `
+  -RunId $first.run_id `
+  -FunctionKey $key `
+  -PollIntervalSeconds 2 `
+  -TimeoutSeconds 600
+$firstComplete.result.response
+
+# A new turn with the same server-created session carries committed context.
+$second = & $client -ContinueSession `
+  -SessionId $session.session_id `
+  -Prompt 'Continue using the committed conversation context.' `
+  -SandboxProfile retained_session `
+  -FunctionKey $key
+```
+
+The retained-sandbox endpoint is **inspection only**:
+
+```powershell
+$sandbox = & $client -GetRetainedSandbox -RunId $second.run_id -FunctionKey $key
+$sandbox
+```
+
+The current HTTP surface has no client-facing ACA `resume` or `ensure` route.
+`-ContinueSession` is conversational continuation, not an explicit sandbox
+lifecycle command. When a retained-session turn needs a stopped sandbox, the
+service owns its resume/attach behavior; `-GetRetainedSandbox` reports only
+the safe alias, generation, state, and checkpoint presence.
+
+For a human wait, use the status object's `human_input.request_id` to get the
+full prompt and schema, then submit exactly one idempotent answer:
+
+```powershell
+$waiting = & $client -WaitRun -RunId $second.run_id -FunctionKey $key
+$human = & $client -GetHumanInput `
+  -RunId $second.run_id `
+  -HumanRequestId $waiting.status_snapshot.human_input.request_id `
+  -FunctionKey $key
+$accepted = & $client -SubmitHumanInput `
+  -RunId $second.run_id `
+  -HumanRequestId $human.request_id `
+  -Answer 'Blue' `
+  -FunctionKey $key
+```
+
+`-AnswerJson` accepts one JSON value when the requested response schema is not
+a string choice. Cancellation is durable and asynchronous: `-CancelRun`
+returns its delivery state (`delivered` or `retry_pending`), so poll status
+afterward rather than treating the acceptance receipt as completed cleanup.
+
+The script uses `-FunctionKey` when supplied. Otherwise,
+`-RetrieveFunctionKey` explicitly selects the Azure CLI lookup; without that
+switch it reads the process environment variable named by
+`-FunctionKeyEnvironmentVariable` (default
+`DURABLE_LOOP_FUNCTION_KEY`).
+For the deployed spike, this command retrieves the key only into the current
+script process and never prints or persists it:
+
+```powershell
+& $client -StartRun `
+  -Prompt 'Start a bounded test turn.' `
+  -FunctionAppName func-durable-loop-0904 `
+  -ResourceGroup larohra-durable-agent-loop `
+  -RetrieveFunctionKey
+```
+
+When a start receipt has `possibly_committed = $true`, the client returns
+`requires_status_check = $true` and does not retry the request. Use the
+returned run ID with `-GetStatus` before taking any further action.
+
+Run the source-contract mock without contacting Azure or invoking a model:
+
+```powershell
+pwsh -NoProfile -File `
+  .\samples\durable-agent-loop-spike\scripts\tests\Test-DurableAgentLoopClient.ps1
+```
+
 ### Request flow
 
 The complete request path is shown below. Functions and DTS remain the trusted
