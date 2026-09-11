@@ -569,8 +569,8 @@ Multi-turn conversations are persisted as JSON Lines, one record per message:
   as either a connection string or the identity-based
   `AzureWebJobsStorage__blobServiceUri` setting that `azd` provisions —
   history is written to **Azure Blob Storage** via the runtime's
-  `BlobHistoryProvider`. One Append Blob per session is stored under
-  `agent-sessions/{session_id}.jsonl` inside the
+  `BlobHistoryProvider`. One Append Blob per agent/session pair is stored under
+  `agent-sessions/{agent_slug}/{session_id}.jsonl` inside the
   `azure-functions-agents` container (override with
   `AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER`). No file share, no storage
   account key, no mount path; the same identity that the function app
@@ -580,12 +580,20 @@ Multi-turn conversations are persisted as JSON Lines, one record per message:
 - **Local dev fallback.** When neither `AzureWebJobsStorage` nor
   `AzureWebJobsStorage__blobServiceUri` is set, history falls back to MAF's
   `FileHistoryProvider` writing to
-  `{AZURE_FUNCTIONS_AGENTS_SESSION_DIR}/agent-sessions/{session_id}.jsonl`,
+  `{AZURE_FUNCTIONS_AGENTS_SESSION_DIR}/agent-sessions/{agent_slug}/{session_id}.jsonl`,
   defaulting to `~/.azure-functions-agents/agent-sessions/`.
 
 Session ids must match `^[A-Za-z0-9._-]{1,128}$` — anything else is rejected at the API boundary.
+The same caller-visible session id may be reused across agents for correlation, but each agent's
+transcript remains independent.
 
-> **Single-process scope**: A per-session `asyncio.Lock` serializes concurrent turns within a single Function instance. The contract is "one active turn per session id". Multi-instance distributed locking is intentionally out of scope.
+> **Breaking change:** Earlier releases stored unscoped history at
+> `agent-sessions/{session_id}.jsonl`; those files are not loaded automatically after upgrading.
+> If continuity is required, copy each file to its corresponding agent-specific path before
+> upgrading.
+> Azure Blob copies must preserve the Append Blob type so later appends continue to work.
+
+> **Single-process scope**: A per-agent/session `asyncio.Lock` serializes concurrent turns within a single Function instance. The contract is "one active turn per agent/session pair". Multi-instance distributed locking is intentionally out of scope.
 
 ## Samples
 

@@ -77,7 +77,6 @@ class LifecycleStage:
     INDEX = "index"
     CLIENT_BUILD = "client_build"
     DISCOVERY = "discovery"
-    HISTORY = "history"
     PROMPT_BUILD = "prompt_build"
     AGENT_RUN = "agent_run"
     TOOL_EXECUTION = "tool_execution"

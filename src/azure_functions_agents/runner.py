@@ -13,12 +13,10 @@ Architecture
   per-request tool sets (sandbox, connectors) and the resolved chat-session id
   are closed over correctly. Building an Agent is cheap because the underlying
   chat client is reused across requests.
-* Chat history is persisted to Azure Blob Storage via
-  :class:`BlobHistoryProvider` when ``AzureWebJobsStorage`` is configured
-  (either as a connection string or via the identity-based
-  ``AzureWebJobsStorage__blobServiceUri`` setting). Otherwise — for purely
-  local development — it falls back to MAF's :class:`FileHistoryProvider`
-  writing to ``{config_dir}/agent-sessions/{session_id}.jsonl``.
+* Chat history is persisted by canonical agent slug and public session id.
+  Azure Blob Storage uses
+  ``agent-sessions/{agent_slug}/{session_id}.jsonl``; pure local development
+  falls back to the same scoped layout beneath the config directory.
 * Streaming maps MAF's :class:`AgentResponseUpdate` content items into the
   existing SSE vocabulary (``session`` / ``delta`` / ``message`` /
   ``intermediate`` / ``tool_start`` / ``tool_end`` / ``done`` / ``error``)
@@ -44,13 +42,13 @@ Architecture
 Concurrency
 -----------
 
-Two simultaneous turns against the same chat session would race writes to the
-same history record. We serialize them with a per-session
-:class:`asyncio.Lock` keyed by the chat-session id. Cross-instance distributed
+Two simultaneous turns against the same agent/session pair would race writes
+to the same history record. We serialize them with an :class:`asyncio.Lock`
+keyed by canonical agent slug and chat-session id. Cross-instance distributed
 locking is intentionally out of scope — the documented contract is "one
-active turn per chat-session id". ``BlobHistoryProvider`` uses Append Blobs
-whose ``append_block`` is atomic on the server, so concurrent writes from
-two instances cannot interleave within a single block, but turn-level
+active turn per agent/session pair". ``BlobHistoryProvider`` uses Append
+Blobs whose ``append_block`` is atomic on the server, so concurrent writes
+from two instances cannot interleave within a single block, but turn-level
 ordering across instances is still the caller's responsibility.
 """
 
@@ -68,7 +66,9 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, Field
 
 from ._blob_history import build_blob_provider_from_environment
+from ._file_history import ScopedFileHistoryProvider
 from ._function_tool import FunctionTool, tool
+from ._history_identity import validate_agent_slug
 from ._logger import logger
 from ._observability import (
     FaultDomain,
@@ -230,33 +230,34 @@ class _AgentUsageRecorder:
 # Per-session locks (single-process scope)
 # ---------------------------------------------------------------------------
 
-_SESSION_LOCKS: dict[str, asyncio.Lock] = {}
+_SESSION_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 _SESSION_LOCKS_GUARD = asyncio.Lock()
 
 
-async def _get_session_lock(session_id: str) -> asyncio.Lock:
+async def _get_session_lock(session_id: str, agent_slug: str = "main") -> asyncio.Lock:
+    key = (agent_slug, session_id)
     async with _SESSION_LOCKS_GUARD:
-        lock = _SESSION_LOCKS.get(session_id)
+        lock = _SESSION_LOCKS.get(key)
         if lock is None:
             lock = asyncio.Lock()
-            _SESSION_LOCKS[session_id] = lock
+            _SESSION_LOCKS[key] = lock
         return lock
 
 
 @contextlib.asynccontextmanager
-async def _session_lock_bounded_by(session_id: str, deadline: float) -> AsyncIterator[None]:
-    """Acquire the per-session lock with the wait bounded by ``deadline``, and always release.
+async def _session_lock_bounded_by(
+    session_id: str,
+    deadline: float,
+    *,
+    agent_slug: str = "main",
+) -> AsyncIterator[None]:
+    """Acquire the agent/session lock with a bounded wait, and always release.
 
-    A concurrent turn on the same session id can hold the lock for a while,
-    so the acquire *wait* must be bounded by the caller's own absolute
-    deadline too — otherwise total wall-clock time could exceed the
-    caller's timeout by however long that wait took. `TimeoutError` from
-    the bounded acquire propagates to the caller: the lock was never
-    acquired, so `release()` is neither reachable nor needed on that path.
-    Once acquired, `release()` always runs in `finally`, including on
-    cancellation.
+    A concurrent turn on the same agent/session pair can hold the lock for a
+    while, so the acquire wait must be bounded by the caller's own absolute
+    deadline too.
     """
-    lock = await _get_session_lock(session_id)
+    lock = await _get_session_lock(session_id, agent_slug)
     loop = asyncio.get_running_loop()
     await asyncio.wait_for(lock.acquire(), timeout=max(0.0, deadline - loop.time()))
     try:
@@ -302,33 +303,47 @@ def _validate_session_id(session_id: str | None) -> str | None:
     return session_id
 
 
-def _resolve_sessions_dir() -> Path:
-    """Resolve the directory used by :class:`FileHistoryProvider` for local sessions.
+def _resolve_sessions_dir(agent_slug: str) -> Path:
+    """Resolve the agent-scoped directory used for local session history.
 
-    Returns ``{config_dir}/agent-sessions`` (creating it if needed). This is
-    the *directory* path — :class:`FileHistoryProvider` itself appends
-    ``{session_id}.jsonl`` per session.
+    Returns ``{config_dir}/agent-sessions/{agent_slug}``, creating it if
+    needed.
     """
-    base = Path(resolve_config_dir()).resolve() / "agent-sessions"
+    slug = validate_agent_slug(agent_slug)
+    base = Path(resolve_config_dir()).resolve() / "agent-sessions" / slug
     base.mkdir(parents=True, exist_ok=True)
     return base
 
 
-def _build_history_provider() -> Any:
+def _build_history_provider(agent_slug: str) -> Any:
     """Choose the history provider to use for this turn.
 
     Prefers :class:`BlobHistoryProvider` when the Azure Functions storage
     binding is configured (either ``AzureWebJobsStorage`` connection string
     or the identity-based ``AzureWebJobsStorage__blobServiceUri`` setting),
     which gives true multi-instance support without any extra resources.
-    Falls back to :class:`FileHistoryProvider` for pure local development.
+    Falls back to :class:`ScopedFileHistoryProvider` for pure local
+    development.
     """
-    from agent_framework import FileHistoryProvider
-
-    blob_provider = build_blob_provider_from_environment()
+    blob_provider = build_blob_provider_from_environment(agent_slug=agent_slug)
     if blob_provider is not None:
         return blob_provider
-    return FileHistoryProvider(storage_path=_resolve_sessions_dir())
+    scoped_dir = _resolve_sessions_dir(agent_slug)
+    return ScopedFileHistoryProvider(
+        storage_root=scoped_dir.parent,
+        agent_slug=agent_slug,
+    )
+
+
+def _resolve_history_agent_slug(
+    agent_name: str | None,
+    workflow_agent_slug: str | None,
+) -> str:
+    if agent_name is not None:
+        return agent_name
+    if workflow_agent_slug is not None:
+        return workflow_agent_slug
+    return "main"
 
 
 def _build_chat_options_from_environment() -> dict[str, Any] | None:
@@ -824,7 +839,8 @@ async def _build_agent_session(
         resolved_id = validated_id
         session = AgentSession(session_id=resolved_id)
 
-    history_provider = _build_history_provider()
+    history_agent_slug = _resolve_history_agent_slug(agent_name, workflow_agent_slug)
+    history_provider = _build_history_provider(history_agent_slug)
 
     delegate_tools: list[FunctionTool] | None = None
     delegate_error_tracker: _DelegateErrorTracker | None = None
@@ -1009,6 +1025,9 @@ async def run_agent(
     ``tools=[], mcp_tools=[], sandbox_tools=None, web_request_tools=None``.
     """
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
+    history_agent_slug = validate_agent_slug(
+        _resolve_history_agent_slug(agent_name, workflow_agent_slug)
+    )
     # Computed before building the agent so a delegate tool's adapter can cap
     # its own specialist timeout at "however much of *this* run's budget is
     # left" (FRD 0007 Decision #12: "effective timeout = min(specialist,
@@ -1041,7 +1060,11 @@ async def run_agent(
     )
 
     try:
-        async with _session_lock_bounded_by(resolved_id, coordinator_deadline):
+        async with _session_lock_bounded_by(
+            resolved_id,
+            coordinator_deadline,
+            agent_slug=history_agent_slug,
+        ):
             # Re-derive the remaining budget *after* the lock wait instead of
             # reusing the original full `timeout` — otherwise a long lock
             # wait plus a full fresh `timeout` window could run well past
@@ -1188,6 +1211,9 @@ async def run_agent_stream(
     * ``error``        — terminal error message
     """
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
+    history_agent_slug = validate_agent_slug(
+        _resolve_history_agent_slug(agent_name, workflow_agent_slug)
+    )
     # Computed before building the agent (see run_agent) so a delegate tool's
     # adapter can cap its own specialist timeout at this run's remaining
     # budget. Reused, unchanged, as `deadline` further down for the existing
@@ -1257,7 +1283,11 @@ async def run_agent_stream(
     ) as span:
         ordinary_tool_error_count = 0
         try:
-            async with _session_lock_bounded_by(resolved_id, deadline):
+            async with _session_lock_bounded_by(
+                resolved_id,
+                deadline,
+                agent_slug=history_agent_slug,
+            ):
                 pending_tool_calls: dict[str, dict[str, Any]] = {}
                 emitted_tool_calls: set[str] = set()
 
