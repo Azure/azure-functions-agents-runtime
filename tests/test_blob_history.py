@@ -14,11 +14,8 @@ from typing import Any, ClassVar
 
 import pytest
 from azure.core.exceptions import (
-    HttpResponseError,
     ResourceExistsError,
     ResourceNotFoundError,
-    ServiceRequestError,
-    ServiceResponseError,
 )
 
 from azure_functions_agents import _blob_history
@@ -63,12 +60,7 @@ class _FakeBlobClient:
 
     async def get_blob_properties(self) -> object:
         self._account.properties_calls.append(self._key)
-        error = self._account.properties_errors.get(self._key)
-        if error is not None:
-            raise error
-        if self._key not in self._account.blobs:
-            raise ResourceNotFoundError("blob not found")
-        return object()
+        raise AssertionError("Blob property probes are not expected.")
 
     async def create_append_blob(self) -> None:
         if self._key in self._account.blobs:
@@ -117,7 +109,6 @@ class _FakeAccount:
         self.container_create_calls: list[str] = []
         self.download_calls: list[tuple[str, str]] = []
         self.properties_calls: list[tuple[str, str]] = []
-        self.properties_errors: dict[tuple[str, str], BaseException] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -419,127 +410,33 @@ def test_same_session_id_remains_independent_across_agent_slugs(
     ) in fake_account.blobs
 
 
-def test_legacy_unscoped_blob_is_not_loaded_and_warning_omits_path_details(
-    caplog: pytest.LogCaptureFixture,
+def test_missing_scoped_blob_ignores_unscoped_blob_without_property_probe(
     fake_account: _FakeAccount,
 ) -> None:
-    session_id = "legacy-session"
-    second_session_id = "another-legacy-session"
-    legacy_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}{session_id}.jsonl")
-    second_legacy_key = (
-        DEFAULT_CONTAINER_NAME,
-        f"{DEFAULT_BLOB_PREFIX}{second_session_id}.jsonl",
-    )
-    legacy_content = b'{"message":"legacy record"}\n'
-    fake_account.blobs[legacy_key] = legacy_content
-    fake_account.blobs[second_legacy_key] = legacy_content
-    provider = BlobHistoryProvider(
-        agent_slug="blob_warning_agent",
-        connection_string="UseDevelopmentStorage=true",
-    )
-
-    with caplog.at_level("WARNING", logger="azure.functions.AgentRuntime"):
-        assert asyncio.run(provider.get_messages(session_id)) == []
-        assert asyncio.run(provider.get_messages(second_session_id)) == []
-
-    scoped_key = (
-        DEFAULT_CONTAINER_NAME,
-        f"{DEFAULT_BLOB_PREFIX}blob_warning_agent/{session_id}.jsonl",
-    )
-    assert scoped_key not in fake_account.blobs
-    assert fake_account.blobs[legacy_key] == legacy_content
-    assert legacy_key not in fake_account.download_calls
-    assert fake_account.properties_calls == [legacy_key, second_legacy_key]
-    warning_text = caplog.text
-    assert warning_text.count("Legacy unscoped chat history path detected") == 1
-    assert "agent_slug=blob_warning_agent backend=blob" in warning_text
-    for omitted_detail in (
-        session_id,
-        second_session_id,
-        "legacy record",
-        DEFAULT_BLOB_PREFIX,
-        "UseDevelopmentStorage",
-    ):
-        assert omitted_detail not in warning_text
-
-    asyncio.run(provider.save_messages(session_id, [_make_message("new scoped message")]))
-    assert fake_account.blobs[legacy_key] == legacy_content
-    assert scoped_key in fake_account.blobs
-    assert b"new scoped message" in fake_account.blobs[scoped_key]
-
-
-def test_missing_scoped_and_legacy_blobs_emit_no_warning(
-    caplog: pytest.LogCaptureFixture,
-    fake_account: _FakeAccount,
-) -> None:
-    provider = BlobHistoryProvider(
-        agent_slug="missing_blob_warning_agent",
-        connection_string="UseDevelopmentStorage=true",
-    )
-
-    with caplog.at_level("WARNING", logger="azure.functions.AgentRuntime"):
-        assert asyncio.run(provider.get_messages("missing-session")) == []
-    assert "Legacy unscoped chat history path detected" not in caplog.text
-
-
-@pytest.mark.parametrize(
-    "probe_error",
-    [
-        HttpResponseError(message="service rejected properties request"),
-        ServiceRequestError("request transport failed"),
-        ServiceResponseError("response transport failed"),
-        TimeoutError("properties request timed out"),
-    ],
-)
-def test_legacy_probe_failure_keeps_missing_scoped_history_empty(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    fake_account: _FakeAccount,
-    probe_error: BaseException,
-) -> None:
-    session_id = "legacy-probe-failure"
-    legacy_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}{session_id}.jsonl")
-    legacy_content = b'{"message":"legacy record"}\n'
-    fake_account.blobs[legacy_key] = legacy_content
-    fake_account.properties_errors[legacy_key] = probe_error
+    session_id = "existing-unscoped-session"
+    unscoped_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}{session_id}.jsonl")
+    unscoped_content = b'{"message":"existing record"}\n'
+    fake_account.blobs[unscoped_key] = unscoped_content
     provider = BlobHistoryProvider(
         agent_slug="billing",
         connection_string="UseDevelopmentStorage=true",
     )
 
-    with caplog.at_level("DEBUG", logger="azure.functions.AgentRuntime"):
-        assert asyncio.run(provider.get_messages(session_id)) == []
+    assert asyncio.run(provider.get_messages(session_id)) == []
 
     scoped_key = (
         DEFAULT_CONTAINER_NAME,
         f"{DEFAULT_BLOB_PREFIX}billing/{session_id}.jsonl",
     )
-    assert fake_account.blobs[legacy_key] == legacy_content
     assert scoped_key not in fake_account.blobs
+    assert fake_account.blobs[unscoped_key] == unscoped_content
     assert fake_account.download_calls == [scoped_key]
-    assert fake_account.properties_calls == [legacy_key]
-    assert fake_account.append_calls == []
-    assert fake_account.create_calls == []
-    [record] = [
-        record
-        for record in caplog.records
-        if "Could not check the legacy unscoped blob history path" in record.message
-    ]
-    assert record.exc_info is not None
-    assert record.exc_info[0] is type(probe_error)
+    assert fake_account.properties_calls == []
 
-
-def test_legacy_probe_preserves_cancellation(fake_account: _FakeAccount) -> None:
-    session_id = "legacy-probe-cancelled"
-    legacy_key = (DEFAULT_CONTAINER_NAME, f"{DEFAULT_BLOB_PREFIX}{session_id}.jsonl")
-    fake_account.properties_errors[legacy_key] = asyncio.CancelledError()
-    provider = BlobHistoryProvider(
-        agent_slug="billing",
-        connection_string="UseDevelopmentStorage=true",
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(provider.get_messages(session_id))
+    asyncio.run(provider.save_messages(session_id, [_make_message("new scoped message")]))
+    assert fake_account.blobs[unscoped_key] == unscoped_content
+    assert scoped_key in fake_account.blobs
+    assert b"new scoped message" in fake_account.blobs[scoped_key]
 
 
 # ---------------------------------------------------------------------------

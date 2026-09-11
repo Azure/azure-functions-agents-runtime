@@ -25,7 +25,7 @@ Concurrency
 ``BlobClient.append_block`` is atomic on the server side, so two Function
 instances appending to the same session blob simultaneously cannot interleave
 within a single block. The documented runtime contract is still
-"one active turn per session id" — cross-instance turn ordering is the
+"one active turn per agent/session pair" — cross-instance turn ordering is the
 caller's responsibility.
 
 Configuration
@@ -55,14 +55,11 @@ from typing import Any, ClassVar
 
 from agent_framework import HistoryProvider, Message
 from azure.core.exceptions import (
-    HttpResponseError,
     ResourceExistsError,
     ResourceNotFoundError,
-    ServiceRequestError,
-    ServiceResponseError,
 )
 
-from ._history_identity import validate_agent_slug, warn_legacy_history_detected
+from ._history_identity import validate_agent_slug
 from ._logger import logger
 
 # ---------------------------------------------------------------------------
@@ -168,7 +165,6 @@ class BlobHistoryProvider(HistoryProvider):
             downloader = await blob_client.download_blob(encoding="utf-8")
             content = await downloader.readall()
         except ResourceNotFoundError:
-            await self._detect_legacy_blob(session_id)
             return []
 
         text = content if isinstance(content, str) else content.decode("utf-8")
@@ -235,45 +231,12 @@ class BlobHistoryProvider(HistoryProvider):
         stem = session_id or "default"
         return f"{self._blob_prefix}{self._agent_slug}/{stem}.jsonl"
 
-    def _legacy_blob_name(self, session_id: str | None) -> str:
-        stem = session_id or "default"
-        return f"{self._blob_prefix}{stem}.jsonl"
-
     async def _get_blob_client(self, session_id: str | None) -> Any:
         service_client = await self._get_service_client()
         await self._ensure_container(service_client)
         return service_client.get_blob_client(
             container=self._container_name,
             blob=self._blob_name(session_id),
-        )
-
-    async def _detect_legacy_blob(self, session_id: str | None) -> None:
-        service_client = await self._get_service_client()
-        legacy_client = service_client.get_blob_client(
-            container=self._container_name,
-            blob=self._legacy_blob_name(session_id),
-        )
-        try:
-            await legacy_client.get_blob_properties()
-        except ResourceNotFoundError:
-            return
-        except (
-            HttpResponseError,
-            ServiceRequestError,
-            ServiceResponseError,
-            TimeoutError,
-        ) as exc:
-            logger.debug(
-                "Could not check the legacy unscoped blob history path "
-                "(agent_slug=%s error=%s).",
-                self._agent_slug,
-                type(exc).__name__,
-                exc_info=True,
-            )
-            return
-        warn_legacy_history_detected(
-            agent_slug=self._agent_slug,
-            backend="blob",
         )
 
     async def _get_service_client(self) -> Any:

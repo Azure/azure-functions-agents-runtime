@@ -591,6 +591,7 @@ transcript remains independent.
 > `agent-sessions/{session_id}.jsonl`; those files are not loaded automatically after upgrading.
 > If continuity is required, copy each file to its corresponding agent-specific path before
 > upgrading.
+> Azure Blob copies must preserve the Append Blob type so later appends continue to work.
 
 > **Single-process scope**: A per-agent/session `asyncio.Lock` serializes concurrent turns within a single Function instance. The contract is "one active turn per agent/session pair". Multi-instance distributed locking is intentionally out of scope.
 
