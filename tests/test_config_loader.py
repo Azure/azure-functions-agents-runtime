@@ -296,21 +296,26 @@ def test_load_agent_specs_resolves_trigger_type(
     assert spec.trigger.type == "http_trigger"
 
 
-def test_load_agent_specs_missing_name_raises(tmp_path: Path) -> None:
-    source = tmp_path / "main.agent.md"
+def test_load_agent_specs_missing_name_is_allowed(tmp_path: Path) -> None:
+    source = tmp_path / "silent.agent.md"
     source.write_text(
         textwrap.dedent(
             """
             ---
-            description: Main agent
+            description: Silent agent
             ---
             Hello
             """
         ).lstrip(),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match=r"name"):
-        load_agent_specs(tmp_path, strict=True)
+
+    [spec] = load_agent_specs(tmp_path, strict=True)
+    resolved = compose(spec, load_global_config(tmp_path))
+
+    assert spec.name is None
+    assert resolved.display_name is None
+    assert resolved.slug == "silent"
 
 
 def test_load_global_config_empty_file_returns_empty(tmp_path: Path) -> None:
@@ -751,7 +756,15 @@ def test_load_agent_specs_flexible_naming_normalizes_and_marks_main(
     assert specs[0].name == name
     assert Path(specs[0].source_file).name == expected_source_name
     assert specs[0].is_main is expected_is_main
-    assert allocate_unique_function_name(specs[0].source_file, specs[0].name, set()) == expected_slug
+    resolved = compose(specs[0], load_global_config(tmp_path))
+    assert (
+        allocate_unique_function_name(
+            resolved.slug,
+            set(),
+            source_file=specs[0].source_file,
+        )
+        == expected_slug
+    )
 
 
 def test_load_agent_specs_flexible_naming_variants_coexist(tmp_path: Path) -> None:
@@ -818,4 +831,3 @@ def test_load_agent_specs_bare_agent_md_is_alias_for_main(tmp_path: Path) -> Non
     assert {spec.name for spec in specs if spec.is_main} == {"Default Agent", "Main Agent"}
     assert Path(next(spec for spec in specs if spec.name == "Default Agent").source_file).name == "agent.md"
     assert Path(next(spec for spec in specs if spec.name == "Main Agent").source_file).name == "main.agent.md"
-

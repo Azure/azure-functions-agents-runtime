@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from azure_functions_agents._history_identity import AGENT_SLUG_PATTERN
 from azure_functions_agents.config.merge import (
     DEFAULT_TIMEOUT,
     _resolve_agent_configuration,
@@ -229,7 +230,13 @@ def test_compose_end_to_end() -> None:
 
 def test_compose_copies_logger_into_metadata() -> None:
     resolved = compose(
-        AgentSpec(name="Agent", description="desc", logger=False, is_main=True),
+        AgentSpec(
+            name="Agent",
+            description="desc",
+            logger=False,
+            is_main=True,
+            source_file="agent.agent.md",
+        ),
         GlobalConfig(),
         discovered_mcp_names=[],
         discovered_skill_names=[],
@@ -240,7 +247,13 @@ def test_compose_copies_logger_into_metadata() -> None:
 
 def test_compose_preserves_substitute_variables_flag() -> None:
     resolved = compose(
-        AgentSpec(name="Agent", description="desc", substitute_variables=False, is_main=True),
+        AgentSpec(
+            name="Agent",
+            description="desc",
+            substitute_variables=False,
+            is_main=True,
+            source_file="agent.agent.md",
+        ),
         GlobalConfig(),
         discovered_mcp_names=[],
         discovered_skill_names=[],
@@ -265,6 +278,7 @@ def test_compose_preserves_typed_workflow_subagent_grant() -> None:
             name="Coordinator",
             description="Coordinates PR reporting.",
             workflows=workflow_config,
+            source_file="coordinator.agent.md",
         ),
         GlobalConfig(),
     )
@@ -292,6 +306,7 @@ def test_compose_defers_warning_only_validation(
         builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
         skills=SkillsFilter(exclude=["missing-skill"]),
         tools=ToolsFilter(exclude=["bash"]),
+        source_file="agent.agent.md",
     )
 
     with caplog.at_level(logging.WARNING):
@@ -404,30 +419,49 @@ def test_compose_derives_slug_from_source_file_stem() -> None:
     assert resolved.slug == "billing_specialist"
 
 
-def test_compose_slug_matches_function_name_derivation() -> None:
-    """The slug must equal exactly what `_naming.py`'s function-name allocator would compute
-    for the same source file — this equivalence is load-bearing for FRD 0007 Decision #17."""
-    from azure_functions_agents._slug import _function_name_from_source
-
+@pytest.mark.parametrize(
+    "display_name",
+    ["Billing Specialist", "Accounts Payable", None],
+)
+def test_display_name_never_reaches_slug(display_name: str | None) -> None:
     spec = AgentSpec(
-        name="Weird Name!!",
+        name=display_name,
         description="d",
-        source_file=str(Path(r"C:\agents\my-cool.agent.md")),
+        source_file="Billing Specialist.agent.md",
     )
     resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
-    assert resolved.slug == _function_name_from_source(resolved.source_file, resolved.name)
+    assert resolved.slug == "Billing_Specialist"
+    assert resolved.display_name == display_name
 
 
-def test_compose_slug_missing_source_file_does_not_warn(
-    caplog: pytest.LogCaptureFixture,
+@pytest.mark.parametrize(
+    ("source_file", "expected_slug"),
+    [
+        ("Billing Specialist.agent.md", "Billing_Specialist"),
+        ("billing.v2.agent.md", "billing_v2"),
+        ("sales+support!.agent.md", "sales_support"),
+    ],
+)
+def test_compose_slug_is_always_a_safe_identifier(
+    source_file: str,
+    expected_slug: str,
 ) -> None:
-    """Directly-constructed AgentSpecs (common in tests) may omit source_file; compose() must
-    silently fall back rather than warn (validation-time concerns belong elsewhere)."""
+    resolved = compose(
+        AgentSpec(description="d", source_file=source_file),
+        GlobalConfig(),
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.slug == expected_slug
+    assert AGENT_SLUG_PATTERN.fullmatch(resolved.slug)
+
+
+def test_compose_requires_source_file_for_slug() -> None:
     spec = AgentSpec(name="No Source File", description="d")
-    with caplog.at_level(logging.WARNING):
-        resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
-    assert resolved.slug == "No_Source_File"
-    assert caplog.records == []
+
+    with pytest.raises(ValueError, match="source_file"):
+        compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
 
 
 def test_compose_normalizes_subagents() -> None:
@@ -438,6 +472,7 @@ def test_compose_normalizes_subagents() -> None:
             SubagentRef(agent="billing-specialist", when="Billing questions."),
             SubagentRef(agent="shipping-specialist"),
         ],
+        source_file="coordinator.agent.md",
     )
     resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
     assert resolved.subagents == [
@@ -447,7 +482,11 @@ def test_compose_normalizes_subagents() -> None:
 
 
 def test_compose_subagents_defaults_to_empty_list() -> None:
-    spec = AgentSpec(name="Coordinator", description="d")
+    spec = AgentSpec(
+        name="Coordinator",
+        description="d",
+        source_file="coordinator.agent.md",
+    )
     resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
     assert resolved.subagents == []
 
@@ -455,7 +494,12 @@ def test_compose_subagents_defaults_to_empty_list() -> None:
 def test_compose_normalized_subagents_are_independent_copies() -> None:
     """`compose()` must copy SubagentRef entries, not alias the spec's own list/objects."""
     ref = SubagentRef(agent="billing-specialist")
-    spec = AgentSpec(name="Coordinator", description="d", subagents=[ref])
+    spec = AgentSpec(
+        name="Coordinator",
+        description="d",
+        subagents=[ref],
+        source_file="coordinator.agent.md",
+    )
     resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
     assert resolved.subagents[0] == ref
     assert resolved.subagents[0] is not ref
@@ -723,7 +767,12 @@ def test_compose_wires_resolved_agent_configuration() -> None:
         max_context_window_tokens=8192,
     )
     resolved = compose(
-        AgentSpec(name="A", description="desc", agent_configuration=config),
+        AgentSpec(
+            name="A",
+            description="desc",
+            agent_configuration=config,
+            source_file="a.agent.md",
+        ),
         GlobalConfig(),
     )
     assert resolved.agent_configuration == config
@@ -731,7 +780,12 @@ def test_compose_wires_resolved_agent_configuration() -> None:
 
 def test_compose_enables_all_discovered_mcp_when_no_per_agent_filter() -> None:
     resolved = compose(
-        AgentSpec(name="Agent", description="desc", is_main=True),
+        AgentSpec(
+            name="Agent",
+            description="desc",
+            is_main=True,
+            source_file="agent.agent.md",
+        ),
         GlobalConfig(),
         discovered_mcp_names=["a", "b"],
         discovered_skill_names=[],
@@ -742,7 +796,13 @@ def test_compose_enables_all_discovered_mcp_when_no_per_agent_filter() -> None:
 
 def test_compose_disables_mcp_when_agent_sets_mcp_false() -> None:
     resolved = compose(
-        AgentSpec(name="Agent", description="desc", is_main=True, mcp=False),
+        AgentSpec(
+            name="Agent",
+            description="desc",
+            is_main=True,
+            mcp=False,
+            source_file="agent.agent.md",
+        ),
         GlobalConfig(),
         discovered_mcp_names=["a", "b"],
         discovered_skill_names=[],
@@ -754,7 +814,13 @@ def test_compose_disables_mcp_when_agent_sets_mcp_false() -> None:
 
 def test_compose_excludes_specific_mcp_servers() -> None:
     resolved = compose(
-        AgentSpec(name="Agent", description="desc", is_main=True, mcp=McpFilter(exclude=["a"])),
+        AgentSpec(
+            name="Agent",
+            description="desc",
+            is_main=True,
+            mcp=McpFilter(exclude=["a"]),
+            source_file="agent.agent.md",
+        ),
         GlobalConfig(),
         discovered_mcp_names=["a", "b", "c"],
         discovered_skill_names=[],

@@ -667,7 +667,7 @@ async def test_denied_target_returns_a_terminal_outcome_instead_of_retrying() ->
     }
 
 
-_AGENT = {"workflow_agent_slug": "coordinator"}
+_AGENT = {"agent_slug": "coordinator"}
 
 
 @pytest.fixture(autouse=True)
@@ -731,7 +731,7 @@ class _RecordingContext:
 
     def __init__(self, tasks: list[dict[str, Any]], results: dict[str, Any]) -> None:
         self.instance_id = "workflow-parent"
-        self._input = {"workflow_agent_slug": "coordinator", "tasks": tasks}
+        self._input = {"agent_slug": "coordinator", "tasks": tasks}
         self._results = results
         self.plain: list[dict[str, Any]] = []
         self.retried: list[tuple[dict[str, Any], Any]] = []
@@ -854,6 +854,8 @@ def test_retried_sub_agent_activity_keeps_its_display_tag() -> None:
     }
     [(payload, retry_policy)] = context.retried
     assert payload["execution"] == execution
+    assert payload["agent_slug"] == "coordinator"
+    assert payload["target_agent_slug"] == "analyst"
     assert retry_policy.max_number_of_attempts == 3
     assert context.activity_tags == [
         (
@@ -907,7 +909,7 @@ async def test_sync_tool_handlers_run_off_the_activity_event_loop(
     task = {
         "id": "work",
         "workflow_id": "workflow-1",
-        "workflow_agent_slug": "coordinator",
+        "agent_slug": "coordinator",
         "tool": "publish",
         "args": {},
     }
@@ -1087,9 +1089,9 @@ async def test_start_workflow_persists_only_plan_authored_retry() -> None:
             return instance_id
 
     session = workflow_tools.WorkflowSessionContext(
-        workflow_agent_slug="coordinator",
+        agent_slug="coordinator",
         session_id="session-1",
-        agent_name="main",
+        display_name="Coordinator",
         durable_client=_Client(),  # type: ignore[arg-type]
     )
     response = await workflow_tools.start_workflow(
@@ -1135,7 +1137,9 @@ async def test_start_workflow_persists_only_plan_authored_retry() -> None:
         "durable_retry_policy": _DURABLE_POLICY,
     }
     assert "execution" not in plain
-    assert started["tags"] == {"durabletask.displayName": "main-orchestration"}
+    assert started["tags"] == {
+        "durabletask.displayName": "Coordinator-orchestration"
+    }
     assert subagent["execution"] == retried["execution"]
 
 
@@ -1168,9 +1172,9 @@ async def test_start_workflow_persists_tool_declared_retry() -> None:
             return instance_id
 
     session = workflow_tools.WorkflowSessionContext(
-        workflow_agent_slug="coordinator",
+        agent_slug="coordinator",
         session_id="session-1",
-        agent_name="main",
+        display_name="Coordinator",
         durable_client=_Client(),  # type: ignore[arg-type]
     )
     response = await workflow_tools.start_workflow(
@@ -1217,9 +1221,9 @@ async def test_start_workflow_rejects_explicit_null_execution_with_tool_retry() 
             }
         ),
         workflow_tools.WorkflowSessionContext(
-            workflow_agent_slug="coordinator",
+            agent_slug="coordinator",
             session_id="session-1",
-            agent_name="main",
+            display_name="Coordinator",
             durable_client=_UnexpectedClient(),  # type: ignore[arg-type]
         ),
         policy=WorkflowPlanPolicy(

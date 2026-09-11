@@ -9,7 +9,7 @@ describe short-lived starter behavior and terminal result sinks. Both cover
 when to reach for a workflow and which tools the workflow can call.
 
 The app factory builds one complete handler catalog and one immutable
-workflow-agent-policy catalog, registers the Durable engine once, then builds each
+workflow policy catalog, registers the Durable engine once, then builds each
 workflow-enabled agent's tools and addenda without mutating the app.
 ``build_workflow_integration``
 retains the original direct-helper behavior for compatibility tests and callers.
@@ -473,7 +473,7 @@ def build_workflow_agent_policy_catalog(
 ) -> WorkflowAgentPolicyCatalog:
     """Freeze one independent workflow policy per workflow-enabled agent."""
     policies: dict[str, WorkflowPlanPolicy] = {}
-    for workflow_agent_slug, entry in catalog.items():
+    for agent_slug, entry in catalog.items():
         resolved = entry.resolved
         if resolved.workflows is None or not resolved.workflows.enabled:
             continue
@@ -485,7 +485,7 @@ def build_workflow_agent_policy_catalog(
                 and handler.public
             )
         )
-        policies[workflow_agent_slug] = _build_plan_policy(
+        policies[agent_slug] = _build_plan_policy(
             allowed_tools,
             resolved.workflows.subagents,
             catalog,
@@ -497,10 +497,12 @@ def build_workflow_agent_policy_catalog(
 def build_workflow_agent_integration(
     policy: WorkflowPlanPolicy,
     handler_catalog: registry.WorkflowHandlerCatalog,
+    *,
+    agent_slug: str,
 ) -> WorkflowIntegrationResult:
     """Build one workflow-enabled agent's tools and prompt guidance without app mutation."""
     return WorkflowIntegrationResult(
-        workflow_tools=build_workflow_tools(policy=policy),
+        workflow_tools=build_workflow_tools(agent_slug=agent_slug, policy=policy),
         chat_system_addendum=_build_addendum(
             policy,
             trigger_invocation=False,
@@ -537,6 +539,7 @@ def build_workflow_integration(
     metadata: dict[str, Any],
     workflow_tools: Sequence[WorkflowTool] | None = None,
     *,
+    agent_slug: str,
     workflow_subagents: Sequence[WorkflowSubagentRef] = (),
     catalog: AgentCatalog | None = None,
 ) -> WorkflowIntegrationResult:
@@ -572,7 +575,7 @@ def build_workflow_integration(
         app,
         catalog=catalog,
         handler_catalog=handler_catalog,
-        workflow_agent_policies=MappingProxyType({"main": policy}),
+        workflow_agent_policies=MappingProxyType({agent_slug: policy}),
     )
     registry.set_app_config(effective)
     logger.info(
@@ -581,7 +584,11 @@ def build_workflow_integration(
         len(policy.allowed_subagents),
         ", ".join(sorted(effective)) or "<none>",
     )
-    return build_workflow_agent_integration(policy, handler_catalog)
+    return build_workflow_agent_integration(
+        policy,
+        handler_catalog,
+        agent_slug=agent_slug,
+    )
 
 
 __all__ = [

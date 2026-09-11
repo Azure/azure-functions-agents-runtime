@@ -829,3 +829,20 @@ def test_agent_configuration_fixture() -> None:
     assert explicit_null_spec.agent_configuration is None
     assert explicit_null.agent_configuration.max_output_tokens is None
     assert explicit_null.agent_configuration.agent_framework is None
+
+
+# ---------------------------------------------------------------------------
+# 20 — display name is optional and never determines canonical identity
+# ---------------------------------------------------------------------------
+
+
+def test_optional_display_name_fixture() -> None:
+    fixture = FIXTURES_ROOT / "20_optional_display_name"
+    global_config = load_global_config(fixture)
+    specs = load_agent_specs(fixture, strict=True)
+    resolved = [compose(spec, global_config) for spec in specs]
+    by_slug = {agent.slug: agent for agent in resolved}
+
+    assert set(by_slug) == {"Billing_Specialist", "silent"}
+    assert by_slug["Billing_Specialist"].display_name == "Billing Specialist"
+    assert by_slug["silent"].display_name is None

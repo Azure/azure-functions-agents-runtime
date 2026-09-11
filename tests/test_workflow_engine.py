@@ -128,10 +128,10 @@ async def test_sub_agent_activity_uses_catalog_timeout_and_result_envelope(
     result = await activity(
         {
             "id": "analyze_pr",
-            "agent": "pr_status_analyst",
+            "target_agent_slug": "pr_status_analyst",
             "task": "Analyze PR 117.",
             "workflow_id": "workflow-1",
-            "workflow_agent_slug": "coordinator",
+            "agent_slug": "coordinator",
         }
     )
 
@@ -174,10 +174,10 @@ async def test_policy_aware_sub_agent_timeout_is_retryable(
     with pytest.raises(DurableRetryableActivityError, match="subagent_timeout"):
         await activity({
             "id": "analyze_pr",
-            "agent": "pr_status_analyst",
+            "target_agent_slug": "pr_status_analyst",
             "task": "Analyze PR 117.",
             "workflow_id": "workflow-1",
-            "workflow_agent_slug": "coordinator",
+            "agent_slug": "coordinator",
             "task_id": "analyze_pr",
             "execution": {
                 "max_attempts": 3,
@@ -212,10 +212,10 @@ async def test_policy_aware_sub_agent_success_uses_the_retry_envelope(
 
     outcome = await activity({
         "id": "analyze_pr",
-        "agent": "pr_status_analyst",
+        "target_agent_slug": "pr_status_analyst",
         "task": "Analyze PR 117.",
         "workflow_id": "workflow-1",
-        "workflow_agent_slug": "coordinator",
+        "agent_slug": "coordinator",
         "task_id": "analyze_pr",
         "execution": {
             "max_attempts": 3,
@@ -256,10 +256,10 @@ async def test_policy_aware_sub_agent_unknown_failure_is_terminal(
 
     outcome = await activity({
         "id": "analyze_pr",
-        "agent": "pr_status_analyst",
+        "target_agent_slug": "pr_status_analyst",
         "task": "Analyze PR 117.",
         "workflow_id": "workflow-1",
-        "workflow_agent_slug": "coordinator",
+        "agent_slug": "coordinator",
         "task_id": "analyze_pr",
         "execution": {
             "max_attempts": 3,
@@ -297,10 +297,10 @@ async def test_sub_agent_activity_fails_closed_on_catalog_miss() -> None:
         await activity(
             {
                 "id": "analyze_pr",
-                "agent": "missing",
+                "target_agent_slug": "missing",
                 "task": "Analyze PR 117.",
                 "workflow_id": "workflow-1",
-                "workflow_agent_slug": "coordinator",
+                "agent_slug": "coordinator",
             }
         )
 
@@ -322,10 +322,10 @@ async def test_sub_agent_activity_rejects_revoked_owner_grant() -> None:
         await activity(
             {
                 "id": "analyze_pr",
-                "agent": "pr_status_analyst",
+                "target_agent_slug": "pr_status_analyst",
                 "task": "Analyze PR 117.",
                 "workflow_id": "workflow-1",
-                "workflow_agent_slug": "coordinator",
+                "agent_slug": "coordinator",
             }
         )
 
@@ -341,14 +341,14 @@ async def test_sub_agent_activity_missing_agent_policy_fails_closed(
         workflow_agent_policies=workflow_agent_policies,
     )
 
-    with pytest.raises(RuntimeError, match="agent policy"):
+    with pytest.raises(RuntimeError, match="agent workflow policy"):
         await activity(
             {
                 "id": "analyze_pr",
-                "agent": "pr_status_analyst",
+                "target_agent_slug": "pr_status_analyst",
                 "task": "Analyze PR 117.",
                 "workflow_id": "workflow-1",
-                "workflow_agent_slug": "missing",
+                "agent_slug": "missing",
             }
         )
 
@@ -378,10 +378,10 @@ async def test_sub_agent_activity_sanitizes_leaf_failure(
         await activity(
             {
                 "id": "analyze_pr",
-                "agent": "pr_status_analyst",
+                "target_agent_slug": "pr_status_analyst",
                 "task": "Analyze PR 117.",
                 "workflow_id": "workflow-1",
-                "workflow_agent_slug": "coordinator",
+                "agent_slug": "coordinator",
             }
         )
 
@@ -421,7 +421,7 @@ class _FakeOrchestrationContext:
         result_for: Callable[[str, dict[str, Any]], dict[str, Any]],
     ) -> None:
         self.instance_id = "workflow-parent"
-        self._input = {"workflow_agent_slug": "coordinator", "tasks": tasks}
+        self._input = {"agent_slug": "coordinator", "tasks": tasks}
         self._result_for = result_for
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.activity_tags: list[tuple[str, dict[str, str]]] = []
@@ -505,6 +505,98 @@ def test_orchestrator_preserves_activity_failure() -> None:
         _run_orchestrator(orchestrator, context)
 
 
+def test_subagent_activity_keeps_owner_and_target_distinct() -> None:
+    context = _FakeOrchestrationContext(
+        [
+            {
+                "id": "delegate",
+                "type": SUB_AGENT_TASK_TYPE,
+                "agent": "billing",
+                "task": "Review the invoice.",
+                "depends_on": [],
+            }
+        ],
+        lambda name, payload: {
+            "id": payload["id"],
+            "result": {"agent": "billing", "text": "Approved."},
+        },
+    )
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    _run_orchestrator(orchestrator, context)
+
+    assert context.calls == [
+        (
+            engine.SUB_AGENT_ACTIVITY_NAME,
+            {
+                "id": "delegate",
+                "target_agent_slug": "billing",
+                "task": "Review the invoice.",
+                "workflow_id": "workflow-parent",
+                "agent_slug": "coordinator",
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "raw_payload",
+    [
+        {
+            "workflow_agent_slug": "coordinator",
+            "tasks": [
+                {
+                    "id": "publish",
+                    "type": TOOL_TASK_TYPE,
+                    "tool": "publish",
+                    "args": {},
+                    "depends_on": [],
+                }
+            ],
+        },
+        {
+            "tasks": [
+                {
+                    "id": "publish",
+                    "type": TOOL_TASK_TYPE,
+                    "tool": "publish",
+                    "args": {},
+                    "depends_on": [],
+                }
+            ],
+        },
+        {
+            "agent_slug": "",
+            "tasks": [
+                {
+                    "id": "publish",
+                    "type": TOOL_TASK_TYPE,
+                    "tool": "publish",
+                    "args": {},
+                    "depends_on": [],
+                }
+            ],
+        },
+        None,
+    ],
+    ids=["legacy-owner", "missing-owner", "empty-owner", "raw-none"],
+)
+def test_legacy_owner_payload_fails_before_dispatch(
+    raw_payload: dict[str, Any] | None,
+) -> None:
+    context = _FakeOrchestrationContext(
+        [],
+        lambda name, payload: {"id": payload["id"], "result": {"ok": True}},
+    )
+    context._input = raw_payload
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    with pytest.raises((KeyError, RuntimeError, ValueError), match="agent_slug"):
+        _run_orchestrator(orchestrator, context)
+
+    assert context.calls == []
+
+
 def test_orchestrator_fans_out_sub_agents_and_reduces_templated_results() -> None:
     tasks = [
         {
@@ -539,7 +631,7 @@ def test_orchestrator_fans_out_sub_agents_and_reduces_templated_results() -> Non
             return {
                 "id": payload["id"],
                 "result": {
-                    "agent": payload["agent"],
+                    "agent": payload["target_agent_slug"],
                     "text": f"summary-{payload['id']}",
                 },
             }
@@ -572,9 +664,14 @@ def test_orchestrator_fans_out_sub_agents_and_reduces_templated_results() -> Non
         for _, payload in context.calls
     )
     assert all(
-        payload["workflow_agent_slug"] == "coordinator"
+        payload["agent_slug"] == "coordinator"
         for _, payload in context.calls
     )
+    assert [payload["target_agent_slug"] for _, payload in context.calls] == [
+        "pr_status_analyst",
+        "pr_status_analyst",
+        "report_writer",
+    ]
     assert context.activity_tags == [
         (
             engine.SUB_AGENT_ACTIVITY_NAME,
@@ -597,7 +694,7 @@ def test_orchestrator_fans_out_sub_agents_and_reduces_templated_results() -> Non
     ]
 
 
-def test_orchestrator_threads_workflow_agent_slug_to_tool_activity() -> None:
+def test_orchestrator_threads_agent_slug_to_tool_activity() -> None:
     tasks = [
         {
             "id": "publish",
@@ -622,7 +719,7 @@ def test_orchestrator_threads_workflow_agent_slug_to_tool_activity() -> None:
                 "id": "publish",
                 "tool": "publish",
                 "args": {},
-                "workflow_agent_slug": "coordinator",
+                "agent_slug": "coordinator",
                 "workflow_id": "workflow-parent",
             },
         )
@@ -663,7 +760,7 @@ def test_tool_activity_reauthorizes_current_agent_policy() -> None:
         "id": "publish",
         "tool": "publish",
         "args": {"value": 1},
-        "workflow_agent_slug": "workflow-agent",
+        "agent_slug": "workflow-agent",
         "workflow_id": "workflow-1",
     }
 
@@ -688,14 +785,14 @@ def test_tool_activity_missing_agent_policy_fails_closed(
         workflow_agent_policies=workflow_agent_policies,
     )
 
-    with pytest.raises(RuntimeError, match="agent policy"):
+    with pytest.raises(RuntimeError, match="agent workflow policy"):
         asyncio.run(
             activity(
                 {
                     "id": "publish",
                     "tool": "publish",
                     "args": {},
-                    "workflow_agent_slug": "missing",
+                    "agent_slug": "missing",
                     "workflow_id": "workflow-1",
                 }
             )

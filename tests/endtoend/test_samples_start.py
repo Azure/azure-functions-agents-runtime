@@ -37,7 +37,7 @@ SAMPLE_APPS = _discover_sample_apps()
 def _startup_env(app_dir: Path) -> dict[str, str]:
     """Disable timers while testing host startup so scheduled work cannot race CI."""
     return {
-        f"AzureWebJobs.{_function_name_from_source(spec.source_file, spec.name)}.Disabled": "true"
+        f"AzureWebJobs.{_function_name_from_source(spec.source_file)}.Disabled": "true"
         for spec in load_agent_specs(app_dir)
         if spec.trigger is not None and spec.trigger.type == "timer_trigger"
     }

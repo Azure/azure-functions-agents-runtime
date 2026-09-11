@@ -4,7 +4,7 @@ title: Dynamic workflows
 status: Finalized
 author: TsuyoshiUshio
 created: 2026-07-06
-updated: 2026-09-03
+updated: 2026-09-11
 issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108, https://github.com/Azure/azure-functions-agents-runtime/issues/109, https://github.com/Azure/azure-functions-bucees-planning/issues/1274, https://github.com/Azure/azure-functions-bucees-planning/issues/1275, https://github.com/Azure/azure-functions-bucees-planning/issues/1276]
 pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117, https://github.com/Azure/azure-functions-agents-runtime/pull/151, https://github.com/Azure/azure-functions-agents-runtime/pull/163]
 ---
@@ -41,9 +41,9 @@ repeating the base workflow design.
 
 The next operational evolution adds human-readable DTS dashboard labels without
 changing workflow plans or registered Azure Function names. Orchestrations use
-the existing workflow session `agent_name` plus the fixed `-orchestration`
-suffix; tool and Sub Agent Activities use their concrete tool name or agent
-slug.
+the optional workflow agent `display_name` when present and otherwise its
+required canonical `agent_slug`, plus the fixed `-orchestration` suffix; tool
+and Sub Agent Activities use their concrete tool name or target agent slug.
 
 ## 2. Motivation / problem
 
@@ -510,9 +510,9 @@ not introduce new frontmatter or DAG syntax: every agent with
 workflows through whichever triggers or built-in endpoints it independently
 exposes.
 
-The implementation calls such an agent a *workflow-enabled agent*. Its
-`workflow_agent_slug` defines the authorization namespace but is not an
-authoring keyword.
+The implementation calls such an agent a *workflow-enabled agent*. Its required
+`agent_slug` defines the authorization namespace and is not an authoring
+keyword. Its optional `display_name` is presentation-only.
 
 #### App-wide execution and per-agent authorization
 
@@ -531,12 +531,14 @@ unregister a handler another agent may use.
 
 #### Agent and session isolation
 
-`ResolvedAgent.slug` is the stable agent identity on chat, MCP, HTTP-trigger, and
-non-HTTP-trigger paths. Workflow management is scoped by
-`(workflow_agent_slug, session_id)` internally. Durable instance IDs begin with a
-32-hex-character (128-bit) truncated SHA-256 digest over an unambiguous
-length-delimited encoding of both values, followed by the existing random UUID
-suffix. Raw slugs and session IDs are not exposed in instance IDs.
+`ResolvedAgent.slug` supplies the required `agent_slug`, the stable machine
+identity on chat, MCP, HTTP-trigger, and non-HTTP-trigger paths. Workflow
+management is scoped by `(agent_slug, session_id)` internally; optional
+`display_name` metadata never participates in authorization or isolation.
+Durable instance IDs begin with a 32-hex-character (128-bit) truncated SHA-256
+digest over an unambiguous length-delimited encoding of both identity values,
+followed by the existing random UUID suffix. Raw slugs and session IDs are not
+exposed in instance IDs.
 
 Active-workflow limits, list, status, cancel, terminate, and HTTP polling all
 require both components. A mismatched agent or session returns the same
@@ -550,8 +552,9 @@ Durable Functions or DTS tooling before upgrading.
 
 #### Activity-time reauthorization
 
-Capability-bearing Activities carry `workflow_agent_slug` and check the currently
-deployed policy immediately before shared-catalog dispatch:
+Capability-bearing Activities carry the owning `agent_slug` and check the
+currently deployed policy immediately before shared-catalog dispatch. Workflow
+Sub Agent Activities additionally carry `target_agent_slug` for the specialist:
 
 - tool Activities require the task tool in `policy.allowed_tools`;
 - Workflow Sub Agent Activities require the specialist in
@@ -1014,15 +1017,16 @@ that tag as the primary label in orchestration lists, sequence/flow views, and
 detail panels while retaining the registered function name in metadata.
 
 The orchestration label is derived deterministically as
-`<agent_name>-orchestration`. Here, `agent_name` is the existing workflow
-session value currently populated from the resolved agent slug on production
-invocation paths. The runtime does not ask the LLM to invent a workflow title
-and does not add a field to `start_workflow`.
+`<display_name-or-agent_slug>-orchestration`: the optional `display_name` is
+used when present, otherwise the required canonical `agent_slug` is used. The
+runtime does not ask the LLM to invent a workflow title and does not add a field
+to `start_workflow`. This presentation choice never changes workflow ownership,
+persisted machine identity, history selection, policy lookup, or instance IDs.
 
 Tool Activities use the workflow tool name. Workflow Sub Agent Activities use
-the authorized agent slug. Expanded `for_each` instances intentionally share
-the same display name; their distinct runtime task IDs remain in the Activity
-input and details. Timer tasks are unchanged.
+the authorized `target_agent_slug`. Expanded `for_each` instances intentionally
+share the same display name; their distinct runtime task IDs remain in the
+Activity input and details. Timer tasks are unchanged.
 
 The pinned Durable Functions client exposes orchestration tags through
 `schedule_new_orchestration`, so workflow startup moves from deprecated
@@ -1124,6 +1128,7 @@ results remain unchanged.
 | 79 | Workflow Sub Agent retry classification | Retry every leaf failure / reject Sub Agent retry / retry only a closed transient set | Treat a leaf `TimeoutError` as transient and retryable; classify all other leaf exceptions as terminal unless a future reviewed mapping proves they are safe to replay | Agent, architecture review | 2026-09-02 |
 | 80 | Retry schedule time bound | Set Durable `retry_timeout` / validate an authored delay-sum cap only | Validate the one-hour delay-sum cap before start and leave Durable `retry_timeout` unset. The SDK compares that timeout to real wall-clock time while replaying old failure events, so a finite value can change historical scheduling after enough time passes | Agent, final review | 2026-09-02 |
 | 81 | Rebase strategy for decorator retry | Rebase the full PR #185 branch / port only the approved residual slice | Port only `@workflow_tool(retry=...)` metadata propagation and submission precedence onto current `main`; rebasing the stale full branch would reintroduce already-merged foundation changes and enlarge review scope | Human + Agent | 2026-09-08 |
+| 82 | Canonical workflow identity terminology | Keep workflow-specific owner aliases / retain ambiguous `agent_name` / use the runtime-wide two-concept contract | Use required `agent_slug` as the workflow owner and execution/history identity, persist it in workflow payloads, and use it for policy lookup and instance namespaces. Use optional `display_name` only for presentation, falling back to `agent_slug`, and use `target_agent_slug` for Workflow Sub Agent targets. This supersedes Decisions #40 and #67 terminology without changing their isolation or display-tag intent. | Human (Laveesh Rohra) | 2026-09-11 |
 
 ## 6. Test plan
 
@@ -1260,7 +1265,7 @@ results remain unchanged.
 - [ ] Evolution #DTS display names:
   - `tests/test_workflow_registry.py` verifies
     `schedule_new_orchestration(..., input=..., tags=...)` and the deterministic
-    `<agent_name>-orchestration` label;
+    `<display_name-or-agent_slug>-orchestration` label;
   - `tests/test_workflow_engine.py` drives the native two-argument orchestrator
     contract and verifies tool/Sub Agent tags on static, dynamic, and expanded
     Activities;
@@ -1404,3 +1409,7 @@ results remain unchanged.
   contracts, and approved a residual-only port preserving persisted-input replay
   behavior, filtered immutable policy catalogs, and decorator-over-plan
   precedence. Decision 81 records the resulting scope.
+- **Canonical identity cleanup approval:** Laveesh Rohra, 2026-09-11. Approved
+  required `agent_slug`, optional presentation-only `display_name`,
+  `target_agent_slug` for Workflow Sub Agent targets, and removal of
+  workflow-specific owner aliases. Decision 82 records the change.

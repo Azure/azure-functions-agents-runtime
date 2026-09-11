@@ -28,7 +28,9 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - Can apply **exclude lists** to filter out unwanted MCP servers, skills, or tools
 - Can **override** runtime settings (model, timeout)
 - Can enable Dynamic Workflows on any agent
-- Must define **trigger** (how the agent is invoked)
+- Must define a **description**
+- May define an optional human-readable **name**; the canonical `agent_slug` comes from the source filename
+- Must define a **trigger** or enable a built-in endpoint unless it is referenced as an internal specialist
 - Can enable **HTTP/MCP endpoints** for testing and composition
 
 ### Configuration Precedence
@@ -48,7 +50,7 @@ For capabilities (MCP, skills, tools):
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
 | **Global** (`agents.config.yaml`) | None (entire file is optional) | `agent_configuration`, `system_tools`, `model`, `timeout`, `tools`, `http_auth` |
-| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `agent_configuration`, `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `workflows`, `subagents`, `input_schema`, `response_schema`, `response_example`, `metadata` |
+| **Agent** (`.agent.md` front matter) | `description`, `trigger`* | `name`, `agent_configuration`, `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `workflows`, `subagents`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
 ---
@@ -78,11 +80,11 @@ Optional file in the root directory that defines shared infrastructure and runti
 YAML front matter at the top of each agent file.
 
 **Required properties:**
-- `name` — String, display name for the agent
 - `description` — String, brief description of the agent's purpose
 - `trigger` — Object defining how the agent is invoked (optional only when at least one `builtin_endpoints` value is enabled)
 
 **Optional properties:**
+- `name` — Optional human-readable display name. It maps only to `ResolvedAgent.display_name`; the source filename supplies the canonical `agent_slug`.
 - `builtin_endpoints` — Object or boolean for enabling built-in chat UI, chat API, and MCP tool endpoints
 - `agent_configuration` — Portable and Microsoft Agent Framework-specific execution settings; recursively inherits global values
 - `model` — String to override global default model
@@ -159,7 +161,8 @@ Fields are organized into categories based on how they can be used:
 - `agent_configuration` — Output-token limit and Microsoft Agent Framework conversation-compaction settings
 
 **Agent-Specific (Agent front matter only):**
-- `name`, `description` — Agent identity (required)
+- `description` — Required description of the agent's purpose
+- `name` — Optional presentation label; never machine identity
 - `trigger` — Invocation method (required unless at least one built-in endpoint is enabled, or the agent is referenced as an internal specialist via another agent's `subagents` or `workflows.subagents`)
 - `builtin_endpoints` — Built-in chat UI, chat API, and MCP tool endpoints
 - `subagents` — Chat-time delegation to specialist agents (`delegate_<slug>` tools; see [`subagents`](#subagents))
@@ -171,16 +174,10 @@ Fields are organized into categories based on how they can be used:
 
 ### Required Fields (Agent Front Matter Only)
 
-**Summary:** Every `.agent.md` file must have `name` and `description`. It must
-also have either a `trigger` or at least one enabled `builtin_endpoints` value,
-unless another agent references it through `subagents` or
-`workflows.subagents` as an internal specialist.
-
-#### `name`
-- **Type:** `string`
-- **Typical location:** Agent only (required)
-- **Description:** Display name for the agent. This is used for chat UI labels, descriptions, logs, and documentation, but it does **not** control any registered Azure Function name, route slug, or MCP/debug identifier. See [File Naming Conventions](#file-naming-conventions).
-- **Example:** `"Daily Azure Report"`
+**Summary:** Every `.agent.md` file must have `description`. It must also have
+either a `trigger` or at least one enabled `builtin_endpoints` value, unless
+another agent references it through `subagents` or `workflows.subagents` as an
+internal specialist.
 
 #### `description`
 - **Type:** `string`
@@ -191,6 +188,35 @@ unless another agent references it through `subagents` or
 ---
 
 ### Optional Fields
+
+#### `name`
+- **Type:** `string | null`
+- **Typical location:** Agent only (optional)
+- **Default:** `null`
+- **Description:** Optional human-readable display name used for presentation-only labels and logs. The authoring key remains `name`, and the resolved runtime field is `display_name`. It does **not** control the canonical `agent_slug`, Microsoft Agent Framework `Agent.name`, history or locks, usage attribution, registered Azure Function names, routes, workflow ownership, or machine telemetry. See [File Naming Conventions](#file-naming-conventions) and the [generated reference](./front-matter-reference.md#agent-front-matter-agentmd).
+
+`billing.agent.md` uses a display name containing spaces while retaining the
+canonical slug `billing`:
+
+```markdown
+---
+name: Billing Specialist
+description: Handles billing questions
+builtin_endpoints: true
+---
+Help users with billing questions.
+```
+
+`silent.agent.md` omits the display name and retains the canonical slug
+`silent`:
+
+```markdown
+---
+description: Handles requests without a presentation label
+builtin_endpoints: true
+---
+Handle the request.
+```
 
 #### `agent_configuration`
 - **Type:** `object | null`
@@ -1344,7 +1370,8 @@ step-by-step answers.
 12. **MCP server references:** Servers in `mcp.exclude` must be defined in MCP configuration discovered from `mcp.json`
 13. **Skill references:** Skills in `skills.exclude` are best-effort validated; unknown skill names produce warnings during config validation
 14. **Subagent references:** Every `subagents[].agent` must name a slug that exists in the app; duplicate and self-references within the same agent's `subagents:` list are rejected; the derived `delegate_<slug>` tool name must not collide with any other tool available to the coordinator (custom/user tools, MCP tools, sandbox, workflow-management tools, or another specialist's `delegate_<slug>`)
-15. **Configuration file location:** `agents.config.yaml` must be in the same directory as agent `.md` files
+15. **Canonical agent identity:** Every discovered agent must have a source filename that produces a non-empty canonical `agent_slug`; optional frontmatter `name` maps only to `display_name` and is never an identity fallback
+16. **Configuration file location:** `agents.config.yaml` must be in the same directory as agent `.md` files
 
 ---
 
@@ -1357,7 +1384,15 @@ step-by-step answers.
 
 ### Function name resolution
 
-For agents, two related identifiers are derived from the source filename. The frontmatter `name:` field remains display-only and is never used for either identifier.
+Every loaded agent has one required canonical machine identity, `agent_slug`,
+derived from the source filename. `agent_slug` is not an authoring key. The
+optional frontmatter `name:` key maps only to `ResolvedAgent.display_name`.
+
+The canonical slug drives Microsoft Agent Framework `Agent.name`, conversation
+history and per-session locks, token-usage attribution, registered Azure
+Function names and built-in routes where applicable, workflow ownership,
+policy lookup and instance namespaces, and machine telemetry. Presentation
+labels never participate in those decisions.
 
 - **Azure Function name** (used for host indexing and `admin/functions/{name}` URLs):
   - Start with the agent filename stem (remove `.agent.md`).
@@ -1400,7 +1435,9 @@ _(saved as `agent.md` — available at `/agents/main/chat`, same endpoint as `ma
 
 > **Breaking change (FRD 0007):** Duplicate agent slugs — including two file stems that *sanitize* to the same value (for example `daily-report.agent.md` and `daily_report.agent.md`), and duplicates across the root and an `agents/` subfolder — now fail app startup instead of silently auto-suffixing. This unifies agent-slug collision handling with the pre-existing duplicate-skill and duplicate-workflow-tool checks, and is required because a slug is now also a prompt-visible identity (the `delegate_<slug>` tool name); a silently renamed agent could otherwise leave a `subagents:` reference pointing at the wrong agent, or leave two different agents indistinguishable to a coordinator's model. If you relied on the old auto-suffix behavior, rename the colliding file(s) so every agent slug is unique.
 
-In other words, the display `name:` field is never used to derive registered Azure Function names, routes, or runtime identifiers; it is presentation-only. See also [`name`](#name).
+In other words, the optional display `name:` field is never used to derive
+registered Azure Function names, routes, or runtime identifiers; it is
+presentation-only. See also [`name`](#name).
 
 **Endpoint-only agents:**
 Any `.agent.md` file, including `main.agent.md`, may omit `trigger` when at least one built-in endpoint is enabled. For example, `main.agent.md` with `builtin_endpoints: true` is available at `/agents/main/`, `/agents/main/chat`, and `/agents/main/chatstream`, and registers an MCP tool named `main` on the shared runtime MCP transport.

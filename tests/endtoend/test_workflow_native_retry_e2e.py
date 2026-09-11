@@ -158,9 +158,9 @@ def _order_recovery_submission() -> tuple[str, dict[str, Any]]:
             workflow_tools.start_workflow(
                 params,
                 workflow_tools.WorkflowSessionContext(
-                    workflow_agent_slug="main",
+                    agent_slug="main",
                     session_id="retry-e2e",
-                    agent_name="main",
+                    display_name="main",
                     durable_client=_CapturingClient(),  # type: ignore[arg-type]
                 ),
                 policy=_sample_workflow_policy(),
@@ -172,10 +172,10 @@ def _order_recovery_submission() -> tuple[str, dict[str, Any]]:
         task for task in captured["tasks"] if task["id"] == "reserve_inventory"
     )
     assert "durable_retry_policy" in retry_task["execution"]
-    assert captured["workflow_agent"] == {
-        "workflow_agent_slug": "main",
+    assert captured["agent_slug"] == "main"
+    assert captured["agent"] == {
+        "agent_slug": "main",
         "session_id": "retry-e2e",
-        "agent_name": "main",
     }
     return workflow_id, captured
 
