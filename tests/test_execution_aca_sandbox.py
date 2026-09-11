@@ -2725,39 +2725,53 @@ async def test_backend_does_not_submit_after_a_concurrent_quarantine(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_backend_retains_admitted_slot_when_acceptance_times_out(
+async def test_backend_retains_admitted_slot_when_acceptance_fails_after_launch(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    launch_completed = asyncio.Event()
+    acceptance_path: str | None = None
+
+    class AcceptanceFailureHandle(FakeSandboxSessionHandle):
+        async def read_file(self, path: str) -> bytes:
+            if launch_completed.is_set() and path == acceptance_path:
+                raise SandboxFileOperationError("journal acceptance unavailable")
+            return await super().read_file(path)
+
     script_root = _script_root(tmp_path)
     session = _session(script_root)
     store = FakeSessionStateStore(session)
-    handle = FakeSandboxSessionHandle()
+    handle = AcceptanceFailureHandle()
     provider = FakeSandboxSessionProvider(handle)
-    original_start = SetupBudget.start
-    monkeypatch.setattr(
-        "azure_functions_agents.execution.aca_sandbox.SetupBudget.start",
-        lambda: original_start(setup_seconds=0.05),
-    )
+
+    async def mark_launch_completed(command: str) -> None:
+        nonlocal acceptance_path
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        acceptance_path = status_path(run_id)
+        launch_completed.set()
+
+    handle.exec_hook = mark_launch_completed
     backend = AcaSandboxExecutionBackend(
         _binding(),
         runtime=_runtime(script_root, provider, store),
         owner=_owner(),
-        run_control=SandboxRunControl(event_poll_interval_seconds=0.001),
     )
 
-    with pytest.raises(DurableAdmissionSetupTimeoutError):
+    with pytest.raises(DurableAdmissionIndeterminateError) as excinfo:
         await backend.start_run(StartRunRequest(prompt="hello", session_id=session.session_id))
 
     operations = [call.operation for call in handle.calls]
-    assert operations.count("read_file") >= 3
     assert operations.index("write_file") < operations.index("exec")
+    assert launch_completed.is_set()
     assert store.adopted == []
     assert store.session is not None
     assert store.session.status == "running"
     assert len(store.runs) == 1
     admitted_run = next(iter(store.runs.values()))
     assert admitted_run.status == "accepted"
+    assert excinfo.value.handle.run_id == admitted_run.run_id
+    assert excinfo.value.handle.session_id == session.session_id
+    assert excinfo.value.handle.state == "accepted"
+    assert excinfo.value.handle.phase == "executing"
     assert store.session.active_run_id == admitted_run.run_id
 
 
