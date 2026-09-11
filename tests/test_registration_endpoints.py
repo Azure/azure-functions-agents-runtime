@@ -20,7 +20,10 @@ from azure_functions_agents.config.schema import (
     ResolvedAgent,
     ToolsFilter,
 )
-from azure_functions_agents.registration._naming import _function_name_from_source
+from azure_functions_agents.registration._naming import (
+    _function_name_from_source,
+    allocate_unique_builtin_slug,
+)
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
     _MAX_HISTORY_REPLAY_MESSAGES,
@@ -113,7 +116,7 @@ class DummyRequest:
 
 def _resolved_agent(
     *,
-    name: str,
+    name: str | None,
     is_main: bool,
     builtin_endpoints: BuiltinEndpointsConfig,
     source_file: str | Path | None = None,
@@ -121,9 +124,9 @@ def _resolved_agent(
     slug: str | None = None,
 ) -> ResolvedAgent:
     source = source_file or Path(__file__).resolve()
-    resolved_slug = _function_name_from_source(source, name) if slug is None else slug
+    resolved_slug = _function_name_from_source(source) if slug is None else slug
     return ResolvedAgent(
-        name=name,
+        display_name=name,
         slug=resolved_slug,
         description="desc",
         trigger=None,
@@ -155,13 +158,15 @@ class _CapturedSpan:
     Mirrors ``test_web_request.py``'s ``_CapturedSpan``. The built-in chat/MCP
     endpoints call ``run_agent``/``run_agent_stream`` directly rather than
     going through ``_handlers.py``'s trigger-registered handlers, so they now
-    open their *own* ``agent.run {name}`` span (see the comment above
+    open their *own* ``agent.run {slug}`` span (see the comment above
     ``start_span`` in ``handle_chat``/``handle_mcp_agent_chat``) instead of
     relying on a caller to have opened one.
     """
 
     def __init__(self, attributes: dict[str, Any]) -> None:
-        self.attributes: dict[str, Any] = dict(attributes)
+        self.attributes: dict[str, Any] = {
+            key: value for key, value in attributes.items() if value is not None
+        }
         self.errors: list[tuple[str, str]] = []
         self.exceptions: list[BaseException] = []
         self.content: dict[str, str] = {}
@@ -281,6 +286,32 @@ def test_register_builtin_endpoints_uses_filename_slug_for_duplicate_display_nam
     ]
 
 
+def test_allocate_unique_builtin_slug_uses_explicit_slug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    registered_names: set[str] = set()
+
+    assert (
+        allocate_unique_builtin_slug(
+            "billing",
+            registered_names,
+            source_file="/agents/Billing Specialist.agent.md",
+        )
+        == "billing"
+    )
+    assert registered_names == {"billing"}
+
+    with caplog.at_level("ERROR"), pytest.raises(ValueError) as exc_info:
+        allocate_unique_builtin_slug(
+            "billing",
+            registered_names,
+            source_file="/agents/renamed.agent.md",
+        )
+
+    assert "/agents/billing/" in str(exc_info.value)
+    assert "renamed.agent.md" in str(exc_info.value)
+
+
 def test_run_builtin_agent_generates_session_id_before_building_sandbox_tools(
     monkeypatch: Any,
 ) -> None:
@@ -327,12 +358,8 @@ def test_run_builtin_agent_generates_session_id_before_building_sandbox_tools(
     assert calls["run_agent"]["session_id"] == "generated-session-id"
     assert calls["run_agent"]["sandbox_tools"] == ["sandbox-tool"]
     assert result.session_id == "generated-session-id"
-    # S1: the coordinator/direct-role agent must be identified by
-    # `resolved.slug` for telemetry, not the mutable display `name` (FRD
-    # 0007 §4.3) -- matches round 2's B2 fix for delegated specialists.
-    assert calls["run_agent"]["agent_name"] == resolved.slug
-    assert calls["run_agent"]["agent_name"] != resolved.name
-    assert calls["run_agent"]["workflow_agent_slug"] == resolved.slug
+    assert calls["run_agent"]["agent_slug"] == resolved.slug
+    assert calls["run_agent"]["display_name"] == resolved.display_name
 
 
 def test_run_builtin_agent_stream_generates_session_id_before_building_sandbox_tools(
@@ -382,10 +409,8 @@ def test_run_builtin_agent_stream_generates_session_id_before_building_sandbox_t
     assert calls["run_agent_stream"]["session_id"] == "generated-stream-session-id"
     assert calls["run_agent_stream"]["sandbox_tools"] == ["sandbox-tool"]
     assert result == "stream"
-    # S1: same contract as the non-streaming builtin-agent test above.
-    assert calls["run_agent_stream"]["agent_name"] == resolved.slug
-    assert calls["run_agent_stream"]["workflow_agent_slug"] == resolved.slug
-    assert calls["run_agent_stream"]["agent_name"] != resolved.name
+    assert calls["run_agent_stream"]["agent_slug"] == resolved.slug
+    assert calls["run_agent_stream"]["display_name"] == resolved.display_name
 
 
 def test_register_builtin_endpoints_chat_also_registers_http_routes_for_non_main_agent(
@@ -596,10 +621,8 @@ def test_handle_chat_reports_delegate_error_count_on_span(
     # comes from `delegate_error_count`, proving it is the piece that was
     # previously dropped on this surface.
     assert span.attributes["af.agent.tool_error_count"] == 2
-    # S1: this endpoint's own span must identify the coordinator agent by
-    # `resolved.slug`, not the mutable display `name` (FRD 0007 §4.3).
-    assert span.attributes["af.agent.name"] == resolved.slug
-    assert span.attributes["af.agent.name"] != resolved.name
+    assert span.attributes["af.agent.slug"] == resolved.slug
+    assert span.attributes["af.agent.display_name"] == resolved.display_name
 
 
 def test_handle_mcp_agent_chat_reports_delegate_error_count_on_span(
@@ -647,9 +670,8 @@ def test_handle_mcp_agent_chat_reports_delegate_error_count_on_span(
     [span] = spans
     assert span.attributes["af.agent.outcome"] == "success"
     assert span.attributes["af.agent.tool_error_count"] == 1
-    # S1: same contract as the chat endpoint test above, for the MCP surface.
-    assert span.attributes["af.agent.name"] == resolved.slug
-    assert span.attributes["af.agent.name"] != resolved.name
+    assert span.attributes["af.agent.slug"] == resolved.slug
+    assert span.attributes["af.agent.display_name"] == resolved.display_name
 
 
 def test_handle_mcp_agent_chat_refreshes_span_session_id_when_caller_omits_it(

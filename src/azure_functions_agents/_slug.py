@@ -10,8 +10,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from ._logger import logger
-
 
 def _safe_function_name(raw_name: str) -> str:
     name = re.sub(r"[^a-zA-Z0-9_]", "_", raw_name).strip("_")
@@ -37,28 +35,13 @@ def _is_single_agent_file(filename: str) -> bool:
     return _is_bare_agent_md(filename) or _is_claude_md(filename)
 
 
-def _function_name_from_source(
-    source_file: str | Path | None, fallback_name: str, *, warn_on_missing: bool = True
-) -> str:
+def _function_name_from_source(source_file: str | Path) -> str:
     """Derive a sanitized base name from ``source_file``'s stem.
 
-    ``warn_on_missing`` gates the "no source_file" warning: registration
-    call sites (``registration/_naming.py``) want it (a missing
-    ``source_file`` there means something real is misconfigured), but
-    ``config/merge.py``'s ``compose()`` must stay warning-free — see
-    ``test_compose_defers_warning_only_validation`` — since directly
-    constructed ``AgentSpec``s (common in unit tests) often omit
-    ``source_file`` and that is not itself a validation concern.
+    The caller must supply the source filename; presentation metadata is never
+    used as a machine-identity fallback.
     """
-    source_value = str(source_file).strip() if source_file is not None else ""
-    if not source_value:
-        if warn_on_missing:
-            logger.warning(
-                "Resolved agent is missing source_file; falling back to sanitized default for function registration.",
-            )
-        return _safe_function_name(fallback_name)
-
-    source_name = Path(source_value).name
+    source_name = Path(source_file).name
     lower_name = source_name.lower()
 
     # Single-agent files (bare agent.md or CLAUDE.md, any casing) → alias for main.agent.md

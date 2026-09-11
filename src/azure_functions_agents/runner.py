@@ -196,7 +196,7 @@ async def _stream_usage_details(stream: Any, *, remaining_timeout: float) -> Any
 class _AgentUsageRecorder:
     """Attempt at most one internal token-usage record for a MAF invocation."""
 
-    agent_name: str
+    agent_slug: str
     execution_role: _AgentExecutionRole
     inference_target: InferenceTarget = field(default_factory=InferenceTarget)
     _emission_attempted: bool = field(default=False, init=False)
@@ -209,7 +209,7 @@ class _AgentUsageRecorder:
         try:
             usage = _normalize_usage_details(usage_details)
             payload: dict[str, Any] = {
-                "agent_name": self.agent_name,
+                "agent_slug": self.agent_slug,
                 "event_name": "agent_token_usage",
                 "execution_role": self.execution_role,
                 "input_tokens": usage.get("input_tokens"),
@@ -234,7 +234,7 @@ _SESSION_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 _SESSION_LOCKS_GUARD = asyncio.Lock()
 
 
-async def _get_session_lock(session_id: str, agent_slug: str = "main") -> asyncio.Lock:
+async def _get_session_lock(session_id: str, agent_slug: str) -> asyncio.Lock:
     key = (agent_slug, session_id)
     async with _SESSION_LOCKS_GUARD:
         lock = _SESSION_LOCKS.get(key)
@@ -249,7 +249,7 @@ async def _session_lock_bounded_by(
     session_id: str,
     deadline: float,
     *,
-    agent_slug: str = "main",
+    agent_slug: str,
 ) -> AsyncIterator[None]:
     """Acquire the agent/session lock with a bounded wait, and always release.
 
@@ -309,8 +309,7 @@ def _resolve_sessions_dir(agent_slug: str) -> Path:
     Returns ``{config_dir}/agent-sessions/{agent_slug}``, creating it if
     needed.
     """
-    slug = validate_agent_slug(agent_slug)
-    base = Path(resolve_config_dir()).resolve() / "agent-sessions" / slug
+    base = Path(resolve_config_dir()).resolve() / "agent-sessions" / agent_slug
     base.mkdir(parents=True, exist_ok=True)
     return base
 
@@ -333,17 +332,6 @@ def _build_history_provider(agent_slug: str) -> Any:
         storage_root=scoped_dir.parent,
         agent_slug=agent_slug,
     )
-
-
-def _resolve_history_agent_slug(
-    agent_name: str | None,
-    workflow_agent_slug: str | None,
-) -> str:
-    if agent_name is not None:
-        return agent_name
-    if workflow_agent_slug is not None:
-        return workflow_agent_slug
-    return "main"
 
 
 def _build_chat_options_from_environment() -> dict[str, Any] | None:
@@ -407,8 +395,8 @@ def _assemble_agent_inputs(
     system_addendum: str | None,
     workflow_enabled: bool,
     workflow_durable_client: Any | None,
-    workflow_agent_slug: str | None,
-    agent_name: str | None,
+    agent_slug: str,
+    display_name: str | None,
     resolved_id: str | None,
     delegate_tools: list[FunctionTool] | None,
     workflow_policy: WorkflowPlanPolicy | None,
@@ -429,9 +417,9 @@ def _assemble_agent_inputs(
 
         resolved_tools.extend(
             build_workflow_tools(
+                agent_slug=agent_slug,
                 session_id=resolved_id or "",
-                workflow_agent_slug=workflow_agent_slug or agent_name or "main",
-                agent_name=agent_name or "main",
+                display_name=display_name,
                 durable_client=workflow_durable_client,
                 policy=workflow_policy,
             )
@@ -459,7 +447,7 @@ def _build_role_agent(
     agent_instructions: str | None,
     tools: list[AgentTool],
     skill_paths: list[Path] | None,
-    agent_name: str | None,
+    agent_slug: str,
     history_provider: HistoryProvider | None,
     agent_configuration: AgentConfiguration,
 ) -> Agent[Any]:
@@ -484,7 +472,7 @@ def _build_role_agent(
         warnings.simplefilter("ignore", category=ExperimentalWarning)
         return create_harness_agent(
             chat_client,
-            name=agent_name,
+            name=agent_slug,
             harness_instructions="",
             agent_instructions=agent_instructions,
             tools=tools,
@@ -513,7 +501,7 @@ def _build_delegated_agent(
     """Build one specialist in its resolved mode for a stateless leaf role.
 
     Runs as itself: own instructions, model, and static tools, but never a
-    per-request sandbox or main-only Dynamic-Workflow tools (naturally
+    per-request sandbox or direct-invocation-only Dynamic-Workflow tools (naturally
     absent — never passed to :func:`_build_role_agent`, not stripped).
     ``resolved.subagents`` is deliberately never read — the structural
     enforcement of single-level delegation (Decision #6).
@@ -529,8 +517,8 @@ def _build_delegated_agent(
         system_addendum=None,
         workflow_enabled=False,
         workflow_durable_client=None,
-        workflow_agent_slug=None,
-        agent_name=resolved.slug,
+        agent_slug=resolved.slug,
+        display_name=resolved.display_name,
         resolved_id=None,
         delegate_tools=None,
         workflow_policy=None,
@@ -540,7 +528,7 @@ def _build_delegated_agent(
         agent_instructions=effective_instructions,
         tools=resolved_tools,
         skill_paths=capabilities.enabled_skill_paths,
-        agent_name=resolved.slug,
+        agent_slug=resolved.slug,
         history_provider=None,
         agent_configuration=resolved.agent_configuration,
     )
@@ -558,7 +546,7 @@ async def run_leaf_agent_task(
     """Run one fresh stateless specialist and return its response text."""
     specialist_agent, inference_target = _build_delegated_agent(resolved, capabilities)
     usage_recorder = _AgentUsageRecorder(
-        agent_name=resolved.slug,
+        agent_slug=resolved.slug,
         execution_role=execution_role,
         inference_target=inference_target,
     )
@@ -577,7 +565,7 @@ async def run_leaf_agent_task(
     return response.text
 
 
-def _sanitize_delegate_failure(slug: str, exc: BaseException) -> str:
+def _sanitize_delegate_failure(target_agent_slug: str, exc: BaseException) -> str:
     """Sanitized, model-facing message for a recovered delegate failure.
 
     Deliberately generic and class-independent — never varies by exception
@@ -586,7 +574,7 @@ def _sanitize_delegate_failure(slug: str, exc: BaseException) -> str:
     telemetry (Decision #12).
     """
     return (
-        f"The '{slug}' specialist could not complete this task. "
+        f"The '{target_agent_slug}' specialist could not complete this task. "
         "Consider trying again, rephrasing the request, or proceeding without it."
     )
 
@@ -629,7 +617,10 @@ async def _finalize_maf_stream(stream: Any, exc: BaseException) -> None:
 
 
 def _record_generic_delegate_failure(
-    span: RuntimeSpan, tracker: _DelegateErrorTracker, slug: str, exc: BaseException
+    span: RuntimeSpan,
+    tracker: _DelegateErrorTracker,
+    target_agent_slug: str,
+    exc: BaseException,
 ) -> str:
     """Record a recoverable delegate failure and return the sanitized model-facing string."""
     tracker.record_error()
@@ -639,11 +630,15 @@ def _record_generic_delegate_failure(
     # the real exception type/detail in telemetry instead of a flattened
     # string.
     span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
-    return _sanitize_delegate_failure(slug, exc)
+    return _sanitize_delegate_failure(target_agent_slug, exc)
 
 
 def _record_delegate_timeout(
-    span: RuntimeSpan, tracker: _DelegateErrorTracker, slug: str, effective_timeout: float, exc: BaseException
+    span: RuntimeSpan,
+    tracker: _DelegateErrorTracker,
+    target_agent_slug: str,
+    effective_timeout: float,
+    exc: BaseException,
 ) -> str:
     """Record a recoverable delegate timeout (deadline or specialist-raised) and return the model-facing string."""
     tracker.record_error()
@@ -652,7 +647,7 @@ def _record_delegate_timeout(
     span.set_attribute("af.delegate.timeout_seconds", effective_timeout)
     span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
     return (
-        f"The '{slug}' specialist did not respond in time and was "
+        f"The '{target_agent_slug}' specialist did not respond in time and was "
         "stopped. Consider a narrower request, trying again, or "
         "proceeding without it."
     )
@@ -688,8 +683,8 @@ def _build_delegate_tool(
     """
     resolved = entry.resolved
     capabilities = entry.capabilities
-    slug = ref.agent
-    tool_name = delegate_tool_name(slug)
+    target_agent_slug = ref.agent
+    tool_name = delegate_tool_name(target_agent_slug)
     description = ref.when or resolved.description
     specialist_timeout = resolved.timeout
 
@@ -704,7 +699,7 @@ def _build_delegate_tool(
         task_text = params.task
 
         span = current_span()
-        span.set_attribute("af.delegate.specialist", slug)
+        span.set_attribute("af.delegate.specialist", target_agent_slug)
         span.set_attribute("af.delegate.task_bytes", len(task_text))
         span.set_content("af.delegate.task", task_text)
 
@@ -714,8 +709,16 @@ def _build_delegate_tool(
         remaining = max(0.0, coordinator_deadline - loop.time())
         effective_timeout = min(specialist_timeout, remaining)
         if effective_timeout <= 0:
-            exc = TimeoutError(f"delegate_{slug}: coordinator budget exhausted before dispatch")
-            return _record_delegate_timeout(span, tracker, slug, effective_timeout, exc)
+            exc = TimeoutError(
+                f"delegate_{target_agent_slug}: coordinator budget exhausted before dispatch"
+            )
+            return _record_delegate_timeout(
+                span,
+                tracker,
+                target_agent_slug,
+                effective_timeout,
+                exc,
+            )
 
         try:
             # Building the specialist `Agent` is inside this `try` too, so a
@@ -741,9 +744,20 @@ def _build_delegate_tool(
             # Covers both a genuine `wait_for` deadline expiry and any
             # `TimeoutError` the specialist's own code happens to raise —
             # both are recoverable specialist-side timeouts either way.
-            return _record_delegate_timeout(span, tracker, slug, effective_timeout, exc)
+            return _record_delegate_timeout(
+                span,
+                tracker,
+                target_agent_slug,
+                effective_timeout,
+                exc,
+            )
         except Exception as exc:
-            return _record_generic_delegate_failure(span, tracker, slug, exc)
+            return _record_generic_delegate_failure(
+                span,
+                tracker,
+                target_agent_slug,
+                exc,
+            )
 
         record_delegate_call(error=False)
         span.set_attribute("af.delegate.outcome", "success")
@@ -809,8 +823,8 @@ async def _build_agent_session(
     system_addendum: str | None,
     workflow_enabled: bool,
     workflow_durable_client: Any | None,
-    workflow_agent_slug: str | None = None,
-    agent_name: str | None,
+    agent_slug: str,
+    display_name: str | None = None,
     web_request_tools: list[FunctionTool] | None = None,
     agent_configuration: AgentConfiguration | None = None,
     subagents: list[SubagentRef] | None = None,
@@ -839,8 +853,7 @@ async def _build_agent_session(
         resolved_id = validated_id
         session = AgentSession(session_id=resolved_id)
 
-    history_agent_slug = _resolve_history_agent_slug(agent_name, workflow_agent_slug)
-    history_provider = _build_history_provider(history_agent_slug)
+    history_provider = _build_history_provider(agent_slug)
 
     delegate_tools: list[FunctionTool] | None = None
     delegate_error_tracker: _DelegateErrorTracker | None = None
@@ -863,8 +876,8 @@ async def _build_agent_session(
         system_addendum=system_addendum,
         workflow_enabled=workflow_enabled,
         workflow_durable_client=workflow_durable_client,
-        workflow_agent_slug=workflow_agent_slug,
-        agent_name=agent_name,
+        agent_slug=agent_slug,
+        display_name=display_name,
         resolved_id=resolved_id,
         delegate_tools=delegate_tools,
         workflow_policy=workflow_policy,
@@ -875,7 +888,7 @@ async def _build_agent_session(
         agent_instructions=effective_instructions,
         tools=resolved_tools,
         skill_paths=skill_paths,
-        agent_name=agent_name,
+        agent_slug=agent_slug,
         history_provider=history_provider,
         agent_configuration=resolved_config,
     )
@@ -948,6 +961,8 @@ def _function_result_event(item: Any) -> dict[str, Any]:
 async def run_agent(
     prompt: str,
     *,
+    agent_slug: str,
+    display_name: str | None = None,
     instructions: str | None = None,
     timeout: float | None = None,
     tools: list[AgentFunctionTool] | None = None,
@@ -959,8 +974,6 @@ async def run_agent(
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: Any | None = None,
-    workflow_agent_slug: str | None = None,
-    agent_name: str | None = None,
     web_request_tools: list[FunctionTool] | None = None,
     agent_configuration: AgentConfiguration | None = None,
     subagents: list[SubagentRef] | None = None,
@@ -973,6 +986,10 @@ async def run_agent(
     ----------
     prompt:
         Prompt text. Sent as a user message.
+    agent_slug:
+        Required canonical machine identity for the executing agent.
+    display_name:
+        Optional presentation label used only for human-readable output.
     instructions:
         Per-call agent instructions (typically the body of an ``*.agent.md``
         file). Used verbatim as the agent's system prompt.
@@ -1024,10 +1041,8 @@ async def run_agent(
     To fully disable all tools from a direct API call, pass
     ``tools=[], mcp_tools=[], sandbox_tools=None, web_request_tools=None``.
     """
+    agent_slug = validate_agent_slug(agent_slug)
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
-    history_agent_slug = validate_agent_slug(
-        _resolve_history_agent_slug(agent_name, workflow_agent_slug)
-    )
     # Computed before building the agent so a delegate tool's adapter can cap
     # its own specialist timeout at "however much of *this* run's budget is
     # left" (FRD 0007 Decision #12: "effective timeout = min(specialist,
@@ -1048,8 +1063,8 @@ async def run_agent(
             system_addendum=system_addendum,
             workflow_enabled=workflow_enabled,
             workflow_durable_client=workflow_durable_client,
-            workflow_agent_slug=workflow_agent_slug,
-            agent_name=agent_name,
+            agent_slug=agent_slug,
+            display_name=display_name,
             web_request_tools=web_request_tools,
             agent_configuration=agent_configuration,
             subagents=subagents,
@@ -1063,7 +1078,7 @@ async def run_agent(
         async with _session_lock_bounded_by(
             resolved_id,
             coordinator_deadline,
-            agent_slug=history_agent_slug,
+            agent_slug=agent_slug,
         ):
             # Re-derive the remaining budget *after* the lock wait instead of
             # reusing the original full `timeout` — otherwise a long lock
@@ -1073,7 +1088,7 @@ async def run_agent(
             if remaining_after_lock <= 0:
                 raise TimeoutError
             usage_recorder = _AgentUsageRecorder(
-                agent_name=agent_name or "main",
+                agent_slug=agent_slug,
                 execution_role="primary",
                 inference_target=inference_target,
             )
@@ -1151,6 +1166,8 @@ async def run_agent(
 async def run_agent_stream(
     prompt: str,
     *,
+    agent_slug: str,
+    display_name: str | None = None,
     instructions: str | None = None,
     timeout: float | None = None,
     tools: list[AgentFunctionTool] | None = None,
@@ -1162,9 +1179,6 @@ async def run_agent_stream(
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: Any | None = None,
-    workflow_agent_slug: str | None = None,
-    agent_name: str | None = None,
-    display_name: str | None = None,
     web_request_tools: list[FunctionTool] | None = None,
     agent_configuration: AgentConfiguration | None = None,
     subagents: list[SubagentRef] | None = None,
@@ -1192,7 +1206,7 @@ async def run_agent_stream(
       the same ``tool_start``/``tool_end`` events as any other tool call; the
       per-run delegate-error count is not surfaced in the SSE vocabulary
       itself (only in :class:`AgentResult` for the non-streaming path), but
-      it IS applied to this run's own ``agent.run {name}`` span as
+      it IS applied to this run's own ``agent.run {agent_slug}`` span as
       ``af.agent.tool_error_count`` once the stream completes, mirroring
       what the non-streaming path does for :class:`AgentResult`.
     * To fully disable all tools from a direct API call, pass
@@ -1210,10 +1224,8 @@ async def run_agent_stream(
     * ``done``         — stream completed normally
     * ``error``        — terminal error message
     """
+    agent_slug = validate_agent_slug(agent_slug)
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
-    history_agent_slug = validate_agent_slug(
-        _resolve_history_agent_slug(agent_name, workflow_agent_slug)
-    )
     # Computed before building the agent (see run_agent) so a delegate tool's
     # adapter can cap its own specialist timeout at this run's remaining
     # budget. Reused, unchanged, as `deadline` further down for the existing
@@ -1234,8 +1246,8 @@ async def run_agent_stream(
                 system_addendum=system_addendum,
                 workflow_enabled=workflow_enabled,
                 workflow_durable_client=workflow_durable_client,
-                workflow_agent_slug=workflow_agent_slug,
-                agent_name=agent_name,
+                agent_slug=agent_slug,
+                display_name=display_name,
                 web_request_tools=web_request_tools,
                 agent_configuration=agent_configuration,
                 subagents=subagents,
@@ -1255,7 +1267,7 @@ async def run_agent_stream(
     # a caller-provided one (B3): unlike the non-streaming path — where
     # `run_agent` returns synchronously and callers such as
     # `registration/_handlers.py`/`registration/endpoints.py` wrap the whole
-    # call in an `agent.run {name}` span before it returns — a caller of this
+    # call in an `agent.run {agent_slug}` span before it returns — a caller of this
     # generator (e.g. `handle_chat_stream`) typically just constructs the
     # generator and hands it to a `StreamingResponse` without ever driving it
     # itself, so no ambient span from the caller is active while this body
@@ -1263,12 +1275,12 @@ async def run_agent_stream(
     # timeout/exception outcomes) always lands somewhere for the streaming
     # surface too, matching the non-streaming path's `AgentResult.delegate_error_count`.
     with start_span(
-        f"agent.run {agent_name or 'agent'}",
+        f"agent.run {agent_slug}",
         lifecycle_stage=LifecycleStage.AGENT_RUN,
         attributes={
-            "af.agent.name": agent_name,
+            "af.agent.slug": agent_slug,
             # S1b: mirrors what `registration/endpoints.py`'s own
-            # `agent.run {name}` spans already set (`af.agent.name` = slug,
+            # `agent.run {slug}` spans already set (`af.agent.slug` = slug,
             # `af.agent.display_name` = human-readable name) for the
             # non-streaming/MCP surfaces. Those surfaces open their own span
             # around `run_agent`, which has none of its own — but nothing
@@ -1286,7 +1298,7 @@ async def run_agent_stream(
             async with _session_lock_bounded_by(
                 resolved_id,
                 deadline,
-                agent_slug=history_agent_slug,
+                agent_slug=agent_slug,
             ):
                 pending_tool_calls: dict[str, dict[str, Any]] = {}
                 emitted_tool_calls: set[str] = set()
@@ -1348,7 +1360,7 @@ async def run_agent_stream(
                 usage_recorder: _AgentUsageRecorder | None = None
                 try:
                     usage_recorder = _AgentUsageRecorder(
-                        agent_name=agent_name or "main",
+                        agent_slug=agent_slug,
                         execution_role="primary",
                         inference_target=inference_target,
                     )

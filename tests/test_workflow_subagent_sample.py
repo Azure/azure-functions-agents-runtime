@@ -69,11 +69,11 @@ def test_sample_is_runnable_and_indexes_subagent_activity() -> None:
         "agents_workflow_run_sub_agent",
         "agents_workflow_run_tool",
         "agents_workflow_orchestrator",
-        "handler_PR_Status_Portfolio_Coordinator",
+        "handler_main",
     } <= functions.keys()
     assert [
         binding["type"]
-        for binding in functions["handler_PR_Status_Portfolio_Coordinator"]
+        for binding in functions["handler_main"]
     ] == ["durableClient", "queueTrigger"]
 
 

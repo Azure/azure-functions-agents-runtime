@@ -227,7 +227,8 @@ def test_agent_configuration_accepts_partial_and_null_shapes() -> None:
 
 def test_resolved_agent_configuration_defaults_empty() -> None:
     resolved = ResolvedAgent(
-        name="X",
+        display_name="X",
+        slug="x",
         description="desc",
         trigger=None,
         instructions="",

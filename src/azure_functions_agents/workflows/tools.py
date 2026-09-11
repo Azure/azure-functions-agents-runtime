@@ -11,7 +11,7 @@ Five tools:
 All five call the Durable client captured by the per-session MAF tool
 wrappers built in ``build_workflow_tools``.
 Isolation is enforced by prefix-matching the Durable instance ID against a
-128-bit SHA-256 prefix for ``(workflow_agent_slug, session_id)``; a mismatch
+128-bit SHA-256 prefix for ``(agent_slug, session_id)``; a mismatch
 returns 404 (same shape as "not found") to avoid leaking another agent's workflows.
 """
 
@@ -290,7 +290,7 @@ def _is_active_status(status: Any) -> bool:
 
 async def fetch_session_workflows(
     durable_client: DurableFunctionsClient,
-    workflow_agent_slug: str,
+    agent_slug: str,
     session_id: str,
 ) -> list[dict[str, Any]]:
     """Return status envelopes for workflows matching the agent and session.
@@ -306,7 +306,7 @@ async def fetch_session_workflows(
     for status in statuses or []:
         instance_id = getattr(status, "instance_id", None)
         if not instance_id or not workflow_matches_agent_session(
-            workflow_agent_slug, session_id, instance_id
+            agent_slug, session_id, instance_id
         ):
             continue
         envelopes.append(status_envelope(status))
@@ -319,7 +319,7 @@ async def fetch_session_workflows(
 
 async def count_active_session_workflows(
     durable_client: DurableFunctionsClient,
-    workflow_agent_slug: str,
+    agent_slug: str,
     session_id: str,
 ) -> int:
     statuses = await durable_client.get_status_all()
@@ -329,7 +329,7 @@ async def count_active_session_workflows(
         if (
             instance_id
             and workflow_matches_agent_session(
-                workflow_agent_slug, session_id, instance_id
+                agent_slug, session_id, instance_id
             )
             and _is_active_status(status)
         ):
@@ -341,14 +341,14 @@ async def count_active_session_workflows(
 
 async def fetch_session_workflow_status(
     durable_client: DurableFunctionsClient,
-    workflow_agent_slug: str,
+    agent_slug: str,
     session_id: str,
     workflow_id: str,
 ) -> dict[str, Any] | None:
-    """Return the status if it matches the workflow agent and session.
+    """Return the status if it matches the agent and session.
     """
     if not workflow_matches_agent_session(
-        workflow_agent_slug, session_id, workflow_id
+        agent_slug, session_id, workflow_id
     ):
         return None
     status = await durable_client.get_status(workflow_id)
@@ -470,27 +470,26 @@ async def start_workflow(
             metadata["path"] = exc.path
         return _error(str(exc), **metadata)
 
-    workflow_agent = {
-        "workflow_agent_slug": session.workflow_agent_slug,
+    agent = {
+        "agent_slug": session.agent_slug,
         "session_id": session.session_id,
-        "agent_name": session.agent_name,
     }
     instance_id = new_workflow_instance_id(
-        session.workflow_agent_slug,
+        session.agent_slug,
         session.session_id,
     )
 
     try:
         active_count = await count_active_session_workflows(
             session.durable_client,
-            session.workflow_agent_slug,
+            session.agent_slug,
             session.session_id,
         )
     except Exception:
         logger.exception(
             "start_workflow: client.get_status_all failed "
-            "workflow_agent=%s session=%s",
-            session.workflow_agent_slug,
+            "agent_slug=%s session=%s",
+            session.agent_slug,
             session.session_id,
         )
         return _error("failed to start workflow")
@@ -507,22 +506,24 @@ async def start_workflow(
             instance_id=instance_id,
             input={
                 "tasks": plan_to_activity_inputs(plan, effective_policies),
-                "workflow_agent_slug": session.workflow_agent_slug,
-                "workflow_agent": workflow_agent,
+                "agent_slug": session.agent_slug,
+                "agent": agent,
                 "policy": {
                     "allowed_tools": sorted(policy.allowed_tools),
                     "allowed_subagents": sorted(policy.allowed_subagents),
                 },
             },
             tags={
-                "durabletask.displayName": f"{session.agent_name}-orchestration"
+                "durabletask.displayName": (
+                    f"{session.display_name or session.agent_slug}-orchestration"
+                )
             },
         )
     except Exception:
         logger.exception(
             "start_workflow: client.schedule_new_orchestration failed "
-            "workflow_agent=%s session=%s",
-            session.workflow_agent_slug,
+            "agent_slug=%s session=%s",
+            session.agent_slug,
             session.session_id,
         )
         return _error("failed to start workflow")
@@ -536,9 +537,9 @@ async def start_workflow(
             instance_id,
         )
     logger.info(
-        "workflow started: id=%s workflow_agent=%s session=%s",
+        "workflow started: id=%s agent_slug=%s session=%s",
         instance_id,
-        session.workflow_agent_slug,
+        session.agent_slug,
         session.session_id,
     )
     return json.dumps({"workflow_id": instance_id})
@@ -555,7 +556,7 @@ async def get_workflow_status(
     # not start with this session's hash is treated as nonexistent — same
     # shape as "not found" so existence cannot be probed.
     if not workflow_matches_agent_session(
-        session.workflow_agent_slug,
+        session.agent_slug,
         session.session_id,
         params.workflow_id,
     ):
@@ -569,8 +570,8 @@ async def get_workflow_status(
     except Exception:
         logger.exception(
             "get_workflow_status: client.get_status failed "
-            "workflow_agent=%s session=%s",
-            session.workflow_agent_slug,
+            "agent_slug=%s session=%s",
+            session.agent_slug,
             session.session_id,
         )
         return _error("failed to fetch workflow status")
@@ -594,14 +595,14 @@ async def list_workflows(
     try:
         envelopes = await fetch_session_workflows(
             session.durable_client,
-            session.workflow_agent_slug,
+            session.agent_slug,
             session.session_id,
         )
     except Exception:
         logger.exception(
             "list_workflows: fetch_session_workflows failed "
-            "workflow_agent=%s session=%s",
-            session.workflow_agent_slug,
+            "agent_slug=%s session=%s",
+            session.agent_slug,
             session.session_id,
         )
         return _error("failed to list workflows")
@@ -617,7 +618,7 @@ async def terminate_workflow(
         return _error(_NO_CLIENT_MESSAGE)
 
     if not workflow_matches_agent_session(
-        session.workflow_agent_slug,
+        session.agent_slug,
         session.session_id,
         params.workflow_id,
     ):
@@ -631,16 +632,16 @@ async def terminate_workflow(
     except Exception:
         logger.exception(
             "terminate_workflow: client.terminate failed "
-            "workflow_agent=%s session=%s",
-            session.workflow_agent_slug,
+            "agent_slug=%s session=%s",
+            session.agent_slug,
             session.session_id,
         )
         return _error("failed to terminate workflow")
 
     logger.info(
-        "workflow terminated: id=%s workflow_agent=%s session=%s reason=%r",
+        "workflow terminated: id=%s agent_slug=%s session=%s reason=%r",
         params.workflow_id,
-        session.workflow_agent_slug,
+        session.agent_slug,
         session.session_id,
         params.reason,
     )
@@ -655,7 +656,7 @@ async def cancel_workflow(
         return _error(_NO_CLIENT_MESSAGE)
 
     if not workflow_matches_agent_session(
-        session.workflow_agent_slug,
+        session.agent_slug,
         session.session_id,
         params.workflow_id,
     ):
@@ -671,16 +672,16 @@ async def cancel_workflow(
     except Exception:
         logger.exception(
             "cancel_workflow: client.raise_event failed "
-            "workflow_agent=%s session=%s",
-            session.workflow_agent_slug,
+            "agent_slug=%s session=%s",
+            session.agent_slug,
             session.session_id,
         )
         return _error("failed to cancel workflow")
 
     logger.info(
-        "workflow cancel requested: id=%s workflow_agent=%s session=%s reason=%r",
+        "workflow cancel requested: id=%s agent_slug=%s session=%s reason=%r",
         params.workflow_id,
-        session.workflow_agent_slug,
+        session.agent_slug,
         session.session_id,
         params.reason,
     )
@@ -690,32 +691,32 @@ async def cancel_workflow(
 
 
 def _build_session(
-    workflow_agent_slug: str,
+    agent_slug: str,
     session_id: str | None,
-    agent_name: str,
+    display_name: str | None,
     durable_client: DurableFunctionsClient | None,
 ) -> WorkflowSessionContext | None:
     if not session_id or durable_client is None:
         return None
     return WorkflowSessionContext(
-        workflow_agent_slug=workflow_agent_slug,
+        agent_slug=agent_slug,
         session_id=session_id,
-        agent_name=agent_name,
+        display_name=display_name,
         durable_client=durable_client,
     )
 
 
 def build_workflow_tools(
     *,
+    agent_slug: str,
     session_id: str | None = None,
-    workflow_agent_slug: str = "main",
-    agent_name: str = "main",
+    display_name: str | None = None,
     durable_client: DurableFunctionsClient | None = None,
     policy: WorkflowPlanPolicy | None = None,
 ) -> list[Any]:
     """Return the list of workflow tool objects to inject for an agent."""
     session = _build_session(
-        workflow_agent_slug, session_id, agent_name, durable_client
+        agent_slug, session_id, display_name, durable_client
     )
 
     @define_tool(

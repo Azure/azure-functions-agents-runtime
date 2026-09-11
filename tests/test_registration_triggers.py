@@ -18,10 +18,6 @@ from azure_functions_agents.config.schema import (
     ToolsFilter,
     TriggerSpec,
 )
-from azure_functions_agents.registration._naming import (
-    _function_name_from_source,
-    _safe_function_name,
-)
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.triggers import (
     allocate_unique_function_name,
@@ -125,7 +121,8 @@ def _stub_handler(*args: Any, **kwargs: Any) -> Any:
 
 def _resolved_agent(*, trigger: TriggerSpec, is_main: bool = False) -> ResolvedAgent:
     return ResolvedAgent(
-        name="Daily Report",
+        display_name="Daily Report",
+        slug="daily_report",
         description="desc",
         trigger=trigger,
         instructions="Run the timer workflow.",
@@ -159,7 +156,7 @@ def test_register_agent_uses_source_filename_for_function_name(
 
     register_agent(app, resolved, AgentCapabilities())
 
-    assert app.function_names == ["simple"]
+    assert app.function_names == [resolved.slug]
     assert app.durable_client_inputs == []
 
 
@@ -177,7 +174,7 @@ def test_register_agent_sanitizes_source_filename(
 
     register_agent(app, resolved, AgentCapabilities())
 
-    assert app.function_names == [_safe_function_name("daily-report")]
+    assert app.function_names == [resolved.slug]
 
 
 def test_register_agent_avoids_name_collisions_from_display_names(
@@ -196,10 +193,7 @@ def test_register_agent_avoids_name_collisions_from_display_names(
     for resolved in resolved_agents:
         register_agent(app, resolved, AgentCapabilities())
 
-    assert app.function_names == [
-        _safe_function_name("report-a"),
-        _safe_function_name("report-b"),
-    ]
+    assert app.function_names == [resolved.slug for resolved in resolved_agents]
     assert app.function_names[0] != app.function_names[1]
 
 
@@ -210,19 +204,17 @@ def test_loaded_agent_keeps_display_name_in_metadata(tmp_path: Path) -> None:
     [resolved] = _resolve_agents(tmp_path)
 
     assert spec.name == "Simple Agent"
-    assert resolved.name == "Simple Agent"
+    assert resolved.display_name == "Simple Agent"
+    assert resolved.slug == "simple"
 
 
-def test_function_name_from_source_falls_back_to_display_name(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    display_name = "Daily Report"
+def test_loaded_agent_slug_is_independent_of_display_name(tmp_path: Path) -> None:
+    _write_timer_agent(tmp_path, "daily-report.agent.md", "Unrelated Presentation Name")
 
-    with caplog.at_level("WARNING"):
-        function_name = _function_name_from_source(None, display_name)
+    [resolved] = _resolve_agents(tmp_path)
 
-    assert function_name == _safe_function_name(display_name)
-    assert "missing source_file" in caplog.text
+    assert resolved.slug == "daily_report"
+    assert resolved.display_name == "Unrelated Presentation Name"
 
 
 def test_allocate_unique_function_name_fails_fast_on_collision(
@@ -233,9 +225,9 @@ def test_allocate_unique_function_name_fails_fast_on_collision(
 
     with caplog.at_level(logging.ERROR), pytest.raises(ValueError, match="Function name collision"):
         allocate_unique_function_name(
-            "/path/daily-report.agent.md",
-            "Daily Report",
+            "daily_report",
             registered_names,
+            source_file="/path/daily-report.agent.md",
         )
 
     assert registered_names == {"daily_report"}
@@ -251,9 +243,9 @@ def test_allocate_unique_function_name_no_warning_for_unique_name(
 
     with caplog.at_level(logging.WARNING):
         function_name = allocate_unique_function_name(
-            "/path/daily-report.agent.md",
-            "Daily Report",
+            "daily_report",
             registered_names,
+            source_file="/path/daily-report.agent.md",
         )
 
     assert function_name == "daily_report"
@@ -261,9 +253,8 @@ def test_allocate_unique_function_name_no_warning_for_unique_name(
     assert caplog.records == []
 
 
-def test_register_agent_missing_source_file_warns_and_falls_back(
+def test_register_agent_uses_resolved_slug_when_source_file_is_missing(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     resolved = _resolved_agent(
         trigger=TriggerSpec(type="timer_trigger", args={"schedule": "0 0 * * * *"})
@@ -275,11 +266,9 @@ def test_register_agent_missing_source_file_warns_and_falls_back(
         lambda *args, **kwargs: _stub_handler,
     )
 
-    with caplog.at_level("WARNING"):
-        register_agent(app, resolved, AgentCapabilities())
+    register_agent(app, resolved, AgentCapabilities())
 
-    assert app.function_names == [_safe_function_name("Daily Report")]
-    assert "missing source_file" in caplog.text
+    assert app.function_names == [resolved.slug]
 
 
 def test_register_agent_fails_fast_on_duplicate_function_names_with_registry(
@@ -661,7 +650,7 @@ def test_register_agent_dispatches_connector_trigger_to_builtin_registration(
             app,
             resolved,
             capabilities,
-            _function_name_from_source(resolved.source_file, resolved.name),
+            resolved.slug,
             {"connection": "example"},
             "connector_trigger",
             None,
@@ -712,7 +701,7 @@ def test_register_agent_falls_back_to_generic_connector_trigger(
             },
         )
     ]
-    assert app.function_names == [_function_name_from_source(resolved.source_file, resolved.name)]
+    assert app.function_names == [resolved.slug]
 
 
 def test_register_agent_registers_non_http_trigger_on_main_agent(
@@ -737,7 +726,7 @@ def test_register_agent_registers_non_http_trigger_on_main_agent(
             app,
             resolved,
             capabilities,
-            _function_name_from_source(resolved.source_file, resolved.name),
+            resolved.slug,
             {"schedule": "0 0 * * * *"},
             "timer_trigger",
             None,
@@ -768,7 +757,7 @@ def test_register_agent_registers_http_trigger_on_main_agent(
             app,
             resolved,
             capabilities,
-            _function_name_from_source(resolved.source_file, resolved.name),
+            resolved.slug,
             {"route": "reports"},
             None,
         )
@@ -797,7 +786,7 @@ def test_register_agent_dispatches_non_connector_trigger_types_to_builtin_regist
             app,
             resolved,
             capabilities,
-            _function_name_from_source(resolved.source_file, resolved.name),
+            resolved.slug,
             {"queue_name": "reports"},
             "queue_trigger",
             None,
@@ -883,4 +872,4 @@ def test_register_workflow_timer_adds_durable_client_without_changing_trigger(
             },
         )
     ]
-    assert app.function_names == ["test_registration_triggers"]
+    assert app.function_names == [resolved.slug]
