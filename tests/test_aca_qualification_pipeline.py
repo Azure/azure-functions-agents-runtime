@@ -11,6 +11,7 @@ qualification evidence to the wrong deployment.
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import json
 import re
@@ -18,16 +19,20 @@ import subprocess
 import tomllib
 import zipfile
 from argparse import Namespace
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from azure.identity import aio as azure_identity_aio
 from eng.scripts import aca_deployed_qualification, aca_qualification_pipeline
 from eng.scripts.aca_qualification_pipeline import (
+    _DEDICATED_GROUP_SCOPE_ACKNOWLEDGMENT,
     _DEPLOY_CONFIGURATION_TIMEOUT_SECONDS,
     _DEPLOY_TIMEOUT_SECONDS,
     _NOT_READY_STATUSES,
     QualificationPipelineError,
+    _parser,
     _redacted_reason,
     _run_az,
     _write_deployment_archive,
@@ -37,10 +42,15 @@ from eng.scripts.aca_qualification_pipeline import (
     content_report,
     deploy_preflight_failure_message,
     fetch_build_info,
+    parse_created_at,
     render_requirements,
+    render_sweep_report,
     run_deploy,
+    run_sweep,
     select_runtime_wheel,
+    select_stale_sandboxes,
     stamp_marker,
+    sweep_with_adapter,
 )
 from packaging.markers import default_environment
 from packaging.requirements import Requirement
@@ -237,6 +247,294 @@ async def test_build_info_retries_total_timeout_within_readiness_deadline(
     assert attempts == 2
 
 
+@dataclass(frozen=True)
+class _Summary:
+    sandbox_id: str
+    created_at: str | None
+
+
+class TestStaleSelection:
+    def _now(self) -> datetime:
+        return datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
+
+    def test_only_resources_strictly_older_than_six_hours_are_selected(self) -> None:
+        old = (self._now() - timedelta(hours=6, seconds=1)).isoformat()
+        boundary = (self._now() - timedelta(hours=6)).isoformat()
+        recent = (self._now() - timedelta(minutes=20)).isoformat()
+
+        selection = select_stale_sandboxes(
+            [
+                _Summary("old", old),
+                _Summary("boundary", boundary),
+                _Summary("recent", recent),
+            ],
+            now=self._now(),
+        )
+
+        assert selection.stale_ids == ("old",)
+        assert selection.recent_count == 2
+
+    @pytest.mark.parametrize("created_at", [None, "", "not-a-date", "2026-08-19"])
+    def test_unknown_age_is_never_selected(self, created_at: str | None) -> None:
+        selection = select_stale_sandboxes(
+            [_Summary("unknown", created_at)],
+            now=self._now(),
+        )
+
+        assert selection.stale_ids == ()
+        assert selection.unknown_age_ids == ("unknown",)
+
+    def test_naive_and_zulu_timestamps_are_treated_as_utc(self) -> None:
+        assert parse_created_at("2026-08-19T06:00:00Z") == datetime(
+            2026, 8, 19, 6, 0, tzinfo=UTC
+        )
+        naive = (self._now() - timedelta(hours=7)).replace(tzinfo=None).isoformat()
+        assert select_stale_sandboxes(
+            [_Summary("naive", naive)],
+            now=self._now(),
+        ).stale_ids == ("naive",)
+
+
+class TestSweepExecution:
+    def test_helper_rejects_unacknowledged_group_before_inspection(self) -> None:
+        seen: list[str] = []
+
+        class _Adapter:
+            async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[object, ...]:
+                del labels
+                seen.append("list")
+                return ()
+
+            async def delete_sandbox(self, sandbox_id: str) -> None:
+                del sandbox_id
+                seen.append("delete")
+
+            async def close(self) -> None:
+                seen.append("close")
+
+        with pytest.raises(
+            QualificationPipelineError,
+            match="sweep_dedicated_group_acknowledgment_required",
+        ):
+            asyncio.run(
+                sweep_with_adapter(
+                    _Adapter(),
+                    now=datetime(2026, 8, 19, 12, 0, tzinfo=UTC),
+                    dedicated_group_scope="shared-group",
+                )
+            )
+
+        assert seen == ["close"]
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            ["sweep", "--region", "eastus"],
+            [
+                "sweep",
+                "--region",
+                "eastus",
+                "--dedicated-group-scope",
+                "shared-group",
+            ],
+        ],
+    )
+    def test_cli_requires_exact_dedicated_group_acknowledgment(
+        self,
+        arguments: list[str],
+    ) -> None:
+        with pytest.raises(SystemExit):
+            _parser().parse_args(arguments)
+
+    def test_list_failure_warns_and_cannot_render_as_clean(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        class _Adapter:
+            async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[object, ...]:
+                assert labels == {}
+                raise RuntimeError("failed?sig=secret-value")
+
+            async def close(self) -> None:
+                return None
+
+        outcome = asyncio.run(
+            sweep_with_adapter(
+                _Adapter(),
+                now=datetime(2026, 8, 19, 12, 0, tzinfo=UTC),
+                dedicated_group_scope=_DEDICATED_GROUP_SCOPE_ACKNOWLEDGMENT,
+            )
+        )
+        report = render_sweep_report(outcome)
+        output = capsys.readouterr().out
+
+        assert "##vso[task.logissue type=warning]" in output
+        assert "secret-value" not in output
+        assert "stale=unavailable" in report
+        assert "inspection_failures=1" in report
+        assert "incomplete=1" in report
+
+    def test_unknown_age_and_delete_failures_emit_durable_warnings(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        now = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
+        old = (now - timedelta(hours=7)).isoformat()
+        deleted: list[str] = []
+
+        class _Adapter:
+            async def list_sandboxes(
+                self,
+                *,
+                labels: dict[str, str],
+            ) -> tuple[_Summary, ...]:
+                assert labels == {}
+                return (
+                    _Summary("delete-ok", old),
+                    _Summary("delete-fails", old),
+                    _Summary("unknown", None),
+                    _Summary("recent", now.isoformat()),
+                )
+
+            async def delete_sandbox(self, sandbox_id: str) -> None:
+                if sandbox_id == "delete-fails":
+                    raise RuntimeError("failed?sig=secret-value")
+                deleted.append(sandbox_id)
+
+            async def close(self) -> None:
+                return None
+
+        outcome = asyncio.run(
+            sweep_with_adapter(
+                _Adapter(),
+                now=now,
+                dedicated_group_scope=_DEDICATED_GROUP_SCOPE_ACKNOWLEDGMENT,
+            )
+        )
+        report = render_sweep_report(outcome)
+        output = capsys.readouterr().out
+
+        assert deleted == ["delete-ok"]
+        assert output.count("##vso[task.logissue type=warning]") == 2
+        assert "secret-value" not in output
+        assert "resource_ref=sha256:" in output
+        assert "stale=2" in report
+        assert "deleted=1" in report
+        assert "unknown_age=1" in report
+        assert "recent=1" in report
+        assert "delete_failures=1" in report
+        assert "incomplete=2" in report
+
+    def test_delete_not_found_counts_as_already_absent_without_warning(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from azure_functions_agents.transport.transport_models import (
+            SandboxNotFoundError,
+        )
+
+        now = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
+
+        class _Adapter:
+            async def list_sandboxes(
+                self,
+                *,
+                labels: dict[str, str],
+            ) -> tuple[_Summary, ...]:
+                assert labels == {}
+                return (_Summary("already-gone", (now - timedelta(hours=7)).isoformat()),)
+
+            async def delete_sandbox(self, sandbox_id: str) -> None:
+                assert sandbox_id == "already-gone"
+                raise SandboxNotFoundError("Session backing sandbox was not found.")
+
+            async def close(self) -> None:
+                return None
+
+        outcome = asyncio.run(
+            sweep_with_adapter(
+                _Adapter(),
+                now=now,
+                dedicated_group_scope=_DEDICATED_GROUP_SCOPE_ACKNOWLEDGMENT,
+            )
+        )
+        report = render_sweep_report(outcome)
+
+        assert capsys.readouterr().out == ""
+        assert "stale=1" in report
+        assert "deleted=0" in report
+        assert "already_absent=1" in report
+        assert "delete_failures=0" in report
+        assert "incomplete=0" in report
+
+    def test_run_sweep_does_not_warn_when_all_stale_resources_are_already_absent(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        async def already_absent(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            return aca_qualification_pipeline.SweepOutcome(
+                selection=aca_qualification_pipeline.SweepSelection(
+                    stale_ids=("already-gone",),
+                    unknown_age_ids=(),
+                    recent_count=0,
+                ),
+                deleted_count=0,
+                already_absent_count=1,
+                delete_failure_count=0,
+                inspection_failure_count=0,
+            )
+
+        monkeypatch.setattr(aca_qualification_pipeline, "_sweep", already_absent)
+
+        result = run_sweep(
+            {
+                "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID": (
+                    "/subscriptions/example/resourceGroups/example/providers/"
+                    "Microsoft.App/sessionPools/example"
+                )
+            },
+            region="eastus",
+            dedicated_group_scope=_DEDICATED_GROUP_SCOPE_ACKNOWLEDGMENT,
+        )
+        output = capsys.readouterr().out
+
+        assert result == 0
+        assert "##vso[task.logissue type=warning]" not in output
+        assert "stale=1" in output
+        assert "already_absent=1" in output
+        assert "incomplete=0" in output
+
+    def test_adapter_open_failure_is_warning_only_and_explicitly_incomplete(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        async def fail_open(*args: object, **kwargs: object) -> None:
+            del args, kwargs
+            raise RuntimeError("failed?sig=secret-value")
+
+        monkeypatch.setattr(aca_qualification_pipeline, "_sweep", fail_open)
+        result = run_sweep(
+            {
+                "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID": (
+                    "/subscriptions/example/resourceGroups/example/providers/"
+                    "Microsoft.App/sessionPools/example"
+                )
+            },
+            region="eastus",
+            dedicated_group_scope=_DEDICATED_GROUP_SCOPE_ACKNOWLEDGMENT,
+        )
+        output = capsys.readouterr().out
+
+        assert result == 0
+        assert "##vso[task.logissue type=warning]" in output
+        assert "secret-value" not in output
+        assert "stale=unavailable" in output
+        assert "incomplete=1" in output
+
+
 class TestContentReport:
     def test_reports_usage_against_caps(self) -> None:
         rendered = content_report(_marker_payload())
@@ -306,29 +604,35 @@ class TestQualificationPipelineWiring:
             self._root() / "eng" / "templates" / "official" / "jobs" / "aca-qualify.yml"
         ).read_text(encoding="utf-8")
 
-    def _qualification_stage(self) -> str:
-        pipeline = self._pipeline()
-        marker = "      - stage: AcaQualification"
-        assert pipeline.count(marker) == 1
-        return pipeline.split(marker, 1)[1]
+    def _sweep_template(self) -> str:
+        return (
+            self._root() / "eng" / "templates" / "official" / "jobs" / "aca-sweep.yml"
+        ).read_text(encoding="utf-8")
 
-    def test_only_the_qualification_stage_is_added(self) -> None:
+    def _stage(self, name: str) -> str:
+        pipeline = self._pipeline()
+        marker = f"      - stage: {name}"
+        assert pipeline.count(marker) == 1
+        tail = pipeline.split(marker, 1)[1]
+        return tail.split("\n      - stage:", 1)[0]
+
+    def test_sweep_and_qualification_stages_are_present(self) -> None:
         pipeline = self._pipeline()
         assert pipeline.count("- stage: AcaQualification") == 1
-        assert "AcaSweep" not in pipeline
-        assert not (
-            self._root() / "eng" / "templates" / "official" / "jobs" / "aca-sweep.yml"
-        ).exists()
+        assert pipeline.count("- stage: AcaSweep") == 1
+        assert "dependsOn: []" in self._stage("AcaSweep")
 
-    def test_qualification_depends_only_on_build(self) -> None:
-        stage = self._qualification_stage()
-        assert "dependsOn: Build" in stage
-        assert "dependsOn:\n" not in stage
+    def test_qualification_waits_for_build_and_nonblocking_sweep(self) -> None:
+        stage = self._stage("AcaQualification")
+        assert "dependsOn:\n          - Build\n          - AcaSweep" in stage
+        assert "in(dependencies.Build.result, 'Succeeded', 'SucceededWithIssues')" in stage
+        assert "succeeded()" not in stage
 
-    def test_condition_allows_manual_or_main_ci_only(self) -> None:
+    @pytest.mark.parametrize("stage_name", ["AcaSweep", "AcaQualification"])
+    def test_conditions_allow_manual_or_main_ci_only(self, stage_name: str) -> None:
         condition = next(
             line.strip()
-            for line in self._qualification_stage().splitlines()
+            for line in self._stage(stage_name).splitlines()
             if line.strip().startswith("condition:")
         )
         assert "'Manual'" in condition
@@ -363,7 +667,7 @@ class TestQualificationPipelineWiring:
         assert "continueOnError: true" in template
 
     def test_aca_settings_are_basic_variables_not_variable_groups(self) -> None:
-        source = self._pipeline() + "\n" + self._template()
+        source = self._pipeline() + "\n" + self._template() + "\n" + self._sweep_template()
         assert not re.search(r"(?m)^\s*-\s*group\s*:", source)
         for name in (
             "ACA_DEPLOYED_APP_SUBSCRIPTION_ID",
@@ -381,6 +685,24 @@ class TestQualificationPipelineWiring:
             "ACA_SANDBOX_REGION",
         ):
             assert f"$({name})" in source
+
+    def test_sweep_acknowledges_the_external_dedicated_group_invariant(self) -> None:
+        template = self._sweep_template()
+        assert (
+            template.count(
+                "--dedicated-group-scope exclusive-ci-qualification"
+            )
+            == 1
+        )
+        assert "continueOnError: true" in template
+        assert '--region "$(ACA_SANDBOX_REGION)"' in template
+
+    def test_sweep_is_pre_run_only(self) -> None:
+        assert " aca_qualification_pipeline.py sweep " not in self._template()
+        assert self._sweep_template().count(
+            "aca_qualification_pipeline.py sweep"
+        ) == 1
+        assert "always()" not in self._sweep_template()
 
     def test_template_keeps_lightweight_marker_attestation(self) -> None:
         template = self._template()
