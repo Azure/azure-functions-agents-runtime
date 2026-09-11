@@ -43,7 +43,7 @@ def _usage_payloads(caplog: Any) -> list[dict[str, Any]]:
 
 
 _USAGE_FIELDS = {
-    "agent_name",
+    "agent_slug",
     "event_name",
     "execution_role",
     "provider",
@@ -153,7 +153,7 @@ def test_model_publisher_is_derived_only_for_known_openai_transports(
 
 def test_usage_recorder_emits_deterministic_json_once_through_shared_logger(caplog: Any) -> None:
     recorder = runner._AgentUsageRecorder(
-        agent_name="billing",
+        agent_slug="billing",
         execution_role="workflow_subagent",
         inference_target=InferenceTarget("azure_openai", "gpt-4o"),
     )
@@ -175,7 +175,7 @@ def test_usage_recorder_emits_deterministic_json_once_through_shared_logger(capl
     assert records[0].name == "azure.functions.AgentRuntime"
     payload = _usage_payload(records[0])
     assert payload == {
-        "agent_name": "billing",
+        "agent_slug": "billing",
         "event_name": "agent_token_usage",
         "execution_role": "workflow_subagent",
         "input_tokens": 10,
@@ -188,7 +188,7 @@ def test_usage_recorder_emits_deterministic_json_once_through_shared_logger(capl
 
 def test_usage_recorder_logs_null_counts_when_usage_is_unavailable(caplog: Any) -> None:
     recorder = runner._AgentUsageRecorder(
-        agent_name="main",
+        agent_slug="main",
         execution_role="primary",
     )
 
@@ -203,7 +203,7 @@ def test_usage_recorder_logs_null_counts_when_usage_is_unavailable(caplog: Any) 
 
 def test_usage_recorder_logs_available_token_counts_independently(caplog: Any) -> None:
     recorder = runner._AgentUsageRecorder(
-        agent_name="main",
+        agent_slug="main",
         execution_role="primary",
     )
 
@@ -229,7 +229,7 @@ def test_usage_recorder_never_changes_agent_behavior_when_logging_fails(monkeypa
         raise RuntimeError("logging unavailable")
 
     monkeypatch.setattr(runner.logger, "info", fail_logging)
-    recorder = runner._AgentUsageRecorder(agent_name="main", execution_role="primary")
+    recorder = runner._AgentUsageRecorder(agent_slug="main", execution_role="primary")
 
     recorder.emit({"input_token_count": 4})
     recorder.emit()
@@ -256,11 +256,17 @@ async def test_run_agent_logs_usage_from_real_maf_final_response(
 
     _install_primary_agent(monkeypatch, Agent())
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
-        result = await runner.run_agent("prompt", agent_name="main")
+        result = await runner.run_agent(
+            "prompt",
+            agent_slug="billing",
+            display_name="Billing Specialist",
+        )
 
     assert result.session_id == "session-1"
     payload = _usage_payload(caplog.records[-1])
     _assert_exact_usage_fields(payload)
+    assert payload["agent_slug"] == "billing"
+    assert "display_name" not in payload
     assert payload["execution_role"] == "primary"
     assert "session_id" not in payload
     assert payload["input_tokens"] == 11
@@ -279,7 +285,7 @@ async def test_run_agent_success_with_maf_optional_usage_absent_logs_unavailable
 
     _install_primary_agent(monkeypatch, Agent())
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
-        result = await runner.run_agent("prompt")
+        result = await runner.run_agent("prompt", agent_slug="main")
 
     assert response.usage_details is None
     assert result.content == ""
@@ -311,7 +317,7 @@ async def test_run_agent_failure_logs_once(
         caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"),
         pytest.raises(expected_exception),
     ):
-        await runner.run_agent("prompt", timeout=0.01)
+        await runner.run_agent("prompt", agent_slug="main", timeout=0.01)
 
     payloads = _usage_payloads(caplog)
     assert len(payloads) == 1
@@ -331,7 +337,7 @@ async def test_run_agent_cancellation_logs_once(monkeypatch: Any, caplog: Any) -
 
     _install_primary_agent(monkeypatch, Agent())
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
-        task = asyncio.create_task(runner.run_agent("prompt"))
+        task = asyncio.create_task(runner.run_agent("prompt", agent_slug="main"))
         await started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -356,7 +362,7 @@ async def test_run_agent_build_failure_emits_no_usage_record(
         caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"),
         pytest.raises(RuntimeError, match="configuration failed"),
     ):
-        await runner.run_agent("prompt")
+        await runner.run_agent("prompt", agent_slug="main")
 
     assert _usage_payloads(caplog) == []
 
@@ -385,7 +391,10 @@ async def test_run_agent_stream_logs_usage_from_real_maf_final_response(
     target = InferenceTarget("openai", "gpt-4o-mini")
     _install_primary_agent(monkeypatch, Agent(), "session-2", target)
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
-        events = [chunk async for chunk in runner.run_agent_stream("prompt", agent_name="main")]
+        events = [
+            chunk
+            async for chunk in runner.run_agent_stream("prompt", agent_slug="main")
+        ]
 
     assert [json.loads(event.removeprefix("data: "))["type"] for event in events] == [
         "session",
@@ -492,7 +501,9 @@ async def test_run_agent_stream_failure_logs_once(
         events = [
             chunk
             async for chunk in runner.run_agent_stream(
-                "prompt", timeout=0.01 if failure == "timeout" else 1.0
+                "prompt",
+                agent_slug="main",
+                timeout=0.01 if failure == "timeout" else 1.0,
             )
         ]
 
@@ -523,7 +534,10 @@ async def test_run_agent_stream_cancellation_logs_once(monkeypatch: Any, caplog:
     _install_primary_agent(monkeypatch, Agent())
 
     async def collect() -> list[str]:
-        return [chunk async for chunk in runner.run_agent_stream("prompt")]
+        return [
+            chunk
+            async for chunk in runner.run_agent_stream("prompt", agent_slug="main")
+        ]
 
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         task = asyncio.create_task(collect())
@@ -549,7 +563,7 @@ async def test_run_agent_stream_aclose_logs_cancelled_once(monkeypatch: Any, cap
             return updates()
 
     _install_primary_agent(monkeypatch, Agent())
-    stream = runner.run_agent_stream("prompt")
+    stream = runner.run_agent_stream("prompt", agent_slug="main")
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         await stream.__anext__()
         await stream.__anext__()
@@ -576,7 +590,10 @@ async def test_run_agent_stream_without_final_response_logs_success_unavailable(
 
     _install_primary_agent(monkeypatch, Agent())
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
-        events = [chunk async for chunk in runner.run_agent_stream("prompt")]
+        events = [
+            chunk
+            async for chunk in runner.run_agent_stream("prompt", agent_slug="main")
+        ]
 
     assert json.loads(events[-1].removeprefix("data: "))["type"] == "done"
     payloads = _usage_payloads(caplog)
@@ -608,7 +625,8 @@ async def test_run_agent_stream_bounds_hanging_final_response(
     _install_primary_agent(monkeypatch, Agent())
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         events = await asyncio.wait_for(
-            _collect_stream(runner.run_agent_stream("prompt")), timeout=0.2
+            _collect_stream(runner.run_agent_stream("prompt", agent_slug="main")),
+            timeout=0.2,
         )
 
     assert json.loads(events[-1].removeprefix("data: "))["type"] == "done"
@@ -650,7 +668,7 @@ async def test_run_agent_stream_yields_done_before_collecting_usage_on_close(
             return Stream()
 
     _install_primary_agent(monkeypatch, Agent())
-    stream = runner.run_agent_stream("prompt")
+    stream = runner.run_agent_stream("prompt", agent_slug="main")
 
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         session = await stream.__anext__()
@@ -709,7 +727,7 @@ async def test_leaf_agent_logs_distinct_attempts_and_execution_roles(
     payloads = _usage_payloads(caplog)
     assert len(payloads) == 3
     assert payloads[0]["execution_role"] == payloads[1]["execution_role"] == "workflow_subagent"
-    assert payloads[2]["agent_name"] == "analyst"
+    assert payloads[2]["agent_slug"] == "analyst"
     assert payloads[2]["execution_role"] == "delegate"
     for payload in payloads:
         _assert_exact_usage_fields(payload)

@@ -383,10 +383,12 @@ def test_owner_addenda_render_only_owner_specific_tools_and_subagents() -> None:
     agent_a_integration = integration.build_workflow_agent_integration(
         policies["owner_a"],
         handlers,
+        agent_slug="owner_a",
     )
     agent_b_integration = integration.build_workflow_agent_integration(
         policies["owner_b"],
         handlers,
+        agent_slug="owner_b",
     )
 
     for addendum in (
@@ -465,9 +467,9 @@ async def test_same_session_cross_agent_management_is_not_found() -> None:
     workflow_id = context.new_workflow_instance_id("agent_a", "same-session")
     client = _StatusClient([_Status(workflow_id)])
     agent_b = context.WorkflowSessionContext(
-        workflow_agent_slug="agent_b",
+        agent_slug="agent_b",
         session_id="same-session",
-        agent_name="Agent B",
+        display_name="Agent B",
         durable_client=client,
     )
 

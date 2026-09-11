@@ -63,7 +63,7 @@ from azure_functions_agents.workflows.schema import WorkflowPlanPolicy
 def _make_resolved(**overrides: Any) -> ResolvedAgent:
     """Build a minimal, valid ``ResolvedAgent`` — mirrors test_config_validation.py's helper."""
     defaults: dict[str, Any] = {
-        "name": "Agent",
+        "display_name": "Agent",
         "slug": "agent",
         "description": "desc",
         "trigger": None,
@@ -320,8 +320,8 @@ def test_assemble_agent_inputs_for_delegated_role_has_only_its_own_tools() -> No
         system_addendum=None,
         workflow_enabled=False,
         workflow_durable_client=None,
-        workflow_agent_slug=None,
-        agent_name="billing",
+        agent_slug="billing",
+        display_name="Billing Specialist",
         resolved_id=None,
         delegate_tools=None,
         workflow_policy=None,
@@ -370,8 +370,8 @@ def test_assemble_agent_inputs_for_direct_role_has_full_tool_superset(
         system_addendum=None,
         workflow_enabled=True,
         workflow_durable_client=None,
-        workflow_agent_slug=None,
-        agent_name="coordinator",
+        agent_slug="coordinator",
+        display_name="Coordinator",
         resolved_id="session-1",
         delegate_tools=[delegate_tool],
         workflow_policy=policy,
@@ -388,6 +388,8 @@ def test_assemble_agent_inputs_for_direct_role_has_full_tool_superset(
         "get_workflow_status",
         "list_workflows",
     } <= tool_names
+    assert captured["agent_slug"] == "coordinator"
+    assert captured["display_name"] == "Coordinator"
     assert captured["policy"] is policy
 
 
@@ -457,7 +459,7 @@ async def test_agent_configuration_applies_to_each_stateless_leaf_role(
 
     assert result == "handled: invoice 42"
     assert len(captured) == 1
-    assert captured[0]["agent_name"] == "billing"
+    assert captured[0]["agent_slug"] == "billing"
     assert captured[0]["agent_instructions"] == "handle billing"
     assert captured[0]["agent_configuration"] is config
     assert captured[0]["history_provider"] is None
@@ -506,7 +508,7 @@ def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and
         agent_instructions="be a coordinator",
         tools=[coordinator_only_tool],
         skill_paths=[coordinator_skill_path],
-        agent_name="coordinator",
+        agent_slug="coordinator",
         history_provider=None,
         agent_configuration=AgentConfiguration(),
     )
@@ -1197,8 +1199,8 @@ async def test_real_maf_agent_invoke_span_reports_specialist_slug_as_agent_name(
     """A REAL ``agent_framework.Agent`` specialist's own ``invoke_agent`` OTel
     span (created by MAF's ``AgentTelemetryLayer``, not by any code in this
     repo) must carry the specialist's *slug* as ``gen_ai.agent.name`` — proving
-    ``_build_delegated_agent`` passes ``agent_name=resolved.slug`` (not
-    ``resolved.name``, the human-facing display name) all the way into MAF's
+    ``_build_delegated_agent`` passes ``agent_slug=resolved.slug`` (not
+    ``resolved.display_name``, the human-facing label) all the way into MAF's
     ``Agent(name=...)`` constructor call in ``_build_role_agent``.
 
     Goes through the real ``build_subagent_tools`` -> ``_build_delegate_tool``
@@ -1237,7 +1239,7 @@ async def test_real_maf_agent_invoke_span_reports_specialist_slug_as_agent_name(
     set_client_manager(_RunnableFakeClientManager())
 
     resolved = _make_resolved(
-        name="Billing Specialist",
+        display_name="Billing Specialist",
         slug="billing",
         instructions="Handle billing questions.",
     )
@@ -1259,14 +1261,14 @@ async def test_real_maf_agent_invoke_span_reports_specialist_slug_as_agent_name(
     assert len(invoke_spans) == 1, f"expected exactly one invoke_agent span, got: {[s.name for s in finished]}"
     invoke_span = invoke_spans[0]
 
-    # The slug — never the display name `resolved.name` ("Billing
+    # The slug — never `resolved.display_name` ("Billing
     # Specialist") — is what MAF's AgentTelemetryLayer must see as
     # `Agent.name`, since it is what both the span name and the
     # `gen_ai.agent.name` attribute are derived from.
     assert invoke_span.name == "invoke_agent billing"
     assert invoke_span.attributes is not None
     assert invoke_span.attributes.get("gen_ai.agent.name") == "billing"
-    assert invoke_span.attributes.get("gen_ai.agent.name") != resolved.name
+    assert invoke_span.attributes.get("gen_ai.agent.name") != resolved.display_name
 
 
 # ---------------------------------------------------------------------------
@@ -1315,8 +1317,8 @@ async def test_real_maf_agent_run_raises_on_expanded_mcp_function_collision() ->
         system_addendum=None,
         workflow_enabled=False,
         workflow_durable_client=None,
-        workflow_agent_slug=None,
-        agent_name="coordinator",
+        agent_slug="coordinator",
+        display_name="Coordinator",
         resolved_id=None,
         delegate_tools=[delegate_tool],
         workflow_policy=None,
@@ -1326,7 +1328,7 @@ async def test_real_maf_agent_run_raises_on_expanded_mcp_function_collision() ->
         agent_instructions=effective_instructions,
         tools=resolved_tools,
         skill_paths=None,
-        agent_name="coordinator",
+        agent_slug="coordinator",
         history_provider=None,
         agent_configuration=AgentConfiguration(),
     )
@@ -1455,7 +1457,7 @@ async def test_delegate_handler_finalizes_real_maf_agent_span_on_specialist_time
     set_client_manager(_NeverRespondingClientManager())
 
     resolved = _make_resolved(
-        name="Billing Specialist",
+        display_name="Billing Specialist",
         slug="billing",
         instructions="Handle billing questions.",
         timeout=0.05,
@@ -1508,7 +1510,7 @@ async def test_delegate_handler_finalizes_real_maf_agent_span_on_outer_cancellat
     set_client_manager(_NeverRespondingClientManager())
 
     resolved = _make_resolved(
-        name="Billing Specialist",
+        display_name="Billing Specialist",
         slug="billing",
         instructions="Handle billing questions.",
         timeout=30.0,
@@ -1658,7 +1660,9 @@ async def test_real_delegate_tool_invoke_produces_nested_execute_tool_and_invoke
     set_client_manager(_RunnableFakeClientManager())
 
     resolved = _make_resolved(
-        name="Billing Specialist", slug="billing", instructions="Handle billing questions."
+        display_name="Billing Specialist",
+        slug="billing",
+        instructions="Handle billing questions.",
     )
     catalog = _catalog_of(("billing", resolved))
     loop = asyncio.get_event_loop()

@@ -17,6 +17,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -175,7 +176,10 @@ def test_reserved_names_match_management_tools():
     ``build_workflow_tools`` actually injects, otherwise a future
     addition could shadow a node-target name without anyone noticing.
     """
-    actual = {tool.name for tool in tools.build_workflow_tools()}
+    actual = {
+        tool.name
+        for tool in tools.build_workflow_tools(agent_slug="test-agent")
+    }
     assert actual == set(registry.RESERVED_TOOL_NAMES)
 
 
@@ -306,6 +310,7 @@ def test_integration_default_workflow_tools_are_public_tools_only():
     result = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(),
+        agent_slug="test-agent",
         workflow_tools=[
             _workflow_tool("alpha", "alpha desc"),
             _workflow_tool("beta", "beta desc", public=False),
@@ -321,10 +326,31 @@ def test_integration_default_workflow_tools_are_public_tools_only():
     assert "alpha" in effective and "beta" not in effective
 
 
+def test_integration_owner_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def capture_registration(app: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(integration, "register_workflows", capture_registration)
+
+    result = integration.build_workflow_integration(
+        _FakeApp(),
+        _enable_metadata(),
+        agent_slug="billing",
+    )
+
+    policies = captured["workflow_agent_policies"]
+    assert set(policies) == {"billing"}
+    assert policies["billing"] is result.plan_policy
+    assert "main" not in policies
+
+
 def test_integration_exclude_filters_public_workflow_tools():
     result = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(exclude=["beta"]),
+        agent_slug="test-agent",
         workflow_tools=[
             _workflow_tool("alpha", "alpha desc"),
             _workflow_tool("beta", "beta desc"),
@@ -347,6 +373,7 @@ def test_integration_freezes_allowed_tool_retry_declarations() -> None:
     result = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(exclude=["excluded"]),
+        agent_slug="test-agent",
         workflow_tools=[
             _workflow_tool("allowed", "Allowed", retry=retry),
             _workflow_tool("excluded", "Excluded", retry=retry),
@@ -400,13 +427,17 @@ def test_agent_policy_catalog_keeps_retry_only_for_allowed_public_tools() -> Non
 def test_integration_malformed_exclude_fails_at_app_start():
     with pytest.raises(RuntimeError, match="must be a list of non-empty strings"):
         integration.build_workflow_integration(
-            _FakeApp(), {"workflows": {"enabled": True, "exclude": "not-a-list"}}
+            _FakeApp(),
+            {"workflows": {"enabled": True, "exclude": "not-a-list"}},
+            agent_slug="test-agent",
         )
 
 
 def test_integration_no_workflow_tools_yields_empty_effective_set():
     result = integration.build_workflow_integration(
-        _FakeApp(), _enable_metadata()
+        _FakeApp(),
+        _enable_metadata(),
+        agent_slug="test-agent",
     )
     assert result.workflow_tools  # management tools still come back
     assert "No tool tasks are currently allowed" in result.chat_system_addendum
@@ -420,7 +451,9 @@ def test_integration_disabled_returns_empty_and_does_not_set_config():
     # Stash a sentinel and ensure the disabled path doesn't clobber it.
     registry.set_app_config(frozenset({"sentinel"}))
     result = integration.build_workflow_integration(
-        _FakeApp(), {"workflows": {"enabled": False}}
+        _FakeApp(),
+        {"workflows": {"enabled": False}},
+        agent_slug="test-agent",
     )
     assert result.workflow_tools == []
     assert result.chat_system_addendum is None
@@ -432,6 +465,7 @@ def test_addendum_includes_per_tool_descriptions():
     result = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(),
+        agent_slug="test-agent",
         workflow_tools=[
             _workflow_tool(
                 "demo_evidence_tool",
@@ -450,6 +484,7 @@ def test_data_driven_control_flow_grammar_uses_progressive_skill_disclosure():
     result = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(),
+        agent_slug="test-agent",
         workflow_tools=[_workflow_tool("alpha", "alpha desc")],
     )
 
@@ -489,6 +524,7 @@ def test_integration_builds_owner_specific_policy_and_sub_agent_guidance() -> No
     result = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(),
+        agent_slug="coordinator",
         workflow_tools=[_workflow_tool("publish", "Publish the report.")],
         workflow_subagents=[
             WorkflowSubagentRef(
@@ -522,6 +558,7 @@ def test_integration_fails_closed_when_authorized_sub_agent_is_missing() -> None
         integration.build_workflow_integration(
             _FakeApp(),
             _enable_metadata(),
+            agent_slug="coordinator",
             workflow_subagents=[WorkflowSubagentRef(agent="missing")],
             catalog=_agent_catalog(known="Known specialist."),
         )
@@ -535,12 +572,14 @@ def test_integration_policies_for_different_owners_do_not_mix() -> None:
     first = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(),
+        agent_slug="owner_a",
         workflow_subagents=[WorkflowSubagentRef(agent="analyst_a")],
         catalog=catalog,
     )
     second = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(),
+        agent_slug="owner_b",
         workflow_subagents=[WorkflowSubagentRef(agent="analyst_b")],
         catalog=catalog,
     )
@@ -563,6 +602,7 @@ def test_addendum_enforces_fire_and_forget_no_poll_guidance():
     result = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(),
+        agent_slug="test-agent",
         workflow_tools=[
             _workflow_tool(
                 "demo_evidence_tool",
@@ -609,6 +649,7 @@ def test_addendum_documents_workflow_notification_contract():
     result = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(),
+        agent_slug="test-agent",
         workflow_tools=[
             _workflow_tool(
                 "demo_evidence_tool",
@@ -690,7 +731,7 @@ def test_workflow_activity_logs_tool_exceptions_without_raising_raw_details(capl
                     "id": "explode",
                     "tool": "exploding",
                     "args": {},
-                    "workflow_agent_slug": "test-agent",
+                    "agent_slug": "test-agent",
                     "workflow_id": "workflow-1",
                 }
             )
@@ -702,7 +743,7 @@ def test_workflow_activity_logs_tool_exceptions_without_raising_raw_details(capl
         record.message
         == (
             "workflow activity failed: workflow_id=workflow-1 "
-            "workflow_agent=test-agent id=explode tool=exploding"
+            "agent_slug=test-agent id=explode tool=exploding"
         )
         and record.exc_info
         and secret_message in str(record.exc_info[1])
@@ -770,9 +811,9 @@ async def test_workflow_tools_log_durable_exceptions_without_returning_details(
         failing_workflow_session,
     )
     session = context.WorkflowSessionContext(
-        workflow_agent_slug="test-agent",
+        agent_slug="test-agent",
         session_id=failing_workflow_session,
-        agent_name="test-agent",
+        display_name="Test Agent",
         durable_client=_FailingDurableClient(),
     )
 
@@ -801,9 +842,9 @@ async def test_start_workflow_rejects_new_workflow_when_session_active_cap_reach
     ]
     client = _CappedDurableClient(statuses)
     session = context.WorkflowSessionContext(
-        workflow_agent_slug="test-agent",
+        agent_slug="test-agent",
         session_id=session_id,
-        agent_name="test-agent",
+        display_name="Test Agent",
         durable_client=client,
     )
     registry.set_app_config(frozenset())
@@ -829,9 +870,9 @@ async def test_start_workflow_uses_passed_policy_for_sub_agent_authorization() -
             raise AssertionError("authorization must fail before Durable scheduling")
 
     session = context.WorkflowSessionContext(
-        workflow_agent_slug="coordinator",
+        agent_slug="coordinator",
         session_id="session-1",
-        agent_name="coordinator",
+        display_name="Coordinator",
         durable_client=_UnexpectedClient(),
     )
     params = tools.StartWorkflowParams(
@@ -855,12 +896,12 @@ async def test_start_workflow_uses_passed_policy_for_sub_agent_authorization() -
 
 
 @pytest.mark.asyncio
-async def test_start_workflow_threads_workflow_agent_slug_into_durable_input() -> None:
+async def test_start_workflow_threads_agent_slug_into_durable_input() -> None:
     client = _CappedDurableClient([])
     session = context.WorkflowSessionContext(
-        workflow_agent_slug="incident",
+        agent_slug="incident",
         session_id="session-1",
-        agent_name="Incident",
+        display_name="Incident",
         durable_client=client,
     )
     policy = schema.WorkflowPlanPolicy(
@@ -876,13 +917,24 @@ async def test_start_workflow_threads_workflow_agent_slug_into_durable_input() -
         policy=policy,
     )
 
-    assert "workflow_id" in json.loads(result)
-    assert client.start_kwargs["input"]["workflow_agent_slug"] == "incident"
-    assert client.start_kwargs["input"]["workflow_agent"] == {
-        "workflow_agent_slug": "incident",
+    workflow_id = json.loads(result)["workflow_id"]
+    assert context.workflow_matches_agent_session(
+        "incident",
+        "session-1",
+        workflow_id,
+    )
+    assert not context.workflow_matches_agent_session(
+        "main",
+        "session-1",
+        workflow_id,
+    )
+    assert client.start_kwargs["input"]["agent_slug"] == "incident"
+    assert client.start_kwargs["input"]["agent"] == {
+        "agent_slug": "incident",
         "session_id": "session-1",
-        "agent_name": "Incident",
     }
+    assert "workflow_agent_slug" not in client.start_kwargs["input"]
+    assert "workflow_agent" not in client.start_kwargs["input"]
     assert client.start_kwargs["tags"] == {
         "durabletask.displayName": "Incident-orchestration"
     }
@@ -957,9 +1009,9 @@ async def test_start_workflow_serializes_stable_reference_validation_metadata() 
             raise AssertionError("validation must fail before Durable scheduling")
 
     session = context.WorkflowSessionContext(
-        workflow_agent_slug="coordinator",
+        agent_slug="coordinator",
         session_id="session-1",
-        agent_name="coordinator",
+        display_name="Coordinator",
         durable_client=_UnexpectedClient(),
     )
     params = tools.StartWorkflowParams(
@@ -1105,9 +1157,9 @@ class _CapturingDurableClient:
 async def test_start_workflow_persists_sorted_owner_policy_in_client_input():
     client = _CapturingDurableClient()
     session = context.WorkflowSessionContext(
-        workflow_agent_slug="coordinator",
+        agent_slug="coordinator",
         session_id="session-1",
-        agent_name="coordinator",
+        display_name="Coordinator",
         durable_client=client,
     )
     params = tools.StartWorkflowParams(

@@ -89,10 +89,10 @@ class _SharedHistoryProvider(HistoryProvider):
         self.messages.extend(messages)
 
 
-def test_build_agent_session_forces_provider_managed_history(
+def test_build_agent_session_uses_canonical_slug_for_maf_and_history(
     monkeypatch: Any,
 ) -> None:
-    """Fresh request-scoped sessions must reload history from the configured provider."""
+    """Machine identity stays canonical when the presentation name differs."""
     captured: list[dict[str, Any]] = []
 
     def fake_create_harness_agent(_client: Any, **kwargs: Any) -> _FakeAgent:
@@ -131,14 +131,17 @@ def test_build_agent_session_forces_provider_managed_history(
             system_addendum=None,
             workflow_enabled=False,
             workflow_durable_client=None,
-            agent_name=None,
+            agent_slug="billing",
+            display_name="Billing Specialist",
             web_request_tools=None,
             agent_configuration=AgentConfiguration(),
         )
     )
 
     assert captured[0]["default_options"] == {"store": False}
-    assert history_calls == ["main"]
+    assert captured[0]["name"] == "billing"
+    assert "display_name" not in captured[0]
+    assert history_calls == ["billing"]
 
 
 def test_build_agent_session_forwards_system_instructions(monkeypatch: Any) -> None:
@@ -176,7 +179,7 @@ def test_build_agent_session_forwards_system_instructions(monkeypatch: Any) -> N
             system_addendum=" Runtime system addendum.",
             workflow_enabled=False,
             workflow_durable_client=None,
-            agent_name=None,
+            agent_slug="main",
             web_request_tools=None,
             agent_configuration=AgentConfiguration(),
         )
@@ -228,7 +231,7 @@ def test_build_role_agent_skips_approval_for_all_skill_tools(
         agent_instructions=None,
         tools=[],
         skill_paths=[skill_dir],
-        agent_name=None,
+        agent_slug="main",
         history_provider=None,
         agent_configuration=AgentConfiguration(),
     )
@@ -312,7 +315,8 @@ def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
             system_addendum=None,
             workflow_enabled=False,
             workflow_durable_client=None,
-            agent_name="coordinator",
+            agent_slug="coordinator",
+            display_name="Coordinator",
             web_request_tools=[web_request_tool],
             agent_configuration=AgentConfiguration(),
             subagents=subagents,
@@ -330,6 +334,8 @@ def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
         "delegate_billing",
     ]
     assert returned_tracker is delegate_tracker
+    assert captured_agent_options[0]["name"] == "coordinator"
+    assert captured_delegate_options[0][0][0].agent == "billing"
     assert history_calls == ["coordinator"]
 
 
@@ -378,7 +384,7 @@ def test_fresh_harness_agents_reload_history_for_same_session(monkeypatch: Any) 
             "system_addendum": None,
             "workflow_enabled": False,
             "workflow_durable_client": None,
-            "agent_name": None,
+            "agent_slug": "main",
             "web_request_tools": None,
             "agent_configuration": AgentConfiguration(),
         }
@@ -433,7 +439,7 @@ def test_harness_compacts_model_context_without_rewriting_stored_history(
             "system_addendum": None,
             "workflow_enabled": False,
             "workflow_durable_client": None,
-            "agent_name": None,
+            "agent_slug": "main",
             "web_request_tools": None,
             "agent_configuration": AgentConfiguration(
                 max_output_tokens=100,
@@ -491,6 +497,8 @@ def test_run_agent_uses_session_builder_with_configuration(monkeypatch: Any) -> 
     result = asyncio.run(
         runner.run_agent(
             "hello",
+            agent_slug="coordinator",
+            display_name="Coordinator",
             agent_configuration=AgentConfiguration(),
             subagents=subagents,
             catalog=catalog,
@@ -500,6 +508,8 @@ def test_run_agent_uses_session_builder_with_configuration(monkeypatch: Any) -> 
     assert len(session_calls) == 1
     assert session_calls[0]["subagents"] is subagents
     assert session_calls[0]["catalog"] is catalog
+    assert session_calls[0]["agent_slug"] == "coordinator"
+    assert session_calls[0]["display_name"] == "Coordinator"
     assert isinstance(session_calls[0]["coordinator_deadline"], float)
     assert result.content == "harness response"
     assert result.session_id == "harness-session"
@@ -516,7 +526,7 @@ def test_run_agent_uses_session_builder_with_default_configuration(monkeypatch: 
 
     monkeypatch.setattr(runner, "_build_agent_session", fake_session_builder)
 
-    result = asyncio.run(runner.run_agent("hello"))
+    result = asyncio.run(runner.run_agent("hello", agent_slug="main"))
 
     assert len(session_calls) == 1
     assert session_calls[0]["agent_configuration"] is None
@@ -546,6 +556,8 @@ def test_run_agent_stream_uses_session_builder_with_configuration(monkeypatch: A
             chunk
             async for chunk in runner.run_agent_stream(
                 "hi",
+                agent_slug="coordinator",
+                display_name="Coordinator",
                 agent_configuration=AgentConfiguration(),
                 subagents=subagents,
                 catalog=catalog,
@@ -557,6 +569,8 @@ def test_run_agent_stream_uses_session_builder_with_configuration(monkeypatch: A
     assert session_calls[0]["agent_configuration"] == AgentConfiguration()
     assert session_calls[0]["subagents"] is subagents
     assert session_calls[0]["catalog"] is catalog
+    assert session_calls[0]["agent_slug"] == "coordinator"
+    assert session_calls[0]["display_name"] == "Coordinator"
     assert isinstance(session_calls[0]["coordinator_deadline"], float)
 
 
@@ -577,6 +591,6 @@ def test_run_agent_passes_agent_configuration_to_builder(monkeypatch: Any) -> No
 
     monkeypatch.setattr(runner, "_build_agent_session", fake_harness_builder)
 
-    asyncio.run(runner.run_agent("prompt", agent_configuration=config))
+    asyncio.run(runner.run_agent("prompt", agent_slug="main", agent_configuration=config))
 
     assert captured[0]["agent_configuration"] is config

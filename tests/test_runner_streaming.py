@@ -184,7 +184,8 @@ class _CapturedSpan:
     ``runner.start_span`` itself rather than ``runner.current_span``.
     """
 
-    def __init__(self, attributes: dict[str, Any]) -> None:
+    def __init__(self, name: str, attributes: dict[str, Any]) -> None:
+        self.name = name
         self.attributes: dict[str, Any] = dict(attributes)
         self.errors: list[tuple[str, str]] = []
         self.exceptions: list[BaseException] = []
@@ -218,7 +219,7 @@ def _install_start_span_capture(monkeypatch: Any) -> list[_CapturedSpan]:
         lifecycle_stage: str | None = None,
         attributes: dict[str, Any] | None = None,
     ) -> Iterator[_CapturedSpan]:
-        span = _CapturedSpan(attributes or {})
+        span = _CapturedSpan(name, attributes or {})
         spans.append(span)
         yield span
 
@@ -246,7 +247,10 @@ def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> No
     monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
-        return [chunk async for chunk in runner.run_agent_stream("prompt")]
+        return [
+            chunk
+            async for chunk in runner.run_agent_stream("prompt", agent_slug="main")
+        ]
 
     events = _events_from_sse(asyncio.run(collect()))
     tool_starts = [event for event in events if event["type"] == "tool_start"]
@@ -330,6 +334,7 @@ async def test_run_agent_stream_continues_after_loading_skill(
             chunk
             async for chunk in runner.run_agent_stream(
                 "Load the test skill.",
+                agent_slug="main",
                 mcp_tools=[],
                 skill_paths=[skill_dir],
                 session_id="skill-session",
@@ -372,7 +377,12 @@ def test_run_agent_stream_bounds_stalled_generator_by_coordinator_deadline(
 
     async def collect() -> list[str]:
         return [
-            chunk async for chunk in runner.run_agent_stream("prompt", timeout=0.05)
+            chunk
+            async for chunk in runner.run_agent_stream(
+                "prompt",
+                agent_slug="main",
+                timeout=0.05,
+            )
         ]
 
     started = time.monotonic()
@@ -431,7 +441,7 @@ def test_run_agent_stream_finalizes_when_deadline_exhausted_between_updates(
     monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def drive() -> list[str]:
-        gen = runner.run_agent_stream("prompt", timeout=0.05)
+        gen = runner.run_agent_stream("prompt", agent_slug="main", timeout=0.05)
         chunks = [await gen.__anext__()]  # "session"
         chunks.append(await gen.__anext__())  # "delta" for the first update
         await asyncio.sleep(0.2)  # exceed the 0.05s deadline *outside* the generator
@@ -493,7 +503,7 @@ def test_run_agent_stream_finalizes_when_cancelled_while_suspended_at_a_yield(
     monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def drive() -> None:
-        gen = runner.run_agent_stream("prompt", timeout=30.0)
+        gen = runner.run_agent_stream("prompt", agent_slug="main", timeout=30.0)
         await gen.__anext__()  # "session"
         await gen.__anext__()  # "delta" for the first update -- suspends generator right after this yield
         await gen.aclose()  # inject GeneratorExit at that exact suspension point
@@ -622,10 +632,15 @@ def test_run_agent_bounds_lock_wait_by_coordinator_deadline(monkeypatch: Any) ->
     monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def scenario() -> BaseException | None:
-        lock = await runner._get_session_lock(resolved_id)
+        lock = await runner._get_session_lock(resolved_id, "main")
         await lock.acquire()
         try:
-            await runner.run_agent("prompt", timeout=0.05, session_id=resolved_id)
+            await runner.run_agent(
+                "prompt",
+                agent_slug="main",
+                timeout=0.05,
+                session_id=resolved_id,
+            )
         except BaseException as exc:  # captured for assertion below, not swallowed silently
             return exc
         finally:
@@ -661,13 +676,16 @@ def test_run_agent_stream_bounds_lock_wait_by_coordinator_deadline(monkeypatch: 
     monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def scenario() -> list[str]:
-        lock = await runner._get_session_lock(resolved_id)
+        lock = await runner._get_session_lock(resolved_id, "main")
         await lock.acquire()
         try:
             return [
                 chunk
                 async for chunk in runner.run_agent_stream(
-                    "prompt", timeout=0.05, session_id=resolved_id
+                    "prompt",
+                    agent_slug="main",
+                    timeout=0.05,
+                    session_id=resolved_id,
                 )
             ]
         finally:
@@ -695,10 +713,14 @@ def test_session_lock_bounded_by_releases_lock_after_successful_body() -> None:
     resolved_id = "test-session-lock-cm-success"
 
     async def scenario() -> tuple[bool, bool]:
-        lock = await runner._get_session_lock(resolved_id)
+        lock = await runner._get_session_lock(resolved_id, "main")
         loop = asyncio.get_event_loop()
         locked_during_body = False
-        async with runner._session_lock_bounded_by(resolved_id, loop.time() + 5.0):
+        async with runner._session_lock_bounded_by(
+            resolved_id,
+            loop.time() + 5.0,
+            agent_slug="main",
+        ):
             locked_during_body = lock.locked()
         return locked_during_body, lock.locked()
 
@@ -729,7 +751,7 @@ def test_public_runners_pass_agent_slug_to_bounded_session_lock(
         session_id: str,
         deadline: float,
         *,
-        agent_slug: str = "main",
+        agent_slug: str,
     ) -> Any:
         del deadline
         calls.append((session_id, agent_slug))
@@ -754,7 +776,13 @@ def test_public_runners_pass_agent_slug_to_bounded_session_lock(
     monkeypatch.setattr(runner, "_session_lock_bounded_by", fake_lock)
     monkeypatch.setattr(runner, "_build_agent_session", fake_non_streaming_session)
 
-    asyncio.run(runner.run_agent("prompt", agent_name="billing"))
+    asyncio.run(
+        runner.run_agent(
+            "prompt",
+            agent_slug="billing",
+            display_name="Billing Specialist",
+        )
+    )
 
     async def fake_streaming_session(
         **_kwargs: Any,
@@ -768,7 +796,8 @@ def test_public_runners_pass_agent_slug_to_bounded_session_lock(
             chunk
             async for chunk in runner.run_agent_stream(
                 "prompt",
-                agent_name="support",
+                agent_slug="support",
+                display_name="Support Specialist",
             )
         ]
 
@@ -780,31 +809,45 @@ def test_public_runners_pass_agent_slug_to_bounded_session_lock(
     ]
 
 
-@pytest.mark.parametrize(
-    ("agent_name", "workflow_agent_slug"),
-    [("", None), (None, "")],
-)
-def test_empty_agent_identity_does_not_fall_back_to_main(
-    agent_name: str | None,
-    workflow_agent_slug: str | None,
-) -> None:
+def test_public_runners_require_agent_slug() -> None:
     async def scenario() -> None:
-        with pytest.raises(ValueError, match="agent_slug"):
-            await runner.run_agent(
-                "prompt",
-                agent_name=agent_name,
-                workflow_agent_slug=workflow_agent_slug,
-            )
+        with pytest.raises(TypeError, match="agent_slug"):
+            await runner.run_agent("prompt")  # type: ignore[call-arg]
 
-        with pytest.raises(ValueError, match="agent_slug"):
-            async for _ in runner.run_agent_stream(
-                "prompt",
-                agent_name=agent_name,
-                workflow_agent_slug=workflow_agent_slug,
-            ):
+        with pytest.raises(TypeError, match="agent_slug"):
+            async for _ in runner.run_agent_stream("prompt"):  # type: ignore[call-arg]
                 pass
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("agent_slug", ["", "has space", "../escape"])
+def test_invalid_agent_slug_fails_before_runner_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+    agent_slug: str,
+) -> None:
+    build_calls: list[dict[str, Any]] = []
+
+    async def fail_if_built(**kwargs: Any) -> Any:
+        build_calls.append(kwargs)
+        raise AssertionError("runner construction must not start")
+
+    monkeypatch.setattr(runner, "_build_agent_session", fail_if_built)
+    monkeypatch.setattr(runner, "resolve_config_dir", lambda: tmp_path)
+
+    async def scenario() -> None:
+        with pytest.raises(ValueError, match="agent_slug"):
+            await runner.run_agent("prompt", agent_slug=agent_slug)
+
+        with pytest.raises(ValueError, match="agent_slug"):
+            async for _ in runner.run_agent_stream("prompt", agent_slug=agent_slug):
+                pass
+
+    asyncio.run(scenario())
+
+    assert build_calls == []
+    assert not (tmp_path / "agent-sessions").exists()
 
 
 def test_session_lock_bounded_by_releases_lock_on_body_exception() -> None:
@@ -814,10 +857,14 @@ def test_session_lock_bounded_by_releases_lock_on_body_exception() -> None:
     resolved_id = "test-session-lock-cm-body-exception"
 
     async def scenario() -> bool:
-        lock = await runner._get_session_lock(resolved_id)
+        lock = await runner._get_session_lock(resolved_id, "main")
         loop = asyncio.get_event_loop()
         with contextlib.suppress(ValueError):
-            async with runner._session_lock_bounded_by(resolved_id, loop.time() + 5.0):
+            async with runner._session_lock_bounded_by(
+                resolved_id,
+                loop.time() + 5.0,
+                agent_slug="main",
+            ):
                 raise ValueError("boom")
         return lock.locked()
 
@@ -832,10 +879,14 @@ def test_session_lock_bounded_by_does_not_release_on_acquire_timeout() -> None:
     resolved_id = "test-session-lock-cm-acquire-timeout"
 
     async def scenario() -> tuple[BaseException | None, bool]:
-        lock = await runner._get_session_lock(resolved_id)
+        lock = await runner._get_session_lock(resolved_id, "main")
         await lock.acquire()  # simulate a concurrent turn already holding it
         try:
-            async with runner._session_lock_bounded_by(resolved_id, asyncio.get_event_loop().time()):
+            async with runner._session_lock_bounded_by(
+                resolved_id,
+                asyncio.get_event_loop().time(),
+                agent_slug="main",
+            ):
                 pass  # pragma: no cover - must never be entered
         except BaseException as exc:  # captured for assertion, not swallowed
             caught: BaseException | None = exc
@@ -874,7 +925,10 @@ def test_run_agent_stream_reports_delegate_error_count_on_span(monkeypatch: Any)
     monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
-        return [chunk async for chunk in runner.run_agent_stream("prompt")]
+        return [
+            chunk
+            async for chunk in runner.run_agent_stream("prompt", agent_slug="main")
+        ]
 
     events = _events_from_sse(asyncio.run(collect()))
     assert any(event["type"] == "done" for event in events)
@@ -904,7 +958,10 @@ def test_run_agent_stream_reports_zero_tool_errors_without_delegation(monkeypatc
     monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
-        return [chunk async for chunk in runner.run_agent_stream("prompt")]
+        return [
+            chunk
+            async for chunk in runner.run_agent_stream("prompt", agent_slug="main")
+        ]
 
     asyncio.run(collect())
 
@@ -938,7 +995,10 @@ def test_run_agent_stream_counts_ordinary_tool_errors_without_delegation(
     monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
-        return [chunk async for chunk in runner.run_agent_stream("prompt")]
+        return [
+            chunk
+            async for chunk in runner.run_agent_stream("prompt", agent_slug="main")
+        ]
 
     events = _events_from_sse(asyncio.run(collect()))
     assert any(event["type"] == "done" for event in events)
@@ -970,7 +1030,10 @@ def test_run_agent_stream_sums_ordinary_and_delegate_tool_errors(monkeypatch: An
     monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
-        return [chunk async for chunk in runner.run_agent_stream("prompt")]
+        return [
+            chunk
+            async for chunk in runner.run_agent_stream("prompt", agent_slug="main")
+        ]
 
     asyncio.run(collect())
 
@@ -979,14 +1042,11 @@ def test_run_agent_stream_sums_ordinary_and_delegate_tool_errors(monkeypatch: An
     assert span.attributes["af.agent.tool_error_count"] == 2
 
 
-def test_run_agent_stream_reports_display_name_on_span(monkeypatch: Any) -> None:
-    """S1b: the streaming path's own ``agent.run {name}`` span must carry
-    ``af.agent.display_name`` too, not just ``af.agent.name`` — mirroring
-    what ``registration/endpoints.py``'s non-streaming/MCP handlers already
-    set on their own wrapping spans. ``run_agent_stream`` opens the *only*
-    span for the streaming surface (see the comment above ``start_span`` in
-    ``runner.py``), so this is the only place that attribute can be recorded
-    for it.
+def test_run_agent_stream_uses_canonical_slug_for_span_identity(monkeypatch: Any) -> None:
+    """The streaming run span uses the slug while retaining display metadata.
+
+    The presentation label must not replace the canonical identity in either
+    the span name or the standard runtime identity attribute.
     """
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
@@ -1003,14 +1063,17 @@ def test_run_agent_stream_reports_display_name_on_span(monkeypatch: Any) -> None
         return [
             chunk
             async for chunk in runner.run_agent_stream(
-                "prompt", agent_name="billing", display_name="Billing Specialist"
+                "prompt",
+                agent_slug="billing",
+                display_name="Billing Specialist",
             )
         ]
 
     asyncio.run(collect())
 
     [span] = spans
-    assert span.attributes["af.agent.name"] == "billing"
+    assert span.name == "agent.run billing"
+    assert span.attributes["af.agent.slug"] == "billing"
     assert span.attributes["af.agent.display_name"] == "Billing Specialist"
 
 

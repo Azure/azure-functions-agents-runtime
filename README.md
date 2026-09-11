@@ -53,7 +53,7 @@ Create `main.agent.md`:
 
 ```markdown
 ---
-name: My Agent
+name: My Agent  # Optional display name
 description: A helpful assistant
 
 builtin_endpoints: true
@@ -61,6 +61,9 @@ builtin_endpoints: true
 
 You are a helpful assistant. Answer questions concisely.
 ```
+
+The source filename supplies the canonical machine identity: `main.agent.md`
+produces `agent_slug="main"`. The optional `name` key is presentation-only.
 
 ### 2. Create the function app entry point
 
@@ -156,6 +159,38 @@ Any `.agent.md` file can opt into built-in endpoints with `builtin_endpoints`. T
 - **Session persistence** — multi-turn conversations stored in Azure Blob Storage via the runtime's `BlobHistoryProvider`, reusing the function app's `AzureWebJobsStorage` account
 
 If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint-only agents as well as triggered agents that also expose a chat UI or API. `builtin_endpoints.debug_chat_ui: true` automatically enables the backing chat APIs. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints, including the MCP tool. See [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
+
+### Canonical agent identity and direct runner APIs
+
+Every loaded agent has a required canonical `agent_slug`, derived from its
+source filename after sanitization. The optional frontmatter `name` maps only
+to `display_name`. The slug drives Microsoft Agent Framework `Agent.name`,
+history and per-session locks, usage attribution, registered Function names and
+built-in routes where applicable, workflow ownership/policy/instance IDs, and
+machine telemetry.
+
+The public runner APIs require `agent_slug` and optionally accept
+`display_name`:
+
+```python
+from azure_functions_agents import run_agent, run_agent_stream
+
+result = await run_agent(
+    "Summarize the account status.",
+    agent_slug="billing",
+    display_name="Billing Specialist",
+)
+
+async for event in run_agent_stream(
+    "Summarize the account status.",
+    agent_slug="billing",
+):
+    ...
+```
+
+The removed `agent_name` and `workflow_agent_slug` parameters are not
+supported. Runtime spans use `af.agent.slug`; MAF's standard
+`gen_ai.agent.name` remains available and contains the same canonical slug.
 
 ### Agent configuration
 
@@ -264,7 +299,7 @@ Agent files use YAML frontmatter + markdown body:
 
 ```yaml
 ---
-name: Agent Name
+name: Agent Name          # optional display name; filename supplies agent_slug
 description: What this agent does
 
 # Optional: system tools (code execution)
@@ -297,7 +332,7 @@ Agent instructions in markdown...
 ### Multiple functions from markdown
 
 - **`*.agent.md` with `trigger`** — creates an event-triggered Azure Function. Exactly one trigger per file.
-- **`*.agent.md` with `builtin_endpoints`** — also serves `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream` when chat endpoints are enabled, and can expose an MCP tool when `builtin_endpoints: true` or `builtin_endpoints.mcp: true`. The sanitized filename stem becomes the base Azure Function name, endpoint slug, and the agent's global identity (its slug — also used for `delegate_<slug>` tool names, see [Multi-agent delegation](#multi-agent-delegation-subagents) above). The frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution) and [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
+- **`*.agent.md` with `builtin_endpoints`** — also serves `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream` when chat endpoints are enabled, and can expose an MCP tool when `builtin_endpoints: true` or `builtin_endpoints.mcp: true`. The sanitized filename stem becomes the required canonical `agent_slug`, base Azure Function name, endpoint slug, and `delegate_<slug>` identity (see [Multi-agent delegation](#multi-agent-delegation-subagents) above). The optional frontmatter `name:` field maps only to `display_name`. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution) and [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
 
 > **Flexible filename conventions:** Beyond `*.agent.md`, the runtime also supports:
 > - **`agent.md`** (any casing: `Agent.md`, `AGENT.MD`) and **`CLAUDE.md`** (any casing: `Claude.md`, `claude.md`) — bare aliases for `main.agent.md` that produce slug `main` and `is_main=True`. `agent.md`, `CLAUDE.md`, and `main.agent.md` all produce the same slug so at most one may be present in the same app.

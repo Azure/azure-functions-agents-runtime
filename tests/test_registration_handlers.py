@@ -47,9 +47,11 @@ class DummyRequest:
 class RecordingSpan:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict[str, Any] | None]] = []
+        self.attributes: dict[str, Any] = {}
 
     def set_attribute(self, key: str, value: Any) -> None:
-        return None
+        if value is not None:
+            self.attributes[key] = value
 
     def set_content(self, key: str, value: str) -> None:
         return None
@@ -69,6 +71,8 @@ def _install_recording_span(monkeypatch: Any) -> RecordingSpan:
 
     @contextmanager
     def _fake_start_span(*args: Any, **kwargs: Any) -> Any:
+        for key, value in kwargs.get("attributes", {}).items():
+            span.set_attribute(key, value)
         yield span
 
     monkeypatch.setattr(
@@ -84,15 +88,12 @@ def _resolved_agent(
     input_schema: dict[str, Any] | None = None,
     sandbox_config: DynamicSessionsCodeInterpreterConfig | None = None,
     tools_disabled: bool = False,
-    # Deliberately distinct from `name` below (S1): identity/telemetry call
-    # sites must key off `slug`, never the mutable display `name` (FRD 0007
-    # §4.3, "Display `name` is never an identity"). Defaulted so existing
-    # callers of this factory are unaffected.
+    display_name: str | None = "Report",
     slug: str = "resolved-agent-slug",
 ) -> ResolvedAgent:
     source = Path(__file__).resolve()
     return ResolvedAgent(
-        name="Report",
+        display_name=display_name,
         slug=slug,
         description="desc",
         trigger=None,
@@ -592,7 +593,7 @@ def test_total_tool_error_count_handles_missing_fields_gracefully() -> None:
     assert _total_tool_error_count(None) == 0
 
 
-def test_non_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
+def test_non_http_handler_passes_resolved_slug_as_agent_slug(
     monkeypatch: Any,
 ) -> None:
     """S1: the coordinator/direct-role agent must be identified by `resolved.slug`.
@@ -605,7 +606,7 @@ def test_non_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
     captured: dict[str, Any] = {}
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
-        captured["agent_name"] = kwargs.get("agent_name")
+        captured.update(kwargs)
         return SimpleNamespace(content="ok", session_id=kwargs["session_id"], tool_calls=[])
 
     monkeypatch.setattr(
@@ -618,11 +619,38 @@ def test_non_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
 
     asyncio.run(handler({"message": "hello"}))
 
-    assert captured["agent_name"] == "report-slug"
-    assert captured["agent_name"] != resolved.name
+    assert captured["agent_slug"] == resolved.slug
+    assert captured["display_name"] == resolved.display_name
 
 
-def test_non_http_workflow_handler_threads_workflow_agent_slug(
+def test_display_name_none_is_omitted_from_telemetry(monkeypatch: Any) -> None:
+    span = _install_recording_span(monkeypatch)
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            content="ok",
+            session_id=kwargs["session_id"],
+            tool_calls=[],
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    resolved = _resolved_agent(
+        response_schema=None,
+        display_name=None,
+        slug="silent",
+    )
+    handler = make_agent_handler(resolved, "queue_trigger", AgentCapabilities())
+
+    asyncio.run(handler({"message": "hello"}))
+
+    assert span.attributes["af.agent.slug"] == "silent"
+    assert "af.agent.display_name" not in span.attributes
+
+
+def test_non_http_workflow_handler_uses_agent_slug(
     monkeypatch: Any,
 ) -> None:
     captured: dict[str, Any] = {}
@@ -650,18 +678,18 @@ def test_non_http_workflow_handler_threads_workflow_agent_slug(
 
     asyncio.run(handler({"message": "hello"}, client=durable_client))
 
-    assert captured["workflow_agent_slug"] == "queue-owner"
+    assert captured["agent_slug"] == "queue-owner"
     assert captured["workflow_durable_client"] is durable_client
 
 
-def test_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
+def test_http_handler_passes_resolved_slug_as_agent_slug(
     monkeypatch: Any,
 ) -> None:
     """S1: same contract as the non-HTTP handler test above, for the HTTP trigger path."""
     captured: dict[str, Any] = {}
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
-        captured["agent_name"] = kwargs.get("agent_name")
+        captured.update(kwargs)
         return SimpleNamespace(content="ok", session_id="session-123")
 
     monkeypatch.setattr(
@@ -674,11 +702,11 @@ def test_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
 
     asyncio.run(handler(DummyRequest({"hello": "world"})))
 
-    assert captured["agent_name"] == "report-slug"
-    assert captured["agent_name"] != resolved.name
+    assert captured["agent_slug"] == resolved.slug
+    assert captured["display_name"] == resolved.display_name
 
 
-def test_http_workflow_handler_threads_workflow_agent_slug(
+def test_http_workflow_handler_uses_agent_slug(
     monkeypatch: Any,
 ) -> None:
     captured: dict[str, Any] = {}
@@ -707,7 +735,7 @@ def test_http_workflow_handler_threads_workflow_agent_slug(
     )
 
     assert response.status_code == 200
-    assert captured["workflow_agent_slug"] == "http-owner"
+    assert captured["agent_slug"] == "http-owner"
     assert captured["workflow_durable_client"] is durable_client
 
 
@@ -846,7 +874,7 @@ def test_workflow_non_http_handler_passes_durable_context(monkeypatch: Any) -> N
     assert captured["workflow_enabled"] is True
     assert captured["workflow_durable_client"] is durable_client
     assert captured["system_addendum"] == "\ntrigger workflow guidance"
-    assert captured["agent_name"] == "resolved-agent-slug"
+    assert captured["agent_slug"] == "resolved-agent-slug"
 
 
 def test_workflow_http_handler_passes_durable_context(monkeypatch: Any) -> None:
@@ -880,7 +908,7 @@ def test_workflow_http_handler_passes_durable_context(monkeypatch: Any) -> None:
     assert captured["workflow_enabled"] is True
     assert captured["workflow_durable_client"] is durable_client
     assert captured["system_addendum"] == "\ntrigger workflow guidance"
-    assert captured["agent_name"] == "resolved-agent-slug"
+    assert captured["agent_slug"] == "resolved-agent-slug"
 
 
 def test_disabled_non_http_handler_keeps_single_binding_signature(
@@ -999,7 +1027,8 @@ def _resolved_agent_with_configuration(
 ) -> ResolvedAgent:
     source = Path(__file__).resolve()
     return ResolvedAgent(
-        name="HarnessAgent",
+        display_name="HarnessAgent",
+        slug="harness_agent",
         description="desc",
         trigger=None,
         instructions="Be helpful",
@@ -1091,4 +1120,3 @@ def test_non_http_handler_forwards_agent_configuration(monkeypatch: Any) -> None
     asyncio.run(handler({}))
 
     assert captured.get("agent_configuration") is config
-
