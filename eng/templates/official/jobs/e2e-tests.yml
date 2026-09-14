@@ -36,6 +36,7 @@ jobs:
       - bash: |
           python -m pip install --upgrade pip
           python -m pip install -U -e .[dev]
+          python eng/scripts/install_e2e_dependencies.py
         displayName: 'Install dependencies for $(PYTHON_VERSION)'
 
       - template: /eng/templates/install-core-tools.yml@self

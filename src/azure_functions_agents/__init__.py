@@ -15,7 +15,7 @@ Framework. The most common entry points are:
   Dynamic Workflow Activity execution.
 """
 
-__version__ = "0.1.0b13"
+__version__ = "0.1.0b14"
 
 # ---------------------------------------------------------------------------
 # Global MAF ExperimentalWarning suppression
@@ -127,6 +127,16 @@ from .runner import (  # noqa: E402
 )
 from .system_tools.sandbox import create_sandbox_tools  # noqa: E402
 from .system_tools.web_request import create_web_request_tools  # noqa: E402
+from .workflows.context import (  # noqa: E402
+    WorkflowTaskContext,
+    current_workflow_task_context,
+)
+from .workflows.schema import (  # noqa: E402
+    WorkflowRetryableError,
+    WorkflowRetryBackoff,
+    WorkflowRetryPolicy,
+    WorkflowTerminalError,
+)
 
 __all__ = [
     "DEFAULT_MODEL",
@@ -134,10 +144,16 @@ __all__ = [
     "AgentResult",
     "ClientManager",
     "MAFClientManager",
+    "WorkflowRetryBackoff",
+    "WorkflowRetryPolicy",
+    "WorkflowRetryableError",
+    "WorkflowTaskContext",
+    "WorkflowTerminalError",
     "__version__",
     "create_function_app",
     "create_sandbox_tools",
     "create_web_request_tools",
+    "current_workflow_task_context",
     "get_client_manager",
     "resolve_config_dir",
     "run_agent",

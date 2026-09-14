@@ -5,9 +5,21 @@ import contextlib
 import json
 import textwrap
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
+from agent_framework import (
+    BaseChatClient,
+    ChatResponse,
+    ChatResponseUpdate,
+    Content,
+    FunctionInvocationLayer,
+    Message,
+    ResponseStream,
+)
 
 from azure_functions_agents import runner
 from azure_functions_agents.client_manager import InferenceTarget
@@ -256,6 +268,86 @@ def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> No
             "result": "ok",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_stream_continues_after_loading_skill(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A read-only skill load executes and returns control to the model."""
+
+    class LoadSkillChatClient(FunctionInvocationLayer[Any], BaseChatClient[Any]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.call_count = 0
+
+        def _inner_get_response(
+            self,
+            *,
+            messages: Sequence[Message],
+            stream: bool,
+            options: Mapping[str, Any],
+            **kwargs: Any,
+        ) -> Any:
+            assert stream
+            self.call_count += 1
+            is_tool_turn = self.call_count == 1
+            content = (
+                Content.from_function_call(
+                    "load-skill-1",
+                    "load_skill",
+                    arguments={"skill_name": "test-skill"},
+                )
+                if is_tool_turn
+                else Content.from_text("Skill loaded.")
+            )
+
+            async def updates() -> AsyncIterator[ChatResponseUpdate]:
+                yield ChatResponseUpdate(
+                    contents=[content],
+                    role="assistant",
+                    finish_reason="tool_calls" if is_tool_turn else "stop",
+                )
+
+            return ResponseStream(updates(), finalizer=ChatResponse.from_updates)
+
+    skill_dir = tmp_path / "test-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: test-skill\ndescription: Test skill\n---\n\n# Test skill\n",
+        encoding="utf-8",
+    )
+    chat_client = LoadSkillChatClient()
+    monkeypatch.setattr(
+        runner.get_client_manager(),
+        "build_chat_client_with_target",
+        lambda _model: (chat_client, InferenceTarget()),
+    )
+    monkeypatch.setattr(runner, "_build_history_provider", lambda agent_slug: None)
+
+    events = _events_from_sse(
+        [
+            chunk
+            async for chunk in runner.run_agent_stream(
+                "Load the test skill.",
+                mcp_tools=[],
+                skill_paths=[skill_dir],
+                session_id="skill-session",
+            )
+        ]
+    )
+
+    assert [event["type"] for event in events] == [
+        "session",
+        "tool_start",
+        "tool_end",
+        "delta",
+        "done",
+    ]
+    assert events[1]["tool_name"] == "load_skill"
+    assert events[2]["tool_call_id"] == "load-skill-1"
+    assert events[3]["content"] == "Skill loaded."
+    assert chat_client.call_count == 2
 
 
 def test_run_agent_stream_bounds_stalled_generator_by_coordinator_deadline(
@@ -613,6 +705,106 @@ def test_session_lock_bounded_by_releases_lock_after_successful_body() -> None:
     locked_during_body, locked_after = asyncio.run(scenario())
     assert locked_during_body is True
     assert locked_after is False
+
+
+def test_session_locks_remain_independent_across_agent_slugs() -> None:
+    async def run() -> None:
+        billing = await runner._get_session_lock("shared-session", "billing")
+        support = await runner._get_session_lock("shared-session", "support")
+        same_billing = await runner._get_session_lock("shared-session", "billing")
+
+        assert billing is same_billing
+        assert billing is not support
+
+    asyncio.run(run())
+
+
+def test_public_runners_pass_agent_slug_to_bounded_session_lock(
+    monkeypatch: Any,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    @contextlib.asynccontextmanager
+    async def fake_lock(
+        session_id: str,
+        deadline: float,
+        *,
+        agent_slug: str = "main",
+    ) -> Any:
+        del deadline
+        calls.append((session_id, agent_slug))
+        yield
+
+    class _NonStreamingAgent:
+        async def run(
+            self,
+            _prompt: str,
+            *,
+            session: object,
+            options: dict[str, Any] | None = None,
+        ) -> Any:
+            del session, options
+            return SimpleNamespace(text="done", messages=[])
+
+    async def fake_non_streaming_session(
+        **_kwargs: Any,
+    ) -> tuple[_Agent, object, str, None, InferenceTarget]:
+        return _NonStreamingAgent(), object(), "shared-session", None, InferenceTarget()
+
+    monkeypatch.setattr(runner, "_session_lock_bounded_by", fake_lock)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_non_streaming_session)
+
+    asyncio.run(runner.run_agent("prompt", agent_name="billing"))
+
+    async def fake_streaming_session(
+        **_kwargs: Any,
+    ) -> tuple[_Agent, object, str, None, InferenceTarget]:
+        return _Agent(), object(), "shared-session", None, InferenceTarget()
+
+    monkeypatch.setattr(runner, "_build_agent_session", fake_streaming_session)
+
+    async def collect() -> list[str]:
+        return [
+            chunk
+            async for chunk in runner.run_agent_stream(
+                "prompt",
+                agent_name="support",
+            )
+        ]
+
+    asyncio.run(collect())
+
+    assert calls == [
+        ("shared-session", "billing"),
+        ("shared-session", "support"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("agent_name", "workflow_agent_slug"),
+    [("", None), (None, "")],
+)
+def test_empty_agent_identity_does_not_fall_back_to_main(
+    agent_name: str | None,
+    workflow_agent_slug: str | None,
+) -> None:
+    async def scenario() -> None:
+        with pytest.raises(ValueError, match="agent_slug"):
+            await runner.run_agent(
+                "prompt",
+                agent_name=agent_name,
+                workflow_agent_slug=workflow_agent_slug,
+            )
+
+        with pytest.raises(ValueError, match="agent_slug"):
+            async for _ in runner.run_agent_stream(
+                "prompt",
+                agent_name=agent_name,
+                workflow_agent_slug=workflow_agent_slug,
+            ):
+                pass
+
+    asyncio.run(scenario())
 
 
 def test_session_lock_bounded_by_releases_lock_on_body_exception() -> None:

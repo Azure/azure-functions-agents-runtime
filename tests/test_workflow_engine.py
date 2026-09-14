@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ from azure_functions_agents.config.schema import (
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows import engine, integration
+from azure_functions_agents.workflows.native_retry import DurableRetryableActivityError
 from azure_functions_agents.workflows.schema import (
     MAX_NODES,
     MAX_PARALLELISM,
@@ -151,6 +153,134 @@ async def test_sub_agent_activity_uses_catalog_timeout_and_result_envelope(
 
 
 @pytest.mark.asyncio
+async def test_policy_aware_sub_agent_timeout_is_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run_leaf(*args: Any, **kwargs: Any) -> str:
+        raise TimeoutError("provider detail")
+
+    monkeypatch.setattr(engine, "run_leaf_agent_task", run_leaf)
+    activity = _registered_function(
+        engine.SUB_AGENT_ACTIVITY_NAME,
+        catalog=_catalog("pr_status_analyst"),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(
+                allowed_tools=frozenset(),
+                allowed_subagents=frozenset({"pr_status_analyst"}),
+            )
+        },
+    )
+
+    with pytest.raises(DurableRetryableActivityError, match="subagent_timeout"):
+        await activity({
+            "id": "analyze_pr",
+            "agent": "pr_status_analyst",
+            "task": "Analyze PR 117.",
+            "workflow_id": "workflow-1",
+            "workflow_agent_slug": "coordinator",
+            "task_id": "analyze_pr",
+            "execution": {
+                "max_attempts": 3,
+                "durable_retry_policy": {
+                    "first_retry_interval_ms": 1_000,
+                    "max_number_of_attempts": 3,
+                    "backoff_coefficient": 2.0,
+                    "max_retry_interval_ms": 4_000,
+                },
+            },
+        })
+
+
+@pytest.mark.asyncio
+async def test_policy_aware_sub_agent_success_uses_the_retry_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run_leaf(*args: Any, **kwargs: Any) -> str:
+        return "PR is ready."
+
+    monkeypatch.setattr(engine, "run_leaf_agent_task", run_leaf)
+    activity = _registered_function(
+        engine.SUB_AGENT_ACTIVITY_NAME,
+        catalog=_catalog("pr_status_analyst"),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(
+                allowed_tools=frozenset(),
+                allowed_subagents=frozenset({"pr_status_analyst"}),
+            )
+        },
+    )
+
+    outcome = await activity({
+        "id": "analyze_pr",
+        "agent": "pr_status_analyst",
+        "task": "Analyze PR 117.",
+        "workflow_id": "workflow-1",
+        "workflow_agent_slug": "coordinator",
+        "task_id": "analyze_pr",
+        "execution": {
+            "max_attempts": 3,
+            "durable_retry_policy": {
+                "first_retry_interval_ms": 1_000,
+                "max_number_of_attempts": 3,
+                "backoff_coefficient": 2.0,
+                "max_retry_interval_ms": 4_000,
+            },
+        },
+    })
+
+    assert outcome == {
+        "id": "analyze_pr",
+        "ok": True,
+        "result": {"agent": "pr_status_analyst", "text": "PR is ready."},
+    }
+
+
+@pytest.mark.asyncio
+async def test_policy_aware_sub_agent_unknown_failure_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run_leaf(*args: Any, **kwargs: Any) -> str:
+        raise RuntimeError("private provider detail")
+
+    monkeypatch.setattr(engine, "run_leaf_agent_task", run_leaf)
+    activity = _registered_function(
+        engine.SUB_AGENT_ACTIVITY_NAME,
+        catalog=_catalog("pr_status_analyst"),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(
+                allowed_tools=frozenset(),
+                allowed_subagents=frozenset({"pr_status_analyst"}),
+            )
+        },
+    )
+
+    outcome = await activity({
+        "id": "analyze_pr",
+        "agent": "pr_status_analyst",
+        "task": "Analyze PR 117.",
+        "workflow_id": "workflow-1",
+        "workflow_agent_slug": "coordinator",
+        "task_id": "analyze_pr",
+        "execution": {
+            "max_attempts": 3,
+            "durable_retry_policy": {
+                "first_retry_interval_ms": 1_000,
+                "max_number_of_attempts": 3,
+                "backoff_coefficient": 2.0,
+                "max_retry_interval_ms": 4_000,
+            },
+        },
+    })
+
+    assert outcome["failure"] == {
+        "error_code": "workflow_task_execution_unknown",
+        "error": "Task execution failed.",
+        "kind": "execution_unknown",
+        "retryable": False,
+    }
+
+
+@pytest.mark.asyncio
 async def test_sub_agent_activity_fails_closed_on_catalog_miss() -> None:
     activity = _registered_function(
         engine.SUB_AGENT_ACTIVITY_NAME,
@@ -264,12 +394,24 @@ async def test_sub_agent_activity_sanitizes_leaf_failure(
 
 class _Task:
     def __init__(self, result: Any = None) -> None:
-        self.result = result
-        self.is_completed = True
+        self._result = result
+        self.is_complete = True
         self.cancelled = False
+        self._parent = None
+
+    @property
+    def result(self) -> Any:
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+    @result.setter
+    def result(self, value: Any) -> None:
+        self._result = value
 
     def cancel(self) -> None:
         self.cancelled = True
+        self.is_complete = True
 
 
 class _FakeOrchestrationContext:
@@ -282,52 +424,70 @@ class _FakeOrchestrationContext:
         self._input = {"workflow_agent_slug": "coordinator", "tasks": tasks}
         self._result_for = result_for
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.activity_tags: list[tuple[str, dict[str, str]]] = []
         self.last_wave = _Task([])
         self.cancel_task = _Task()
         self.statuses: list[str] = []
-
-    def get_input(self) -> dict[str, Any]:
-        return self._input
+        self.selections = 0
 
     def wait_for_external_event(self, name: str) -> _Task:
         assert name == engine.CANCEL_EVENT_NAME
         return self.cancel_task
 
-    def call_activity(self, name: str, payload: dict[str, Any]) -> _Task:
-        self.calls.append((name, payload))
-        return _Task(self._result_for(name, payload))
-
-    def task_all(self, tasks: list[_Task]) -> _Task:
-        self.last_wave = _Task([task.result for task in tasks])
-        return self.last_wave
-
-    def task_any(self, tasks: list[_Task]) -> _Task:
-        return _Task()
+    def call_activity(
+        self,
+        name: str,
+        *,
+        input: dict[str, Any],
+        retry_policy: Any = None,
+        tags: dict[str, str],
+    ) -> _Task:
+        self.calls.append((name, input))
+        self.activity_tags.append((name, tags))
+        return _Task(self._result_for(name, input))
 
     def set_custom_status(self, status: str) -> None:
         self.statuses.append(status)
 
 
+def _drive(context: _FakeOrchestrationContext, selection: Any) -> Any:
+    candidates = getattr(selection, "_tasks", None)
+    if candidates is None:
+        return selection
+    context.selections += 1
+    if getattr(context, "cancel_next", False):
+        context.cancel_next = False
+        return context.cancel_task
+    for candidate in candidates:
+        if candidate is not context.cancel_task:
+            return candidate
+    return context.cancel_task
+
+
 def _run_orchestrator(
-    orchestrator: Callable[[Any], Any],
+    orchestrator: Callable[[Any, Any], Any],
     context: _FakeOrchestrationContext,
 ) -> dict[str, Any]:
-    generator = orchestrator(context)
+    generator = orchestrator(context, context._input)
     try:
-        next(generator)
+        selection = next(generator)
         while True:
-            generator.send(context.last_wave)
+            selection = generator.send(_drive(context, selection))
     except StopIteration as stop:
         return stop.value
 
 
-def test_orchestrator_preserves_activity_failure() -> None:
-    class _FailedWaveContext(_FakeOrchestrationContext):
-        def task_all(self, tasks: list[_Task]) -> _Task:
-            self.last_wave = _Task(RuntimeError("activity authorization failed"))
-            return self.last_wave
+def _drive_one_wave(generator: Any, context: _FakeOrchestrationContext, selection: Any) -> Any:
+    remaining = [task for task in selection._tasks if task is not context.cancel_task]
+    while remaining:
+        selection = generator.send(remaining.pop(0))
+        candidates = getattr(selection, "_tasks", [])
+        remaining = [task for task in remaining if task in candidates]
+    return selection
 
-    context = _FailedWaveContext(
+
+def test_orchestrator_preserves_activity_failure() -> None:
+    context = _FakeOrchestrationContext(
         [
             {
                 "id": "publish",
@@ -337,7 +497,7 @@ def test_orchestrator_preserves_activity_failure() -> None:
                 "depends_on": [],
             }
         ],
-        lambda name, payload: {"id": payload["id"], "result": {"ok": True}},
+        lambda name, payload: RuntimeError("activity authorization failed"),
     )
     orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
 
@@ -415,6 +575,20 @@ def test_orchestrator_fans_out_sub_agents_and_reduces_templated_results() -> Non
         payload["workflow_agent_slug"] == "coordinator"
         for _, payload in context.calls
     )
+    assert context.activity_tags == [
+        (
+            engine.SUB_AGENT_ACTIVITY_NAME,
+            {"durabletask.displayName": "pr_status_analyst"},
+        ),
+        (
+            engine.SUB_AGENT_ACTIVITY_NAME,
+            {"durabletask.displayName": "pr_status_analyst"},
+        ),
+        (
+            engine.SUB_AGENT_ACTIVITY_NAME,
+            {"durabletask.displayName": "report_writer"},
+        ),
+    ]
     assert context.statuses == [
         "0/3 tasks done, running=analyze_117,analyze_118",
         "2/3 tasks done, next=report",
@@ -453,6 +627,12 @@ def test_orchestrator_threads_workflow_agent_slug_to_tool_activity() -> None:
             },
         )
     ]
+    assert context.activity_tags == [
+        (
+            "agents_workflow_run_tool",
+            {"durabletask.displayName": "publish"},
+        )
+    ]
 
 
 def test_tool_activity_reauthorizes_current_agent_policy() -> None:
@@ -487,12 +667,12 @@ def test_tool_activity_reauthorizes_current_agent_policy() -> None:
         "workflow_id": "workflow-1",
     }
 
-    assert allowed(payload) == {
+    assert asyncio.run(allowed(payload)) == {
         "id": "publish",
         "result": {"published": {"value": 1}},
     }
     with pytest.raises(RuntimeError, match="not authorized"):
-        revoked(payload)
+        asyncio.run(revoked(payload))
 
 
 @pytest.mark.parametrize("workflow_agent_policies", [None, {}])
@@ -509,14 +689,16 @@ def test_tool_activity_missing_agent_policy_fails_closed(
     )
 
     with pytest.raises(RuntimeError, match="agent policy"):
-        activity(
-            {
-                "id": "publish",
-                "tool": "publish",
-                "args": {},
-                "workflow_agent_slug": "missing",
-                "workflow_id": "workflow-1",
-            }
+        asyncio.run(
+            activity(
+                {
+                    "id": "publish",
+                    "tool": "publish",
+                    "args": {},
+                    "workflow_agent_slug": "missing",
+                    "workflow_id": "workflow-1",
+                }
+            )
         )
 
 
@@ -547,7 +729,7 @@ class _DynamicContext(_FakeOrchestrationContext):
 
     def create_timer(self, deadline: datetime) -> _Task:
         timer = _Task()
-        timer.is_completed = False
+        timer.is_complete = False
         self.timers.append(timer)
         return timer
 
@@ -605,14 +787,21 @@ def test_dynamic_activity_failure_cancels_pending_wave_timer() -> None:
     class _FailedSecondWaveContext(_DynamicContext):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
-            self.wave_count = 0
+            self.activity_calls = 0
 
-        def task_all(self, tasks: list[_Task]) -> _Task:
-            self.wave_count += 1
-            if self.wave_count == 2:
-                self.last_wave = _Task(RuntimeError("dynamic activity failed"))
-                return self.last_wave
-            return super().task_all(tasks)
+        def call_activity(
+            self,
+            name: str,
+            *,
+            input: dict[str, Any],
+            tags: dict[str, str],
+        ) -> _Task:
+            self.activity_calls += 1
+            if self.activity_calls == 2:
+                self.calls.append((name, input))
+                self.activity_tags.append((name, tags))
+                return _Task(RuntimeError("dynamic activity failed"))
+            return super().call_activity(name, input=input, tags=tags)
 
     tasks = [
         {
@@ -659,6 +848,7 @@ def test_dynamic_activity_failure_cancels_pending_wave_timer() -> None:
 
     assert len(context.timers) == 1
     assert context.timers[0].cancelled is True
+    assert context.selections == 2
 
 
 # --- Static-path preservation ---------------------------------------------
@@ -966,6 +1156,11 @@ def test_expanded_mixed_run_skip_aggregate_source_order() -> None:
         "disc",
         "analyze[0]",
         "analyze[2]",
+    ]
+    assert context.activity_tags == [
+        (engine._ACTIVITY_NAME, {"durabletask.displayName": "collect"}),
+        (engine._ACTIVITY_NAME, {"durabletask.displayName": "at"}),
+        (engine._ACTIVITY_NAME, {"durabletask.displayName": "at"}),
     ]
 
 
@@ -1609,9 +1804,9 @@ def test_dynamic_cancellation_cancels_timer_and_returns_partial() -> None:
     context.cancel_task.result = "user-request"
     orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
 
-    gen = orchestrator(context)
-    next(gen)  # yields the t1 wave
-    gen.send(context.last_wave)  # completes t1, expands w1, dispatches its timer
+    gen = orchestrator(context, context._input)
+    selection = next(gen)  # yields the t1 wave
+    _drive_one_wave(gen, context, selection)  # completes t1, expands w1, dispatches its timer
     result: dict[str, Any] = {}
     try:
         gen.send(context.cancel_task)  # cancel while the timer is pending
@@ -1667,10 +1862,10 @@ def test_dynamic_cancellation_preserves_completed_iteration_instances() -> None:
     context.cancel_task.result = "user-request"
     orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
 
-    gen = orchestrator(context)
-    next(gen)  # discover
-    gen.send(context.last_wave)  # first inspect wave
-    gen.send(context.last_wave)  # final inspect instance
+    gen = orchestrator(context, context._input)
+    selection = next(gen)  # discover
+    selection = _drive_one_wave(gen, context, selection)  # first inspect wave
+    _drive_one_wave(gen, context, selection)  # final inspect instance
     result: dict[str, Any] = {}
     try:
         gen.send(context.cancel_task)

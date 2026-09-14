@@ -60,6 +60,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/config/loader.py` | Loads YAML front matter and `agents.config.yaml` into typed models. | `load_agent_specs()`, `load_global_config()` |
 | `azure_functions_agents/config/merge.py` | Applies defaults, overrides, and per-agent filters to produce runtime config, including each agent's identity `slug` (via `_slug.py`) and its normalized `subagents` list. | `compose()` |
 | `azure_functions_agents/_slug.py` | Derives an agent's identity slug from its `.agent.md` filename (and the `delegate_<slug>` tool-name convention) in one shared place, so naming, config composition, and delegation can never compute a slug differently. | `_function_name_from_source()`, `delegate_tool_name()` |
+| `azure_functions_agents/_history_identity.py`, `_blob_history.py`, `_file_history.py` | Validate the canonical slug before using it as a path segment and persist conversation history by `(agent_slug, session_id)`. | `validate_agent_slug()`, `BlobHistoryProvider`, `ScopedFileHistoryProvider` |
 | `azure_functions_agents/config/validation.py` | Post-merge sanity checks for resolved agents, including rejecting unknown/duplicate/self references in both independent Sub Agent grants against the app-wide slug index. | `validate_resolved_agent()`, `validate_subagent_references()`, `validate_workflow_subagent_references()` |
 | `azure_functions_agents/discovery/skills.py` | Walks `skills/<name>/SKILL.md` files, validates frontmatter, and caches the name→directory map for MAF's `SkillsProvider`. | `discover_skills()`, `clear_skills_cache()` |
 | `azure_functions_agents/discovery/tools.py` | Imports `tools/*.py`, finds normal `FunctionTool`/plain-function tools, discovers `@workflow_tool` Activity targets, and caches both inventories. | `discover_project_tools()`, `discover_user_tools()` |
@@ -76,11 +77,13 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming; builds per-request `delegate_<slug>` tools and fresh stateless workflow leaf agents; attempts one internal token-usage record through the shared runtime logger for each actual MAF invocation attempt. | `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
-| `azure_functions_agents/workflows/integration.py` | Builds the complete immutable handler catalog, immutable slug-keyed workflow-agent policy catalog, per-agent management tools/addenda, validates declared trigger support for workflow-enabled agents, and performs the one app-wide Durable registration. It also resolves the packaged `data-driven-workflows` skill used for progressive authoring guidance. | `build_workflow_handler_catalog()`, `build_workflow_agent_policy_catalog()`, `build_workflow_agent_integration()`, `data_driven_workflows_skill_path()`, `validate_workflow_agent_trigger()`, `register_workflow_runtime()` |
-| `azure_functions_agents/workflows/engine.py` | Registers one Durable blueprint per app and executes the orchestrator, workflow-tool Activity, and Workflow Sub Agent Activity. Capability-bearing Activities reauthorize against the current workflow-agent policy before complete-catalog dispatch. Data-driven execution uses typed persisted-task/state contracts and deterministic phase helpers for `when` evaluation, bounded `for_each` materialization, runnable selection, ordered aggregation, result application, cancellation restoration, structured (`schema_version: 2`) status, and controlled-failure normalization. Durable `yield` boundaries remain in the top-level orchestrator generator. | `register_workflows()` |
-| `azure_functions_agents/workflows/context.py` | Tracks invocation context by `(workflow_agent_slug, session_id)` and derives non-revealing 128-bit agent/session prefixes for Durable instance IDs. | `session_instance_prefix()`, `new_workflow_instance_id()`, `workflow_matches_agent_session()` |
+| `azure_functions_agents/workflows/integration.py` | Builds the complete immutable handler catalog, immutable slug-keyed workflow-agent policy catalog (including allowed tools' decorator-owned retry declarations), per-agent management tools/addenda, validates declared trigger support for workflow-enabled agents, and performs the one app-wide Durable registration. It also resolves the packaged `data-driven-workflows` skill used for progressive authoring guidance. | `build_workflow_handler_catalog()`, `build_workflow_agent_policy_catalog()`, `build_workflow_agent_integration()`, `data_driven_workflows_skill_path()`, `validate_workflow_agent_trigger()`, `register_workflow_runtime()` |
+| `azure_functions_agents/workflows/engine.py` | Registers one Durable blueprint per app and executes the native two-argument Durable Task orchestrator, workflow-tool Activity, and Workflow Sub Agent Activity. Orchestration and Activity schedules attach `durabletask.displayName` tags for readable DTS dashboard timelines without changing registered function names. Capability-bearing Activities reauthorize against the current workflow-agent policy before complete-catalog dispatch. Data-driven execution uses typed persisted-task/state contracts and deterministic phase helpers for `when` evaluation, bounded `for_each` materialization, runnable selection, ordered aggregation, result application, cancellation restoration, structured (`schema_version: 2`) status, and controlled-failure normalization. It selects each task's retry driver from persisted orchestration input alone and passes a native `retry_policy` to `call_activity` only for tasks whose policy was frozen at submission; policy-free and retry-aware calls carry the same display tags. Durable `yield` boundaries remain in the top-level orchestrator generator. | `register_workflows()` |
+| `azure_functions_agents/workflows/context.py` | Tracks invocation context by `(workflow_agent_slug, session_id)`, derives non-revealing 128-bit agent/session prefixes for Durable instance IDs, and exposes the per-delivery task context whose idempotency key is stable across retry attempts. | `session_instance_prefix()`, `new_workflow_instance_id()`, `workflow_matches_agent_session()`, `current_workflow_task_context()` |
+| `azure_functions_agents/workflows/activity.py` | Policy-aware Activity execution: strict validation of the persisted retry policy, the `ok`/`failure` outcome envelope, and the failure classification that decides whether Durable is asked to retry. Models read back from Durable history ignore unknown keys so a newer history still validates. | `invoke_policy_handler()`, `validate_activity_result()` |
+| `azure_functions_agents/workflows/native_retry.py` | Maps the persisted retry policy onto Durable Python 2.x `RetryPolicy`, raises the private marker that asks Durable to retry a sanitized outcome, and decodes that outcome back out of an exhausted `TaskFailedError`. | `create_durable_retry_policy()`, `raise_for_durable_retry()`, `decode_durable_retry_failure()` |
 | `azure_functions_agents/workflows/registry.py` | Defines immutable workflow handler entries/catalogs; production app composition passes this complete catalog explicitly rather than using the compatibility singleton allowlist as authorization. | `WorkflowHandlerCatalog`, `build_handler_catalog()` |
-| `azure_functions_agents/workflows/schema.py`, `workflows/tools.py` | Define workflow plans/policies — including the data-driven `when` predicate and bounded `for_each` fields — and build agent-scoped management tools. Start-time validation and list/status/cancel/terminate operations use the captured workflow-agent policy and agent/session identity. | `WorkflowPlanPolicy`, `WorkflowCondition`, `validate_plan()`, `evaluate_condition()`, `build_workflow_tools()` |
+| `azure_functions_agents/workflows/schema.py`, `workflows/tools.py` | Define workflow plans/policies — including the data-driven `when` predicate, bounded `for_each`, plan-authored `execution.retry`, and decorator-over-plan retry precedence — and build agent-scoped management tools. Start-time validation freezes effective retry policy into orchestration input; list/status/cancel/terminate operations use the captured workflow-agent policy and agent/session identity. | `WorkflowPlanPolicy`, `WorkflowTaskExecution`, `WorkflowCondition`, `validate_plan()`, `resolve_workflow_task_execution()`, `build_workflow_tools()` |
 | `azure_functions_agents/_function_tool.py` | Thin local shim around MAF `FunctionTool` creation so project tools can use `@tool`, plus `@workflow_tool` metadata for Dynamic Workflow Activity targets. | `tool()`, `workflow_tool()` |
 | `azure_functions_agents/_logger.py` | Shared package logger used across discovery, registration, and runtime code. | `logger` |
 | `azure_functions_agents/_observability.py` | Cross-cutting OpenTelemetry bootstrap and conventions: enables MAF `gen_ai` instrumentation and, when the optional `[monitor]` extra is installed, the Azure Monitor exporter, provides the `af.*` span/attribute helpers (fault domain, lifecycle stage), the resolved sensitive-data flag from `ENABLE_SENSITIVE_DATA`, minimal dynamic-session and delegate-call metrics, and third-party log-noise control. | `configure_observability()`, `start_span()`, `current_span()`, `FaultDomain`, `LifecycleStage`, `record_delegate_call()` |
@@ -202,18 +205,28 @@ Registration does not run the agent itself. Instead, `registration/_handlers.py`
 authored `null` values to clear inherited leaves or subtrees,
 then validates the effective token limits. `ResolvedAgent.agent_configuration` is always a concrete
 configuration object. The runner unconditionally constructs every role with MAF's
-`create_harness_agent`. Direct execution uses the runtime history provider, keyed by the public
-session ID returned to the caller and supplied on later turns.
-In Azure, `BlobHistoryProvider` stores that history in the
+`create_harness_agent`. Direct execution uses the runtime history provider, keyed by
+`(agent_slug, session_id)`, where endpoint registration supplies the same validated slug used in
+the route and the public session ID is returned to the caller and supplied on later turns. This
+matches workflow management's
+`(workflow_agent_slug, session_id)` identity: equal caller-visible session IDs on different agents
+retain independent persisted transcripts, locks, and workflow scope.
+In Azure, `BlobHistoryProvider` stores each transcript at
+`agent-sessions/{agent_slug}/{session_id}.jsonl` in the
 Function App's configured storage account, so a request handled by another worker can reload the
 same conversation. The `FileHistoryProvider` fallback is for local development and does not provide
-cross-worker sharing. Runs force provider-managed history (`store=false`) because the runtime
+cross-worker sharing; it uses
+`{config_dir}/agent-sessions/{agent_slug}/{session_id}.jsonl`. Runs force provider-managed history
+(`store=false`) because the runtime
 creates a new in-memory `AgentSession` object for every request, including later requests that supply
 the same session ID. Those objects represent the same logical conversation: each is initialized with
-the supplied ID, and the Blob/File provider reloads the history stored under that ID. Blob/File
+the supplied ID, and the Blob/File provider reloads the history stored under the agent/session pair.
+Blob/File
 history, rather than a provider-side conversation ID retained on an earlier object, therefore remains
 authoritative. Cross-worker turn ordering is not coordinated, so callers must still avoid concurrent
-turns for the same session ID. With effective context and output limits configured, MAF compacts the externally
+turns for the same agent/session pair. Earlier unscoped
+`agent-sessions/{session_id}.jsonl` records are not loaded or mutated. With effective context and
+output limits configured, MAF compacts the externally
 loaded conversation history immediately before each model call. Agent instructions remain part of
 every call; compaction controls accumulated message-history growth.
 
@@ -242,6 +255,17 @@ workflow metadata.
 ### Dynamic Workflow execution lifetimes
 
 A declared trigger handler is a short-lived Durable **client/starter**. The agent authors a plan, calls `start_workflow`, receives the Durable instance ID, and ends its turn without polling. The starter remains subject to the normal model-call and Function timeout, but the orchestration does not: Durable checkpoints and resumes the DAG independently across Activities and timers.
+
+Durable Python 2.x async clients are single-invocation resources whose gRPC
+channels are closed when the decorated function returns. Non-streaming chat,
+MCP, and declared-trigger handlers therefore use the rich client injected by
+`durable_client_input` only while they are awaited. The SSE chat handler has a
+longer response-stream lifetime: it receives the host-provided `durableClient`
+binding configuration as a raw value, creates one rich client when that
+response begins streaming, passes it to every workflow management tool for that
+turn, and closes it when the stream completes or fails. No rich Durable client
+is retained across turns; each request and concurrent stream owns a distinct
+client.
 
 Application management identity is `(workflow_agent_slug, session_id)`, encoded in instance IDs as a
 32-hex-character (128-bit) truncated SHA-256 digest over a length-delimited pair.
@@ -487,7 +511,7 @@ This design keeps global config declarative: shared config says what exists, whi
 
 ### Other notable boundaries
 
-- **Skills:** project skills are discovered as `SKILL.md` directories, filtered into cataloged `AgentCapabilities`, and handed to MAF's `SkillsProvider`. The provider exposes `load_skill` / `read_skill_resource` tools to the agent and scopes file access to the skill directory by design — no runtime-wide file tools required. The packaged `data-driven-workflows` skill is the one runtime-owned exception: it is added only to a workflow-enabled agent's direct trigger/endpoint capability copy, independently of project `skills` filtering, and never to catalog-backed delegated roles.
+- **Skills:** project skills are discovered as `SKILL.md` directories, filtered into cataloged `AgentCapabilities`, and handed to MAF's `SkillsProvider`. The provider exposes `load_skill` / `read_skill_resource` tools to the agent and scopes file access to the skill directory by design — no runtime-wide file tools required. Skill tools, including `run_skill_script`, do not require approval so turns can continue autonomously. The packaged `data-driven-workflows` skill is the one runtime-owned exception: it is added only to a workflow-enabled agent's direct trigger/endpoint capability copy, independently of project `skills` filtering, and never to catalog-backed delegated roles.
 - **Connectors:** connector actions are exposed to agents through MCP servers in `mcp.json`; connector-triggered agents use `trigger.type: connector_trigger`.
 - **Built-in endpoints:** endpoint registration is a separate module so the trigger-registration path stays focused on Azure Function bindings rather than UI and chat surface concerns.
 - **Multi-agent delegation:** `subagents:` is itself an extension point of sorts — it lets an agent's own front matter opt other, already-registered agents into its tool set without any code changes. See Section 5.

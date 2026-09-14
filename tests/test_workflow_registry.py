@@ -13,6 +13,7 @@ Exercises:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -73,7 +74,7 @@ class _FakeStatus:
 class _FailingDurableClient:
     secret = "durable storage account internal details"
 
-    async def start_new(self, *args, **kwargs):
+    async def schedule_new_orchestration(self, *args, **kwargs):
         raise RuntimeError(self.secret)
 
     async def get_status(self, *args, **kwargs):
@@ -98,7 +99,7 @@ class _CappedDurableClient:
     async def get_status_all(self, *args, **kwargs):
         return self.statuses
 
-    async def start_new(self, *args, **kwargs):
+    async def schedule_new_orchestration(self, *args, **kwargs):
         self.started = True
         self.start_kwargs = kwargs
         return kwargs["instance_id"]
@@ -191,6 +192,16 @@ def test_register_workflow_tool_rejects_non_callable():
         registry.register_workflow_tool("badtool", "no", "not a callable")  # type: ignore[arg-type]
 
 
+def test_register_workflow_tool_rejects_invalid_retry_type() -> None:
+    with pytest.raises(ValueError, match="retry must be a WorkflowRetryPolicy"):
+        registry.register_workflow_tool(
+            "badretry",
+            "no",
+            _noop,
+            retry="three attempts",  # type: ignore[arg-type]
+        )
+
+
 def test_register_workflow_tool_rejects_blank_name():
     with pytest.raises(ValueError, match="non-empty string"):
         registry.register_workflow_tool("", "no", _noop)
@@ -274,8 +285,9 @@ def _workflow_tool(
     handler=_noop,
     *,
     public: bool = True,
+    retry: schema.WorkflowRetryPolicy | None = None,
 ) -> WorkflowTool:
-    return WorkflowTool(name, description, handler, public=public)
+    return WorkflowTool(name, description, handler, public=public, retry=retry)
 
 
 def _agent_catalog(**descriptions: str):
@@ -321,6 +333,68 @@ def test_integration_exclude_filters_public_workflow_tools():
     assert "alpha" in result.chat_system_addendum
     assert "beta" not in result.chat_system_addendum
     assert registry.get_app_config() == frozenset({"alpha"})
+
+
+def test_integration_freezes_allowed_tool_retry_declarations() -> None:
+    retry = schema.WorkflowRetryPolicy(
+        max_attempts=3,
+        backoff=schema.WorkflowRetryBackoff(
+            initial="PT1S",
+            multiplier=2.0,
+            max="PT4S",
+        ),
+    )
+    result = integration.build_workflow_integration(
+        _FakeApp(),
+        _enable_metadata(exclude=["excluded"]),
+        workflow_tools=[
+            _workflow_tool("allowed", "Allowed", retry=retry),
+            _workflow_tool("excluded", "Excluded", retry=retry),
+            _workflow_tool("private", "Private", public=False, retry=retry),
+        ],
+    )
+
+    assert result.plan_policy is not None
+    assert result.plan_policy.tool_execution["allowed"].retry == retry
+    assert set(result.plan_policy.tool_execution) == {"allowed"}
+    with pytest.raises(TypeError):
+        result.plan_policy.tool_execution["other"] = schema.WorkflowToolExecutionPolicy(  # type: ignore[index]
+            retry=retry
+        )
+
+
+def test_agent_policy_catalog_keeps_retry_only_for_allowed_public_tools() -> None:
+    retry = schema.WorkflowRetryPolicy(
+        max_attempts=3,
+        backoff=schema.WorkflowRetryBackoff(
+            initial="PT1S",
+            multiplier=2.0,
+            max="PT4S",
+        ),
+    )
+    allowed = _workflow_tool("allowed", "Allowed", retry=retry)
+    private = _workflow_tool("private", "Private", public=False, retry=retry)
+    handler_catalog = integration.build_workflow_handler_catalog([allowed, private])
+    catalog = build_catalog(
+        {
+            "coordinator": CatalogEntry(
+                SimpleNamespace(  # type: ignore[arg-type]
+                    workflows=SimpleNamespace(enabled=True, subagents=[]),
+                ),
+                AgentCapabilities(filtered_workflow_tools=[allowed, private]),
+            )
+        }
+    )
+
+    policies = integration.build_workflow_agent_policy_catalog(
+        catalog,
+        handler_catalog,
+    )
+
+    policy = policies["coordinator"]
+    assert policy.allowed_tools == frozenset({"allowed"})
+    assert set(policy.tool_execution) == {"allowed"}
+    assert policy.tool_execution["allowed"].retry == retry
 
 
 def test_integration_malformed_exclude_fails_at_app_start():
@@ -610,14 +684,16 @@ def test_workflow_activity_logs_tool_exceptions_without_raising_raw_details(capl
     )
 
     with pytest.raises(RuntimeError) as excinfo:
-        activity(
-            {
-                "id": "explode",
-                "tool": "exploding",
-                "args": {},
-                "workflow_agent_slug": "test-agent",
-                "workflow_id": "workflow-1",
-            }
+        asyncio.run(
+            activity(
+                {
+                    "id": "explode",
+                    "tool": "exploding",
+                    "args": {},
+                    "workflow_agent_slug": "test-agent",
+                    "workflow_id": "workflow-1",
+                }
+            )
         )
 
     assert str(excinfo.value) == "task 'explode': workflow-safe tool failed"
@@ -801,11 +877,14 @@ async def test_start_workflow_threads_workflow_agent_slug_into_durable_input() -
     )
 
     assert "workflow_id" in json.loads(result)
-    assert client.start_kwargs["client_input"]["workflow_agent_slug"] == "incident"
-    assert client.start_kwargs["client_input"]["workflow_agent"] == {
+    assert client.start_kwargs["input"]["workflow_agent_slug"] == "incident"
+    assert client.start_kwargs["input"]["workflow_agent"] == {
         "workflow_agent_slug": "incident",
         "session_id": "session-1",
         "agent_name": "Incident",
+    }
+    assert client.start_kwargs["tags"] == {
+        "durabletask.displayName": "Incident-orchestration"
     }
 
 
@@ -1017,8 +1096,8 @@ class _CapturingDurableClient:
     async def get_status_all(self, *args, **kwargs):
         return []
 
-    async def start_new(self, *args, **kwargs):
-        self.client_input = kwargs["client_input"]
+    async def schedule_new_orchestration(self, *args, **kwargs):
+        self.client_input = kwargs["input"]
         return kwargs["instance_id"]
 
 

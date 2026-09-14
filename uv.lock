@@ -234,6 +234,15 @@ wheels = [
 ]
 
 [[package]]
+name = "asyncio"
+version = "4.0.0"
+source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
+sdist = { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/asyncio/4/asyncio-4.0.0.tar.gz", hash = "sha256:570cd9e50db83bc1629152d4d0b7558d6451bb1bfd5dfc2e935d96fc2f40329b" }
+wheels = [
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/asyncio/4/asyncio-4.0.0-py3-none-any.whl", hash = "sha256:c1eddb0659231837046809e68103969b2bef8b0400d59cfa6363f6b5ed8cc88b" },
+]
+
+[[package]]
 name = "attrs"
 version = "26.1.0"
 source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
@@ -301,32 +310,28 @@ wheels = [
 
 [[package]]
 name = "azure-functions"
-version = "2.1.0"
+version = "2.3.0"
 source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
 dependencies = [
     { name = "werkzeug" },
 ]
-sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/azure-functions/2.1/azure_functions-2.1.0.tar.gz", hash = "sha256:f0d95bf53569ff32a7258a0ea7d727d1a174183c79e8240760d90876b3d32acd" }
+sdist = { url = "https://ms-feed-2.pkgs.visualstudio.com/f5581750-f66a-4ee8-b9cc-8269930bd7c4/_packaging/637e612b-d5d4-45c1-8a31-e0deb2a5a828/pypi/download/azure-functions/2.3/azure_functions-2.3.0.tar.gz", hash = "sha256:32136bae3285680edd2b2d1786c37d381a9ba4c23332dcd590e354190dbe6c9a" }
 wheels = [
-    { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/azure-functions/2.1/azure_functions-2.1.0-py3-none-any.whl", hash = "sha256:f840457d5eab8fd51c18d8b8bd0939080766a7fbb85a821838545c767b3a5c61" },
+    { url = "https://ms-feed-2.pkgs.visualstudio.com/f5581750-f66a-4ee8-b9cc-8269930bd7c4/_packaging/637e612b-d5d4-45c1-8a31-e0deb2a5a828/pypi/download/azure-functions/2.3/azure_functions-2.3.0-py3-none-any.whl", hash = "sha256:9eb166cd83875dd88996c5f23a46f8edbbc78c0f9c41926bfdf960be54b6c889" },
 ]
 
 [[package]]
 name = "azure-functions-durable"
-version = "1.6.0"
+version = "2.0.0b2"
 source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
 dependencies = [
-    { name = "aiohttp" },
     { name = "azure-functions" },
-    { name = "furl" },
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-sdk" },
-    { name = "python-dateutil" },
-    { name = "requests" },
+    { name = "azure-identity" },
+    { name = "durabletask", extra = ["opentelemetry"] },
 ]
-sdist = { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/azure-functions-durable/1.6/azure_functions_durable-1.6.0.tar.gz", hash = "sha256:30feb3968aed71fc481e62b88fbaea5c89e9e8dacd703e0a1d5b86aa12ad8c92" }
+sdist = { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/azure-functions-durable/2b2/azure_functions_durable-2.0.0b2.tar.gz", hash = "sha256:f94d5003f5eee28433961dfdf50189bcd0044dec59150f7be897bd88cefd4eab" }
 wheels = [
-    { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/azure-functions-durable/1.6/azure_functions_durable-1.6.0-py3-none-any.whl", hash = "sha256:7f28545d7025c10476c0d0ba33b90969476af76115f8d4862827db941b546760" },
+    { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/azure-functions-durable/2b2/azure_functions_durable-2.0.0b2-py3-none-any.whl", hash = "sha256:492c57e462664dd8fb1b6cd8c6938681f282f703a51253b74c6700ba185894bb" },
 ]
 
 [[package]]
@@ -462,7 +467,7 @@ requires-dist = [
     { name = "agent-framework-openai", specifier = "==1.10.2" },
     { name = "aiohttp", specifier = ">=3.14.2,<4" },
     { name = "azure-functions", specifier = ">=2.1.0,<3" },
-    { name = "azure-functions-durable", specifier = ">=1.2.10,<2" },
+    { name = "azure-functions-durable", specifier = "==2.0.0b2" },
     { name = "azure-identity", specifier = ">=1.25.3,<2" },
     { name = "azure-monitor-opentelemetry", marker = "extra == 'dev'", specifier = "==1.8.8" },
     { name = "azure-monitor-opentelemetry", marker = "extra == 'monitor'", specifier = "==1.8.8" },
@@ -795,6 +800,27 @@ wheels = [
 ]
 
 [[package]]
+name = "durabletask"
+version = "1.9.0"
+source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
+dependencies = [
+    { name = "asyncio" },
+    { name = "grpcio" },
+    { name = "packaging" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://ms-feed-2.pkgs.visualstudio.com/f5581750-f66a-4ee8-b9cc-8269930bd7c4/_packaging/637e612b-d5d4-45c1-8a31-e0deb2a5a828/pypi/download/durabletask/1.9/durabletask-1.9.0.tar.gz", hash = "sha256:55460fbfda8941e721096c4639e72111b03638708df1556af466160ee649478d" }
+wheels = [
+    { url = "https://ms-feed-2.pkgs.visualstudio.com/f5581750-f66a-4ee8-b9cc-8269930bd7c4/_packaging/637e612b-d5d4-45c1-8a31-e0deb2a5a828/pypi/download/durabletask/1.9/durabletask-1.9.0-py3-none-any.whl", hash = "sha256:a759af4ad8e6897922575886e93bf40c6b3af936eaed83798d492ee561607185" },
+]
+
+[package.optional-dependencies]
+opentelemetry = [
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-sdk" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.136.1"
 source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
@@ -884,19 +910,6 @@ wheels = [
 ]
 
 [[package]]
-name = "furl"
-version = "2.1.4"
-source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
-dependencies = [
-    { name = "orderedmultidict" },
-    { name = "six" },
-]
-sdist = { url = "https://ms-feed-2.pkgs.visualstudio.com/f5581750-f66a-4ee8-b9cc-8269930bd7c4/_packaging/637e612b-d5d4-45c1-8a31-e0deb2a5a828/pypi/download/furl/2.1.4/furl-2.1.4.tar.gz", hash = "sha256:877657501266c929269739fb5f5980534a41abd6bbabcb367c136d1d3b2a6015" }
-wheels = [
-    { url = "https://ms-feed-2.pkgs.visualstudio.com/f5581750-f66a-4ee8-b9cc-8269930bd7c4/_packaging/637e612b-d5d4-45c1-8a31-e0deb2a5a828/pypi/download/furl/2.1.4/furl-2.1.4-py2.py3-none-any.whl", hash = "sha256:da34d0b34e53ffe2d2e6851a7085a05d96922b5b578620a37377ff1dbeeb11c8" },
-]
-
-[[package]]
 name = "ghp-import"
 version = "2.1.0"
 source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
@@ -906,6 +919,37 @@ dependencies = [
 sdist = { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/ghp-import/2.1/ghp-import-2.1.0.tar.gz", hash = "sha256:9c535c4c61193c2df8871222567d7fd7e5014d835f97dc7b7439069e2413d343" }
 wheels = [
     { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/ghp-import/2.1/ghp_import-2.1.0-py3-none-any.whl", hash = "sha256:8337dd7b50877f163d4c0289bc1f1c7f127550241988d568c1db512c4324a619" },
+]
+
+[[package]]
+name = "grpcio"
+version = "1.83.0"
+source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0.tar.gz", hash = "sha256:7674587248fbbb2ac6e4eecf83a8a0f3d91a928f941de571acfd3a2f007fbc24" }
+wheels = [
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp313-cp313-linux_armv7l.whl", hash = "sha256:6662f3b1e07cc7493d437351860dc867bddc6a93c83ecf33bbfdaf0c217ab2d0" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp313-cp313-macosx_11_0_universal2.whl", hash = "sha256:74fe6f9e8a35c7dbf32255ee154d15e3e5338a81ed39173d079d594d2e544cd1" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:10b3fa0475eb572c9a81a6fe37fa16a9c500c0c91cfc148cac15692b7e3c2867" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp313-cp313-manylinux2014_i686.manylinux_2_17_i686.whl", hash = "sha256:5f20a988480b0f28207f057f7f7ae1313393c3cef0adcfeae8248f9947eaf881" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:7bd82671b39065ba18cd536e9cd45b27ff649053f81ddd2c6a966d595067080f" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:bc60215b5cb9fc8ca72942c498b551ac2305bd08f6ef8d4e3f0d21b64fbecd61" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp313-cp313-musllinux_1_2_i686.whl", hash = "sha256:f1c3e5689d4b90987b1d72022bcfe866a9a3dc66197484cf856d96b6150e7f45" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:a21cb4eeeba124443f399be2e8b624943cde864dcbe588cb42e5c483a52a906c" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp313-cp313-win32.whl", hash = "sha256:8fe04f1050a59f875601eb55d42b4f66946fe89817f967e34db1462ccd07dadf" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp313-cp313-win_amd64.whl", hash = "sha256:6e01ecd9d8ef280abe1365138a4dc318f9a5287f4cb1b41d07816f796653f735" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp314-cp314-linux_armv7l.whl", hash = "sha256:3f351629f6ae16ecc0ec3553e586a6763ffd9f6114044286d0cbec3e09241bfa" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp314-cp314-macosx_11_0_universal2.whl", hash = "sha256:d05ff664100d429335b93c91b8b34ddf9e94a112205e7fa06dede309e44a4e4c" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:7936f2a56cf04f6514705c0fedf400971de01b6aa1719327e4718f410a765e2b" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp314-cp314-manylinux2014_i686.manylinux_2_17_i686.whl", hash = "sha256:b0a0be840e51b6b7ee9df9269770faf77bdf4b771053c257c21d12bad607714c" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:009667eaf3dcd5224c713589cdc98e7ca4ed0ff0b61132c6b276e930eb83a2df" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:bb669918fd88936b15599caff4160a77ab74bdeb25f2231f6e45b61282d6107b" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp314-cp314-musllinux_1_2_i686.whl", hash = "sha256:c19b454d3d3f28db81f2c7c4dbaee96e7f6fd149721733ffe79d6bc530f17404" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:61007cd08640abc5c54547ee32505474c482cd733a53cb87551ea81faa6350af" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp314-cp314-win32.whl", hash = "sha256:32e11c37f5285b0c6fa3042c05fe06903696689749833fc64e67dec71b9bbe33" },
+    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/grpcio/1.83/grpcio-1.83.0-cp314-cp314-win_amd64.whl", hash = "sha256:2bb48cb5e6dd005ca12b89ce4b6ac0b48ff3112c747542ee7986ef611a8ca6d9" },
 ]
 
 [[package]]
@@ -1780,18 +1824,6 @@ wheels = [
 ]
 
 [[package]]
-name = "orderedmultidict"
-version = "1.0.2"
-source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
-dependencies = [
-    { name = "six" },
-]
-sdist = { url = "https://ms-feed-2.pkgs.visualstudio.com/f5581750-f66a-4ee8-b9cc-8269930bd7c4/_packaging/637e612b-d5d4-45c1-8a31-e0deb2a5a828/pypi/download/orderedmultidict/1.0.2/orderedmultidict-1.0.2.tar.gz", hash = "sha256:16a7ae8432e02cc987d2d6d5af2df5938258f87c870675c73ee77a0920e6f4a6" }
-wheels = [
-    { url = "https://ms-feed-2.pkgs.visualstudio.com/f5581750-f66a-4ee8-b9cc-8269930bd7c4/_packaging/637e612b-d5d4-45c1-8a31-e0deb2a5a828/pypi/download/orderedmultidict/1.0.2/orderedmultidict-1.0.2-py2.py3-none-any.whl", hash = "sha256:ab5044c1dca4226ae4c28524cfc5cc4c939f0b49e978efa46a6ad6468049f79b" },
-]
-
-[[package]]
 name = "packaging"
 version = "26.2"
 source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
@@ -1911,6 +1943,21 @@ wheels = [
     { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/propcache/0.5.2/propcache-0.5.2-cp314-cp314t-win_amd64.whl", hash = "sha256:d447bb0b3054be5818458fbb171208b1d9ff11eba14e18ca18b90cbb45767370" },
     { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/propcache/0.5.2/propcache-0.5.2-cp314-cp314t-win_arm64.whl", hash = "sha256:fe67a3d11cd9b4efabfa45c3d00ffba2b26811442a73a581a94b67c2b5faccf6" },
     { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/propcache/0.5.2/propcache-0.5.2-py3-none-any.whl", hash = "sha256:be1ddfcbb376e3de5d2e2db1d58d6d67463e6b4f9f040c000de8e300295465fe" },
+]
+
+[[package]]
+name = "protobuf"
+version = "7.36.0"
+source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
+sdist = { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/protobuf/7.36/protobuf-7.36.0.tar.gz", hash = "sha256:e8e09cb0d794c6687926fa558a8a6e72aa10edb997d5ca61da0765f12a3e00ea" }
+wheels = [
+    { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/protobuf/7.36/protobuf-7.36.0-cp310-abi3-macosx_10_9_universal2.whl", hash = "sha256:9103532dffd80c6fab7e50c65a31007680a06eb57537d437bb1b35812c138a37" },
+    { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/protobuf/7.36/protobuf-7.36.0-cp310-abi3-manylinux2014_aarch64.whl", hash = "sha256:bf94a5917c71058262de683669bc0a797a7669d3de71f0b36d058e3194f47b44" },
+    { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/protobuf/7.36/protobuf-7.36.0-cp310-abi3-manylinux2014_s390x.whl", hash = "sha256:3297e60abdff301e5f74393d87f6cc59dacab5f024a89548a6e8de1d26576b16" },
+    { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/protobuf/7.36/protobuf-7.36.0-cp310-abi3-manylinux2014_x86_64.whl", hash = "sha256:70f5ec8eb0da81a44360c0dc0beac99a0d78071d21956a7076bae8bd2051841b" },
+    { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/protobuf/7.36/protobuf-7.36.0-cp310-abi3-win32.whl", hash = "sha256:7326fd717bdc419162a735938d89d4032332bcc3408804012b24ff3a37086071" },
+    { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/protobuf/7.36/protobuf-7.36.0-cp310-abi3-win_amd64.whl", hash = "sha256:1781cc1de61249b750848029bca452c0a8b7e990080316b9bbc2518b2117b488" },
+    { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/protobuf/7.36/protobuf-7.36.0-py3-none-any.whl", hash = "sha256:53374d53fc29a67f7dbbf0ade47d7526a0f0137bf0f9c90e48d8a60790ef748c" },
 ]
 
 [[package]]

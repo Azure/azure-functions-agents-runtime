@@ -450,10 +450,30 @@ def fetch_logs(args: dict[str, Any]) -> dict[str, Any]:
 ```
 
 Use both `@tool` and `@workflow_tool` when the same callable should be
-available both directly in chat and inside workflows. See
+available both directly in chat and inside workflows. A workflow tool can own
+the retry policy for an operation that is safe to repeat:
+
+```python
+from azure_functions_agents import WorkflowRetryBackoff, WorkflowRetryPolicy
+
+
+@workflow_tool(
+    retry=WorkflowRetryPolicy(
+        max_attempts=3,
+        backoff=WorkflowRetryBackoff(initial="PT1S", multiplier=2.0, max="PT4S"),
+    )
+)
+def reserve_inventory(args: dict[str, Any]) -> dict[str, Any]:
+    ...
+```
+
+The decorator policy overrides plan-authored `execution.retry`. The tool raises
+`WorkflowRetryableError` when a failure is safe to retry; every other tool
+failure is terminal. See
 [`docs/workflows.md`](docs/workflows.md) for the Activity handler
-contract and `workflows.exclude`. Any agent can enable workflows; triggers and
-built-in endpoints independently determine how that agent is invoked. See the
+contract, `workflows.exclude`, and the full retry contract. Any agent can enable
+workflows; triggers and built-in endpoints independently determine how that agent
+is invoked. See the
 [`per-agent-workflows`](samples/per-agent-workflows) sample for two independent
 non-main workflow-enabled agents sharing one Durable engine.
 
@@ -549,8 +569,8 @@ Multi-turn conversations are persisted as JSON Lines, one record per message:
   as either a connection string or the identity-based
   `AzureWebJobsStorage__blobServiceUri` setting that `azd` provisions —
   history is written to **Azure Blob Storage** via the runtime's
-  `BlobHistoryProvider`. One Append Blob per session is stored under
-  `agent-sessions/{session_id}.jsonl` inside the
+  `BlobHistoryProvider`. One Append Blob per agent/session pair is stored under
+  `agent-sessions/{agent_slug}/{session_id}.jsonl` inside the
   `azure-functions-agents` container (override with
   `AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER`). No file share, no storage
   account key, no mount path; the same identity that the function app
@@ -560,12 +580,20 @@ Multi-turn conversations are persisted as JSON Lines, one record per message:
 - **Local dev fallback.** When neither `AzureWebJobsStorage` nor
   `AzureWebJobsStorage__blobServiceUri` is set, history falls back to MAF's
   `FileHistoryProvider` writing to
-  `{AZURE_FUNCTIONS_AGENTS_SESSION_DIR}/agent-sessions/{session_id}.jsonl`,
+  `{AZURE_FUNCTIONS_AGENTS_SESSION_DIR}/agent-sessions/{agent_slug}/{session_id}.jsonl`,
   defaulting to `~/.azure-functions-agents/agent-sessions/`.
 
 Session ids must match `^[A-Za-z0-9._-]{1,128}$` — anything else is rejected at the API boundary.
+The same caller-visible session id may be reused across agents for correlation, but each agent's
+transcript remains independent.
 
-> **Single-process scope**: A per-session `asyncio.Lock` serializes concurrent turns within a single Function instance. The contract is "one active turn per session id". Multi-instance distributed locking is intentionally out of scope.
+> **Breaking change:** Earlier releases stored unscoped history at
+> `agent-sessions/{session_id}.jsonl`; those files are not loaded automatically after upgrading.
+> If continuity is required, copy each file to its corresponding agent-specific path before
+> upgrading.
+> Azure Blob copies must preserve the Append Blob type so later appends continue to work.
+
+> **Single-process scope**: A per-agent/session `asyncio.Lock` serializes concurrent turns within a single Function instance. The contract is "one active turn per agent/session pair". Multi-instance distributed locking is intentionally out of scope.
 
 ## Samples
 
@@ -577,6 +605,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 - [`outlook-reply-agent`](samples/outlook-reply-agent) — connector-triggered agent that drafts replies to incoming Office 365 Outlook email
 - [`multi-agent-delegation`](samples/multi-agent-delegation) — HTTP coordinator that delegates to two specialists via `subagents:`, one of them endpoint-less
 - [`workflow-incident-triage`](samples/workflow-incident-triage) — interactive Dynamic Workflow with live progress
+- [`workflow-retry-policy`](samples/workflow-retry-policy) — order recovery whose inventory task retries transient failures on Durable
 - [`workflow-queue-p0-report`](samples/workflow-queue-p0-report) — queue-started fan-out workflow that publishes an HTML Blob report
 - [`workflow-subagents-preview`](samples/workflow-subagents-preview) — queue-started parallel PR analysis with isolated workflow specialists and a stable HTML Blob report
 - [`per-agent-workflows`](samples/per-agent-workflows) — Engineering Operations Hub with two non-main workflow-enabled agents and independent policies

@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, Literal
 
-from azure.durable_functions import DurableOrchestrationClient
+from azure.durable_functions import DurableFunctionsClient
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from azure_functions_agents._function_tool import tool as define_tool
@@ -34,9 +34,12 @@ from .context import (
 )
 from .engine import CANCEL_EVENT_NAME, ORCHESTRATOR_NAME
 from .schema import (
+    EffectiveWorkflowTaskExecution,
     PlanValidationError,
     WorkflowPlanPolicy,
+    WorkflowTaskExecution,
     plan_to_activity_inputs,
+    resolve_workflow_task_execution,
     validate_plan,
 )
 
@@ -104,6 +107,15 @@ class _ToolTaskSpec(_TaskSpecBase):
             "One task instance is created for each array item."
         ),
     )
+    execution: WorkflowTaskExecution | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Optional bounded retry policy for transient failures. Use it only "
+            "when repeating the task is safe; the tool must raise "
+            "WorkflowRetryableError for a failure Durable should retry."
+        ),
+    )
 
 
 class _WaitTaskSpec(_TaskSpecBase):
@@ -146,6 +158,14 @@ class _SubAgentTaskSpec(_TaskSpecBase):
         description=(
             "Optional full upstream-result reference resolving to a JSON array. "
             "One Sub Agent task is created for each array item."
+        ),
+    )
+    execution: WorkflowTaskExecution | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Optional bounded retry policy for this Sub Agent task. Only a "
+            "Sub Agent timeout is classified as transient in this version."
         ),
     )
 
@@ -269,7 +289,7 @@ def _is_active_status(status: Any) -> bool:
 
 
 async def fetch_session_workflows(
-    durable_client: DurableOrchestrationClient,
+    durable_client: DurableFunctionsClient,
     workflow_agent_slug: str,
     session_id: str,
 ) -> list[dict[str, Any]]:
@@ -298,7 +318,7 @@ async def fetch_session_workflows(
 
 
 async def count_active_session_workflows(
-    durable_client: DurableOrchestrationClient,
+    durable_client: DurableFunctionsClient,
     workflow_agent_slug: str,
     session_id: str,
 ) -> int:
@@ -320,7 +340,7 @@ async def count_active_session_workflows(
 
 
 async def fetch_session_workflow_status(
-    durable_client: DurableOrchestrationClient,
+    durable_client: DurableFunctionsClient,
     workflow_agent_slug: str,
     session_id: str,
     workflow_id: str,
@@ -406,6 +426,7 @@ async def start_workflow(
             "workflow tools are registered but the per-app allowlist was "
             "never configured (build_workflow_integration was not called)"
         )
+    effective_policies: dict[str, EffectiveWorkflowTaskExecution] = {}
     try:
         if policy is None:
             assert allowed_tools is not None
@@ -413,10 +434,34 @@ async def start_workflow(
                 allowed_tools=frozenset(allowed_tools),
                 allowed_subagents=frozenset(),
             )
+        plan_payload = params.model_dump(exclude_unset=True)
+        for input_task, serialized_task in zip(
+            params.tasks,
+            plan_payload["tasks"],
+            strict=True,
+        ):
+            if (
+                isinstance(input_task, (_ToolTaskSpec, _SubAgentTaskSpec))
+                and "execution" in input_task.model_fields_set
+                and input_task.execution is None
+            ):
+                serialized_task["execution"] = None
         plan = validate_plan(
-            params.model_dump(exclude_unset=True),
+            plan_payload,
             policy=policy,
         )
+        for task in plan.tasks:
+            declaration = (
+                policy.tool_execution.get(task.tool or "")
+                if task.type == "tool"
+                else None
+            )
+            effective = resolve_workflow_task_execution(
+                task,
+                decorator_retry=declaration.retry if declaration is not None else None,
+            )
+            if effective is not None:
+                effective_policies[task.id] = effective
     except PlanValidationError as exc:
         metadata: dict[str, str | None] = {}
         if exc.error_code is not None:
@@ -457,11 +502,11 @@ async def start_workflow(
         )
 
     try:
-        returned_id = await session.durable_client.start_new(
+        returned_id = await session.durable_client.schedule_new_orchestration(
             ORCHESTRATOR_NAME,
             instance_id=instance_id,
-            client_input={
-                "tasks": plan_to_activity_inputs(plan),
+            input={
+                "tasks": plan_to_activity_inputs(plan, effective_policies),
                 "workflow_agent_slug": session.workflow_agent_slug,
                 "workflow_agent": workflow_agent,
                 "policy": {
@@ -469,10 +514,14 @@ async def start_workflow(
                     "allowed_subagents": sorted(policy.allowed_subagents),
                 },
             },
+            tags={
+                "durabletask.displayName": f"{session.agent_name}-orchestration"
+            },
         )
     except Exception:
         logger.exception(
-            "start_workflow: client.start_new failed workflow_agent=%s session=%s",
+            "start_workflow: client.schedule_new_orchestration failed "
+            "workflow_agent=%s session=%s",
             session.workflow_agent_slug,
             session.session_id,
         )
@@ -644,7 +693,7 @@ def _build_session(
     workflow_agent_slug: str,
     session_id: str | None,
     agent_name: str,
-    durable_client: DurableOrchestrationClient | None,
+    durable_client: DurableFunctionsClient | None,
 ) -> WorkflowSessionContext | None:
     if not session_id or durable_client is None:
         return None
@@ -661,7 +710,7 @@ def build_workflow_tools(
     session_id: str | None = None,
     workflow_agent_slug: str = "main",
     agent_name: str = "main",
-    durable_client: DurableOrchestrationClient | None = None,
+    durable_client: DurableFunctionsClient | None = None,
     policy: WorkflowPlanPolicy | None = None,
 ) -> list[Any]:
     """Return the list of workflow tool objects to inject for an agent."""

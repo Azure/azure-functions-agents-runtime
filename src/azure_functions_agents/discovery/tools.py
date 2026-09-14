@@ -108,6 +108,7 @@ def _workflow_tool_from_member(module_name: str, name: str, obj: object) -> Work
         description=description,
         handler=handler,
         public=metadata.public,
+        retry=metadata.retry,
     )
 
 
