@@ -7,6 +7,7 @@ import textwrap
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -322,7 +323,7 @@ async def test_run_agent_stream_continues_after_loading_skill(
         "build_chat_client_with_target",
         lambda _model: (chat_client, InferenceTarget()),
     )
-    monkeypatch.setattr(runner, "_build_history_provider", lambda: None)
+    monkeypatch.setattr(runner, "_build_history_provider", lambda agent_slug: None)
 
     events = _events_from_sse(
         [
@@ -704,6 +705,106 @@ def test_session_lock_bounded_by_releases_lock_after_successful_body() -> None:
     locked_during_body, locked_after = asyncio.run(scenario())
     assert locked_during_body is True
     assert locked_after is False
+
+
+def test_session_locks_remain_independent_across_agent_slugs() -> None:
+    async def run() -> None:
+        billing = await runner._get_session_lock("shared-session", "billing")
+        support = await runner._get_session_lock("shared-session", "support")
+        same_billing = await runner._get_session_lock("shared-session", "billing")
+
+        assert billing is same_billing
+        assert billing is not support
+
+    asyncio.run(run())
+
+
+def test_public_runners_pass_agent_slug_to_bounded_session_lock(
+    monkeypatch: Any,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    @contextlib.asynccontextmanager
+    async def fake_lock(
+        session_id: str,
+        deadline: float,
+        *,
+        agent_slug: str = "main",
+    ) -> Any:
+        del deadline
+        calls.append((session_id, agent_slug))
+        yield
+
+    class _NonStreamingAgent:
+        async def run(
+            self,
+            _prompt: str,
+            *,
+            session: object,
+            options: dict[str, Any] | None = None,
+        ) -> Any:
+            del session, options
+            return SimpleNamespace(text="done", messages=[])
+
+    async def fake_non_streaming_session(
+        **_kwargs: Any,
+    ) -> tuple[_Agent, object, str, None, InferenceTarget]:
+        return _NonStreamingAgent(), object(), "shared-session", None, InferenceTarget()
+
+    monkeypatch.setattr(runner, "_session_lock_bounded_by", fake_lock)
+    monkeypatch.setattr(runner, "_build_agent_session", fake_non_streaming_session)
+
+    asyncio.run(runner.run_agent("prompt", agent_name="billing"))
+
+    async def fake_streaming_session(
+        **_kwargs: Any,
+    ) -> tuple[_Agent, object, str, None, InferenceTarget]:
+        return _Agent(), object(), "shared-session", None, InferenceTarget()
+
+    monkeypatch.setattr(runner, "_build_agent_session", fake_streaming_session)
+
+    async def collect() -> list[str]:
+        return [
+            chunk
+            async for chunk in runner.run_agent_stream(
+                "prompt",
+                agent_name="support",
+            )
+        ]
+
+    asyncio.run(collect())
+
+    assert calls == [
+        ("shared-session", "billing"),
+        ("shared-session", "support"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("agent_name", "workflow_agent_slug"),
+    [("", None), (None, "")],
+)
+def test_empty_agent_identity_does_not_fall_back_to_main(
+    agent_name: str | None,
+    workflow_agent_slug: str | None,
+) -> None:
+    async def scenario() -> None:
+        with pytest.raises(ValueError, match="agent_slug"):
+            await runner.run_agent(
+                "prompt",
+                agent_name=agent_name,
+                workflow_agent_slug=workflow_agent_slug,
+            )
+
+        with pytest.raises(ValueError, match="agent_slug"):
+            async for _ in runner.run_agent_stream(
+                "prompt",
+                agent_name=agent_name,
+                workflow_agent_slug=workflow_agent_slug,
+            ):
+                pass
+
+    asyncio.run(scenario())
 
 
 def test_session_lock_bounded_by_releases_lock_on_body_exception() -> None:

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from agent_framework import FunctionTool
 
-from azure_functions_agents._function_tool import tool
+from azure_functions_agents._function_tool import tool, workflow_tool
 from azure_functions_agents.discovery.tools import (
     clear_tool_discovery_cache,
     discover_project_tools,
@@ -268,6 +268,45 @@ def test_workflow_tool_public_false_flows_through_discovery(tmp_path: Path) -> N
     assert workflow_tool.description == "Internal lookup"
     assert workflow_tool.public is False
     assert workflow_tool.handler is not None
+
+
+def test_workflow_tool_retry_flows_through_discovery(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "retrying_workflow_tool",
+        """
+        from azure_functions_agents import (
+            WorkflowRetryBackoff,
+            WorkflowRetryPolicy,
+            workflow_tool,
+        )
+
+        @workflow_tool(
+            retry=WorkflowRetryPolicy(
+                max_attempts=3,
+                backoff=WorkflowRetryBackoff(
+                    initial="PT1S",
+                    multiplier=2.0,
+                    max="PT4S",
+                ),
+            )
+        )
+        def reserve(args: dict[str, object]) -> dict[str, object]:
+            return {"args": args}
+        """,
+    )
+
+    [workflow_tool] = discover_project_tools(tmp_path).workflow_tools
+
+    assert workflow_tool.retry is not None
+    assert workflow_tool.retry.max_attempts == 3
+    assert workflow_tool.retry.backoff is not None
+    assert workflow_tool.retry.backoff.max == "PT4S"
+
+
+def test_workflow_tool_rejects_invalid_retry_type() -> None:
+    with pytest.raises(TypeError, match="WorkflowRetryPolicy"):
+        workflow_tool(retry="three attempts")  # type: ignore[arg-type]
 
 
 def test_multiple_workflow_tools_can_be_declared_in_one_file(tmp_path: Path) -> None:

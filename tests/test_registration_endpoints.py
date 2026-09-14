@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -19,6 +20,7 @@ from azure_functions_agents.config.schema import (
     ResolvedAgent,
     ToolsFilter,
 )
+from azure_functions_agents.registration._naming import _function_name_from_source
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
     _MAX_HISTORY_REPLAY_MESSAGES,
@@ -116,19 +118,13 @@ def _resolved_agent(
     builtin_endpoints: BuiltinEndpointsConfig,
     source_file: str | Path | None = None,
     input_schema: dict[str, Any] | None = None,
-    # Deliberately distinct from `name` above (S1): identity/telemetry call
-    # sites must key off `slug`, never the mutable display `name` (FRD 0007
-    # §4.3, "Display `name` is never an identity"). Defaulted so existing
-    # callers of this factory are unaffected; note route paths (e.g.
-    # `agents/daily_report_a/`) are derived from `source_file`/`name` via
-    # `_function_name_from_source`, not this `slug` field, so changing its
-    # default here does not affect any route-path assertions.
-    slug: str = "resolved-agent-slug",
+    slug: str | None = None,
 ) -> ResolvedAgent:
     source = source_file or Path(__file__).resolve()
+    resolved_slug = _function_name_from_source(source, name) if slug is None else slug
     return ResolvedAgent(
         name=name,
-        slug=slug,
+        slug=resolved_slug,
         description="desc",
         trigger=None,
         instructions="Assist the user.",
@@ -288,7 +284,12 @@ def test_register_builtin_endpoints_uses_filename_slug_for_duplicate_display_nam
 def test_run_builtin_agent_generates_session_id_before_building_sandbox_tools(
     monkeypatch: Any,
 ) -> None:
-    resolved = _resolved_agent(name="Secondary Agent", is_main=False, builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True))
+    resolved = _resolved_agent(
+        name="Secondary Agent",
+        slug="secondary_agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
+    )
     calls: dict[str, Any] = {}
 
     class FakeUuid:
@@ -337,7 +338,12 @@ def test_run_builtin_agent_generates_session_id_before_building_sandbox_tools(
 def test_run_builtin_agent_stream_generates_session_id_before_building_sandbox_tools(
     monkeypatch: Any,
 ) -> None:
-    resolved = _resolved_agent(name="Secondary Agent", is_main=False, builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True))
+    resolved = _resolved_agent(
+        name="Secondary Agent",
+        slug="secondary_agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
+    )
     calls: dict[str, Any] = {}
 
     class FakeUuid:
@@ -1224,6 +1230,197 @@ def test_history_endpoint_filters_to_user_and_assistant_text(
     assert provider.captured_session_id == "abc123"
 
 
+def test_history_endpoint_passes_route_slug_to_storage_lookup(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    provider = _FakeHistoryProvider([])
+    build_calls: list[dict[str, Any]] = []
+
+    def fake_build(**kwargs: Any) -> Any:
+        build_calls.append(kwargs)
+        return provider
+
+    monkeypatch.setattr(
+        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        fake_build,
+    )
+    app = FakeFunctionApp()
+    register_builtin_endpoints(
+        app, _chat_api_agent(tmp_path, EndpointAuthConfig()), AgentCapabilities()
+    )
+
+    request = DummyRequest({}, headers={"x-ms-session-id": "abc123"})
+    response = asyncio.run(_history_route(app)["handler"](request))
+
+    assert response.status_code == 200
+    assert build_calls == [{"agent_slug": "test_agent"}]
+
+
+def test_resolved_slug_is_used_by_routes_chat_stream_mcp_and_history(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
+        calls.append(("run", kwargs["resolved"].slug))
+        return SimpleNamespace(
+            session_id="shared-session",
+            content="ok",
+            tool_calls=[],
+            delegate_error_count=0,
+        )
+
+    async def fake_stream() -> Any:
+        yield 'data: {"type":"done"}\n\n'
+
+    def fake_run_builtin_agent_stream(prompt: str, **kwargs: Any) -> Any:
+        calls.append(("stream", kwargs["resolved"].slug))
+        return fake_stream()
+
+    provider = _FakeHistoryProvider([])
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent",
+        fake_run_builtin_agent,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent_stream",
+        fake_run_builtin_agent_stream,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        lambda *, agent_slug: calls.append(("history", agent_slug)) or provider,
+    )
+    app = FakeFunctionApp()
+    resolved = _resolved_agent(
+        name="Route Owner",
+        slug="canonical_owner",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True, mcp=True),
+        source_file=tmp_path / "route_owner.agent.md",
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
+
+    chat_route = next(
+        route for route in app.routes if route["route"] == "agents/canonical_owner/chat"
+    )
+    stream_route = next(
+        route
+        for route in app.routes
+        if route["route"] == "agents/canonical_owner/chatstream"
+    )
+    history_route = next(
+        route
+        for route in app.routes
+        if route["route"] == "agents/canonical_owner/history"
+    )
+    mcp_route = next(route for route in app.routes if route.get("mcp_tool_trigger"))
+    asyncio.run(chat_route["handler"](DummyRequest({"prompt": "hello"})))
+    stream_response = asyncio.run(
+        stream_route["handler"](DummyRequest({"prompt": "hello"}))
+    )
+
+    async def consume_stream() -> None:
+        async for _ in stream_response.body_iterator:
+            pass
+
+    asyncio.run(consume_stream())
+    asyncio.run(
+        mcp_route["handler"](
+            json.dumps(
+                {
+                    "arguments": {"prompt": "hello"},
+                    "sessionId": "shared-session",
+                }
+            )
+        )
+    )
+    asyncio.run(
+        history_route["handler"](
+            DummyRequest({}, headers={"x-ms-session-id": "shared-session"})
+        )
+    )
+
+    assert calls == [
+        ("run", "canonical_owner"),
+        ("stream", "canonical_owner"),
+        ("run", "canonical_owner"),
+        ("history", "canonical_owner"),
+    ]
+
+
+@pytest.mark.parametrize("slug", ["", ".", "..", "billing/support", "billing support"])
+def test_register_builtin_endpoints_rejects_invalid_resolved_slug(
+    tmp_path: Path,
+    slug: str,
+) -> None:
+    app = FakeFunctionApp()
+    resolved = _resolved_agent(
+        name="Invalid slug",
+        slug=slug,
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+        source_file=tmp_path / "invalid.agent.md",
+    )
+
+    with pytest.raises(ValueError, match="agent_slug"):
+        register_builtin_endpoints(
+            app,
+            resolved,
+            AgentCapabilities(),
+        )
+    assert app.routes == []
+
+
+def test_register_builtin_endpoints_has_no_route_slug_override() -> None:
+    assert "slug" not in inspect.signature(register_builtin_endpoints).parameters
+
+
+def test_history_endpoints_keep_same_session_independent_across_agents(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    providers = {
+        "billing": _FakeHistoryProvider([SimpleNamespace(role="assistant", text="billing")]),
+        "support": _FakeHistoryProvider([SimpleNamespace(role="assistant", text="support")]),
+    }
+    monkeypatch.setattr(
+        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        lambda *, agent_slug: providers[agent_slug],
+    )
+    app = FakeFunctionApp()
+    for slug in ("billing", "support"):
+        source_file = tmp_path / f"{slug}.agent.md"
+        source_file.write_text(f"---\nname: {slug}\n---\n", encoding="utf-8")
+        register_builtin_endpoints(
+            app,
+            _resolved_agent(
+                name=slug,
+                slug=slug,
+                is_main=False,
+                builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+                source_file=source_file,
+            ),
+            AgentCapabilities(),
+        )
+
+    request = DummyRequest({}, headers={"x-ms-session-id": "shared-session"})
+    billing_route = next(
+        route for route in app.routes if route["route"] == "agents/billing/history"
+    )
+    support_route = next(
+        route for route in app.routes if route["route"] == "agents/support/history"
+    )
+    billing_response = asyncio.run(billing_route["handler"](request))
+    support_response = asyncio.run(support_route["handler"](request))
+
+    assert json.loads(_response_text(billing_response))["messages"] == [
+        {"role": "assistant", "text": "billing"}
+    ]
+    assert json.loads(_response_text(support_response))["messages"] == [
+        {"role": "assistant", "text": "support"}
+    ]
+
+
 def test_history_endpoint_caps_to_latest_messages(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
@@ -1439,12 +1636,17 @@ def test_workflow_status_endpoint_hides_same_session_other_owner(
     tmp_path: Path,
 ) -> None:
     app = FakeFunctionApp()
-    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig())
+    resolved = _resolved_agent(
+        name="Owner B",
+        slug="owner_b",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+        source_file=tmp_path / "owner_b.agent.md",
+    )
     register_builtin_endpoints(
         app,
         resolved,
         AgentCapabilities(),
-        slug="owner_b",
         workflows_enabled=True,
     )
     route = next(
@@ -1480,12 +1682,17 @@ def test_workflow_list_endpoint_hides_same_session_other_owner(
             ]
 
     app = FakeFunctionApp()
-    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig())
+    resolved = _resolved_agent(
+        name="Owner B",
+        slug="owner_b",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+        source_file=tmp_path / "owner_b.agent.md",
+    )
     register_builtin_endpoints(
         app,
         resolved,
         AgentCapabilities(),
-        slug="owner_b",
         workflows_enabled=True,
     )
     route = next(
@@ -1501,13 +1708,13 @@ def test_workflow_list_endpoint_hides_same_session_other_owner(
     assert json.loads(response.body) == {"workflows": []}
 
 
-def test_workflow_list_endpoint_uses_resolved_workflow_agent_slug_not_route_slug(
+def test_workflow_list_endpoint_uses_resolved_slug_for_route_and_workflow_identity(
     tmp_path: Path,
 ) -> None:
     class _Client:
         async def get_status_all(self) -> list[Any]:
             workflow_id = new_workflow_instance_id(
-                "canonical-owner",
+                "canonical_owner",
                 "same-session",
             )
             return [
@@ -1524,7 +1731,7 @@ def test_workflow_list_endpoint_uses_resolved_workflow_agent_slug_not_route_slug
     app = FakeFunctionApp()
     resolved = _resolved_agent(
         name="Owner",
-        slug="canonical-owner",
+        slug="canonical_owner",
         is_main=False,
         builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
         source_file=tmp_path / "route-owner.agent.md",
@@ -1533,13 +1740,12 @@ def test_workflow_list_endpoint_uses_resolved_workflow_agent_slug_not_route_slug
         app,
         resolved,
         AgentCapabilities(),
-        slug="route-owner",
         workflows_enabled=True,
     )
     route = next(
         route
         for route in app.routes
-        if route["route"] == "agents/route-owner/workflows"
+        if route["route"] == "agents/canonical_owner/workflows"
     )
     request = DummyRequest({}, headers={"x-ms-session-id": "same-session"})
 
@@ -1548,5 +1754,5 @@ def test_workflow_list_endpoint_uses_resolved_workflow_agent_slug_not_route_slug
     assert response.status_code == 200
     [workflow] = json.loads(response.body)["workflows"]
     assert workflow["workflow_id"].startswith(
-        session_instance_prefix("canonical-owner", "same-session")
+        session_instance_prefix("canonical_owner", "same-session")
     )

@@ -34,9 +34,12 @@ from .context import (
 )
 from .engine import CANCEL_EVENT_NAME, ORCHESTRATOR_NAME
 from .schema import (
+    EffectiveWorkflowTaskExecution,
     PlanValidationError,
     WorkflowPlanPolicy,
+    WorkflowTaskExecution,
     plan_to_activity_inputs,
+    resolve_workflow_task_execution,
     validate_plan,
 )
 
@@ -104,6 +107,15 @@ class _ToolTaskSpec(_TaskSpecBase):
             "One task instance is created for each array item."
         ),
     )
+    execution: WorkflowTaskExecution | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Optional bounded retry policy for transient failures. Use it only "
+            "when repeating the task is safe; the tool must raise "
+            "WorkflowRetryableError for a failure Durable should retry."
+        ),
+    )
 
 
 class _WaitTaskSpec(_TaskSpecBase):
@@ -146,6 +158,14 @@ class _SubAgentTaskSpec(_TaskSpecBase):
         description=(
             "Optional full upstream-result reference resolving to a JSON array. "
             "One Sub Agent task is created for each array item."
+        ),
+    )
+    execution: WorkflowTaskExecution | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Optional bounded retry policy for this Sub Agent task. Only a "
+            "Sub Agent timeout is classified as transient in this version."
         ),
     )
 
@@ -406,6 +426,7 @@ async def start_workflow(
             "workflow tools are registered but the per-app allowlist was "
             "never configured (build_workflow_integration was not called)"
         )
+    effective_policies: dict[str, EffectiveWorkflowTaskExecution] = {}
     try:
         if policy is None:
             assert allowed_tools is not None
@@ -413,10 +434,34 @@ async def start_workflow(
                 allowed_tools=frozenset(allowed_tools),
                 allowed_subagents=frozenset(),
             )
+        plan_payload = params.model_dump(exclude_unset=True)
+        for input_task, serialized_task in zip(
+            params.tasks,
+            plan_payload["tasks"],
+            strict=True,
+        ):
+            if (
+                isinstance(input_task, (_ToolTaskSpec, _SubAgentTaskSpec))
+                and "execution" in input_task.model_fields_set
+                and input_task.execution is None
+            ):
+                serialized_task["execution"] = None
         plan = validate_plan(
-            params.model_dump(exclude_unset=True),
+            plan_payload,
             policy=policy,
         )
+        for task in plan.tasks:
+            declaration = (
+                policy.tool_execution.get(task.tool or "")
+                if task.type == "tool"
+                else None
+            )
+            effective = resolve_workflow_task_execution(
+                task,
+                decorator_retry=declaration.retry if declaration is not None else None,
+            )
+            if effective is not None:
+                effective_policies[task.id] = effective
     except PlanValidationError as exc:
         metadata: dict[str, str | None] = {}
         if exc.error_code is not None:
@@ -461,7 +506,7 @@ async def start_workflow(
             ORCHESTRATOR_NAME,
             instance_id=instance_id,
             input={
-                "tasks": plan_to_activity_inputs(plan),
+                "tasks": plan_to_activity_inputs(plan, effective_policies),
                 "workflow_agent_slug": session.workflow_agent_slug,
                 "workflow_agent": workflow_agent,
                 "policy": {

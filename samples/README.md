@@ -14,6 +14,7 @@ app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure
 | [obo-e2e](obo-e2e/) | HTTP | | | ✅ (custom OBO target) | | | |
 | [obo-whoami-mcp-server](obo-whoami-mcp-server/) | MCP (streamable HTTP) | | | | | | |
 | [workflow-incident-triage](workflow-incident-triage/) | HTTP | | | | | | ✅ |
+| [workflow-retry-policy](workflow-retry-policy/) | HTTP | ✅ workflow-safe | | | | | ✅ |
 | [workflow-queue-p0-report](workflow-queue-p0-report/) | Queue | ✅ workflow-safe | | | | | |
 | [per-agent-workflows](per-agent-workflows/) | HTTP | ✅ workflow-safe | | | | | ✅ |
 | [workflow-subagents-preview](workflow-subagents-preview/) | Queue | ✅ workflow-safe | | | ✅ | | |
