@@ -37,7 +37,7 @@ from .config.env import _to_bool, runtime_env_value
 # Framework's ``gen_ai.*`` attributes or OpenTelemetry semantic conventions, and makes them trivial
 # to query ("everything we add starts with af."). A few sub-namespaces group the details:
 #
-#   * ``af.agent.*``            — attributes on the per-run ``agent.run {name}`` span.
+#   * ``af.agent.*``            — attributes on the per-run ``agent.run {agent_slug}`` span.
 #   * ``af.dynamic_session.*``  — attributes on the ``dynamic_session.execute`` (sandbox) span.
 #   * ``af.delegate.*``         — attributes on the ``execute_tool delegate_<slug>`` span added
 #                                 for a chat-time sub-agent delegation (FRD 0007).

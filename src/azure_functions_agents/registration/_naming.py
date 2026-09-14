@@ -32,41 +32,45 @@ def _allocate_unique_name(base_name: str, registered_names: set[str]) -> str:
 
 
 def allocate_unique_function_name(
-    source_file: str | Path | None, name: str, registered_names: set[str]
+    agent_slug: str,
+    registered_names: set[str],
+    *,
+    source_file: str | Path | None = None,
 ) -> str:
-    base_name = _function_name_from_source(source_file, name)
     try:
-        return _allocate_unique_name(base_name, registered_names)
+        return _allocate_unique_name(agent_slug, registered_names)
     except ValueError as exc:
         source_desc = f"{source_file!r}" if source_file else "<unknown source_file>"
         logger.error(
             "Function name collision: %s would register as %r but that name is already used.",
             source_desc,
-            base_name,
+            agent_slug,
         )
         raise ValueError(
-            f"Function name collision: {source_desc} would register as {base_name!r} "
+            f"Function name collision: {source_desc} would register as {agent_slug!r} "
             "but that name is already used by another agent. Rename the source file "
             "to resolve this."
         ) from exc
 
 
 def allocate_unique_builtin_slug(
-    source_file: str | Path | None, name: str, registered_names: set[str]
+    agent_slug: str,
+    registered_names: set[str],
+    *,
+    source_file: str | Path | None = None,
 ) -> str:
-    base_slug = _function_name_from_source(source_file, name)
     try:
-        return _allocate_unique_name(base_slug, registered_names)
+        return _allocate_unique_name(agent_slug, registered_names)
     except ValueError as exc:
         source_desc = Path(str(source_file)).name if source_file else "<unknown source_file>"
         logger.error(
             "Built-in endpoint slug collision: %r would register at '/agents/%s/' but "
             "that route is already used.",
             source_desc,
-            base_slug,
+            agent_slug,
         )
         raise ValueError(
             f"Built-in endpoint slug collision: {source_desc!r} would register at "
-            f"'/agents/{base_slug}/' but that route is already used by another agent. "
+            f"'/agents/{agent_slug}/' but that route is already used by another agent. "
             "Rename the source file to resolve this."
         ) from exc

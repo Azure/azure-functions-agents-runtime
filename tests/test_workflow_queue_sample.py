@@ -70,9 +70,9 @@ def test_workflow_queue_sample_indexes_queue_and_durable_functions() -> None:
     assert {
         "agents_workflow_run_tool",
         "agents_workflow_orchestrator",
-        "handler_P0_Issue_Portfolio_Reporter",
+        "handler_main",
     } <= functions.keys()
-    trigger_bindings = functions["handler_P0_Issue_Portfolio_Reporter"]
+    trigger_bindings = functions["handler_main"]
     assert [binding["type"] for binding in trigger_bindings] == [
         "durableClient",
         "queueTrigger",

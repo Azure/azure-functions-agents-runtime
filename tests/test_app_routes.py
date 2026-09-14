@@ -174,12 +174,12 @@ def test_workflow_timer_trigger_registers_durable_client_binding(tmp_path: Path)
     function_app = app_module.create_function_app(app_root=tmp_path)
 
     assert isinstance(function_app, df.DFApp)
-    assert "durableClient" in _binding_types(function_app, "handler_Main")
+    assert "durableClient" in _binding_types(function_app, "handler_main")
     assert (
-        get_type_hints(_registered_function(function_app, "handler_Main"))["client"]
+        get_type_hints(_registered_function(function_app, "handler_main"))["client"]
         is str
     )
-    bindings = _bindings(function_app, "handler_Main")
+    bindings = _bindings(function_app, "handler_main")
     timer_binding = next(binding for binding in bindings if binding["type"] == "timerTrigger")
     assert timer_binding["schedule"] == "0 */5 * * * *"
     assert timer_binding["name"] == "trigger_data"
@@ -228,7 +228,7 @@ def test_workflow_declared_triggers_register_durable_client_binding(
     )
 
     function_app = app_module.create_function_app(app_root=tmp_path)
-    bindings = _bindings(function_app, "handler_Main")
+    bindings = _bindings(function_app, "handler_main")
 
     binding_types = [binding["type"] for binding in bindings]
     assert binding_types[:2] == [

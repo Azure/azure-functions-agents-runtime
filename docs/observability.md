@@ -55,7 +55,7 @@ require the `PYTHON_ENABLE_DEBUG_LOGGING` app setting. This is by design.
 
 **So to debug a run, use the spans — not the log list:**
 
-- `agent.run {name}` and `dynamic_session.execute`, with all the `af.*` attributes below.
+- `agent.run {agent_slug}` and `dynamic_session.execute`, with all the `af.*` attributes below.
 - Runtime **span events** on `agent.run` (input/response-contract milestones — see that span's
   section) and MAF's `gen_ai.*` child spans (per model/tool call).
 - **Failures are captured on the span**, not just in logs: a failing run is marked error with
@@ -78,7 +78,7 @@ Four sub-namespaces group the detail, plus two cross-cutting attributes:
 
 | Namespace | Used for |
 | --- | --- |
-| `af.agent.*` | attributes on the per-run `agent.run {name}` span |
+| `af.agent.*` | attributes on the per-run `agent.run {agent_slug}` span |
 | `af.dynamic_session.*` | attributes on the `dynamic_session.execute` (code sandbox) span |
 | `af.web_request.*` | attributes on the `web_request` (outbound HTTP tool) span |
 | `af.delegate.*` | attributes on the `execute_tool delegate_<slug>` span (chat-time sub-agent delegation) |
@@ -87,6 +87,14 @@ Four sub-namespaces group the detail, plus two cross-cutting attributes:
 Where a standard OpenTelemetry attribute already exists we reuse it instead of inventing an `af.`
 name — for example `server.address` for the session-pool host. MAF keeps emitting its own
 `gen_ai.*` spans (agent invocation, chat, tool calls, token usage); we don't touch those.
+
+Agent identity is consistent across both namespaces. The runtime's custom
+identity key is `af.agent.slug`. MAF's standard `gen_ai.agent.name` is preserved
+and contains the same canonical slug because every MAF agent is constructed
+with `name=agent_slug`. Optional `display_name` values are presentation-only:
+they may appear as `af.agent.display_name` or in human-readable labels/logs,
+but never replace the canonical slug. The separate internal token-usage record
+uses `agent_slug` and does not include `display_name`.
 
 ## Spans and attributes we emit today
 
@@ -97,14 +105,15 @@ name — for example `server.address` for the session-pool host. MAF keeps emitt
 | `af.fault_domain` | Whose fault a failure is: `app`, `runtime`, `platform`, `model`, `connector`, `sandbox`, `web_request`, `delegate`, `unknown`. Set **only on failing spans**. |
 | `af.lifecycle_stage` | Which run stage the span represents, e.g. `agent_run`, `tool_execution`. |
 
-### Span `agent.run {name}`
+### Span `agent.run {agent_slug}`
 
 One per agent invocation (timer, connector, HTTP, …). It is the parent that ties the MAF `gen_ai`
 spans and the sandbox/`web_request` tool spans together.
 
 | Attribute | Meaning |
 | --- | --- |
-| `af.agent.name` | Agent name. |
+| `af.agent.slug` | Required canonical machine identity derived from the source filename. |
+| `af.agent.display_name` | Optional human-readable presentation label. Omitted when the agent has no frontmatter `name`. |
 | `af.agent.trigger_type` | `timer`, `connectorTrigger`, `http`, … |
 | `af.agent.model` | Model/deployment used. |
 | `af.agent.session_id` | Conversation/session id. |
@@ -120,7 +129,7 @@ Plus `af.lifecycle_stage=agent_run`, and `af.fault_domain` if the run fails.
 
 #### Span events (runtime lifecycle milestones)
 
-These `agent.run {name}` span events mark runtime-owned input/output-contract boundaries. They carry
+These `agent.run {agent_slug}` span events mark runtime-owned input/output-contract boundaries. They carry
 only non-sensitive metadata (names/status/counts — never request/response/model content). MAF's
 `gen_ai.*` child spans already cover per-model/per-tool detail, so these events intentionally track
 runtime milestones rather than duplicating tool/model spans.

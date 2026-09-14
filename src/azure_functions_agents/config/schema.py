@@ -290,7 +290,7 @@ class AgentSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str
+    name: str | None = None
     description: str
     agent_configuration: AgentConfiguration | None = None
     trigger: TriggerSpec | None = None
@@ -319,12 +319,8 @@ class ResolvedAgent(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    name: str
-    # Identity slug (derived from source_file's stem; see _slug.py). Defaulted
-    # rather than required because many tests construct ResolvedAgent directly,
-    # bypassing config.merge.compose(), which is the only code path that
-    # actually computes it.
-    slug: str = ""
+    display_name: str | None = None
+    slug: str
     description: str
     trigger: TriggerSpec | None
     instructions: str
@@ -448,12 +444,12 @@ TOOLS_FILTER_DESCRIPTIONS: dict[str, str] = {
 }
 
 AGENT_SPEC_REQUIRED_DESCRIPTIONS: dict[str, str] = {
-    "name": "Display name for the agent. Does not control function name or route.",
     "description": "Brief description of the agent's purpose",
     "trigger": "Required unless at least one `builtin_endpoints` value is enabled. [Details](#agent-trigger)",
 }
 
 AGENT_SPEC_OPTIONAL_DESCRIPTIONS: dict[str, str] = {
+    "name": "Optional display name for the agent. Does not control machine identity, function name, or route.",
     "agent_configuration": "Portable and SDK-specific execution settings. Recursively inherits global values. [Details](./front-matter-spec.md#agent_configuration)",
     "builtin_endpoints": "Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints)",
     "model": "Override LLM model for this agent",

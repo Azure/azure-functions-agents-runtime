@@ -63,14 +63,18 @@ class _FakeApp:
 def test_workflows_block_rejects_non_mapping():
     with pytest.raises(RuntimeError, match="workflows must be a mapping"):
         integration.build_workflow_integration(
-            _FakeApp(), {"workflows": "yes please"}
+            _FakeApp(),
+            {"workflows": "yes please"},
+            agent_slug="test-agent",
         )
 
 
 def test_workflows_block_rejects_non_mapping_list():
     with pytest.raises(RuntimeError, match="workflows must be a mapping"):
         integration.build_workflow_integration(
-            _FakeApp(), {"workflows": ["enabled"]}
+            _FakeApp(),
+            {"workflows": ["enabled"]},
+            agent_slug="test-agent",
         )
 
 
@@ -85,6 +89,7 @@ def test_workflows_block_rejects_unknown_key_typo():
         integration.build_workflow_integration(
             _FakeApp(),
             {"workflows": {"enabld": True}},
+            agent_slug="test-agent",
         )
     msg = str(excinfo.value)
     assert "unknown key" in msg
@@ -107,6 +112,7 @@ def test_workflows_block_rejects_backend_key():
         integration.build_workflow_integration(
             _FakeApp(),
             {"workflows": {"enabled": True, "backend": "dts"}},
+            agent_slug="test-agent",
         )
     msg = str(excinfo.value)
     assert "unknown key" in msg
@@ -126,6 +132,7 @@ def test_workflows_block_rejects_task_hub_key():
         integration.build_workflow_integration(
             _FakeApp(),
             {"workflows": {"enabled": True, "task_hub": "myhub"}},
+            agent_slug="test-agent",
         )
     msg = str(excinfo.value)
     assert "unknown key" in msg
@@ -143,6 +150,7 @@ def test_workflows_block_lists_supported_keys_in_error():
         integration.build_workflow_integration(
             _FakeApp(),
             {"workflows": {"bogus": 1}},
+            agent_slug="test-agent",
         )
     msg = str(excinfo.value)
     assert "enabled" in msg
@@ -155,6 +163,7 @@ def test_workflows_block_rejects_allowed_tools():
         integration.build_workflow_integration(
             _FakeApp(),
             {"workflows": {"enabled": True, "allowed_tools": ["fetch_url"]}},
+            agent_slug="test-agent",
             workflow_tools=[],
         )
     msg = str(excinfo.value)
@@ -173,21 +182,27 @@ def test_workflows_block_rejects_non_bool_enabled_string():
     """
     with pytest.raises(RuntimeError, match=r"workflows\.enabled must be a boolean"):
         integration.build_workflow_integration(
-            _FakeApp(), {"workflows": {"enabled": "false"}}
+            _FakeApp(),
+            {"workflows": {"enabled": "false"}},
+            agent_slug="test-agent",
         )
 
 
 def test_workflows_block_rejects_non_bool_enabled_truthy_string():
     with pytest.raises(RuntimeError, match=r"workflows\.enabled must be a boolean"):
         integration.build_workflow_integration(
-            _FakeApp(), {"workflows": {"enabled": "true"}}
+            _FakeApp(),
+            {"workflows": {"enabled": "true"}},
+            agent_slug="test-agent",
         )
 
 
 def test_workflows_block_rejects_non_bool_enabled_int():
     with pytest.raises(RuntimeError, match=r"workflows\.enabled must be a boolean"):
         integration.build_workflow_integration(
-            _FakeApp(), {"workflows": {"enabled": 1}}
+            _FakeApp(),
+            {"workflows": {"enabled": 1}},
+            agent_slug="test-agent",
         )
 
 
@@ -197,7 +212,9 @@ def test_workflows_block_rejects_none_enabled():
     """
     with pytest.raises(RuntimeError, match=r"workflows\.enabled must be a boolean"):
         integration.build_workflow_integration(
-            _FakeApp(), {"workflows": {"enabled": None}}
+            _FakeApp(),
+            {"workflows": {"enabled": None}},
+            agent_slug="test-agent",
         )
 
 
@@ -215,6 +232,7 @@ def test_validation_runs_on_disabled_path_unknown_key():
         integration.build_workflow_integration(
             _FakeApp(),
             {"workflows": {"enabled": False, "bogus": 1}},
+            agent_slug="test-agent",
         )
 
 
@@ -223,6 +241,7 @@ def test_validation_runs_on_disabled_path_non_bool_enabled():
         integration.build_workflow_integration(
             _FakeApp(),
             {"workflows": {"enabled": "no"}},
+            agent_slug="test-agent",
         )
 
 
@@ -234,6 +253,7 @@ def test_validation_runs_on_disabled_path_malformed_exclude():
         integration.build_workflow_integration(
             _FakeApp(),
             {"workflows": {"enabled": False, "exclude": "fetch_url"}},
+            agent_slug="test-agent",
         )
 
 
@@ -250,6 +270,7 @@ def test_exclude_rejects_non_list():
         integration.build_workflow_integration(
             _FakeApp(),
             {"workflows": {"enabled": True, "exclude": "not-a-list"}},
+            agent_slug="test-agent",
         )
 
 
@@ -260,6 +281,7 @@ def test_exclude_rejects_empty_string_in_list():
         integration.build_workflow_integration(
             _FakeApp(),
             {"workflows": {"enabled": True, "exclude": ["fetch_url", ""]}},
+            agent_slug="test-agent",
         )
 
 
@@ -270,6 +292,7 @@ def test_exclude_rejects_non_string_in_list():
         integration.build_workflow_integration(
             _FakeApp(),
             {"workflows": {"enabled": True, "exclude": ["fetch_url", 42]}},
+            agent_slug="test-agent",
         )
 
 
@@ -280,7 +303,11 @@ def test_exclude_rejects_non_string_in_list():
 
 def test_no_workflows_key_at_all_is_fine():
     """Agents without any workflows declaration must keep working."""
-    result = integration.build_workflow_integration(_FakeApp(), {})
+    result = integration.build_workflow_integration(
+        _FakeApp(),
+        {},
+        agent_slug="test-agent",
+    )
     assert result.workflow_tools == []
     assert result.chat_system_addendum is None
     assert result.trigger_system_addendum is None
@@ -288,7 +315,11 @@ def test_no_workflows_key_at_all_is_fine():
 
 
 def test_result_preserves_legacy_two_value_unpacking():
-    result = integration.build_workflow_integration(_FakeApp(), {})
+    result = integration.build_workflow_integration(
+        _FakeApp(),
+        {},
+        agent_slug="test-agent",
+    )
 
     workflow_tools, system_addendum = result
 
@@ -298,7 +329,9 @@ def test_result_preserves_legacy_two_value_unpacking():
 
 def test_disabled_explicitly_is_a_noop():
     result = integration.build_workflow_integration(
-        _FakeApp(), {"workflows": {"enabled": False}}
+        _FakeApp(),
+        {"workflows": {"enabled": False}},
+        agent_slug="test-agent",
     )
     assert result.workflow_tools == []
     assert result.chat_system_addendum is None
@@ -308,7 +341,10 @@ def test_disabled_explicitly_is_a_noop():
 
 def test_enabled_with_no_other_keys_works():
     result = integration.build_workflow_integration(
-        _FakeApp(), {"workflows": {"enabled": True}}, workflow_tools=[]
+        _FakeApp(),
+        {"workflows": {"enabled": True}},
+        workflow_tools=[],
+        agent_slug="test-agent",
     )
     assert result.workflow_tools
     assert result.chat_system_addendum is not None
@@ -326,6 +362,7 @@ def test_enabled_with_exclude_filters_workflow_tools():
         _FakeApp(),
         {"workflows": {"enabled": True, "exclude": ["skip"]}},
         workflow_tools=workflow_tools,
+        agent_slug="test-agent",
     )
     assert result.workflow_tools
     assert "`keep`" in result.chat_system_addendum
@@ -341,6 +378,7 @@ def test_enabled_builds_channel_specific_workflow_guidance():
         workflow_tools=[
             WorkflowTool("publish_result", "Publish the final result.", lambda args: args)
         ],
+        agent_slug="test-agent",
     )
 
     assert result.enabled is True

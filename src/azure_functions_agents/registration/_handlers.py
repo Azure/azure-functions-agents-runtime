@@ -113,6 +113,10 @@ def _should_log(resolved: ResolvedAgent) -> bool:
     return _to_bool(resolved.metadata.get("logger", True), default=True)
 
 
+def _agent_label(resolved: ResolvedAgent) -> str:
+    return resolved.display_name or resolved.slug
+
+
 def _looks_like_tool_error(result: Any) -> bool:
     """Best-effort: does a recorded tool result represent a failure?
 
@@ -256,8 +260,8 @@ def make_agent_handler(
             f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.slug,
-                "af.agent.display_name": resolved.name,
+                "af.agent.slug": resolved.slug,
+                "af.agent.display_name": resolved.display_name,
                 "af.agent.trigger_type": trigger_type,
                 "af.agent.session_id": session_id,
                 "af.agent.model": resolved.model,
@@ -289,9 +293,9 @@ def make_agent_handler(
                     system_addendum=workflow_system_addendum,
                     workflow_enabled=workflows_enabled,
                     workflow_durable_client=durable_client,
-                    workflow_agent_slug=resolved.slug,
                     workflow_policy=workflow_policy,
-                    agent_name=resolved.slug,
+                    agent_slug=resolved.slug,
+                    display_name=resolved.display_name,
                 )
 
                 _set_run_result_attributes(span, result)
@@ -329,7 +333,7 @@ def make_agent_handler(
         await _handle(trigger_data, None)
 
     handler = _handler_with_client if workflows_enabled else _handler_without_client
-    handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
+    handler.__name__ = f"handler_{resolved.slug}"
     return handler
 
 
@@ -370,8 +374,8 @@ def make_http_agent_handler(
             f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.slug,
-                "af.agent.display_name": resolved.name,
+                "af.agent.slug": resolved.slug,
+                "af.agent.display_name": resolved.display_name,
                 "af.agent.trigger_type": "http",
                 "af.agent.model": resolved.model,
             },
@@ -395,7 +399,7 @@ def make_http_agent_handler(
                     if validation_error.status_code == 500:
                         logger.error(
                             "HTTP agent '%s' has invalid input schema: %s",
-                            resolved.name,
+                            _agent_label(resolved),
                             validation_error.body.decode("utf-8"),
                         )
                     span.set_attribute("af.agent.outcome", "error")
@@ -432,9 +436,9 @@ def make_http_agent_handler(
                     system_addendum=workflow_system_addendum,
                     workflow_enabled=workflows_enabled,
                     workflow_durable_client=durable_client,
-                    workflow_agent_slug=resolved.slug,
                     workflow_policy=workflow_policy,
-                    agent_name=resolved.slug,
+                    agent_slug=resolved.slug,
+                    display_name=resolved.display_name,
                 )
 
                 _set_run_result_attributes(span, result)
@@ -444,7 +448,7 @@ def make_http_agent_handler(
                 if _should_log(resolved):
                     logger.info(
                         "HTTP agent '%s' response: %s",
-                        resolved.name,
+                        _agent_label(resolved),
                         json.dumps(
                             _run_log_payload(resolved, result),
                             ensure_ascii=False,
@@ -459,7 +463,7 @@ def make_http_agent_handler(
                     except json.JSONDecodeError as exc:
                         logger.warning(
                             "HTTP agent '%s' returned invalid JSON: %s",
-                            resolved.name,
+                            _agent_label(resolved),
                             exc,
                         )
                         span.set_attribute("af.agent.outcome", "error")
@@ -488,7 +492,7 @@ def make_http_agent_handler(
                         except jsonschema.ValidationError as exc:
                             logger.warning(
                                 "HTTP agent '%s' returned JSON that failed schema validation: %s",
-                                resolved.name,
+                                _agent_label(resolved),
                                 exc,
                             )
                             span.set_attribute("af.agent.outcome", "error")
@@ -526,7 +530,7 @@ def make_http_agent_handler(
             except Exception as exc:
                 span.set_attribute("af.agent.outcome", "error")
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
-                logger.exception("HTTP agent '%s' failed: %s", resolved.name, exc)
+                logger.exception("HTTP agent '%s' failed: %s", _agent_label(resolved), exc)
                 return Response(
                     content=json.dumps({"error": str(exc)}),
                     status_code=500,
@@ -541,5 +545,5 @@ def make_http_agent_handler(
         return await _handle(req, None)
 
     handler = _handler_with_client if workflows_enabled else _handler_without_client
-    handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
+    handler.__name__ = f"handler_{resolved.slug}"
     return handler

@@ -21,6 +21,10 @@ Runtime rules:
 - `http_trigger` is the agent-runtime name for the Azure Functions `route(...)` decorator. Use `http_trigger`, not `route`.
 - Connector-triggered agents use `connector_trigger`, which maps to the Azure Functions Python `connector_trigger(...)` decorator.
 - Other supported trigger types map directly to `FunctionApp.<trigger_type>(arg_name="trigger_data", **trigger.args)`.
+- The registered Azure Function name is the agent's canonical `agent_slug`,
+  derived from the source filename. Built-in endpoint routes use the same slug;
+  an `http_trigger` URL path still comes from `trigger.args.route`. Optional
+  frontmatter `name` changes neither.
 - `timer_trigger` accepts 5-part cron expressions; the runtime prepends seconds before registration.
 - String values under `trigger.*`, including `type`, follow [environment variable substitution](./front-matter-spec.md#environment-variable-substitution).
 
@@ -62,7 +66,7 @@ runnable example.
 
 | Agent `trigger.type` | Azure Functions decorator | Status | Notes |
 |---|---|---|---|
-| `http_trigger` | `route(...)` | Supported with runtime mapping | Agent-specific name. Requires `route` in `trigger.args`. |
+| `http_trigger` | `route(...)` | Supported with runtime mapping | Requires `route` in `trigger.args`; the registered Function name remains the filename-derived `agent_slug`. |
 | `timer_trigger` | `timer_trigger(...)` | Supported | Preferred timer trigger name. |
 | `queue_trigger` | `queue_trigger(...)` | Supported | Azure Storage Queue trigger. |
 | `blob_trigger` | `blob_trigger(...)` | Supported | Azure Blob Storage trigger. |

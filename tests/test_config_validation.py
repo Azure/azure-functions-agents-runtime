@@ -27,7 +27,7 @@ def _make_resolved(**overrides: object) -> ResolvedAgent:
     file intentionally keep constructing ResolvedAgent(...) inline for clarity.
     """
     defaults: dict[str, object] = dict(
-        name="Agent",
+        display_name="Agent",
         slug="agent",
         description="desc",
         trigger=None,
@@ -56,7 +56,8 @@ def test_validate_resolved_agent_requires_trigger_when_no_builtin_endpoints(
 ) -> None:
     source = tmp_path / "report.agent.md"
     resolved = ResolvedAgent(
-        name="Report",
+        display_name="Report",
+        slug="report",
         description="desc",
         trigger=None,
         instructions="x",
@@ -96,7 +97,8 @@ def test_validate_resolved_agent_allows_missing_trigger_with_builtin_endpoints(
 ) -> None:
     source = tmp_path / "endpoint.agent.md"
     resolved = ResolvedAgent(
-        name="Endpoint Agent",
+        display_name="Endpoint Agent",
+        slug="endpoint",
         description="desc",
         trigger=None,
         instructions="x",
@@ -140,7 +142,8 @@ def test_validate_resolved_agent_rejects_unsupported_trigger_types(
 ) -> None:
     source = tmp_path / "report.agent.md"
     resolved = ResolvedAgent(
-        name="Report",
+        display_name="Report",
+        slug="report",
         description="desc",
         trigger=TriggerSpec(type=trigger_type, args={}),
         instructions="x",
@@ -175,7 +178,8 @@ def test_validate_resolved_agent_rejects_dotted_connector_trigger_types(
 ) -> None:
     source = tmp_path / "report.agent.md"
     resolved = ResolvedAgent(
-        name="Report",
+        display_name="Report",
+        slug="report",
         description="desc",
         trigger=TriggerSpec(type=trigger_type, args={}),
         instructions="x",
@@ -207,7 +211,8 @@ def test_validate_resolved_agent_rejects_dotted_connector_trigger_types(
 def test_validate_resolved_agent_allows_connector_trigger(tmp_path: Path) -> None:
     source = tmp_path / "report.agent.md"
     resolved = ResolvedAgent(
-        name="Report",
+        display_name="Report",
+        slug="report",
         description="desc",
         trigger=TriggerSpec(type="connector_trigger", args={}),
         instructions="x",
@@ -234,7 +239,8 @@ def test_validate_resolved_agent_rejects_unknown_mcp_exclude(
 ) -> None:
     source = tmp_path / "report.agent.md"
     resolved = ResolvedAgent(
-        name="Report",
+        display_name="Report",
+        slug="report",
         description="desc",
         trigger=None,
         instructions="x",
@@ -270,7 +276,8 @@ def test_validate_resolved_agent_warns_on_unknown_skill_exclude(
     catch typos without breaking startup."""
     source = tmp_path / "agent.agent.md"
     resolved = ResolvedAgent(
-        name="A",
+        display_name="A",
+        slug="agent",
         description="d",
         trigger=None,
         instructions="x",
@@ -310,7 +317,8 @@ def test_validate_resolved_agent_warns_on_tool_exclude(
     """Defensive: tool excludes are warned (not validated) since tool registry is dynamic."""
     source = tmp_path / "agent.agent.md"
     resolved = ResolvedAgent(
-        name="A",
+        display_name="A",
+        slug="agent",
         description="d",
         trigger=None,
         instructions="x",

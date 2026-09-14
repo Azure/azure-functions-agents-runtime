@@ -238,6 +238,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             workflow_integration = build_workflow_agent_integration(
                 workflow_policy,
                 workflow_handler_catalog,
+                agent_slug=resolved.slug,
             )
             workflows_enabled = workflow_integration.enabled
             workflow_system_addendum = workflow_integration.chat_system_addendum

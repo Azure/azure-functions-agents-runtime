@@ -177,9 +177,9 @@ async def _run_builtin_agent(
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
-        workflow_agent_slug=resolved.slug,
         workflow_policy=workflow_policy,
-        agent_name=resolved.slug,
+        agent_slug=resolved.slug,
+        display_name=resolved.display_name,
         agent_configuration=resolved.agent_configuration,
         subagents=resolved.subagents,
         catalog=catalog,
@@ -214,15 +214,9 @@ def _run_builtin_agent_stream(
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
-        workflow_agent_slug=resolved.slug,
         workflow_policy=workflow_policy,
-        agent_name=resolved.slug,
-        # S1b: `_register_http_chat_stream`'s `handle_chat_stream` (unlike
-        # `handle_chat`/`handle_mcp_agent_chat` above) opens no span of its
-        # own around this call, so `run_agent_stream`'s own internal
-        # `agent.run {name}` span is the only place `af.agent.display_name`
-        # can be recorded for the streaming surface — thread it through.
-        display_name=resolved.name,
+        agent_slug=resolved.slug,
+        display_name=resolved.display_name,
         agent_configuration=resolved.agent_configuration,
         subagents=resolved.subagents,
         catalog=catalog,
@@ -300,7 +294,7 @@ def _register_http_chat(
         # This endpoint calls `run_agent` directly rather than going through
         # `_handlers.py`'s trigger-registered handlers, so — unlike a
         # user-defined `trigger:` agent — nothing upstream opens an
-        # `agent.run {name}` span for it. Opened here so this built-in
+        # `agent.run {agent_slug}` span for it. Opened here so this built-in
         # surface gets the same run-level span/attributes (including B3's
         # `af.agent.tool_error_count`, which folds in delegate errors) that
         # `make_agent_handler`/`make_http_agent_handler` already provide.
@@ -308,8 +302,8 @@ def _register_http_chat(
             f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.slug,
-                "af.agent.display_name": resolved.name,
+                "af.agent.slug": resolved.slug,
+                "af.agent.display_name": resolved.display_name,
                 "af.agent.trigger_type": "builtin_chat",
                 "af.agent.session_id": resolved_session_id,
                 "af.agent.model": resolved.model,
@@ -475,14 +469,14 @@ def _register_mcp_endpoint(
     async def handle_mcp_agent_chat(context: str, durable_client: Any | None) -> str:
         # Same rationale as `handle_chat` above: this built-in MCP surface
         # calls `run_agent` directly, so nothing upstream opens an
-        # `agent.run {name}` span for it — open one here to get the same
+        # `agent.run {agent_slug}` span for it — open one here to get the same
         # run-level attributes (including B3's `af.agent.tool_error_count`).
         with start_span(
             f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.slug,
-                "af.agent.display_name": resolved.name,
+                "af.agent.slug": resolved.slug,
+                "af.agent.display_name": resolved.display_name,
                 "af.agent.trigger_type": "builtin_mcp",
                 "af.agent.model": resolved.model,
             },
@@ -557,8 +551,7 @@ def _register_mcp_endpoint(
 def _register_workflow_status_endpoints(
     app: func.FunctionApp,
     *,
-    slug: str,
-    workflow_agent_slug: str,
+    agent_slug: str,
     base_function_name: str,
     auth: EndpointAuthConfig,
 ) -> None:
@@ -581,12 +574,12 @@ def _register_workflow_status_endpoints(
             )
         try:
             envelopes = await fetch_session_workflows(
-                client, workflow_agent_slug, session_id
+                client, agent_slug, session_id
             )
         except Exception:
             logger.exception(
-                "workflows list endpoint failed workflow_agent=%s",
-                workflow_agent_slug,
+                "workflows list endpoint failed agent_slug=%s",
+                agent_slug,
             )
             return Response(
                 json.dumps({"error": "failed to list workflows"}),
@@ -602,7 +595,7 @@ def _register_workflow_status_endpoints(
         list_session_workflows
     )
     decorated_list = app.durable_client_input(client_name="client")(decorated_list)
-    app.route(route=f"agents/{slug}/workflows", methods=["GET"], auth_level=auth_level)(
+    app.route(route=f"agents/{agent_slug}/workflows", methods=["GET"], auth_level=auth_level)(
         decorated_list
     )
 
@@ -623,14 +616,14 @@ def _register_workflow_status_endpoints(
         try:
             envelope = await fetch_session_workflow_status(
                 client,
-                workflow_agent_slug,
+                agent_slug,
                 session_id,
                 workflow_id,
             )
         except Exception:
             logger.exception(
-                "workflow status endpoint failed workflow_agent=%s",
-                workflow_agent_slug,
+                "workflow status endpoint failed agent_slug=%s",
+                agent_slug,
             )
             return Response(
                 json.dumps({"error": "failed to fetch workflow status"}),
@@ -649,7 +642,11 @@ def _register_workflow_status_endpoints(
         get_session_workflow_status
     )
     decorated_status = app.durable_client_input(client_name="client")(decorated_status)
-    app.route(route=f"agents/{slug}/workflow-status", methods=["GET"], auth_level=auth_level)(
+    app.route(
+        route=f"agents/{agent_slug}/workflow-status",
+        methods=["GET"],
+        auth_level=auth_level,
+    )(
         decorated_status
     )
 
@@ -657,7 +654,7 @@ def _register_workflow_status_endpoints(
 def _register_history_endpoint(
     app: func.FunctionApp,
     *,
-    slug: str,
+    agent_slug: str,
     base_function_name: str,
     auth: EndpointAuthConfig,
 ) -> None:
@@ -690,7 +687,7 @@ def _register_history_endpoint(
 
         from .._blob_history import build_blob_provider_from_environment
 
-        provider = build_blob_provider_from_environment(agent_slug=slug)
+        provider = build_blob_provider_from_environment(agent_slug=agent_slug)
         if provider is None:
             return Response(
                 json.dumps({"messages": [], "truncated": False}),
@@ -731,7 +728,7 @@ def _register_history_endpoint(
     # above `@app.route`. This is also what lets the route be looked up by
     # its function name in tests.
     decorated = app.route(
-        route=f"agents/{slug}/history", methods=["GET"], auth_level=auth_level
+        route=f"agents/{agent_slug}/history", methods=["GET"], auth_level=auth_level
     )(get_session_history)
     app.function_name(name=f"{base_function_name}_history")(decorated)
 
@@ -748,14 +745,14 @@ def register_builtin_endpoints(
 ) -> None:
     """Register built-in debug chat UI, REST chat, and MCP endpoints for one agent."""
 
-    slug = validate_agent_slug(resolved.slug)
+    agent_slug = validate_agent_slug(resolved.slug)
     builtin_endpoints = resolved.builtin_endpoints
 
-    base_function_name = _safe_function_name(f"agent_{slug}_builtin")
+    base_function_name = _safe_function_name(f"agent_{agent_slug}_builtin")
     auth = builtin_endpoints.http_auth
 
     if builtin_endpoints.debug_chat_ui:
-        route = f"agents/{slug}/"
+        route = f"agents/{agent_slug}/"
         _register_chat_page(
             app,
             resolved,
@@ -764,8 +761,8 @@ def register_builtin_endpoints(
         )
 
     if builtin_endpoints.chat_api:
-        chat_route = f"agents/{slug}/chat"
-        stream_route = f"agents/{slug}/chatstream"
+        chat_route = f"agents/{agent_slug}/chat"
+        stream_route = f"agents/{agent_slug}/chatstream"
         _register_http_chat(
             app,
             resolved,
@@ -792,15 +789,14 @@ def register_builtin_endpoints(
         )
         _register_history_endpoint(
             app,
-            slug=slug,
+            agent_slug=agent_slug,
             base_function_name=base_function_name,
             auth=auth,
         )
         if workflows_enabled:
             _register_workflow_status_endpoints(
                 app,
-                slug=slug,
-                workflow_agent_slug=slug,
+                agent_slug=agent_slug,
                 base_function_name=base_function_name,
                 auth=auth,
             )
@@ -810,7 +806,7 @@ def register_builtin_endpoints(
             app,
             resolved,
             capabilities,
-            tool_name=slug,
+            tool_name=agent_slug,
             function_name=f"{base_function_name}_mcp",
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,

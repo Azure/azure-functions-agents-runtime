@@ -10,7 +10,6 @@ from pydantic import ValidationError
 from .._logger import logger
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
-from . import _naming
 from ._auth import resolve_endpoint_auth_level
 from ._handlers import (
     make_agent_handler,
@@ -28,8 +27,6 @@ __all__ = [
     "allocate_unique_function_name",
     "register_agent",
 ]
-
-_function_name_from_source = _naming._function_name_from_source
 
 # Legacy flat ``auth_level`` values accepted on ``http_trigger``. These map 1:1 to
 # the ``function``/``admin``/``anonymous`` auth modes; the flat field never
@@ -104,7 +101,7 @@ def _resolve_http_trigger_auth(
                 "Agent '%s' (%s): http_trigger sets both 'http_auth' and 'auth_level'; "
                 "'auth_level' is deprecated and ignored in favor of 'http_auth'. "
                 "See docs/front-matter-spec.md#http-trigger.",
-                resolved.name,
+                resolved.display_name or resolved.slug,
                 source_marker(resolved.source_file),
             )
         try:
@@ -112,7 +109,7 @@ def _resolve_http_trigger_auth(
         except ValidationError as exc:
             detail = exc.errors()[0].get("msg", "invalid value") if exc.errors() else "invalid value"
             raise ValueError(
-                f"Agent '{resolved.name}' ({resolved.source_file}): "
+                f"Agent '{resolved.display_name or resolved.slug}' ({resolved.source_file}): "
                 f"invalid http_trigger 'http_auth': {detail}. "
                 "See docs/front-matter-spec.md#http-trigger."
             ) from exc
@@ -121,7 +118,7 @@ def _resolve_http_trigger_auth(
         logger.warning(
             "Agent '%s' (%s): http_trigger 'auth_level' is deprecated; use the nested "
             "'http_auth' object instead (http_auth: %s). See docs/front-matter-spec.md#http-trigger.",
-            resolved.name,
+            resolved.display_name or resolved.slug,
             source_marker(resolved.source_file),
             str(raw_level).lower(),
         )
@@ -129,7 +126,7 @@ def _resolve_http_trigger_auth(
         if level_str not in _LEGACY_AUTH_LEVELS:
             valid = ", ".join(sorted(_LEGACY_AUTH_LEVELS))
             raise ValueError(
-                f"Agent '{resolved.name}' ({resolved.source_file}): "
+                f"Agent '{resolved.display_name or resolved.slug}' ({resolved.source_file}): "
                 f"invalid auth_level '{level_str}'. Must be one of: {valid}. "
                 "See docs/front-matter-spec.md#auth_level."
             )
@@ -153,7 +150,7 @@ def _register_http_agent(
     route = trigger_params.get("route")
     if not route:
         raise ValueError(
-            f"Agent '{resolved.name}' ({resolved.source_file}): "
+            f"Agent '{resolved.display_name or resolved.slug}' ({resolved.source_file}): "
             "http_trigger requires 'route' in trigger.args. "
             "See docs/front-matter-spec.md#http-trigger."
         )
@@ -203,13 +200,13 @@ def register_agent(
     trigger_type = resolved.trigger.type.strip()
     trigger_params = dict(resolved.trigger.args or {})
     if function_name is None and registered_names is None:
-        function_name = _function_name_from_source(resolved.source_file, resolved.name)
+        function_name = resolved.slug
     elif function_name is None:
         assert registered_names is not None
         function_name = allocate_unique_function_name(
-            resolved.source_file,
-            resolved.name,
+            resolved.slug,
             registered_names.copy(),
+            source_file=resolved.source_file,
         )
 
     if trigger_type == "http_trigger":

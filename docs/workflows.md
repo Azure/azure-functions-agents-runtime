@@ -839,11 +839,15 @@ returns after the initial model turn; orchestration continues asynchronously.
 ## Agent and session isolation
 
 Each workflow is isolated by the workflow-enabled agent's canonical slug and the
-invocation `session_id`. Internally, Durable payloads call this pair
-`(workflow_agent_slug, session_id)`; `workflow_agent_slug` is not a frontmatter field. The instance
-ID begins with a 32-hex-character (128-bit) truncated SHA-256 digest over an
-unambiguous length-delimited encoding of that pair; neither raw value appears in
-the ID. `get_workflow_status`,
+invocation `session_id`. Durable payloads store the owner as required
+`agent_slug`; it is derived from the agent source filename and is not a
+frontmatter key. Workflow Sub Agent Activity payloads additionally use
+`target_agent_slug` for the delegated specialist. Optional `display_name`
+metadata never participates in ownership, policy lookup, or isolation.
+
+The `(agent_slug, session_id)` pair is encoded into the instance ID as a
+32-hex-character (128-bit) truncated SHA-256 digest over an unambiguous
+length-delimited encoding; neither raw value appears in the ID. `get_workflow_status`,
 `list_workflows`, `cancel_workflow`, and `terminate_workflow` filter
 on that prefix. A workflow whose agent **or** session does not match is treated
 as nonexistent (404/empty, never 403), so two agents remain isolated even when
@@ -877,22 +881,24 @@ The runtime/Durable ownership and long-term remediation are tracked in
 This experimental feature intentionally changes IDs from a session-only 48-bit
 prefix to the agent-and-session 128-bit prefix. New agent tools and polling
 routes cannot list, inspect, cancel, or terminate pre-upgrade IDs. In addition,
-legacy orchestration inputs contain no `workflow_agent_slug`, so an in-flight legacy
-workflow fails closed when it next dispatches a `tool` or `sub_agent` Activity;
-pure `wait` nodes do not require agent authorization. Drain or terminate active
-workflows before upgrading. Use Durable Functions or DTS tooling to inspect or
-control any legacy instances that remain.
+current orchestration inputs require `agent_slug`. Older payload shapes that
+omit it or use removed aliases such as `workflow_agent_slug`,
+`workflow_agent`, or `agent_name` are unsupported and fail before
+capability-bearing dispatch. Drain or terminate active workflows before
+upgrading. Use Durable Functions or DTS tooling to inspect or control any
+legacy instances that remain.
 
 ### Operational scaling notes
 
 Each worker reconstructs the immutable agent-policy and handler catalogs from
 the same deployed agent project during app startup. Orchestrators persist
-`workflow_agent_slug` in their input and pass it to Activities, so an Activity may safely
-run on a different worker. Do not share a Task Hub between applications or
-deployments with different agent definitions. During a rolling deployment,
-old and new workers may briefly enforce different policy versions; restrictive
-changes can therefore fail pending nodes closed as soon as a new worker handles
-them.
+the owning `agent_slug` in their input and pass it to Activities, so an
+Activity may safely run on a different worker. Workflow Sub Agent Activities
+carry a separate `target_agent_slug`; the owner and specialist target are never
+conflated. Do not share a Task Hub between applications or deployments with
+different agent definitions. During a rolling deployment, old and new workers
+may briefly enforce different policy versions; restrictive changes can
+therefore fail pending nodes closed as soon as a new worker handles them.
 
 Session workflow listing currently calls Durable's task-hub status API and
 filters by agent/session prefix in the application. Configure backend retention
@@ -911,9 +917,10 @@ agent-wide throttle.
   `host.json` is configured with the DTS `storageProvider`, each
   workflow appears as a queryable instance with per-task state and retry
   history. The runtime labels each orchestration
-  `<agent_name>-orchestration`, each tool Activity with its workflow tool name,
-  and each Workflow Sub Agent Activity with its agent slug. DTS retains the
-  shared registered Function name in the item's details.
+  `<display_name-or-agent_slug>-orchestration`, each tool Activity with its
+  workflow tool name, and each Workflow Sub Agent Activity with its
+  `target_agent_slug`. DTS retains the shared registered Function name in the
+  item's details. Display labels do not alter persisted machine identity.
 - **`custom_status`** — the orchestration emits a low-cost polling summary.
   Static plans return a concise string (`"3/7 tasks done, current=summarize"`);
   dynamically controlled plans return the structured `schema_version: 2`

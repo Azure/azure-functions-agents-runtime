@@ -31,6 +31,7 @@ import azure.durable_functions as df
 import azure.functions as func
 from durabletask.task import CancellableTask, OrchestrationContext, Task, when_any
 
+from azure_functions_agents._history_identity import validate_agent_slug
 from azure_functions_agents._logger import logger
 from azure_functions_agents.registration.catalog import AgentCatalog
 from azure_functions_agents.runner import run_leaf_agent_task
@@ -76,7 +77,7 @@ WORKFLOW_SAFE_ECHO_TOOL = ECHO_TOOL_NAME
 
 class _ActivityInputBase(TypedDict):
     id: str
-    workflow_agent_slug: str
+    agent_slug: str
     workflow_id: str
     # Present only when a retry policy was frozen at submission time. Its
     # absence is what keeps histories written by earlier runtime versions on the
@@ -91,7 +92,7 @@ class _ToolActivityInput(_ActivityInputBase):
 
 
 class _SubAgentActivityInput(_ActivityInputBase):
-    agent: str
+    target_agent_slug: str
     task: str
 
 
@@ -285,7 +286,7 @@ def _run_static_workflow(
     deps: dict[str, set[str]] = {
         t["id"]: set(t.get("depends_on") or []) for t in tasks
     }
-    workflow_agent_slug = str(payload.get("workflow_agent_slug") or "")
+    agent_slug = payload["agent_slug"]
     results: dict[str, Any] = {}
     remaining: set[str] = set(by_id)
     total = len(tasks)
@@ -326,7 +327,7 @@ def _run_static_workflow(
                             "id": tid,
                             "tool": task["tool"],
                             "args": resolved_args,
-                            "workflow_agent_slug": workflow_agent_slug,
+                            "agent_slug": agent_slug,
                             "workflow_id": context.instance_id,
                             **_policy_activity_fields(task, logical_id=tid),
                         },
@@ -355,10 +356,10 @@ def _run_static_workflow(
                         SUB_AGENT_ACTIVITY_NAME,
                         input={
                             "id": tid,
-                            "agent": task["agent"],
+                            "target_agent_slug": task["agent"],
                             "task": resolved_task,
                             "workflow_id": context.instance_id,
-                            "workflow_agent_slug": workflow_agent_slug,
+                            "agent_slug": agent_slug,
                             **_policy_activity_fields(task, logical_id=tid),
                         },
                         tags={"durabletask.displayName": task["agent"]},
@@ -413,9 +414,9 @@ def _run_static_workflow(
                 f"canceled at {len(results)}/{total} tasks done"
             )
             logger.info(
-                "workflow canceled: instance=%s workflow_agent=%s reason=%r",
+                "workflow canceled: instance=%s agent_slug=%s reason=%r",
                 context.instance_id,
-                workflow_agent_slug,
+                agent_slug,
                 reason,
             )
             return {
@@ -509,7 +510,7 @@ class _DynamicWorkflowState:
     deps: dict[str, set[str]]
     allowed_tools: frozenset[str]
     allowed_subagents: frozenset[str]
-    workflow_agent_slug: str
+    agent_slug: str
     results: dict[str, Any]
     logical_state: dict[str, _LogicalState]
     node_instances: dict[str, list[_MaterializedInstance]]
@@ -541,7 +542,7 @@ def _new_dynamic_workflow_state(
         },
         allowed_tools=allowed_tools,
         allowed_subagents=allowed_subagents,
-        workflow_agent_slug=payload.get("workflow_agent_slug", ""),
+        agent_slug=payload["agent_slug"],
         results={},
         logical_state={task_id: "pending" for task_id in by_id},
         node_instances={},
@@ -962,7 +963,7 @@ def _dispatch_dynamic_wave(
                         "id": instance["instance_id"],
                         "tool": task["tool"],
                         "args": instance["resolved"],
-                        "workflow_agent_slug": state.workflow_agent_slug,
+                        "agent_slug": state.agent_slug,
                         "workflow_id": context.instance_id,
                         **_policy_activity_fields(task, logical_id=logical_id),
                     },
@@ -982,10 +983,10 @@ def _dispatch_dynamic_wave(
                     SUB_AGENT_ACTIVITY_NAME,
                     input={
                         "id": instance["instance_id"],
-                        "agent": task["agent"],
+                        "target_agent_slug": task["agent"],
                         "task": instance["resolved"],
                         "workflow_id": context.instance_id,
-                        "workflow_agent_slug": state.workflow_agent_slug,
+                        "agent_slug": state.agent_slug,
                         **_policy_activity_fields(task, logical_id=logical_id),
                     },
                     tags={"durabletask.displayName": task["agent"]},
@@ -1109,9 +1110,9 @@ def _run_dynamic_workflow(
             _restore_canceled_dynamic_wave(state, wave, wave_tasks)
             _publish_dynamic_status(context, state)
             logger.info(
-                "workflow canceled: instance=%s workflow_agent=%s reason=%r",
+                "workflow canceled: instance=%s agent_slug=%s reason=%r",
                 context.instance_id,
-                state.workflow_agent_slug,
+                state.agent_slug,
                 reason,
             )
             return {
@@ -1151,24 +1152,24 @@ def register_workflows(
     def require_workflow_agent_policy(
         task: _ActivityInput,
     ) -> tuple[str, WorkflowPlanPolicy]:
-        workflow_agent_slug = task["workflow_agent_slug"]
+        agent_slug = task["agent_slug"]
         policy = (
-            workflow_agent_policies.get(workflow_agent_slug)
+            workflow_agent_policies.get(agent_slug)
             if workflow_agent_policies is not None
             else None
         )
-        if not workflow_agent_slug or policy is None:
+        if not agent_slug or policy is None:
             logger.error(
                 "workflow activity agent policy miss: "
-                "workflow_id=%s node_id=%s workflow_agent=%s",
+                "workflow_id=%s node_id=%s agent_slug=%s",
                 task["workflow_id"],
                 task["id"],
-                workflow_agent_slug or "<missing>",
+                agent_slug or "<missing>",
             )
             raise RuntimeError(
-                f"task {task['id']!r}: workflow agent policy is not available"
+                f"task {task['id']!r}: agent workflow policy is not available"
             )
-        return workflow_agent_slug, policy
+        return agent_slug, policy
 
     @bp.activity_trigger(input_name="task")
     async def agents_workflow_run_tool(task: _ToolActivityInput) -> dict[str, Any]:
@@ -1181,7 +1182,7 @@ def register_workflows(
         tool_name = task["tool"]
         args = task["args"]
         try:
-            workflow_agent_slug, policy = require_workflow_agent_policy(task)
+            agent_slug, policy = require_workflow_agent_policy(task)
         except RuntimeError:
             if policy_aware:
                 return dict(authorization_outcome(task_id))
@@ -1190,10 +1191,10 @@ def register_workflows(
         if tool_name not in policy.allowed_tools:
             logger.error(
                 "workflow tool authorization denied: "
-                "workflow_id=%s node_id=%s workflow_agent=%s tool=%s",
+                "workflow_id=%s node_id=%s agent_slug=%s tool=%s",
                 workflow_id,
                 task_id,
-                workflow_agent_slug,
+                agent_slug,
                 tool_name,
             )
             if policy_aware:
@@ -1215,9 +1216,9 @@ def register_workflows(
             )
         logger.info(
             "workflow activity running: "
-            "workflow_id=%s workflow_agent=%s id=%s tool=%s",
+            "workflow_id=%s agent_slug=%s id=%s tool=%s",
             workflow_id,
-            workflow_agent_slug,
+            agent_slug,
             task_id,
             tool_name,
         )
@@ -1237,9 +1238,9 @@ def register_workflows(
         except Exception:
             logger.exception(
                 "workflow activity failed: "
-                "workflow_id=%s workflow_agent=%s id=%s tool=%s",
+                "workflow_id=%s agent_slug=%s id=%s tool=%s",
                 workflow_id,
-                workflow_agent_slug,
+                agent_slug,
                 task_id,
                 tool_name,
             )
@@ -1263,51 +1264,51 @@ def register_workflows(
             if invalid is not None:
                 return dict(invalid)
         task_id = task["id"]
-        agent_slug = task["agent"]
+        target_agent_slug = task["target_agent_slug"]
         workflow_id = task["workflow_id"]
         try:
-            workflow_agent_slug, policy = require_workflow_agent_policy(task)
+            agent_slug, policy = require_workflow_agent_policy(task)
         except RuntimeError:
             if policy_aware:
                 return dict(authorization_outcome(task_id))
             raise
-        if agent_slug not in policy.allowed_subagents:
+        if target_agent_slug not in policy.allowed_subagents:
             logger.error(
                 "workflow sub-agent authorization denied: "
-                "workflow_id=%s node_id=%s workflow_agent=%s agent=%s",
+                "workflow_id=%s node_id=%s agent_slug=%s target_agent_slug=%s",
                 workflow_id,
                 task_id,
-                workflow_agent_slug,
                 agent_slug,
+                target_agent_slug,
             )
             if policy_aware:
                 return dict(authorization_outcome(task_id))
             raise RuntimeError(
-                f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} is not authorized"
+                f"task {task_id!r}: Workflow Sub Agent {target_agent_slug!r} is not authorized"
             )
-        if catalog is None or agent_slug not in catalog:
+        if catalog is None or target_agent_slug not in catalog:
             logger.error(
                 "workflow sub-agent catalog miss: "
-                "workflow_id=%s node_id=%s workflow_agent=%s agent=%s",
+                "workflow_id=%s node_id=%s agent_slug=%s target_agent_slug=%s",
                 workflow_id,
                 task_id,
-                workflow_agent_slug,
                 agent_slug,
+                target_agent_slug,
             )
             if policy_aware:
                 return dict(authorization_outcome(task_id))
             raise RuntimeError(
-                f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} is not available"
+                f"task {task_id!r}: Workflow Sub Agent {target_agent_slug!r} is not available"
             )
 
-        entry = catalog[agent_slug]
+        entry = catalog[target_agent_slug]
         logger.info(
             "workflow sub-agent activity running: "
-            "workflow_id=%s node_id=%s workflow_agent=%s agent=%s",
+            "workflow_id=%s node_id=%s agent_slug=%s target_agent_slug=%s",
             workflow_id,
             task_id,
-            workflow_agent_slug,
             agent_slug,
+            target_agent_slug,
         )
         if policy_aware:
 
@@ -1324,10 +1325,10 @@ def register_workflows(
                 except TimeoutError:
                     logger.exception(
                         "workflow sub-agent activity timed out: "
-                        "workflow_id=%s node_id=%s agent=%s",
+                        "workflow_id=%s node_id=%s target_agent_slug=%s",
                         workflow_id,
                         task_id,
-                        agent_slug,
+                        target_agent_slug,
                     )
                     timeout_failure = WorkflowRetryableError(
                         "subagent_timeout",
@@ -1335,14 +1336,14 @@ def register_workflows(
                     )
                 if timeout_failure is not None:
                     raise timeout_failure
-                return {"agent": agent_slug, "text": text}
+                return {"agent": target_agent_slug, "text": text}
 
             return dict(
                 await invoke_policy_handler(
                     run_policy_sub_agent,
                     {},
                     task=task,
-                    target=agent_slug,
+                    target=target_agent_slug,
                 )
             )
         try:
@@ -1357,30 +1358,32 @@ def register_workflows(
             raise
         except TimeoutError:
             logger.exception(
-                "workflow sub-agent activity timed out: workflow_id=%s node_id=%s agent=%s",
+                "workflow sub-agent activity timed out: "
+                "workflow_id=%s node_id=%s target_agent_slug=%s",
                 workflow_id,
                 task_id,
-                agent_slug,
+                target_agent_slug,
             )
             raise RuntimeError(
-                f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} timed out"
+                f"task {task_id!r}: Workflow Sub Agent {target_agent_slug!r} timed out"
             ) from None
         except Exception:
             logger.exception(
-                "workflow sub-agent activity failed: workflow_id=%s node_id=%s agent=%s",
+                "workflow sub-agent activity failed: "
+                "workflow_id=%s node_id=%s target_agent_slug=%s",
                 workflow_id,
                 task_id,
-                agent_slug,
+                target_agent_slug,
             )
             raise RuntimeError(
-                f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} failed "
+                f"task {task_id!r}: Workflow Sub Agent {target_agent_slug!r} failed "
                 "(error_code=workflow_subagent_execution_failed)"
             ) from None
 
         result = {
             "id": task_id,
             "result": {
-                "agent": agent_slug,
+                "agent": target_agent_slug,
                 "text": text,
             },
         }
@@ -1409,12 +1412,9 @@ def register_workflows(
           ``wait_for_external_event``.
         """
         if raw_payload is None:
-            payload: WorkflowPayload = {
-                "tasks": [],
-                "workflow_agent_slug": "",
-            }
-        else:
-            payload = raw_payload
+            raise ValueError("Invalid agent_slug: workflow payload is required")
+        validate_agent_slug(raw_payload["agent_slug"])
+        payload = raw_payload
         tasks = list(payload.get("tasks", []))
         if _plan_is_dynamic(tasks):
             return (yield from _run_dynamic_workflow(context, payload, tasks))

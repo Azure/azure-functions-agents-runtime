@@ -266,12 +266,14 @@ def _resolve_slug(spec: AgentSpec) -> str:
     identifier ``subagents[].agent`` references point at and the suffix of
     the ``delegate_<slug>`` tool name (FRD 0007 §4.8).
 
-    ``compose()`` must stay warning-free (validation-time concerns belong
-    to ``config.validation``), so a missing ``source_file`` — common for
-    directly-constructed ``AgentSpec``s in unit tests — silently falls
-    back to a sanitized version of ``spec.name`` rather than warning.
+    Canonical identity requires a source filename. Other resolved-config
+    validation remains deferred to ``config.validation``.
     """
-    return _function_name_from_source(spec.source_file, spec.name, warn_on_missing=False)
+    if spec.source_file is None or not str(spec.source_file).strip():
+        raise ValueError(
+            "Agent source_file is required to derive the canonical agent_slug"
+        )
+    return _function_name_from_source(spec.source_file)
 
 
 def _normalize_subagents(spec: AgentSpec) -> list[SubagentRef]:
@@ -307,7 +309,7 @@ def compose(
         metadata["workflows"] = spec.workflows.model_dump(mode="json")
 
     resolved = ResolvedAgent(
-        name=spec.name,
+        display_name=spec.name,
         slug=_resolve_slug(spec),
         description=spec.description,
         trigger=spec.trigger,

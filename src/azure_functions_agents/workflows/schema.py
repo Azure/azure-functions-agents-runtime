@@ -375,11 +375,16 @@ class WorkflowPolicyInput(TypedDict):
     allowed_subagents: list[str]
 
 
+class WorkflowAgentInput(TypedDict):
+    agent_slug: str
+    session_id: str
+
+
 class WorkflowPayload(TypedDict):
     tasks: list[WorkflowTaskInput]
-    workflow_agent_slug: str
+    agent_slug: str
     policy: NotRequired[WorkflowPolicyInput]
-    workflow_agent: NotRequired[dict[str, str]]
+    agent: NotRequired[WorkflowAgentInput]
 
 
 class PlanValidationMetadata(TypedDict, total=False):
