@@ -29,7 +29,7 @@ from typing import Any, Literal, NotRequired, TypedDict, cast
 
 import azure.durable_functions as df
 import azure.functions as func
-from durabletask.task import CancellableTask, OrchestrationContext, Task, when_any
+from durabletask.task import CancellableTask, OrchestrationContext, Task, when_all, when_any
 
 from azure_functions_agents._logger import logger
 from azure_functions_agents.registration.catalog import AgentCatalog
@@ -223,28 +223,14 @@ def _await_wave(
     cancel_task: Task[Any],
     wave_tasks: list[Task[Any]],
 ) -> Generator[Task[Any], Task[Any], list[Any] | None]:
-    """Await leaf tasks until cancellation wins or the whole wave completes.
-
-    Durable 2.x composite tasks do not notify their own composite parent, so
-    racing ``task_all(wave_tasks)`` against cancellation would never resume.
-    """
-    outcomes: dict[int, Any] = {}
-    pending = list(range(len(wave_tasks)))
-    while pending:
-        winner = yield when_any(
-            [cancel_task, *(wave_tasks[index] for index in pending)]
-        )
-        if winner is cancel_task:
-            return None
-        completed = next(
-            (index for index in pending if wave_tasks[index] is winner),
-            None,
-        )
-        if completed is None:
-            raise RuntimeError("workflow task selection returned an unknown task")
-        pending.remove(completed)
-        outcomes[completed] = wave_tasks[completed].result
-    return [outcomes[index] for index in range(len(wave_tasks))]
+    """Await the ordered wave result unless cooperative cancellation wins."""
+    wave_task = when_all(wave_tasks)
+    winner = yield when_any([cancel_task, wave_task])
+    if winner is cancel_task:
+        return None
+    if winner is not wave_task:
+        raise RuntimeError("workflow task selection returned an unknown task")
+    return wave_task.result
 
 
 def _cancel_timer_task(task: Task[Any]) -> None:
