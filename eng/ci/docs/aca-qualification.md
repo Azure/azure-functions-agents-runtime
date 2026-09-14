@@ -50,6 +50,12 @@ redacted error detail. A stale sandbox already removed by ACA idle-delete is
 counted as `already_absent`, not as a failure. The summary includes
 already-absent, incomplete, and delete-failure counts; an inspection that did
 not complete reports counts as unavailable rather than presenting a clean group.
+Deletion uses four concurrent workers under one absolute six-minute budget. This
+leaves nine minutes of the 15-minute job for checkout, tooling installation, the
+bounded inventory probe, adapter shutdown, and durable summary logging. At the
+deadline, outstanding workers are cancelled and awaited; every unfinished or
+unattempted stale sandbox is reported as `deferred`, warned by hashed reference,
+and included in `incomplete`.
 
 Unfiltered deletion is safe only because this infrastructure is externally
 provisioned as a CI-dedicated Sandbox Group. The data-plane inventory cannot

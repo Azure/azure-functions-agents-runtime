@@ -47,7 +47,7 @@ import subprocess
 import sys
 import time
 import zipfile
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -61,6 +61,9 @@ _GROUP_RESOURCE_ID_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"
 _GROUP_REGION_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_REGION"
 _SWEEP_MAX_AGE_HOURS = 6
 _SWEEP_INSPECTION_TIMEOUT_SECONDS = 30.0
+_SWEEP_DELETE_CONCURRENCY = 4
+_SWEEP_DELETE_BUDGET_SECONDS = 360.0
+_SWEEP_CLOSE_TIMEOUT_SECONDS = 30.0
 
 _DEPLOY_PREFLIGHT_TIMEOUT_SECONDS = 30.0
 _DEPLOY_CONFIGURATION_TIMEOUT_SECONDS = 300.0
@@ -300,6 +303,7 @@ class SweepOutcome:
     already_absent_count: int
     delete_failure_count: int
     inspection_failure_count: int
+    deferred_count: int = 0
     close_failure_count: int = 0
 
     @property
@@ -311,8 +315,17 @@ class SweepOutcome:
             unknown_age_count
             + self.delete_failure_count
             + self.inspection_failure_count
+            + self.deferred_count
             + self.close_failure_count
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _SweepDeletionOutcome:
+    deleted_ids: tuple[str, ...]
+    already_absent_ids: tuple[str, ...]
+    failures: tuple[tuple[str, BaseException], ...]
+    deferred_ids: tuple[str, ...]
 
 
 def parse_created_at(value: str | None) -> datetime | None:
@@ -365,6 +378,7 @@ def render_sweep_report(outcome: SweepOutcome) -> str:
         f"already_absent={outcome.already_absent_count} "
         f"unknown_age={unknown_age} recent={recent} "
         f"delete_failures={outcome.delete_failure_count} "
+        f"deferred={outcome.deferred_count} "
         f"inspection_failures={outcome.inspection_failure_count} "
         f"incomplete={outcome.incomplete_count} "
         f"age_threshold={_SWEEP_MAX_AGE_HOURS}h"
@@ -405,11 +419,121 @@ def _require_dedicated_group_acknowledgment(dedicated_group_scope: str) -> None:
         )
 
 
+async def _run_delete_worker(
+    adapter: Any,
+    queue: asyncio.Queue[tuple[int, str]],
+    classifications: dict[int, tuple[str, BaseException | None]],
+) -> None:
+    from azure_functions_agents.transport.transport_models import (
+        SandboxNotFoundError,
+    )
+
+    while True:
+        try:
+            index, sandbox_id = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        try:
+            try:
+                await adapter.delete_sandbox(sandbox_id)
+            except SandboxNotFoundError:
+                classifications[index] = ("already_absent", None)
+            except Exception as error:
+                classifications[index] = ("failed", error)
+            else:
+                classifications[index] = ("deleted", None)
+        finally:
+            queue.task_done()
+
+
+async def _wait_for_delete_workers(
+    workers: set[asyncio.Task[None]],
+    deadline_task: asyncio.Task[None],
+) -> None:
+    pending_workers = set(workers)
+    try:
+        while pending_workers:
+            done, _ = await asyncio.wait(
+                pending_workers | {deadline_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if deadline_task in done:
+                return
+            pending_workers.difference_update(done)
+            for task in done:
+                task.result()
+    finally:
+        for task in pending_workers:
+            task.cancel()
+        await asyncio.gather(*pending_workers, return_exceptions=True)
+        if not deadline_task.done():
+            deadline_task.cancel()
+        await asyncio.gather(deadline_task, return_exceptions=True)
+
+
+def _build_deletion_outcome(
+    indexed_ids: Sequence[tuple[int, str]],
+    classifications: Mapping[int, tuple[str, BaseException | None]],
+) -> _SweepDeletionOutcome:
+    deleted: list[str] = []
+    already_absent: list[str] = []
+    failures: list[tuple[str, BaseException]] = []
+    deferred: list[str] = []
+    for index, sandbox_id in indexed_ids:
+        classification = classifications.get(index)
+        if classification is None:
+            deferred.append(sandbox_id)
+            continue
+        status, error = classification
+        if status == "deleted":
+            deleted.append(sandbox_id)
+        elif status == "already_absent":
+            already_absent.append(sandbox_id)
+        else:
+            assert error is not None
+            failures.append((sandbox_id, error))
+    return _SweepDeletionOutcome(
+        tuple(deleted),
+        tuple(already_absent),
+        tuple(failures),
+        tuple(deferred),
+    )
+
+
+async def _delete_stale_sandboxes(
+    adapter: Any,
+    sandbox_ids: Sequence[str],
+    *,
+    deadline_waiter: Awaitable[None] | None = None,
+) -> _SweepDeletionOutcome:
+    indexed_ids = tuple(enumerate(sandbox_ids))
+    if not indexed_ids:
+        return _SweepDeletionOutcome((), (), (), ())
+
+    queue: asyncio.Queue[tuple[int, str]] = asyncio.Queue()
+    for item in indexed_ids:
+        queue.put_nowait(item)
+    classifications: dict[int, tuple[str, BaseException | None]] = {}
+
+    workers = {
+        asyncio.create_task(_run_delete_worker(adapter, queue, classifications))
+        for _ in range(min(_SWEEP_DELETE_CONCURRENCY, len(indexed_ids)))
+    }
+    deadline_task = asyncio.create_task(
+        asyncio.sleep(_SWEEP_DELETE_BUDGET_SECONDS)
+        if deadline_waiter is None
+        else deadline_waiter
+    )
+    await _wait_for_delete_workers(workers, deadline_task)
+    return _build_deletion_outcome(indexed_ids, classifications)
+
+
 async def sweep_with_adapter(
     adapter: Any,
     *,
     now: datetime,
     dedicated_group_scope: str,
+    delete_deadline_waiter: Awaitable[None] | None = None,
 ) -> SweepOutcome:
     """Inspect and delete stale resources through an already-open adapter."""
     selection: SweepSelection | None = None
@@ -417,12 +541,10 @@ async def sweep_with_adapter(
     already_absent_count = 0
     delete_failure_count = 0
     inspection_failure_count = 0
+    deferred_count = 0
     close_failure_count = 0
     try:
         _require_dedicated_group_acknowledgment(dedicated_group_scope)
-        from azure_functions_agents.transport.transport_models import (
-            SandboxNotFoundError,
-        )
 
         try:
             async with asyncio.timeout(_SWEEP_INSPECTION_TIMEOUT_SECONDS):
@@ -442,22 +564,31 @@ async def sweep_with_adapter(
                     f"(resource_ref={_sandbox_reference(sandbox_id)}); "
                     "the resource was not deleted."
                 )
-            for sandbox_id in selection.stale_ids:
-                try:
-                    await adapter.delete_sandbox(sandbox_id)
-                    deleted_count += 1
-                except SandboxNotFoundError:
-                    already_absent_count += 1
-                except Exception as error:
-                    delete_failure_count += 1
-                    _emit_ado_warning(
-                        "ACA pre-run sweep delete failed "
-                        f"(resource_ref={_sandbox_reference(sandbox_id)}, "
-                        f"{type(error).__name__}: {_redacted_reason(error)})."
-                    )
+            deletion = await _delete_stale_sandboxes(
+                adapter,
+                selection.stale_ids,
+                deadline_waiter=delete_deadline_waiter,
+            )
+            deleted_count = len(deletion.deleted_ids)
+            already_absent_count = len(deletion.already_absent_ids)
+            delete_failure_count = len(deletion.failures)
+            deferred_count = len(deletion.deferred_ids)
+            for sandbox_id, error in deletion.failures:
+                _emit_ado_warning(
+                    "ACA pre-run sweep delete failed "
+                    f"(resource_ref={_sandbox_reference(sandbox_id)}, "
+                    f"{type(error).__name__}: {_redacted_reason(error)})."
+                )
+            for sandbox_id in deletion.deferred_ids:
+                _emit_ado_warning(
+                    "ACA pre-run sweep delete deferred after the internal deadline "
+                    f"(resource_ref={_sandbox_reference(sandbox_id)}); "
+                    "the resource was not deleted."
+                )
     finally:
         try:
-            await adapter.close()
+            async with asyncio.timeout(_SWEEP_CLOSE_TIMEOUT_SECONDS):
+                await adapter.close()
         except Exception as error:
             close_failure_count = 1
             _emit_ado_warning(
@@ -470,6 +601,7 @@ async def sweep_with_adapter(
         already_absent_count=already_absent_count,
         delete_failure_count=delete_failure_count,
         inspection_failure_count=inspection_failure_count,
+        deferred_count=deferred_count,
         close_failure_count=close_failure_count,
     )
 
@@ -539,7 +671,7 @@ def run_sweep(
         outcome = unavailable
 
     print(render_sweep_report(outcome))
-    if outcome.deleted_count or outcome.delete_failure_count:
+    if outcome.deleted_count or outcome.delete_failure_count or outcome.deferred_count:
         _emit_ado_warning(
             "Stale ACA resources were found. Automatic cleanup through ACA "
             "idle-delete or controller reconciliation may have stopped working."

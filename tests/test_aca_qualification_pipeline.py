@@ -506,6 +506,147 @@ class TestSweepExecution:
         assert "already_absent=1" in output
         assert "incomplete=0" in output
 
+    @pytest.mark.asyncio
+    async def test_delete_workers_bound_concurrency_and_classify_each_id_once(
+        self,
+    ) -> None:
+        now = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
+        stale_ids = tuple(f"stale-{index}" for index in range(8))
+        started: list[str] = []
+        completed: list[str] = []
+        active = 0
+        max_active = 0
+        four_started = asyncio.Event()
+        release = asyncio.Event()
+        never_deadline = asyncio.Event()
+
+        class _Adapter:
+            async def list_sandboxes(
+                self,
+                *,
+                labels: dict[str, str],
+            ) -> tuple[_Summary, ...]:
+                assert labels == {}
+                old = (now - timedelta(hours=7)).isoformat()
+                return tuple(_Summary(sandbox_id, old) for sandbox_id in stale_ids)
+
+            async def delete_sandbox(self, sandbox_id: str) -> None:
+                nonlocal active, max_active
+                started.append(sandbox_id)
+                active += 1
+                max_active = max(max_active, active)
+                if active == aca_qualification_pipeline._SWEEP_DELETE_CONCURRENCY:
+                    four_started.set()
+                try:
+                    await release.wait()
+                    completed.append(sandbox_id)
+                finally:
+                    active -= 1
+
+            async def close(self) -> None:
+                return None
+
+        task = asyncio.create_task(
+            sweep_with_adapter(
+                _Adapter(),
+                now=now,
+                dedicated_group_scope=_DEDICATED_GROUP_SCOPE_ACKNOWLEDGMENT,
+                delete_deadline_waiter=never_deadline.wait(),
+            )
+        )
+        await asyncio.wait_for(four_started.wait(), timeout=1)
+        assert max_active == aca_qualification_pipeline._SWEEP_DELETE_CONCURRENCY
+        assert len(started) == aca_qualification_pipeline._SWEEP_DELETE_CONCURRENCY
+        release.set()
+        outcome = await task
+
+        assert sorted(started) == sorted(stale_ids)
+        assert sorted(completed) == sorted(stale_ids)
+        assert outcome.deleted_count == len(stale_ids)
+        assert outcome.already_absent_count == 0
+        assert outcome.delete_failure_count == 0
+        assert outcome.deferred_count == 0
+        assert outcome.incomplete_count == 0
+
+    def test_delete_deadline_cancels_workers_and_reports_all_deferred_ids(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        now = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
+        stale_ids = tuple(f"stale-{index}" for index in range(6))
+        attempted: list[str] = []
+        cancelled: list[str] = []
+        active = 0
+        max_active = 0
+        four_started = asyncio.Event()
+
+        class _Adapter:
+            async def list_sandboxes(
+                self,
+                *,
+                labels: dict[str, str],
+            ) -> tuple[_Summary, ...]:
+                assert labels == {}
+                old = (now - timedelta(hours=7)).isoformat()
+                return tuple(_Summary(sandbox_id, old) for sandbox_id in stale_ids)
+
+            async def delete_sandbox(self, sandbox_id: str) -> None:
+                nonlocal active, max_active
+                attempted.append(sandbox_id)
+                active += 1
+                max_active = max(max_active, active)
+                if active == aca_qualification_pipeline._SWEEP_DELETE_CONCURRENCY:
+                    four_started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.append(sandbox_id)
+                    active -= 1
+
+            async def close(self) -> None:
+                assert active == 0
+
+        adapter = _Adapter()
+
+        async def deadline() -> None:
+            await four_started.wait()
+
+        async def timed_sweep(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            return await sweep_with_adapter(
+                adapter,
+                now=now,
+                dedicated_group_scope=_DEDICATED_GROUP_SCOPE_ACKNOWLEDGMENT,
+                delete_deadline_waiter=deadline(),
+            )
+
+        monkeypatch.setattr(aca_qualification_pipeline, "_sweep", timed_sweep)
+        result = run_sweep(
+            {
+                "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID": (
+                    "/subscriptions/example/resourceGroups/example/providers/"
+                    "Microsoft.App/sessionPools/example"
+                )
+            },
+            region="eastus",
+            dedicated_group_scope=_DEDICATED_GROUP_SCOPE_ACKNOWLEDGMENT,
+        )
+        output = capsys.readouterr().out
+
+        assert result == 0
+        assert max_active == aca_qualification_pipeline._SWEEP_DELETE_CONCURRENCY
+        assert attempted == list(stale_ids[:4])
+        assert sorted(cancelled) == sorted(attempted)
+        assert output.count("delete deferred after the internal deadline") == len(stale_ids)
+        assert output.count("resource_ref=sha256:") == len(stale_ids)
+        assert "stale=6" in output
+        assert "deleted=0" in output
+        assert "already_absent=0" in output
+        assert "delete_failures=0" in output
+        assert "deferred=6" in output
+        assert "incomplete=6" in output
+
     def test_adapter_open_failure_is_warning_only_and_explicitly_incomplete(
         self,
         monkeypatch: pytest.MonkeyPatch,

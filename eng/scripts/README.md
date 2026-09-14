@@ -118,7 +118,9 @@ recent resources are retained. Inspection, unknown-age, and delete failures
 emit Azure DevOps warnings, and the summary exposes incomplete and
 delete-failure counts while remaining nonblocking. A stale sandbox that ACA
 idle-delete removes between inventory and deletion is reported as
-`already_absent`, without a failure warning.
+`already_absent`, without a failure warning. Four delete workers share a
+six-minute deadline; unfinished and unattempted stale resources are reported as
+`deferred` with durable warnings before the nonblocking command exits.
 
 The sweep is pre-run rather than a destructive post-run reaper. Current-run
 qualification suites already assert their own cleanup; deleting immediately
