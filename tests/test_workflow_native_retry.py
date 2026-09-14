@@ -715,11 +715,24 @@ class _RecordingTask:
     def __init__(self, result: Any = None) -> None:
         self._result = result
         self.is_complete = True
+        self._parent = None
+
+    @property
+    def is_failed(self) -> bool:
+        return isinstance(self._result, Exception)
 
     @property
     def result(self) -> Any:
         if isinstance(self._result, Exception):
             raise self._result
+        return self._result
+
+    def get_result(self) -> Any:
+        return self.result
+
+    def get_exception(self) -> Exception:
+        if not isinstance(self._result, Exception):
+            raise ValueError("The task has not failed.")
         return self._result
 
     def cancel(self) -> None:
@@ -738,6 +751,7 @@ class _RecordingContext:
         self.activity_tags: list[tuple[str, dict[str, str]]] = []
         self.last_wave = _RecordingTask([])
         self.cancel_task = _RecordingTask()
+        self.cancel_task.is_complete = False
 
     def get_input(self) -> dict[str, Any]:
         return self._input

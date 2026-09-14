@@ -400,6 +400,10 @@ class _Task:
         self._parent = None
 
     @property
+    def is_failed(self) -> bool:
+        return isinstance(self._result, Exception)
+
+    @property
     def result(self) -> Any:
         if isinstance(self._result, Exception):
             raise self._result
@@ -408,6 +412,14 @@ class _Task:
     @result.setter
     def result(self, value: Any) -> None:
         self._result = value
+
+    def get_result(self) -> Any:
+        return self.result
+
+    def get_exception(self) -> Exception:
+        if not isinstance(self._result, Exception):
+            raise ValueError("The task has not failed.")
+        return self._result
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -427,6 +439,7 @@ class _FakeOrchestrationContext:
         self.activity_tags: list[tuple[str, dict[str, str]]] = []
         self.last_wave = _Task([])
         self.cancel_task = _Task()
+        self.cancel_task.is_complete = False
         self.statuses: list[str] = []
         self.selections = 0
 
@@ -460,6 +473,10 @@ def _drive(context: _FakeOrchestrationContext, selection: Any) -> Any:
         return context.cancel_task
     for candidate in candidates:
         if candidate is not context.cancel_task:
+            for child in getattr(candidate, "_tasks", []):
+                if not child.is_complete:
+                    child.is_complete = True
+                    child._parent.on_child_completed(child)
             return candidate
     return context.cancel_task
 
@@ -751,6 +768,70 @@ def _activity_ids(context: _FakeOrchestrationContext, name: str) -> list[str]:
     return [payload["id"] for called, payload in context.calls if called == name]
 
 
+def test_dynamic_for_each_races_when_all_wave_against_cancel(monkeypatch) -> None:
+    wave_composites: list[_Task] = []
+    races: list[list[_Task]] = []
+
+    def record_when_all(tasks: list[_Task]) -> _Task:
+        composite = _Task([task.result for task in tasks])
+        composite._tasks = tasks
+        wave_composites.append(composite)
+        return composite
+
+    def record_when_any(tasks: list[_Task]) -> _Task:
+        selection = _Task()
+        selection._tasks = tasks
+        races.append(tasks)
+        return selection
+
+    monkeypatch.setattr(engine, "when_all", record_when_all)
+    monkeypatch.setattr(engine, "when_any", record_when_any)
+    tasks = [
+        {
+            "id": "discover",
+            "type": TOOL_TASK_TYPE,
+            "tool": "collect",
+            "args": {},
+            "depends_on": [],
+        },
+        {
+            "id": "inspect",
+            "type": TOOL_TASK_TYPE,
+            "tool": "inspect",
+            "args": {"index": "${index}"},
+            "depends_on": ["discover"],
+            "for_each": "${discover.result.items}",
+        },
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "discover":
+            return {
+                "id": "discover",
+                "result": {"items": [{}, {}]},
+            }
+        return {"id": payload["id"], "result": payload["args"]}
+
+    result, context = _run_dynamic(
+        tasks,
+        policy={
+            "allowed_tools": ["collect", "inspect"],
+            "allowed_subagents": [],
+        },
+        result_for=result_for,
+    )
+
+    assert result["results"]["inspect"] == [
+        {"index": 0, "status": "completed", "result": {"index": 0}},
+        {"index": 1, "status": "completed", "result": {"index": 1}},
+    ]
+    assert [len(composite._tasks) for composite in wave_composites] == [1, 2]
+    assert races == [
+        [context.cancel_task, wave_composites[0]],
+        [context.cancel_task, wave_composites[1]],
+    ]
+
+
 def test_dynamic_dispatch_rejects_unsupported_persisted_task_type() -> None:
     tasks = [
         {
@@ -783,7 +864,7 @@ def test_dynamic_dispatch_rejects_unsupported_persisted_task_type() -> None:
         )
 
 
-def test_dynamic_activity_failure_cancels_pending_wave_timer() -> None:
+def test_dynamic_activity_failure_raises_after_pending_wave_timer() -> None:
     class _FailedSecondWaveContext(_DynamicContext):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
@@ -847,7 +928,8 @@ def test_dynamic_activity_failure_cancels_pending_wave_timer() -> None:
         _run_orchestrator(orchestrator, context)
 
     assert len(context.timers) == 1
-    assert context.timers[0].cancelled is True
+    assert context.timers[0].is_complete is True
+    assert context.timers[0].cancelled is False
     assert context.selections == 2
 
 

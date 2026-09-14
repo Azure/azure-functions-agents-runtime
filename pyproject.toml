@@ -24,6 +24,8 @@ dependencies = [
     "azure-storage-blob>=12.28.0,<13",
     "jsonschema>=4.26.0,<5",
     "mcp>=1.28.1,<2",
+    # Temporary: replace this pin with the first release that contains microsoft/durabletask-python#267.
+    "durabletask[opentelemetry]",
 ]
 
 [project.optional-dependencies]
@@ -146,3 +148,6 @@ addopts = "-m 'not e2e'"
 markers = [
     "e2e: end-to-end tests that boot sample apps with `func start` (require func + Azurite).",
 ]
+
+[tool.uv.sources]
+durabletask = { git = "https://github.com/microsoft/durabletask-python.git", rev = "2d73a6a3d3bf71f88ceac75bd48463f8c2f14060" }
