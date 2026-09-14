@@ -113,3 +113,32 @@ uv run mkdocs serve
 
 Open http://127.0.0.1:8000/. Pull requests run `mkdocs build --strict` as a CI check but do not
 deploy; only pushes to `main` (or a manual workflow dispatch) publish the site.
+
+### Customer-facing release notes
+
+Customer outcomes awaiting publication are staged under the single **Unreleased** section in
+`docs/releases.md`. Each entry uses the metadata format documented in
+`eng/scripts/README.md`. Run `python eng/scripts/validate_release_notes.py` after editing the page.
+
+After the package and GitHub release are published, the release owner opens a documentation pull
+request against `main`. Reconcile the exact released tag and commit range with the PR numbers in
+Unreleased metadata, then move included entries into one new version section. Do not copy them, and
+leave excluded entries under Unreleased. Preserve each entry's metadata comment.
+
+For every published package version, add:
+
+- the release date and links to its GitHub release and PyPI package;
+- a customer-focused summary grouped into features, improvements, bug or security fixes,
+  and maintenance or documentation as applicable;
+- upgrade or compatibility guidance when customers need to take action; and
+- links to the relevant pull requests and full tag comparison.
+
+Explain the resulting behavior rather than copying pull request titles. Keep the newest release
+first and add it to the summary table at the top of the page. The GitHub release remains the source
+for artifacts and the exhaustive commit list. Copy the exact GitHub tag into release and comparison
+URLs rather than inferring it from the package version; historical tags use more than one naming
+format. Reconcile the GitHub release list with PyPI so no published version is omitted.
+
+Published-history corrections require explicit maintainer review; passing structural validation is
+not authorization to rewrite an existing release. Customer value, prose accuracy, compatibility
+guidance, and security-sensitive wording also require human review.

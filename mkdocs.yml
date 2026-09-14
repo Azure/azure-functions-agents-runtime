@@ -52,6 +52,7 @@ validation:
 nav:
   - Home: index.md
   - Getting started: getting-started.md
+  - Releases: releases.md
   - Concepts:
       - Architecture: architecture.md
       - Triggers: triggers.md

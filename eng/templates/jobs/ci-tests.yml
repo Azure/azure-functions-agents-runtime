@@ -29,11 +29,17 @@ jobs:
           python -m ruff check src tests
         displayName: 'Lint with ruff'
       - bash: |
+          python -m ruff check eng/scripts/validate_release_notes.py
+        displayName: 'Lint release notes validator with ruff'
+      - bash: |
           python -m mypy src
         displayName: 'Type check with mypy'
       - bash: |
           python eng/scripts/generate_config_reference.py --check
         displayName: 'Verify config reference docs are up to date'
+      - bash: |
+          python eng/scripts/validate_release_notes.py
+        displayName: 'Validate release notes'
       - bash: |
           python -m pytest --cache-clear --cov=./src/azure_functions_agents --cov-report=xml --cov-branch tests
         displayName: 'Test with pytest'

@@ -32,6 +32,7 @@ azurefunctions-agents-runtime
 ## Where to go next
 
 - [Getting started](getting-started.md) — create your first agent and run it locally
+- [Releases](releases.md) — customer-focused changes, fixes, and upgrade notes by version
 - [Architecture](architecture.md) — module map and data flow pipeline
 - [Front matter spec](front-matter-spec.md) — the `.agent.md` and `agents.config.yaml` field reference
 - [Triggers](triggers.md) — supported trigger types and payload shapes
