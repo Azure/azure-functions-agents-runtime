@@ -24,6 +24,7 @@ dependencies = [
     "azure-storage-blob>=12.28.0,<13",
     "jsonschema>=4.26.0,<5",
     "mcp>=1.28.1,<2",
+    "msal>=1.35.1,<2",
 ]
 
 [project.optional-dependencies]
@@ -69,6 +70,16 @@ version = {attr = "azure_functions_agents.__version__"}
 
 [tool.setuptools.package-data]
 azure_functions_agents = ["public/**", "workflows/skills/**"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+# E2E tests require Core Tools (func) + Azurite, so they are deselected from the
+# default unit-test run. The E2E pipeline opts back in with `-m e2e`.
+addopts = "-m 'not e2e'"
+markers = [
+    "e2e: end-to-end tests that boot sample apps with `func start` (require func + Azurite).",
+]
 
 [tool.ruff]
 target-version = "py313"
@@ -122,6 +133,7 @@ module = [
     "agent_framework_foundry.*",
     "azurefunctions.*",
     "azure.durable_functions",
+    "msal",
     "azure.functions_connectors",
     "azure.functions_connectors.*",
     "frontmatter",
@@ -138,11 +150,3 @@ ignore_errors = true
 init_forbid_extra = true
 init_typed = true
 warn_required_dynamic_aliases = true
-
-[tool.pytest.ini_options]
-# E2E tests require Core Tools (func) + Azurite, so they are deselected from the
-# default unit-test run. The E2E pipeline opts back in with `-m e2e`.
-addopts = "-m 'not e2e'"
-markers = [
-    "e2e: end-to-end tests that boot sample apps with `func start` (require func + Azurite).",
-]

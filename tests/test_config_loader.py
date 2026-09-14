@@ -63,6 +63,7 @@ def test_load_global_config_leaves_unset_placeholders_literal(tmp_path: Path) ->
 def test_load_global_config_missing_returns_empty(tmp_path: Path) -> None:
     assert load_global_config(tmp_path) == load_global_config(tmp_path)
     assert load_global_config(tmp_path).model_dump() == {
+        "auth": None,
         "agent_configuration": None,
         "system_tools": None,
         "model": None,
