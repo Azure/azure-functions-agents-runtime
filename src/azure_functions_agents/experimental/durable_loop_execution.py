@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from ..client_manager import ClientManager
 from ..config.paths import get_app_root
 from ..discovery.mcp import discover_mcp_servers
+from .durable_chat_execution_observer import (
+    current_durable_chat_execution_context,
+)
 from .durable_loop_catalog import (
     freeze_durable_tool_catalog,
     load_durable_tool_policy,
@@ -139,6 +142,9 @@ class DurableExecutionPlaneRouter(
         ):
             raise RuntimeError("durable tool request classification changed")
         if request.provenance is ToolProvenance.REMOTE:
+            context = current_durable_chat_execution_context()
+            if context is not None:
+                context.observer.remote_no_sandbox(request)
             return await self._remote.dispatch(request)
         if request.provenance is ToolProvenance.LOCAL:
             return await self._local.dispatch(request)

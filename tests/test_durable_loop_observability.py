@@ -1,12 +1,28 @@
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import pytest
+from azure.monitor.opentelemetry.exporter.export.trace._exporter import (
+    AzureMonitorTraceExporter,
+)
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+    InMemorySpanExporter,
+)
 
+from azure_functions_agents import _observability
 from azure_functions_agents.experimental import durable_loop_observability
+from azure_functions_agents.experimental.durable_chat_protocol import (
+    durable_chat_run_correlation,
+)
 from azure_functions_agents.experimental.durable_loop_observability import (
+    DURABLE_LOOP_RUN_CORRELATION_ATTRIBUTE,
     DurableLoopOutcome,
     DurableLoopPhase,
+    durable_loop_run_correlation,
     record_durable_loop_event,
+    start_durable_loop_activity_span,
 )
 
 
@@ -146,3 +162,66 @@ def test_durable_progress_rejects_invalid_duration(duration: float) -> None:
             DurableLoopOutcome.FAILED,
             duration_seconds=duration,
         )
+
+
+def test_durable_activity_span_inherits_function_trace_and_exports_private_correlation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(memory))
+    monkeypatch.setattr(_observability, "_enabled", True)
+    monkeypatch.setattr(
+        _observability,
+        "get_tracer",
+        lambda: provider.get_tracer("durable-chat-test"),
+    )
+    run_id = "run-private-123"
+    function_context = SimpleNamespace(
+        trace_context=SimpleNamespace(
+            trace_parent=(
+                "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+            ),
+            trace_state=None,
+        )
+    )
+
+    with (
+        _observability.use_function_trace_context(function_context),
+        start_durable_loop_activity_span(
+            DurableLoopPhase.MODEL_STEP,
+            run_id=run_id,
+            provenance="model",
+        ),
+    ):
+        pass
+
+    spans = memory.get_finished_spans()
+    assert len(spans) == 1
+    span = spans[0]
+    assert span.parent is not None
+    assert span.parent.span_id == int("0123456789abcdef", 16)
+    assert span.attributes == {
+        DURABLE_LOOP_RUN_CORRELATION_ATTRIBUTE: durable_chat_run_correlation(run_id),
+        "af.durable_loop.phase": "model_step",
+        "af.durable_loop.provenance": "model",
+    }
+
+    exporter = AzureMonitorTraceExporter(
+        connection_string=(
+            "InstrumentationKey=00000000-0000-0000-0000-000000000000"
+        )
+    )
+    envelope = exporter._span_to_envelope(span)
+    data = envelope.data.base_data
+
+    assert data.type == "InProc"
+    assert data.properties[DURABLE_LOOP_RUN_CORRELATION_ATTRIBUTE] == (
+        durable_chat_run_correlation(run_id)
+    )
+    assert durable_loop_run_correlation(run_id) == durable_chat_run_correlation(
+        run_id
+    )
+    assert run_id not in str(data.properties)
+    assert "session_id" not in data.properties
+    assert "sandbox_id" not in data.properties

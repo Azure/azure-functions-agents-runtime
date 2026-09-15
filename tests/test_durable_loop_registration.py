@@ -248,8 +248,21 @@ def test_registered_durable_binding_annotations_are_worker_compatible(
         handler = _registered_handler(app, name)
         assert get_type_hints(handler)["payload"] is dict
 
-    delivery = _registered_handler(app, DURABLE_LOOP_HUMAN_DELIVERY_ACTIVITY_NAME)
-    assert get_type_hints(delivery)["client"] is str
+    durable_client_function_names = (
+        DURABLE_LOOP_HUMAN_DELIVERY_ACTIVITY_NAME,
+        "durable_agent_run_start_v1",
+        "durable_agent_run_status_v1",
+        "durable_agent_run_result_v1",
+        "durable_agent_run_sandbox_v1",
+        "durable_agent_run_cancel_v1",
+        "durable_agent_run_human_input_detail_v1",
+        "durable_agent_run_human_input_v1",
+        "durable_chat_events_v1",
+        "durable_chat_diagnostics_v1",
+    )
+    for name in durable_client_function_names:
+        handler = _registered_handler(app, name)
+        assert get_type_hints(handler)["client"] is str
 
 
 @pytest.mark.asyncio
@@ -597,6 +610,273 @@ def test_session_entity_abort_releases_slot_without_advancing_generation() -> No
         "possibly_committed": False,
         "status": "Failed",
     }
+
+
+def test_chat_ui_admission_replays_its_original_frozen_receipt_metadata() -> None:
+    admitted_at = "2026-09-04T00:00:00Z"
+    expires_at = "2026-09-05T00:00:00Z"
+    state, admitted = apply_session_entity_operation(
+        None,
+        "admit",
+        {
+            "chat_ui": True,
+            "expires_at": expires_at,
+            "now": admitted_at,
+            "request_hash": "b" * 64,
+            "request_id_hash": "a" * 64,
+            "run_id": "run-1",
+        },
+    )
+
+    assert admitted == {
+        "admitted_at": admitted_at,
+        "chat_ui": True,
+        "committed_context_ref": None,
+        "committed_generation": 0,
+        "disposition": "admitted",
+        "expires_at": expires_at,
+        "lifecycle": "admitted",
+        "run_id": "run-1",
+    }
+    receipt = state["idempotency"]["a" * 64]
+    assert receipt == {
+        "admitted_at": admitted_at,
+        "chat_ui": True,
+        "committed_context_ref": None,
+        "committed_generation": 0,
+        "expires_at": expires_at,
+        "lifecycle": "admitted",
+        "request_hash": "b" * 64,
+        "run_id": "run-1",
+    }
+
+    state["committed_context_ref"] = {"object_id": "later-context"}
+    state["committed_generation"] = 7
+    state, _ = apply_session_entity_operation(state, "abort", {"run_id": "run-1"})
+    state, replayed = apply_session_entity_operation(
+        state,
+        "admit",
+        {
+            "chat_ui": True,
+            "expires_at": "2026-09-06T00:00:00Z",
+            "now": "2026-09-05T00:00:00Z",
+            "request_hash": "b" * 64,
+            "request_id_hash": "a" * 64,
+            "run_id": "different-run",
+        },
+    )
+
+    assert replayed["disposition"] == "replayed"
+    assert replayed["lifecycle"] == "aborted"
+    assert replayed["chat_ui"] is True
+    assert replayed["admitted_at"] == admitted_at
+    assert replayed["expires_at"] == expires_at
+    assert replayed["committed_context_ref"] is None
+    assert replayed["committed_generation"] == 0
+    assert state["idempotency"]["a" * 64]["chat_ui"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("now", None),
+        ("now", "2026-09-04T00:00:00"),
+        ("expires_at", None),
+        ("expires_at", "2026-09-05T00:00:00"),
+    ),
+)
+def test_chat_ui_admission_requires_aware_original_timestamps(
+    field: str,
+    value: object,
+) -> None:
+    payload: dict[str, object] = {
+        "chat_ui": True,
+        "expires_at": "2026-09-05T00:00:00Z",
+        "now": "2026-09-04T00:00:00Z",
+        "request_hash": "b" * 64,
+        "request_id_hash": "a" * 64,
+        "run_id": "run-1",
+    }
+    payload[field] = value
+
+    with pytest.raises(ValueError, match=r"timezone-aware|ISO-8601"):
+        apply_session_entity_operation(None, "admit", payload)
+
+
+def test_expired_admitted_chat_receipt_replays_same_key_and_frees_a_new_ui_run() -> None:
+    original_now = "2026-09-04T00:00:00Z"
+    original_expires_at = "2026-09-04T00:00:01Z"
+    state, _ = apply_session_entity_operation(
+        None,
+        "admit",
+        {
+            "chat_ui": True,
+            "expires_at": original_expires_at,
+            "now": original_now,
+            "request_hash": "b" * 64,
+            "request_id_hash": "a" * 64,
+            "run_id": "expired-run",
+        },
+    )
+    replay_state, replayed = apply_session_entity_operation(
+        state,
+        "admit",
+        {
+            "chat_ui": True,
+            "expires_at": "2026-09-05T00:00:00Z",
+            "now": "2026-09-05T00:00:00Z",
+            "request_hash": "b" * 64,
+            "request_id_hash": "a" * 64,
+            "run_id": "different-run",
+        },
+    )
+    reclaimed_state, admitted = apply_session_entity_operation(
+        replay_state,
+        "admit",
+        {
+            "chat_ui": True,
+            "expires_at": "2026-09-06T00:00:00Z",
+            "now": "2026-09-05T00:00:00Z",
+            "request_hash": "d" * 64,
+            "request_id_hash": "c" * 64,
+            "run_id": "new-run",
+        },
+    )
+
+    assert replayed["disposition"] == "replayed"
+    assert replayed["run_id"] == "expired-run"
+    assert replayed["expires_at"] == original_expires_at
+    assert replay_state["active_run_id"] == "expired-run"
+    assert admitted["disposition"] == "admitted"
+    assert reclaimed_state["active_run_id"] == "new-run"
+    assert reclaimed_state["idempotency"]["a" * 64]["run_id"] == "expired-run"
+
+
+def test_expired_chat_reclaim_does_not_release_running_or_legacy_receipts() -> None:
+    expired_payload = {
+        "chat_ui": True,
+        "expires_at": "2026-09-04T00:00:01Z",
+        "now": "2026-09-04T00:00:00Z",
+        "request_hash": "b" * 64,
+        "request_id_hash": "a" * 64,
+        "run_id": "run-1",
+    }
+    running_state, _ = apply_session_entity_operation(
+        None,
+        "admit",
+        expired_payload,
+    )
+    running_state, _ = apply_session_entity_operation(
+        running_state,
+        "mark_running",
+        {"run_id": "run-1"},
+    )
+    still_running, running_result = apply_session_entity_operation(
+        running_state,
+        "reclaim_expired_chat_admission",
+        {
+            "now": "2026-09-05T00:00:00Z",
+            "request_hash": "b" * 64,
+            "request_id_hash": "a" * 64,
+            "run_id": "run-1",
+        },
+    )
+    legacy_state, _ = apply_session_entity_operation(
+        None,
+        "admit",
+        {
+            "expires_at": "2026-09-04T00:00:01Z",
+            "now": "2026-09-04T00:00:00Z",
+            "request_hash": "e" * 64,
+            "request_id_hash": "f" * 64,
+            "run_id": "legacy-run",
+        },
+    )
+    still_legacy, legacy_result = apply_session_entity_operation(
+        legacy_state,
+        "reclaim_expired_chat_admission",
+        {
+            "now": "2026-09-05T00:00:00Z",
+            "request_hash": "e" * 64,
+            "request_id_hash": "f" * 64,
+            "run_id": "legacy-run",
+        },
+    )
+
+    assert running_result == {"disposition": "stale"}
+    assert still_running["active_run_id"] == "run-1"
+    assert legacy_result == {"disposition": "stale"}
+    assert still_legacy["active_run_id"] == "legacy-run"
+
+
+def test_expired_chat_reclaim_requires_its_matching_receipt() -> None:
+    state, _ = apply_session_entity_operation(
+        None,
+        "admit",
+        {
+            "chat_ui": True,
+            "expires_at": "2026-09-04T00:00:01Z",
+            "now": "2026-09-04T00:00:00Z",
+            "request_hash": "b" * 64,
+            "request_id_hash": "a" * 64,
+            "run_id": "run-1",
+        },
+    )
+    unchanged, mismatch = apply_session_entity_operation(
+        state,
+        "reclaim_expired_chat_admission",
+        {
+            "now": "2026-09-05T00:00:00Z",
+            "request_hash": "c" * 64,
+            "request_id_hash": "a" * 64,
+            "run_id": "run-1",
+        },
+    )
+    reclaimed, result = apply_session_entity_operation(
+        unchanged,
+        "reclaim_expired_chat_admission",
+        {
+            "now": "2026-09-05T00:00:00Z",
+            "request_hash": "b" * 64,
+            "request_id_hash": "a" * 64,
+            "run_id": "run-1",
+        },
+    )
+
+    assert mismatch == {"disposition": "stale"}
+    assert unchanged["active_run_id"] == "run-1"
+    assert result == {"disposition": "reclaimed"}
+    assert reclaimed["active_run_id"] is None
+    assert reclaimed["idempotency"]["a" * 64]["lifecycle"] == "admitted"
+
+
+def test_legacy_admission_does_not_reclaim_an_expired_chat_receipt() -> None:
+    state, _ = apply_session_entity_operation(
+        None,
+        "admit",
+        {
+            "chat_ui": True,
+            "expires_at": "2026-09-04T00:00:01Z",
+            "now": "2026-09-04T00:00:00Z",
+            "request_hash": "b" * 64,
+            "request_id_hash": "a" * 64,
+            "run_id": "expired-chat-run",
+        },
+    )
+    unchanged, result = apply_session_entity_operation(
+        state,
+        "admit",
+        {
+            "expires_at": "2026-09-06T00:00:00Z",
+            "now": "2026-09-05T00:00:00Z",
+            "request_hash": "d" * 64,
+            "request_id_hash": "c" * 64,
+            "run_id": "legacy-run",
+        },
+    )
+
+    assert result == {"active_run_id": "expired-chat-run", "disposition": "busy"}
+    assert unchanged["active_run_id"] == "expired-chat-run"
 
 
 def test_abort_receipt_saturation_still_releases_active_slot() -> None:

@@ -10,6 +10,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Extend with MCP servers** — plug in remote HTTP MCP servers, including MCP servers backed by connectors
 - **Build custom tools in plain Python** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and pull in any package you need
 - **Run agents on durable workflows** *(experimental, see [`docs/workflows.md`](docs/workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
+- **Inspect private Durable Agent Loop runs** *(experimental, see [`docs/durable-agent-loop-chat-ui.md`](docs/durable-agent-loop-chat-ui.md))* — a separately hosted, browser-local chat UI can replay foreground progress and request diagnostics without replacing ordinary chat
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
@@ -157,6 +158,23 @@ If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint
 #### Securing endpoints
 
 By default the chat API requires a function/host key (`http_auth: function`). Configure `builtin_endpoints.http_auth` to change the policy — `admin` (system key), `anonymous`, or `entra` (Entra ID / Azure AD). In `entra` mode the runtime relies on platform App Service Authentication (Easy Auth): the platform validates the Entra token and the runtime enforces the injected `x-ms-client-principal` (with optional tenant/audience/client-id allowlists). Because the `entra` route is anonymous, the runtime trusts that header only with non-spoofable evidence Easy Auth is enforced (`WEBSITE_AUTH_ENABLED` or the `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH` app setting) and fails closed (401) otherwise. `http_auth` applies only to HTTP endpoints and does not affect the MCP endpoint (`/runtime/webhooks/mcp`), which is owned by the Functions host and always requires the MCP extension system key. See [`docs/front-matter-spec.md#http_auth--endpoint-authentication`](docs/front-matter-spec.md#http_auth--endpoint-authentication).
+
+### Private Durable Agent Loop chat UI
+
+The private Durable Agent Loop has a separate static UI at
+`/api/experimental/durable-chat/` when the existing
+`AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_ENABLED` gate is
+enabled. It does not replace the built-in `/agents/{slug}/` UI, introduce a
+new authoring field, or add a second chat gate. The shell is data-free;
+bootstrap and durable data routes use the configured endpoint authentication.
+
+The page stores its session/request history only in browser IndexedDB and holds
+a Function key only in page memory. It supports browser-local session recovery,
+foreground streaming, cancellation, human input, historical sandbox
+observations, and request diagnostics. See
+[the Durable Agent Loop chat UI guide](docs/durable-agent-loop-chat-ui.md) for
+the exact privacy, retention, sandbox, DTS, and Application Insights
+boundaries.
 
 ### Event-driven agents (`<name>.agent.md`)
 
@@ -660,6 +678,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 - [`workflow-incident-triage`](samples/workflow-incident-triage) — interactive Dynamic Workflow with live progress
 - [`workflow-queue-p0-report`](samples/workflow-queue-p0-report) — queue-started fan-out workflow that publishes an HTML Blob report
 - [`workflow-subagents-preview`](samples/workflow-subagents-preview) — queue-started parallel PR analysis with isolated workflow specialists and a stable HTML Blob report
+- [`durable-agent-loop-spike`](samples/durable-agent-loop-spike) — private durable-loop infrastructure and qualification scaffolding; its focused recording demo is distinct from the hosted Durable Agent Loop chat UI
 
 ## Deployment Notes
 
@@ -680,6 +699,11 @@ when `ENABLE_SENSITIVE_DATA=true`. The runtime emits an `agent.run` span for eac
 with `af.fault_domain`, and quiets noisy third-party loggers. For full setup and the span/attribute
 reference, see [`docs/observability.md`](docs/observability.md). If you also want host↔worker
 correlation, `host.json` `telemetryMode: OpenTelemetry` is optional and additive.
+
+For the private Durable Agent Loop chat UI, a request-scoped Logs action also
+needs a valid `APPLICATIONINSIGHTS_RESOURCE_ID` and active runtime tracing. A
+connection string alone cannot construct the resource-scoped link; see
+[the Durable Agent Loop chat UI guide](docs/durable-agent-loop-chat-ui.md#application-insights).
 
 ### Optional config overrides
 

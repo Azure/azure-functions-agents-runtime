@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from enum import StrEnum
 from typing import Any
 
-from .._observability import current_span
+from .._observability import RuntimeSpan, current_span, start_span
+from .durable_chat_protocol import durable_chat_run_correlation
 
 
 class DurableLoopPhase(StrEnum):
@@ -52,6 +55,7 @@ _meter: Any | None = None
 _counter: Any | None = None
 _duration: Any | None = None
 _ready = False
+DURABLE_LOOP_RUN_CORRELATION_ATTRIBUTE = "af.durable_loop.run_correlation"
 _PROVENANCE_VALUES = frozenset(
     {
         "apim",
@@ -65,6 +69,34 @@ _PROVENANCE_VALUES = frozenset(
         "sandbox",
     }
 )
+
+
+def durable_loop_run_correlation(run_id: str) -> str:
+    """Return a telemetry-safe stable correlation value for one opaque run ID."""
+    return durable_chat_run_correlation(run_id)
+
+
+@contextmanager
+def start_durable_loop_activity_span(
+    phase: DurableLoopPhase,
+    *,
+    run_id: str,
+    provenance: str | None = None,
+) -> Iterator[RuntimeSpan]:
+    """Record one internal runtime span beneath the active Function trace."""
+    if provenance is not None and provenance not in _PROVENANCE_VALUES:
+        raise ValueError("durable-loop provenance is not a bounded value")
+    attributes: dict[str, str] = {
+        DURABLE_LOOP_RUN_CORRELATION_ATTRIBUTE: durable_chat_run_correlation(run_id),
+        "af.durable_loop.phase": phase.value,
+    }
+    if provenance is not None:
+        attributes["af.durable_loop.provenance"] = provenance
+    with start_span(
+        f"azure_functions_agents.durable_loop.{phase.value}",
+        attributes=attributes,
+    ) as span:
+        yield span
 
 
 def record_durable_loop_event(

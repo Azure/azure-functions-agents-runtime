@@ -681,6 +681,8 @@ def _register_private_durable_loop_routes(
     app: func.FunctionApp,
     resolved_agents: tuple[ResolvedAgent, ...],
     settings: object | None,
+    *,
+    app_root: Path,
 ) -> None:
     if settings is None:
         return
@@ -690,7 +692,24 @@ def _register_private_durable_loop_routes(
     if not isinstance(settings, DurableLoopSettings):
         raise TypeError("durable-loop settings have an invalid type")
     main = next(resolved for resolved in resolved_agents if resolved.is_main)
-    register_durable_loop_http_routes(app, resolved=main, settings=settings)
+    from .experimental.durable_chat_config import DurableChatSettings
+
+    chat_settings = DurableChatSettings.from_environment(app_root=app_root)
+    register_durable_loop_http_routes(
+        app,
+        resolved=main,
+        settings=settings,
+        chat_settings=chat_settings if chat_settings.enabled else None,
+    )
+    if chat_settings.enabled:
+        from .experimental.durable_chat_http import register_durable_chat_http_routes
+
+        register_durable_chat_http_routes(
+            app,
+            resolved=main,
+            settings=settings,
+            chat_settings=chat_settings,
+        )
 
 
 def _register_private_durable_loop_reaper(
@@ -890,6 +909,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         app,
         resolved_agents,
         durable_loop_settings,
+        app_root=resolved_root,
     )
 
     # --- Two-pass composition, pass 2 (FRD 0007 §4.2): mutate `app` --------------------

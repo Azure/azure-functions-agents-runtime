@@ -20,6 +20,8 @@ from pydantic import BaseModel
 from .._credential import build_async_credential_with_client_id
 from ..client_manager import ClientManager
 from ..strict_json import assert_json_value, canonical_json_bytes
+from .durable_chat_execution_observer import DurableChatExecutionObserver
+from .durable_chat_protocol import DurableChatModelProducerV1
 from .durable_loop_config import (
     DURABLE_LOOP_CONTENT_BLOB_URI_ENV,
     DURABLE_LOOP_CONTENT_CLIENT_ID_ENV,
@@ -425,6 +427,20 @@ class OneStepModelProvider(Protocol):
 
 
 @runtime_checkable
+class DurableChatStreamingModelProvider(Protocol):
+    """Foreground one-step extension that keeps observation state out of inputs."""
+
+    async def run_one_step_with_observer(
+        self,
+        request: OneStepModelRequest,
+        *,
+        observer: DurableChatExecutionObserver,
+        producers: Sequence[DurableChatModelProducerV1],
+    ) -> ModelDecisionEnvelopeV1:
+        """Run an optional foreground stream using pre-reserved producer epochs."""
+
+
+@runtime_checkable
 class BackgroundModelProvider(Protocol):
     """Start/poll/cancel seam for one backend-bound background response."""
 
@@ -647,12 +663,62 @@ class MafOneStepModelProvider:
             )
         return self.parse_agent_response(request, response)
 
+    async def run_one_step_with_observer(
+        self,
+        request: OneStepModelRequest,
+        *,
+        observer: DurableChatExecutionObserver,
+        producers: Sequence[DurableChatModelProducerV1],
+    ) -> ModelDecisionEnvelopeV1:
+        """Stream one foreground attempt without persisting observation metadata."""
+        producer = producers[0] if producers else None
+        if producer is None:
+            return await self.run_one_step(request)
+        observer.model_attempt_started(producer)
+        try:
+            decision = await self.run_one_step_streaming(
+                request,
+                observer=observer,
+                producer=producer,
+            )
+        except asyncio.CancelledError:
+            observer.model_attempt_failed(producer)
+            raise
+        except Exception:
+            observer.model_attempt_failed(producer)
+            raise
+        observer.model_attempt_completed(producer)
+        return decision
+
+    async def run_one_step_streaming(
+        self,
+        request: OneStepModelRequest,
+        *,
+        observer: DurableChatExecutionObserver,
+        producer: DurableChatModelProducerV1,
+        client_kwargs: Mapping[str, object] | None = None,
+    ) -> ModelDecisionEnvelopeV1:
+        """Stream assistant text before parsing the unchanged terminal response."""
+        response = await self.run_agent_response(
+            request,
+            client_kwargs=client_kwargs,
+            stream_observer=observer,
+            model_producer=producer,
+        )
+        if response.continuation_token is not None:
+            raise DurableLoopModelError(
+                "foreground one-step inference returned a continuation token"
+            )
+        return self.parse_agent_response(request, response)
+
     async def run_agent_response(
         self,
         request: OneStepModelRequest,
         *,
         background: bool = False,
         client_kwargs: Mapping[str, object] | None = None,
+        stream_observer: DurableChatExecutionObserver | None = None,
+        model_producer: DurableChatModelProducerV1 | None = None,
     ) -> Any:
         """Run the fresh one-step Agent and return its public response object."""
         _require_target_maf_versions()
@@ -720,18 +786,30 @@ class MafOneStepModelProvider:
             Message.from_dict(_maf_replay_message(message))
             for message in request.working_context.bundle.messages
         ]
-        response = await Agent(
+        agent = Agent(
             client=client,
             instructions=request.instructions,
             tools=tools,
             context_providers=[],
             default_options=options,
-        ).run(
+        )
+        if stream_observer is not None and model_producer is not None:
+            stream = agent.run(
+                messages,
+                session=None,
+                stream=True,
+                client_kwargs=client_kwargs,
+            )
+            async for update in stream:
+                for content in update.contents:
+                    if content.type == "text" and isinstance(content.text, str):
+                        stream_observer.assistant_text(model_producer, content.text)
+            return await stream.get_final_response()
+        return await agent.run(
             messages,
             session=None,
             client_kwargs=client_kwargs,
         )
-        return response
 
     def parse_agent_response(
         self,

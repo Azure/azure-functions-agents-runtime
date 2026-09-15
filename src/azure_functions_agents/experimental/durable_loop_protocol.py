@@ -179,6 +179,13 @@ class SandboxExecutionProfile(StrEnum):
     RETAINED_SESSION = "retained_session"
 
 
+class DurableChatModelMode(StrEnum):
+    """The immutable model delivery mode selected for a chat observation run."""
+
+    FOREGROUND = "foreground"
+    BACKGROUND = "background"
+
+
 class DurableFaultProfile(StrEnum):
     """A bounded deterministic live-qualification fault."""
 
@@ -193,6 +200,41 @@ class DurableFaultProfile(StrEnum):
 
 class _DurableLoopModel(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+
+class DurableChatStartOptionsV1(_DurableLoopModel):
+    """The explicit browser opt-in accepted by the durable start route."""
+
+    schema_version: SchemaVersion = DURABLE_LOOP_SCHEMA_VERSION
+    stream_response: bool
+
+    def freeze(self, *, model_mode: DurableChatModelMode) -> DurableChatRunOptionsV1:
+        """Bind the browser request to the effective delivery mode."""
+        if (
+            self.stream_response
+            and model_mode is DurableChatModelMode.BACKGROUND
+        ):
+            raise ValueError(
+                "chat streaming is not supported for background model mode"
+            )
+        return DurableChatRunOptionsV1(
+            stream_response=self.stream_response,
+            model_mode=model_mode,
+        )
+
+
+class DurableChatRunOptionsV1(_DurableLoopModel):
+    """Frozen observation options persisted only for an opted-in chat run."""
+
+    schema_version: SchemaVersion = DURABLE_LOOP_SCHEMA_VERSION
+    stream_response: bool
+    model_mode: DurableChatModelMode
+
+    @model_validator(mode="after")
+    def validate_streaming_mode(self) -> Self:
+        if self.stream_response and self.model_mode is DurableChatModelMode.BACKGROUND:
+            raise ValueError("chat streaming is not supported for background model mode")
+        return self
 
 
 class DurableLoopBudgetV1(_DurableLoopModel):
@@ -509,6 +551,10 @@ class ToolRequestV1(_DurableLoopModel):
     workspace_ref: ContentRefV1 | None = None
     sandbox_profile: SandboxExecutionProfile = SandboxExecutionProfile.PER_CALL
     fault_profile: DurableFaultProfile = DurableFaultProfile.NONE
+    chat_ui: Literal[True] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     deadline: datetime
 
     @model_validator(mode="after")
@@ -1055,6 +1101,10 @@ class DurableLoopPlanDocumentV1(_DurableLoopModel):
     settings: dict[str, object]
     sandbox_profile: SandboxExecutionProfile = SandboxExecutionProfile.PER_CALL
     fault_profile: DurableFaultProfile = DurableFaultProfile.NONE
+    ui: DurableChatRunOptionsV1 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_plan_json(self) -> Self:

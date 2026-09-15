@@ -1,0 +1,299 @@
+<!doctype html>
+<!--
+THESIS: Keep a durable conversation and its request-specific operating context equally legible without making either compete.
+OWN-WORLD: The runtime's light surfaces, quiet blue actions, system typography, fine borders, and restrained status color.
+STORY: Start or reopen a session, follow the active response, and inspect the run context only when it is useful.
+FIRST VIEWPORT: Sessions sit left, the selected conversation owns the center, and the request inspector is visible at right.
+FORM: Approved Option A request-inspector composition, with an explicit persistent details control and responsive drawers.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Durable Agent Chat</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <svg class="durable-chat-icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <defs>
+      <symbol id="durable-chat-icon-add" viewBox="0 0 24 24">
+        <path d="M12 5v14M5 12h14"/>
+      </symbol>
+      <symbol id="durable-chat-icon-arrow-up" viewBox="0 0 24 24">
+        <path d="M12 19V5m-6 6 6-6 6 6"/>
+      </symbol>
+      <symbol id="durable-chat-icon-box" viewBox="0 0 24 24">
+        <path d="m12 3 9 5-9 5-9-5 9-5Zm-9 5v9l9 5 9-5V8M12 13v9M7.5 5.5l9 5"/>
+      </symbol>
+      <symbol id="durable-chat-icon-chat" viewBox="0 0 24 24">
+        <path d="M20 15a3 3 0 0 1-3 3H9l-5 3V6a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3v9Z"/>
+        <path d="M8 8h8M8 12h5"/>
+      </symbol>
+      <symbol id="durable-chat-icon-close" viewBox="0 0 24 24">
+        <path d="m6 6 12 12M6 18 18 6"/>
+      </symbol>
+      <symbol id="durable-chat-icon-copy" viewBox="0 0 24 24">
+        <rect x="8" y="8" width="12" height="13" rx="2"/>
+        <path d="M15 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3"/>
+      </symbol>
+      <symbol id="durable-chat-icon-edit" viewBox="0 0 24 24">
+        <path d="m4 20 4.4-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z"/>
+        <path d="m13.8 7.2 3 3"/>
+      </symbol>
+      <symbol id="durable-chat-icon-external" viewBox="0 0 24 24">
+        <path d="M14 4h6v6m0-6L10 14M10 5H5a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h13a1 1 0 0 0 1-1v-5"/>
+      </symbol>
+      <symbol id="durable-chat-icon-menu" viewBox="0 0 24 24">
+        <path d="M4 6h16M4 12h16M4 18h16"/>
+      </symbol>
+      <symbol id="durable-chat-icon-panel" viewBox="0 0 24 24">
+        <rect x="3" y="4" width="18" height="16" rx="2"/>
+        <path d="M14 4v16"/>
+      </symbol>
+      <symbol id="durable-chat-icon-sandbox" viewBox="0 0 24 24">
+        <path d="m12 3 9 5-9 5-9-5 9-5Zm-9 5v9l9 5 9-5V8M12 13v9"/>
+      </symbol>
+      <symbol id="durable-chat-icon-check" viewBox="0 0 24 24">
+        <path d="m5 12 4 4L19 6"/>
+      </symbol>
+      <symbol id="durable-chat-icon-clock" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9"/>
+        <path d="M12 7v5l3 2"/>
+      </symbol>
+      <symbol id="durable-chat-icon-warning" viewBox="0 0 24 24">
+        <path d="M12 3 2.8 20h18.4L12 3Z"/>
+        <path d="M12 9v5M12 17v.1"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <main id="durable-chat-shell" class="durable-chat-shell" data-connection-state="unconfigured" data-details-visible="true" data-sidebar-open="false">
+    <header class="durable-chat-shell__header">
+      <div class="durable-chat-brand">
+        <button id="durable-chat-sidebar-toggle" class="durable-chat-icon-button durable-chat-sidebar-toggle" type="button" aria-label="Show sessions" aria-controls="durable-chat-sidebar" aria-expanded="false">
+          <svg class="durable-chat-icon" aria-hidden="true"><use href="#durable-chat-icon-menu"/></svg>
+        </button>
+        <span class="durable-chat-brand__mark">
+          <svg class="durable-chat-icon" aria-hidden="true"><use href="#durable-chat-icon-box"/></svg>
+        </span>
+        <div>
+          <h1>Durable Agent Chat</h1>
+          <p id="durable-chat-deployment-label">Function App</p>
+        </div>
+      </div>
+
+      <div class="durable-chat-shell__actions">
+        <span id="durable-chat-connection-summary" class="durable-chat-connection-summary">
+          <span class="durable-chat-status-dot" aria-hidden="true"></span>
+          <span>Connection not configured</span>
+        </span>
+        <button id="durable-chat-connection-toggle" class="durable-chat-secondary-button" type="button" aria-controls="durable-chat-connection-panel" aria-expanded="false">
+          Connection
+        </button>
+        <button id="durable-chat-details-toggle" class="durable-chat-secondary-button durable-chat-details-toggle" type="button" aria-controls="durable-chat-details-panel" aria-expanded="true" aria-label="Hide request details">
+          <svg class="durable-chat-icon" aria-hidden="true"><use href="#durable-chat-icon-panel"/></svg>
+          <span id="durable-chat-details-toggle-label">Hide details</span>
+        </button>
+      </div>
+    </header>
+
+    <section id="durable-chat-connection-panel" class="durable-chat-connection-panel" aria-label="Connection and authentication" hidden>
+      <div>
+        <h2>Connection</h2>
+        <p id="durable-chat-connection-message">Connect to load this Durable Chat configuration.</p>
+      </div>
+      <form id="durable-chat-auth-form" class="durable-chat-auth-form">
+        <label for="durable-chat-functions-key">Function key</label>
+        <input id="durable-chat-functions-key" name="functionsKey" type="password" autocomplete="off" spellcheck="false" disabled>
+        <button id="durable-chat-auth-submit" class="durable-chat-secondary-button" type="submit" disabled>Use key</button>
+        <button id="durable-chat-auth-clear" class="durable-chat-text-button" type="button" disabled>Clear</button>
+      </form>
+      <p class="durable-chat-connection-panel__note">A supplied key is intended for this page only and is never written by the shell.</p>
+    </section>
+
+    <div class="durable-chat-workbench">
+      <button id="durable-chat-sidebar-scrim" class="durable-chat-sidebar-scrim" type="button" aria-label="Close sessions" hidden></button>
+
+      <aside id="durable-chat-sidebar" class="durable-chat-session-sidebar" aria-label="Sessions">
+        <button id="durable-chat-new-session" class="durable-chat-new-session" type="button" data-action="new-session">
+          <svg class="durable-chat-icon" aria-hidden="true"><use href="#durable-chat-icon-add"/></svg>
+          New session
+        </button>
+
+        <div class="durable-chat-sidebar-heading">
+          <h2>Sessions</h2>
+          <span id="durable-chat-session-count" aria-label="Number of sessions">—</span>
+        </div>
+        <p id="durable-chat-session-list-state" class="durable-chat-sidebar-state">Saved sessions will appear here when history is available.</p>
+        <nav id="durable-chat-session-list" class="durable-chat-session-list" aria-label="Saved sessions"></nav>
+
+        <div id="durable-chat-history-status" class="durable-chat-sidebar-footnote" data-storage-mode="" hidden>
+          <svg class="durable-chat-icon" aria-hidden="true"><use href="#durable-chat-icon-clock"/></svg>
+          <p id="durable-chat-history-status-text"></p>
+        </div>
+      </aside>
+
+      <section class="durable-chat-conversation" aria-label="Conversation">
+        <header class="durable-chat-conversation__header">
+          <div class="durable-chat-conversation__title-row">
+            <h2 id="durable-chat-session-title">No session selected</h2>
+            <span id="durable-chat-session-status" class="durable-chat-status-badge" hidden></span>
+          </div>
+          <div class="durable-chat-session-identity">
+            <span>Session ID</span>
+            <code id="durable-chat-session-id" data-durable-chat-slot="session-id">—</code>
+            <button id="durable-chat-copy-session-id" class="durable-chat-icon-button durable-chat-copy-button" type="button" data-action="copy-identifier" data-copy-target="durable-chat-session-id" disabled aria-label="Copy session ID">
+              <svg class="durable-chat-icon" aria-hidden="true"><use href="#durable-chat-icon-copy"/></svg>
+            </button>
+          </div>
+        </header>
+
+        <div id="durable-chat-connection-notice" class="durable-chat-connection-notice" role="status">
+          <p id="durable-chat-connection-notice-text">Connect to a Function App to load or start a session.</p>
+          <p id="durable-chat-configured-sandbox-group-context" class="durable-chat-configured-sandbox-group" hidden>
+            <span>Configured Sandbox Group</span>
+            <code id="durable-chat-configured-sandbox-group" data-durable-chat-slot="configured-sandbox-group">—</code>
+          </p>
+        </div>
+        <div id="durable-chat-storage-notice" class="durable-chat-storage-notice" role="status" hidden>
+          <p>Browser history status will be shown here when it needs attention.</p>
+        </div>
+
+        <div id="durable-chat-transcript" class="durable-chat-transcript" aria-busy="false">
+          <section id="durable-chat-conversation-loading" class="durable-chat-state-message" hidden>
+            <span class="durable-chat-loading-mark" aria-hidden="true"></span>
+            <p>Loading the selected conversation.</p>
+          </section>
+
+          <section id="durable-chat-empty-state" class="durable-chat-empty-state">
+            <svg class="durable-chat-icon" aria-hidden="true"><use href="#durable-chat-icon-chat"/></svg>
+            <h3>Start a durable conversation</h3>
+            <p>Create a session to send a request and follow its request-specific progress here.</p>
+          </section>
+
+          <section id="durable-chat-conversation-error" class="durable-chat-error-message" role="alert" hidden>
+            <svg class="durable-chat-icon" aria-hidden="true"><use href="#durable-chat-icon-warning"/></svg>
+            <div>
+              <h3>Conversation unavailable</h3>
+              <p id="durable-chat-conversation-error-text">The conversation could not be loaded.</p>
+              <button id="durable-chat-reconnect" class="durable-chat-text-button" type="button" data-action="reconnect">Reconnect</button>
+            </div>
+          </section>
+
+          <div id="durable-chat-request-list" class="durable-chat-request-list"></div>
+        </div>
+
+        <div class="durable-chat-composer-area">
+          <div id="durable-chat-composer-context" class="durable-chat-composer-context">
+            <span id="durable-chat-composer-state">Choose or create a session to compose a request.</span>
+            <button id="durable-chat-cancel-request" class="durable-chat-text-button" type="button" data-action="cancel-request" disabled>Cancel request</button>
+          </div>
+          <form id="durable-chat-composer" class="durable-chat-composer">
+            <label class="durable-chat-sr-only" for="durable-chat-prompt">Message your agent</label>
+            <textarea id="durable-chat-prompt" name="prompt" rows="2" maxlength="262144" placeholder="Choose a session to begin." disabled></textarea>
+            <div class="durable-chat-composer__bottom">
+              <span class="durable-chat-composer__mode">
+                <span class="durable-chat-status-dot" aria-hidden="true"></span>
+                Durable execution
+              </span>
+              <label class="durable-chat-composer__profile" for="durable-chat-sandbox-profile">
+                <span>Sandbox</span>
+                <select id="durable-chat-sandbox-profile" name="sandboxProfile" disabled>
+                  <option value="">Loading sandbox profile…</option>
+                </select>
+              </label>
+              <button id="durable-chat-send" class="durable-chat-send-button" type="submit" disabled aria-label="Send message">
+                <svg class="durable-chat-icon" aria-hidden="true"><use href="#durable-chat-icon-arrow-up"/></svg>
+              </button>
+            </div>
+          </form>
+          <p class="durable-chat-composer-footnote">Enter to send · Shift + Enter for a new line</p>
+        </div>
+      </section>
+
+      <aside id="durable-chat-details-panel" class="durable-chat-details-panel" aria-label="Selected request details">
+        <header class="durable-chat-details-panel__header">
+          <div>
+            <h2 id="durable-chat-details-heading" tabindex="-1">Request details</h2>
+            <span id="durable-chat-details-status" class="durable-chat-status-badge" hidden></span>
+          </div>
+          <p id="durable-chat-details-selection">Select a request to inspect its durable context.</p>
+        </header>
+
+        <section class="durable-chat-detail-section" aria-labelledby="durable-chat-run-heading">
+          <h3 id="durable-chat-run-heading">Run</h3>
+          <div class="durable-chat-identifier">
+            <span>Run ID</span>
+            <code id="durable-chat-run-id" data-durable-chat-slot="run-id">—</code>
+            <button id="durable-chat-copy-run-id" class="durable-chat-icon-button durable-chat-copy-button" type="button" data-action="copy-identifier" data-copy-target="durable-chat-run-id" disabled aria-label="Copy run ID">
+              <svg class="durable-chat-icon" aria-hidden="true"><use href="#durable-chat-icon-copy"/></svg>
+            </button>
+          </div>
+        </section>
+
+        <section class="durable-chat-detail-section" aria-labelledby="durable-chat-sandbox-heading">
+          <h3 id="durable-chat-sandbox-heading">
+            <svg class="durable-chat-icon" aria-hidden="true"><use href="#durable-chat-icon-sandbox"/></svg>
+            Sandbox
+          </h3>
+          <dl class="durable-chat-detail-list">
+            <div>
+              <dt id="durable-chat-sandbox-group-label">Sandbox Group</dt>
+              <dd class="durable-chat-sandbox-identifier">
+                <span id="durable-chat-sandbox-group" data-durable-chat-slot="sandbox-group">—</span>
+                <button id="durable-chat-copy-sandbox-group" class="durable-chat-icon-button durable-chat-copy-button" type="button" data-action="copy-identifier" data-copy-target="durable-chat-sandbox-group" disabled aria-label="Copy sandbox group">
+                  <svg class="durable-chat-icon" aria-hidden="true"><use href="#durable-chat-icon-copy"/></svg>
+                </button>
+              </dd>
+            </div>
+            <div>
+              <dt>Sandbox ID</dt>
+              <dd class="durable-chat-sandbox-identifier">
+                <code id="durable-chat-sandbox-id" data-durable-chat-slot="sandbox-id">—</code>
+                <button id="durable-chat-copy-sandbox-id" class="durable-chat-icon-button durable-chat-copy-button" type="button" data-action="copy-identifier" data-copy-target="durable-chat-sandbox-id" disabled aria-label="Copy sandbox ID">
+                  <svg class="durable-chat-icon" aria-hidden="true"><use href="#durable-chat-icon-copy"/></svg>
+                </button>
+              </dd>
+            </div>
+          </dl>
+          <h4>Sandbox history</h4>
+          <ul id="durable-chat-sandbox-history" class="durable-chat-history-list" data-durable-chat-slot="sandbox-history">
+            <li>Select a request to load its recorded sandbox history.</li>
+          </ul>
+        </section>
+
+        <section class="durable-chat-detail-section" aria-labelledby="durable-chat-progress-heading">
+          <h3 id="durable-chat-progress-heading">Lifecycle and progress</h3>
+          <p id="durable-chat-progress-summary" class="durable-chat-progress-summary">No request selected.</p>
+          <ol id="durable-chat-lifecycle-progress" class="durable-chat-progress-list" data-durable-chat-slot="lifecycle-progress">
+            <li class="durable-chat-progress-list__empty">Request progress will appear here.</li>
+          </ol>
+        </section>
+
+        <section class="durable-chat-detail-section" aria-labelledby="durable-chat-diagnostics-heading">
+          <h3 id="durable-chat-diagnostics-heading">Diagnostics</h3>
+          <div class="durable-chat-diagnostic-links">
+            <a id="durable-chat-open-dts" class="durable-chat-diagnostic-link" aria-disabled="true" tabindex="-1">
+              <span>Open DTS dashboard</span>
+              <svg class="durable-chat-icon" aria-hidden="true"><use href="#durable-chat-icon-external"/></svg>
+            </a>
+            <a id="durable-chat-open-app-insights" class="durable-chat-diagnostic-link" aria-disabled="true" tabindex="-1">
+              <span>Open Application Insights</span>
+              <svg class="durable-chat-icon" aria-hidden="true"><use href="#durable-chat-icon-external"/></svg>
+            </a>
+          </div>
+          <p id="durable-chat-diagnostics-note" class="durable-chat-diagnostics-note">Select a request to view available diagnostic links.</p>
+        </section>
+      </aside>
+    </div>
+
+    <div id="durable-chat-announcements" class="durable-chat-sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+    <noscript>
+      <p class="durable-chat-noscript">This chat shell requires JavaScript to render session and request data safely.</p>
+    </noscript>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

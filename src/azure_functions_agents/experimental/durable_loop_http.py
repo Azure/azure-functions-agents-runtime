@@ -7,8 +7,9 @@ import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -24,12 +25,21 @@ from ..registration._auth import (
 )
 from ..session_state import EntraPrincipal, FunctionAppPrincipal, OwnerPrincipal
 from ..strict_json import assert_json_value, canonical_json_bytes
+from .durable_chat_config import DurableChatSettings, durable_chat_route
+from .durable_chat_journal import (
+    DurableChatInitializationError,
+    get_durable_chat_journal,
+)
+from .durable_chat_protocol import DurableChatRunInitializationV1
 from .durable_loop import create_run_identity
 from .durable_loop_activities import get_protocol_model, put_protocol_model
 from .durable_loop_config import DurableLoopSettings
 from .durable_loop_protocol import (
     CheckpointStateV1,
     ContentRefV1,
+    DurableChatModelMode,
+    DurableChatRunOptionsV1,
+    DurableChatStartOptionsV1,
     DurableFaultProfile,
     DurableLoopPlanDocumentV1,
     DurableLoopRunStatus,
@@ -54,6 +64,7 @@ from .durable_loop_registration import (
     DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME,
     DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
     DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+    _normalize_durable_client_binding_annotation,
     configure_durable_loop_execution_binding,
     get_durable_loop_activity_runtime,
 )
@@ -68,6 +79,14 @@ _SHORT_WAIT_SECONDS = 30.0
 _SHORT_POLL_SECONDS = 0.05
 _MAX_PROMPT_BYTES = 256 * 1024
 _MAX_HUMAN_ANSWER_BYTES = 64 * 1024
+_DURABLE_DATA_HEADERS = {
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+}
+_DURABLE_DATA_HEADER_NAMES = frozenset(
+    header.casefold() for header in _DURABLE_DATA_HEADERS
+)
 
 
 def register_durable_loop_http_routes(  # noqa: PLR0915
@@ -75,6 +94,7 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
     *,
     resolved: ResolvedAgent,
     settings: DurableLoopSettings,
+    chat_settings: DurableChatSettings | None = None,
 ) -> None:
     """Register private start/status/result/cancel/human-input routes."""
     configure_durable_loop_execution_binding(
@@ -84,43 +104,74 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
     auth = resolved.builtin_endpoints.http_auth
     auth_level = resolve_endpoint_auth_level(auth)
 
-    async def start_run(  # noqa: PLR0912
+    async def start_run(  # noqa: PLR0912, PLR0915
         req: Request,
         client: df.DurableOrchestrationClient,
     ) -> Response:
         owner = _authorized_owner(req, auth)
         if isinstance(owner, Response):
             return owner
+        csrf_failure = _same_origin_mutation_failure(req)
+        if csrf_failure is not None:
+            return csrf_failure
         try:
             body = await req.json()
-            payload = _start_payload(body)
+            payload = _start_payload(
+                body,
+                chat_enabled=chat_settings is not None and chat_settings.enabled,
+            )
+            chat_options = _frozen_chat_options(payload, settings)
             session_id = _session_id(req, payload)
             request_id = _request_id(req, payload)
             owner_hash = _owner_hash(owner)
             run_id = _run_id()
-            metadata = await _run_metadata(
-                resolved=resolved,
-                settings=settings,
-                body=payload,
-                owner_hash=owner_hash,
-                session_id=session_id,
-                request_id=request_id,
-                run_id=run_id,
-            )
+            chat_ui = chat_options is not None
+            if chat_ui:
+                admission_now = datetime.now(UTC)
+                admission_expires_at = admission_now + timedelta(
+                    seconds=settings.max_run_wait_seconds
+                )
+                metadata = None
+            else:
+                metadata = await _run_metadata(
+                    resolved=resolved,
+                    settings=settings,
+                    body=payload,
+                    owner_hash=owner_hash,
+                    session_id=session_id,
+                    request_id=request_id,
+                    run_id=run_id,
+                )
+                admission_now = metadata.identity.created_at
+                admission_expires_at = metadata.identity.absolute_deadline
         except ValueError as exc:
             return _json_response({"error": str(exc)}, status_code=400)
 
-        admission = await _run_short_orchestration(
-            client,
-            DURABLE_LOOP_ADMISSION_ORCHESTRATOR_NAME,
-            {
+        if chat_ui:
+            admission_payload: dict[str, object] = {
+                "chat_ui": True,
+                "expires_at": admission_expires_at.isoformat(),
+                "now": admission_now.isoformat(),
+                "request_hash": canonical_hash(payload),
+                "request_id_hash": canonical_hash({"request_id": request_id}),
+                "run_id": run_id,
+                "session_entity_key": _session_entity_key(owner_hash, session_id),
+            }
+        else:
+            if metadata is None:
+                return _json_response({"error": "admission_unavailable"}, status_code=503)
+            admission_payload = {
                 "expires_at": metadata.identity.absolute_deadline.isoformat(),
                 "now": metadata.identity.created_at.isoformat(),
                 "request_hash": metadata.identity.request_hash,
                 "request_id_hash": metadata.identity.request_id_hash,
                 "run_id": run_id,
                 "session_entity_key": metadata.session_entity_key,
-            },
+            }
+        admission = await _run_short_orchestration(
+            client,
+            DURABLE_LOOP_ADMISSION_ORCHESTRATOR_NAME,
+            admission_payload,
         )
         disposition = admission.get("disposition")
         if disposition == "replayed":
@@ -132,7 +183,11 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
                 )
             existing = await client.get_status(existing_run_id)
             if existing is not None:
-                return _accepted_response(existing_run_id, session_id)
+                return _accepted_response(
+                    existing_run_id,
+                    session_id,
+                    chat_ui=chat_ui,
+                )
             lifecycle = admission.get("lifecycle")
             if lifecycle == "completed":
                 response_ref = _optional_content_ref(
@@ -173,22 +228,25 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
                     },
                     status_code=410,
                 )
-            if lifecycle == "running":
+            if lifecycle == "running" and not chat_ui:
                 return _json_response(
                     {
                         "possibly_committed": True,
                         "run_id": existing_run_id,
                         "session_id": session_id,
                         "status": DurableLoopRunStatus.RUNNING.value,
-                        "status_url": f"/api/{_ROUTE_BASE}/{existing_run_id}",
+                        "status_url": (
+                            f"{_durable_route_base()}/{existing_run_id}"
+                        ),
                     },
                     status_code=202,
                 )
             run_id = existing_run_id
-            metadata = replace(
-                metadata,
-                identity=metadata.identity.model_copy(update={"run_id": run_id}),
-            )
+            if metadata is not None:
+                metadata = replace(
+                    metadata,
+                    identity=metadata.identity.model_copy(update={"run_id": run_id}),
+                )
         elif disposition == "conflict":
             return _json_response({"error": "idempotency_conflict"}, status_code=409)
         elif disposition == "busy":
@@ -202,41 +260,62 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
         elif disposition != "admitted":
             return _json_response({"error": "admission_unavailable"}, status_code=503)
 
-        committed_generation = _nonnegative_int(
-            admission.get("committed_generation"),
-            "committed_generation",
-        )
-        try:
-            durable_input = await _persist_run_input(
-                metadata,
-                prompt=str(payload["prompt"]).strip(),
-                committed_context_ref=_optional_content_ref(
-                    admission.get("committed_context_ref")
-                ),
-                committed_generation=committed_generation,
+        if chat_ui:
+            durable_input = await _recover_or_initialize_chat_run(
+                admission=admission,
+                client=client,
+                resolved=resolved,
+                settings=settings,
+                chat_settings=chat_settings,
+                payload=payload,
+                owner_hash=owner_hash,
+                session_id=session_id,
+                request_id=request_id,
+                run_id=run_id,
             )
-        except Exception:
-            logger.exception("durable-loop content persistence failed")
-            await _run_short_orchestration(
-                client,
-                DURABLE_LOOP_CONTROL_ORCHESTRATOR_NAME,
-                {
-                    "operation": "release_admission",
-                    "run_id": run_id,
-                    "session_entity_key": metadata.session_entity_key,
-                },
+            if isinstance(durable_input, Response):
+                return durable_input
+        else:
+            if metadata is None:
+                return _json_response({"error": "admission_unavailable"}, status_code=503)
+            committed_generation = _nonnegative_int(
+                admission.get("committed_generation"),
+                "committed_generation",
             )
-            return _json_response({"error": "content_persistence_failed"}, status_code=503)
+            try:
+                durable_input = await _persist_run_input(
+                    metadata,
+                    prompt=str(payload["prompt"]).strip(),
+                    committed_context_ref=_optional_content_ref(
+                        admission.get("committed_context_ref")
+                    ),
+                    committed_generation=committed_generation,
+                )
+            except Exception:
+                logger.exception("durable-loop content persistence failed")
+                await _run_short_orchestration(
+                    client,
+                    DURABLE_LOOP_CONTROL_ORCHESTRATOR_NAME,
+                    {
+                        "operation": "release_admission",
+                        "run_id": run_id,
+                        "session_entity_key": metadata.session_entity_key,
+                    },
+                )
+                return _json_response(
+                    {"error": "content_persistence_failed"},
+                    status_code=503,
+                )
         try:
             await client.start_new(
-                metadata.identity.orchestration_version,
+                durable_input.identity.orchestration_version,
                 instance_id=run_id,
                 client_input=durable_input.model_dump(mode="json"),
             )
         except Exception:
             logger.exception("durable-loop orchestration start acknowledgement was lost")
             if await client.get_status(run_id) is not None:
-                return _accepted_response(run_id, session_id)
+                return _accepted_response(run_id, session_id, chat_ui=chat_ui)
             return _json_response(
                 {
                     "error": "run_start_acknowledgement_lost",
@@ -245,7 +324,7 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
                 },
                 status_code=202,
             )
-        return _accepted_response(run_id, session_id)
+        return _accepted_response(run_id, session_id, chat_ui=chat_ui)
 
     async def get_status(
         req: Request,
@@ -270,13 +349,13 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
                     "allow_free_text": request.allow_free_text,
                     "choice_count": len(request.choices),
                     "detail_url": (
-                        f"/api/{_ROUTE_BASE}/{status.instance_id}/"
+                        f"{_durable_route_base()}/{status.instance_id}/"
                         f"input/{request.request_id}"
                     ),
                     "expires_at": request.expires_at.isoformat(),
                     "request_id": request.request_id,
                     "respond_url": (
-                        f"/api/{_ROUTE_BASE}/{status.instance_id}/"
+                        f"{_durable_route_base()}/{status.instance_id}/"
                         f"input/{request.request_id}"
                     ),
                     "schema_present": request.response_schema is not None,
@@ -370,6 +449,9 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
         authorized = await _authorized_status(req, client, auth)
         if isinstance(authorized, Response):
             return authorized
+        csrf_failure = _same_origin_mutation_failure(req)
+        if csrf_failure is not None:
+            return csrf_failure
         status, durable_input = authorized
         if _runtime_status_name(status) in {"Completed", "Failed", "Terminated"}:
             return _json_response({"error": "run_terminal"}, status_code=410)
@@ -427,6 +509,9 @@ def register_durable_loop_http_routes(  # noqa: PLR0915
         authorized = await _authorized_status(req, client, auth)
         if isinstance(authorized, Response):
             return authorized
+        csrf_failure = _same_origin_mutation_failure(req)
+        if csrf_failure is not None:
+            return csrf_failure
         status, durable_input = authorized
         custom = status.custom_status
         if not isinstance(custom, Mapping) or custom.get("phase") != "human_wait":
@@ -763,6 +848,10 @@ def _register_route(
 ) -> None:
     handler.__name__ = name
     decorated = app.durable_client_input(client_name="client")(handler)
+    _normalize_durable_client_binding_annotation(
+        decorated,
+        client_name="client",
+    )
     app.route(route=route, methods=methods, auth_level=auth_level)(decorated)
 
 
@@ -782,6 +871,7 @@ async def _run_metadata(
     session_id: str,
     request_id: str,
     run_id: str,
+    now: datetime | None = None,
 ) -> _RunMetadata:
     client_manager = get_client_manager()
     target = client_manager.resolve_inference_target(resolved.model)
@@ -837,6 +927,7 @@ async def _run_metadata(
         policy_hash=catalog.policy_hash,
         settings=settings,
         orchestration_version=orchestration_version,
+        now=now,
         execution_binding_hash=canonical_hash(
             {
                 "catalog_hash": catalog.catalog_hash,
@@ -858,6 +949,7 @@ async def _run_metadata(
         settings=asdict(settings),
         sandbox_profile=sandbox_profile,
         fault_profile=fault_profile,
+        ui=_frozen_chat_options(body, settings),
     )
     return _RunMetadata(
         identity=identity,
@@ -954,6 +1046,264 @@ async def _persist_run_input(
     )
 
 
+async def _recover_or_initialize_chat_run(
+    *,
+    admission: Mapping[str, object],
+    client: df.DurableOrchestrationClient,
+    resolved: ResolvedAgent,
+    settings: DurableLoopSettings,
+    chat_settings: DurableChatSettings | None,
+    payload: Mapping[str, object],
+    owner_hash: str,
+    session_id: str,
+    request_id: str,
+    run_id: str,
+) -> DurableOrchestrationInputV1 | Response:
+    """Return the winner or reclaim only its expired, unstarted UI admission."""
+    if chat_settings is None or not chat_settings.enabled:
+        return _json_response({"error": "durable-chat UI is not enabled"}, status_code=400)
+    journal = get_durable_chat_journal()
+    try:
+        initialization = await journal.load_run_initialization(run_id=run_id)
+        if initialization is None:
+            admitted_at = _receipt_datetime(admission.get("admitted_at"), "admitted_at")
+            expires_at = _receipt_datetime(admission.get("expires_at"), "expires_at")
+            if datetime.now(UTC) >= expires_at:
+                await _reclaim_expired_chat_admission(
+                    client=client,
+                    owner_hash=owner_hash,
+                    payload=payload,
+                    request_id=request_id,
+                    run_id=run_id,
+                    session_id=session_id,
+                )
+                return _expired_chat_initialization_response(run_id)
+            committed_generation = _nonnegative_int(
+                admission.get("committed_generation"),
+                "committed_generation",
+            )
+            metadata = await _run_metadata(
+                resolved=resolved,
+                settings=settings,
+                body=payload,
+                owner_hash=owner_hash,
+                session_id=session_id,
+                request_id=request_id,
+                run_id=run_id,
+                now=admitted_at,
+            )
+            metadata = replace(
+                metadata,
+                identity=metadata.identity.model_copy(
+                    update={
+                        "active_deadline": min(
+                            metadata.identity.active_deadline,
+                            expires_at,
+                        ),
+                        "absolute_deadline": expires_at,
+                    }
+                ),
+            )
+            persisted = await _persist_chat_run_input(
+                metadata,
+                prompt=str(payload["prompt"]).strip(),
+                committed_context_ref=_optional_content_ref(
+                    admission.get("committed_context_ref")
+                ),
+                committed_generation=committed_generation,
+            )
+            ui = _require_chat_options(metadata.plan.ui)
+            initialization = await journal.create_run_initialization_once(
+                initialization=DurableChatRunInitializationV1(
+                    run_id=run_id,
+                    session_id=session_id,
+                    owner_hash=owner_hash,
+                    request_id_hash=metadata.identity.request_id_hash,
+                    request_hash=metadata.identity.request_hash,
+                    plan_ref=persisted.plan_ref,
+                    input_ref=persisted.input_ref,
+                    expires_at=expires_at,
+                    committed_generation=committed_generation,
+                    ui=ui,
+                    created_at=admitted_at,
+                    diagnostics=chat_settings.freeze_diagnostics(
+                        request_started_at=admitted_at,
+                        request_ends_at=expires_at,
+                    ),
+                )
+            )
+        _validate_chat_initialization_binding(
+            initialization,
+            owner_hash=owner_hash,
+            session_id=session_id,
+            request_id=request_id,
+            payload=payload,
+        )
+        if datetime.now(UTC) >= initialization.expires_at.astimezone(UTC):
+            await _reclaim_expired_chat_admission(
+                client=client,
+                owner_hash=owner_hash,
+                payload=payload,
+                request_id=request_id,
+                run_id=run_id,
+                session_id=session_id,
+            )
+            return _expired_chat_initialization_response(run_id)
+        return await _load_initialized_chat_input(initialization)
+    except (DurableChatInitializationError, ValueError):
+        logger.warning(
+            "durable-chat initialization failed: run_id=%s",
+            run_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "durable-chat initialization storage failed: run_id=%s error_type=%s",
+            run_id,
+            type(exc).__name__,
+        )
+    return _json_response(
+        {
+            "error": "chat_initialization_failed",
+            "possibly_committed": True,
+            "run_id": run_id,
+        },
+        status_code=503,
+    )
+
+
+async def _reclaim_expired_chat_admission(
+    *,
+    client: df.DurableOrchestrationClient,
+    owner_hash: str,
+    payload: Mapping[str, object],
+    request_id: str,
+    run_id: str,
+    session_id: str,
+) -> None:
+    receipt = await _run_short_orchestration(
+        client,
+        DURABLE_LOOP_CONTROL_ORCHESTRATOR_NAME,
+        {
+            "now": datetime.now(UTC).isoformat(),
+            "operation": "reclaim_expired_chat_admission",
+            "request_hash": canonical_hash(payload),
+            "request_id_hash": canonical_hash({"request_id": request_id}),
+            "run_id": run_id,
+            "session_entity_key": _session_entity_key(owner_hash, session_id),
+        },
+    )
+    if receipt.get("disposition") not in {"reclaimed", "stale"}:
+        raise DurableChatInitializationError(
+            "durable-chat expired admission could not be reclaimed"
+        )
+
+
+def _expired_chat_initialization_response(run_id: str) -> Response:
+    return _json_response(
+        {
+            "error": "chat_initialization_expired",
+            "possibly_committed": True,
+            "run_id": run_id,
+        },
+        status_code=410,
+    )
+
+
+def _validate_chat_initialization_binding(
+    initialization: DurableChatRunInitializationV1,
+    *,
+    owner_hash: str,
+    session_id: str,
+    request_id: str,
+    payload: Mapping[str, object],
+) -> None:
+    if (
+        initialization.owner_hash != owner_hash
+        or initialization.session_id != session_id
+        or initialization.request_id_hash != canonical_hash({"request_id": request_id})
+        or initialization.request_hash != canonical_hash(payload)
+    ):
+        raise DurableChatInitializationError(
+            "durable-chat initialization does not match the admitted request"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _PersistedChatRun:
+    durable_input: DurableOrchestrationInputV1
+    plan_ref: ContentRefV1
+    input_ref: ContentRefV1
+
+
+async def _persist_chat_run_input(
+    metadata: _RunMetadata,
+    *,
+    prompt: str,
+    committed_context_ref: ContentRefV1 | None,
+    committed_generation: int,
+) -> _PersistedChatRun:
+    """Persist independent plan and input references before chat initialization."""
+    durable_input = await _persist_run_input(
+        metadata,
+        prompt=prompt,
+        committed_context_ref=committed_context_ref,
+        committed_generation=committed_generation,
+    )
+    runtime = get_durable_loop_activity_runtime()
+    plan_ref = await put_protocol_model(
+        runtime.content,
+        kind="durable-chat-plan",
+        model=metadata.plan,
+    )
+    input_ref = await put_protocol_model(
+        runtime.content,
+        kind="durable-chat-input",
+        model=durable_input,
+    )
+    return _PersistedChatRun(
+        durable_input=durable_input,
+        plan_ref=plan_ref,
+        input_ref=input_ref,
+    )
+
+
+async def _load_initialized_chat_input(
+    initialization: DurableChatRunInitializationV1,
+) -> DurableOrchestrationInputV1:
+    """Rehydrate only the winner's exact input and plan references."""
+    runtime = get_durable_loop_activity_runtime()
+    durable_input = await get_protocol_model(
+        runtime.content,
+        initialization.input_ref,
+        DurableOrchestrationInputV1,
+    )
+    plan = await get_protocol_model(
+        runtime.content,
+        initialization.plan_ref,
+        DurableLoopPlanDocumentV1,
+    )
+    document = await get_protocol_model(
+        runtime.content,
+        durable_input.run_document_ref,
+        DurableRunDocumentV1,
+    )
+    if (
+        durable_input.identity.run_id != initialization.run_id
+        or durable_input.identity.session_id != initialization.session_id
+        or durable_input.identity.owner_hash != initialization.owner_hash
+        or durable_input.identity.request_hash != initialization.request_hash
+        or durable_input.identity.request_id_hash != initialization.request_id_hash
+        or durable_input.committed_session_generation
+        != initialization.committed_generation
+        or plan != document.plan
+        or plan.ui != initialization.ui
+    ):
+        raise DurableChatInitializationError(
+            "durable-chat initialization references do not match"
+        )
+    return durable_input
+
+
 async def _authorized_status(
     req: Request,
     client: Any,
@@ -1029,7 +1379,11 @@ def _validate_answer(request: HumanInputRequestV1, answer: object) -> None:
         raise ValueError("human answer is not allowed")
 
 
-def _start_payload(body: object) -> Mapping[str, object]:
+def _start_payload(
+    body: object,
+    *,
+    chat_enabled: bool = False,
+) -> Mapping[str, object]:
     if not isinstance(body, Mapping):
         raise ValueError("request body must be a JSON object")
     prompt = body.get("prompt")
@@ -1037,7 +1391,56 @@ def _start_payload(body: object) -> Mapping[str, object]:
         raise ValueError("prompt is required")
     if len(prompt.encode("utf-8")) > _MAX_PROMPT_BYTES:
         raise ValueError("prompt exceeds the byte limit")
-    return body
+    if "ui" not in body:
+        return body
+    if not chat_enabled:
+        raise ValueError("durable-chat UI is not enabled")
+    try:
+        ui = DurableChatStartOptionsV1.model_validate(body["ui"])
+    except ValueError as exc:
+        raise ValueError("ui is invalid") from exc
+    normalized = dict(body)
+    normalized["ui"] = ui.model_dump(mode="json")
+    return normalized
+
+
+def _frozen_chat_options(
+    body: Mapping[str, object],
+    settings: DurableLoopSettings,
+) -> DurableChatRunOptionsV1 | None:
+    if "ui" not in body:
+        return None
+    ui = DurableChatStartOptionsV1.model_validate(body["ui"])
+    model_mode = (
+        DurableChatModelMode.BACKGROUND
+        if settings.background_model_enabled
+        else DurableChatModelMode.FOREGROUND
+    )
+    return ui.freeze(model_mode=model_mode)
+
+
+def _session_entity_key(owner_hash: str, session_id: str) -> str:
+    return canonical_hash({"owner_hash": owner_hash, "session_id": session_id})
+
+
+def _receipt_datetime(value: object, field_name: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} is invalid")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"{field_name} is invalid") from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field_name} is invalid")
+    return parsed.astimezone(UTC)
+
+
+def _require_chat_options(
+    options: DurableChatRunOptionsV1 | None,
+) -> DurableChatRunOptionsV1:
+    if options is None:
+        raise ValueError("durable-chat initialization has no UI options")
+    return options
 
 
 def _sandbox_profile(
@@ -1086,6 +1489,67 @@ def _authorized_owner(req: Request, auth: EndpointAuthConfig) -> OwnerPrincipal 
     if isinstance(owner, AuthError):
         return _json_response({"error": owner.message}, status_code=owner.status_code)
     return owner
+
+
+def _same_origin_mutation_failure(req: Request) -> Response | None:
+    """Reject browser-origin mutations that do not target this exact origin."""
+    origin = req.headers.get("Origin")
+    if origin is None:
+        return None
+    # The Functions streaming proxy overwrites forwarded headers and replaces Host.
+    host = req.headers.get("X-Forwarded-Host", req.headers.get("Host"))
+    if not host or "," in host or any(character.isspace() for character in host):
+        return _json_response({"error": "cross_origin_request_rejected"}, status_code=403)
+    forwarded = req.headers.get("X-Forwarded-Proto")
+    expected_scheme = (
+        forwarded.strip().casefold()
+        if forwarded
+        else _request_scheme(req)
+    )
+    try:
+        parsed = urlsplit(origin)
+        expected_host = urlsplit(f"//{host}")
+        origin_port = parsed.port
+        expected_port = expected_host.port
+    except ValueError:
+        return _json_response({"error": "cross_origin_request_rejected"}, status_code=403)
+    if (
+        expected_scheme not in {"http", "https"}
+        or parsed.scheme not in {"http", "https"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or expected_host.hostname is None
+        or expected_host.username is not None
+        or expected_host.password is not None
+        or expected_host.path
+        or expected_host.query
+        or expected_host.fragment
+        or parsed.hostname is None
+        or parsed.hostname.casefold() != expected_host.hostname.casefold()
+        or _effective_port(parsed.scheme, origin_port)
+        != _effective_port(expected_scheme, expected_port)
+    ):
+        return _json_response({"error": "cross_origin_request_rejected"}, status_code=403)
+    if parsed.scheme.casefold() != expected_scheme:
+        return _json_response({"error": "cross_origin_request_rejected"}, status_code=403)
+    return None
+
+
+def _request_scheme(req: Request) -> str:
+    url = getattr(req, "url", None)
+    scheme = getattr(url, "scheme", None)
+    if isinstance(scheme, str) and scheme.casefold() in {"http", "https"}:
+        return scheme.casefold()
+    return "https"
+
+
+def _effective_port(scheme: str, port: int | None) -> int:
+    if port is not None:
+        return port
+    return 443 if scheme.casefold() == "https" else 80
 
 
 def _owner_hash(owner: OwnerPrincipal) -> str:
@@ -1227,18 +1691,38 @@ def _nonnegative_int(value: object, field_name: str) -> int:
     return value
 
 
-def _accepted_response(run_id: str, session_id: str) -> Response:
+def _durable_route_base() -> str:
+    return durable_chat_route(f"/{_ROUTE_BASE}")
+
+
+def _accepted_response(
+    run_id: str,
+    session_id: str,
+    *,
+    chat_ui: bool = False,
+    possibly_committed: bool = False,
+    status: DurableLoopRunStatus = DurableLoopRunStatus.PENDING,
+) -> Response:
+    base = _durable_route_base()
+    body: dict[str, object] = {
+        "cancel_url": f"{base}/{run_id}/cancel",
+        "result_url": f"{base}/{run_id}/result",
+        "run_id": run_id,
+        "session_id": session_id,
+        "status": status.value,
+        "status_url": f"{base}/{run_id}",
+    }
+    if possibly_committed:
+        body["possibly_committed"] = True
+    headers = {"x-ms-session-id": session_id}
+    if chat_ui:
+        headers["Cache-Control"] = "no-store"
+        headers["Referrer-Policy"] = "no-referrer"
+        headers["X-Content-Type-Options"] = "nosniff"
     return _json_response(
-        {
-            "cancel_url": f"/api/{_ROUTE_BASE}/{run_id}/cancel",
-            "result_url": f"/api/{_ROUTE_BASE}/{run_id}/result",
-            "run_id": run_id,
-            "session_id": session_id,
-            "status": DurableLoopRunStatus.PENDING.value,
-            "status_url": f"/api/{_ROUTE_BASE}/{run_id}",
-        },
+        body,
         status_code=202,
-        headers={"x-ms-session-id": session_id},
+        headers=headers,
     )
 
 
@@ -1248,9 +1732,15 @@ def _json_response(
     status_code: int = 200,
     headers: Mapping[str, str] | None = None,
 ) -> Response:
+    response_headers = {
+        name: value
+        for name, value in (headers or {}).items()
+        if name.casefold() not in _DURABLE_DATA_HEADER_NAMES
+    }
+    response_headers.update(_DURABLE_DATA_HEADERS)
     return Response(
         content=json.dumps(body, ensure_ascii=True, separators=(",", ":")),
         status_code=status_code,
         media_type="application/json",
-        headers=dict(headers or {}),
+        headers=response_headers,
     )

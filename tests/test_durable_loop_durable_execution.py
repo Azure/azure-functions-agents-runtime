@@ -11,6 +11,22 @@ import azure.durable_functions as df
 import pytest
 
 from azure_functions_agents import app as app_module
+from azure_functions_agents.experimental.durable_chat_execution_observer import (
+    current_durable_chat_execution_context,
+)
+from azure_functions_agents.experimental.durable_chat_journal import (
+    DurableChatJournal,
+    reset_durable_chat_journal_factory,
+    set_durable_chat_journal_factory,
+)
+from azure_functions_agents.experimental.durable_chat_protocol import (
+    DurableChatAssistantTextObservationV1,
+    DurableChatRunInitializationV1,
+    DurableChatSandboxObservationEventV1,
+    DurableChatSandboxState,
+    DurableChatToolObservationV1,
+    DurableChatToolState,
+)
 from azure_functions_agents.experimental.durable_loop import create_run_identity
 from azure_functions_agents.experimental.durable_loop_activities import (
     DeterministicContextCompactor,
@@ -29,8 +45,12 @@ from azure_functions_agents.experimental.durable_loop_config import (
 from azure_functions_agents.experimental.durable_loop_protocol import (
     DURABLE_LOOP_ORCHESTRATOR_V1_NAME,
     DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+    BackgroundStartDisposition,
+    BackgroundStartResultV1,
     CheckpointStateV1,
     ContentRefV1,
+    DurableChatModelMode,
+    DurableChatRunOptionsV1,
     DurableFaultProfile,
     DurableLoopPlanDocumentV1,
     DurableLoopRunStatus,
@@ -80,10 +100,18 @@ from azure_functions_agents.experimental.durable_loop_registration import (
     reset_durable_loop_activity_runtime_factory,
     set_durable_loop_activity_runtime_factory,
 )
+from azure_functions_agents.experimental.durable_loop_sandbox import (
+    DurableAcaSandboxLane,
+)
 from azure_functions_agents.experimental.durable_loop_tools import (
     DurableToolRegistry,
 )
+from azure_functions_agents.experimental.hybrid_config import HybridSandboxSettings
 from azure_functions_agents.strict_json import canonical_json_bytes
+from tests.doubles.durable_chat_test_sandbox import (
+    TEST_SANDBOX_GROUP,
+    DurableChatTestSandboxWorld,
+)
 
 _HASH = "a" * 64
 
@@ -226,6 +254,8 @@ async def _run_input(
     orchestration_version: str = DURABLE_LOOP_ORCHESTRATOR_V1_NAME,
     fault_profile: DurableFaultProfile = DurableFaultProfile.NONE,
     model_settings: dict[str, object] | None = None,
+    ui: DurableChatRunOptionsV1 | None = None,
+    now: datetime | None = None,
 ) -> DurableOrchestrationInputV1:
     settings = _settings()
     identity = create_run_identity(
@@ -242,7 +272,7 @@ async def _run_input(
         policy_hash=catalog.policy_hash,
         settings=settings,
         orchestration_version=orchestration_version,
-        now=datetime(2026, 9, 4, tzinfo=UTC),
+        now=now if now is not None else datetime(2026, 9, 4, tzinfo=UTC),
     )
     messages: tuple[dict[str, object], ...] = (
         {
@@ -290,6 +320,7 @@ async def _run_input(
             api_version="responses-v1",
             settings=asdict(settings),
             fault_profile=fault_profile,
+            ui=ui,
         ),
         checkpoint=checkpoint,
     )
@@ -304,6 +335,48 @@ async def _run_input(
         session_entity_key="e" * 64,
         working_context_bytes=len(canonical_json_bytes(messages)),
     )
+
+
+async def _initialize_chat_journal(
+    journal: DurableChatJournal,
+    run_input: DurableOrchestrationInputV1,
+    ui: DurableChatRunOptionsV1,
+) -> None:
+    identity = run_input.identity
+    now = datetime.now(UTC)
+    await journal.create_run_initialization_once(
+        initialization=DurableChatRunInitializationV1(
+            run_id=identity.run_id,
+            session_id=identity.session_id,
+            owner_hash=identity.owner_hash,
+            request_id_hash=identity.request_id_hash,
+            request_hash=identity.request_hash,
+            plan_ref=run_input.run_document_ref,
+            input_ref=run_input.run_document_ref,
+            expires_at=now + timedelta(hours=1),
+            committed_generation=0,
+            ui=ui,
+            created_at=now,
+        )
+    )
+
+
+async def _model_tool_request(
+    app: df.DFApp,
+    run_input: DurableOrchestrationInputV1,
+    content: InMemoryDurableContentStore,
+) -> tuple[ToolRequestV1, ContentRefV1]:
+    model_activity = _registered(app, DURABLE_LOOP_MODEL_ACTIVITY_NAME)
+    raw_model = await model_activity(
+        {"run_document_ref": run_input.run_document_ref.model_dump(mode="json")}
+    )
+    model_result = ModelStepActivityResultV1.model_validate_json(
+        canonical_json_bytes(raw_model)
+    )
+    assert model_result.tool_calls
+    request_ref = model_result.tool_calls[0].request_ref
+    request = await get_protocol_model(content, request_ref, ToolRequestV1)
+    return request, request_ref
 
 
 def _drive_to_completion(generator: Any) -> object:
@@ -408,6 +481,274 @@ async def test_model_activity_returns_only_refs_and_preserves_full_audit(
     )
     assert len(document.checkpoint.audit_bundle.messages) == 2
     assert document.checkpoint.audit_head_hash == document.checkpoint.audit_bundle.bundle_hash
+
+
+@pytest.mark.asyncio
+async def test_non_chat_model_activity_skips_chat_observer_setup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_if_chat_observer_is_initialized(**_kwargs: object) -> None:
+        raise AssertionError("legacy model activity initialized durable-chat observer")
+
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.durable_loop_registration."
+        "_start_durable_chat_observer",
+        fail_if_chat_observer_is_initialized,
+    )
+    registry = DurableToolRegistry()
+    catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
+    content = InMemoryDurableContentStore()
+    runtime = DurableLoopActivityRuntime(
+        model=ScriptedOneStepModelProvider([ScriptedModelStep(final_text="done")]),
+        tools=registry.build_dispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=content,
+    )
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    run_input = await _run_input(content, catalog)
+
+    try:
+        activity = _registered(app, DURABLE_LOOP_MODEL_ACTIVITY_NAME)
+        raw_result = await activity(
+            {
+                "run_document_ref": run_input.run_document_ref.model_dump(
+                    mode="json"
+                )
+            }
+        )
+    finally:
+        reset_durable_loop_activity_runtime_factory()
+
+    assert ModelStepActivityResultV1.model_validate_json(
+        canonical_json_bytes(raw_result)
+    ).final_response_ref is not None
+
+
+@pytest.mark.asyncio
+async def test_foreground_chat_model_activity_reserves_once_and_publishes_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StreamingProvider:
+        def __init__(self) -> None:
+            self.producers = ()
+
+        async def run_one_step(self, _request):
+            raise AssertionError("foreground chat did not use the streaming adapter")
+
+        async def run_one_step_with_observer(
+            self,
+            request,
+            *,
+            observer,
+            producers,
+        ):
+            self.producers = tuple(producers)
+            observer.model_attempt_started(producers[0])
+            observer.assistant_text(producers[0], "streamed first")
+            observer.model_attempt_completed(producers[0])
+            return ScriptedModelStep(final_text="terminal answer").build(request)
+
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    registry = DurableToolRegistry()
+    catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
+    content = InMemoryDurableContentStore()
+    journal = DurableChatJournal(
+        content=content,
+        documents=InMemoryDurableKeyedDocumentStore(),
+    )
+    provider = StreamingProvider()
+    runtime = DurableLoopActivityRuntime(
+        model=provider,
+        tools=registry.build_dispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=content,
+    )
+    ui = DurableChatRunOptionsV1(
+        stream_response=True,
+        model_mode=DurableChatModelMode.FOREGROUND,
+    )
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    set_durable_chat_journal_factory(lambda: journal)
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    run_input = await _run_input(content, catalog, ui=ui)
+    await _initialize_chat_journal(journal, run_input, ui)
+
+    try:
+        activity = _registered(app, DURABLE_LOOP_MODEL_ACTIVITY_NAME)
+        raw_result = await activity(
+            {
+                "run_document_ref": run_input.run_document_ref.model_dump(
+                    mode="json"
+                )
+            }
+        )
+    finally:
+        reset_durable_loop_activity_runtime_factory()
+        reset_durable_chat_journal_factory()
+
+    result = ModelStepActivityResultV1.model_validate_json(
+        canonical_json_bytes(raw_result)
+    )
+    replay = await journal.replay(run_id="run-1", after_sequence=0, limit=64)
+    assert result.final_response_ref is not None
+    assert len(provider.producers) == 3
+    assert any(
+        isinstance(event.event, DurableChatAssistantTextObservationV1)
+        and event.event.delta == "streamed first"
+        for event in replay.events
+    )
+
+
+@pytest.mark.asyncio
+async def test_background_chat_model_activity_is_status_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnexpectedForegroundProvider:
+        async def run_one_step(self, _request):
+            raise AssertionError("background chat invoked the foreground provider")
+
+    class BackgroundProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def start(self, request):
+            self.calls += 1
+            return BackgroundStartResultV1(
+                disposition=BackgroundStartDisposition.ACCEPTED,
+                operation=ModelOperationV1(
+                    operation_key="d" * 64,
+                    run_id=request.identity.run_id,
+                    step_index=request.step_index,
+                    status=ModelOperationStatus.QUEUED,
+                    backend_binding_hash="e" * 64,
+                    deployment_hash=request.identity.deployment_hash,
+                    deadline=request.effective_active_deadline
+                    or request.identity.active_deadline,
+                ),
+            )
+
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    registry = DurableToolRegistry()
+    catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
+    content = InMemoryDurableContentStore()
+    journal = DurableChatJournal(
+        content=content,
+        documents=InMemoryDurableKeyedDocumentStore(),
+    )
+    background = BackgroundProvider()
+    runtime = DurableLoopActivityRuntime(
+        model=UnexpectedForegroundProvider(),
+        tools=registry.build_dispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=content,
+        background_model=background,
+    )
+    ui = DurableChatRunOptionsV1(
+        stream_response=False,
+        model_mode=DurableChatModelMode.BACKGROUND,
+    )
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    set_durable_chat_journal_factory(lambda: journal)
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    run_input = await _run_input(content, catalog, ui=ui)
+    await _initialize_chat_journal(journal, run_input, ui)
+
+    try:
+        activity = _registered(app, DURABLE_LOOP_MODEL_ACTIVITY_NAME)
+        raw_result = await activity(
+            {
+                "run_document_ref": run_input.run_document_ref.model_dump(
+                    mode="json"
+                )
+            }
+        )
+    finally:
+        reset_durable_loop_activity_runtime_factory()
+        reset_durable_chat_journal_factory()
+
+    result = ModelStepActivityResultV1.model_validate_json(
+        canonical_json_bytes(raw_result)
+    )
+    replay = await journal.replay(run_id="run-1", after_sequence=0, limit=64)
+    assert background.calls == 1
+    assert result.background_operation_ref is not None
+    assert not any(
+        isinstance(event.event, DurableChatAssistantTextObservationV1)
+        for event in replay.events
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_model_persists_tool_observer_opt_in_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_observer(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.durable_loop_registration."
+        "_start_durable_chat_observer",
+        no_observer,
+    )
+    registry = DurableToolRegistry()
+    descriptor = FrozenToolDescriptorV1(
+        name="lookup",
+        description="Lookup.",
+        parameters={"additionalProperties": True, "type": "object"},
+        provenance=ToolProvenance.REMOTE,
+        behavior=ToolBehavior.READ_ONLY,
+    )
+    registry.register(descriptor, lambda _arguments, _call_key: {"ok": True})
+    catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
+    content = InMemoryDurableContentStore()
+    runtime = DurableLoopActivityRuntime(
+        model=ScriptedOneStepModelProvider(
+            [ScriptedModelStep(calls=(("call-1", "lookup", {}),))]
+        ),
+        tools=registry.build_dispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=content,
+    )
+    ui = DurableChatRunOptionsV1(
+        stream_response=False,
+        model_mode=DurableChatModelMode.FOREGROUND,
+    )
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    run_input = await _run_input(content, catalog, ui=ui)
+
+    try:
+        activity = _registered(app, DURABLE_LOOP_MODEL_ACTIVITY_NAME)
+        raw_result = await activity(
+            {
+                "run_document_ref": run_input.run_document_ref.model_dump(
+                    mode="json"
+                )
+            }
+        )
+    finally:
+        reset_durable_loop_activity_runtime_factory()
+
+    result = ModelStepActivityResultV1.model_validate_json(
+        canonical_json_bytes(raw_result)
+    )
+    request = await get_protocol_model(
+        content,
+        result.tool_calls[0].request_ref,
+        ToolRequestV1,
+    )
+    assert request.chat_ui is True
 
 
 @pytest.mark.asyncio
@@ -751,6 +1092,550 @@ async def test_registered_tool_activity_enforces_configured_payload_limits(
     assert result_result.error is not None
     assert result_result.error.code == "tool_result_too_large"
     assert dispatcher.calls == ["result-limit"]
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_observer_starts_only_for_dispatched_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecordingObserver:
+        def __init__(self) -> None:
+            self.states: list[ToolResultStatus | str] = []
+
+        def run_status(self, **_kwargs: object) -> None:
+            pass
+
+        def tool_started(self, _request: ToolRequestV1) -> None:
+            self.states.append("started")
+
+        def tool_finished(
+            self,
+            _request: ToolRequestV1,
+            status: ToolResultStatus,
+        ) -> None:
+            self.states.append(status)
+
+        async def drain(self, **_kwargs: object) -> None:
+            return None
+
+    class UnexpectedDispatcher:
+        async def dispatch(self, _request: ToolRequestV1) -> ToolResultV1:
+            raise AssertionError("oversized request reached the tool dispatcher")
+
+    observer = RecordingObserver()
+
+    async def start_observer(**_kwargs: object) -> RecordingObserver:
+        return observer
+
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.durable_loop_registration."
+        "_start_durable_chat_observer",
+        start_observer,
+    )
+    content = InMemoryDurableContentStore()
+    runtime = DurableLoopActivityRuntime(
+        model=ScriptedOneStepModelProvider([]),
+        tools=UnexpectedDispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=content,
+    )
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    arguments = {"value": "x" * 1100}
+    request_hash = tool_request_hash(
+        tool_name="argument-limit",
+        arguments=arguments,
+        behavior=ToolBehavior.READ_ONLY,
+        provenance=ToolProvenance.REMOTE,
+        argument_byte_limit=1024,
+        result_byte_limit=2048,
+        policy_hash=_HASH,
+        catalog_hash="b" * 64,
+        package_hash="c" * 64,
+    )
+    request = ToolRequestV1(
+        run_id="run-1",
+        session_id="session-1",
+        step_index=0,
+        call_ordinal=0,
+        provider_call_id="argument-limit-call",
+        call_key="1" * 64,
+        tool_name="argument-limit",
+        provenance=ToolProvenance.REMOTE,
+        behavior=ToolBehavior.READ_ONLY,
+        arguments=arguments,
+        argument_byte_limit=1024,
+        result_byte_limit=2048,
+        request_hash=request_hash,
+        policy_hash=_HASH,
+        catalog_hash="b" * 64,
+        package_hash="c" * 64,
+        chat_ui=True,
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    request_ref = await put_protocol_model(
+        content,
+        kind="tool-request",
+        model=request,
+    )
+
+    try:
+        activity = _registered(app, DURABLE_LOOP_TOOL_ACTIVITY_NAME)
+        await activity({"request_ref": request_ref.model_dump(mode="json")})
+    finally:
+        reset_durable_loop_activity_runtime_factory()
+
+    assert observer.states == [ToolResultStatus.FAILED]
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_activity_publishes_actual_sandbox_history_to_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    monkeypatch.setenv(
+        "WEBSITE_OWNER_NAME",
+        "00000000-0000-0000-0000-000000000001+durable-chat-observer-test",
+    )
+    monkeypatch.setenv("WEBSITE_SITE_NAME", "durable-chat-observer-test")
+    monkeypatch.setenv("WEBSITE_SLOT_NAME", "Production")
+    content = InMemoryDurableContentStore()
+    receipts = InMemoryDurableKeyedDocumentStore()
+    journal = DurableChatJournal(content=content, documents=receipts)
+    world = DurableChatTestSandboxWorld()
+    sandbox = DurableAcaSandboxLane(
+        settings=HybridSandboxSettings(
+            group_resource_id=TEST_SANDBOX_GROUP,
+            region="westus2",
+            allowed_hosts=(),
+            sandbox_disk="python-3.13",
+            create_timeout_seconds=10,
+            ready_timeout_seconds=10,
+            drain_timeout_seconds=1,
+            orphan_age_seconds=1200,
+        ),
+        loop_settings=DurableLoopSettings(),
+        content=content,
+        receipts=receipts,
+        provider_factory=world.open_provider,
+        package_factory=world.package,
+    )
+    arguments = {"nonce": "journal-observation", "step": 1}
+    registry = DurableToolRegistry()
+    registry.register(
+        FrozenToolDescriptorV1(
+            name="append_note",
+            description="Append a note.",
+            parameters={"additionalProperties": False, "type": "object"},
+            provenance=ToolProvenance.LOCAL,
+            behavior=ToolBehavior.MUTATING,
+        ),
+        lambda _arguments, _call_key: {"unexpected": True},
+    )
+    catalog = registry.catalog(policy_hash=_HASH, package_hash="f" * 64)
+    runtime = DurableLoopActivityRuntime(
+        model=ScriptedOneStepModelProvider(
+            [
+                ScriptedModelStep(
+                    calls=(("local-sandbox-call", "append_note", arguments),)
+                )
+            ]
+        ),
+        tools=sandbox,
+        compactor=DeterministicContextCompactor(),
+        content=content,
+    )
+    ui = DurableChatRunOptionsV1(
+        stream_response=False,
+        model_mode=DurableChatModelMode.FOREGROUND,
+    )
+    # The real sandbox lane checks wall-clock expiry, unlike the replay doubles.
+    run_input = await _run_input(content, catalog, ui=ui, now=datetime.now(UTC))
+    identity = run_input.identity
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    set_durable_chat_journal_factory(lambda: journal)
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    await _initialize_chat_journal(journal, run_input, ui)
+
+    try:
+        request, request_ref = await _model_tool_request(app, run_input, content)
+        assert request.chat_ui is True
+        assert request.request_hash != identity.request_hash
+        tool_activity = _registered(app, DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME)
+        raw_result = await tool_activity(
+            {"request_ref": request_ref.model_dump(mode="json")}
+        )
+    finally:
+        reset_durable_loop_activity_runtime_factory()
+        reset_durable_chat_journal_factory()
+
+    result = ToolResultRefV1.model_validate_json(canonical_json_bytes(raw_result))
+    replay = await journal.replay(run_id=identity.run_id, after_sequence=0, limit=64)
+    tool_states = [
+        event.event.progress.state
+        for event in replay.events
+        if isinstance(event.event, DurableChatToolObservationV1)
+    ]
+    sandbox_observations = [
+        event.event.observation
+        for event in replay.events
+        if isinstance(event.event, DurableChatSandboxObservationEventV1)
+    ]
+
+    assert result.status is ToolResultStatus.SUCCEEDED
+    assert tool_states == [
+        DurableChatToolState.STARTED,
+        DurableChatToolState.SUCCEEDED,
+    ]
+    assert [observation.state for observation in sandbox_observations] == [
+        DurableChatSandboxState.NOT_ALLOCATED,
+        DurableChatSandboxState.EXECUTING,
+        DurableChatSandboxState.DELETE_REQUESTED,
+        DurableChatSandboxState.CONFIRMED_DELETED,
+    ]
+    physical_sandbox_id = sandbox_observations[1].sandbox_id
+    assert physical_sandbox_id is not None
+    assert physical_sandbox_id.startswith("e2e-sandbox-")
+    for observation in sandbox_observations[1:]:
+        assert observation.sandbox_group_resource_id == TEST_SANDBOX_GROUP
+        assert observation.sandbox_id == physical_sandbox_id
+        assert observation.sandbox_generation == 1
+        assert observation.producer.call_key == request.call_key
+
+    _assert_sandbox_world_summary(
+        world,
+        physical_sandbox_id=physical_sandbox_id,
+        request=request,
+    )
+
+
+def _assert_sandbox_world_summary(
+    world: DurableChatTestSandboxWorld,
+    *,
+    physical_sandbox_id: str,
+    request: ToolRequestV1,
+) -> None:
+    physical_summaries = [
+        summary
+        for summary in world.summaries()
+        if summary["sandbox_id"] == physical_sandbox_id
+    ]
+
+    assert physical_summaries == [
+        {
+            "sandbox_id": physical_sandbox_id,
+            "sandbox_group_resource_id": TEST_SANDBOX_GROUP,
+            "delete_calls": 1,
+            "invocations": [
+                {
+                    "call_key": request.call_key,
+                    "nonce": "journal-observation",
+                    "step": 1,
+                }
+            ],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chat_cleanup_activity_starts_and_drains_observer_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CleanupProbe:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, SandboxExecutionProfile]] = []
+
+        async def dispatch(self, _request: ToolRequestV1) -> ToolResultV1:
+            raise AssertionError("cleanup test must not dispatch a tool")
+
+        async def cleanup(
+            self,
+            *,
+            run_id: str,
+            session_id: str,
+            sandbox_profile: SandboxExecutionProfile,
+            fault_profile: DurableFaultProfile,
+        ) -> None:
+            del fault_profile
+            context = current_durable_chat_execution_context()
+            assert context is not None
+            self.calls.append((run_id, session_id, sandbox_profile))
+            context.observer.retained_sandbox(
+                call_key="1" * 64,
+                step_index=2,
+                tool_name="append_note",
+                state=DurableChatSandboxState.DELETE_REQUESTED,
+                sandbox_group_resource_id=TEST_SANDBOX_GROUP,
+                sandbox_id="e2e-sandbox-retained",
+                sandbox_generation=1,
+            )
+            context.observer.retained_sandbox(
+                call_key="1" * 64,
+                step_index=2,
+                tool_name="append_note",
+                state=DurableChatSandboxState.CONFIRMED_DELETED,
+                sandbox_group_resource_id=TEST_SANDBOX_GROUP,
+                sandbox_id="e2e-sandbox-retained",
+                sandbox_generation=1,
+            )
+
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    content = InMemoryDurableContentStore()
+    receipts = InMemoryDurableKeyedDocumentStore()
+    journal = DurableChatJournal(content=content, documents=receipts)
+    probe = CleanupProbe()
+    runtime = DurableLoopActivityRuntime(
+        model=ScriptedOneStepModelProvider([]),
+        tools=probe,
+        compactor=DeterministicContextCompactor(),
+        content=content,
+    )
+    catalog = DurableToolRegistry().catalog(
+        policy_hash=_HASH,
+        package_hash="f" * 64,
+    )
+    ui = DurableChatRunOptionsV1(
+        stream_response=False,
+        model_mode=DurableChatModelMode.FOREGROUND,
+    )
+    run_input = await _run_input(content, catalog, ui=ui)
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    set_durable_chat_journal_factory(lambda: journal)
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    await _initialize_chat_journal(journal, run_input, ui)
+
+    try:
+        activity = _registered(app, DURABLE_LOOP_CLEANUP_ACTIVITY_NAME)
+        result = await activity(
+            {
+                "fault_profile": DurableFaultProfile.NONE.value,
+                "run_id": run_input.identity.run_id,
+                "sandbox_profile": SandboxExecutionProfile.RETAINED_SESSION.value,
+                "session_id": run_input.identity.session_id,
+            }
+        )
+    finally:
+        reset_durable_loop_activity_runtime_factory()
+        reset_durable_chat_journal_factory()
+
+    replay = await journal.replay(
+        run_id=run_input.identity.run_id,
+        after_sequence=0,
+        limit=64,
+    )
+    observations = [
+        event.event.observation
+        for event in replay.events
+        if isinstance(event.event, DurableChatSandboxObservationEventV1)
+    ]
+    assert result == {"cleaned": True}
+    assert probe.calls == [
+        (
+            run_input.identity.run_id,
+            run_input.identity.session_id,
+            SandboxExecutionProfile.RETAINED_SESSION,
+        )
+    ]
+    assert [observation.state for observation in observations] == [
+        DurableChatSandboxState.DELETE_REQUESTED,
+        DurableChatSandboxState.CONFIRMED_DELETED,
+    ]
+    assert all(
+        observation.sandbox_id == "e2e-sandbox-retained"
+        and observation.producer.call_key == "1" * 64
+        for observation in observations
+    )
+
+
+@pytest.mark.asyncio
+async def test_cleanup_runs_when_chat_observer_setup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingJournal:
+        async def load_run_initialization(self, *, run_id: str) -> None:
+            del run_id
+            raise OSError("journal unavailable")
+
+    class CleanupProbe:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, SandboxExecutionProfile]] = []
+
+        async def dispatch(self, _request: ToolRequestV1) -> ToolResultV1:
+            raise AssertionError("cleanup test must not dispatch a tool")
+
+        async def cleanup(
+            self,
+            *,
+            run_id: str,
+            session_id: str,
+            sandbox_profile: SandboxExecutionProfile,
+            fault_profile: DurableFaultProfile,
+        ) -> None:
+            del fault_profile
+            self.calls.append((run_id, session_id, sandbox_profile))
+
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    probe = CleanupProbe()
+    runtime = DurableLoopActivityRuntime(
+        model=ScriptedOneStepModelProvider([]),
+        tools=probe,
+        compactor=DeterministicContextCompactor(),
+        content=InMemoryDurableContentStore(),
+    )
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    set_durable_chat_journal_factory(FailingJournal)
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+
+    try:
+        activity = _registered(app, DURABLE_LOOP_CLEANUP_ACTIVITY_NAME)
+        result = await activity(
+            {
+                "fault_profile": DurableFaultProfile.NONE.value,
+                "run_id": "run-1",
+                "sandbox_profile": SandboxExecutionProfile.RETAINED_SESSION.value,
+                "session_id": "session-1",
+            }
+        )
+    finally:
+        reset_durable_loop_activity_runtime_factory()
+        reset_durable_chat_journal_factory()
+
+    assert result == {"cleaned": True}
+    assert probe.calls == [
+        ("run-1", "session-1", SandboxExecutionProfile.RETAINED_SESSION)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_observer_does_not_relabel_persistence_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ResultFailingContentStore(InMemoryDurableContentStore):
+        async def put_bytes(
+            self,
+            *,
+            kind: str,
+            payload: bytes,
+            media_type: str,
+            retention_class: str,
+        ) -> ContentRefV1:
+            if kind == "tool-result":
+                raise OSError("result persistence failed")
+            return await super().put_bytes(
+                kind=kind,
+                payload=payload,
+                media_type=media_type,
+                retention_class=retention_class,
+            )
+
+    class RecordingObserver:
+        def __init__(self) -> None:
+            self.states: list[ToolResultStatus | str] = []
+
+        def run_status(self, **_kwargs: object) -> None:
+            pass
+
+        def tool_started(self, _request: ToolRequestV1) -> None:
+            self.states.append("started")
+
+        def tool_finished(
+            self,
+            _request: ToolRequestV1,
+            status: ToolResultStatus,
+        ) -> None:
+            self.states.append(status)
+
+        async def drain(self, **_kwargs: object) -> None:
+            return None
+
+    class SuccessfulDispatcher:
+        async def dispatch(self, request: ToolRequestV1) -> ToolResultV1:
+            return ToolResultV1(
+                run_id=request.run_id,
+                step_index=request.step_index,
+                call_ordinal=request.call_ordinal,
+                provider_call_id=request.provider_call_id,
+                call_key=request.call_key,
+                request_hash=request.request_hash,
+                tool_name=request.tool_name,
+                status=ToolResultStatus.SUCCEEDED,
+                elapsed_ms=1.0,
+                value={"ok": True},
+            )
+
+    observer = RecordingObserver()
+
+    async def start_observer(**_kwargs: object) -> RecordingObserver:
+        return observer
+
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    monkeypatch.setattr(
+        "azure_functions_agents.experimental.durable_loop_registration."
+        "_start_durable_chat_observer",
+        start_observer,
+    )
+    content = ResultFailingContentStore()
+    runtime = DurableLoopActivityRuntime(
+        model=ScriptedOneStepModelProvider([]),
+        tools=SuccessfulDispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=content,
+    )
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    arguments = {"value": "small"}
+    request_hash = tool_request_hash(
+        tool_name="persistence",
+        arguments=arguments,
+        behavior=ToolBehavior.READ_ONLY,
+        provenance=ToolProvenance.REMOTE,
+        policy_hash=_HASH,
+        catalog_hash="b" * 64,
+        package_hash="c" * 64,
+    )
+    request = ToolRequestV1(
+        run_id="run-1",
+        session_id="session-1",
+        step_index=0,
+        call_ordinal=0,
+        provider_call_id="persistence-call",
+        call_key="2" * 64,
+        tool_name="persistence",
+        provenance=ToolProvenance.REMOTE,
+        behavior=ToolBehavior.READ_ONLY,
+        arguments=arguments,
+        request_hash=request_hash,
+        policy_hash=_HASH,
+        catalog_hash="b" * 64,
+        package_hash="c" * 64,
+        chat_ui=True,
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    request_ref = await put_protocol_model(
+        content,
+        kind="tool-request",
+        model=request,
+    )
+
+    try:
+        activity = _registered(app, DURABLE_LOOP_TOOL_ACTIVITY_NAME)
+        with pytest.raises(OSError, match="result persistence failed"):
+            await activity({"request_ref": request_ref.model_dump(mode="json")})
+    finally:
+        reset_durable_loop_activity_runtime_factory()
+
+    assert observer.states == ["started", ToolResultStatus.SUCCEEDED]
 
 
 @pytest.mark.asyncio

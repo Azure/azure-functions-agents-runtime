@@ -1,0 +1,19 @@
+{
+  "version": "2.0",
+  "extensions": {
+    "http": {
+      "routePrefix": "chat-e2e"
+    },
+    "durableTask": {
+      "hubName": "%DURABLE_CHAT_E2E_TASK_HUB%",
+      "tracing": {
+        "distributedTracingEnabled": true,
+        "version": "V2"
+      }
+    }
+  },
+  "extensionBundle": {
+    "id": "Microsoft.Azure.Functions.ExtensionBundle",
+    "version": "[4.32.0, 5.0.0)"
+  }
+}

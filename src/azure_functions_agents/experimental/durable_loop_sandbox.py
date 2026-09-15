@@ -7,9 +7,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, NoReturn
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .._logger import logger
 from ..config.paths import get_app_root
@@ -18,6 +18,10 @@ from ..strict_json import canonical_json_bytes
 from ..transport.manifest import ExpectedSandboxManifestBinding
 from ..transport.ports import SandboxSessionProvider
 from ..transport.transport_models import PersistedSandboxBinding, SandboxGroupBinding
+from .durable_chat_execution_observer import (
+    current_durable_chat_execution_context,
+)
+from .durable_chat_protocol import DurableChatSandboxState
 from .durable_loop_activities import (
     DurableContentStore,
     get_protocol_model,
@@ -69,6 +73,31 @@ from .hybrid_tools import InvocationSandboxLease
 type SandboxProviderFactory = Callable[[], Awaitable[SandboxSessionProvider]]
 _DURABLE_WAVE_OWNER_KIND = "durable_loop_wave"
 _DURABLE_RETAINED_OWNER_KIND = "durable_loop_retained"
+_OPAQUE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+_TOOL_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$"
+_SHA256_PATTERN = r"^[0-9a-f]{64}$"
+
+
+def _observe_local_sandbox(
+    request: ToolRequestV1,
+    *,
+    state: DurableChatSandboxState,
+    sandbox_group_resource_id: str,
+    sandbox_id: str | None = None,
+    sandbox_generation: int | None = None,
+    replaced_sandbox_id: str | None = None,
+) -> None:
+    context = current_durable_chat_execution_context()
+    if context is None:
+        return
+    context.observer.local_sandbox(
+        request,
+        state=state,
+        sandbox_group_resource_id=sandbox_group_resource_id,
+        sandbox_id=sandbox_id,
+        sandbox_generation=sandbox_generation,
+        replaced_sandbox_id=replaced_sandbox_id,
+    )
 
 
 class DurableSandboxError(DurableToolInspectionError):
@@ -81,6 +110,29 @@ class _CapacityLeaseV1(BaseModel):
     schema_version: Literal["1"] = "1"
     operation_key: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
     expires_at: datetime
+
+
+class _RetainedChatObservationV1(BaseModel):
+    """Content-free latest call binding used only for terminal cleanup history."""
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    schema_version: Literal["1"] = "1"
+    run_id: Annotated[
+        str,
+        Field(min_length=1, max_length=128, pattern=_OPAQUE_ID_PATTERN),
+    ]
+    session_id: Annotated[
+        str,
+        Field(min_length=1, max_length=128, pattern=_OPAQUE_ID_PATTERN),
+    ]
+    owner_hash: Annotated[str, Field(pattern=_SHA256_PATTERN)]
+    call_key: Annotated[str, Field(pattern=_SHA256_PATTERN)]
+    step_index: Annotated[int, Field(ge=0)]
+    tool_name: Annotated[
+        str,
+        Field(min_length=1, max_length=128, pattern=_TOOL_NAME_PATTERN),
+    ]
 
 
 class _RetainedSandboxV1(BaseModel):
@@ -100,9 +152,91 @@ class _RetainedSandboxV1(BaseModel):
     package_digest: str
     workspace_ref: ContentRefV1 | None = None
     owner_call_key: str | None = None
+    chat_observation: dict[str, object] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     capacity_key: str
     capacity_revision: str
     expires_at: datetime
+
+
+def _retained_chat_observation(
+    request: ToolRequestV1,
+) -> dict[str, object] | None:
+    if request.chat_ui is not True:
+        return None
+    return _RetainedChatObservationV1(
+        run_id=request.run_id,
+        session_id=request.session_id,
+        owner_hash=request.owner_hash,
+        call_key=request.call_key,
+        step_index=request.step_index,
+        tool_name=request.tool_name,
+    ).model_dump(mode="json")
+
+
+def _cleanup_chat_observation(
+    document: _RetainedSandboxV1,
+    *,
+    run_id: str,
+    session_id: str,
+) -> _RetainedChatObservationV1 | None:
+    raw = document.chat_observation
+    if raw is None:
+        return None
+    try:
+        observation = _RetainedChatObservationV1.model_validate(raw)
+    except (TypeError, ValidationError, ValueError) as exc:
+        logger.warning(
+            "Durable retained sandbox cleanup observation is invalid "
+            "(error_type=%s).",
+            type(exc).__name__,
+        )
+        return None
+    if (
+        observation.run_id != run_id
+        or observation.session_id != session_id
+        or observation.run_id != document.run_id
+        or observation.session_id != document.session_id
+    ):
+        logger.warning("Durable retained sandbox cleanup observation did not match.")
+        return None
+    return observation
+
+
+def _observe_retained_cleanup(
+    observation: _RetainedChatObservationV1 | None,
+    *,
+    state: DurableChatSandboxState,
+    sandbox_group_resource_id: str,
+    sandbox_id: str,
+    sandbox_generation: int,
+) -> None:
+    if observation is None:
+        return
+    context = current_durable_chat_execution_context()
+    if context is None:
+        return
+    if (
+        context.observer.owner_hash is not None
+        and observation.owner_hash != context.observer.owner_hash
+    ):
+        logger.warning("Durable retained sandbox cleanup owner binding changed.")
+        return
+    context.observer.retained_sandbox(
+        call_key=observation.call_key,
+        step_index=observation.step_index,
+        tool_name=observation.tool_name,
+        state=state,
+        sandbox_group_resource_id=sandbox_group_resource_id,
+        sandbox_id=sandbox_id,
+        sandbox_generation=sandbox_generation,
+    )
+
+
+def _raise_cleanup_failure() -> NoReturn:
+    raise DurableSandboxError("injected sandbox cleanup failure")
 
 
 class DurableSandboxCapacityCoordinator:
@@ -318,19 +452,51 @@ class DurableAcaSandboxLane:
         if current is None:
             return
         document = _RetainedSandboxV1.model_validate_json(current.payload)
-        if document.run_id != run_id:
+        if document.run_id != run_id or document.session_id != session_id:
             raise DurableSandboxError("retained sandbox run fence changed")
-        provider = await self._provider_factory()
+        observation = _cleanup_chat_observation(
+            document,
+            run_id=run_id,
+            session_id=session_id,
+        )
+        provider: SandboxSessionProvider | None = None
         try:
+            provider = await self._provider_factory()
             if await self._faults.consume(
                 fault_profile,
                 run_id=run_id,
                 point="cleanup_failure",
             ):
-                raise DurableSandboxError("injected sandbox cleanup failure")
+                _raise_cleanup_failure()
+            _observe_retained_cleanup(
+                observation,
+                state=DurableChatSandboxState.DELETE_REQUESTED,
+                sandbox_group_resource_id=document.group_resource_id,
+                sandbox_id=document.sandbox_id,
+                sandbox_generation=document.generation,
+            )
             await provider.delete_sandbox(document.sandbox_id)
+        except BaseException:
+            _observe_retained_cleanup(
+                observation,
+                state=DurableChatSandboxState.UNAVAILABLE,
+                sandbox_group_resource_id=document.group_resource_id,
+                sandbox_id=document.sandbox_id,
+                sandbox_generation=document.generation,
+            )
+            timer.finish(DurableLoopOutcome.FAILED)
+            raise
+        else:
+            _observe_retained_cleanup(
+                observation,
+                state=DurableChatSandboxState.CONFIRMED_DELETED,
+                sandbox_group_resource_id=document.group_resource_id,
+                sandbox_id=document.sandbox_id,
+                sandbox_generation=document.generation,
+            )
         finally:
-            await provider.close()
+            if provider is not None:
+                await provider.close()
         await self._capacity.release(
             document.capacity_key,
             document.capacity_revision,
@@ -387,12 +553,18 @@ class DurableAcaSandboxLane:
         request: ToolRequestV1,
         receipt_key: str,
     ) -> ToolResultV1:
+        _observe_local_sandbox(
+            request,
+            state=DurableChatSandboxState.NOT_ALLOCATED,
+            sandbox_group_resource_id=self._settings.group_resource_id,
+        )
         manifest, package = await self._require_catalog()
         slot_key, revision = await self._capacity.acquire(
             request.call_key,
             deadline=request.deadline,
         )
         lease: InvocationSandboxLease | None = None
+        sandbox_binding: PersistedSandboxBinding | None = None
         timer = DurableLoopTimer(
             DurableLoopPhase.SANDBOX_EXECUTE,
             provenance="per_call",
@@ -406,6 +578,14 @@ class DurableAcaSandboxLane:
                 owner_kind=_DURABLE_WAVE_OWNER_KIND,
                 provider_factory=self._provider_factory,
                 package_factory=lambda _root: _return_package(package),
+            )
+            sandbox_binding = lease.persisted_binding
+            _observe_local_sandbox(
+                request,
+                state=DurableChatSandboxState.EXECUTING,
+                sandbox_group_resource_id=sandbox_binding.group.resource_id,
+                sandbox_id=sandbox_binding.sandbox_id,
+                sandbox_generation=1,
             )
             _verify_manifest(lease.manifest, manifest)
             await self._restore_workspace(lease, request)
@@ -448,10 +628,37 @@ class DurableAcaSandboxLane:
             return result
         finally:
             if lease is not None:
-                await lease.delete()
+                if sandbox_binding is not None:
+                    _observe_local_sandbox(
+                        request,
+                        state=DurableChatSandboxState.DELETE_REQUESTED,
+                        sandbox_group_resource_id=sandbox_binding.group.resource_id,
+                        sandbox_id=sandbox_binding.sandbox_id,
+                        sandbox_generation=1,
+                    )
+                try:
+                    await lease.delete()
+                except BaseException:
+                    if sandbox_binding is not None:
+                        _observe_local_sandbox(
+                            request,
+                            state=DurableChatSandboxState.UNAVAILABLE,
+                            sandbox_group_resource_id=(
+                                sandbox_binding.group.resource_id
+                            ),
+                        )
+                    raise
+                if sandbox_binding is not None:
+                    _observe_local_sandbox(
+                        request,
+                        state=DurableChatSandboxState.CONFIRMED_DELETED,
+                        sandbox_group_resource_id=sandbox_binding.group.resource_id,
+                        sandbox_id=sandbox_binding.sandbox_id,
+                        sandbox_generation=1,
+                    )
             await self._capacity.release(slot_key, revision)
 
-    async def _dispatch_retained(  # noqa: PLR0912
+    async def _dispatch_retained(  # noqa: PLR0912, PLR0915
         self,
         request: ToolRequestV1,
         receipt_key: str,
@@ -480,6 +687,7 @@ class DurableAcaSandboxLane:
             created = True
         else:
             document = _RetainedSandboxV1.model_validate_json(current.payload)
+            previous_sandbox_id = document.sandbox_id
             lease, replacement = await self._attach_or_recreate(
                 request,
                 document,
@@ -489,6 +697,14 @@ class DurableAcaSandboxLane:
             if replacement is not None:
                 created = True
                 document = replacement
+                _observe_local_sandbox(
+                    request,
+                    state=DurableChatSandboxState.REPLACEMENT_INSTANCE,
+                    sandbox_group_resource_id=document.group_resource_id,
+                    sandbox_id=document.sandbox_id,
+                    sandbox_generation=document.generation,
+                    replaced_sandbox_id=previous_sandbox_id,
+                )
 
         claimed = document.model_copy(
             update={
@@ -498,6 +714,7 @@ class DurableAcaSandboxLane:
                 ),
                 "owner_call_key": request.call_key,
                 "run_id": request.run_id,
+                "chat_observation": _retained_chat_observation(request),
             }
         )
         if document.owner_call_key not in {None, request.call_key}:
@@ -529,6 +746,13 @@ class DurableAcaSandboxLane:
                 ),
             )
             raise DurableSandboxError("retained sandbox claim disappeared")
+        _observe_local_sandbox(
+            request,
+            state=DurableChatSandboxState.EXECUTING,
+            sandbox_group_resource_id=document.group_resource_id,
+            sandbox_id=document.sandbox_id,
+            sandbox_generation=document.generation,
+        )
         try:
             reconciled = await lease.read_result(
                 request.call_key,
@@ -571,13 +795,34 @@ class DurableAcaSandboxLane:
                 run_id=request.run_id,
                 point="sandbox_loss_after_checkpoint",
             ):
+                _observe_local_sandbox(
+                    request,
+                    state=DurableChatSandboxState.DELETE_REQUESTED,
+                    sandbox_group_resource_id=document.group_resource_id,
+                    sandbox_id=document.sandbox_id,
+                    sandbox_generation=document.generation,
+                )
                 await lease.delete()
+                _observe_local_sandbox(
+                    request,
+                    state=DurableChatSandboxState.CONFIRMED_DELETED,
+                    sandbox_group_resource_id=document.group_resource_id,
+                    sandbox_id=document.sandbox_id,
+                    sandbox_generation=document.generation,
+                )
             else:
                 await lease.close(
                     retain=True,
                     retain_auto_delete_seconds=(
                         self._loop_settings.retained_sandbox_auto_delete_seconds
                     ),
+                )
+                _observe_local_sandbox(
+                    request,
+                    state=DurableChatSandboxState.RETAINED_IDLE,
+                    sandbox_group_resource_id=document.group_resource_id,
+                    sandbox_id=document.sandbox_id,
+                    sandbox_generation=document.generation,
                 )
             return result
         except BaseException:
@@ -612,7 +857,19 @@ class DurableAcaSandboxLane:
                     self._loop_settings.retained_sandbox_auto_delete_seconds
                 ),
             )
+            _observe_local_sandbox(
+                request,
+                state=DurableChatSandboxState.RETAINED_IDLE,
+                sandbox_group_resource_id=claimed.group_resource_id,
+                sandbox_id=claimed.sandbox_id,
+                sandbox_generation=claimed.generation,
+            )
         except BaseException:
+            _observe_local_sandbox(
+                request,
+                state=DurableChatSandboxState.UNAVAILABLE,
+                sandbox_group_resource_id=claimed.group_resource_id,
+            )
             logger.warning(
                 "Durable retained sandbox close failed after tool failure.",
                 exc_info=True,
@@ -882,6 +1139,7 @@ def _retained_document(
         package_digest_kind=lease.package.digest_kind,
         package_digest=lease.package.digest,
         workspace_ref=workspace_ref,
+        chat_observation=_retained_chat_observation(request),
         capacity_key=capacity_key,
         capacity_revision=capacity_revision,
         expires_at=expires_at,

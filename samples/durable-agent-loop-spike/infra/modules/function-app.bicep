@@ -105,6 +105,7 @@ resource functionAppSettings 'Microsoft.Web/sites/config@2024-11-01' = {
       AzureWebJobsStorage__fileServiceUri: storageAccount.properties.primaryEndpoints.file
       APPLICATIONINSIGHTS_AUTHENTICATION_STRING: 'Authorization=AAD;ClientId=${functionIdentityClientId}'
       APPLICATIONINSIGHTS_CONNECTION_STRING: applicationInsights.properties.ConnectionString
+      APPLICATIONINSIGHTS_RESOURCE_ID: applicationInsights.id
       AZURE_CLIENT_ID: functionIdentityClientId
       AZURE_FUNCTIONS_AGENTS_PROVIDER: 'foundry'
       FOUNDRY_PROJECT_ENDPOINT: foundryProjectEndpoint

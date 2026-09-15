@@ -26,6 +26,7 @@ from azure_functions_agents.experimental.durable_loop_config import (
     DURABLE_LOOP_RETAINED_SANDBOX_ENABLED_ENV,
 )
 from azure_functions_agents.experimental.durable_loop_http import (
+    _json_response,
     _persist_run_input,
     _RunMetadata,
     _status_projection,
@@ -109,6 +110,22 @@ def test_status_projection_exposes_sanitized_ambiguous_outcome() -> None:
         "run_id": "run-1",
         "status": "Failed",
     }
+
+
+def test_durable_json_responses_never_cache_sensitive_data_or_errors() -> None:
+    response = _json_response(
+        {"error": "run_not_found"},
+        status_code=404,
+        headers={
+            "cache-control": "public, max-age=3600",
+            "x-ms-session-id": "session-1",
+        },
+    )
+
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-ms-session-id"] == "session-1"
 
 
 def _write_agent(root: Path) -> None:
@@ -658,6 +675,49 @@ async def test_private_start_profiles_are_strict_and_gate_controlled(
         DurableRunDocumentV1,
     )
     assert document.plan.model_settings["background"] is True
+
+
+@pytest.mark.asyncio
+async def test_background_chat_rejects_explicit_streaming_before_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    monkeypatch.setenv(DURABLE_LOOP_BACKGROUND_MODEL_ENABLED_ENV, "true")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_MODEL", "resolved-model")
+    runtime = DurableLoopActivityRuntime(
+        model=ScriptedOneStepModelProvider([]),
+        tools=DurableToolRegistry().build_dispatcher(),
+        compactor=DeterministicContextCompactor(),
+        content=InMemoryDurableContentStore(),
+    )
+    set_durable_loop_activity_runtime_factory(lambda: runtime)
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    assert isinstance(app, df.DFApp)
+    start = _registered_function(app, "durable_agent_run_start_v1")
+    client = _Client()
+
+    try:
+        rejected = await start(
+            _Request(
+                body={
+                    "prompt": "hello",
+                    "request_id": "streaming-in-background",
+                    "ui": {"schema_version": "1", "stream_response": True},
+                }
+            ),
+            client,
+        )
+    finally:
+        reset_durable_loop_activity_runtime_factory()
+
+    assert rejected.status_code == 400
+    assert json.loads(rejected.body) == {
+        "error": "chat streaming is not supported for background model mode"
+    }
+    assert client.starts == []
 
 
 @pytest.mark.asyncio

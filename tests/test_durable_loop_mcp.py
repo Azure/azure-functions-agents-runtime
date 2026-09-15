@@ -8,6 +8,10 @@ import pytest
 from agent_framework import FunctionTool
 
 from azure_functions_agents.experimental import durable_loop_execution
+from azure_functions_agents.experimental.durable_chat_execution_observer import (
+    DurableChatExecutionContext,
+    use_durable_chat_execution_context,
+)
 from azure_functions_agents.experimental.durable_loop_activities import (
     InMemoryDurableContentStore,
 )
@@ -23,6 +27,7 @@ from azure_functions_agents.experimental.durable_loop_protocol import (
     ToolProvenance,
     ToolRequestV1,
     ToolResultStatus,
+    ToolResultV1,
     canonical_hash,
     tool_request_hash,
 )
@@ -295,3 +300,110 @@ async def test_router_rejects_forged_tool_behavior_before_dispatch(
     with pytest.raises(RuntimeError, match="classification"):
         await router.dispatch(forged)
     assert remote.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_router_observes_remote_calls_as_having_no_sandbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = FrozenToolDescriptorV1(
+        name="lookup",
+        description="Remote lookup.",
+        parameters={"additionalProperties": True, "type": "object"},
+        provenance=ToolProvenance.REMOTE,
+        behavior=ToolBehavior.READ_ONLY,
+    )
+
+    class Remote:
+        async def discover(self):
+            return (descriptor,)
+
+        async def dispatch(self, request: ToolRequestV1) -> ToolResultV1:
+            return ToolResultV1(
+                run_id=request.run_id,
+                step_index=request.step_index,
+                call_ordinal=request.call_ordinal,
+                provider_call_id=request.provider_call_id,
+                call_key=request.call_key,
+                request_hash=request.request_hash,
+                tool_name=request.tool_name,
+                status=ToolResultStatus.SUCCEEDED,
+                elapsed_ms=1.0,
+                value={"ok": True},
+            )
+
+    class Local:
+        async def discover(self):
+            return (), "c" * 64
+
+        async def dispatch(self, _request: ToolRequestV1) -> ToolResultV1:
+            raise AssertionError("remote tool reached local sandbox")
+
+        async def cleanup(self, **_kwargs: object) -> None:
+            return None
+
+    class Observer:
+        def __init__(self) -> None:
+            self.requests: list[ToolRequestV1] = []
+
+        def remote_no_sandbox(self, request: ToolRequestV1) -> None:
+            self.requests.append(request)
+
+    (tmp_path / "durable-loop-tools.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "tools": {
+                    "lookup": {
+                        "provenance": "remote",
+                        "behavior": "read_only",
+                        "parallel_safe": False,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(durable_loop_execution, "get_app_root", lambda: tmp_path)
+    router = DurableExecutionPlaneRouter(remote=Remote(), local=Local())  # type: ignore[arg-type]
+    snapshot = await router.freeze_catalog(
+        policy_hash="a" * 64,
+        sandbox_profile=SandboxExecutionProfile.PER_CALL,
+    )
+    arguments: dict[str, object] = {}
+    request_hash = tool_request_hash(
+        tool_name="lookup",
+        arguments=arguments,
+        behavior=ToolBehavior.READ_ONLY,
+        provenance=ToolProvenance.REMOTE,
+        policy_hash=snapshot.catalog.policy_hash,
+        catalog_hash=snapshot.catalog.catalog_hash,
+        package_hash=snapshot.package_hash,
+    )
+    request = ToolRequestV1(
+        run_id="run-1",
+        session_id="session-1",
+        step_index=0,
+        call_ordinal=0,
+        provider_call_id="lookup-call",
+        call_key="d" * 64,
+        tool_name="lookup",
+        provenance=ToolProvenance.REMOTE,
+        behavior=ToolBehavior.READ_ONLY,
+        arguments=arguments,
+        request_hash=request_hash,
+        policy_hash=snapshot.catalog.policy_hash,
+        catalog_hash=snapshot.catalog.catalog_hash,
+        package_hash=snapshot.package_hash,
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    observer = Observer()
+
+    with use_durable_chat_execution_context(
+        DurableChatExecutionContext(observer=observer)  # type: ignore[arg-type]
+    ):
+        result = await router.dispatch(request)
+
+    assert result.status is ToolResultStatus.SUCCEEDED
+    assert observer.requests == [request]

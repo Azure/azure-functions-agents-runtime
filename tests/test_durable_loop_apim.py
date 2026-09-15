@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 from agent_framework.exceptions import ChatClientException
 
+from azure_functions_agents.experimental.durable_chat_execution_observer import (
+    DurableChatExecutionObserver,
+)
+from azure_functions_agents.experimental.durable_chat_protocol import (
+    DurableChatAssistantDraftReplacedObservationV1,
+    DurableChatAssistantTextObservationV1,
+    DurableChatEnqueueDisposition,
+    DurableChatEnqueueResultV1,
+    DurableChatModelAttemptObservationV1,
+    DurableChatModelAttemptState,
+    DurableChatModelProducerV1,
+    DurableChatObservationV1,
+)
 from azure_functions_agents.experimental.durable_loop_activities import (
     DurableLoopModelError,
     InMemoryDurableContentStore,
@@ -193,6 +207,22 @@ class _Transport:
         assert timeout_seconds > 0
         self.requests.append((method, url, dict(headers)))
         return 200, {}, self.responses.pop(0)
+
+
+class _ObservationSink:
+    def __init__(self) -> None:
+        self.observations: list[DurableChatObservationV1] = []
+
+    def try_enqueue(
+        self,
+        *,
+        observation: DurableChatObservationV1,
+    ) -> DurableChatEnqueueResultV1:
+        self.observations.append(observation)
+        return DurableChatEnqueueResultV1(
+            disposition=DurableChatEnqueueDisposition.ENQUEUED,
+            pending_observations=len(self.observations),
+        )
 
 
 def _manager() -> HybridApimClientManager:
@@ -449,6 +479,225 @@ async def test_synchronous_apim_429_fault_retries_once_without_content() -> None
     assert first_headers["x-af-operation-id"] == second_headers["x-af-operation-id"]
     assert request.fault_profile is DurableFaultProfile.MODEL_APIM_429_ONCE
     assert SandboxExecutionProfile.PER_CALL.value not in decision.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_faulted_streaming_retry_fences_its_reserved_first_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request()
+    receipts = InMemoryDurableKeyedDocumentStore()
+    foreground = _Foreground(request)
+    provider = ApimMafResponsesProvider(
+        _manager(),
+        content=InMemoryDurableContentStore(),
+        receipts=receipts,
+        settings=DurableLoopSettings(),
+        control_base_url="https://gateway.test/model-control",
+        foreground=foreground,
+    )
+
+    async def fail_before_provider_call(
+        _request: OneStepModelRequest,
+        attempt: int,
+    ) -> None:
+        if attempt == 1:
+            raise ApimResponsesError(
+                "model_throttled",
+                status_code=429,
+                retry_after_seconds=0.01,
+            )
+
+    monkeypatch.setattr(provider, "_inject_model_fault", fail_before_provider_call)
+    sink = _ObservationSink()
+    observer = DurableChatExecutionObserver(
+        sink=sink,
+        run_id=request.identity.run_id,
+        session_id=request.identity.session_id,
+    )
+    producers = tuple(
+        DurableChatModelProducerV1(step_index=0, observation_epoch=epoch)
+        for epoch in range(1, 4)
+    )
+
+    decision = await provider.run_one_step_with_observer(
+        request,
+        observer=observer,
+        producers=producers,
+    )
+
+    replacements = [
+        observation
+        for observation in sink.observations
+        if isinstance(observation, DurableChatAssistantDraftReplacedObservationV1)
+    ]
+    attempts = [
+        observation
+        for observation in sink.observations
+        if isinstance(observation, DurableChatModelAttemptObservationV1)
+    ]
+    assert decision.attempts == 2
+    assert foreground.calls == 1
+    assert len(replacements) == 1
+    assert replacements[0].previous_producer == producers[0]
+    assert replacements[0].producer == producers[1]
+    assert [
+        (observation.producer, observation.state)
+        for observation in attempts
+    ] == [
+        (producers[0], DurableChatModelAttemptState.STARTED),
+        (producers[0], DurableChatModelAttemptState.SUPERSEDED),
+        (producers[1], DurableChatModelAttemptState.STARTED),
+        (producers[1], DurableChatModelAttemptState.COMPLETED),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_streaming_retry_replaces_the_failed_attempt_draft() -> None:
+    request = _request()
+
+    class StreamingForeground(_Foreground):
+        async def run_one_step_streaming(
+            self,
+            _request: OneStepModelRequest,
+            *,
+            observer: DurableChatExecutionObserver,
+            producer: DurableChatModelProducerV1,
+            client_kwargs=None,
+        ):
+            self.calls += 1
+            self.client_kwargs.append(client_kwargs)
+            if self.calls == 1:
+                observer.assistant_text(producer, "discard this draft")
+                raise ApimResponsesError(
+                    "model_throttled",
+                    status_code=429,
+                    retry_after_seconds=0.01,
+                )
+            observer.assistant_text(producer, "replacement draft")
+            return self.decision
+
+    foreground = StreamingForeground(request)
+    provider = ApimMafResponsesProvider(
+        _manager(),
+        content=InMemoryDurableContentStore(),
+        receipts=InMemoryDurableKeyedDocumentStore(),
+        settings=DurableLoopSettings(),
+        control_base_url="https://gateway.test/model-control",
+        foreground=foreground,
+    )
+    sink = _ObservationSink()
+    observer = DurableChatExecutionObserver(
+        sink=sink,
+        run_id="run-1",
+        session_id="session-1",
+    )
+    producers = (
+        DurableChatModelProducerV1(step_index=0, observation_epoch=1),
+        DurableChatModelProducerV1(step_index=0, observation_epoch=2),
+        DurableChatModelProducerV1(step_index=0, observation_epoch=3),
+    )
+
+    decision = await provider.run_one_step_with_observer(
+        request,
+        observer=observer,
+        producers=producers,
+    )
+
+    assert decision.attempts == 2
+    assert [
+        observation.delta
+        for observation in sink.observations
+        if isinstance(observation, DurableChatAssistantTextObservationV1)
+    ] == ["discard this draft", "replacement draft"]
+    replacements = [
+        observation
+        for observation in sink.observations
+        if isinstance(observation, DurableChatAssistantDraftReplacedObservationV1)
+    ]
+    assert len(replacements) == 1
+    assert replacements[0].previous_producer == producers[0]
+    assert replacements[0].producer == producers[1]
+    assert "observation_epoch" not in foreground.client_kwargs[0]
+    assert "observation_epoch" not in foreground.client_kwargs[1]
+    assert "observation_epoch" not in decision.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_streaming_timeout_marks_active_attempt_failed_without_retry() -> None:
+    request = _request()
+
+    class BlockingStreamingForeground(_Foreground):
+        def __init__(self, request: OneStepModelRequest) -> None:
+            super().__init__(request)
+            self.stream_started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def run_one_step_streaming(
+            self,
+            _request: OneStepModelRequest,
+            *,
+            observer: DurableChatExecutionObserver,
+            producer: DurableChatModelProducerV1,
+            client_kwargs=None,
+        ):
+            self.calls += 1
+            self.client_kwargs.append(client_kwargs)
+            observer.assistant_text(producer, "partial draft")
+            self.stream_started.set()
+            await self.release.wait()
+            return self.decision
+
+    foreground = BlockingStreamingForeground(request)
+    provider = ApimMafResponsesProvider(
+        _manager(),
+        content=InMemoryDurableContentStore(),
+        receipts=InMemoryDurableKeyedDocumentStore(),
+        settings=DurableLoopSettings(),
+        control_base_url="https://gateway.test/model-control",
+        foreground=foreground,
+    )
+    sink = _ObservationSink()
+    observer = DurableChatExecutionObserver(
+        sink=sink,
+        run_id=request.identity.run_id,
+        session_id=request.identity.session_id,
+    )
+    producer = DurableChatModelProducerV1(step_index=0, observation_epoch=1)
+
+    async def invoke_with_timeout() -> None:
+        async with asyncio.timeout(0.1):
+            await provider.run_one_step_with_observer(
+                request,
+                observer=observer,
+                producers=(producer,),
+            )
+
+    task = asyncio.create_task(invoke_with_timeout())
+    await asyncio.wait_for(foreground.stream_started.wait(), timeout=1)
+
+    with pytest.raises(TimeoutError):
+        await task
+
+    assert foreground.calls == 1
+    assert [
+        observation.delta
+        for observation in sink.observations
+        if isinstance(observation, DurableChatAssistantTextObservationV1)
+    ] == ["partial draft"]
+    assert [
+        (observation.producer, observation.state)
+        for observation in sink.observations
+        if isinstance(observation, DurableChatModelAttemptObservationV1)
+    ] == [
+        (producer, DurableChatModelAttemptState.STARTED),
+        (producer, DurableChatModelAttemptState.STREAMING),
+        (producer, DurableChatModelAttemptState.FAILED),
+    ]
+    assert not any(
+        isinstance(observation, DurableChatAssistantDraftReplacedObservationV1)
+        for observation in sink.observations
+    )
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
@@ -13,8 +13,14 @@ from urllib.parse import urlsplit
 from agent_framework import Content, Message
 
 from ..strict_json import canonical_json_bytes
+from .durable_chat_execution_observer import (
+    DURABLE_CHAT_FOREGROUND_MODEL_ATTEMPTS,
+    DurableChatExecutionObserver,
+)
+from .durable_chat_protocol import DurableChatModelProducerV1
 from .durable_loop_activities import (
     BackgroundModelProvider,
+    DurableChatStreamingModelProvider,
     DurableContentStore,
     DurableLoopModelError,
     MafOneStepModelProvider,
@@ -127,6 +133,21 @@ class MafAgentResponseAdapter(Protocol):
         """Parse one terminal public Agent response."""
 
 
+@runtime_checkable
+class MafAgentStreamingResponseAdapter(Protocol):
+    """Optional MAF foreground extension for an externally observed attempt."""
+
+    async def run_one_step_streaming(
+        self,
+        request: OneStepModelRequest,
+        *,
+        observer: DurableChatExecutionObserver,
+        producer: DurableChatModelProducerV1,
+        client_kwargs: Mapping[str, object] | None = None,
+    ) -> ModelDecisionEnvelopeV1:
+        """Run one foreground attempt and emit only assistant-visible deltas."""
+
+
 class AiohttpApimResponsesTransport:
     """Default APIM transport with response-body logging disabled."""
 
@@ -178,7 +199,11 @@ class AiohttpApimResponsesTransport:
             ) from exc
 
 
-class ApimMafResponsesProvider(OneStepModelProvider, BackgroundModelProvider):
+class ApimMafResponsesProvider(
+    OneStepModelProvider,
+    BackgroundModelProvider,
+    DurableChatStreamingModelProvider,
+):
     """MAF one-step foreground plus APIM-affine background Responses."""
 
     def __init__(
@@ -216,27 +241,89 @@ class ApimMafResponsesProvider(OneStepModelProvider, BackgroundModelProvider):
         request: OneStepModelRequest,
     ) -> ModelDecisionEnvelopeV1:
         """Run one synchronous Responses call with deadline-bounded retries."""
+        return await self._run_one_step(request)
+
+    async def run_one_step_with_observer(
+        self,
+        request: OneStepModelRequest,
+        *,
+        observer: DurableChatExecutionObserver,
+        producers: Sequence[DurableChatModelProducerV1],
+    ) -> ModelDecisionEnvelopeV1:
+        """Run retries with externally reserved draft producers outside request inputs."""
+        return await self._run_one_step(
+            request,
+            observer=observer,
+            producers=producers,
+        )
+
+    async def _run_one_step(  # noqa: PLR0912
+        self,
+        request: OneStepModelRequest,
+        *,
+        observer: DurableChatExecutionObserver | None = None,
+        producers: Sequence[DurableChatModelProducerV1] = (),
+    ) -> ModelDecisionEnvelopeV1:
         timer = DurableLoopTimer(DurableLoopPhase.MODEL_STEP, provenance="apim")
         try:
-            for attempt in range(1, 4):
+            for attempt in range(1, DURABLE_CHAT_FOREGROUND_MODEL_ATTEMPTS + 1):
                 client_kwargs: Mapping[str, object] = {}
+                producer = (
+                    producers[attempt - 1]
+                    if observer is not None and attempt <= len(producers)
+                    else None
+                )
+                producer_started = False
                 try:
+                    if observer is not None and producer is not None:
+                        observer.model_attempt_started(producer)
+                        producer_started = True
                     await self._inject_model_fault(request, attempt)
                     client_kwargs = await self._model_client_kwargs(
                         request,
                         attempt,
                     )
-                    decision = await self._foreground.run_one_step(
-                        request,
-                        client_kwargs=client_kwargs,
-                    )
+                    if (
+                        observer is not None
+                        and producer is not None
+                        and isinstance(
+                            self._foreground,
+                            MafAgentStreamingResponseAdapter,
+                        )
+                    ):
+                        decision = await self._foreground.run_one_step_streaming(
+                            request,
+                            observer=observer,
+                            producer=producer,
+                            client_kwargs=client_kwargs,
+                        )
+                    else:
+                        decision = await self._foreground.run_one_step(
+                            request,
+                            client_kwargs=client_kwargs,
+                        )
+                except asyncio.CancelledError:
+                    if producer_started and observer is not None and producer is not None:
+                        observer.model_attempt_failed(producer)
+                    raise
                 except Exception as raw_exc:
                     exc = _normalized_model_exception(raw_exc)
-                    if (
+                    terminal = (
                         _cross_activity_429(request, client_kwargs, exc)
                         or not _retryable_exception(exc)
-                        or attempt == 3
-                    ):
+                        or attempt == DURABLE_CHAT_FOREGROUND_MODEL_ATTEMPTS
+                    )
+                    if producer_started and observer is not None and producer is not None:
+                        next_producer = (
+                            producers[attempt]
+                            if attempt < len(producers)
+                            else None
+                        )
+                        if not terminal and next_producer is not None:
+                            observer.model_attempt_superseded(producer, next_producer)
+                        else:
+                            observer.model_attempt_failed(producer)
+                    if terminal:
                         raise exc from None
                     await self._retry_delay(
                         request,
@@ -248,6 +335,8 @@ class ApimMafResponsesProvider(OneStepModelProvider, BackgroundModelProvider):
                         ),
                     )
                     continue
+                if producer_started and observer is not None and producer is not None:
+                    observer.model_attempt_completed(producer)
                 timer.finish(DurableLoopOutcome.COMPLETED)
                 return decision.model_copy(update={"attempts": attempt})
         except BaseException:

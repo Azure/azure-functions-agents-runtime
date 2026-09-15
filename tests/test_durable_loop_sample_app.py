@@ -143,6 +143,18 @@ def test_retained_demo_pins_resume_readiness_budget() -> None:
     )
 
 
+def test_durable_chat_wires_non_secret_application_insights_metadata() -> None:
+    local_settings = json.loads(
+        (SAMPLE_SRC / "local.settings.template.json").read_text(encoding="utf-8")
+    )["Values"]
+    template = (SAMPLE_ROOT / "infra" / "modules" / "function-app.bicep").read_text(
+        encoding="utf-8"
+    )
+
+    assert local_settings["APPLICATIONINSIGHTS_RESOURCE_ID"] == ""
+    assert "APPLICATIONINSIGHTS_RESOURCE_ID: applicationInsights.id" in template
+
+
 def test_microsoft_learn_mcp_is_remote_http_only() -> None:
     document = json.loads((SAMPLE_SRC / "mcp.json").read_text(encoding="utf-8"))
     assert document == {

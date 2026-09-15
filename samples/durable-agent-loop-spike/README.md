@@ -4,8 +4,10 @@ This folder codifies the independently deployable infrastructure and
 qualification scaffolding for finalized
 [FRD 0010](../../docs/frds/0010-durable-agent-loop-spike.md). It reproduces the
 authorized private environment in `eastus2` with exact stable names. It does
-not contain the unfinished durable-loop application or define its routes,
-payloads, or runtime API.
+not add a separate durable-loop application or redefine its routes, payloads,
+or runtime API. The runtime package now contains a separately hosted Durable
+Agent Loop chat UI; this sample's focused proxy/demo remains a distinct,
+recording-oriented surface.
 
 Do not run `azd up` for this slice. Provisioning and application deployment are
 deliberately separate:
@@ -145,6 +147,12 @@ For local development, `local.settings.template.json` targets the official DTS
 emulator at `http://localhost:8080` and task hub `default`; its dashboard is at
 `http://localhost:8082`.
 
+The deployed Function App also receives the non-secret
+`APPLICATIONINSIGHTS_RESOURCE_ID`. The local template intentionally leaves it
+blank. A Durable Agent Loop chat UI Logs action needs that resource ID **and**
+active runtime tracing/exporter configuration; an Application Insights
+connection string alone is not sufficient.
+
 Rollback is deliberately package-based rather than secret-based: redeploy the
 known storage-backed source package at commit
 `d205c4206b6ac539979aef518c4fb249818fd285`, remove only
@@ -214,6 +222,35 @@ uv run python samples\durable-agent-loop-spike\demo\focused\proxy.py `
 ```
 
 The focused UI is demo support, not a deployed customer surface.
+
+### Hosted Durable Agent Loop chat UI
+
+The runtime's separate hosted UI is documented in
+[`docs/durable-agent-loop-chat-ui.md`](../../docs/durable-agent-loop-chat-ui.md).
+When the existing
+`AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_ENABLED` gate is on,
+its default Functions route is:
+
+```text
+/api/experimental/durable-chat/
+```
+
+The effective host route prefix can be nested or empty. The page is not this
+focused proxy: it keeps the browser's persisted history locally, authenticates
+bootstrap/data through the existing Function/Easy Auth policy, and keeps any
+Function key in memory rather than a URL or browser storage. It does not
+replace ordinary chat or expose the focused demo's aliases.
+
+The same existing gate controls the durable HTTP routes and hosted UI together.
+This sample keeps it `false` until a qualified operator explicitly enables it.
+Background-model, retained-sandbox, and fault-injection gates remain separate
+controls; the UI does not enable any of them.
+
+Server observation retention is deliberately independent of browser history.
+`retention_class` labels do not create Blob deletion. Before adding an Azure
+Blob lifecycle rule, use only the documented observation-only prefixes and
+avoid the shared run-document, checkpoint, receipt, and retained-execution
+paths; see the [retention guidance](../../docs/durable-agent-loop-chat-ui.md#observation-retention-is-not-browser-retention).
 
 ### Standalone PowerShell client
 
@@ -338,18 +375,18 @@ or the
 [PNG export](../../docs/diagrams/durable-agent-loop-request-flow.png).
 
 After the package is deployed and indexed with the main gate off, live
-qualification enables the main, background-model, retained-sandbox, and
-fault-injection gates together through a secure app-setting update.
-The HTTP client auto-instrumentors are disabled for this privacy-focused spike;
-the runtime's bounded durable-loop spans and metrics remain enabled.
+qualification enables only the existing gates required by its approved
+scenario through a secure app-setting update. Enabling the main durable-loop
+gate also registers the hosted Durable Agent Loop chat UI; it does not require
+or imply enabling background-model, retained-sandbox, or fault-injection
+controls. The HTTP client auto-instrumentors are disabled for this
+privacy-focused spike; the runtime's bounded durable-loop spans and metrics
+remain enabled.
 
-## Final application assembly
+## Application assembly
 
-The final stacked layer adds `function_app.py` and all application files
-directly under `src/`. Until then, assembly fails with
-`application_source_incomplete:function_app.py`.
-
-After that layer is present:
+The sample includes `function_app.py` and its application files directly under
+`src/`. Assemble the deployable package with:
 
 ```powershell
 uv run --with pip python eng\scripts\durable_loop_spike.py assemble

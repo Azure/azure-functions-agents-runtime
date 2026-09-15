@@ -10,6 +10,18 @@ from types import SimpleNamespace
 import pytest
 
 from azure_functions_agents.controller.package import CapturedContentPackage
+from azure_functions_agents.experimental.durable_chat_execution_observer import (
+    DurableChatExecutionContext,
+    DurableChatExecutionObserver,
+    use_durable_chat_execution_context,
+)
+from azure_functions_agents.experimental.durable_chat_protocol import (
+    DurableChatEnqueueDisposition,
+    DurableChatEnqueueResultV1,
+    DurableChatObservationV1,
+    DurableChatSandboxObservationEventV1,
+    DurableChatSandboxState,
+)
 from azure_functions_agents.experimental.durable_loop_activities import (
     InMemoryDurableContentStore,
     get_protocol_model,
@@ -59,6 +71,11 @@ from azure_functions_agents.transport.transport_models import (
     SandboxGroupBinding,
 )
 
+_GROUP_RESOURCE_ID = (
+    "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/r/"
+    "providers/Microsoft.App/sandboxGroups/g"
+)
+
 
 def _package() -> CapturedContentPackage:
     payload = b"package"
@@ -99,10 +116,7 @@ class _Lease:
             owner_hash_version="h1",
             owner_hash="owner",
             app_hash="h1-app",
-            sandbox_group_resource_id=(
-                "/subscriptions/s/resourceGroups/r/providers/"
-                "Microsoft.App/sandboxGroups/g"
-            ),
+            sandbox_group_resource_id=_GROUP_RESOURCE_ID,
             sandbox_id=f"sandbox-{generation}",
             generation=generation,
             digest_kind=self.package.digest_kind,
@@ -173,17 +187,22 @@ class _Lease:
 
 class _Provider:
     group = SimpleNamespace(
-        resource_id=(
-            "/subscriptions/s/resourceGroups/r/providers/"
-            "Microsoft.App/sandboxGroups/g"
-        ),
+        resource_id=_GROUP_RESOURCE_ID,
         region="eastus2",
     )
 
-    def __init__(self, *, present: bool, state: str = "Stopped") -> None:
+    def __init__(
+        self,
+        *,
+        present: bool,
+        state: str = "Stopped",
+        delete_error: Exception | None = None,
+    ) -> None:
         self.present = present
         self.state = state
+        self.delete_error = delete_error
         self.closed = 0
+        self.deleted_sandbox_ids: list[str] = []
 
     async def get_sandbox_summary(self, _sandbox_id: str):
         return (
@@ -192,19 +211,34 @@ class _Provider:
             else None
         )
 
-    async def delete_sandbox(self, _sandbox_id: str) -> None:
-        return None
+    async def delete_sandbox(self, sandbox_id: str) -> None:
+        self.deleted_sandbox_ids.append(sandbox_id)
+        if self.delete_error is not None:
+            raise self.delete_error
 
     async def close(self) -> None:
         self.closed += 1
 
 
+class _ObservationSink:
+    def __init__(self) -> None:
+        self.observations: list[DurableChatObservationV1] = []
+
+    def try_enqueue(
+        self,
+        *,
+        observation: DurableChatObservationV1,
+    ) -> DurableChatEnqueueResultV1:
+        self.observations.append(observation)
+        return DurableChatEnqueueResultV1(
+            disposition=DurableChatEnqueueDisposition.ENQUEUED,
+            pending_observations=len(self.observations),
+        )
+
+
 def _settings() -> HybridSandboxSettings:
     return HybridSandboxSettings(
-        group_resource_id=(
-            "/subscriptions/s/resourceGroups/r/providers/"
-            "Microsoft.App/sandboxGroups/g"
-        ),
+        group_resource_id=_GROUP_RESOURCE_ID,
         region="eastus2",
         allowed_hosts=(),
         sandbox_disk="python-3.13",
@@ -262,6 +296,16 @@ def _request(
         fault_profile=fault,
         deadline=datetime.now(UTC) + timedelta(minutes=5),
     )
+
+
+def test_chat_ui_tool_marker_preserves_legacy_serialization_and_request_hash() -> None:
+    request = _request(call=1)
+    marked = request.model_copy(update={"chat_ui": True})
+
+    assert "chat_ui" not in request.model_dump(mode="json")
+    assert marked.model_dump(mode="json")["chat_ui"] is True
+    assert marked.request_hash == request.request_hash
+    assert marked.call_key == request.call_key
 
 
 def test_workspace_export_restore_is_integrity_bound(tmp_path: Path) -> None:
@@ -370,6 +414,65 @@ async def test_per_call_wave_checkpoints_workspace_and_deduplicates(
     assert await content.get_bytes(artifact.archive_ref) == b"workspace-1"
     assert replay.deduplicated is True
     assert replay.workspace_ref == first.workspace_ref
+    assert not leases
+
+
+@pytest.mark.asyncio
+async def test_per_call_observations_preserve_actual_sandbox_identity_before_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leases = [_Lease(0), _Lease(1)]
+
+    async def acquire(_cls, *_args, **_kwargs):
+        return leases.pop(0)
+
+    monkeypatch.setattr(
+        InvocationSandboxLease,
+        "acquire",
+        classmethod(acquire),
+    )
+    lane = DurableAcaSandboxLane(
+        settings=_settings(),
+        loop_settings=DurableLoopSettings(),
+        content=InMemoryDurableContentStore(),
+        receipts=InMemoryDurableKeyedDocumentStore(),
+        provider_factory=lambda: _provider(False),
+        package_factory=lambda _root: _async_value(_package()),
+    )
+    request = _request(call=1)
+    sink = _ObservationSink()
+    observer = DurableChatExecutionObserver(
+        sink=sink,
+        run_id=request.run_id,
+        session_id=request.session_id,
+    )
+
+    with use_durable_chat_execution_context(
+        DurableChatExecutionContext(observer=observer)
+    ):
+        result = await lane.dispatch(request)
+
+    assert result.status is ToolResultStatus.SUCCEEDED
+    observations = [
+        event.observation
+        for event in sink.observations
+        if isinstance(event, DurableChatSandboxObservationEventV1)
+    ]
+    assert [observation.state for observation in observations] == [
+        DurableChatSandboxState.NOT_ALLOCATED,
+        DurableChatSandboxState.EXECUTING,
+        DurableChatSandboxState.DELETE_REQUESTED,
+        DurableChatSandboxState.CONFIRMED_DELETED,
+    ]
+    for observation in observations[1:]:
+        assert observation.sandbox_group_resource_id == (
+            _GROUP_RESOURCE_ID
+        )
+        assert observation.sandbox_id == "sandbox-1"
+        assert observation.sandbox_generation == 1
+        assert observation.producer.call_key == request.call_key
+        assert observation.step_index == request.step_index
+    assert observations[0].sandbox_id is None
     assert not leases
 
 
@@ -546,27 +649,70 @@ async def test_retained_loss_recreates_from_last_checkpoint(
         package_factory=lambda _root: _async_value(_package()),
         faults=faults,
     )
-    first = await lane.dispatch(
-        _request(
-            call=1,
-            profile=SandboxExecutionProfile.RETAINED_SESSION,
-            fault=DurableFaultProfile.SANDBOX_LOSS_AFTER_CHECKPOINT,
-        )
+    first_request = _request(
+        call=1,
+        profile=SandboxExecutionProfile.RETAINED_SESSION,
+        fault=DurableFaultProfile.SANDBOX_LOSS_AFTER_CHECKPOINT,
     )
+    first_sink = _ObservationSink()
+    with use_durable_chat_execution_context(
+        DurableChatExecutionContext(
+            observer=DurableChatExecutionObserver(
+                sink=first_sink,
+                run_id=first_request.run_id,
+                session_id=first_request.session_id,
+            )
+        )
+    ):
+        first = await lane.dispatch(first_request)
     assert first.workspace_ref is not None
-    second = await lane.dispatch(
-        _request(
-            call=2,
-            run_id="run-2",
-            workspace_ref=first.workspace_ref,
-            profile=SandboxExecutionProfile.RETAINED_SESSION,
-        )
+    second_request = _request(
+        call=2,
+        run_id="run-2",
+        workspace_ref=first.workspace_ref,
+        profile=SandboxExecutionProfile.RETAINED_SESSION,
     )
+    second_sink = _ObservationSink()
+    with use_durable_chat_execution_context(
+        DurableChatExecutionContext(
+            observer=DurableChatExecutionObserver(
+                sink=second_sink,
+                run_id=second_request.run_id,
+                session_id=second_request.session_id,
+            )
+        )
+    ):
+        second = await lane.dispatch(second_request)
 
     assert first_lease.deleted == 1
     assert second.status is ToolResultStatus.SUCCEEDED
     assert second_lease.expected_manifest.generation == 2
     assert second_lease.restored == [b"workspace-1"]
+    first_observations = [
+        event.observation
+        for event in first_sink.observations
+        if isinstance(event, DurableChatSandboxObservationEventV1)
+    ]
+    second_observations = [
+        event.observation
+        for event in second_sink.observations
+        if isinstance(event, DurableChatSandboxObservationEventV1)
+    ]
+    assert [observation.state for observation in first_observations] == [
+        DurableChatSandboxState.EXECUTING,
+        DurableChatSandboxState.DELETE_REQUESTED,
+        DurableChatSandboxState.CONFIRMED_DELETED,
+    ]
+    assert [observation.state for observation in second_observations] == [
+        DurableChatSandboxState.REPLACEMENT_INSTANCE,
+        DurableChatSandboxState.EXECUTING,
+        DurableChatSandboxState.RETAINED_IDLE,
+    ]
+    replacement = second_observations[0]
+    assert replacement.sandbox_id == "sandbox-2"
+    assert replacement.sandbox_generation == 2
+    assert replacement.replaced_sandbox_id == "sandbox-1"
+    assert replacement.producer.call_key == second_request.call_key
     assert not leases
 
 
@@ -667,6 +813,153 @@ async def test_retained_session_resumes_existing_inventory_without_restore(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("delete_error", "factory_error", "expected_states"),
+    (
+        (
+            None,
+            None,
+            (
+                DurableChatSandboxState.DELETE_REQUESTED,
+                DurableChatSandboxState.CONFIRMED_DELETED,
+            ),
+        ),
+        (
+            RuntimeError("sandbox deletion failed"),
+            None,
+            (
+                DurableChatSandboxState.DELETE_REQUESTED,
+                DurableChatSandboxState.UNAVAILABLE,
+            ),
+        ),
+        (
+            None,
+            RuntimeError("sandbox provider unavailable"),
+            (DurableChatSandboxState.UNAVAILABLE,),
+        ),
+    ),
+    ids=("delete_succeeds", "delete_fails", "provider_open_fails"),
+)
+async def test_retained_cleanup_observes_historical_sandbox_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    delete_error: Exception | None,
+    factory_error: Exception | None,
+    expected_states: tuple[DurableChatSandboxState, ...],
+) -> None:
+    leases = [_Lease(0), _Lease(1)]
+
+    async def acquire(_cls, *_args, **_kwargs):
+        return leases.pop(0)
+
+    monkeypatch.setattr(
+        InvocationSandboxLease,
+        "acquire",
+        classmethod(acquire),
+    )
+    provider = _Provider(present=True, delete_error=delete_error)
+
+    async def provider_factory() -> _Provider:
+        if factory_error is not None:
+            raise factory_error
+        return provider
+
+    receipts = InMemoryDurableKeyedDocumentStore()
+    lane = DurableAcaSandboxLane(
+        settings=_settings(),
+        loop_settings=DurableLoopSettings(retained_sandbox_enabled=True),
+        content=InMemoryDurableContentStore(),
+        receipts=receipts,
+        provider_factory=provider_factory,
+        package_factory=lambda _root: _async_value(_package()),
+    )
+    request = _request(
+        call=1,
+        profile=SandboxExecutionProfile.RETAINED_SESSION,
+    ).model_copy(update={"chat_ui": True})
+    dispatch_sink = _ObservationSink()
+    with use_durable_chat_execution_context(
+        DurableChatExecutionContext(
+            observer=DurableChatExecutionObserver(
+                sink=dispatch_sink,
+                run_id=request.run_id,
+                session_id=request.session_id,
+            )
+        )
+    ):
+        result = await lane.dispatch(request)
+    assert result.status is ToolResultStatus.SUCCEEDED
+
+    retained = await receipts.get(
+        f"retained-sandboxes/{canonical_hash({'session_id': request.session_id})}"
+    )
+    assert retained is not None
+    association = json.loads(retained.payload)["chat_observation"]
+    assert association == {
+        "call_key": request.call_key,
+        "owner_hash": request.owner_hash,
+        "run_id": request.run_id,
+        "schema_version": "1",
+        "session_id": request.session_id,
+        "step_index": request.step_index,
+        "tool_name": request.tool_name,
+    }
+
+    cleanup_sink = _ObservationSink()
+    with use_durable_chat_execution_context(
+        DurableChatExecutionContext(
+            observer=DurableChatExecutionObserver(
+                sink=cleanup_sink,
+                run_id=request.run_id,
+                session_id=request.session_id,
+            )
+        )
+    ):
+        if delete_error is None and factory_error is None:
+            await lane.cleanup(
+                run_id=request.run_id,
+                session_id=request.session_id,
+                profile=SandboxExecutionProfile.RETAINED_SESSION,
+                fault_profile=DurableFaultProfile.NONE,
+            )
+        else:
+            expected_error = factory_error or delete_error
+            assert expected_error is not None
+            with pytest.raises(RuntimeError, match=str(expected_error)):
+                await lane.cleanup(
+                    run_id=request.run_id,
+                    session_id=request.session_id,
+                    profile=SandboxExecutionProfile.RETAINED_SESSION,
+                    fault_profile=DurableFaultProfile.NONE,
+                )
+
+    observations = [
+        event.observation
+        for event in cleanup_sink.observations
+        if isinstance(event, DurableChatSandboxObservationEventV1)
+    ]
+    assert provider.deleted_sandbox_ids == (
+        [] if factory_error is not None else ["sandbox-1"]
+    )
+    assert provider.closed == (0 if factory_error is not None else 1)
+    assert tuple(observation.state for observation in observations) == expected_states
+    for observation in observations:
+        assert observation.sandbox_group_resource_id == _GROUP_RESOURCE_ID
+        assert observation.sandbox_id == "sandbox-1"
+        assert observation.sandbox_generation == 1
+        assert observation.producer.call_key == request.call_key
+        assert observation.step_index == request.step_index
+        assert observation.tool_name == request.tool_name
+        assert observation.sandbox_profile is SandboxExecutionProfile.RETAINED_SESSION
+    if delete_error is None and factory_error is None:
+        assert not leases
+    else:
+        retained = await receipts.get(
+            f"retained-sandboxes/{canonical_hash({'session_id': request.session_id})}"
+        )
+        assert retained is not None
+
+
+@pytest.mark.asyncio
 async def test_failed_retained_read_releases_claim_for_next_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -719,6 +1012,7 @@ async def test_failed_retained_read_releases_claim_for_next_read(
     assert retained_payload["sandbox_id"] == "sandbox-1"
     assert retained_payload["generation"] == 1
     assert retained_payload["workspace_ref"] is None
+    assert "chat_observation" not in retained_payload
 
     second = await lane.dispatch(
         _request(

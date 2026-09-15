@@ -16,11 +16,22 @@ from .._observability import use_function_trace_context
 from ..client_manager import get_client_manager
 from ..strict_json import canonical_json_bytes
 from . import durable_loop_protocol as _protocol
+from .durable_chat_execution_observer import (
+    DURABLE_CHAT_FOREGROUND_MODEL_ATTEMPTS,
+    DURABLE_CHAT_OBSERVER_SETUP_DEADLINE_SECONDS,
+    DurableChatExecutionContext,
+    DurableChatExecutionObserver,
+    durable_chat_observer_drain_deadline,
+    durable_chat_observer_setup_deadline,
+    use_durable_chat_execution_context,
+)
+from .durable_chat_protocol import DurableChatModelProducerV1
 from .durable_loop import DurableLoopPlan, build_tool_requests
 from .durable_loop_activities import (
     BackgroundModelProvider,
     BlobDurableContentStore,
     DeterministicContextCompactor,
+    DurableChatStreamingModelProvider,
     DurableContentStore,
     DurableLoopProviderTerminalError,
     HumanEventDeliveryPort,
@@ -36,9 +47,15 @@ from .durable_loop_activities import (
 )
 from .durable_loop_config import DurableLoopSettings
 from .durable_loop_execution import DurableLoopExecutionBinding
+from .durable_loop_observability import (
+    DurableLoopPhase,
+    start_durable_loop_activity_span,
+)
 from .durable_loop_protocol import (
     CheckpointStateV1,
     ContentRefV1,
+    DurableChatModelMode,
+    DurableChatRunOptionsV1,
     DurableFaultProfile,
     DurableLoopPlanDocumentV1,
     DurableLoopRunStatus,
@@ -276,6 +293,91 @@ def reset_durable_loop_activity_runtime_factory() -> None:
     _activity_runtime_factory = _default_activity_runtime
 
 
+async def _start_durable_chat_observer(
+    *,
+    run_id: str,
+    session_id: str,
+    owner_hash: str | None,
+    admitted_request_hash: str | None,
+    expected_ui: DurableChatRunOptionsV1 | None = None,
+) -> DurableChatExecutionObserver | None:
+    """Start optional journal capture after validating the admitted-run binding.
+
+    Tool dispatches carry their own deterministic request hash, not the admitted
+    POST-body hash. They therefore bind the initialized run by run, session, and
+    owner identity instead. Terminal cleanup has no request payload, so it uses
+    ``owner_hash=None`` only after matching the authoritative run/session record.
+    """
+    try:
+        from .durable_chat_journal import (
+            DurableChatInitializationError,
+            DurableChatJournalError,
+            DurableChatObserver,
+            get_durable_chat_journal,
+        )
+
+        journal = get_durable_chat_journal()
+        async with asyncio.timeout(
+            DURABLE_CHAT_OBSERVER_SETUP_DEADLINE_SECONDS
+        ):
+            initialization = await journal.load_run_initialization(run_id=run_id)
+    except (
+        DurableChatInitializationError,
+        DurableChatJournalError,
+        OSError,
+        RuntimeError,
+        TimeoutError,
+        ValueError,
+    ) as exc:
+        logger.warning(
+            "Durable chat observation setup failed (error_type=%s).",
+            type(exc).__name__,
+        )
+        return None
+    if initialization is None:
+        return None
+    if (
+        initialization.session_id != session_id
+        or (
+            owner_hash is not None
+            and initialization.owner_hash != owner_hash
+        )
+        or (
+            admitted_request_hash is not None
+            and initialization.request_hash != admitted_request_hash
+        )
+        or (
+            expected_ui is not None
+            and initialization.ui != expected_ui
+        )
+    ):
+        logger.warning("Durable chat observation initialization did not match.")
+        return None
+    try:
+        sink = DurableChatObserver(journal=journal, run_id=run_id)
+        sink.start()
+        return DurableChatExecutionObserver(
+            sink=sink,
+            drainer=sink,
+            journal=journal,
+            run_id=run_id,
+            session_id=session_id,
+            owner_hash=initialization.owner_hash,
+        )
+    except (
+        OSError,
+        RuntimeError,
+        TimeoutError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        logger.warning(
+            "Durable chat observation publisher setup failed (error_type=%s).",
+            type(exc).__name__,
+        )
+        return None
+
+
 def apply_session_entity_operation(  # noqa: PLR0912, PLR0915
     state: Mapping[str, object] | None,
     operation: str,
@@ -328,6 +430,8 @@ def apply_session_entity_operation(  # noqa: PLR0912, PLR0915
         current["active_run_id"] = None
         current["idempotency"] = idempotency
         return current, {"disposition": "released"}
+    if operation == "reclaim_expired_chat_admission":
+        return _entity_reclaim_expired_chat_admission(current, data)
     if operation == "cancel":
         run_id = _required_string(data, "run_id")
         if current.get("active_run_id") != run_id:
@@ -542,8 +646,27 @@ def _provenance_tool_activity_name(call: ToolDispatchRefV1) -> str:
     raise RuntimeError("runtime control tools cannot reach a transport activity")
 
 
+def _normalize_durable_client_binding_annotation(
+    decorated: Any,
+    *,
+    client_name: str,
+) -> None:
+    """Materialize the SDK wrapper annotation the Functions worker validates.
+
+    Durable Functions mutates the wrapped user function's annotation to ``str``.
+    On Python 3.14, ``functools.wraps`` also carries the deferred annotation
+    evaluator to the SDK's middleware wrapper, which otherwise restores the rich
+    client annotation when the worker reads it.
+    """
+    function = getattr(decorated, "_function", decorated)
+    handler = getattr(function, "_func", function)
+    annotations = dict(handler.__annotations__)
+    annotations[client_name] = str
+    handler.__annotations__ = annotations
+
+
 def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
-    async def execute_tool_activity(
+    async def execute_tool_activity(  # noqa: PLR0912, PLR0915
         payload: dict,  # type: ignore[type-arg]
         *,
         expected_provenance: ToolProvenance | None,
@@ -563,7 +686,38 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         remaining = (
             request.deadline.astimezone(UTC) - datetime.now(UTC)
         ).total_seconds()
+        observer = (
+            await _start_durable_chat_observer(
+                run_id=request.run_id,
+                session_id=request.session_id,
+                owner_hash=request.owner_hash,
+                admitted_request_hash=None,
+            )
+            if request.chat_ui is True
+            else None
+        )
+
+        async def dispatch_tool() -> ToolResultV1:
+            if observer is not None:
+                observer.tool_started(request)
+            with start_durable_loop_activity_span(
+                DurableLoopPhase.TOOL_STEP,
+                run_id=request.run_id,
+                provenance=request.provenance.value,
+            ):
+                if observer is None:
+                    return await runtime.tools.dispatch(request)
+                with use_durable_chat_execution_context(
+                    DurableChatExecutionContext(observer=observer)
+                ):
+                    return await runtime.tools.dispatch(request)
+
         try:
+            if observer is not None:
+                observer.run_status(
+                    status=DurableLoopRunStatus.RUNNING,
+                    phase=DurableLoopPhase.TOOL_STEP.value,
+                )
             if (
                 len(canonical_json_bytes(request.arguments))
                 > request.argument_byte_limit
@@ -573,97 +727,114 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                     code="tool_arguments_too_large",
                 )
             else:
-                async with asyncio.timeout(max(0.001, remaining)):
-                    result = await runtime.tools.dispatch(request)
+                try:
+                    async with asyncio.timeout(max(0.001, remaining)):
+                        result = await dispatch_tool()
+                except TimeoutError:
+                    result = ToolResultV1(
+                        run_id=request.run_id,
+                        step_index=request.step_index,
+                        call_ordinal=request.call_ordinal,
+                        provider_call_id=request.provider_call_id,
+                        call_key=request.call_key,
+                        request_hash=request.request_hash,
+                        tool_name=request.tool_name,
+                        status=ToolResultStatus.TIMED_OUT,
+                        elapsed_ms=max(0.0, remaining * 1000.0),
+                        error=ErrorEnvelopeV1(
+                            code="tool_timeout",
+                            classification="timeout",
+                            retryable=request.behavior is ToolBehavior.READ_ONLY,
+                            phase="tool_step",
+                            step_index=request.step_index,
+                            call_key=request.call_key,
+                        ),
+                    )
+                except Exception:
+                    if observer is not None:
+                        observer.tool_finished(request, ToolResultStatus.FAILED)
+                    raise
                 if _tool_result_size(result) > request.result_byte_limit:
                     result = _tool_limit_result(
                         request,
                         code="tool_result_too_large",
                     )
-        except TimeoutError:
-            result = ToolResultV1(
+            if runtime.faults is not None and await runtime.faults.consume(
+                request.fault_profile,
                 run_id=request.run_id,
-                step_index=request.step_index,
-                call_ordinal=request.call_ordinal,
-                provider_call_id=request.provider_call_id,
-                call_key=request.call_key,
-                request_hash=request.request_hash,
-                tool_name=request.tool_name,
-                status=ToolResultStatus.TIMED_OUT,
-                elapsed_ms=max(0.0, remaining * 1000.0),
-                error=ErrorEnvelopeV1(
-                    code="tool_timeout",
-                    classification="timeout",
-                    retryable=request.behavior is ToolBehavior.READ_ONLY,
-                    phase="tool_step",
-                    step_index=request.step_index,
-                    call_key=request.call_key,
-                ),
-            )
-        if runtime.faults is not None and await runtime.faults.consume(
-            request.fault_profile,
-            run_id=request.run_id,
-            point="tool_activity_ack_loss",
-        ):
-            if (
-                request.behavior is ToolBehavior.MUTATING
-                and result.status is ToolResultStatus.SUCCEEDED
+                point="tool_activity_ack_loss",
             ):
-                result = ToolResultV1(
-                    run_id=request.run_id,
-                    step_index=request.step_index,
-                    call_ordinal=request.call_ordinal,
-                    provider_call_id=request.provider_call_id,
-                    call_key=request.call_key,
-                    request_hash=request.request_hash,
-                    tool_name=request.tool_name,
-                    status=ToolResultStatus.AMBIGUOUS,
-                    elapsed_ms=result.elapsed_ms,
-                    error=ErrorEnvelopeV1(
-                        code="tool_acknowledgement_lost",
-                        classification="tool",
-                        retryable=False,
-                        disposition=ErrorDisposition.AMBIGUOUS,
-                        possibly_committed=True,
-                        phase="tool_step",
+                if (
+                    request.behavior is ToolBehavior.MUTATING
+                    and result.status is ToolResultStatus.SUCCEEDED
+                ):
+                    result = ToolResultV1(
+                        run_id=request.run_id,
                         step_index=request.step_index,
+                        call_ordinal=request.call_ordinal,
+                        provider_call_id=request.provider_call_id,
                         call_key=request.call_key,
-                    ),
-                )
-            else:
-                result = await runtime.tools.dispatch(request)
-        result_ref = await put_protocol_model(
-            runtime.content,
-            kind="tool-result",
-            model=result,
-        )
-        written_bytes = result_ref.byte_length
-        if result.workspace_ref is not None:
-            workspace = await get_protocol_model(
+                        request_hash=request.request_hash,
+                        tool_name=request.tool_name,
+                        status=ToolResultStatus.AMBIGUOUS,
+                        elapsed_ms=result.elapsed_ms,
+                        error=ErrorEnvelopeV1(
+                            code="tool_acknowledgement_lost",
+                            classification="tool",
+                            retryable=False,
+                            disposition=ErrorDisposition.AMBIGUOUS,
+                            possibly_committed=True,
+                            phase="tool_step",
+                            step_index=request.step_index,
+                            call_key=request.call_key,
+                        ),
+                    )
+                else:
+                    try:
+                        result = await dispatch_tool()
+                    except Exception:
+                        if observer is not None:
+                            observer.tool_finished(request, ToolResultStatus.FAILED)
+                        raise
+            if observer is not None:
+                observer.tool_finished(request, result.status)
+            result_ref = await put_protocol_model(
                 runtime.content,
-                result.workspace_ref,
-                WorkspaceArtifactV1,
+                kind="tool-result",
+                model=result,
             )
-            written_bytes += (
-                result.workspace_ref.byte_length
-                + workspace.archive_ref.byte_length
-            )
-        return ToolResultRefV1(
-            result_ref=result_ref,
-            call_ordinal=result.call_ordinal,
-            call_key=result.call_key,
-            request_hash=result.request_hash,
-            tool_name=result.tool_name,
-            status=result.status,
-            written_bytes=written_bytes,
-        ).model_dump(mode="json")
+            written_bytes = result_ref.byte_length
+            if result.workspace_ref is not None:
+                workspace = await get_protocol_model(
+                    runtime.content,
+                    result.workspace_ref,
+                    WorkspaceArtifactV1,
+                )
+                written_bytes += (
+                    result.workspace_ref.byte_length
+                    + workspace.archive_ref.byte_length
+                )
+            return ToolResultRefV1(
+                result_ref=result_ref,
+                call_ordinal=result.call_ordinal,
+                call_key=result.call_key,
+                request_hash=result.request_hash,
+                tool_name=result.tool_name,
+                status=result.status,
+                written_bytes=written_bytes,
+            ).model_dump(mode="json")
+        finally:
+            if observer is not None:
+                await observer.drain(
+                    deadline=durable_chat_observer_drain_deadline()
+                )
 
     @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
         input_name="payload",
         activity=DURABLE_LOOP_MODEL_ACTIVITY_NAME,
     )
     @_with_function_trace_context
-    async def durable_agent_model_step_v1(
+    async def durable_agent_model_step_v1(  # noqa: PLR0912, PLR0915
         payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
         runtime = get_durable_loop_activity_runtime()
@@ -688,95 +859,167 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                 + timedelta(seconds=checkpoint.parked_seconds)
             ),
         )
+        observer = None
+        if document.plan.ui is not None:
+            observer = await _start_durable_chat_observer(
+                run_id=checkpoint.identity.run_id,
+                session_id=checkpoint.identity.session_id,
+                owner_hash=checkpoint.identity.owner_hash,
+                admitted_request_hash=checkpoint.identity.request_hash,
+                expected_ui=document.plan.ui,
+            )
+        producers: tuple[DurableChatModelProducerV1, ...] = ()
+        if (
+            observer is not None
+            and document.plan.ui is not None
+            and document.plan.ui.model_mode is DurableChatModelMode.FOREGROUND
+            and document.plan.ui.stream_response
+        ):
+            producers = await observer.reserve_model_producers(
+                step_index=checkpoint.next_model_step,
+                count=DURABLE_CHAT_FOREGROUND_MODEL_ATTEMPTS,
+                deadline=durable_chat_observer_setup_deadline(),
+            )
         background_written_bytes = 0
-        background_model = (
-            None
-            if (
-                checkpoint.identity.orchestration_version
-                == DURABLE_LOOP_ORCHESTRATOR_V3_NAME
-                and plan.fault_profile
-                is DurableFaultProfile.MODEL_APIM_429_ONCE
+        background_model = runtime.background_model
+        if (
+            document.plan.ui is not None
+            and document.plan.ui.model_mode is DurableChatModelMode.FOREGROUND
+        ) or (
+            checkpoint.identity.orchestration_version
+            == DURABLE_LOOP_ORCHESTRATOR_V3_NAME
+            and plan.fault_profile is DurableFaultProfile.MODEL_APIM_429_ONCE
+        ):
+            background_model = None
+        if observer is not None:
+            observer.run_status(
+                status=DurableLoopRunStatus.RUNNING,
+                phase=DurableLoopPhase.MODEL_STEP.value,
             )
-            else runtime.background_model
-        )
+            observer.progress(
+                status=DurableLoopRunStatus.RUNNING,
+                phase=DurableLoopPhase.MODEL_STEP.value,
+                model_steps=checkpoint.completed_model_steps,
+                tool_calls=checkpoint.completed_tool_calls,
+                human_waits=checkpoint.human_wait_count,
+                step_index=checkpoint.next_model_step,
+            )
         try:
-            async with asyncio.timeout(plan.settings.activity_timeout_seconds):
-                if background_model is None:
-                    decision = await runtime.model.run_one_step(request)
-                else:
-                    started = await background_model.start(request)
-                    background_written_bytes = started.written_bytes
-                    if started.operation is not None:
-                        operation_ref = await put_protocol_model(
-                            runtime.content,
-                            kind="model-operation",
-                            model=started.operation,
+            try:
+                async with asyncio.timeout(plan.settings.activity_timeout_seconds):
+                    with start_durable_loop_activity_span(
+                        DurableLoopPhase.MODEL_STEP,
+                        run_id=checkpoint.identity.run_id,
+                        provenance="model",
+                    ):
+                        if background_model is None:
+                            if (
+                                observer is not None
+                                and producers
+                                and isinstance(
+                                    runtime.model,
+                                    DurableChatStreamingModelProvider,
+                                )
+                            ):
+                                with use_durable_chat_execution_context(
+                                    DurableChatExecutionContext(
+                                        observer=observer,
+                                        model_producers=producers,
+                                    )
+                                ):
+                                    decision = await runtime.model.run_one_step_with_observer(
+                                        request,
+                                        observer=observer,
+                                        producers=producers,
+                                    )
+                            else:
+                                decision = await runtime.model.run_one_step(request)
+                        else:
+                            started = await background_model.start(request)
+                            background_written_bytes = started.written_bytes
+                            if started.operation is not None:
+                                operation_ref = await put_protocol_model(
+                                    runtime.content,
+                                    kind="model-operation",
+                                    model=started.operation,
+                                )
+                                return ModelStepActivityResultV1(
+                                    run_document_ref=reference,
+                                    step_index=checkpoint.next_model_step,
+                                    background_operation_ref=operation_ref,
+                                    poll_after_seconds=plan.settings.poll_initial_seconds,
+                                    written_bytes=(
+                                        started.written_bytes
+                                        or operation_ref.byte_length
+                                    ),
+                                ).model_dump(mode="json")
+                            if started.error is not None:
+                                return await _persist_model_error(
+                                    runtime,
+                                    document,
+                                    started.error,
+                                    extra_written_bytes=started.written_bytes,
+                                )
+                            if started.decision is None:
+                                raise RuntimeError(
+                                    "background model start returned no outcome"
+                                )
+                            decision = started.decision
+            except TimeoutError:
+                raise RuntimeError("durable model activity timed out") from None
+            except DurableLoopProviderTerminalError as exc:
+                error = ErrorEnvelopeV1(
+                    code=exc.code,
+                    classification="model",
+                    retryable=False,
+                    phase="model_step",
+                    step_index=checkpoint.next_model_step,
+                )
+                failed = document.model_copy(
+                    update={
+                        "checkpoint": _checkpoint_with_usage(
+                            checkpoint,
+                            exc.usage,
+                        ).model_copy(
+                            update={
+                                "last_error": error,
+                                "status": DurableLoopRunStatus.FAILED,
+                            }
                         )
-                        return ModelStepActivityResultV1(
-                            run_document_ref=reference,
-                            step_index=checkpoint.next_model_step,
-                            background_operation_ref=operation_ref,
-                            poll_after_seconds=plan.settings.poll_initial_seconds,
-                            written_bytes=(
-                                started.written_bytes
-                                or operation_ref.byte_length
-                            ),
-                        ).model_dump(mode="json")
-                    if started.error is not None:
-                        return await _persist_model_error(
-                            runtime,
-                            document,
-                            started.error,
-                            extra_written_bytes=started.written_bytes,
-                        )
-                    if started.decision is None:
-                        raise RuntimeError(
-                            "background model start returned no outcome"
-                        )
-                    decision = started.decision
-        except TimeoutError:
-            raise RuntimeError("durable model activity timed out") from None
-        except DurableLoopProviderTerminalError as exc:
-            error = ErrorEnvelopeV1(
-                code=exc.code,
-                classification="model",
-                retryable=False,
-                phase="model_step",
-                step_index=checkpoint.next_model_step,
+                    }
+                )
+                failed_ref = await put_protocol_model(
+                    runtime.content,
+                    kind="run-document",
+                    model=failed,
+                )
+                return ModelStepActivityResultV1(
+                    run_document_ref=failed_ref,
+                    step_index=checkpoint.next_model_step,
+                    error=error,
+                    usage=exc.usage,
+                    written_bytes=failed_ref.byte_length,
+                ).model_dump(mode="json")
+            if observer is not None:
+                observer.progress(
+                    status=DurableLoopRunStatus.RUNNING,
+                    phase=DurableLoopPhase.MODEL_STEP.value,
+                    model_steps=checkpoint.completed_model_steps + 1,
+                    tool_calls=checkpoint.completed_tool_calls,
+                    human_waits=checkpoint.human_wait_count,
+                    step_index=checkpoint.next_model_step,
+                )
+            return await _persist_model_decision(
+                runtime,
+                document,
+                decision,
+                extra_written_bytes=background_written_bytes,
             )
-            failed = document.model_copy(
-                update={
-                    "checkpoint": _checkpoint_with_usage(
-                        checkpoint,
-                        exc.usage,
-                    ).model_copy(
-                        update={
-                            "last_error": error,
-                            "status": DurableLoopRunStatus.FAILED,
-                        }
-                    )
-                }
-            )
-            failed_ref = await put_protocol_model(
-                runtime.content,
-                kind="run-document",
-                model=failed,
-            )
-            return ModelStepActivityResultV1(
-                run_document_ref=failed_ref,
-                step_index=checkpoint.next_model_step,
-                error=error,
-                usage=exc.usage,
-                written_bytes=failed_ref.byte_length,
-            ).model_dump(mode="json")
-        return await _persist_model_decision(
-            runtime,
-            document,
-            decision,
-            extra_written_bytes=(
-                background_written_bytes
-            ),
-        )
+        finally:
+            if observer is not None:
+                await observer.drain(
+                    deadline=durable_chat_observer_drain_deadline()
+                )
 
     @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
         input_name="payload",
@@ -877,7 +1120,8 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         payload: dict,  # type: ignore[type-arg]
     ) -> dict[str, object]:
         runtime = get_durable_loop_activity_runtime()
-        if isinstance(runtime.tools, DurableToolCleanupPort):
+        tools = runtime.tools
+        if isinstance(tools, DurableToolCleanupPort):
             run_id = _required_string(payload, "run_id")
             session_id = _required_string(payload, "session_id")
             sandbox_profile = SandboxExecutionProfile(
@@ -886,22 +1130,38 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
             fault_profile = DurableFaultProfile(
                 _required_string(payload, "fault_profile")
             )
+            observer = await _start_durable_chat_observer(
+                run_id=run_id,
+                session_id=session_id,
+                owner_hash=None,
+                admitted_request_hash=None,
+            )
+
+            async def cleanup_tools() -> None:
+                if observer is None:
+                    await tools.cleanup(
+                        run_id=run_id,
+                        session_id=session_id,
+                        sandbox_profile=sandbox_profile,
+                        fault_profile=fault_profile,
+                    )
+                    return
+                with use_durable_chat_execution_context(
+                    DurableChatExecutionContext(observer=observer)
+                ):
+                    await tools.cleanup(
+                        run_id=run_id,
+                        session_id=session_id,
+                        sandbox_profile=sandbox_profile,
+                        fault_profile=fault_profile,
+                    )
+
             try:
-                await runtime.tools.cleanup(
-                    run_id=run_id,
-                    session_id=session_id,
-                    sandbox_profile=sandbox_profile,
-                    fault_profile=fault_profile,
-                )
+                await cleanup_tools()
             except Exception as exc:
                 if fault_profile is DurableFaultProfile.CLEANUP_FAILURE_ONCE:
                     try:
-                        await runtime.tools.cleanup(
-                            run_id=run_id,
-                            session_id=session_id,
-                            sandbox_profile=sandbox_profile,
-                            fault_profile=fault_profile,
-                        )
+                        await cleanup_tools()
                     except Exception as retry_exc:
                         logger.error(
                             "Durable-loop cleanup retry failed "
@@ -915,6 +1175,11 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                         type(exc).__name__,
                     )
                     return {"cleaned": False}
+            finally:
+                if observer is not None:
+                    await observer.drain(
+                        deadline=durable_chat_observer_drain_deadline()
+                    )
         return {"cleaned": True}
 
     @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
@@ -1304,6 +1569,11 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
             )
         return result.model_dump(mode="json")
 
+    _normalize_durable_client_binding_annotation(
+        durable_agent_human_delivery_v1,
+        client_name="client",
+    )
+
     @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
         input_name="payload",
         activity=DURABLE_LOOP_COMPACTION_ACTIVITY_NAME,
@@ -1497,6 +1767,7 @@ def _register_short_orchestrators(blueprint: df.Blueprint) -> None:
             "get",
             "mark_human_delivery",
             "orphan_human",
+            "reclaim_expired_chat_admission",
             "release_admission",
             "reserve_human",
         }:
@@ -2369,7 +2640,7 @@ def _entity_admit(
     if isinstance(previous, Mapping):
         if previous.get("request_hash") != request_hash:
             return current, {"disposition": "conflict"}
-        return current, {
+        replayed: dict[str, object] = {
             "disposition": "replayed",
             "lifecycle": previous.get("lifecycle"),
             "run_id": previous.get("run_id"),
@@ -2384,32 +2655,122 @@ def _entity_admit(
             "committed_context_ref": current.get("committed_context_ref"),
             "committed_generation": current.get("committed_generation"),
         }
+        if previous.get("chat_ui") is True:
+            replayed.update(
+                {
+                    "admitted_at": previous.get("admitted_at"),
+                    "chat_ui": True,
+                    "committed_context_ref": previous.get("committed_context_ref"),
+                    "committed_generation": previous.get("committed_generation"),
+                    "expires_at": previous.get("expires_at"),
+                }
+            )
+        return current, replayed
+    chat_ui = data.get("chat_ui") is True
+    chat_now: datetime | None = None
+    if chat_ui:
+        chat_now = _datetime_value(data.get("now"), "now")
+        _datetime_value(data.get("expires_at"), "expires_at")
     active_run_id = current.get("active_run_id")
     if isinstance(active_run_id, str) and active_run_id:
-        return current, {
-            "active_run_id": active_run_id,
-            "disposition": "busy",
-        }
-    now = _optional_datetime(data.get("now"))
+        if chat_now is not None:
+            _reclaim_active_expired_chat_admission(current, now=chat_now)
+        active_run_id = current.get("active_run_id")
+        if isinstance(active_run_id, str) and active_run_id:
+            return current, {
+                "active_run_id": active_run_id,
+                "disposition": "busy",
+            }
+    now = chat_now or _optional_datetime(data.get("now"))
     if len(idempotency) >= _MAX_ENTITY_IDEMPOTENCY_RECEIPTS:
         _evict_terminal_idempotency_receipts(idempotency, now)
     if len(idempotency) >= _MAX_ENTITY_IDEMPOTENCY_RECEIPTS:
         return current, {"disposition": "idempotency_capacity_exceeded"}
-    idempotency[request_id_hash] = {
+    receipt: dict[str, object] = {
         "expires_at": data.get("expires_at"),
         "lifecycle": "admitted",
         "request_hash": request_hash,
         "run_id": run_id,
     }
+    if chat_ui:
+        receipt.update(
+            {
+                "admitted_at": data.get("now"),
+                "chat_ui": True,
+                "committed_context_ref": current.get("committed_context_ref"),
+                "committed_generation": current.get("committed_generation"),
+            }
+        )
+    idempotency[request_id_hash] = receipt
     current["active_run_id"] = run_id
     current["idempotency"] = idempotency
-    return current, {
+    admitted: dict[str, object] = {
         "committed_context_ref": current.get("committed_context_ref"),
         "committed_generation": current.get("committed_generation"),
         "disposition": "admitted",
         "lifecycle": "admitted",
         "run_id": run_id,
     }
+    if receipt.get("chat_ui") is True:
+        admitted.update(
+            {
+                "admitted_at": receipt.get("admitted_at"),
+                "chat_ui": True,
+                "committed_context_ref": receipt.get("committed_context_ref"),
+                "committed_generation": receipt.get("committed_generation"),
+                "expires_at": receipt.get("expires_at"),
+            }
+        )
+    return current, admitted
+
+
+def _entity_reclaim_expired_chat_admission(
+    current: dict[str, object],
+    data: Mapping[str, object],
+) -> tuple[dict[str, object], dict[str, object]]:
+    now = _datetime_value(data.get("now"), "now")
+    run_id = _required_string(data, "run_id")
+    request_id_hash = _required_string(data, "request_id_hash")
+    request_hash = _required_string(data, "request_hash")
+    idempotency = _mapping(current.get("idempotency"), "idempotency")
+    receipt = idempotency.get(request_id_hash)
+    if (
+        current.get("active_run_id") != run_id
+        or not isinstance(receipt, Mapping)
+        or receipt.get("run_id") != run_id
+        or receipt.get("request_hash") != request_hash
+        or receipt.get("chat_ui") is not True
+        or receipt.get("lifecycle") != "admitted"
+        or not _receipt_expired(receipt, now)
+    ):
+        return current, {"disposition": "stale"}
+    current["active_run_id"] = None
+    return current, {"disposition": "reclaimed"}
+
+
+def _reclaim_active_expired_chat_admission(
+    current: dict[str, object],
+    *,
+    now: datetime,
+) -> bool:
+    active_run_id = current.get("active_run_id")
+    if not isinstance(active_run_id, str) or not active_run_id:
+        return False
+    idempotency = _mapping(current.get("idempotency"), "idempotency")
+    receipts = [
+        receipt
+        for receipt in idempotency.values()
+        if isinstance(receipt, Mapping) and receipt.get("run_id") == active_run_id
+    ]
+    if (
+        len(receipts) != 1
+        or receipts[0].get("chat_ui") is not True
+        or receipts[0].get("lifecycle") != "admitted"
+        or not _receipt_expired(receipts[0], now)
+    ):
+        return False
+    current["active_run_id"] = None
+    return True
 
 
 def _entity_complete(
@@ -2877,6 +3238,8 @@ async def _persist_model_decision(
         plan,
         datetime.now(UTC),
     ):
+        if document.plan.ui is not None:
+            request_item = request_item.model_copy(update={"chat_ui": True})
         request_ref = await put_protocol_model(
             runtime.content,
             kind="tool-request",
