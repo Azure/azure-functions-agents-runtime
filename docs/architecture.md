@@ -60,6 +60,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/config/loader.py` | Loads YAML front matter and `agents.config.yaml` into typed models. | `load_agent_specs()`, `load_global_config()` |
 | `azure_functions_agents/config/merge.py` | Applies defaults, overrides, and per-agent filters to produce runtime config, including each agent's identity `slug` (via `_slug.py`) and its normalized `subagents` list. | `compose()` |
 | `azure_functions_agents/_slug.py` | Derives an agent's identity slug from its `.agent.md` filename (and the `delegate_<slug>` tool-name convention) in one shared place, so naming, config composition, and delegation can never compute a slug differently. | `_function_name_from_source()`, `delegate_tool_name()` |
+| `azure_functions_agents/_history_identity.py`, `_blob_history.py`, `_file_history.py` | Validate the canonical slug before using it as a path segment and persist conversation history by `(agent_slug, session_id)`. | `validate_agent_slug()`, `BlobHistoryProvider`, `ScopedFileHistoryProvider` |
 | `azure_functions_agents/config/validation.py` | Post-merge sanity checks for resolved agents, including rejecting unknown/duplicate/self references in both independent Sub Agent grants against the app-wide slug index. | `validate_resolved_agent()`, `validate_subagent_references()`, `validate_workflow_subagent_references()` |
 | `azure_functions_agents/discovery/skills.py` | Walks `skills/<name>/SKILL.md` files, validates frontmatter, and caches the name→directory map for MAF's `SkillsProvider`. | `discover_skills()`, `clear_skills_cache()` |
 | `azure_functions_agents/discovery/tools.py` | Imports `tools/*.py`, finds normal `FunctionTool`/plain-function tools, discovers `@workflow_tool` Activity targets, and caches both inventories. | `discover_project_tools()`, `discover_user_tools()` |
@@ -204,18 +205,28 @@ Registration does not run the agent itself. Instead, `registration/_handlers.py`
 authored `null` values to clear inherited leaves or subtrees,
 then validates the effective token limits. `ResolvedAgent.agent_configuration` is always a concrete
 configuration object. The runner unconditionally constructs every role with MAF's
-`create_harness_agent`. Direct execution uses the runtime history provider, keyed by the public
-session ID returned to the caller and supplied on later turns.
-In Azure, `BlobHistoryProvider` stores that history in the
+`create_harness_agent`. Direct execution uses the runtime history provider, keyed by
+`(agent_slug, session_id)`, where endpoint registration supplies the same validated slug used in
+the route and the public session ID is returned to the caller and supplied on later turns. This
+matches workflow management's
+`(workflow_agent_slug, session_id)` identity: equal caller-visible session IDs on different agents
+retain independent persisted transcripts, locks, and workflow scope.
+In Azure, `BlobHistoryProvider` stores each transcript at
+`agent-sessions/{agent_slug}/{session_id}.jsonl` in the
 Function App's configured storage account, so a request handled by another worker can reload the
 same conversation. The `FileHistoryProvider` fallback is for local development and does not provide
-cross-worker sharing. Runs force provider-managed history (`store=false`) because the runtime
+cross-worker sharing; it uses
+`{config_dir}/agent-sessions/{agent_slug}/{session_id}.jsonl`. Runs force provider-managed history
+(`store=false`) because the runtime
 creates a new in-memory `AgentSession` object for every request, including later requests that supply
 the same session ID. Those objects represent the same logical conversation: each is initialized with
-the supplied ID, and the Blob/File provider reloads the history stored under that ID. Blob/File
+the supplied ID, and the Blob/File provider reloads the history stored under the agent/session pair.
+Blob/File
 history, rather than a provider-side conversation ID retained on an earlier object, therefore remains
 authoritative. Cross-worker turn ordering is not coordinated, so callers must still avoid concurrent
-turns for the same session ID. With effective context and output limits configured, MAF compacts the externally
+turns for the same agent/session pair. Earlier unscoped
+`agent-sessions/{session_id}.jsonl` records are not loaded or mutated. With effective context and
+output limits configured, MAF compacts the externally
 loaded conversation history immediately before each model call. Agent instructions remain part of
 every call; compaction controls accumulated message-history growth.
 

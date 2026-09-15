@@ -281,7 +281,6 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 app,
                 resolved,
                 direct_capabilities,
-                slug=resolved.slug,
                 workflows_enabled=workflows_enabled,
                 workflow_system_addendum=workflow_system_addendum,
                 workflow_policy=workflow_policy,

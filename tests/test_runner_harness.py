@@ -112,7 +112,12 @@ def test_build_agent_session_forces_provider_managed_history(
         "build_chat_client_with_target",
         lambda _model: (object(), InferenceTarget()),
     )
-    monkeypatch.setattr(runner, "_build_history_provider", lambda: object())
+    history_calls: list[str] = []
+    monkeypatch.setattr(
+        runner,
+        "_build_history_provider",
+        lambda agent_slug: history_calls.append(agent_slug) or object(),
+    )
 
     asyncio.run(
         runner._build_agent_session(
@@ -133,6 +138,7 @@ def test_build_agent_session_forces_provider_managed_history(
     )
 
     assert captured[0]["default_options"] == {"store": False}
+    assert history_calls == ["main"]
 
 
 def test_build_agent_session_forwards_system_instructions(monkeypatch: Any) -> None:
@@ -156,7 +162,7 @@ def test_build_agent_session_forwards_system_instructions(monkeypatch: Any) -> N
         "build_chat_client_with_target",
         lambda _model: (object(), InferenceTarget()),
     )
-    monkeypatch.setattr(runner, "_build_history_provider", lambda: object())
+    monkeypatch.setattr(runner, "_build_history_provider", lambda agent_slug: object())
 
     asyncio.run(
         runner._build_agent_session(
@@ -257,6 +263,7 @@ def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
     delegate_tracker = runner._DelegateErrorTracker()
     subagents = [SimpleNamespace(agent="billing")]
     catalog = object()
+    history_calls: list[str] = []
 
     def fake_create_harness_agent(_client: Any, **kwargs: Any) -> _FakeAgent:
         captured_agent_options.append(kwargs)
@@ -286,7 +293,11 @@ def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
         "build_chat_client_with_target",
         lambda _model: (object(), InferenceTarget()),
     )
-    monkeypatch.setattr(runner, "_build_history_provider", lambda: object())
+    monkeypatch.setattr(
+        runner,
+        "_build_history_provider",
+        lambda agent_slug: history_calls.append(agent_slug) or object(),
+    )
     monkeypatch.setattr(runner, "build_subagent_tools", fake_build_subagent_tools)
 
     _, _, _, returned_tracker, _ = asyncio.run(
@@ -319,6 +330,24 @@ def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
         "delegate_billing",
     ]
     assert returned_tracker is delegate_tracker
+    assert history_calls == ["coordinator"]
+
+
+def test_build_history_provider_scopes_local_storage_by_agent(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    captured_blob_slugs: list[str] = []
+    monkeypatch.setattr(runner, "resolve_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        runner,
+        "build_blob_provider_from_environment",
+        lambda *, agent_slug: captured_blob_slugs.append(agent_slug) or None,
+    )
+
+    provider = runner._build_history_provider("billing")
+
+    assert captured_blob_slugs == ["billing"]
+    assert provider.storage_path == tmp_path / "agent-sessions" / "billing"
 
 
 def test_fresh_harness_agents_reload_history_for_same_session(monkeypatch: Any) -> None:
@@ -334,7 +363,7 @@ def test_fresh_harness_agents_reload_history_for_same_session(monkeypatch: Any) 
     monkeypatch.setattr(
         runner,
         "_build_history_provider",
-        lambda: _SharedHistoryProvider(stored_messages),
+        lambda agent_slug: _SharedHistoryProvider(stored_messages),
     )
 
     async def run_two_turns() -> None:
@@ -389,7 +418,7 @@ def test_harness_compacts_model_context_without_rewriting_stored_history(
     monkeypatch.setattr(
         runner,
         "_build_history_provider",
-        lambda: _SharedHistoryProvider(stored_messages),
+        lambda agent_slug: _SharedHistoryProvider(stored_messages),
     )
 
     async def run_two_turns() -> None:

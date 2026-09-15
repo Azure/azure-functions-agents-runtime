@@ -13,6 +13,7 @@ import azure.functions as func
 from azure.durable_functions import DurableFunctionsClient
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
+from .._history_identity import validate_agent_slug
 from .._logger import logger
 from .._observability import FaultDomain, LifecycleStage, start_span
 from .._session_id import SESSION_ID_PATTERN
@@ -20,7 +21,7 @@ from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
 from ._auth import authorize_entra_request, resolve_endpoint_auth_level
 from ._handlers import _set_run_result_attributes, build_sandbox_tools_for_session
-from ._naming import _function_name_from_source, _safe_function_name
+from ._naming import _safe_function_name
 from .capabilities import AgentCapabilities
 from .catalog import AgentCatalog
 
@@ -689,7 +690,7 @@ def _register_history_endpoint(
 
         from .._blob_history import build_blob_provider_from_environment
 
-        provider = build_blob_provider_from_environment()
+        provider = build_blob_provider_from_environment(agent_slug=slug)
         if provider is None:
             return Response(
                 json.dumps({"messages": [], "truncated": False}),
@@ -739,7 +740,6 @@ def register_builtin_endpoints(
     app: func.FunctionApp,
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
-    slug: str | None = None,
     *,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
@@ -748,7 +748,7 @@ def register_builtin_endpoints(
 ) -> None:
     """Register built-in debug chat UI, REST chat, and MCP endpoints for one agent."""
 
-    slug = slug or _function_name_from_source(resolved.source_file, resolved.name)
+    slug = validate_agent_slug(resolved.slug)
     builtin_endpoints = resolved.builtin_endpoints
 
     base_function_name = _safe_function_name(f"agent_{slug}_builtin")
@@ -800,7 +800,7 @@ def register_builtin_endpoints(
             _register_workflow_status_endpoints(
                 app,
                 slug=slug,
-                workflow_agent_slug=resolved.slug,
+                workflow_agent_slug=slug,
                 base_function_name=base_function_name,
                 auth=auth,
             )
