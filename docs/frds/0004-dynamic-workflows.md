@@ -4,7 +4,7 @@ title: Dynamic workflows
 status: Finalized
 author: TsuyoshiUshio
 created: 2026-07-06
-updated: 2026-09-03
+updated: 2026-09-14
 issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108, https://github.com/Azure/azure-functions-agents-runtime/issues/109, https://github.com/Azure/azure-functions-bucees-planning/issues/1274, https://github.com/Azure/azure-functions-bucees-planning/issues/1275, https://github.com/Azure/azure-functions-bucees-planning/issues/1276]
 pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117, https://github.com/Azure/azure-functions-agents-runtime/pull/151, https://github.com/Azure/azure-functions-agents-runtime/pull/163]
 ---
@@ -109,8 +109,8 @@ explicitly opt a function into the Durable Activity execution path.
 
 - Hand-authored workflow YAML/markdown templates; workflow plans remain
   LLM-authored through `start_workflow`.
-- Per-task timeout, concurrency, continue-on-error, and retry observability
-  settings. This evolution adds plan-authored retry only.
+- Per-task concurrency and retry observability settings. Timeout and
+  continue-on-error are included in the execution-policy extensions below.
 - Sub-orchestrations, nested/stateful Sub Agent tasks, MCP Tasks integration,
   or cross-app workflow coordination. Stateless leaf Sub Agent tasks are in v1.
 - Changing normal MAF tool execution semantics.
@@ -179,13 +179,13 @@ The retry schedule is bounded at submission. `max_attempts`, `backoff.initial`,
 all native retry delays must fit a one-hour admission cap. Durable's finite
 `retry_timeout` remains unset because the SDK evaluates it against real
 wall-clock time while replaying history. Per-attempt deadlines are added by the
-timeout and continuation slice below and share that same admission cap.
+timeout slice below and share that same admission cap.
 
 ### Attempt timeout and continuation
 
-The retry slice bounds *how many times* a task is delivered. This slice bounds
-*how long one delivery may take* and *whether the DAG survives its failure*. Both
-are authored on the same `execution` object and frozen at submission time:
+Use `execution` to set retry, attempt timeout, and failure continuation for tool
+and Sub Agent tasks. Tools can also declare retry and timeout through
+`@workflow_tool(retry=..., timeout=...)`.
 
 ```json
 {
@@ -204,77 +204,116 @@ are authored on the same `execution` object and frozen at submission time:
 }
 ```
 
-All three fields become optional, so `execution` may declare a timeout without a
-retry policy. An `execution` object that declares nothing is rejected, because a
-policy-free task must stay policy-free: persisting an empty payload would move it
-onto the structured envelope for no authored reason. Error codes stay narrow and
-stable: retry shape and schedule failures keep their shipped
-`workflow_retry_policy_invalid` / `workflow_retry_schedule_exceeded` codes,
-including the already-shipped explicit-`null` execution case, and the new
-`workflow_execution_policy_invalid` covers only what this slice adds — an
-`execution` that declares no field, an out-of-domain `execution.timeout`, and a
-decorator policy applied to a non-tool task.
+**Fields and defaults.** Each field is optional. Defaults apply after tool
+declarations are combined with the plan.
 
-`timeout` is bounded to `PT1S`-`PT10M` and, like `retry`, may be declared
-authoritatively on the tool via `@workflow_tool(timeout=...)`. `continue_on_error`
-is deliberately never decorator metadata: whether a workflow may proceed past a
-failed node is a property of the plan, not of the tool. Decorator precedence is
-resolved independently per field, so the two declaration sites compose:
+| Field | Where to set it | If absent from both locations | Rules |
+| --- | --- | --- | --- |
+| `retry` | Plan or tool decorator | One attempt; no retry delay | `max_attempts` is 1-5, including the first attempt. More than one attempt requires `backoff`. The tool's retry policy replaces the plan's retry policy. |
+| `timeout` | Plan or tool decorator | No runtime attempt deadline | ISO 8601 duration from `PT1S` to `PT10M`. The tool's timeout replaces the plan's timeout. Host and specialist limits still apply. |
+| `continue_on_error` | Plan only | `false`; a task failure fails the workflow | Boolean. `true` permits only the failure kinds listed below. |
 
-| Declared on the tool | Declared in the plan | Effective |
+**Configuration patterns.** `R` means a valid retry policy, such as the one in
+the example. Tool and plan settings combine independently for each field.
+
+| Tool declaration | Plan `execution` | Effective behavior |
 | --- | --- | --- |
-| `retry` | `retry` | tool `retry` |
-| `retry` | `timeout` | tool `retry` + plan `timeout` |
-| `timeout` | `retry` | plan `retry` + tool `timeout` |
-| `timeout` | `timeout` | tool `timeout` |
-| — | `continue_on_error` | plan `continue_on_error` |
+| None | Omitted | No execution payload. Keep existing behavior. |
+| None | `{"timeout":"PT30S"}` | One attempt with a 30-second deadline. |
+| None | `{"retry":R}` | Use `R`; no runtime attempt deadline. |
+| None | `{"continue_on_error":true}` | One attempt. Continue after a permitted failure. |
+| None | `{"continue_on_error":false}` | One attempt. Keep existing failure timing. |
+| None | `{"timeout":"PT30S","retry":R,"continue_on_error":true}` | Apply the deadline to each attempt. Continue after a terminal failure or after retries are exhausted. |
+| `timeout="PT20S"` | Omitted | One attempt with the tool's 20-second deadline. |
+| `retry=R` | `{"timeout":"PT30S"}` | Use the tool's retry policy and the plan's timeout. |
+| `timeout="PT20S"` | `{"retry":R,"timeout":"PT30S"}` | Use the plan's retry policy and the tool's 20-second timeout. |
+| `retry=R` | A different retry policy | Use the tool's retry policy. |
+| Any | `{}` or `null` | Reject the plan. |
 
-The submission-time bounded-execution guard now covers deadlines too, so the
-worst case of `max_attempts * timeout` plus the retry delay ceiling must still fit
-the one-hour admission cap.
+**Validation and persistence.** Retry errors keep
+`workflow_retry_policy_invalid` and `workflow_retry_schedule_exceeded`.
+Explicit `execution: null` keeps `workflow_retry_policy_invalid`.
+Use `workflow_execution_policy_invalid` for an empty execution object, invalid
+timeout or continuation values, and a new decorator timeout policy applied to a
+non-tool task. Existing decorator retry errors keep their current code.
 
-Both persisted keys are `NotRequired` and written only when they were asked for,
-so a task that uses neither freezes a payload byte-identical to the one the
-retry-only runtime wrote and replays through exactly the same path.
+For a policy without retry, use the existing
+`WorkflowRetryPolicy(max_attempts=1)` conversion to persist `max_attempts` and
+`durable_retry_policy`. Do not add a separate wire format.
+
+The persisted `timeout_ms` and `continue_on_error` keys are `NotRequired`.
+Write them only when declared in the effective policy. A task that uses neither
+keeps the payload written by the retry-only runtime. Payload compatibility alone
+does not ensure replay compatibility: preserve the existing scheduler path as
+specified under **Failure timing**.
+
+**Admission and platform limits.** The one-hour admission cap is a library
+validation rule, not an Azure execution guarantee. For each materialized task
+instance, the sum of retry delays and `max_attempts * timeout` must not exceed
+one hour. Without a timeout, only retry delays count toward this cap.
+Queue delays, host downtime, and other execution overhead are not included.
+The cap does not limit the total elapsed time of an instance, wave, or workflow.
+
+The host's `functionTimeout` setting in `host.json` also limits Activity
+execution. The following values are from the
+[Azure Functions hosting limits](https://learn.microsoft.com/en-us/azure/azure-functions/functions-scale#function-app-timeout-duration),
+checked on 2026-09-14. They describe host limits, not Python version availability
+on each plan.
+
+| Hosting plan | Default `functionTimeout` | Maximum | Conditions |
+| --- | --- | --- | --- |
+| Consumption | 5 minutes | 10 minutes | Legacy plan. |
+| Flex Consumption | 30 minutes | No fixed maximum | Scale-in grace period: 60 minutes. Platform-update grace period: 10 minutes. |
+| Premium | 30 minutes | No fixed maximum | Scale-in grace period: 60 minutes. Platform-update grace period: 10 minutes. |
+| Dedicated | 30 minutes | No fixed maximum | Always On is required for unbounded execution. Platform-update grace period: 10 minutes. |
+| Container Apps | Normally 30 minutes | No fixed maximum | With zero minimum replicas, the default depends on the triggers. |
+
+For a finite `functionTimeout`, set `execution.timeout` lower and allow time for
+Activity setup, cleanup, and result return. For example, a 10-minute attempt
+deadline cannot provide a 10-minute wait on a host with a 5-minute timeout.
+A host timeout can restart the Python worker before it returns
+`workflow_task_timeout`. Do not classify a host failure as an attempt deadline
+without the runtime's failure result. No fixed maximum does not guarantee
+uninterrupted execution.
+
+The HTTP response limit of 230 seconds is separate. A workflow starter returns
+without waiting for the workflow to finish; this HTTP limit is not a deadline
+for the whole workflow. Do not detect the hosting SKU or change plan validation
+from deployment settings in this extension.
 
 **Attempt deadline.** The Activity applies the persisted deadline around the
-handler invocation. An expired deadline is a new retryable `timeout`
-classification, so Durable schedules the next attempt under the already-frozen
-policy. The deadline bounds *the attempt the orchestration waits for*, and what
-that means differs by target. A workflow tool handler is synchronous and runs on
-a worker thread through `asyncio.to_thread`, and a thread cannot be cancelled
-from outside, so a timed-out attempt is reported while the handler may still be
-running. A Workflow Sub Agent delivery is asynchronous and is cancelled, though
-provider-side work it already dispatched may still complete. Both are the same
-at-least-once exposure a redelivered Activity already has, and the mitigation is
-the same stable `idempotency_key`. A handler that raises `TimeoutError` itself
-stays an unknown execution failure — only the scope that actually expired
-reports a timeout.
+handler invocation. An expired deadline uses the existing `handler_transient`
+kind with `error_code: workflow_task_timeout`. Do not add a `timeout` kind.
+Durable retries under the persisted policy only if attempts remain.
+The error code identifies the attempt deadline without a new failure kind.
+The deadline limits the wait, not the lifetime of the underlying work.
+A synchronous tool handler runs through `asyncio.to_thread`; it can keep running
+after the timeout. An asynchronous handler receives cancellation, but external
+work that it started can still complete. A retry can thus overlap earlier work.
+Handlers must use the stable `idempotency_key` to prevent duplicate effects;
+the key alone does not prevent them. A tool handler that raises `TimeoutError`
+itself remains `execution_unknown`. Only expiration of the runtime's deadline
+produces `workflow_task_timeout`.
 
 A Workflow Sub Agent already carries its own resolved specialist timeout, which
 may be tighter than the attempt deadline. The two bounds are independent and the
-first to expire wins: the specialist bound keeps the `handler_transient`
-classification Decision 79 established, and only the outer attempt deadline
-reports `timeout`. Neither is derived from the other, so an authored
+first to expire wins. Both use `handler_transient`. The specialist timeout keeps
+its existing `subagent_timeout` error code; the outer attempt deadline uses
+`workflow_task_timeout`. Neither is derived from the other, so an authored
 `execution.timeout` never widens or narrows a specialist's own bound.
-
-The one-hour admission cap is per materialized task instance, not per wave or per
-workflow. `MAX_NODES` instances scheduled `MAX_PARALLELISM` at a time can still
-exceed an hour in aggregate; bounding the whole workflow is not a goal of this
-slice.
 
 **Continuation.** A task whose persisted policy set `continue_on_error` commits a
 sanitized failure result instead of failing the workflow, so its dependents run.
-It applies only once the attempt budget is spent: a retryable failure is retried
-by Durable first, and only a terminal or exhausted outcome can be continued.
+Durable retries a retryable failure first, if attempts remain. Only a terminal
+failure or a failure after the last attempt can be continued. Continuation also
+works after one failed attempt without a retry or timeout setting.
 Continuability is derived from the persisted failure `kind` through a
 runtime-owned closed map rather than added to the outcome envelope, whose exact
 key set must keep validating failures written by the previous runtime:
 
 | Failure kind | Continuable | Why |
 | --- | --- | --- |
-| `timeout` | yes | An exhausted attempt deadline is an application-level failure |
-| `handler_transient` | yes | Only reachable here after Durable spent the budget |
+| `handler_transient` | yes | No attempts remain; this includes attempt and specialist timeouts |
 | `handler_terminal` | yes | A handler-declared application failure |
 | `execution_unknown` | yes | An unexpected handler exception is still the handler's |
 | `authorization` | no | Continuation must not route around the authorization boundary |
@@ -297,33 +336,45 @@ all fail cannot grow quadratically. A downstream `${node.result...}` reference o
 or persisted aggregate contract changes. Reporting the distinction between a
 succeeded and a continued node in the status is left to the observability slice.
 
-**Failure timing.** Fail-fast is preserved for every failure that cannot be
-continued. The wave selection loop decides per completed instance: a failure is
-recorded and awaiting continues only when that instance's persisted policy set
-`continue_on_error` *and* the classification is continuable. Any other failure
-raises immediately, exactly as today — a non-continuable failure never waits
-behind a slow sibling or a long timer merely because some other node in the wave
-opted in. Both inputs to that decision are persisted or derived from the outcome,
-so the choice is a pure function of history and replay-stable. Cancellation is
-observed through the same selection loop, so when cancellation is selected the
-wave is restored as it is today and any failure already recorded in it is
-discarded with the rest of the wave.
+**Failure timing.** A wave is a group of task instances that the scheduler waits
+for together. The current scheduler raises Durable exceptions during that wait.
+It processes returned terminal failure outcomes only after the wave completes.
+These are different failure paths; do not change both to immediate failure.
 
-**Downgrade.** Rolling the runtime *back* while orchestrations started by this
-version are in flight is not supported, matching the existing rollback stance: an
-older runtime's closed `_FAILURE_RETRYABLE` map rejects the `timeout` kind as a
-contract failure, and it ignores the persisted `timeout_ms` and
-`continue_on_error` keys entirely, so deadlines stop being enforced and a
-continued node fails its workflow. Drain or terminate in-flight workflows before
-rolling back.
+If no instance in a wave has persisted `continue_on_error: true`, keep the
+existing wait and result-processing path. This includes old histories,
+timeout-only policies, and explicit `continue_on_error: false`. Preserve the
+failure cause, result-application order, and cancellation order.
+
+Only a wave with at least one persisted `continue_on_error: true` uses the new
+per-instance processing path. In that path, record a failure and keep waiting
+only if the failed instance permits continuation and its failure kind permits
+it. Raise all other failures immediately, without waiting for unrelated tasks or
+timers. Share this decision logic between the static and dynamic schedulers.
+Select the path from persisted input, not current tool declarations.
+If cancellation is selected, restore the wave and discard its recorded outcomes,
+as in the current cancellation path.
+
+**Downgrade.** Use of existing failure kinds does not make new policies safe on
+an older runtime. The older runtime ignores `timeout_ms` and
+`continue_on_error`. It stops enforcing deadlines and fails nodes that should
+continue. Let in-flight workflows finish, or terminate them, before a runtime
+downgrade.
 
 ### Delivery plan
+
+Deliver timeout and continuation as two stacked implementation PRs. The timeout
+PR makes `retry` optional and includes decorator timeout support. The continuation
+PR adds `continue_on_error` to the same policy format. Each PR includes tests,
+sample coverage, and user documentation. Telemetry and status changes are
+separate later work.
 
 | Slice | Purpose | Scope | Dependencies | Compatibility | Review focus |
 | --- | --- | --- | --- | --- | --- |
 | Execution foundation (PR #193) | Make plan-authored `execution.retry` usable for tool and stateless Workflow Sub Agent tasks | Retry schema and bounds; persisted effective policy; failure classification; Activity envelope; idempotency context; Durable mapping; static and dynamic dispatch; exhaustion sanitization; tests, docs, sample, and real-host E2E | Durable Functions Python 2.x migration PR #189 (merged) | Tasks without persisted execution data retain legacy dispatch and `{"id","result"}` history; no decorator or catalog surface is introduced | Persisted-input replay selection, failure trust boundary, bounded schedules, Sub Agent timeout behavior |
 | `@workflow_tool` integration (PR #207) | Allow tool declarations to provide retry and define decorator-over-plan precedence | Decorator metadata, discovery, registry/catalog propagation, submission-time precedence, focused tests and docs | Execution foundation (PR #193, merged) | Additive at submission; reuses the same persisted effective policy and does not change replay | Metadata propagation and precedence |
-| Timeout and continuation (current slice) | Add per-attempt timeout and continue-on-error | Optional `execution.timeout` and `execution.continue_on_error`; `@workflow_tool(timeout=...)` precedence; persisted optional keys; Activity attempt deadline and `timeout` classification; per-node wave continuation in both schedulers; tests, docs, and sample | Execution foundation (PR #193, merged) and decorator integration (PR #207, merged) | Additive optional task policy; a task that declares neither key freezes and replays the identical payload | Attempt-deadline semantics, continuability trust boundary, wave failure timing |
+| Attempt timeout (implementation PR 1) | Limit the wait for each attempt | `execution.timeout`; `@workflow_tool(timeout=...)`; per-field precedence; optional retry with a one-attempt default; persisted deadline; `handler_transient` with `workflow_task_timeout`; tests, docs, and sample | PRs #193 and #207 (merged); base `main` | No scheduler timing change; absent timeout keeps existing behavior | Policy propagation, deadline behavior, retry limits, replay |
+| Continuation (implementation PR 2) | Obtain results after selected task failures | Plan-only `execution.continue_on_error`; bounded failure results; shared continuation logic in both schedulers; tests, docs, and sample | Stacked on the attempt-timeout PR | Only waves with persisted continuation enabled use the new path | Failure kinds, cancellation order, old histories, `for_each` |
 | Observability and status | Expose retry/timeout lifecycle telemetry and structured status | Telemetry, status contract, UI/docs | Earlier execution-policy slices | Additive status version | Stable external lifecycle vocabulary |
 
 ### Authoring / API surface
@@ -1275,6 +1326,10 @@ results remain unchanged.
 | 94 | Content of a continued node result | Reuse the workflow failure envelope / commit a bounded object | Commit the bounded `{failed, error_code, error, kind}` object only. The workflow-level failure envelope carries the aggregate `results` map, so reusing it would embed a growing snapshot in every continued instance and let a fully failed `for_each` expansion grow quadratically | Agent, architecture review | 2026-09-10 |
 | 95 | Workflow Sub Agent timeout precedence | Derive one bound from the other / keep both independent | Keep both independent; the first to expire wins. The specialist's own resolved timeout keeps the `handler_transient` classification Decision 79 established and only the outer attempt deadline reports `timeout`, so an authored `execution.timeout` never widens or narrows a specialist bound and no shipped classification changes | Agent, architecture review | 2026-09-10 |
 | 96 | Slice sizing for timeout plus continuation | Stack timeout and continuation as two PRs / deliver one slice | Deliver one slice. Both change the same optionality of `execution` and the same persisted-key compatibility argument, so splitting would review that identical schema and replay change twice, and continuation is only meaningful once an attempt budget can actually be spent. Reviewability is preserved by keeping schema, Activity, and scheduler changes in separate commits | Human (TsuyoshiUshio), Agent | 2026-09-10 |
+| 97 | Requirement review and PR boundaries | Keep one implementation PR / remove decorator timeout / use two stacked PRs | REDUCE. Keep decorator timeout in scope. Deliver timeout, including decorator support, in PR 1; deliver continuation in PR 2 on top of it. Each PR includes tests, sample coverage, and docs. Telemetry and status changes remain separate. This replaces Decision 96: continuation is useful after one failed attempt without a timeout or retry setting | Human (TsuyoshiUshio), Agent | 2026-09-14 |
+| 98 | Timeout failure representation | New failure kind / existing kind with a separate error code | Use `handler_transient` with `workflow_task_timeout` for the attempt deadline. Keep `subagent_timeout` for the specialist deadline. This replaces Decision 86 and the new-kind parts of Decisions 92, 93, and 95. Downgrade still requires workflows to finish or be terminated because older code ignores the new policy keys | Human (TsuyoshiUshio), Agent | 2026-09-14 |
+| 99 | Failure timing and replay | Process all failures immediately / preserve the old path unless continuation is enabled | Replace Decision 88 and clarify Decision 91. Current code raises Durable exceptions during the wave wait but processes returned terminal failures after the wave. Use new per-instance processing only when a wave has persisted `continue_on_error: true`. Otherwise preserve failure cause, result-application order, and cancellation order. Identical payloads alone do not prove replay compatibility | Human (TsuyoshiUshio), Agent | 2026-09-14 |
+| 100 | Retry omitted from an execution policy | New persisted format / existing one-attempt policy | After decorator precedence, default an absent retry policy to `WorkflowRetryPolicy(max_attempts=1)`. Reuse the existing conversion to persist required retry fields with no delay. Apply this to timeout-only and continuation-only policies; tasks with no settings keep no execution payload | Human (TsuyoshiUshio), Agent | 2026-09-14 |
 
 ## 6. Test plan
 
@@ -1439,11 +1494,10 @@ results remain unchanged.
     idempotent workflow tool;
   - a real Functions host proves retry-to-completion and sanitized exhaustion
     against the local Durable backend.
-- [ ] Evolution #1278 slice 3: timeout and continuation contract
+- [ ] Timeout PR: execution contract
   - accept `execution.timeout` alone, reject an `execution` that declares no
     field, and reject a duration outside `PT1S`-`PT10M`;
-  - apply `@workflow_tool(timeout=...)` over a plan-authored timeout while
-    `continue_on_error` stays plan-only and is rejected on the decorator;
+  - apply `@workflow_tool(timeout=...)` over a plan-authored timeout;
   - resolve decorator precedence per field, covering decorator-timeout with
     plan-retry and decorator-retry with plan-timeout;
   - keep shipped retry error codes on retry shape, schedule, and explicit-`null`
@@ -1451,17 +1505,28 @@ results remain unchanged.
     `workflow_execution_policy_invalid`;
   - reject a schedule whose attempt deadlines plus retry delay ceiling exceed the
     one-hour admission cap;
-  - omit both persisted keys unless authored, so an otherwise identical task
-    freezes the payload the retry-only runtime wrote.
-- [ ] Evolution #1278 slice 3: attempt deadline
-  - an expired deadline returns the retryable `timeout` classification and is
-    redelivered under the frozen policy for tool and Sub Agent deliveries;
+  - persist a timeout-only policy as one attempt with no retry delay when neither
+    the plan nor the decorator declares retry;
+  - omit the timeout key unless declared, preserving retry-only payloads.
+- [ ] Timeout PR: attempt deadline
+  - an expired deadline uses `handler_transient` with `workflow_task_timeout`;
+    tool and Sub Agent deliveries retry only while attempts remain;
   - a handler that raises `TimeoutError` itself stays `execution_unknown`;
   - a Sub Agent whose own specialist timeout is tighter than the attempt deadline
-    still reports `handler_transient`, and the reverse ordering reports `timeout`;
+    reports `subagent_timeout`, and the reverse ordering reports
+    `workflow_task_timeout`; both keep the `handler_transient` kind;
+  - a synchronous handler can finish after its deadline; asynchronous handlers
+    receive cancellation, and external cancellation is not reported as a timeout;
   - a history with no persisted deadline keeps its unbounded attempt;
-  - a persisted deadline outside its validated domain is a contract failure.
-- [ ] Evolution #1278 slice 3: DAG continuation
+  - a persisted deadline outside its validated domain is a contract failure;
+  - deadline and retry-delay validation does not change scheduler failure timing.
+- [ ] Continuation PR: execution contract
+  - accept continuation without timeout or retry, using the existing one-attempt
+    persisted policy when neither plan nor decorator declares retry;
+  - keep `continue_on_error` plan-only and reject it on the decorator;
+  - omit the continuation key unless declared and preserve earlier payloads;
+  - reject an empty execution object and invalid continuation values.
+- [ ] Continuation PR: DAG continuation
   - a continued node commits the bounded `{"failed": true, ...}` object with no
     aggregate results snapshot, stays `completed`, and lets dependents, `when`
     predicates, and skip propagation run in both the static and dynamic
@@ -1476,13 +1541,23 @@ results remain unchanged.
     instance and a pending timer still raises immediately;
   - cancellation racing a continuable failure restores the wave and discards the
     recorded failure;
-  - a wave with no declared continuation keeps its current fail-fast timing and
-    reported cause.
-- [ ] Evolution #1278 slice 3: sample/E2E
-  - a real Functions host proves an exhausted attempt deadline, a continued node
-    whose dependents run, and cancellation ordering against the local Durable
-    backend, because mocked tasks do not reproduce Durable 2.x `when_any` and
-    `.result` exception behavior.
+  - a wave with no enabled continuation keeps immediate Durable exceptions and
+    deferred processing of returned terminal outcomes, including authorization
+    failures; preserve its failure cause and result-application order;
+  - old histories, timeout-only policies, and explicit false continuation keep
+    cancellation order when a terminal outcome arrives before a slow sibling;
+  - exercise the same rules in both schedulers.
+- [ ] Timeout PR: sample/E2E
+  - include a runnable timeout example with decorator precedence;
+  - use a real Functions host to prove retry and exhaustion after an attempt
+    deadline against the local Durable backend.
+- [ ] Continuation PR: sample/E2E
+  - include a runnable example of a failed optional task and its dependents;
+  - use a real Functions host to prove continuation after timeout exhaustion,
+    continuation after a single terminal failure, and cancellation order;
+  - replay old histories with a terminal failure and a pending sibling or timer.
+    Mock tasks alone do not reproduce Durable 2.x `when_any` and `.result`
+    exception behavior.
 
 ## 7. Docs impact
 
@@ -1523,10 +1598,16 @@ results remain unchanged.
   idempotency, replay compatibility, and deferred decorator integration.
 - [ ] Evolution #1278 slice 1: add a runnable plan-authored retry sample and list
   it in `samples/README.md`.
-- [ ] Evolution #1278 slice 3: document `execution.timeout`,
-  `@workflow_tool(timeout=...)` precedence, `execution.continue_on_error`, the
-  attempt-deadline at-least-once exposure, and the continued-node result shape in
-  `docs/workflows.md` and `docs/architecture.md`.
+- [ ] Timeout PR: document `execution.timeout`, `@workflow_tool(timeout=...)`,
+  per-field precedence, the one-attempt default, `workflow_task_timeout`, and
+  work that can continue after a deadline in `docs/workflows.md` and
+  `docs/architecture.md`. Distinguish the library admission cap from
+  `functionTimeout` and link to the hosting-plan limits. Include the timeout
+  sample in `samples/README.md`.
+- [ ] Continuation PR: document `execution.continue_on_error`, permitted failure
+  kinds, bounded failure results, and failure/cancellation order in
+  `docs/workflows.md` and `docs/architecture.md`. Include the continuation sample
+  in `samples/README.md`.
 
 ## 8. Status & sign-off
 
@@ -1620,3 +1701,14 @@ results remain unchanged.
   cancellation wording, the per-instance scope of the admission cap, field-wise
   decorator precedence, error-code mapping, and slice sizing are resolved by
   Decisions 85, 90, 95, and 96 and the design above.
+- **Requirement review and human approval:** TsuyoshiUshio, 2026-09-14.
+  Approved REDUCE with decorator timeout retained. Deliver timeout and
+  continuation as two stacked implementation PRs, each with tests and docs.
+  Use the existing transient failure kind with a separate timeout error code.
+  Preserve the old scheduler path for waves without enabled continuation and
+  define one attempt when retry is omitted. Decisions 97-100 record this
+  revision and replace the affected earlier decisions. The earlier review's
+  claim that all failures were already immediate was incorrect: returned
+  terminal outcomes are processed after the wave. The approved design now
+  distinguishes that path from Durable exceptions. Status remains `Finalized`;
+  implementation has not started in PR #212.
