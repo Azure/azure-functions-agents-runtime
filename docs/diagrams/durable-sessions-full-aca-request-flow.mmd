@@ -1,0 +1,95 @@
+sequenceDiagram
+    autonumber
+    actor User as User or trigger
+    participant HTTP as Function HTTP API
+    participant Entity as Session Entity
+    participant DTS as DTS session orchestrator
+    participant Control as Short controller activities
+    participant ACA as Customer ACA Sandbox
+    participant Model as Authorized model endpoint
+    participant Tools as External tools / MCP
+    participant Blob as Customer Blob content
+
+    Note over HTTP,Blob: Proposed / design discussion - not implemented or approved production architecture.
+    Note over Control,ACA: Tables whole-agent execution is reuse evidence - the Durable bridge is new integration.
+    Note over ACA,Blob: All ACA Sandbox Groups are customer-provided/customer-owned, NOT platform-owned.
+    User->>HTTP: Start durable session run
+    HTTP->>Blob: Persist owner-scoped immutable request
+    HTTP->>DTS: Start / rejoin orchestration with refs only
+    HTTP-->>User: 202 + tracking URL (not admission or final success)
+    DTS->>Entity: Admit owner + agent + session + request
+    Entity-->>DTS: Admitted generation fence + binding / committed refs
+    Note over Entity,DTS: Entity owns admission, generation, cancellation and refs, not transcripts/files.<br/>DTS owns explicit control flow - its history carries bounded metadata, not content.
+    DTS->>Control: Start or adopt attempt (stable id + fence)
+    Control->>ACA: Idempotent start/adopt, ordinary agent.run() only for new attempt
+    ACA-->>Control: Attempt handle, execution continues remotely
+    Control-->>DTS: Same attempt ref
+    Note over DTS,Control: Short bounded activities return promptly - polls never call agent.run() or park a worker.
+    par Opaque run inside ACA
+        loop Agent-internal model / tool work until attempt exits
+            ACA->>Model: Model request using guest model authority
+            Model-->>ACA: Answer / tool calls
+            ACA->>ACA: Local tool + workspace operations
+            ACA->>Tools: External tool / MCP call (if used)
+            Tools-->>ACA: Result / receipt if supported
+        end
+        Note over ACA,Tools: Unlike Durable Agent Loop, internal model/tool calls are NOT separate DTS checkpoints.<br/>Model authority may be shared with tool code - no brain/tool least-privilege separation promised.
+    and Durable supervision of the same attempt
+        loop While active, stop for terminal status or cancellation
+            DTS->>DTS: Durable timer to next bounded poll / capture request
+            DTS->>Control: Poll same attempt status (never restart)
+            Control->>ACA: Bounded status + candidate lookup
+            ACA-->>Control: Running / terminal / unavailable + refs
+            Control-->>DTS: Status + bounded refs
+            opt Still active, checkpoint request due (approximately 60 seconds, TBD)
+                DTS->>Control: Request / inspect periodic checkpoint candidate
+                Control->>ACA: Request candidate capture, bounded return, protocol TBD
+                ACA-->>Control: Candidate handle or pending / unavailable
+                Note over Control,Blob: Need consistent conversation/reasoning + workspace content + effect frontier/receipts.<br/>Safe capture, consistency and resume protocol are TBD - requested/raw is NOT committed.
+                alt Candidate validated under a qualified protocol (TBD)
+                    Control->>Blob: Persist validated candidate with controller-scoped permissions
+                    Blob-->>Control: Immutable content refs + integrity hashes
+                    Control-->>DTS: Candidate refs, NOT yet a recovery commit
+                    DTS->>Entity: Conditional checkpoint commit (generation + attempt fence)
+                    Entity-->>DTS: Accepted receipt => authoritative, rejected => retain prior ref
+                else Missing / pending / inconsistent / unverified
+                    Control-->>DTS: No advance to committed recovery state
+                end
+            end
+            opt Controller restart or ACA backing loss
+                DTS->>Control: Locate / adopt same live attempt if available
+                Control->>Blob: If not live, read only qualified committed checkpoint
+                Note over Control,ACA: Recovery requires supported restore + external-effect reconciliation (TBD).<br/>No usable checkpoint or unknown effects => fail / reconciliation required, never blind restart.
+                Control->>ACA: Adopt live attempt, or restore/resume ONLY if recovery qualified
+            end
+        end
+    end
+    Note over ACA,Blob: ACA Disk preserves files, not executor memory. DTS/timers do not snapshot a Python stack.<br/>No exactly-once guarantee for arbitrary external effects.
+    Note over Control,Blob: Customer Blob is recoverable transcript/workspace authority - persistence/commit is controller-mediated.<br/>No implicit broad guest permissions to Blob, Entity or DTS.
+    alt Terminal success candidate
+        DTS->>Control: Obtain final result and final content (bounded)
+        Control->>ACA: Read terminal response + conversation/workspace + effect receipts
+        ACA-->>Control: Final content (bounded refs / transfer)
+        Control->>Blob: Persist and integrity-check final content
+        Blob-->>Control: Verified final refs or persistence failure
+        Control-->>DTS: Verified final refs or error
+        DTS->>Entity: If persisted, fenced idempotent final commit + next generation
+        Entity-->>DTS: Commit receipt or rejection (when attempted)
+        alt Final content persisted and final commit accepted
+            DTS-->>HTTP: Committed success + response ref
+            HTTP->>Blob: Read owner-authorized, integrity-checked final response
+            Blob-->>HTTP: Final response
+            HTTP-->>User: Final result through tracking/result API
+        else Persistence / commit incomplete or rejected
+            DTS->>Entity: Record non-success without advancing recovery state
+            DTS-->>HTTP: Non-success / recovery pending, no final success
+            HTTP-->>User: Explicit status, not a successful answer
+        end
+    else Failed / cancelled / reconciliation required
+        DTS->>Entity: Record cancellation / failure fence and explicit outcome
+        DTS->>Control: Cancel / stop same attempt if needed (bounded)
+        Control->>ACA: Best-effort cancel / stop, no new run
+        Note over Entity,ACA: Cancellation is not proof effects stopped - unresolved effects need reconciliation.
+        DTS-->>HTTP: Failed / cancelled / reconciliation required
+        HTTP-->>User: Explicit non-success outcome
+    end
