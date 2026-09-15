@@ -103,13 +103,13 @@ FORM: Approved Option A request-inspector composition, with an explicit persiste
         <h2>Connection</h2>
         <p id="durable-chat-connection-message">Connect to load this Durable Chat configuration.</p>
       </div>
-      <form id="durable-chat-auth-form" class="durable-chat-auth-form">
+      <form id="durable-chat-auth-form" class="durable-chat-auth-form" hidden>
         <label for="durable-chat-functions-key">Function key</label>
         <input id="durable-chat-functions-key" name="functionsKey" type="password" autocomplete="off" spellcheck="false" disabled>
         <button id="durable-chat-auth-submit" class="durable-chat-secondary-button" type="submit" disabled>Use key</button>
         <button id="durable-chat-auth-clear" class="durable-chat-text-button" type="button" disabled>Clear</button>
       </form>
-      <p class="durable-chat-connection-panel__note">A supplied key is intended for this page only and is never written by the shell.</p>
+      <p id="durable-chat-auth-note" class="durable-chat-connection-panel__note" hidden>A supplied key is intended for this page only and is never written by the shell.</p>
     </section>
 
     <div class="durable-chat-workbench">

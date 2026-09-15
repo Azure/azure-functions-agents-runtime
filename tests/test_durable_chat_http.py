@@ -207,6 +207,27 @@ async def test_bootstrap_uses_custom_prefix_and_does_not_disclose_keys(
 
 
 @pytest.mark.asyncio
+async def test_anonymous_bootstrap_has_a_distinct_shared_history_namespace() -> None:
+    namespaces = {}
+    for mode in ("anonymous", "function", "admin"):
+        app = _App()
+        register_durable_chat_http_routes(
+            app,  # type: ignore[arg-type]
+            resolved=_resolved(auth=EndpointAuthConfig(mode=mode)),
+            settings=DurableLoopSettings(),
+            chat_settings=_settings(),
+        )
+        response = await app.handlers["durable_chat_bootstrap_v1"](_Request())
+
+        assert response.status_code == 200
+        assert str(app.routes["durable_chat_bootstrap_v1"]["auth_level"]).lower() == mode
+        assert response.headers["cache-control"] == "no-store"
+        namespaces[mode] = json.loads(response.body)["history_namespace"]
+    assert namespaces["anonymous"] != namespaces["function"]
+    assert namespaces["function"] == namespaces["admin"]
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_exposes_the_validated_configured_sandbox_group() -> None:
     app = _App()
     register_durable_chat_http_routes(

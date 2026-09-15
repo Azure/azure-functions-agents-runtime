@@ -122,9 +122,11 @@ policies delete both APIM subscription-key carriers (`api-key` header and
 `subscription-key` query parameter) before forwarding so neither can be
 confused with or exposed as a backend model key.
 
-Local operators must supply inbound Function authentication through an
-environment variable. Do not place Function keys, APIM keys, prompts, answers,
-or response bodies in command lines, committed files, or logs.
+For Function-protected deployments, local operators must supply inbound
+Function authentication through an environment variable. The hosted demo
+below is explicitly anonymous; existing qualification clients can still
+supply a key. Do not place Function keys, APIM keys, prompts, answers, or
+response bodies in command lines, committed files, or logs.
 
 Durable prompt, tool, and result content uses the dedicated private
 `durable-loop-content` Blob container rather than `AzureWebJobsStorage`. The
@@ -235,11 +237,24 @@ its default Functions route is:
 /api/experimental/durable-chat/
 ```
 
-The effective host route prefix can be nested or empty. The page is not this
-focused proxy: it keeps the browser's persisted history locally, authenticates
-bootstrap/data through the existing Function/Easy Auth policy, and keeps any
-Function key in memory rather than a URL or browser storage. It does not
-replace ordinary chat or expose the focused demo's aliases.
+The effective host route prefix can be nested or empty. The page connects
+automatically to its hosting Function App. This sample explicitly uses
+`builtin_endpoints.http_auth: anonymous`, so opening the hosted page requires
+no Function key and the key controls stay hidden.
+
+**The enabled demo is public:** anyone who can reach the app can run the agent
+and its tools. Anonymous requests share a separate app-level owner scope;
+previously keyed or Entra-owned runs and browser history are not exposed.
+Start a new session for the anonymous demo. To restore protection, change
+`src/main.agent.md` to `http_auth: function`, or configure Easy Auth and use
+`entra`, then redeploy.
+
+The page is not the focused proxy: it keeps persisted history in the browser
+and follows the app's authored authentication policy. Protected deployments
+keep any supplied Function key in memory rather than a URL or browser storage.
+It does not replace ordinary chat or expose the focused demo's aliases.
+This authentication choice does not change ACA sandbox execution,
+retained-session resumption, or sandbox cleanup.
 
 The same existing gate controls the durable HTTP routes and hosted UI together.
 This sample keeps it `false` until a qualified operator explicitly enables it.

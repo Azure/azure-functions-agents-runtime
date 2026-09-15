@@ -33,7 +33,7 @@ flowchart LR
     O -.->|"privileged HTTP MCP"| P["APIM MCP frontend"]
     O -.->|"single-call or retained profile"| Q["Customer ACA Sandbox Group"]
     O -.->|"best-effort observations"| R
-    R -.->|"data-free shell + authenticated bootstrap"| S["public/durable-chat/*<br/>Browser-local IndexedDB history"]
+    R -.->|"data-free shell + policy-checked bootstrap"| S["public/durable-chat/*<br/>Browser-local IndexedDB history"]
 ```
 
 Read left to right: files on disk become typed config, typed config becomes a `ResolvedAgent`, the app-wide session runtime is validated before registration, and each resolved agent is registered as Azure Functions bindings plus optional built-in endpoints. The identity-index and catalog nodes exist for multi-agent delegation (FRD 0007, Section 5 below): every agent's slug and capabilities are indexed and frozen *before* `H` mutates the `FunctionApp`, so chat-time and workflow subagent grants can resolve any specialist regardless of file order.
@@ -72,7 +72,8 @@ A few boundaries are worth calling out explicitly:
   `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_ENABLED=true`,
   startup selects `DFApp`, skips worker-side customer-tool and executable-skill
   discovery, registers one versioned Durable Entity/blueprint, and adds
-  authenticated private start/status/result/cancel/human-input routes. The
+  start/status/result/cancel/human-input routes governed by the authored HTTP
+  authentication policy. The
   entity fences one active turn per owner/session and the orchestrator owns the
   model-step/tool-step alternation. Each model activity rebuilds a fresh MAF
   `Agent` on core `1.17.0` with automatic function invocation disabled. The
@@ -110,7 +111,7 @@ A few boundaries are worth calling out explicitly:
   old generation and recreates from the checkpoint instead of trusting an
   attach error. Explicit cleanup, auto-delete, and the owner-filtered reaper
   converge failed/cancelled/orphaned inventory toward zero.
-  The authenticated private starter can select `sandbox_profile=per_call` or,
+  The policy-scoped starter can select `sandbox_profile=per_call` or,
   behind a second gate, `retained_session`. A separately gated fixed
   `fault_profile` enum drives deterministic one-shot qualification faults; no
   arbitrary fault payload is accepted. Human-input status remains content-free
@@ -125,10 +126,13 @@ A few boundaries are worth calling out explicitly:
   `AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_ENABLED` setting
   registers its data-free static shell at
   `/api/experimental/durable-chat/` by default (with the effective host route
-  prefix), alongside authenticated bootstrap, owner-authorized event replay,
+  prefix), alongside policy-checked bootstrap, owner-authorized event replay,
   and request-diagnostics routes. It reuses durable-loop admission, status,
   result, cancellation, and human-input contracts. Function-key ownership
-  remains app-owned and Easy Auth owner isolation remains authoritative. The
+  remains app-owned and Easy Auth owner isolation remains authoritative.
+  Explicit `http_auth: anonymous` opts only the Durable path into a separate
+  public app-owned scope; it cannot read previously keyed or Entra-owned runs.
+  The shared session-runtime owner resolver remains unchanged. The
   browser keeps its own deployment/agent/owner-scoped IndexedDB history; it
   neither enumerates server sessions nor synchronizes across devices. Its
   create-once initialization is authoritative for an admitted run, whereas
@@ -153,12 +157,16 @@ for slides and documents.
 ### Durable Agent Loop chat UI flow
 
 The hosted page is a separate UI from ordinary chat and from the focused demo.
-Its anonymous static shell has no run/configuration data; authenticated
+Its anonymous static shell has no run/configuration data; policy-checked
 bootstrap supplies validated same-origin route templates, allowed sandbox
 profiles, and a hashed browser-history namespace. A browser saves the exact
 normalized start body and idempotency key before it calls the existing
 durable-loop starter. The starter binds the optional UI mode to the admitted
 run and writes immutable initialization metadata before scheduling execution.
+The page automatically connects to its hosting app and hides Function-key
+controls after credential-free bootstrap. The sandbox-backed sample explicitly
+selects anonymous access for the temporary public demo; protected apps retain
+key entry and Easy Auth behavior.
 
 Foreground model activities use the real one-step MAF stream to publish
 assistant-visible draft text. Tool, sandbox, progress, status, and terminal
@@ -200,10 +208,10 @@ retention, authentication, and portal limitations.
 | `azure_functions_agents/registration/_auth.py` | Enforces inbound endpoint auth: maps the configured `auth.mode` to a Functions `AuthLevel` (API key / anonymous) and enforces Entra ID identity by trusting the platform-validated Easy Auth `x-ms-client-principal` header (never validating tokens in-app), with optional tenant/audience/client-id allowlists. Because `entra` routes are anonymous, the header is trusted only with non-spoofable evidence Easy Auth is enforced (`WEBSITE_AUTH_ENABLED` / `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH`); fails closed (401) otherwise. FRD 0008 P3a also exposes a dormant typed owner-principal seam: function/admin-key auth resolves only an app marker (never key bytes/name), while Easy Auth ownership requires exactly one stable `tid` + immutable `oid` and fails closed with 401 when those are missing (no fallback to app-owned sessions). It is not wired into request execution yet. | `resolve_endpoint_auth_level()`, `authorize_entra_request()`, `resolve_owner_principal()` |
 | `azure_functions_agents/experimental/durable_loop_config.py` | Private fail-closed environment settings and startup compatibility guards for the durable loop. The gate is absent by default; limits cover model/tool steps, elapsed time, human waits, payloads, activity deadlines, polling, compaction, parallel reads, and generation rollover. | `DurableLoopSettings.from_environment()`, `validate_durable_loop_application()` |
 | `azure_functions_agents/experimental/durable_chat_config.py` | Resolves the hosted chat's same durable-loop gate, safe host route prefix, configured Sandbox Group display value, and credential-free DTS/Application Insights integration availability. It freezes request diagnostic inputs at admission; a dashboard or Logs link is configuration, not a live-connectivity assertion. | `DurableChatSettings.from_environment()`, `durable_chat_route()`, `build_durable_chat_diagnostic_links()` |
-| `azure_functions_agents/experimental/durable_chat_protocol.py` | Strict schema-v1 contracts for authenticated bootstrap, normalized UI start options, create-once run initialization, replayable observations/snapshots, browser persistence, sandbox history, and diagnostics. It keeps stream producer epochs and the hashed run correlation outside durable decision contracts. | `DurableChatBootstrapV1`, `DurableChatRunInitializationV1`, `DurableChatDiagnosticsV1`, `durable_chat_run_correlation()` |
+| `azure_functions_agents/experimental/durable_chat_protocol.py` | Strict schema-v1 contracts for policy-checked bootstrap, normalized UI start options, create-once run initialization, replayable observations/snapshots, browser persistence, sandbox history, and diagnostics. It keeps stream producer epochs and the hashed run correlation outside durable decision contracts. | `DurableChatBootstrapV1`, `DurableChatRunInitializationV1`, `DurableChatDiagnosticsV1`, `durable_chat_run_correlation()` |
 | `azure_functions_agents/experimental/durable_chat_journal.py` | Shared Blob-backed, bounded observation publisher. It writes immutable batches/snapshots before a CAS manifest exposes them, returns snapshots or contiguous cursored replay, and reports degradation without coupling storage failure to durable execution. | `DurableChatJournal`, `DurableChatObserver`, `get_durable_chat_journal()` |
 | `azure_functions_agents/experimental/durable_chat_execution_observer.py` | Non-blocking execution-side facade that captures real model, tool, local-sandbox, remote-no-sandbox, progress, and terminal boundaries. Its independent setup/drain deadlines ensure observation publication cannot consume model/tool budgets. | `DurableChatExecutionObserver`, `use_durable_chat_execution_context()` |
-| `azure_functions_agents/experimental/durable_chat_http.py` | Registers the fixed data-free shell asset allowlist, authenticated bootstrap, owner-authorized SSE replay, and request diagnostics. It resolves all public paths against the effective Functions route prefix and marks static/data responses `no-store`. | `register_durable_chat_http_routes()` |
+| `azure_functions_agents/experimental/durable_chat_http.py` | Registers the fixed data-free shell asset allowlist, policy-checked bootstrap, owner-authorized SSE replay, and request diagnostics. It resolves all public paths against the effective Functions route prefix and marks static/data responses `no-store`. | `register_durable_chat_http_routes()` |
 | `azure_functions_agents/public/durable-chat/` | Five static browser modules for the separate Durable Agent Loop page. They keep Function keys only in memory; versioned IndexedDB stores browser-local sessions, normalized submissions, drafts, cursors, and explicitly removable history. | `index.html`, `styles.css`, `rendering.js`, `history.js`, `app.js` |
 | `azure_functions_agents/experimental/durable_loop_protocol.py` | Strict Pydantic v2 schema-v1 contracts, canonical JSON/hashing, deterministic model/call/event keys, six run statuses, explicit ambiguous dispositions, MAF reasoning/call/result message bundles, working context, background operations, tool/human envelopes, checkpoints, and result/status projections. | `DurableRunIdentityV1`, `MAFMessageBundleV1`, `CheckpointStateV1`, `canonical_hash()` |
 | `azure_functions_agents/experimental/durable_loop.py` | Provider-neutral adaptive loop and local replay simulator. It owns deterministic budgets, ordered tool classification, policy-declared parallel reads, serialized writes, clarification repair, commit receipts, session continuity, cancellation, quiescent generation rollover, and fault-injection boundaries. | `DurableLoopRunner`, `DurableLoopPlan`, `create_run_identity()`, `build_tool_requests()` |
@@ -218,7 +226,7 @@ retention, authentication, and portal limitations.
 | `azure_functions_agents/experimental/durable_loop_state.py` | Session admission/fencing, first-answer CAS, idempotent commit receipt, committed-context continuity, and deterministic activity receipt ports. The in-memory implementations are test adapters; cross-instance registration uses the Durable Entity. | `DurableLoopStatePort`, `InMemoryDurableLoopStateStore`, `InMemoryActivityJournal` |
 | `azure_functions_agents/experimental/durable_loop_tools.py` | Typed tool catalog/dispatch and retained-sandbox inspection ports with reserved runtime clarification provenance and deterministic local fakes for reads, mutations, idempotent writes, timeouts, failures, and dedupe. Customer tools are never imported by the worker under the durable gate. | `DurableToolRegistry`, `DurableToolDispatchPort`, `DurableRetainedSandboxInspectionPort`, `human_input_tool_descriptor()` |
 | `azure_functions_agents/experimental/durable_loop_registration.py` | Versioned Durable Entity plus refs-only model/tool/append/human/compaction activities and adaptive orchestrators. V1 histories preserve the generic tool activity; V2 runs select provenance-specific `sandbox_tool` or `mcp_tool` activity names from the persisted dispatch reference. Demo-only V3 preserves V2 tool decisions but schedules the fixed first-model 429 recovery as two explicit model activities separated by a one-second durable timer, so DTS records the first activity as failed and the second as successful. Opted-in chat activities attach a bounded observer outside model/tool retry scopes. Durable inputs, outputs, custom status, activity envelopes, entity state, and external-event payloads contain only bounded IDs, hashes, classifications, and `ContentRefV1`; full messages, instructions, arguments, results, and answers stay in immutable content blobs. | `register_durable_loop_blueprint()`, `apply_session_entity_operation()` |
-| `azure_functions_agents/experimental/durable_loop_http.py` | Private authenticated HTTP starter and management routes. Start freezes the tool policy plus strict sandbox/fault profiles into the integrity binding, admits ordinary runs to V2, and selects V3 only for new fixed `model_apim_429_once` demo runs. A valid optional UI request is normalized into the admission hash, create-once initialization, and frozen run plan; incompatible background streaming is rejected before admission. Status is content-free; pending human content is available only from the owner-authorized detail GET, and the demo-only sandbox route projects only instance alias, generation, state, and checkpoint presence. | `register_durable_loop_http_routes()` |
+| `azure_functions_agents/experimental/durable_loop_http.py` | Policy-scoped HTTP starter and management routes. Explicit anonymous auth uses a separate public app owner without relaxing the shared session-runtime resolver. Start freezes the tool policy plus strict sandbox/fault profiles into the integrity binding, admits ordinary runs to V2, and selects V3 only for new fixed `model_apim_429_once` demo runs. A valid optional UI request is normalized into the admission hash, create-once initialization, and frozen run plan; incompatible background streaming is rejected before admission. Status is content-free; pending human content is available only from the owner-authorized detail GET, and the demo-only sandbox route projects only instance alias, generation, state, and checkpoint presence. | `register_durable_loop_http_routes()` |
 | `azure_functions_agents/experimental/durable_loop_observability.py` | Content-free durable-loop progress events and low-cardinality operation/duration metrics for run, model start/poll, tool queue, MCP, ACA capacity/create/restore/execute/export/delete, human wait, replay, retry, compaction, cancellation, cleanup, and commit. Runtime activity spans carry the hashed `af.durable_loop.run_correlation` attribute used by durable-chat's request-scoped Logs link; it is never a metric label. | `record_durable_loop_event()`, `DurableLoopTimer`, `durable_loop_run_correlation()` |
 | `azure_functions_agents/session_state/_label_encoding.py` | Shared RFC 4648 base32 encoding (FRD 0008 Decision 106, precision in Decision 113) for every digest-derived label used by this package: lower-cases and strips `=` padding from a SHA-256 digest to a fixed 52-character payload, so `a1-`/`o1-`/`s1-` tokens are 55 characters total — inside ACA Sandbox's 63-character label limit — while preserving full 256-bit entropy (unlike truncating hex). One canonical shape is used everywhere: Table partition keys, manifests, paths, and ACA labels alike. | `encode_label_safe_digest()`, `LABEL_SAFE_PAYLOAD_PATTERN` |
 | `azure_functions_agents/session_state/identity.py` | Defines FRD 0008 P3a's pure, versioned Function App/slot and owner canonicalization: exact length-prefixed UTF-8 framing, portable `a1` identity (`subscription_id` + `site_name` + slot; no resource group / no SKU branches), `o1-` owner hashes (Decision 106: label-safe base32, not hex), historical-version verification without eager migration, fail-closed platform identity resolution, typed owner resolution (function/admin key ⇒ app-owned shared sessions; Easy Auth ⇒ per-user only when `tid`/`oid` are stable), server-minted IDs, and delimiter-safe durable row keys. App/agent rename changes identity space with no automatic migration in v1. It has no Azure SDK dependency and does not cross raw claims, function keys, or credentials into execution. | `resolve_function_app_identity()`, `resolve_owner_context()`, `compute_app_hash()`, `compute_owner_hash()`, `owner_partition()` |

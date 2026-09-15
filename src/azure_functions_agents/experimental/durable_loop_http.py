@@ -1,4 +1,4 @@
-"""Authenticated refs-only HTTP routes for private durable agent runs."""
+"""Policy-scoped refs-only HTTP routes for experimental durable agent runs."""
 
 from __future__ import annotations
 
@@ -87,6 +87,14 @@ _DURABLE_DATA_HEADERS = {
 _DURABLE_DATA_HEADER_NAMES = frozenset(
     header.casefold() for header in _DURABLE_DATA_HEADERS
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _AnonymousDurableOwner:
+    """The separate shared scope of an explicitly anonymous durable app."""
+
+
+type _DurableOwner = OwnerPrincipal | _AnonymousDurableOwner
 
 
 def register_durable_loop_http_routes(  # noqa: PLR0915
@@ -1484,7 +1492,9 @@ def _fault_profile(
     return profile
 
 
-def _authorized_owner(req: Request, auth: EndpointAuthConfig) -> OwnerPrincipal | Response:
+def _authorized_owner(req: Request, auth: EndpointAuthConfig) -> _DurableOwner | Response:
+    if auth.mode == "anonymous":
+        return _AnonymousDurableOwner()
     owner = resolve_owner_principal(req.headers.get, auth)
     if isinstance(owner, AuthError):
         return _json_response({"error": owner.message}, status_code=owner.status_code)
@@ -1552,7 +1562,9 @@ def _effective_port(scheme: str, port: int | None) -> int:
     return 443 if scheme.casefold() == "https" else 80
 
 
-def _owner_hash(owner: OwnerPrincipal) -> str:
+def _owner_hash(owner: _DurableOwner) -> str:
+    if isinstance(owner, _AnonymousDurableOwner):
+        return canonical_hash({"kind": "anonymous_app"})
     if isinstance(owner, FunctionAppPrincipal):
         return canonical_hash({"kind": "function_app"})
     if isinstance(owner, EntraPrincipal):

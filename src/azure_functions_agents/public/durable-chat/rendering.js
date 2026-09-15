@@ -231,6 +231,7 @@ function getElements(shell) {
     announcements: byId("durable-chat-announcements"),
     authClear: byId("durable-chat-auth-clear"),
     authForm: byId("durable-chat-auth-form"),
+    authNote: byId("durable-chat-auth-note"),
     authSubmit: byId("durable-chat-auth-submit"),
     cancelRequest: byId("durable-chat-cancel-request"),
     composer: byId("durable-chat-composer"),
@@ -433,6 +434,8 @@ function setConnectionState(shell, elements, options) {
   }
 
   const allowKeyEntry = options.allowKeyEntry === true;
+  elements.authForm.hidden = !allowKeyEntry;
+  elements.authNote.hidden = !allowKeyEntry;
   elements.functionsKey.disabled = !allowKeyEntry;
   elements.authSubmit.disabled = !allowKeyEntry;
   elements.authClear.disabled = !allowKeyEntry;

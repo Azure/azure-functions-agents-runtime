@@ -284,6 +284,24 @@ origin. User/model text is rendered as text, static assets are locally
 packaged, and response headers use restrictive CSP, `no-store`, `no-referrer`,
 and `nosniff` protections.
 
+### Temporary anonymous demo access
+
+The operator can explicitly select the existing
+`builtin_endpoints.http_auth: anonymous` policy for the Durable Loop demo.
+This makes its durable APIs publicly callable; it does not embed or retrieve
+a Function key. Anonymous callers share a separate durable owner hash and
+browser-history namespace, so changing this policy does not expose previously
+keyed or Entra-owned runs. The shared session-runtime authentication resolver
+remains unchanged and still rejects anonymous persistent-session access.
+
+The browser already bootstraps against its hosting origin automatically.
+After a credential-free connection, it hides Function-key controls; keyed apps
+retain those controls when authentication is required or a key is in use.
+Same-origin mutation checks, bounded admission/execution, and cleanup behavior
+remain unchanged. The sample is explicitly anonymous for this temporary demo;
+switch its authored policy back to `function` or configured `entra` to protect
+it again.
+
 ## 5. Decisions log
 
 | # | Decision | Options considered | Choice | Decided by | Date |
@@ -300,6 +318,8 @@ and `nosniff` protections.
 | 10 | Recovery integrity | Rebuild on retry / Reuse frozen initialization | Create-once admitted-run initialization; identical same-key recovery cannot change the plan. | Agent, review amendment | 2026-09-14 |
 | 11 | Observation isolation | Execution-coupled writes / Bounded independent observer | Separate deadlines and byte allowance; snapshot plus cursor commits atomically. | Agent, review amendment | 2026-09-14 |
 | 12 | Delivery authorization | New FRD cycle / Approved implementation | Implement from the reviewed record; user approved delivery and skipped additional FRD review. | Human | 2026-09-14 |
+| 13 | Temporary demo access | Function key / Microsoft sign-in / Anonymous | Explicit anonymous demo with a separate shared owner scope; existing private runs remain inaccessible. | Human | 2026-09-15 |
+| 14 | Sandbox-preserving delivery | Merge in-process runtime / Separate branch | Publish the anonymous UI separately, retaining ACA execution and resumption; leave the running app unchanged. | Human | 2026-09-15 |
 
 ## 6. Test plan and delivery evidence
 
@@ -309,6 +329,8 @@ The implementation coverage targets:
   chat/focused-demo compatibility, and no public schema change;
 - Function-key and Easy Auth ownership before content/SSE access; same-origin
   mutation checks; no arbitrary static paths;
+- explicit anonymous route bindings, automatic keyless bootstrap, hidden key
+  controls, and owner/history separation from existing private runs;
 - optional UI admission, idempotent recovery, frozen initialization, legacy
   hashes/command graphs, and observation producer fencing;
 - genuine pre-final streaming with unchanged final response/usage validation
@@ -327,9 +349,10 @@ An initial CI-equivalent gate passed 3,005 tests. Later targeted suites and
 native Python 3.13/3.14 API streaming plus actual tool-identity paths passed.
 Those native tests use real Functions/Core Tools, Azurite, and pinned MAF
 runtime paths with isolated model and sandbox file/process transport doubles;
-they are not live LLM, Azure Sandbox, DTS, or Portal validation. The final
-native browser run is still in progress, so this record does not claim a final
-green gate, a live Azure deployment, or cloud E2E completion.
+they are not live LLM, Azure Sandbox, DTS, or Portal validation. The canonical
+local gate and all eight native API/browser scenarios pass, including the
+explicitly anonymous fixture on Python 3.13 and 3.14. This evidence does not
+claim live cloud E2E completion.
 
 ## 7. Docs impact
 
@@ -361,3 +384,8 @@ green gate, a live Azure deployment, or cloud E2E completion.
   API/browser scenarios on Python 3.13 and 3.14 passed; the final packaged
   assets were verified. This record does not claim merge, deployment, or
   live cloud verification.
+- **Anonymous follow-up:** on 2026-09-15 the user authorized a separate branch
+  retaining ACA sandbox execution and resumption, rather than taking the
+  leadership branch's newer in-process runtime. The anonymous owner boundary,
+  hidden key controls, and sandbox-backed native paths pass locally. The
+  follow-up does not deploy or modify the running Azure app.

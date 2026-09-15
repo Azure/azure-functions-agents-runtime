@@ -168,6 +168,13 @@ enabled. It does not replace the built-in `/agents/{slug}/` UI, introduce a
 new authoring field, or add a second chat gate. The shell is data-free;
 bootstrap and durable data routes use the configured endpoint authentication.
 
+The sandbox-backed demo explicitly uses `http_auth: anonymous`: the page
+connects to its hosting app automatically, without a Function-key prompt.
+This makes the enabled demo publicly callable. Anonymous runs and browser
+history have a separate shared owner scope; previously protected runs remain
+inaccessible. Set the authored policy back to `function`, or configured
+`entra`, and redeploy to restore protection.
+
 The page stores its session/request history only in browser IndexedDB and holds
 a Function key only in page memory. It supports browser-local session recovery,
 foreground streaming, cancellation, human input, historical sandbox

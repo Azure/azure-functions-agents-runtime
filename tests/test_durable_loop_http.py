@@ -10,8 +10,10 @@ from typing import Any
 
 import azure.durable_functions as df
 import pytest
+from azurefunctions.extensions.http.fastapi import Response
 
 from azure_functions_agents import app as app_module
+from azure_functions_agents.config import EndpointAuthConfig
 from azure_functions_agents.experimental.durable_loop_activities import (
     DeterministicContextCompactor,
     InMemoryDurableContentStore,
@@ -26,7 +28,9 @@ from azure_functions_agents.experimental.durable_loop_config import (
     DURABLE_LOOP_RETAINED_SANDBOX_ENABLED_ENV,
 )
 from azure_functions_agents.experimental.durable_loop_http import (
+    _authorized_owner,
     _json_response,
+    _owner_hash,
     _persist_run_input,
     _RunMetadata,
     _status_projection,
@@ -58,6 +62,8 @@ from azure_functions_agents.experimental.durable_loop_tools import (
     DurableRetainedSandboxInspection,
     DurableToolRegistry,
 )
+from azure_functions_agents.registration._auth import AuthError, resolve_owner_principal
+from azure_functions_agents.session_state import FunctionAppPrincipal
 
 
 @pytest.mark.parametrize(
@@ -128,13 +134,16 @@ def test_durable_json_responses_never_cache_sensitive_data_or_errors() -> None:
     assert response.headers["x-ms-session-id"] == "session-1"
 
 
-def _write_agent(root: Path) -> None:
+def _write_agent(root: Path, *, auth_mode: str = "function") -> None:
     (root / "main.agent.md").write_text(
         (
             "---\n"
             "name: Main\n"
             "description: Durable test\n"
-            "builtin_endpoints: true\n"
+            "builtin_endpoints:\n"
+            "  chat_api: true\n"
+            "  mcp: true\n"
+            f"  http_auth: {auth_mode}\n"
             "---\n"
             "Test."
         ),
@@ -362,6 +371,75 @@ def test_private_http_routes_register_auth_and_durable_client(
         assert bindings[1]["route"] == route
         assert method in [str(item) for item in bindings[1]["methods"]]
         assert str(bindings[1]["authLevel"]).lower() == "function"
+
+
+def test_anonymous_durable_owner_is_separate_without_relaxing_session_auth() -> None:
+    auth = EndpointAuthConfig(mode="anonymous")
+    request = _Request()
+
+    owner = _authorized_owner(request, auth)
+
+    assert not isinstance(owner, Response)
+    assert _owner_hash(owner) != _owner_hash(FunctionAppPrincipal())
+    assert isinstance(resolve_owner_principal(request.headers.get, auth), AuthError)
+
+
+@pytest.mark.asyncio
+async def test_anonymous_durable_routes_cannot_access_previously_keyed_runs(
+    durable_app: df.DFApp,
+    tmp_path: Path,
+) -> None:
+    private_client = _Client()
+    private_start = _registered_function(durable_app, "durable_agent_run_start_v1")
+    private_response = await private_start(
+        _Request(body={"prompt": "private", "request_id": "private-request"}),
+        private_client,
+    )
+    assert private_response.status_code == 202
+    private_run_id = json.loads(private_response.body)["run_id"]
+    _write_agent(tmp_path, auth_mode="anonymous")
+    public_app = app_module.create_function_app(tmp_path)
+    protected_routes = (
+        "durable_agent_run_status_v1",
+        "durable_agent_run_result_v1",
+        "durable_agent_run_sandbox_v1",
+        "durable_agent_run_cancel_v1",
+        "durable_agent_run_human_input_v1",
+        "durable_agent_run_human_input_detail_v1",
+        "durable_chat_events_v1",
+        "durable_chat_diagnostics_v1",
+    )
+    for name in ("durable_agent_run_start_v1", *protected_routes):
+        trigger = next(
+            binding for binding in _bindings(public_app, name)
+            if binding["type"] == "httpTrigger"
+        )
+        assert str(trigger["authLevel"]).lower() == "anonymous"
+    start_count = len(private_client.starts)
+    for name in protected_routes:
+        response = await _registered_function(public_app, name)(
+            _Request(path_params={"run_id": private_run_id, "request_id": "input-1"}),
+            private_client,
+        )
+        assert response.status_code == 404, name
+    assert len(private_client.starts) == start_count
+
+    public_client = _Client()
+    response = await _registered_function(public_app, "durable_agent_run_start_v1")(
+        _Request(body={"prompt": "public", "request_id": "public-request"}),
+        public_client,
+    )
+    assert response.status_code == 202
+    public_run_id = json.loads(response.body)["run_id"]
+    status_request = _Request(path_params={"run_id": public_run_id})
+    public_status = await _registered_function(public_app, "durable_agent_run_status_v1")(
+        status_request, public_client
+    )
+    private_status = await _registered_function(durable_app, "durable_agent_run_status_v1")(
+        status_request, public_client
+    )
+    assert public_status.status_code == 200
+    assert private_status.status_code == 404
 
 
 @pytest.mark.asyncio

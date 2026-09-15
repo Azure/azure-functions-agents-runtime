@@ -5,7 +5,7 @@ builtin_endpoints:
   debug_chat_ui: false
   chat_api: true
   mcp: false
-  http_auth: function
+  http_auth: anonymous
 ---
 
 You are the deterministic qualification agent for the private durable agent loop.

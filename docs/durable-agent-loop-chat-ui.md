@@ -24,7 +24,7 @@ With the default Functions HTTP route prefix, open:
 The effective prefix comes from the Functions host configuration. A nested
 prefix is preserved, and an empty prefix produces
 `/experimental/durable-chat/`; the page obtains all durable API paths from
-authenticated bootstrap rather than assuming `/api`.
+policy-checked bootstrap rather than assuming `/api`.
 
 The static shell is deliberately data-free. It is a fixed allowlist of five
 sibling assets, not an arbitrary `/assets` file route:
@@ -53,6 +53,33 @@ The shell also has a restrictive CSP, `no-referrer`, and `nosniff` headers.
 
 ## Authentication and origin boundary
 
+The page connects automatically to the Function App that serves it; there is
+no app URL to enter. After a successful connection without a Function key,
+the key form and its explanatory note stay hidden. An authentication failure
+still exposes key entry for Function-protected apps.
+
+The sandbox-backed demo explicitly sets the existing authoring policy:
+
+```yaml
+builtin_endpoints:
+  chat_api: true
+  http_auth: anonymous
+```
+
+**This demo is public when its Durable Loop gate is enabled.** Anyone who can
+reach the app can start agent/tool runs and access anonymous-run data.
+Anonymous callers share a separate app-level owner and browser-history
+namespace; this is not per-user isolation. Previously Function-key- or
+Entra-owned runs remain inaccessible from anonymous mode, and their saved
+browser history is retained separately. Start a new session after switching
+authentication modes.
+
+To protect the app again, change the sample's authored policy back to
+`http_auth: function` or to `entra` with properly configured Easy Auth, then
+redeploy. Other apps retain their existing authentication defaults. The shared
+non-Durable persistent-session authentication resolver still rejects
+anonymous ownership.
+
 The shell contains no bootstrap data, key, session, or run identifier. In
 function-key mode, a supplied key is sent only in the `x-functions-key` request
 header and is held in page memory. It is not placed in a query URL, IndexedDB,
@@ -67,8 +94,9 @@ organizational convenience, not an authorization mechanism.
 Browser-originated mutations use the existing same-origin check. When the
 Functions proxy supplies sanitized forwarded host and protocol headers, the
 server compares the request `Origin` with that effective origin and rejects a
-cross-origin mutation. This is in addition to the Function/Easy Auth policy;
-it is not a CORS-only defense.
+cross-origin mutation. This check also applies in anonymous mode, but it does
+not make a public app private. It is in addition to the configured
+authentication policy, not a CORS-only defense.
 
 ## Using the UI
 
@@ -108,9 +136,10 @@ gate nor changes Azure access.
 
 ### Browser-local history and privacy
 
-History is versioned IndexedDB storage, scoped by a hash of the authenticated
-deployment/route, agent, and owner. It is local to that browser profile: it is
-not server session enumeration, a backup, or cross-device synchronization.
+History is versioned IndexedDB storage, scoped by a hash of the
+deployment/route, agent, and effective owner. It is local to that browser
+profile: it is not server session enumeration, a backup, or cross-device
+synchronization.
 The sidebar, requests, normalized start bodies, idempotency keys, transcripts,
 drafts, and stream cursors are stored in transactional IndexedDB records for
 recovery. The hide/show-details preference is separately remembered in

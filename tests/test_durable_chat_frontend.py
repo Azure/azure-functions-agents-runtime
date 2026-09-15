@@ -34,6 +34,7 @@ class _ChatState:
         self.cancel_sets_status = False
         self.config_headers: dict[str, str] = {}
         self.config_redirect_url = ""
+        self.require_function_key = False
         self.completed = False
         self.configured_sandbox_group: str | None = (
             "/subscriptions/test/resourceGroups/admitted-group"
@@ -82,6 +83,9 @@ class _ChatHandler(http.server.BaseHTTPRequestHandler):
                 return
         if path == f"{_SHELL_PATH}config":
             self.state.config_headers = dict(self.headers)
+            if self.state.require_function_key and not self.headers.get("x-functions-key"):
+                self._json(401, {"error": "function_key_required"})
+                return
             if self.state.config_redirect_url:
                 self._redirect(self.state.config_redirect_url)
                 return
@@ -630,8 +634,11 @@ async def _create_empty_session(page: Any) -> str:
 
 
 async def _submit_function_key(page: Any, value: str) -> None:
+    await page.wait_for("!document.querySelector('#durable-chat-functions-key').disabled")
     await page.evaluate(
+        "if (document.querySelector('#durable-chat-connection-panel').hidden) {"
         "document.querySelector('#durable-chat-connection-toggle').click();"
+        "}"
         "document.querySelector('#durable-chat-functions-key').value = "
         f"{json.dumps(value)};"
         "document.querySelector('#durable-chat-auth-form').requestSubmit()",
@@ -644,6 +651,16 @@ async def _provide_function_key(page: Any, value: str) -> None:
         "document.querySelector('#durable-chat-connection-summary').textContent"
         ".toLowerCase().includes('ready')",
     )
+    assert await page.evaluate(
+        "!document.querySelector('#durable-chat-auth-form').hidden"
+    )
+
+
+async def _assert_keyless_connection(page: Any) -> None:
+    await page.evaluate("document.querySelector('#durable-chat-connection-toggle').click()")
+    assert await page.evaluate("document.querySelector('#durable-chat-auth-form').hidden")
+    assert await page.evaluate("document.querySelector('#durable-chat-auth-note').hidden")
+    await page.evaluate("document.querySelector('#durable-chat-connection-toggle').click()")
 
 
 async def _assert_authoritative_completion(page: Any, *, reload: bool = False) -> None:
@@ -675,6 +692,7 @@ async def test_durable_chat_frontend_uses_bootstrap_history_and_safe_sse_renderi
                     "document.querySelector('#durable-chat-connection-summary').textContent"
                     ".toLowerCase().includes('ready')",
                 )
+                await _assert_keyless_connection(page)
                 assert await page.evaluate(
                     "document.querySelector('#durable-chat-prompt').maxLength"
                 ) == 262144
@@ -1279,6 +1297,7 @@ async def test_durable_chat_frontend_retries_unready_invalid_and_failed_results(
 @pytest.mark.asyncio
 async def test_durable_chat_frontend_surfaces_result_authentication_failure() -> None:
     state = _ChatState()
+    state.require_function_key = True
     state.completed = True
     state.result_mode = "unauthorized"
     browser_directory = _ARTIFACT_ROOT / f"result-auth-{uuid4().hex}"
@@ -1317,6 +1336,7 @@ async def test_durable_chat_frontend_surfaces_result_authentication_failure() ->
 @pytest.mark.asyncio
 async def test_durable_chat_frontend_rejects_credential_bearing_redirects() -> None:
     state = _ChatState()
+    state.require_function_key = True
     state.completed = True
     browser_directory = _ARTIFACT_ROOT / f"redirect-{uuid4().hex}"
     try:
@@ -1351,14 +1371,14 @@ async def test_durable_chat_frontend_rejects_credential_bearing_redirects() -> N
 @pytest.mark.asyncio
 async def test_durable_chat_frontend_rejects_bootstrap_key_redirects() -> None:
     state = _ChatState()
+    state.require_function_key = True
     browser_directory = _ARTIFACT_ROOT / f"bootstrap-redirect-{uuid4().hex}"
     try:
         with _redirect_target() as (redirect_url, target), _chat_page(state) as page_url:
             async with _frontend_page(browser_directory) as page:
                 await page.navigate(page_url)
                 await page.wait_for(
-                    "document.querySelector('#durable-chat-connection-summary').textContent"
-                    ".toLowerCase().includes('ready')",
+                    "!document.querySelector('#durable-chat-functions-key').disabled",
                 )
                 state.config_redirect_url = redirect_url
                 await _submit_function_key(page, "synthetic-bootstrap-key")

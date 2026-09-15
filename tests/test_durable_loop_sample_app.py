@@ -55,7 +55,7 @@ def _public_functions(tree: ast.Module) -> list[ast.FunctionDef | ast.AsyncFunct
     ]
 
 
-def test_sample_application_config_is_explicit_and_private() -> None:
+def test_sample_application_explicitly_enables_anonymous_demo_access() -> None:
     assert (SAMPLE_SRC / "function_app.py").read_text(encoding="utf-8") == (
         "from azure_functions_agents import create_function_app\n\n"
         "app = create_function_app()\n"
@@ -72,14 +72,14 @@ def test_sample_application_config_is_explicit_and_private() -> None:
             "debug_chat_ui": False,
             "chat_api": True,
             "mcp": False,
-            "http_auth": "function",
+            "http_auth": "anonymous",
         },
     }
     [spec] = load_agent_specs(SAMPLE_SRC, strict=True)
     assert spec.builtin_endpoints.chat_api is True
     assert spec.builtin_endpoints.debug_chat_ui is False
     assert spec.builtin_endpoints.mcp is False
-    assert spec.builtin_endpoints.http_auth.mode == "function"
+    assert spec.builtin_endpoints.http_auth.mode == "anonymous"
     assert spec.trigger is None
     assert spec.workflows is None
 

@@ -458,7 +458,7 @@ export class DurableChatApplication {
         );
         this.shell.setConnectionState({
           state: "ready",
-          allowKeyEntry: true,
+          allowKeyEntry: Boolean(this.authKey),
           configuredSandboxGroup: bootstrap.sandboxGroupResourceId,
           deploymentLabel: bootstrap.agent.displayName,
           message: `${bootstrap.agent.displayName} is reachable, but local history is unavailable.`,
@@ -473,7 +473,7 @@ export class DurableChatApplication {
       this._connected = true;
       this.shell.setConnectionState({
         state: "ready",
-        allowKeyEntry: true,
+        allowKeyEntry: Boolean(this.authKey),
         configuredSandboxGroup: bootstrap.sandboxGroupResourceId,
         deploymentLabel: bootstrap.agent.displayName,
         message: `${bootstrap.agent.displayName} is ready for durable chat requests.`,
@@ -1555,7 +1555,7 @@ export class DurableChatApplication {
       : "The Function App connection could not be established. Use reconnect to try again.";
     this.shell.setConnectionState({
       state: "error",
-      allowKeyEntry: true,
+      allowKeyEntry: authenticationRequired || Boolean(this.authKey),
       message,
       announce: true,
     });
