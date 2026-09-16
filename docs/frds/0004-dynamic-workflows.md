@@ -4,7 +4,7 @@ title: Dynamic workflows
 status: Finalized
 author: TsuyoshiUshio
 created: 2026-07-06
-updated: 2026-09-14
+updated: 2026-09-15
 issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108, https://github.com/Azure/azure-functions-agents-runtime/issues/109, https://github.com/Azure/azure-functions-bucees-planning/issues/1274, https://github.com/Azure/azure-functions-bucees-planning/issues/1275, https://github.com/Azure/azure-functions-bucees-planning/issues/1276]
 pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117, https://github.com/Azure/azure-functions-agents-runtime/pull/151, https://github.com/Azure/azure-functions-agents-runtime/pull/163]
 ---
@@ -276,6 +276,32 @@ A host timeout can restart the Python worker before it returns
 without the runtime's failure result. No fixed maximum does not guarantee
 uninterrupted execution.
 
+**Host-failure diagnostics.** The Functions host detects its execution timeout,
+but this library cannot always identify that cause from a Durable failure.
+The Activity worker can stop before it records a diagnostic.
+
+In the timeout PR, add a warning through the shared logger when the orchestrator
+receives an Activity failure without a valid runtime failure classification.
+Keep the original failure and all retry, continuation, and cancellation rules.
+Do not emit this warning for classified handler failures, successful results,
+or unrelated scheduler errors. Suppress the warning during history replay.
+
+Include the workflow ID and, when available, the failed task instance ID and
+persisted attempt timeout. Do not guess the failed task from wave order or log
+task arguments or raw exception content. Use a message such as:
+
+> The workflow received an unclassified Activity failure. A host timeout or
+> worker restart may have interrupted the Activity. Check Azure Functions host
+> logs and Application Insights, if enabled. Compare the effective functionTimeout
+> setting with the task timeout.
+
+The diagnostic guidance must include `host.json` and application-setting
+overrides, such as `AzureFunctionsJobHost__functionTimeout`. State a host timeout
+as a confirmed cause only when supported failure data identifies it. Do not
+infer it from elapsed time or an exception message. No diagnostic is guaranteed
+if the orchestrator does not receive the failure, or if redelivery succeeds.
+This warning is part of the timeout PR, not the later telemetry work.
+
 The HTTP response limit of 230 seconds is separate. A workflow starter returns
 without waiting for the workflow to finish; this HTTP limit is not a deadline
 for the whole workflow. Do not detect the hosting SKU or change plan validation
@@ -333,8 +359,18 @@ bounded object
 aggregate `results` snapshot embedded, so a `for_each` expansion whose instances
 all fail cannot grow quadratically. A downstream `${node.result...}` reference or
 `when` predicate therefore has one stable shape to read, and no scheduler state
-or persisted aggregate contract changes. Reporting the distinction between a
-succeeded and a continued node in the status is left to the observability slice.
+or persisted aggregate contract changes.
+
+**Completion and errors.** If every task fails with a permitted failure and
+continuation enabled, the workflow still completes. `Completed` means that the
+control flow finished, not that every task succeeded.
+Keep Durable's `Completed` and the scheduler's `completed` states.
+The later status/UI slice must distinguish clean completion from
+`Completed with errors`. Base that distinction on failures that the runtime
+actually continued, not a search for `failed` keys in user results.
+Do not add a scheduler state or a new `runtime_status` value in these two PRs.
+Until the status/UI slice ships, the current UI can show ordinary completion;
+users must inspect the task results to see continued failures.
 
 **Failure timing.** A wave is a group of task instances that the scheduler waits
 for together. The current scheduler raises Durable exceptions during that wait.
@@ -375,7 +411,7 @@ separate later work.
 | `@workflow_tool` integration (PR #207) | Allow tool declarations to provide retry and define decorator-over-plan precedence | Decorator metadata, discovery, registry/catalog propagation, submission-time precedence, focused tests and docs | Execution foundation (PR #193, merged) | Additive at submission; reuses the same persisted effective policy and does not change replay | Metadata propagation and precedence |
 | Attempt timeout (implementation PR 1) | Limit the wait for each attempt | `execution.timeout`; `@workflow_tool(timeout=...)`; per-field precedence; optional retry with a one-attempt default; persisted deadline; `handler_transient` with `workflow_task_timeout`; tests, docs, and sample | PRs #193 and #207 (merged); base `main` | No scheduler timing change; absent timeout keeps existing behavior | Policy propagation, deadline behavior, retry limits, replay |
 | Continuation (implementation PR 2) | Obtain results after selected task failures | Plan-only `execution.continue_on_error`; bounded failure results; shared continuation logic in both schedulers; tests, docs, and sample | Stacked on the attempt-timeout PR | Only waves with persisted continuation enabled use the new path | Failure kinds, cancellation order, old histories, `for_each` |
-| Observability and status | Expose retry/timeout lifecycle telemetry and structured status | Telemetry, status contract, UI/docs | Earlier execution-policy slices | Additive status version | Stable external lifecycle vocabulary |
+| Observability and status | Expose retry/timeout lifecycle telemetry and structured status | Telemetry, status contract, UI/docs; distinguish clean completion from completion with continued failures | Earlier execution-policy slices | Additive status version | Stable external lifecycle vocabulary; runtime-owned error tracking |
 
 ### Authoring / API surface
 
@@ -1330,6 +1366,8 @@ results remain unchanged.
 | 98 | Timeout failure representation | New failure kind / existing kind with a separate error code | Use `handler_transient` with `workflow_task_timeout` for the attempt deadline. Keep `subagent_timeout` for the specialist deadline. This replaces Decision 86 and the new-kind parts of Decisions 92, 93, and 95. Downgrade still requires workflows to finish or be terminated because older code ignores the new policy keys | Human (TsuyoshiUshio), Agent | 2026-09-14 |
 | 99 | Failure timing and replay | Process all failures immediately / preserve the old path unless continuation is enabled | Replace Decision 88 and clarify Decision 91. Current code raises Durable exceptions during the wave wait but processes returned terminal failures after the wave. Use new per-instance processing only when a wave has persisted `continue_on_error: true`. Otherwise preserve failure cause, result-application order, and cancellation order. Identical payloads alone do not prove replay compatibility | Human (TsuyoshiUshio), Agent | 2026-09-14 |
 | 100 | Retry omitted from an execution policy | New persisted format / existing one-attempt policy | After decorator precedence, default an absent retry policy to `WorkflowRetryPolicy(max_attempts=1)`. Reuse the existing conversion to persist required retry fields with no delay. Apply this to timeout-only and continuation-only policies; tasks with no settings keep no execution payload | Human (TsuyoshiUshio), Agent | 2026-09-14 |
+| 101 | Host-failure guidance | Documentation only / diagnostic warning / automatic SKU validation | Add a replay-suppressed warning when the orchestrator receives an unclassified Activity failure. Give possible causes and host-log/configuration checks without changing the failure. Keep SKU detection out of scope | Human (TsuyoshiUshio), Agent; review by Victoria Hall | 2026-09-15 |
+| 102 | Completion after continued failures | New scheduler state / separate result display | Keep existing execution states. Require the later status/UI slice to distinguish completion with continued failures, including when all tasks fail. Use runtime-owned continuation records, not user result keys. Document the interim UI limitation | Human (TsuyoshiUshio), Agent; review by Victoria Hall | 2026-09-15 |
 
 ## 6. Test plan
 
@@ -1520,6 +1558,14 @@ results remain unchanged.
   - a history with no persisted deadline keeps its unbounded attempt;
   - a persisted deadline outside its validated domain is a contract failure;
   - deadline and retry-delay validation does not change scheduler failure timing.
+- [ ] Timeout PR: host-failure diagnostics
+  - an unclassified Activity failure emits the guidance warning with available
+    workflow/task identity and persisted timeout, without changing the failure;
+  - classified handler failures, successful results, and scheduler errors do not
+    emit the warning;
+  - replay suppresses the warning, and logs contain no task arguments or raw
+    exception content;
+  - missing failure details or task identity do not produce a guessed cause.
 - [ ] Continuation PR: execution contract
   - accept continuation without timeout or retry, using the existing one-attempt
     persisted policy when neither plan nor decorator declares retry;
@@ -1547,10 +1593,19 @@ results remain unchanged.
   - old histories, timeout-only policies, and explicit false continuation keep
     cancellation order when a terminal outcome arrives before a slow sibling;
   - exercise the same rules in both schedulers.
+- [ ] Status/UI slice: completion with errors
+  - distinguish clean completion, some continued failures, and all tasks failed
+    with continuation enabled;
+  - do not treat a successful user result containing `failed: true` as a
+    runtime-continued failure.
 - [ ] Timeout PR: sample/E2E
   - include a runnable timeout example with decorator precedence;
   - use a real Functions host to prove retry and exhaustion after an attempt
-    deadline against the local Durable backend.
+    deadline against the local Durable backend;
+  - configure a host timeout shorter than the attempt deadline and record the
+    failure data available to the orchestrator. Check diagnostic guidance when
+    it receives an unclassified Activity failure. Do not assume that the worker
+    can log before restart.
 - [ ] Continuation PR: sample/E2E
   - include a runnable example of a failed optional task and its dependents;
   - use a real Functions host to prove continuation after timeout exhaustion,
@@ -1602,12 +1657,14 @@ results remain unchanged.
   per-field precedence, the one-attempt default, `workflow_task_timeout`, and
   work that can continue after a deadline in `docs/workflows.md` and
   `docs/architecture.md`. Distinguish the library admission cap from
-  `functionTimeout` and link to the hosting-plan limits. Include the timeout
-  sample in `samples/README.md`.
+  `functionTimeout` and link to the hosting-plan limits. Explain the diagnostic
+  warning, host logs, Application Insights, and configuration overrides.
+  Include the timeout sample in `samples/README.md`.
 - [ ] Continuation PR: document `execution.continue_on_error`, permitted failure
   kinds, bounded failure results, and failure/cancellation order in
-  `docs/workflows.md` and `docs/architecture.md`. Include the continuation sample
-  in `samples/README.md`.
+  `docs/workflows.md` and `docs/architecture.md`. Explain that completion does not
+  imply task success and that the current UI does not distinguish continued
+  failures. Include the continuation sample in `samples/README.md`.
 
 ## 8. Status & sign-off
 
