@@ -11,6 +11,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Build custom tools in plain Python** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and pull in any package you need
 - **Run agents on durable workflows** *(experimental, see [Dynamic workflows](workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
+- **Evaluate authored behavior** *(preview)* — run MAF checks against the same chat surface under Core Tools or in staging, with optional Foundry grading
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
 - **Harness-only execution controls** — set portable output limits and optional Microsoft Agent Framework token-budget conversation compaction
@@ -36,6 +37,7 @@ azurefunctions-agents-runtime
 - [Front matter spec](front-matter-spec.md) — the `.agent.md` and `agents.config.yaml` field reference
 - [Triggers](triggers.md) — supported trigger types and payload shapes
 - [Observability](observability.md) — tracing and telemetry
+- [Agent evaluations](evaluation.md) — preview MAF checks for local and staging targets
 - [Dynamic workflows](workflows.md) — experimental durable DAG execution
 
 Source code and issues live on GitHub: [Azure/azure-functions-agents-runtime](https://github.com/Azure/azure-functions-agents-runtime).
