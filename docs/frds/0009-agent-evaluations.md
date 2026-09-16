@@ -14,10 +14,10 @@ branch: hallvictoria/evals
 
 ## 1. Summary
 
-Serverless Agents will support repeatable evaluation of customer-authored agents without creating a
+Hosted Skills will support repeatable evaluation of customer-authored agents without creating a
 second evaluation framework. Microsoft Agent Framework (MAF) remains the source of truth for
 evaluation items, deterministic checks, repetitions, evaluator providers, results, and optional
-Microsoft Foundry grading. The initial Serverless Agents experience is a thin, preview
+Microsoft Foundry grading. The initial Hosted Skills experience is a thin, preview
 MAF-compatible target adapter in `azure_functions_agents.evaluation` that invokes the runtime's
 existing synchronous built-in chat endpoint under local Azure Functions Core Tools or on a deployed
 staging Function App. `pytest` and the customer's CI system own execution, reports, and release
@@ -27,12 +27,12 @@ grader plug-in system is added in the MVP.
 ## 2. Motivation / problem
 
 A prompt, model, tool, skill, or runtime change can alter an agent's answer or tool path even when
-ordinary application tests still pass. Today a Serverless Agents customer must independently script
+ordinary application tests still pass. Today a Hosted Skills customer must independently script
 test-case loading, Function invocation, tool-call inspection, grading, CI failure, and trace lookup.
 That creates inconsistent local and deployment checks and encourages every application to invent its
 own result and evaluator contracts.
 
-The missing Serverless Agents primitive is not an evaluator. MAF 1.13.0 already provides
+The missing Hosted Skills primitive is not an evaluator. MAF 1.13.0 already provides
 `EvalItem`, `ExpectedToolCall`, `LocalEvaluator`, `evaluate_agent()`, repetitions, the `Evaluator`
 protocol, and `EvalResults`; `agent-framework-foundry` 1.10.3 provides `FoundryEvals`. The runtime
 already exposes a synchronous HTTP target that returns the final response, observed tool calls and
@@ -265,10 +265,10 @@ prevent deterministic local/CI evaluation.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | - | -------- | ------------------ | ------ | ---------- | ---- |
-| 1 | What customers evaluate | Whole SAF platform / authored agent behavior / both | Authored agent behavior only; platform reliability remains product CI/SLO scope | Human | 2026-09-02 |
+| 1 | What customers evaluate | Whole AFAR platform / authored agent behavior / both | Authored agent behavior only; platform reliability remains product CI/SLO scope | Human | 2026-09-02 |
 | 2 | Initial deployed target | Live production / staging or ephemeral deployment / both | Staging or ephemeral deployment only | Human | 2026-09-02 |
-| 3 | Product ownership | SAF evaluation framework / thin SAF bridge to MAF / docs only | Thin bridge and templates; MAF owns evaluation contracts and checks | Human | 2026-09-02 |
-| 4 | Evaluator abstraction | New SAF `provider` plug-ins / MAF `Evaluator` / Foundry-only | Reuse MAF `Evaluator`; Foundry is optional | Human + Agent | 2026-09-02 |
+| 3 | Product ownership | AFAR evaluation framework / thin AFAR bridge to MAF / docs only | Thin bridge and templates; MAF owns evaluation contracts and checks | Human | 2026-09-02 |
+| 4 | Evaluator abstraction | New AFAR `provider` plug-ins / MAF `Evaluator` / Foundry-only | Reuse MAF `Evaluator`; Foundry is optional | Human + Agent | 2026-09-02 |
 | 5 | Initial runner and reports | Dedicated Functions CLI / pytest and CI / Foundry portal only | Use pytest exit codes and JUnit; preserve optional Foundry report URL | Human + Agent | 2026-09-15 |
 | 6 | Local target | Direct runtime composition / Core Tools HTTP endpoint / both in MVP | Reuse the HTTP contract under Core Tools first; avoid a second composition/execution path | Human + Agent | 2026-09-15 |
 | 7 | Runtime changes | New eval endpoint/run API / preview client adapter / sample copy only | Add a versioned preview client adapter, but no server-side behavior or payload changes | Human + Agent | 2026-09-15 |
