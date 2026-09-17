@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,34 @@ _SPEC = importlib.util.spec_from_file_location(
 assert _SPEC is not None and _SPEC.loader is not None
 order_tools = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(order_tools)
+
+
+def test_sample_provides_storage_and_dts_host_configurations() -> None:
+    host_config = json.loads((_SAMPLE_SRC / "host.json").read_text(encoding="utf-8"))
+    assert "durableTask" not in host_config["extensions"]
+
+    dts_config = json.loads(
+        (_SAMPLE_SRC / "host.dts.json").read_text(encoding="utf-8")
+    )
+    assert dts_config["extensions"]["durableTask"] == {
+        "hubName": "%TASKHUB_NAME%",
+        "tracing": {
+            "distributedTracingEnabled": True,
+            "version": "V2",
+        },
+        "storageProvider": {
+            "type": "azureManaged",
+            "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
+        },
+    }
+
+    settings = json.loads(
+        (_SAMPLE_SRC / "local.settings.template.json").read_text(encoding="utf-8")
+    )
+    assert settings["Values"]["DURABLE_TASK_SCHEDULER_CONNECTION_STRING"] == (
+        "Endpoint=http://localhost:8080;Authentication=None"
+    )
+    assert settings["Values"]["TASKHUB_NAME"] == "prstatusreports"
 
 
 def test_sample_agent_relies_on_the_tool_retry_policy() -> None:

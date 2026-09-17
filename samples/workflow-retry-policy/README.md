@@ -108,11 +108,21 @@ and does not appear in the agent-authored workflow.
 
 Follow the [shared local development guide](../README.md#run-locally) to create
 a virtual environment and install `src/requirements.txt`. Start Azurite for the
-sample's Blob state and start the Durable Task Scheduler emulator for workflow
-execution. The committed `host.json` uses the DTS `azureManaged` provider and
-reads its endpoint and task hub from `DURABLE_TASK_SCHEDULER_CONNECTION_STRING`
-and `TASKHUB_NAME`. Create `src/local.settings.json`, then run `func start` from
-`src/`.
+sample's Blob state. The default `host.json` uses Azure Storage so the sample can
+run in standard development and CI environments.
+
+To use the Durable Task Scheduler emulator, start it and run these commands from
+`src/`:
+
+```powershell
+Copy-Item local.settings.template.json local.settings.json
+Copy-Item host.dts.json host.json
+func start
+```
+
+The DTS configuration reads its endpoint and task hub from
+`DURABLE_TASK_SCHEDULER_CONNECTION_STRING` and `TASKHUB_NAME`. Restore the
+committed `host.json` to return to Azure Storage.
 
 Open <http://localhost:7071/agents/main/> and ask:
 
