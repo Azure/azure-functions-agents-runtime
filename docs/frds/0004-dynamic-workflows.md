@@ -1368,6 +1368,7 @@ results remain unchanged.
 | 100 | Retry omitted from an execution policy | New persisted format / existing one-attempt policy | After decorator precedence, default an absent retry policy to `WorkflowRetryPolicy(max_attempts=1)`. Reuse the existing conversion to persist required retry fields with no delay. Apply this to timeout-only and continuation-only policies; tasks with no settings keep no execution payload | Human (TsuyoshiUshio), Agent | 2026-09-14 |
 | 101 | Host-failure guidance | Documentation only / diagnostic warning / automatic SKU validation | Add a replay-suppressed warning when the orchestrator receives an unclassified Activity failure. Give possible causes and host-log/configuration checks without changing the failure. Keep SKU detection out of scope | Human (TsuyoshiUshio), Agent; review by Victoria Hall | 2026-09-15 |
 | 102 | Completion after continued failures | New scheduler state / separate result display | Keep existing execution states. Require the later status/UI slice to distinguish completion with continued failures, including when all tasks fail. Use runtime-owned continuation records, not user result keys. Document the interim UI limitation | Human (TsuyoshiUshio), Agent; review by Victoria Hall | 2026-09-15 |
+| 103 | Timeout sample delivery | Add a separate timeout sample / extend the retry sample | Extend `workflow-retry-policy` with a carrier task whose decorator timeout overrides a longer plan timeout while the plan retry remains active. This gives one runnable app for retry success, timeout retry, and timeout exhaustion without duplicate Functions setup | Agent | 2026-09-16 |
 
 ## 6. Test plan
 
@@ -1566,13 +1567,13 @@ results remain unchanged.
   - replay suppresses the warning, and logs contain no task arguments or raw
     exception content;
   - missing failure details or task identity do not produce a guessed cause.
-- [ ] Continuation PR: execution contract
+- [x] Continuation PR: execution contract
   - accept continuation without timeout or retry, using the existing one-attempt
     persisted policy when neither plan nor decorator declares retry;
   - keep `continue_on_error` plan-only and reject it on the decorator;
   - omit the continuation key unless declared and preserve earlier payloads;
   - reject an empty execution object and invalid continuation values.
-- [ ] Continuation PR: DAG continuation
+- [x] Continuation PR: DAG continuation
   - a continued node commits the bounded `{"failed": true, ...}` object with no
     aggregate results snapshot, stays `completed`, and lets dependents, `when`
     predicates, and skip propagation run in both the static and dynamic
@@ -1606,7 +1607,7 @@ results remain unchanged.
     failure data available to the orchestrator. Check diagnostic guidance when
     it receives an unclassified Activity failure. Do not assume that the worker
     can log before restart.
-- [ ] Continuation PR: sample/E2E
+- [x] Continuation PR: sample/E2E
   - include a runnable example of a failed optional task and its dependents;
   - use a real Functions host to prove continuation after timeout exhaustion,
     continuation after a single terminal failure, and cancellation order;
@@ -1653,14 +1654,14 @@ results remain unchanged.
   idempotency, replay compatibility, and deferred decorator integration.
 - [ ] Evolution #1278 slice 1: add a runnable plan-authored retry sample and list
   it in `samples/README.md`.
-- [ ] Timeout PR: document `execution.timeout`, `@workflow_tool(timeout=...)`,
+- [x] Timeout PR: document `execution.timeout`, `@workflow_tool(timeout=...)`,
   per-field precedence, the one-attempt default, `workflow_task_timeout`, and
   work that can continue after a deadline in `docs/workflows.md` and
   `docs/architecture.md`. Distinguish the library admission cap from
   `functionTimeout` and link to the hosting-plan limits. Explain the diagnostic
   warning, host logs, Application Insights, and configuration overrides.
   Include the timeout sample in `samples/README.md`.
-- [ ] Continuation PR: document `execution.continue_on_error`, permitted failure
+- [x] Continuation PR: document `execution.continue_on_error`, permitted failure
   kinds, bounded failure results, and failure/cancellation order in
   `docs/workflows.md` and `docs/architecture.md`. Explain that completion does not
   imply task success and that the current UI does not distinguish continued
@@ -1769,3 +1770,7 @@ results remain unchanged.
   terminal outcomes are processed after the wave. The approved design now
   distinguishes that path from Durable exceptions. Status remains `Finalized`;
   implementation has not started in PR #212.
+- **Continuation testing review:** An independent testing review on 2026-09-16
+  required explicit coverage for timeout continuation, opaque failures, dynamic
+  retry exhaustion, aggregate status, wave timing, replay, and the cancellation
+  race. The implementation and real-host E2E now cover these cases.

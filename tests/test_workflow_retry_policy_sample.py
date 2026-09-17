@@ -19,6 +19,7 @@ from azure_functions_agents.workflows.context import (
 from azure_functions_agents.workflows.schema import (
     WorkflowPlanPolicy,
     WorkflowRetryableError,
+    WorkflowTerminalError,
     resolve_workflow_task_execution,
     validate_plan,
 )
@@ -42,7 +43,9 @@ def test_sample_agent_relies_on_the_tool_retry_policy() -> None:
     agent_text = (_SAMPLE_SRC / "main.agent.md").read_text(encoding="utf-8")
 
     assert "start_workflow" in agent_text
-    assert "execution.retry" not in agent_text
+    assert "execution.retry" in agent_text
+    assert "execution.timeout" in agent_text
+    assert "execution.continue_on_error" in agent_text
     assert "tool owns its retry policy" in agent_text
 
 
@@ -128,9 +131,18 @@ def test_sample_tools_declare_retry_only_on_inventory_reservation() -> None:
     discovered = discover_project_tools(_SAMPLE_SRC)
 
     by_name = {tool.name: tool for tool in discovered.workflow_tools}
-    assert set(by_name) == {"load_order", "reserve_inventory", "confirm_order"}
+    assert set(by_name) == {
+        "confirm_order",
+        "load_order",
+        "notify_customer",
+        "reserve_inventory",
+        "verify_carrier",
+    }
     assert by_name["load_order"].retry is None
     assert by_name["confirm_order"].retry is None
+    assert by_name["notify_customer"].retry is None
+    assert by_name["verify_carrier"].retry is None
+    assert by_name["verify_carrier"].timeout == "PT1S"
     retry = by_name["reserve_inventory"].retry
     assert retry is not None
     assert retry.max_attempts == 3
@@ -209,3 +221,70 @@ def test_sample_inventory_failure_is_classified_as_retryable(
 
     assert raised.value.error_code == "inventory_temporarily_unavailable"
     assert incident["transient_failures_observed"] == 1
+
+
+def test_sample_notification_failure_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    incident = {
+        "order_id": "ORD-1001",
+        "failures_remaining": 0,
+        "transient_failures_observed": 2,
+        "carrier_attempts": 2,
+        "notice_attempts": 0,
+        "status": "recovered",
+    }
+
+    def fake_read(incident_id: str) -> tuple[dict[str, object], str]:
+        return dict(incident), "etag-1"
+
+    def fake_write(incident_id: str, state: dict[str, object], **kwargs: object) -> None:
+        incident.update(state)
+
+    monkeypatch.setattr(order_tools, "_read_incident", fake_read)
+    monkeypatch.setattr(order_tools, "_write_incident", fake_write)
+    token = _set_workflow_task_context(
+        WorkflowTaskContext(
+            workflow_id="workflow-1",
+            task_id="notify_customer",
+            node_instance_id="notify_customer",
+            max_attempts=1,
+            idempotency_key="af-wf-task-v1:test",
+        )
+    )
+    try:
+        with pytest.raises(WorkflowTerminalError) as raised:
+            order_tools.notify_customer(
+                {"reservation": {"order_id": "ORD-1001", "reserved": True}}
+            )
+    finally:
+        _reset_workflow_task_context(token)
+
+    assert raised.value.error_code == "customer_notice_unavailable"
+    assert incident["notice_attempts"] == 1
+
+
+def test_sample_confirmation_accepts_continued_failures() -> None:
+    result = order_tools.confirm_order({
+        "carrier": {
+            "failed": True,
+            "error_code": "workflow_task_timeout",
+            "error": "Task attempt timed out.",
+            "kind": "handler_transient",
+        },
+        "notice": {
+            "failed": True,
+            "error_code": "customer_notice_unavailable",
+            "error": "Customer notification is unavailable.",
+            "kind": "handler_terminal",
+        },
+    })
+
+    assert result == {
+        "order_id": "ORD-1001",
+        "status": "confirmed",
+        "carrier": "manual verification required",
+        "timeout_attempts_observed": None,
+        "carrier_verification_failed": True,
+        "customer_notice_failed": True,
+    }

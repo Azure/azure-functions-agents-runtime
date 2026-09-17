@@ -111,9 +111,8 @@ class _ToolTaskSpec(_TaskSpecBase):
         default=None,
         exclude_if=lambda value: value is None,
         description=(
-            "Optional bounded retry policy for transient failures. Use it only "
-            "when repeating the task is safe; the tool must raise "
-            "WorkflowRetryableError for a failure Durable should retry."
+            "Optional bounded execution policy. 'timeout' limits each attempt. "
+            "'retry' repeats transient failures only when repeating the task is safe."
         ),
     )
 
@@ -164,8 +163,8 @@ class _SubAgentTaskSpec(_TaskSpecBase):
         default=None,
         exclude_if=lambda value: value is None,
         description=(
-            "Optional bounded retry policy for this Sub Agent task. Only a "
-            "Sub Agent timeout is classified as transient in this version."
+            "Optional bounded execution policy. 'timeout' limits each attempt. "
+            "A specialist's own timeout remains independent."
         ),
     )
 
@@ -459,6 +458,9 @@ async def start_workflow(
             effective = resolve_workflow_task_execution(
                 task,
                 decorator_retry=declaration.retry if declaration is not None else None,
+                decorator_timeout=(
+                    declaration.timeout if declaration is not None else None
+                ),
             )
             if effective is not None:
                 effective_policies[task.id] = effective

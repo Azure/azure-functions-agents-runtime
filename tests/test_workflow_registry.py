@@ -286,8 +286,16 @@ def _workflow_tool(
     *,
     public: bool = True,
     retry: schema.WorkflowRetryPolicy | None = None,
+    timeout: str | None = None,
 ) -> WorkflowTool:
-    return WorkflowTool(name, description, handler, public=public, retry=retry)
+    return WorkflowTool(
+        name,
+        description,
+        handler,
+        public=public,
+        retry=retry,
+        timeout=timeout,
+    )
 
 
 def _agent_catalog(**descriptions: str):
@@ -361,6 +369,21 @@ def test_integration_freezes_allowed_tool_retry_declarations() -> None:
         result.plan_policy.tool_execution["other"] = schema.WorkflowToolExecutionPolicy(  # type: ignore[index]
             retry=retry
         )
+
+
+def test_integration_freezes_allowed_tool_timeout_declarations() -> None:
+    result = integration.build_workflow_integration(
+        _FakeApp(),
+        _enable_metadata(exclude=["excluded"]),
+        workflow_tools=[
+            _workflow_tool("allowed", "Allowed", timeout="PT20S"),
+            _workflow_tool("excluded", "Excluded", timeout="PT30S"),
+        ],
+    )
+
+    assert result.plan_policy is not None
+    assert result.plan_policy.tool_execution["allowed"].timeout == "PT20S"
+    assert set(result.plan_policy.tool_execution) == {"allowed"}
 
 
 def test_agent_policy_catalog_keeps_retry_only_for_allowed_public_tools() -> None:

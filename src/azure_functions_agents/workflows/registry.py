@@ -49,6 +49,7 @@ class WorkflowToolEntry:
     handler: Callable[[dict[str, Any]], Any]
     public: bool
     retry: WorkflowRetryPolicy | None = None
+    timeout: str | None = None
 
 
 type WorkflowHandlerCatalog = Mapping[str, WorkflowToolEntry]
@@ -79,6 +80,7 @@ def make_workflow_tool_entry(
     *,
     public: bool = True,
     retry: WorkflowRetryPolicy | None = None,
+    timeout: str | None = None,
 ) -> WorkflowToolEntry:
     """Validate and construct one workflow handler-catalog entry."""
     if not isinstance(name, str) or not name:
@@ -100,12 +102,15 @@ def make_workflow_tool_entry(
         )
     if retry is not None and not isinstance(retry, WorkflowRetryPolicy):
         raise ValueError(f"workflow tool {name!r}: retry must be a WorkflowRetryPolicy")
+    if timeout is not None and not isinstance(timeout, str):
+        raise ValueError(f"workflow tool {name!r}: timeout must be an ISO-8601 duration")
     return WorkflowToolEntry(
         name=name,
         description=description,
         handler=handler,
         public=public,
         retry=retry,
+        timeout=timeout,
     )
 
 
@@ -123,6 +128,7 @@ def register_workflow_tool(
     *,
     public: bool = True,
     retry: WorkflowRetryPolicy | None = None,
+    timeout: str | None = None,
 ) -> None:
     """Register a workflow-safe tool.
 
@@ -139,6 +145,7 @@ def register_workflow_tool(
         handler,
         public=public,
         retry=retry,
+        timeout=timeout,
     )
 
 
