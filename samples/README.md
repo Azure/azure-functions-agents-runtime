@@ -24,9 +24,9 @@ chat UI to start and observe an independent workflow.
 
 Development tooling samples:
 
-- [agent-evaluation](agent-evaluation/) — runnable receipt-agent Function App plus JSONL-driven MAF
-	checks against its local or staging chat endpoint, with pytest/JUnit output and optional Foundry
-	grading.
+- [agent-evaluation](agent-evaluation/) — runnable receipt-agent Function App plus a native Vally
+	evaluation against its local or staging chat endpoint, with deterministic tool/output graders,
+	repeated trials, and JUnit output.
 
 ## Run Locally (optional)
 

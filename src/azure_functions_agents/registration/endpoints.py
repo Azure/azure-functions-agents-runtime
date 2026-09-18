@@ -341,6 +341,7 @@ def _register_http_chat(
                         {
                             "session_id": result.session_id,
                             "response": result.content,
+                            "model": getattr(result, "model", None) or resolved.model or "unknown",
                             "tool_calls": result.tool_calls,
                         }
                     ),
@@ -524,6 +525,7 @@ def _register_mcp_endpoint(
                     {
                         "session_id": result.session_id,
                         "response": result.content,
+                        "model": getattr(result, "model", None) or resolved.model or "unknown",
                         "tool_calls": result.tool_calls,
                     }
                 )

@@ -37,3 +37,33 @@ jobs:
       - bash: |
           python -m pytest --cache-clear --cov=./src/azure_functions_agents --cov-report=xml --cov-branch tests
         displayName: 'Test with pytest'
+
+  - job: "TestVallyExecutor"
+    displayName: "Test Vally Azure Functions Executor"
+
+    steps:
+      - task: NodeTool@0
+        inputs:
+          versionSpec: '22.12.x'
+        displayName: 'Use Node.js 22.12'
+      - bash: npm ci
+        workingDirectory: integrations/vally-executor-azure-functions
+        displayName: 'Install locked dependencies'
+      - bash: npm audit --audit-level=moderate
+        workingDirectory: integrations/vally-executor-azure-functions
+        displayName: 'Audit executor dependencies'
+      - bash: npm run typecheck
+        workingDirectory: integrations/vally-executor-azure-functions
+        displayName: 'Type check executor'
+      - bash: npm test
+        workingDirectory: integrations/vally-executor-azure-functions
+        displayName: 'Test executor'
+      - bash: npm run format:check
+        workingDirectory: integrations/vally-executor-azure-functions
+        displayName: 'Check executor formatting'
+      - bash: npm run pack:check
+        workingDirectory: integrations/vally-executor-azure-functions
+        displayName: 'Verify executor package'
+      - bash: npm run test:cli
+        workingDirectory: integrations/vally-executor-azure-functions
+        displayName: 'Smoke test Vally CLI integration'

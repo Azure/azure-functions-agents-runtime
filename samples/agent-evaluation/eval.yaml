@@ -1,0 +1,39 @@
+name: receipt-agent-evaluation
+
+defaults:
+  executor:
+    name: azure-functions-agent
+    config:
+      endpointUrlEnv: AGENT_EVAL_TARGET_URL
+      auth:
+        type: anonymous
+  runs: 2
+  timeout: 120s
+
+stimuli:
+  - name: receipt-total
+    prompt: Read the receipt and return the total.
+    graders:
+      - type: output-contains
+        config:
+          substring: The receipt total is 42.18 USD.
+      - type: tool-calls
+        config:
+          required:
+            - name: ^read_receipt$
+              args:
+                currency: ^USD$
+              result: '"total":42\.18'
+  - name: receipt-memory
+    turns:
+      - Remember confirmation code BLUE-ORBIT-731. Acknowledge with only OK.
+      - What confirmation code did I ask you to remember? Reply with only the code.
+    graders:
+      - type: output-contains
+        config:
+          substring: BLUE-ORBIT-731
+      - type: tool-calls
+        turn: 1
+        config:
+          disallowed:
+            - ^read_receipt$

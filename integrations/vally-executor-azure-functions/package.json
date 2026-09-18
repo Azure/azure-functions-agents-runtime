@@ -1,0 +1,41 @@
+{
+  "name": "@azure-functions-agents/vally-executor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vally executor for Azure Functions Agents Runtime chat endpoints.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "clean": "node -e \"import('node:fs').then(({rmSync}) => { rmSync('dist', { recursive: true, force: true }); rmSync('test-dist', { recursive: true, force: true }); })\"",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "npm run clean && tsc -p tsconfig.test.json && node --test test-dist/test/*.test.js",
+    "test:cli": "npm run build && node test/cli-smoke.mjs && node test/tool-grader-smoke.mjs",
+    "format:check": "prettier --check .",
+    "format": "prettier --write .",
+    "pack:check": "npm run build && npm pack --dry-run"
+  },
+  "dependencies": {
+    "@azure/identity": "4.13.3",
+    "@microsoft/vally": "0.16.0"
+  },
+  "devDependencies": {
+    "@microsoft/vally-cli": "0.16.0",
+    "@types/node": "24.13.4",
+    "prettier": "3.9.6",
+    "typescript": "5.9.3"
+  }
+}

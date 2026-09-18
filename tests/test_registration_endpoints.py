@@ -481,7 +481,12 @@ def test_debug_chat_endpoint_skips_input_schema_validation(
     async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
         run_calls["prompt"] = prompt
         run_calls["kwargs"] = kwargs
-        return SimpleNamespace(session_id="session-123", content="ok", tool_calls=[])
+        return SimpleNamespace(
+            session_id="session-123",
+            content="ok",
+            model="gpt-test",
+            tool_calls=[],
+        )
 
     monkeypatch.setattr(
         "azure_functions_agents.registration.endpoints._run_builtin_agent",
@@ -499,8 +504,10 @@ def test_debug_chat_endpoint_skips_input_schema_validation(
     assert json.loads(_response_text(response)) == {
         "session_id": "session-123",
         "response": "ok",
+        "model": "gpt-test",
         "tool_calls": [],
     }
+    assert response.headers["x-ms-session-id"] == "session-123"
     assert run_calls["prompt"] == "hello"
 
 
@@ -642,6 +649,7 @@ def test_handle_mcp_agent_chat_reports_delegate_error_count_on_span(
     assert json.loads(result) == {
         "session_id": "session-456",
         "response": "ok, but the shipping specialist failed",
+        "model": "unknown",
         "tool_calls": [],
     }
     [span] = spans

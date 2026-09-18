@@ -287,6 +287,7 @@ class AgentResult:
     # recognized by ``_looks_like_tool_error``'s JSON heuristic — see
     # ``registration._handlers._total_tool_error_count``.
     delegate_error_count: int = 0
+    model: str = "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -897,13 +898,22 @@ def _content_text(item: Any) -> str:
     return str(getattr(item, "text", "") or "")
 
 
-def _function_call_event(item: Any) -> dict[str, Any]:
-    return {
+def _function_call_event(item: Any, *, turn_id: str | None = None) -> dict[str, Any]:
+    event = {
         "type": "tool_start",
         "tool_call_id": getattr(item, "call_id", None) or getattr(item, "id", None),
         "tool_name": getattr(item, "name", None),
         "arguments": getattr(item, "arguments", None),
     }
+    if turn_id is not None:
+        event["turn_id"] = turn_id
+    return event
+
+
+def _message_role(message: Any) -> str:
+    role = getattr(message, "role", None)
+    value = getattr(role, "value", role)
+    return str(value or "").lower()
 
 
 def _merge_tool_arguments(previous: Any, current: Any) -> Any:
@@ -1118,11 +1128,16 @@ async def run_agent(
     # Walk content items for tool-call records (best-effort metadata for callers).
     tool_calls: list[dict[str, Any]] = []
     try:
+        assistant_index = -1
         for msg in response.messages:
+            is_assistant = _message_role(msg) == "assistant"
+            if is_assistant:
+                assistant_index += 1
+            turn_id = f"response-{assistant_index}" if is_assistant else None
             for item in getattr(msg, "contents", None) or []:
                 ctype = _content_type(item)
                 if ctype == "function_call":
-                    tool_calls.append(_function_call_event(item))
+                    tool_calls.append(_function_call_event(item, turn_id=turn_id))
                 elif ctype == "function_result":
                     # Attach result to most recent matching tool_start
                     call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
@@ -1131,13 +1146,18 @@ async def run_agent(
                         None,
                     )
                     if matched is not None:
-                        matched["result"] = getattr(item, "result", None)
+                        missing = object()
+                        result = getattr(item, "result", missing)
+                        if result is not missing:
+                            matched["result"] = result
+                            matched["success"] = not _looks_like_tool_error(result)
     except Exception as exc:
         logger.debug("Failed to extract tool_calls: %s", exc)
 
     return AgentResult(
         session_id=resolved_id,
         content=text,
+        model=inference_target.model or model or "unknown",
         tool_calls=tool_calls,
         delegate_error_count=delegate_error_tracker.count if delegate_error_tracker else 0,
     )

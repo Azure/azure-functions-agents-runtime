@@ -1,201 +1,162 @@
-# Evaluate agent behavior
+# Evaluate agent behavior with Vally
 
-> **Preview.** This integration uses experimental Microsoft Agent Framework (MAF) evaluation APIs.
-> Keep the runtime and MAF package versions pinned together when using it in release gates.
+> **Preview.** The executor is pinned to Vally 0.16.0. Vally is pre-1.0, so review and rerun the
+> compatibility gates before upgrading it.
 
-The runtime provides a thin MAF-compatible client target for evaluating an agent through its
-existing synchronous chat endpoint. MAF owns test items, checks, repetitions, evaluator providers,
-and results; `pytest` or another CI runner owns execution and reporting.
+[Vally](https://microsoft.github.io/vally/) evaluates an agent through its existing synchronous
+chat endpoint. Vally owns stimuli, graders, repeated trials, scores, reports, and CI verdicts. This
+repository supplies a custom `azure-functions-agent` executor that calls a local or staging Function
+App and converts its generic response and tool evidence into a Vally trajectory.
 
-Evaluation covers **authored agent behavior**—responses and observed tool calls. It does not test
-Azure Functions availability, trigger delivery, scaling, or platform reliability.
-
-## Choose the three parts independently
-
-| Choice | Preview support |
-| --- | --- |
-| Agent target | Local Azure Functions Core Tools host or deployed staging Function App |
-| Orchestrator | Developer machine, pull-request CI, or scheduled/release CI |
-| Evaluator | MAF local/custom checks and optional Microsoft Foundry evaluators |
-
-Use the same source-controlled cases against local and staging targets by changing only the target
-URL and authentication environment variables. Sending synthetic evaluation traffic to production
-and passive evaluation of production traces are not part of this preview.
+Evaluation covers **authored agent behavior**. It does not test Functions availability, scaling,
+trigger delivery, or platform reliability. The runtime does not expose a separate evaluation route
+and does not import Vally.
 
 ## Prerequisites
 
-The evaluated agent must explicitly enable the existing built-in chat API:
+- Node.js 22.12 or later
+- Vally and the executor's locked dependencies, installed from this repository
+- an agent with `builtin_endpoints.chat_api: true`
+- a Function App running under Core Tools or deployed to staging
 
-```yaml
----
-name: Receipt agent
-builtin_endpoints:
-  chat_api: true
----
-```
-
-Start the Function App with Core Tools or deploy it to a staging slot/environment. Supply the
-**complete** chat endpoint URL because the Functions route prefix is configurable. Examples:
+The endpoint URL must be complete because the Functions route prefix is configurable:
 
 - `http://localhost:7071/api/agents/receipt/chat` with the default `/api` prefix
-- `http://localhost:7071/agents/receipt/chat` when `host.json` sets an empty prefix
+- `http://localhost:7071/agents/receipt/chat` with an empty prefix
 - `https://<staging-app>.azurewebsites.net/agents/receipt/chat`
 
-The adapter does not register or deploy an endpoint. Trigger-only agents cannot be targeted unless
-they opt into `builtin_endpoints.chat_api`.
+Install and build the pinned executor from the repository root:
 
-## Create a target
-
-Import the preview API from its submodule. It is intentionally not re-exported from the stable
-package root.
-
-```python
-from azure_functions_agents.evaluation import FunctionAgentTarget
-
-agent = FunctionAgentTarget(
-    "http://localhost:7071/agents/receipt/chat",
-    agent_id="receipt",
-    name="Receipt agent",
-)
+```powershell
+Push-Location integrations/vally-executor-azure-functions
+npm ci
+npm run build
+Pop-Location
 ```
 
-Each MAF run without an explicit session gets a fresh Function session, including every repetition.
-For an ordered multi-turn test, create and pass a session explicitly:
+## Write an eval specification
 
-```python
-session = agent.create_session(session_id="receipt-conversation-1")
-first = await agent.run("Read the receipt", session=session)
-second = await agent.run("What was the total?", session=session)
+Use Vally's native `eval.yaml` format:
+
+```yaml
+name: receipt-agent-evaluation
+
+defaults:
+  executor:
+    name: azure-functions-agent
+    config:
+      endpointUrlEnv: AGENT_EVAL_TARGET_URL
+      auth:
+        type: anonymous
+  runs: 2
+  timeout: 120s
+
+stimuli:
+  - name: receipt-total
+    prompt: Read the receipt and return the total.
+    graders:
+      - type: output-contains
+        config:
+          substring: The receipt total is 42.18 USD.
+      - type: tool-calls
+        config:
+          required:
+            - name: ^read_receipt$
+              args:
+                currency: ^USD$
 ```
 
-Do not invoke concurrent turns with the same session ID. The runtime persists conversation history,
-but does not coordinate cross-worker turn ordering.
+The `tool-calls.args` values are regular expressions and match string-valued arguments. Use the
+grader's serialized-argument `pattern` for nested, numeric, boolean, or array arguments. Vally also
+supports ordered multi-turn stimuli; the executor sends those prompts sequentially with one shared
+runtime session. Independent trials receive independent generated sessions.
+
+## Run locally
+
+Start the Function App, set its complete chat URL, and invoke the pinned CLI:
+
+```powershell
+$env:AGENT_EVAL_TARGET_URL = "http://localhost:7071/agents/receipt/chat"
+node integrations/vally-executor-azure-functions/node_modules/@microsoft/vally-cli/dist/index.js eval `
+  --eval-spec samples/agent-evaluation/eval.yaml `
+  --executor-plugin ../../integrations/vally-executor-azure-functions/dist/index.js `
+  --require-pass `
+  --junit `
+  --output-dir artifacts/agent-evaluation
+```
+
+Executor plug-in paths are resolved relative to the eval specification, which explains the leading
+`../../` in the command. `--require-pass` is essential for CI: without it, a completed evaluation
+with failing grader verdicts exits successfully. Configuration, execution, and tooling failures
+still exit nonzero. `--junit` writes CI-compatible test output alongside Vally's result artifacts.
 
 ## Authenticate a staging target
 
-The authentication strategy must match the endpoint's `http_auth` configuration.
+Do not put keys or bearer tokens in an eval specification. The executor supports three fail-closed
+authentication configurations.
 
-### Function or host key
+Anonymous endpoints need no extra fields:
 
-```python
-import os
-
-from azure_functions_agents.evaluation import FunctionAgentTarget, FunctionKeyAuth
-
-agent = FunctionAgentTarget(
-    os.environ["AGENT_EVAL_TARGET_URL"],
-    agent_id="receipt",
-    auth=FunctionKeyAuth(os.environ["AGENT_EVAL_FUNCTION_KEY"]),
-)
+```yaml
+auth:
+  type: anonymous
 ```
 
-The key is sent in `x-functions-key`. Keep it in a CI secret; never put it in a case file or test
-artifact.
+For a Functions or host key, reference an environment variable:
 
-### Entra ID
-
-```python
-import os
-
-from azure.identity import DefaultAzureCredential
-from azure_functions_agents.evaluation import EntraTokenAuth, FunctionAgentTarget
-
-agent = FunctionAgentTarget(
-    os.environ["AGENT_EVAL_TARGET_URL"],
-    agent_id="receipt",
-    auth=EntraTokenAuth(
-        credential=DefaultAzureCredential(),
-        scope=os.environ["AGENT_EVAL_ENTRA_SCOPE"],
-    ),
-)
+```yaml
+auth:
+  type: function-key
+  keyEnv: AGENT_EVAL_FUNCTION_KEY
 ```
 
-Use the Function App API scope accepted by Easy Auth, commonly
-`api://<application-id>/.default`. The adapter acquires a token through the supplied Azure
-`TokenCredential` and sends it as a bearer token. It never writes token or key values into MAF
-results.
-
-## Run deterministic checks in pytest
-
-```python
-import pytest
-from agent_framework import (
-    ExpectedToolCall,
-    LocalEvaluator,
-    evaluate_agent,
-    tool_call_args_match,
-    tool_calls_present,
-)
-from azure_functions_agents.evaluation import FunctionAgentTarget
-
-
-@pytest.mark.asyncio
-async def test_receipt_agent(agent: FunctionAgentTarget) -> None:
-    results = await evaluate_agent(
-        agent=agent,
-        queries=["Read the receipt and return the total."],
-        expected_tool_calls=[
-            [ExpectedToolCall("read_receipt", {"currency": "USD"})]
-        ],
-        evaluators=LocalEvaluator(tool_calls_present, tool_call_args_match),
-        num_repetitions=2,
-    )
-
-    for result in results:
-        result.raise_for_status()
+```powershell
+$env:AGENT_EVAL_FUNCTION_KEY = "<CI secret>"
 ```
 
-MAF's argument check uses subset semantics: every expected key and value must match, while extra
-actual arguments are allowed. Types are significant. A string value of `"1"` does not match the
-number `1`.
+For Microsoft Entra authentication, provide the accepted API scope directly or through `scopeEnv`:
 
-Use normal pytest options such as `--junitxml` to publish CI results. Transport, authentication,
-timeout, cancellation, and malformed-response failures are invocation failures—not low quality
-scores—and remain distinguishable through the adapter's typed exceptions.
-
-## Add managed Foundry grading
-
-Managed grading is optional. A deterministic-only suite does not require a Foundry project.
-Scheduled or release suites can add `FoundryEvals` to the same `evaluate_agent()` call:
-
-```python
-from agent_framework_foundry import FoundryEvals
-
-foundry = FoundryEvals(
-    model="<judge-model-deployment>",
-    evaluators=[FoundryEvals.RELEVANCE, FoundryEvals.TASK_ADHERENCE],
-)
+```yaml
+auth:
+  type: entra
+  scopeEnv: AGENT_EVAL_ENTRA_SCOPE
 ```
 
-Configure the Foundry client using the MAF-supported environment variables or pass a configured
-client. Retain `EvalResults.report_url` as a CI artifact when Foundry returns one. Pin evaluator
-names, judge model, rubrics, thresholds, and repetitions for release gates.
+```powershell
+$env:AGENT_EVAL_ENTRA_SCOPE = "api://<application-id>/.default"
+```
 
-The chat response contains observed calls and results, not the complete available tool definitions.
-Do not enable Foundry tool-aware graders that require full tool schemas until your integration
-supplies and validates that evidence.
+Entra authentication uses `DefaultAzureCredential`. Use managed identity in Azure-hosted CI where
+possible. Literal function keys, arbitrary headers, bearer tokens, and endpoint query strings are
+rejected by configuration validation.
 
-## Evidence and data egress
+## Runtime evidence and failure semantics
 
-The target converts the chat response into public MAF `AgentResponse` content:
+The executor maps each configured turn into user/assistant messages, completed tool-call/result
+pairs, and turn boundaries. It preserves:
 
-- final assistant response;
-- observed function-call name, arguments, and call ID;
-- function result when the runtime returned one;
-- Function session ID and client-observed elapsed time as response metadata.
+- the runtime session ID and resolved model;
+- tool names, JSON-compatible arguments, results, and success classification;
+- model-response batch identity for reliable parallel-tool grading;
+- client-observed wall time.
 
-Local checks keep this evidence in the test process. When a managed evaluator is configured, MAF may
-send the case query, expected output, context, final response, and tool evidence to that evaluator.
-Review the evaluator's region, retention, access control, and privacy configuration before enabling
-it for sensitive data.
+It does not invent token usage, cost, reasoning, skill activation, subagent, or workspace evidence.
+Transport errors, authentication failures, timeouts, malformed responses, and mismatched session IDs
+are execution failures rather than low quality scores.
 
-The preview does not return structured token usage/cost, query Application Insights, or promise a
-direct trace link. Latency is report-only. Those capabilities require separately reviewed evidence
-and correlation contracts.
+The endpoint's tool-result `success` field is based on the runtime's sanitized error-envelope
+classification. A semantically unsuccessful plain-text result can still be classified as
+successful; assert important result content with a grader as well.
 
-## Sample
+Do not run concurrent turns with the same explicit session ID. The runtime persists conversation
+history but does not coordinate cross-worker turn ordering.
 
-See the
-[agent evaluation sample](https://github.com/Azure/azure-functions-agents-runtime/tree/main/samples/agent-evaluation)
-for a JSONL loader, deterministic checks, repetitions, target authentication, optional Foundry
-grading, and pytest/JUnit usage.
+## Privacy and optional judge graders
+
+Vally artifacts can contain prompts, responses, tool arguments/results, endpoint metadata, and
+session IDs. Keep artifacts access-controlled and never place credentials in eval files. Optional
+Vally prompt or panel graders can send selected trajectory evidence to their configured model
+provider. Review region, retention, access control, and privacy requirements before enabling them.
+
+See the [agent evaluation sample](https://github.com/Azure/azure-functions-agents-runtime/tree/main/samples/agent-evaluation)
+for a runnable receipt agent and deterministic eval specification.

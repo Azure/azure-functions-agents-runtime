@@ -16,7 +16,6 @@ Like the other E2E tests these require ``func`` + Azurite and are marked ``e2e``
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import os
 import shutil
@@ -24,14 +23,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from agent_framework import (
-    ExpectedToolCall,
-    LocalEvaluator,
-    evaluate_agent,
-    tool_calls_present,
-)
 
-from azure_functions_agents.evaluation import FunctionAgentTarget
 from tests.endtoend._func_host import running_host
 from tests.endtoend._http_probe import (
     HttpClient,
@@ -230,7 +222,7 @@ def test_structured_report_happy_path(structured_io_host: Served) -> None:
 
 @requires_llm
 def test_chat_happy_path(builtin_endpoints_host: Served) -> None:
-    """A valid chat request returns 200 with a response payload and session id."""
+    """A valid chat request returns the runtime evidence consumed by external evaluators."""
     client, endpoints = builtin_endpoints_host
     chat = find_endpoint(endpoints, route_exact="agents/main/chat", method="POST")
 
@@ -238,34 +230,7 @@ def test_chat_happy_path(builtin_endpoints_host: Served) -> None:
 
     expect_status(resp, 200)
     expect_header(resp, "x-ms-session-id")
-    expect_json_keys(resp, ("session_id", "response"))
-
-
-@requires_llm
-def test_evaluation_target_invokes_host_and_rejects_missing_expected_tool(
-    builtin_endpoints_host: Served,
-) -> None:
-    """The preview MAF target should use the real Core Tools chat contract."""
-    client, endpoints = builtin_endpoints_host
-    chat = find_endpoint(endpoints, route_exact="agents/main/chat", method="POST")
-    target = FunctionAgentTarget(
-        chat.url(client.base_url),
-        agent_id="main",
-        name="Concierge",
-    )
-
-    response = asyncio.run(target.run("Say hello in one word."))
-
-    assert response.text
-    results = asyncio.run(
-        evaluate_agent(
-            responses=[response],
-            expected_tool_calls=[[ExpectedToolCall("tool_that_was_not_called")]],
-            evaluators=LocalEvaluator(tool_calls_present),
-        )
-    )
-    assert len(results) == 1
-    assert not results[0].all_passed
+    expect_json_keys(resp, ("session_id", "response", "model", "tool_calls"))
 
 
 # --------------------------------------------------------------------------- #

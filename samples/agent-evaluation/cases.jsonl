@@ -1,1 +1,0 @@
-{"id":"receipt-total","query":"Read the receipt and return the total.","expected_output":"The receipt total is 42.18 USD.","expected_tool_calls":[{"name":"read_receipt","arguments":{"currency":"USD"}}],"tags":["smoke"],"repetitions":2}
