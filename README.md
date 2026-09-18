@@ -519,7 +519,7 @@ If no agent enables built-in endpoints, no chat UI, chat API, chatstream, or age
 
 You can give your agent access to external MCP servers by creating an `mcp.json` file in the app root. Only remote HTTP MCP servers are supported. The `type` field is optional — when omitted, an entry with a `url` is treated as HTTP. When `type` is specified it must be `"http"` or `"streamable-http"`; any other transport (e.g. `stdio`, `sse`) is rejected with a warning.
 
-String values in `mcp.json` support inline environment-variable substitution with both `$VAR` and `%VAR%`. Eligible fields include `url`, `headers` values, `type`, `tools` entries, and Azure identity auth values such as `auth.scope` and `auth.client_id`. Dictionary keys such as server names, environment-variable names, and header names are not substituted.
+String values in `mcp.json` support inline environment-variable substitution with both `$VAR` and `%VAR%`. Eligible fields include `url`, `headers` values, `type`, `tool_name_prefix`, `tools` entries, and Azure identity auth values such as `auth.scope` and `auth.client_id`. Dictionary keys such as server names, environment-variable names, and header names are not substituted.
 
 ```json
 {
@@ -541,6 +541,7 @@ String values in `mcp.json` support inline environment-variable substitution wit
     "office365-outlook": {
       "type": "http",
       "url": "$O365_MCP_SERVER_URL",
+      "tool_name_prefix": "outlook_",
       "tools": ["office365_SendEmailV2"],
       "auth": {
         "scope": "https://apihub.azure.com/.default",
@@ -556,6 +557,8 @@ Tools from configured MCP servers are automatically available to the agent at ru
 - **`type`** — optional. When set, must be `"http"` or `"streamable-http"`. When omitted, an entry with a `url` is treated as HTTP.
 - **`url`** — the MCP server endpoint URL (required)
 - **`headers`** — optional HTTP headers (e.g. for authentication)
+- **`tool_name_prefix`** — optional prefix applied to every tool name from this server. Use
+  unique prefixes when multiple servers expose overlapping tool names.
 - **`tools`** — optional array of tool name patterns to allow (default: `["*"]`)
 - **`auth`** — optional Azure Identity authentication configuration. Set `auth.scope` to the token scope required by the MCP server. The runtime uses `DefaultAzureCredential` to acquire the token.
 
