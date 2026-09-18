@@ -304,9 +304,38 @@ def test_workflow_tool_retry_flows_through_discovery(tmp_path: Path) -> None:
     assert workflow_tool.retry.backoff.max == "PT4S"
 
 
+def test_workflow_tool_timeout_flows_through_discovery(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "timed_workflow_tool",
+        """
+        from azure_functions_agents import workflow_tool
+
+        @workflow_tool(timeout="PT20S")
+        def reserve(args: dict[str, object]) -> dict[str, object]:
+            return {"args": args}
+        """,
+    )
+
+    [workflow_tool] = discover_project_tools(tmp_path).workflow_tools
+
+    assert workflow_tool.timeout == "PT20S"
+
+
 def test_workflow_tool_rejects_invalid_retry_type() -> None:
     with pytest.raises(TypeError, match="WorkflowRetryPolicy"):
         workflow_tool(retry="three attempts")  # type: ignore[arg-type]
+
+
+def test_workflow_tool_rejects_continue_on_error() -> None:
+    with pytest.raises(TypeError, match=r"unknown workflow_tool argument.*continue_on_error"):
+        workflow_tool(continue_on_error=True)  # type: ignore[call-overload]
+
+
+@pytest.mark.parametrize("timeout", ["PT0.5S", "PT11M", "not a duration"])
+def test_workflow_tool_rejects_invalid_timeout(timeout: str) -> None:
+    with pytest.raises(TypeError, match="workflow_tool timeout is invalid"):
+        workflow_tool(timeout=timeout)
 
 
 def test_multiple_workflow_tools_can_be_declared_in_one_file(tmp_path: Path) -> None:

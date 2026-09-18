@@ -27,11 +27,14 @@ from azure_functions_agents.workflows.schema import (
     TemplateResolutionError,
     WorkflowCondition,
     WorkflowPlanPolicy,
+    WorkflowRetryBackoff,
+    WorkflowRetryPolicy,
     evaluate_condition,
     parse_iso8601_datetime,
     parse_iso8601_duration,
     plan_to_activity_inputs,
     resolve_template_value,
+    resolve_workflow_task_execution,
 )
 from azure_functions_agents.workflows.schema import validate_plan as _validate_plan
 
@@ -123,6 +126,212 @@ def test_retry_schema_error_does_not_expose_invalid_input() -> None:
     assert "tasks.0.execution.retry.max_attempts" in message
     assert "Input should be a valid integer" in message
     assert "type=int_type" in message
+
+
+def test_timeout_only_policy_uses_one_attempt_and_persists_milliseconds() -> None:
+    task = _task("a")
+    task["execution"] = {"timeout": "PT30S"}
+
+    plan = validate_plan(_plan(task))
+    effective = resolve_workflow_task_execution(plan.tasks[0])
+
+    assert effective == {
+        "max_attempts": 1,
+        "durable_retry_policy": {
+            "first_retry_interval_ms": 0,
+            "max_number_of_attempts": 1,
+            "backoff_coefficient": 1.0,
+            "max_retry_interval_ms": 0,
+        },
+        "timeout_ms": 30_000,
+    }
+
+
+@pytest.mark.parametrize("continue_on_error", [True, False])
+def test_continuation_only_policy_uses_one_attempt_and_persists_authored_value(
+    continue_on_error: bool,
+) -> None:
+    task = _task("a")
+    task["execution"] = {"continue_on_error": continue_on_error}
+
+    plan = validate_plan(_plan(task))
+    effective = resolve_workflow_task_execution(plan.tasks[0])
+
+    assert effective == {
+        "max_attempts": 1,
+        "durable_retry_policy": {
+            "first_retry_interval_ms": 0,
+            "max_number_of_attempts": 1,
+            "backoff_coefficient": 1.0,
+            "max_retry_interval_ms": 0,
+        },
+        "continue_on_error": continue_on_error,
+    }
+
+
+def test_execution_omits_continuation_when_not_authored() -> None:
+    task = _task("a")
+    task["execution"] = {"timeout": "PT30S"}
+
+    plan = validate_plan(_plan(task))
+    effective = resolve_workflow_task_execution(plan.tasks[0])
+
+    assert effective is not None
+    assert "continue_on_error" not in effective
+
+
+def test_empty_execution_policy_has_the_execution_error_code() -> None:
+    task = _task("a")
+    task["execution"] = {}
+
+    with pytest.raises(PlanValidationError) as raised:
+        validate_plan(_plan(task))
+
+    assert raised.value.error_code == "workflow_execution_policy_invalid"
+    assert raised.value.node_id == "a"
+    assert raised.value.path == "execution"
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", []])
+def test_rejects_invalid_continue_on_error_values(value: object) -> None:
+    task = _task("a")
+    task["execution"] = {"continue_on_error": value}
+
+    with pytest.raises(PlanValidationError) as raised:
+        validate_plan(_plan(task))
+
+    assert raised.value.error_code == "workflow_execution_policy_invalid"
+    assert raised.value.node_id == "a"
+    assert raised.value.path == "execution.continue_on_error"
+
+
+@pytest.mark.parametrize("timeout", ["PT0.999S", "PT10M0.001S", "30 seconds"])
+def test_rejects_invalid_attempt_timeout(timeout: str) -> None:
+    task = _task("a")
+    task["execution"] = {"timeout": timeout}
+
+    with pytest.raises(PlanValidationError) as raised:
+        validate_plan(_plan(task))
+
+    assert raised.value.error_code == "workflow_execution_policy_invalid"
+    assert raised.value.node_id == "a"
+    assert raised.value.path == "execution.timeout"
+
+
+def test_timeout_and_retry_must_fit_the_one_hour_admission_cap() -> None:
+    task = _task("a")
+    task["execution"] = {
+        "timeout": "PT10M",
+        "retry": {
+            "max_attempts": 5,
+            "backoff": {"initial": "PT1M", "multiplier": 2.0, "max": "PT8M"},
+        },
+    }
+
+    plan = validate_plan(_plan(task))
+    with pytest.raises(
+        PlanValidationError,
+        match="attempt deadlines must not exceed PT1H",
+    ) as raised:
+        resolve_workflow_task_execution(plan.tasks[0])
+
+    assert raised.value.error_code == "workflow_retry_schedule_exceeded"
+    assert raised.value.path == "execution"
+
+
+def test_decorator_execution_policy_precedence_is_per_field() -> None:
+    task = _task("a")
+    task["execution"] = {
+        "timeout": "PT30S",
+        "retry": {
+            "max_attempts": 2,
+            "backoff": {"initial": "PT1S", "multiplier": 2.0, "max": "PT2S"},
+        },
+    }
+    plan = validate_plan(_plan(task))
+    decorator_retry = WorkflowRetryPolicy(
+        max_attempts=3,
+        backoff=WorkflowRetryBackoff(initial="PT2S", multiplier=2.0, max="PT4S"),
+    )
+
+    effective = resolve_workflow_task_execution(
+        plan.tasks[0],
+        decorator_retry=decorator_retry,
+        decorator_timeout="PT20S",
+    )
+
+    assert effective == {
+        "max_attempts": 3,
+        "durable_retry_policy": {
+            "first_retry_interval_ms": 2_000,
+            "max_number_of_attempts": 3,
+            "backoff_coefficient": 2.0,
+            "max_retry_interval_ms": 4_000,
+        },
+        "timeout_ms": 20_000,
+    }
+
+
+def test_decorator_fields_do_not_replace_plan_continuation() -> None:
+    task = _task("a")
+    task["execution"] = {
+        "continue_on_error": True,
+        "timeout": "PT30S",
+    }
+    plan = validate_plan(_plan(task))
+
+    effective = resolve_workflow_task_execution(
+        plan.tasks[0],
+        decorator_timeout="PT20S",
+    )
+
+    assert effective is not None
+    assert effective["continue_on_error"] is True
+    assert effective["timeout_ms"] == 20_000
+
+
+def test_decorator_retry_combines_with_plan_timeout() -> None:
+    task = _task("a")
+    task["execution"] = {"timeout": "PT30S"}
+    plan = validate_plan(_plan(task))
+    decorator_retry = WorkflowRetryPolicy(
+        max_attempts=2,
+        backoff=WorkflowRetryBackoff(initial="PT1S", multiplier=1.0, max="PT1S"),
+    )
+
+    effective = resolve_workflow_task_execution(
+        plan.tasks[0],
+        decorator_retry=decorator_retry,
+    )
+
+    assert effective is not None
+    assert effective["max_attempts"] == 2
+    assert effective["timeout_ms"] == 30_000
+    assert effective["durable_retry_policy"]["max_number_of_attempts"] == 2
+
+
+def test_decorator_timeout_is_rejected_for_sub_agent_tasks() -> None:
+    plan = validate_plan(_plan(_subagent("analyze")))
+
+    with pytest.raises(PlanValidationError) as raised:
+        resolve_workflow_task_execution(
+            plan.tasks[0],
+            decorator_timeout="PT30S",
+        )
+
+    assert raised.value.error_code == "workflow_execution_policy_invalid"
+    assert raised.value.path == "execution.timeout"
+
+
+def test_retry_only_payload_does_not_gain_a_timeout_key() -> None:
+    task = _task("a")
+    task["execution"] = {"retry": {"max_attempts": 1}}
+    plan = validate_plan(_plan(task))
+
+    effective = resolve_workflow_task_execution(plan.tasks[0])
+
+    assert effective is not None
+    assert "timeout_ms" not in effective
 
 
 def test_rejects_plans_over_max_nodes():

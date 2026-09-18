@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from durabletask.task import TaskFailedError
 
 from azure_functions_agents._function_tool import WorkflowTool
 from azure_functions_agents.config.schema import (
@@ -17,8 +18,12 @@ from azure_functions_agents.config.schema import (
 )
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
+from azure_functions_agents.workflows import activity as workflow_activity
 from azure_functions_agents.workflows import engine, integration
-from azure_functions_agents.workflows.native_retry import DurableRetryableActivityError
+from azure_functions_agents.workflows.native_retry import (
+    DurableRetryableActivityError,
+    raise_for_durable_retry,
+)
 from azure_functions_agents.workflows.schema import (
     MAX_NODES,
     MAX_PARALLELISM,
@@ -181,11 +186,60 @@ async def test_policy_aware_sub_agent_timeout_is_retryable(
             "task_id": "analyze_pr",
             "execution": {
                 "max_attempts": 3,
+                "timeout_ms": 10_000,
                 "durable_retry_policy": {
                     "first_retry_interval_ms": 1_000,
                     "max_number_of_attempts": 3,
                     "backoff_coefficient": 2.0,
                     "max_retry_interval_ms": 4_000,
+                },
+            },
+        })
+
+
+@pytest.mark.asyncio
+async def test_policy_aware_sub_agent_outer_timeout_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_timeout = asyncio.timeout
+    monkeypatch.setattr(
+        workflow_activity.asyncio,
+        "timeout",
+        lambda _: real_timeout(0.01),
+    )
+
+    async def run_leaf(*args: Any, **kwargs: Any) -> str:
+        await asyncio.sleep(1)
+        return "late"
+
+    monkeypatch.setattr(engine, "run_leaf_agent_task", run_leaf)
+    activity = _registered_function(
+        engine.SUB_AGENT_ACTIVITY_NAME,
+        catalog=_catalog("pr_status_analyst"),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(
+                allowed_tools=frozenset(),
+                allowed_subagents=frozenset({"pr_status_analyst"}),
+            )
+        },
+    )
+
+    with pytest.raises(DurableRetryableActivityError, match="workflow_task_timeout"):
+        await activity({
+            "id": "analyze_pr",
+            "agent": "pr_status_analyst",
+            "task": "Analyze PR 117.",
+            "workflow_id": "workflow-1",
+            "workflow_agent_slug": "coordinator",
+            "task_id": "analyze_pr",
+            "execution": {
+                "max_attempts": 1,
+                "timeout_ms": 1_000,
+                "durable_retry_policy": {
+                    "first_retry_interval_ms": 0,
+                    "max_number_of_attempts": 1,
+                    "backoff_coefficient": 1.0,
+                    "max_retry_interval_ms": 0,
                 },
             },
         })
@@ -414,6 +468,40 @@ class _Task:
         self.is_complete = True
 
 
+def _execution(*, continue_on_error: bool | None = None) -> dict[str, Any]:
+    execution: dict[str, Any] = {
+        "max_attempts": 1,
+        "durable_retry_policy": {
+            "first_retry_interval_ms": 0,
+            "max_number_of_attempts": 1,
+            "backoff_coefficient": 1.0,
+            "max_retry_interval_ms": 0,
+        },
+    }
+    if continue_on_error is not None:
+        execution["continue_on_error"] = continue_on_error
+    return execution
+
+
+def _failure(
+    instance_id: str,
+    *,
+    kind: str = "handler_terminal",
+    error_code: str = "optional_task_failed",
+    error: str = "Optional task failed.",
+) -> dict[str, Any]:
+    return {
+        "id": instance_id,
+        "ok": False,
+        "failure": {
+            "error_code": error_code,
+            "error": error,
+            "kind": kind,
+            "retryable": kind == "handler_transient",
+        },
+    }
+
+
 class _FakeOrchestrationContext:
     def __init__(
         self,
@@ -421,6 +509,7 @@ class _FakeOrchestrationContext:
         result_for: Callable[[str, dict[str, Any]], dict[str, Any]],
     ) -> None:
         self.instance_id = "workflow-parent"
+        self.is_replaying = False
         self._input = {"workflow_agent_slug": "coordinator", "tasks": tasks}
         self._result_for = result_for
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -503,6 +592,497 @@ def test_orchestrator_preserves_activity_failure() -> None:
 
     with pytest.raises(RuntimeError, match="activity authorization failed"):
         _run_orchestrator(orchestrator, context)
+
+
+def test_static_continuation_commits_bounded_failure_and_runs_dependent() -> None:
+    tasks = [
+        {
+            "id": "optional",
+            "type": TOOL_TASK_TYPE,
+            "tool": "optional",
+            "args": {},
+            "depends_on": [],
+            "execution": _execution(continue_on_error=True),
+        },
+        {
+            "id": "finish",
+            "type": TOOL_TASK_TYPE,
+            "tool": "finish",
+            "args": {"failure": "${optional.result}"},
+            "depends_on": ["optional"],
+        },
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "optional":
+            return _failure("optional")
+        return {"id": "finish", "result": {"seen": payload["args"]["failure"]}}
+
+    context = _FakeOrchestrationContext(tasks, result_for)
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    result = _run_orchestrator(orchestrator, context)
+
+    continued = {
+        "failed": True,
+        "error_code": "optional_task_failed",
+        "error": "Optional task failed.",
+        "kind": "handler_terminal",
+    }
+    assert result == {
+        "results": {
+            "optional": continued,
+            "finish": {"seen": continued},
+        }
+    }
+
+
+def test_static_continuation_handles_exhausted_native_retry() -> None:
+    outcome = _failure(
+        "optional",
+        kind="handler_transient",
+        error_code="dependency_unavailable",
+        error="Dependency is unavailable.",
+    )
+    with pytest.raises(DurableRetryableActivityError) as raised:
+        raise_for_durable_retry(outcome)
+    exhausted = TaskFailedError("Activity failed.", raised.value)
+    tasks = [
+        {
+            "id": "optional",
+            "type": TOOL_TASK_TYPE,
+            "tool": "optional",
+            "args": {},
+            "depends_on": [],
+            "execution": _execution(continue_on_error=True),
+        }
+    ]
+    context = _FakeOrchestrationContext(tasks, lambda _name, _payload: exhausted)
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    result = _run_orchestrator(orchestrator, context)
+
+    assert result["results"]["optional"] == {
+        "failed": True,
+        "error_code": "dependency_unavailable",
+        "error": "Dependency is unavailable.",
+        "kind": "handler_transient",
+    }
+
+
+def test_static_continuation_wave_records_failure_and_waits_for_siblings() -> None:
+    tasks = [
+        {
+            "id": "a_optional",
+            "type": TOOL_TASK_TYPE,
+            "tool": "optional",
+            "args": {},
+            "depends_on": [],
+            "execution": _execution(continue_on_error=True),
+        },
+        {
+            "id": "b_sibling",
+            "type": TOOL_TASK_TYPE,
+            "tool": "sibling",
+            "args": {},
+            "depends_on": [],
+        },
+        {
+            "id": "c_pause",
+            "type": WAIT_TASK_TYPE,
+            "duration": "PT1S",
+            "depends_on": [],
+        },
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "a_optional":
+            return _failure(payload["id"])
+        return {"id": payload["id"], "result": {"ok": True}}
+
+    context = _DynamicContext(tasks, result_for, policy={})
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    result = _run_orchestrator(orchestrator, context)
+
+    assert context.selections == 3
+    assert context.timers[0].cancelled is False
+    assert result["results"] == {
+        "a_optional": {
+            "failed": True,
+            "error_code": "optional_task_failed",
+            "error": "Optional task failed.",
+            "kind": "handler_terminal",
+        },
+        "b_sibling": {"ok": True},
+        "c_pause": {"waited_until": "2024-01-01T00:00:01+00:00"},
+    }
+
+
+@pytest.mark.parametrize("kind", ["authorization", "handler_contract"])
+def test_static_noncontinuable_failure_raises_immediately_in_continuation_wave(
+    kind: str,
+) -> None:
+    tasks = [
+        {
+            "id": "blocked",
+            "type": TOOL_TASK_TYPE,
+            "tool": "blocked",
+            "args": {},
+            "depends_on": [],
+            "execution": _execution(continue_on_error=True),
+        },
+        {
+            "id": "pause",
+            "type": WAIT_TASK_TYPE,
+            "duration": "PT1H",
+            "depends_on": [],
+        },
+    ]
+    context = _DynamicContext(
+        tasks,
+        lambda _name, payload: _failure(
+            payload["id"],
+            kind=kind,
+            error_code=f"{kind}_failure",
+        ),
+        policy={},
+    )
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    with pytest.raises(RuntimeError, match=f"{kind}_failure"):
+        _run_orchestrator(orchestrator, context)
+
+    assert context.selections == 1
+    assert context.timers[0].cancelled is True
+
+
+def test_static_noncontinuable_failure_after_recorded_continuation_still_raises() -> None:
+    tasks = [
+        {
+            "id": "a_optional",
+            "type": TOOL_TASK_TYPE,
+            "tool": "optional",
+            "args": {},
+            "depends_on": [],
+            "execution": _execution(continue_on_error=True),
+        },
+        {
+            "id": "b_blocked",
+            "type": TOOL_TASK_TYPE,
+            "tool": "blocked",
+            "args": {},
+            "depends_on": [],
+            "execution": _execution(continue_on_error=False),
+        },
+        {
+            "id": "c_pause",
+            "type": WAIT_TASK_TYPE,
+            "duration": "PT1H",
+            "depends_on": [],
+        },
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "a_optional":
+            return _failure(payload["id"])
+        return _failure(
+            payload["id"],
+            kind="authorization",
+            error_code="authorization_failure",
+        )
+
+    context = _DynamicContext(tasks, result_for, policy={})
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    with pytest.raises(RuntimeError, match="authorization_failure"):
+        _run_orchestrator(orchestrator, context)
+
+    assert context.selections == 2
+    assert context.timers[0].cancelled is True
+
+
+def test_static_task_without_own_continuation_fails_in_continuation_wave() -> None:
+    tasks = [
+        {
+            "id": "a_required",
+            "type": TOOL_TASK_TYPE,
+            "tool": "required",
+            "args": {},
+            "depends_on": [],
+            "execution": _execution(continue_on_error=False),
+        },
+        {
+            "id": "b_optional",
+            "type": TOOL_TASK_TYPE,
+            "tool": "optional",
+            "args": {},
+            "depends_on": [],
+            "execution": _execution(continue_on_error=True),
+        },
+        {
+            "id": "pause",
+            "type": WAIT_TASK_TYPE,
+            "duration": "PT1H",
+            "depends_on": [],
+        },
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "a_required":
+            return _failure(payload["id"])
+        return {"id": payload["id"], "ok": True, "result": {"ok": True}}
+
+    context = _DynamicContext(tasks, result_for, policy={})
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    with pytest.raises(RuntimeError, match="optional_task_failed"):
+        _run_orchestrator(orchestrator, context)
+
+    assert context.selections == 1
+    assert context.timers[0].cancelled is True
+
+
+@pytest.mark.parametrize("continue_on_error", [None, False])
+def test_static_disabled_continuation_keeps_legacy_wave_timing(
+    continue_on_error: bool | None,
+) -> None:
+    tasks = [
+        {
+            "id": "optional",
+            "type": TOOL_TASK_TYPE,
+            "tool": "optional",
+            "args": {},
+            "depends_on": [],
+            "execution": _execution(continue_on_error=continue_on_error),
+        },
+        {
+            "id": "pause",
+            "type": WAIT_TASK_TYPE,
+            "duration": "PT1S",
+            "depends_on": [],
+        },
+    ]
+    context = _DynamicContext(
+        tasks,
+        lambda _name, payload: _failure(payload["id"]),
+        policy={},
+    )
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    with pytest.raises(RuntimeError, match="optional_task_failed"):
+        _run_orchestrator(orchestrator, context)
+
+    assert context.selections == 2
+
+
+def test_static_cancellation_discards_recorded_continuation_failure() -> None:
+    tasks = [
+        {
+            "id": "optional",
+            "type": TOOL_TASK_TYPE,
+            "tool": "optional",
+            "args": {},
+            "depends_on": [],
+            "execution": _execution(continue_on_error=True),
+        },
+        {
+            "id": "pause",
+            "type": WAIT_TASK_TYPE,
+            "duration": "PT1H",
+            "depends_on": [],
+        },
+    ]
+    context = _DynamicContext(
+        tasks,
+        lambda _name, payload: _failure(payload["id"]),
+        policy={},
+    )
+    context.cancel_task.result = "user-request"
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+    generator = orchestrator(context, context._input)
+
+    selection = next(generator)
+    optional_task = next(task for task in selection._tasks if task is not context.cancel_task)
+    selection = generator.send(optional_task)
+
+    with pytest.raises(StopIteration) as stopped:
+        generator.send(context.cancel_task)
+
+    result = stopped.value.value
+    assert result["canceled"] is True
+    assert result["results"] == {}
+    assert context.timers[0].cancelled is True
+
+
+def test_static_subagent_failure_can_continue() -> None:
+    tasks = [
+        {
+            "id": "analyze",
+            "type": SUB_AGENT_TASK_TYPE,
+            "agent": "analyst",
+            "task": "Analyze the incident.",
+            "depends_on": [],
+            "execution": _execution(continue_on_error=True),
+        }
+    ]
+    context = _FakeOrchestrationContext(
+        tasks,
+        lambda _name, payload: _failure(
+            payload["id"],
+            kind="handler_transient",
+            error_code="subagent_timeout",
+            error="Workflow Sub Agent timed out.",
+        ),
+    )
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    result = _run_orchestrator(orchestrator, context)
+
+    assert result["results"]["analyze"] == {
+        "failed": True,
+        "error_code": "subagent_timeout",
+        "error": "Workflow Sub Agent timed out.",
+        "kind": "handler_transient",
+    }
+
+
+def test_unclassified_activity_failure_logs_host_guidance(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    context = _FakeOrchestrationContext([], lambda name, payload: {})
+    secret = "raw host failure detail"
+    failure = TaskFailedError("opaque durable failure", RuntimeError(secret))
+
+    with caplog.at_level("WARNING"):
+        engine._warn_unclassified_activity_failure(
+            context,
+            failure,
+            [("probe", 30_000)],
+        )
+
+    assert "unclassified Activity failure" in caplog.text
+    assert "host.json" in caplog.text
+    assert "AzureFunctionsJobHost__functionTimeout" in caplog.text
+    assert "workflow_id=workflow-parent" in caplog.text
+    assert "node_id=probe" in caplog.text
+    assert "timeout_ms=30000" in caplog.text
+    assert secret not in caplog.text
+
+
+def test_continuation_wave_opaque_durable_failure_fails_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    execution = _execution(continue_on_error=True)
+    execution["timeout_ms"] = 30_000
+    context = _FakeOrchestrationContext(
+        [
+            {
+                "id": "probe",
+                "type": TOOL_TASK_TYPE,
+                "tool": "probe",
+                "args": {},
+                "depends_on": [],
+                "execution": execution,
+            }
+        ],
+        lambda _name, _payload: TaskFailedError(
+            "opaque durable failure",
+            RuntimeError("host detail"),
+        ),
+    )
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    with caplog.at_level("WARNING"), pytest.raises(TaskFailedError):
+        _run_orchestrator(orchestrator, context)
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "unclassified Activity failure" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "node_id=probe" in warnings[0].getMessage()
+    assert "timeout_ms=30000" in warnings[0].getMessage()
+
+
+def test_unclassified_activity_failure_warning_is_suppressed_on_replay(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    context = _FakeOrchestrationContext([], lambda name, payload: {})
+    context.is_replaying = True
+
+    with caplog.at_level("WARNING"):
+        engine._warn_unclassified_activity_failure(
+            context,
+            TaskFailedError("opaque durable failure", RuntimeError("detail")),
+            [("probe", 30_000)],
+        )
+
+    assert "unclassified Activity failure" not in caplog.text
+
+
+def test_policy_free_activity_failure_does_not_log_host_guidance(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    context = _FakeOrchestrationContext(
+        [
+            {
+                "id": "publish",
+                "type": TOOL_TASK_TYPE,
+                "tool": "publish",
+                "args": {},
+                "depends_on": [],
+            }
+        ],
+        lambda name, payload: TaskFailedError(
+            "ordinary activity failure",
+            RuntimeError("tool detail"),
+        ),
+    )
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    with caplog.at_level("WARNING"), pytest.raises(TaskFailedError):
+        _run_orchestrator(orchestrator, context)
+
+    assert "unclassified Activity failure" not in caplog.text
+
+
+def test_policy_aware_opaque_activity_failure_logs_host_guidance(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    context = _FakeOrchestrationContext(
+        [
+            {
+                "id": "publish",
+                "type": TOOL_TASK_TYPE,
+                "tool": "publish",
+                "args": {},
+                "depends_on": [],
+                "execution": {
+                    "max_attempts": 1,
+                    "timeout_ms": 30_000,
+                    "durable_retry_policy": {
+                        "first_retry_interval_ms": 0,
+                        "max_number_of_attempts": 1,
+                        "backoff_coefficient": 1.0,
+                        "max_retry_interval_ms": 0,
+                    },
+                },
+            }
+        ],
+        lambda name, payload: TaskFailedError(
+            "opaque activity failure",
+            RuntimeError("host detail"),
+        ),
+    )
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    with caplog.at_level("WARNING"), pytest.raises(TaskFailedError):
+        _run_orchestrator(orchestrator, context)
+
+    assert "unclassified Activity failure" in caplog.text
+    assert "node_id=publish" in caplog.text
 
 
 def test_orchestrator_fans_out_sub_agents_and_reduces_templated_results() -> None:
@@ -851,6 +1431,62 @@ def test_dynamic_activity_failure_cancels_pending_wave_timer() -> None:
     assert context.selections == 2
 
 
+def test_dynamic_noncontinuable_failure_is_immediate_in_continuation_wave() -> None:
+    tasks = [
+        {
+            "id": "src",
+            "type": TOOL_TASK_TYPE,
+            "tool": "collect",
+            "args": {},
+            "depends_on": [],
+        },
+        {
+            "id": "blocked",
+            "type": TOOL_TASK_TYPE,
+            "tool": "inspect",
+            "args": {},
+            "depends_on": ["src"],
+            "when": {
+                "ref": "${src.result.run}",
+                "operator": "equals",
+                "value": True,
+            },
+            "execution": _execution(continue_on_error=True),
+        },
+        {
+            "id": "pause",
+            "type": WAIT_TASK_TYPE,
+            "duration": "PT1H",
+            "depends_on": ["src"],
+        },
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "src":
+            return {"id": "src", "result": {"run": True}}
+        return _failure(
+            payload["id"],
+            kind="authorization",
+            error_code="authorization_failure",
+        )
+
+    context = _DynamicContext(
+        tasks,
+        result_for,
+        policy={
+            "allowed_tools": ["collect", "inspect"],
+            "allowed_subagents": [],
+        },
+    )
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    with pytest.raises(RuntimeError, match="authorization_failure"):
+        _run_orchestrator(orchestrator, context)
+
+    assert context.selections == 2
+    assert context.timers[0].cancelled is True
+
+
 # --- Static-path preservation ---------------------------------------------
 
 
@@ -939,6 +1575,44 @@ def test_condition_true_resolves_args_and_runs() -> None:
     assert result["results"]["act"] == {"ok": True}
     act_call = next(p for _, p in context.calls if p["id"] == "act")
     assert act_call["args"] == {"echoed": "hi"}
+
+
+def test_continued_failure_can_drive_when_predicate() -> None:
+    tasks = [
+        {
+            "id": "optional",
+            "type": TOOL_TASK_TYPE,
+            "tool": "optional",
+            "args": {},
+            "depends_on": [],
+            "execution": _execution(continue_on_error=True),
+        },
+        {
+            "id": "fallback",
+            "type": TOOL_TASK_TYPE,
+            "tool": "fallback",
+            "args": {"code": "${optional.result.error_code}"},
+            "depends_on": ["optional"],
+            "when": {
+                "ref": "${optional.result.failed}",
+                "operator": "equals",
+                "value": True,
+            },
+        },
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "optional":
+            return _failure("optional")
+        return {"id": "fallback", "result": {"code": payload["args"]["code"]}}
+
+    result, _ = _run_dynamic(
+        tasks,
+        policy={"allowed_tools": ["optional", "fallback"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+
+    assert result["results"]["fallback"] == {"code": "optional_task_failed"}
 
 
 def test_condition_false_skips_before_resolving_args() -> None:
@@ -1161,6 +1835,134 @@ def test_expanded_mixed_run_skip_aggregate_source_order() -> None:
         (engine._ACTIVITY_NAME, {"durabletask.displayName": "collect"}),
         (engine._ACTIVITY_NAME, {"durabletask.displayName": "at"}),
         (engine._ACTIVITY_NAME, {"durabletask.displayName": "at"}),
+    ]
+
+
+@pytest.mark.parametrize("failed_indexes", [{1}, {0, 1, 2}])
+def test_expanded_continuation_aggregates_failed_instances_and_runs_dependent(
+    failed_indexes: set[int],
+) -> None:
+    tasks = [
+        {
+            "id": "disc",
+            "type": TOOL_TASK_TYPE,
+            "tool": "collect",
+            "args": {},
+            "depends_on": [],
+        },
+        {
+            "id": "analyze",
+            "type": TOOL_TASK_TYPE,
+            "tool": "at",
+            "args": {"i": "${index}"},
+            "depends_on": ["disc"],
+            "for_each": "${disc.result.items}",
+            "execution": _execution(continue_on_error=True),
+        },
+        {
+            "id": "finish",
+            "type": TOOL_TASK_TYPE,
+            "tool": "finish",
+            "args": {"all": "${analyze.result}"},
+            "depends_on": ["analyze"],
+        },
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "disc":
+            return {"id": "disc", "result": {"items": [{}, {}, {}]}}
+        if payload["id"].startswith("analyze["):
+            index = payload["args"]["i"]
+            if index in failed_indexes:
+                return _failure(
+                    payload["id"],
+                    kind="execution_unknown",
+                    error_code="analysis_failed",
+                    error="Analysis failed.",
+                )
+            return {"id": payload["id"], "ok": True, "result": {"index": index}}
+        return {"id": "finish", "result": {"count": len(payload["args"]["all"])}}
+
+    result, _ = _run_dynamic(
+        tasks,
+        policy={"allowed_tools": ["collect", "at", "finish"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+
+    aggregate = result["results"]["analyze"]
+    assert result["results"]["finish"] == {"count": 3}
+    assert [entry["status"] for entry in aggregate] == ["completed"] * 3
+    assert [
+        entry["result"]["failed"]
+        for entry in aggregate
+        if entry["index"] in failed_indexes
+    ] == [True] * len(failed_indexes)
+    assert all(
+        set(entry["result"]) == {"failed", "error_code", "error", "kind"}
+        for entry in aggregate
+        if entry["index"] in failed_indexes
+    )
+    assert all(
+        entry == {
+            "index": entry["index"],
+            "status": "completed",
+            "result": {"index": entry["index"]},
+        }
+        for entry in aggregate
+        if entry["index"] not in failed_indexes
+    )
+
+
+def test_expanded_continuation_handles_exhausted_native_retry() -> None:
+    tasks = [
+        {
+            "id": "disc",
+            "type": TOOL_TASK_TYPE,
+            "tool": "collect",
+            "args": {},
+            "depends_on": [],
+        },
+        {
+            "id": "analyze",
+            "type": TOOL_TASK_TYPE,
+            "tool": "at",
+            "args": {"i": "${index}"},
+            "depends_on": ["disc"],
+            "for_each": "${disc.result.items}",
+            "execution": _execution(continue_on_error=True),
+        },
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "disc":
+            return {"id": "disc", "result": {"items": [{}]}}
+        outcome = _failure(
+            payload["id"],
+            kind="handler_transient",
+            error_code="analysis_unavailable",
+            error="Analysis is unavailable.",
+        )
+        with pytest.raises(DurableRetryableActivityError) as raised:
+            raise_for_durable_retry(outcome)
+        return TaskFailedError("Activity failed.", raised.value)
+
+    result, _ = _run_dynamic(
+        tasks,
+        policy={"allowed_tools": ["collect", "at"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+
+    assert result["results"]["analyze"] == [
+        {
+            "index": 0,
+            "status": "completed",
+            "result": {
+                "failed": True,
+                "error_code": "analysis_unavailable",
+                "error": "Analysis is unavailable.",
+                "kind": "handler_transient",
+            },
+        }
     ]
 
 
@@ -1589,6 +2391,71 @@ def test_dynamic_replay_produces_identical_calls_statuses_and_results() -> None:
     assert replay_context.statuses == first_context.statuses
 
 
+def test_dynamic_continuation_replay_is_identical() -> None:
+    tasks = [
+        {
+            "id": "src",
+            "type": TOOL_TASK_TYPE,
+            "tool": "collect",
+            "args": {},
+            "depends_on": [],
+        },
+        {
+            "id": "optional",
+            "type": TOOL_TASK_TYPE,
+            "tool": "inspect",
+            "args": {},
+            "depends_on": ["src"],
+            "when": {
+                "ref": "${src.result.run}",
+                "operator": "equals",
+                "value": True,
+            },
+            "execution": _execution(continue_on_error=True),
+        },
+        {
+            "id": "sibling",
+            "type": TOOL_TASK_TYPE,
+            "tool": "inspect",
+            "args": {},
+            "depends_on": ["src"],
+            "when": {
+                "ref": "${src.result.run}",
+                "operator": "equals",
+                "value": True,
+            },
+        },
+        {
+            "id": "pause",
+            "type": WAIT_TASK_TYPE,
+            "duration": "PT1S",
+            "depends_on": ["src"],
+        },
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "src":
+            return {"id": "src", "result": {"run": True}}
+        if payload["id"] == "optional":
+            return _failure(payload["id"])
+        return {"id": payload["id"], "result": {"ok": True}}
+
+    first_result, first_context = _run_dynamic(
+        tasks,
+        policy={"allowed_tools": ["collect", "inspect"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+    replay_result, replay_context = _run_dynamic(
+        tasks,
+        policy={"allowed_tools": ["collect", "inspect"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+
+    assert replay_result == first_result
+    assert replay_context.calls == first_context.calls
+    assert replay_context.statuses == first_context.statuses
+
+
 def test_for_each_non_array_is_iteration_not_array() -> None:
     tasks = [
         {"id": "disc", "type": TOOL_TASK_TYPE, "tool": "collect", "args": {}, "depends_on": []},
@@ -1779,6 +2646,72 @@ def test_dynamic_status_snapshots_track_states_and_counts() -> None:
 
 
 # --- Cancellation with a dynamic timer -------------------------------------
+
+
+def test_dynamic_cancellation_discards_recorded_continuation_failure() -> None:
+    tasks = [
+        {
+            "id": "src",
+            "type": TOOL_TASK_TYPE,
+            "tool": "collect",
+            "args": {},
+            "depends_on": [],
+        },
+        {
+            "id": "optional",
+            "type": TOOL_TASK_TYPE,
+            "tool": "inspect",
+            "args": {},
+            "depends_on": ["src"],
+            "when": {
+                "ref": "${src.result.run}",
+                "operator": "equals",
+                "value": True,
+            },
+            "execution": _execution(continue_on_error=True),
+        },
+        {
+            "id": "pause",
+            "type": WAIT_TASK_TYPE,
+            "duration": "PT1H",
+            "depends_on": ["src"],
+        },
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "src":
+            return {"id": "src", "result": {"run": True}}
+        return _failure(payload["id"])
+
+    context = _DynamicContext(
+        tasks,
+        result_for,
+        policy={
+            "allowed_tools": ["collect", "inspect"],
+            "allowed_subagents": [],
+        },
+    )
+    context.cancel_task.result = "user-request"
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+    generator = orchestrator(context, context._input)
+
+    selection = next(generator)
+    selection = _drive_one_wave(generator, context, selection)
+    optional_task = next(
+        task
+        for task in selection._tasks
+        if task is not context.cancel_task and task not in context.timers
+    )
+    generator.send(optional_task)
+
+    with pytest.raises(StopIteration) as stopped:
+        generator.send(context.cancel_task)
+
+    result = stopped.value.value
+    assert result["canceled"] is True
+    assert result["results"] == {"src": {"run": True}}
+    assert context.timers[0].cancelled is True
+    assert context.statuses[-1]["nodes"]["optional"]["state"] == "pending"
 
 
 def test_dynamic_cancellation_cancels_timer_and_returns_partial() -> None:

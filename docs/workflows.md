@@ -13,7 +13,7 @@
 > [Engineering Operations Hub](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/per-agent-workflows/README.md)
 > demonstrates two non-main workflow-enabled agents with independent policies in one app.
 > Larger features such as sub-orchestrations,
-> per-task timeouts, and MCP Tasks integration are tracked as v2
+> large-output offloading, and MCP Tasks integration are tracked as v2
 > follow-up work.
 
 Dynamic workflows let a markdown agent author and run **distributed,
@@ -277,9 +277,9 @@ A workflow plan is a list of tasks with `depends_on` edges. Task types:
 - **`sub_agent`** — invoke one leaf specialist authorized by
   `workflows.subagents`, using `agent` and a self-contained `task`.
 
-A `tool` or `sub_agent` task may carry an `execution.retry` policy; see
-[Task execution policy](#task-execution-policy). Per-task timeouts remain a v2
-hardening control.
+A `tool` or `sub_agent` task may carry an `execution` policy for retry,
+per-attempt timeout, and failure continuation. See
+[Task execution policy](#task-execution-policy).
 
 ```json
 {
@@ -502,12 +502,13 @@ whole expansion atomically if it would exceed `max_nodes`
 iterated arrays bounded upstream. `max_parallelism` still caps how many ready
 instances run concurrently.
 
-Future v2 hardening adds configurable frontmatter caps, per-tool timeout
-caps, storage hygiene, and large-output offloading.
+Future v2 hardening adds configurable frontmatter caps, storage hygiene, and
+large-output offloading.
 
 ### Task execution policy
 
-A workflow tool can opt into **Durable native retry** in its decorator:
+A workflow tool can declare **Durable native retry** and an attempt timeout in
+its decorator:
 
 ```python
 from azure_functions_agents import (
@@ -521,13 +522,15 @@ from azure_functions_agents import (
     retry=WorkflowRetryPolicy(
         max_attempts=3,
         backoff=WorkflowRetryBackoff(initial="PT1S", multiplier=2.0, max="PT4S"),
-    )
+    ),
+    timeout="PT30S",
 )
 def reserve_inventory(args: dict[str, Any]) -> dict[str, Any]:
     ...
 ```
 
-A plan may also declare `execution.retry` for a tool or Sub Agent task:
+A plan can also declare `execution.retry`, `execution.timeout`, and
+`execution.continue_on_error` for a tool or Sub Agent task:
 
 ```json
 {
@@ -536,6 +539,8 @@ A plan may also declare `execution.retry` for a tool or Sub Agent task:
   "tool": "reserve_inventory",
   "args": {"order_id": "ORD-1001"},
   "execution": {
+    "timeout": "PT30S",
+    "continue_on_error": true,
     "retry": {
       "max_attempts": 3,
       "backoff": {
@@ -548,9 +553,16 @@ A plan may also declare `execution.retry` for a tool or Sub Agent task:
 }
 ```
 
-For tool tasks, the decorator declaration is authoritative and overrides a
-plan-authored policy. The runtime freezes only the effective policy into
-orchestration input, so later deployments cannot change replay behavior.
+Each field is optional. If retry is absent, the task has one attempt and no
+retry delay. If timeout is absent, the runtime does not set an attempt deadline.
+If continuation is absent or `false`, a failure fails the workflow. An empty
+`execution` object is invalid.
+
+For tool tasks, decorator precedence applies to each field. A decorator timeout
+replaces only the plan timeout. A decorator retry policy replaces only the plan
+retry policy. The runtime freezes the effective policy into orchestration input,
+so later deployments cannot change replay behavior. Continuation is plan-only.
+`@workflow_tool` does not accept `continue_on_error`.
 
 Use retry only when repeating the task is safe. A workflow tool marks a
 transient application failure by raising the public exception:
@@ -571,20 +583,83 @@ raise WorkflowRetryableError(
 | `backoff.initial` | ISO-8601, `PT0.001S`–`PT5M` |
 | `backoff.multiplier` | 1.0–10.0 |
 | `backoff.max` | ISO-8601, up to `PT15M`, not below `initial` |
+| `timeout` | ISO-8601, `PT1S`–`PT10M`, applied to each attempt |
+| `continue_on_error` | Boolean, plan-only, default `false` |
+
+For each materialized task instance, retry delays plus
+`max_attempts * timeout` must not exceed one hour. This limit is an admission
+rule in the library. It is not an Azure execution guarantee.
+
+The Functions host also applies `functionTimeout`. Set the task timeout below a
+finite host timeout and leave time for Activity setup, cleanup, and result
+return. See [Azure Functions hosting
+limits](https://learn.microsoft.com/azure/azure-functions/functions-scale#function-app-timeout-duration).
+The effective host value can come from `host.json` or an application setting
+such as `AzureFunctionsJobHost__functionTimeout`.
 
 The runtime uses a closed failure classification:
 
 - `WorkflowRetryableError` — transient. Durable schedules the next attempt.
 - A Workflow Sub Agent `TimeoutError` — transient. Durable schedules the next
   attempt.
-- `WorkflowTerminalError` — terminal. The task fails immediately and preserves
-  the handler-owned stable `error_code`.
-- Any other tool or Sub Agent exception — terminal. The task fails immediately
-  with the runtime-owned `workflow_task_execution_unknown` code; no exception
-  detail reaches Durable history.
+- An expired task attempt deadline — transient, with
+  `workflow_task_timeout`. Durable schedules the next attempt.
+- `WorkflowTerminalError` — terminal for retry. It preserves the handler-owned
+  stable `error_code`.
+- Any other tool or Sub Agent exception — terminal for retry. It uses the
+  runtime-owned `workflow_task_execution_unknown` code. No exception detail
+  reaches Durable history.
 
 `error_code` must match `^[a-z][a-z0-9_]{0,63}$` and may not start with
 `workflow_`, which is reserved for runtime-generated codes.
+
+When `continue_on_error` is `true`, Durable first uses all permitted retry
+attempts. The runtime can then continue these failure kinds:
+
+| Failure kind | Continuation |
+|---|---|
+| `handler_transient` | Allowed after the last attempt |
+| `handler_terminal` | Allowed |
+| `execution_unknown` | Allowed |
+| `authorization` | Never allowed |
+| `handler_contract` | Never allowed |
+
+An opaque Durable Activity failure also fails the workflow. It has no trusted
+runtime classification.
+
+A continued task stays in the `completed` state and commits exactly this
+bounded result:
+
+```json
+{
+  "failed": true,
+  "error_code": "...",
+  "error": "...",
+  "kind": "handler_terminal"
+}
+```
+
+Dependents, `when` predicates, and `for_each` aggregation can read this result.
+The result does not contain an aggregate copy of prior task results.
+
+Only a wave with at least one persisted `continue_on_error: true` uses
+per-instance failure processing. In that wave, a permitted failure continues
+only for the task that enabled continuation. Any other failure stops the
+workflow as soon as that instance completes. If cancellation wins after a
+continued failure but before the wave finishes, the runtime discards all
+uncommitted wave results and restores the pending wave.
+
+Waves without enabled continuation keep the earlier timing. This includes old
+histories, timeout-only policies, and explicit `continue_on_error: false`.
+Returned terminal failures are processed after the wave, and cancellation keeps
+its earlier order.
+
+A workflow can reach Durable `Completed` when some or all tasks have continued
+failures. `Completed` means that control flow finished. It does not mean that
+every task succeeded. The current status UI does not label this condition as
+`Completed with errors`; inspect task results for the bounded failure object.
+Issue [#221](https://github.com/Azure/azure-functions-agents-runtime/issues/221)
+tracks a warning state for this condition.
 
 Retries are **at-least-once deliveries of the same task**, so a handler with
 side effects needs a stable key. `current_workflow_task_context()` returns one
@@ -602,15 +677,30 @@ if context is not None:
 The attempt number is deliberately not exposed: Durable owns the attempt
 budget, and a replayed orchestration cannot observe it.
 
-The sum of authored retry delays is capped at one hour during submission.
-Durable's finite `retry_timeout` is deliberately left unset because the SDK
-evaluates that timeout against wall-clock time while replaying history.
-Per-attempt timeouts and continuing a workflow past a failed task are not part
-of this release.
+The attempt deadline limits how long the Activity waits. It does not stop all
+underlying work. A synchronous tool runs in a worker thread and can continue
+after the deadline. An asynchronous tool receives cancellation, but external
+work can still finish. A retry can overlap earlier work. Use the stable
+`idempotency_key` to prevent duplicate effects.
+
+A handler-raised `TimeoutError` is not a runtime attempt deadline. It stays an
+`execution_unknown` failure. A Workflow Sub Agent also keeps its independent
+specialist timeout. The first timeout to expire wins. The specialist timeout
+uses `subagent_timeout`; the outer attempt deadline uses
+`workflow_task_timeout`.
+
+If the orchestrator receives an unclassified Activity failure, the runtime logs
+guidance about host logs, Application Insights, `host.json`, and the
+`AzureFunctionsJobHost__functionTimeout` override. It does not guess that a host
+timeout occurred. The original failure remains unchanged.
+
+Durable's finite `retry_timeout` is deliberately unset because the SDK
+evaluates it against wall-clock time during replay.
 
 Only tasks whose policy was frozen at submission time are dispatched with
-retry. Histories without persisted execution data keep the legacy Activity call
-and result envelope, so an upgrade does not disturb an in-flight workflow.
+policy-aware execution. The persisted `timeout_ms` and `continue_on_error` keys
+are optional and are written only when declared. Histories without persisted
+execution data keep the legacy Activity call and result envelope.
 
 ### Determinism contract
 
