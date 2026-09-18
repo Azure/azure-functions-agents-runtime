@@ -111,8 +111,9 @@ class _ToolTaskSpec(_TaskSpecBase):
         default=None,
         exclude_if=lambda value: value is None,
         description=(
-            "Optional bounded execution policy. 'timeout' limits each attempt. "
-            "'retry' repeats transient failures only when repeating the task is safe."
+            "Optional bounded execution policy. 'retry' repeats transient failures "
+            "only when repeating the task is safe. 'timeout' limits each attempt. "
+            "'continue_on_error' lets dependents consume a permitted failure result."
         ),
     )
 
@@ -163,8 +164,10 @@ class _SubAgentTaskSpec(_TaskSpecBase):
         default=None,
         exclude_if=lambda value: value is None,
         description=(
-            "Optional bounded execution policy. 'timeout' limits each attempt. "
-            "A specialist's own timeout remains independent."
+            "Optional bounded execution policy. 'retry' repeats transient failures "
+            "only when repeating the task is safe. 'timeout' limits each attempt and "
+            "remains independent of the specialist timeout. 'continue_on_error' lets "
+            "dependents consume a permitted failure result."
         ),
     )
 

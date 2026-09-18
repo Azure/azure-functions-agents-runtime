@@ -1369,6 +1369,7 @@ results remain unchanged.
 | 101 | Host-failure guidance | Documentation only / diagnostic warning / automatic SKU validation | Add a replay-suppressed warning when the orchestrator receives an unclassified Activity failure. Give possible causes and host-log/configuration checks without changing the failure. Keep SKU detection out of scope | Human (TsuyoshiUshio), Agent; review by Victoria Hall | 2026-09-15 |
 | 102 | Completion after continued failures | New scheduler state / separate result display | Keep existing execution states. Require the later status/UI slice to distinguish completion with continued failures, including when all tasks fail. Use runtime-owned continuation records, not user result keys. Document the interim UI limitation | Human (TsuyoshiUshio), Agent; review by Victoria Hall | 2026-09-15 |
 | 103 | Timeout sample delivery | Add a separate timeout sample / extend the retry sample | Extend `workflow-retry-policy` with a carrier task whose decorator timeout overrides a longer plan timeout while the plan retry remains active. This gives one runnable app for retry success, timeout retry, and timeout exhaustion without duplicate Functions setup | Agent | 2026-09-16 |
+| 104 | Final review delivery | Keep two stacked review PRs / combine completed slices in one final review PR | Combine the completed timeout and continuation slices in one final review PR. The implementation stayed in two commits during development and passed separate implementation and testing reviews. This replaces the review boundary in Decision 97; the product scope and separate status/UI slice do not change | Human (TsuyoshiUshio), Agent | 2026-09-16 |
 
 ## 6. Test plan
 
@@ -1533,7 +1534,7 @@ results remain unchanged.
     idempotent workflow tool;
   - a real Functions host proves retry-to-completion and sanitized exhaustion
     against the local Durable backend.
-- [ ] Timeout PR: execution contract
+- [x] Timeout PR: execution contract
   - accept `execution.timeout` alone, reject an `execution` that declares no
     field, and reject a duration outside `PT1S`-`PT10M`;
   - apply `@workflow_tool(timeout=...)` over a plan-authored timeout;
@@ -1547,7 +1548,7 @@ results remain unchanged.
   - persist a timeout-only policy as one attempt with no retry delay when neither
     the plan nor the decorator declares retry;
   - omit the timeout key unless declared, preserving retry-only payloads.
-- [ ] Timeout PR: attempt deadline
+- [x] Timeout PR: attempt deadline
   - an expired deadline uses `handler_transient` with `workflow_task_timeout`;
     tool and Sub Agent deliveries retry only while attempts remain;
   - a handler that raises `TimeoutError` itself stays `execution_unknown`;
@@ -1559,7 +1560,7 @@ results remain unchanged.
   - a history with no persisted deadline keeps its unbounded attempt;
   - a persisted deadline outside its validated domain is a contract failure;
   - deadline and retry-delay validation does not change scheduler failure timing.
-- [ ] Timeout PR: host-failure diagnostics
+- [x] Timeout PR: host-failure diagnostics
   - an unclassified Activity failure emits the guidance warning with available
     workflow/task identity and persisted timeout, without changing the failure;
   - classified handler failures, successful results, and scheduler errors do not
@@ -1599,7 +1600,7 @@ results remain unchanged.
     with continuation enabled;
   - do not treat a successful user result containing `failed: true` as a
     runtime-continued failure.
-- [ ] Timeout PR: sample/E2E
+- [x] Timeout PR: sample/E2E
   - include a runnable timeout example with decorator precedence;
   - use a real Functions host to prove retry and exhaustion after an attempt
     deadline against the local Durable backend;
@@ -1770,6 +1771,11 @@ results remain unchanged.
   terminal outcomes are processed after the wave. The approved design now
   distinguishes that path from Durable exceptions. Status remains `Finalized`;
   implementation has not started in PR #212.
+- **Final review delivery approval:** TsuyoshiUshio, 2026-09-16. After both
+  implementation slices and their tests were complete, directed one final PR
+  for review. Decision 104 replaces only the two-PR review boundary from
+  Decision 97. The timeout, continuation, and deferred status/UI scopes remain
+  unchanged.
 - **Continuation testing review:** An independent testing review on 2026-09-16
   required explicit coverage for timeout continuation, opaque failures, dynamic
   retry exhaustion, aggregate status, wave timing, replay, and the cancellation

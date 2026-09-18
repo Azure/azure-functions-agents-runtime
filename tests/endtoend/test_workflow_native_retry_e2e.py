@@ -5,7 +5,7 @@ workflow through Durable's built-in orchestration HTTP API. Going straight to
 Durable keeps both cases deterministic and model-free: what is under test is the
 runtime's retry behaviour, not an agent's ability to author a plan.
 
-Three behaviours are asserted against a real host:
+Five behaviors are asserted against a real host:
 
 * a task whose tool reports transient failures is retried by Durable and the
   workflow still reaches ``Completed`` with the expected result;

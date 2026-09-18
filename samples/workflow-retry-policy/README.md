@@ -64,8 +64,9 @@ retry precedence apply per field. The tool's `PT1S` timeout replaces the plan's
 The first carrier attempt sleeps for two seconds. The runtime returns
 `workflow_task_timeout` after one second and Durable starts the second attempt
 after the retry delay. The synchronous first call can continue in its worker
-thread after the deadline, so the tool uses the workflow task idempotency key to
-keep its simulated state stable.
+thread after the deadline. Before it sleeps, the tool updates the workflow-scoped
+Blob with an entity-tag condition. Concurrent deliveries retry that update after
+a conflict, so each delivery records one attempt.
 
 ## Continue after an optional failure
 
@@ -111,8 +112,18 @@ a virtual environment and install `src/requirements.txt`. Start Azurite for the
 sample's Blob state. The default `host.json` uses Azure Storage so the sample can
 run in standard development and CI environments.
 
-To use the Durable Task Scheduler emulator, start it and run these commands from
-`src/`:
+To use the Durable Task Scheduler emulator, start a container that registers this
+sample's `workflowretrypolicy` Task Hub:
+
+```powershell
+docker rm -f workflow-retry-policy-dts 2>$null
+docker run --rm --name workflow-retry-policy-dts `
+  -e DTS_TASK_HUB_NAMES=workflowretrypolicy `
+  -p 8080:8080 -p 8082:8082 `
+  mcr.microsoft.com/dts/dts-emulator:latest
+```
+
+Then run these commands from `src/`:
 
 ```powershell
 Copy-Item local.settings.template.json local.settings.json
@@ -121,8 +132,9 @@ func start
 ```
 
 The DTS configuration reads its endpoint and task hub from
-`DURABLE_TASK_SCHEDULER_CONNECTION_STRING` and `TASKHUB_NAME`. Restore the
-committed `host.json` to return to Azure Storage.
+`DURABLE_TASK_SCHEDULER_CONNECTION_STRING` and `TASKHUB_NAME`. Its extension
+bundle starts at `4.32.0` because that version first includes the `azureManaged`
+provider. Restore the committed `host.json` to return to Azure Storage.
 
 Open <http://localhost:7071/agents/main/> and ask:
 

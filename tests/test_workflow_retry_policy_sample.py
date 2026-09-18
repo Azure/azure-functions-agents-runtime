@@ -65,7 +65,7 @@ def test_sample_provides_storage_and_dts_host_configurations() -> None:
     assert settings["Values"]["DURABLE_TASK_SCHEDULER_CONNECTION_STRING"] == (
         "Endpoint=http://localhost:8080;Authentication=None"
     )
-    assert settings["Values"]["TASKHUB_NAME"] == "prstatusreports"
+    assert settings["Values"]["TASKHUB_NAME"] == "workflowretrypolicy"
 
 
 def test_sample_agent_relies_on_the_tool_retry_policy() -> None:

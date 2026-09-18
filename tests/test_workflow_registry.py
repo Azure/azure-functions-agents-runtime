@@ -202,6 +202,17 @@ def test_register_workflow_tool_rejects_invalid_retry_type() -> None:
         )
 
 
+@pytest.mark.parametrize("timeout", ["PT0.5S", "PT0S", "PT11M", "not-a-duration"])
+def test_register_workflow_tool_rejects_invalid_timeout(timeout: str) -> None:
+    with pytest.raises(ValueError, match="timeout is invalid"):
+        registry.register_workflow_tool(
+            "badtimeout",
+            "no",
+            _noop,
+            timeout=timeout,
+        )
+
+
 def test_register_workflow_tool_rejects_blank_name():
     with pytest.raises(ValueError, match="non-empty string"):
         registry.register_workflow_tool("", "no", _noop)

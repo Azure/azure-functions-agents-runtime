@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from .schema import WorkflowRetryPolicy
+from .schema import WorkflowRetryPolicy, workflow_timeout_ms
 
 
 @dataclass(frozen=True)
@@ -102,8 +102,11 @@ def make_workflow_tool_entry(
         )
     if retry is not None and not isinstance(retry, WorkflowRetryPolicy):
         raise ValueError(f"workflow tool {name!r}: retry must be a WorkflowRetryPolicy")
-    if timeout is not None and not isinstance(timeout, str):
-        raise ValueError(f"workflow tool {name!r}: timeout must be an ISO-8601 duration")
+    if timeout is not None:
+        try:
+            workflow_timeout_ms(timeout)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"workflow tool {name!r}: timeout is invalid: {exc}") from exc
     return WorkflowToolEntry(
         name=name,
         description=description,
