@@ -11,12 +11,18 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
 
 - Use Pydantic v2 models for configuration and other external documents. Shared
   fields and validators belong on the common model base.
-- Parse untrusted documents with `ConfigDict(strict=True, extra=...)`, reject
-  duplicate JSON keys before `model_validate`, and translate `ValidationError`
-  at the trust boundary without exposing rejected values.
+- Parse untrusted documents with `ConfigDict(extra=...)`, reject duplicate
+  JSON keys before `model_validate`, and translate `ValidationError` at the
+  trust boundary. Only add `strict=True` where the authoring format does not
+  rely on non-strict coercion (e.g. `resolve_env_vars_in_data` substitutes
+  environment variables as strings, so numeric front-matter fields such as
+  `$OUTPUT_LIMIT` depend on non-strict parsing today).
 - Do not defensively revalidate already typed SDK results or local dataclasses
   with `getattr`, `isinstance`, casts, or `Any`; import the boundary type and
-  use its declared fields directly.
+  use its declared fields directly. This does not apply to declared,
+  intentionally dynamic extension points (e.g. `ClientManager.build_chat_client`,
+  which returns `Any` because the underlying SDK is pluggable) — narrow
+  runtime inspection is expected there.
 - Frozen dataclasses validate through a `create()` factory and module-level
   normalization helpers, not `__post_init__` mutation.
 
@@ -24,8 +30,9 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
 
 - Prefer guard clauses, early returns, and helpers over deeply nested control
   flow.
-- Give every source module a globally unique, intent-revealing basename.
-  Source tests mirror the module name as `tests/test_<module>.py`.
+- Give every source module (other than package initializers such as
+  `__init__.py`) a globally unique, intent-revealing basename. Source tests
+  mirror the module name as `tests/test_<module>.py`.
 - Use a module constant rather than repeating a named URL, API version, or path.
 - Declare each finite domain vocabulary once in its owning module. Use a
   `StrEnum` when the vocabulary is a runtime concept or crosses a persistence,
