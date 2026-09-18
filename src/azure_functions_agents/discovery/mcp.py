@@ -136,11 +136,16 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> tuple[MCPTool | None, 
             logger.warning("MCP server '%s': %s, skipping", name, error)
             return None, error
         header_provider = _build_header_provider(server)
+        raw_tool_name_prefix = server.get("tool_name_prefix")
+        tool_name_prefix = (
+            str(raw_tool_name_prefix) if raw_tool_name_prefix is not None else None
+        )
 
         return MCPStreamableHTTPTool(
             name=name,
             url=url,
             allowed_tools=allowed_tools,
+            tool_name_prefix=tool_name_prefix,
             load_tools=True,
             load_prompts=False,
             header_provider=header_provider,

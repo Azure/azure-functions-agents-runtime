@@ -50,6 +50,7 @@ class _CapturedMCPStreamableHTTPTool:
         url: str,
         *,
         allowed_tools: list[str] | None = None,
+        tool_name_prefix: str | None = None,
         load_tools: bool = True,
         load_prompts: bool = True,
         header_provider: object = None,
@@ -59,6 +60,7 @@ class _CapturedMCPStreamableHTTPTool:
         self.name = name
         self.url = url
         self.allowed_tools = allowed_tools
+        self.tool_name_prefix = tool_name_prefix
         self.load_tools = load_tools
         self.load_prompts = load_prompts
         self.header_provider = header_provider
@@ -531,6 +533,40 @@ def test_discover_mcp_servers_ignores_load_flags(
     assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
     assert tool.load_tools is True
     assert tool.load_prompts is False
+
+
+def test_discover_mcp_servers_forwards_tool_name_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        mcp_discovery, "MCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool
+    )
+    _write_mcp_json(
+        tmp_path,
+        {
+            "servers": {
+                "teams-direct": {
+                    "type": "http",
+                    "url": "https://direct.example.com/mcp",
+                    "tool_name_prefix": "direct_",
+                },
+                "teams-channel": {
+                    "type": "http",
+                    "url": "https://channel.example.com/mcp",
+                    "tool_name_prefix": "channel_",
+                },
+            }
+        },
+    )
+
+    result = discover_mcp_servers(tmp_path)
+
+    direct = result.servers["teams-direct"]
+    channel = result.servers["teams-channel"]
+    assert isinstance(direct, _CapturedMCPStreamableHTTPTool)
+    assert isinstance(channel, _CapturedMCPStreamableHTTPTool)
+    assert direct.tool_name_prefix == "direct_"
+    assert channel.tool_name_prefix == "channel_"
 
 
 def test_discover_does_not_substitute_server_name_keys(

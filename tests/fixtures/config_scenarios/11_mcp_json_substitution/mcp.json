@@ -3,6 +3,7 @@
     "github": {
       "type": "http",
       "url": "https://api.githubcopilot.com/mcp/",
+      "tool_name_prefix": "$GITHUB_TOOL_PREFIX",
       "headers": {
         "Authorization": "Bearer $GITHUB_MCP_TOKEN",
         "X-Tenant": "%TENANT_NAME%"
