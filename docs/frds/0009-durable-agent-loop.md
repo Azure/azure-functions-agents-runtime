@@ -1388,22 +1388,43 @@ SDK evidence:
 
 ### 4.14 Delivery sequence
 
-**Use a separate FRD review PR and a short implementation stack.** Speed comes
-from overlapping implementation, review and qualification, not from omitting
-the architecture gate or merging incomplete behavior.
+**Use a separate FRD review PR and a short implementation stack into
+`feature/durable-agent-loop`.** The integration branch starts from `main` and
+collects reviewed feature increments without exposing unfinished behavior on
+`main`. Speed comes from overlapping implementation, review and qualification,
+not from omitting the architecture gate or merging incomplete behavior.
 
 | PR / lane | Outcome and base | Review boundary |
 | --- | --- | --- |
-| **D0 - FRD only** | This document and its index entry, targeting `main`; no runtime/dependency changes | Open for architecture review with status In review; resolve decisions and record human sign-off before product implementation |
-| **C1 - Runtime baseline** | Native b3/compatible MAF dependency integration and existing-behavior regression coverage, based on `main` | Useful independently; no dead public Durable flag or provider fork |
+| **D0 - FRD only** | This document and its index entry, targeting `feature/durable-agent-loop`; no runtime/dependency changes | Open for architecture review with status In review; resolve decisions and record human sign-off before product implementation |
+| **C1 - Runtime baseline** | Native b3/compatible MAF dependency integration and existing-behavior regression coverage, based on `feature/durable-agent-loop` | Useful independently; no dead public Durable flag or provider fork |
 | **C2 - Durable HTTP core** | Adapt the spike's model/turn/session/HTTP primitives into the complete native config-to-execution slice, with a working Durable qualification fixture; based on C1 | Shared registrations, ownership/admission, foreground calls, parallel worker/MCP tools, paused input, TTL and approved lifecycle all carry their own tests/docs; no false-success deletion stub |
 | **C3 - Sandbox workspaces** | Reuse selected packaging/bootstrap/SDK transport code and tests; deliver parallel local execution, same-ID resume/loss/cleanup and current-checkout smoke adaptation; based on C2 | Optional workspace capability is complete; worker-side MCP and existing interpreter behavior stay explicit |
 | **C4 - Integrated release qualification** | Adapt the existing ACA deployed pipeline around the C2/C3 fixtures; integrate cross-layer qualification, operator runbooks and support matrix; based on C3 | Not a parking place for missing safety or tests that belong to C1-C3; required release checks cannot silently remain advisory |
+| **R - Promotion to main** | Separate PR from the reviewed and qualified `feature/durable-agent-loop` branch into `main` | Final integration/support/release gates and explicit approval; not opened or merged merely because the integration branch exists |
 | **Q - Qualification/decision lane** | Carry forward the closed bounded A/B/C evidence, source-reuse inventory, pipeline adaptation preparation and remaining platform-owner questions | Runs alongside FRD review and, after approval, implementation; any new live experiment needs fresh scoped approval |
 
-The implementation chain is `main <- C1 <- C2 <- C3 <- C4`; D0 remains a
-separate documentation review. Each code PR targets the branch immediately
-below it so its diff shows only that layer.
+The unmerged implementation chain is
+`feature/durable-agent-loop <- C1 <- C2 <- C3 <- C4`; D0 remains a separate
+documentation review into the integration branch. Each code PR targets the
+branch immediately below it so its diff shows only that layer. Reviewed
+increments can merge into the integration branch before the whole feature is
+ready for `main`; this does not waive any layer's tests, docs or safety contract.
+
+Start C1 explicitly from a current integration-branch snapshot, not the
+project's default `main`. If a lower dependency has already landed, use the
+fresh integration tip containing it. Keep the integration branch synchronized
+with `main` through deliberate reviewed updates and propagate necessary changes
+through owning layer sessions; do not rewrite another session's branch.
+
+The repository's public-build and E2E PR filters include `feature/*`, but
+retargeting does not itself prove checks ran or make them required. Branch
+protections and required checks are a separate repository-owner decision,
+not inherited automatically from `main`. Do not broaden cloud credentials,
+privileged pipeline permissions or release/publishing triggers as a shortcut.
+Only promote the integration branch to `main` after the complete feature meets
+the agreed gates; status Implemented follows that final promotion, not an
+intermediate merge into the feature branch.
 
 Do not wait for a code PR to merge before starting the next layer. Once a lower
 layer has a coherent buildable commit pushed, create the next layer from that
@@ -1580,6 +1601,7 @@ proposed field/default. Agent proposals remain reviewable until sign-off.
 | 48 | Existing spike implementation | Implicit reuse / explicit per-layer intake | Require source-SHA/file-to-target mapping, port/adapt/omit rationale and carried regression tests; no whole-branch merge or unexamined rewrite | Human request; Agent reuse mapping | 2026-09-21 |
 | 49 | E2E qualification infrastructure | Rebuild pipeline / adapt existing ACA work | Reuse feature/aca-sandboxes fixture, deployment, provenance, matrix and suite assets; adapt Entity/DTS assertions and make required release checks explicitly blocking rather than inheriting advisory success | Human request; Agent source-verified proposal | 2026-09-21 |
 | 50 | Review publication boundary | Wait for all qualification / publish an explicitly incomplete review draft | Open the standalone FRD-only PR now with unresolved gates visible; no product implementation, architecture sign-off, pipeline execution or expanded cloud authorization implied | Human | 2026-09-21 |
+| 51 | Integration and final merge target | Land feature increments directly on main / dedicated integration branch | Create feature/durable-agent-loop from main, target D0 and the bottom code layer there, and promote the reviewed/qualified feature to main through a separate final PR. Preserve small reviews, stacked handoffs and all architecture/release gates | Human | 2026-09-21 |
 
 ## 6. Test plan
 
