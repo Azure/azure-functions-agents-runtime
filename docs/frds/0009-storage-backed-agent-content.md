@@ -6,7 +6,7 @@ author: swapnil-nagar
 created: 2026-09-21
 updated: 2026-09-21
 issues: []
-pull_requests: []
+pull_requests: [227]
 branch: swapnil/storage-backed-agent-content
 ---
 
