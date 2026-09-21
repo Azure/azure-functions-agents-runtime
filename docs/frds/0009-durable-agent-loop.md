@@ -46,16 +46,18 @@ immortal workers/sandboxes.
 
 | Gate | Current evidence | Required resolution |
 | --- | --- | --- |
-| Native payload lifecycle | Large Entity state and I/O offload worked, but native blobs survived Entity deletion and orchestration purge | **Blocking design/release decision:** a supported per-session ownership/reclamation, late-writer and coordinated-restore contract, or an explicit revision of the proposed guarantee |
-| Shared runtime and human input | The consolidated design has source/local prototype evidence; no production implementation is included here | Qualify actual host routing/auth, client lifetime, per-call checkpoints, parallel execution and same-run answer/cancel/expiry recovery |
-| Sandbox workspaces | The SDK catalog lists public Python 3.13/3.14 disks as Ready in the selected region | Prove actual guest ABI, package/bootstrap, concurrent tool execution, same-ID resume/loss and exact-owned cleanup; catalog readiness is not execution evidence |
-| Production profiles and limits | A pinned local-host/live-backend primitive experiment and offline MAF serialization cases passed | Qualify advertised deployed Python/host/provider profiles, payload/transport boundaries, managed identity/private paths and platform support commitments |
+| Native payload lifecycle | Large-state offload worked; native blobs survived Entity deletion/purge. The inspected public surfaces and executable counterexamples do not establish complete reclamation; age-only cleanup is rejected | **Blocking design/release decision:** a supported ownership/reference-lifecycle, native writer-fencing/erasure-completion and coordinated-restore contract, or an explicit revision of the proposed guarantee |
+| Shared runtime and human input | The real Python worker indexed exactly seven Functions, but host external configuration startup failed before readiness or any Durable submission | Identify the throwing startup component, then qualify routing/auth, client lifetime, per-call checkpoints, parallel execution and same-run answer/cancel/expiry recovery |
+| Sandbox workspaces | A bounded live Python 3.13/Linux synthetic bundle passed activation, overlapping guest execution, same-ID suspend/resume and owned-resource deletion/404 | Qualify integrated Durable dispatch, managed identity/private paths, restricted-identity negatives, Python 3.14 execution, production dependencies and broader service limits |
+| Production profiles and limits | S0 native-offload and offline MAF results remain valid; B added 54 offline checks. Its optional native cap/read-transport case was not run | Qualify advertised deployed profiles and independent state/message bounds. Source-wired host tuning is not a tested native-Python mitigation or support commitment |
 | Final architecture and delivery approval | Separate FRD review and explicit spike/E2E reuse are requested; implementation slices are proposed in section 4.14 | Resolve the remaining decisions, review the current contracts and record human sign-off before status Finalized or product implementation |
 
 UI/SSE and non-HTTP research are outside the core release dependency chain.
-The remaining live runtime/lifecycle/Sandbox probes have not completed.
-Permission for a bounded experiment is not a successful result, a reusable
-production access grant or a compliance certification.
+Round 2 is closed: runtime qualification is startup-blocked, payload lifecycle
+has a platform-contract gap, and the narrow Sandbox transport has a live pass.
+All mutation receipts are consumed/closed. Successful primitive evidence is
+not overall production qualification, a reusable access grant or a compliance
+certification.
 
 ## 2. Motivation / problem
 
@@ -753,7 +755,9 @@ mutually exclusive and override the inherited source as a unit. The normal
 default is a public Python 3.13/3.14 disk matching the qualified Functions/
 package ABI, with Python 3.13 as the default supported choice. The spike's
 `resolve_sandbox_create_source()` already selects `disk="python-3.<minor>"`;
-verify service availability and compatibility in qualification.
+pass the chosen base explicitly and qualify the applicable profile. Round 2
+executed public `python-3.13`; Python 3.14 has catalog evidence only, not guest
+or native-dependency compatibility proof.
 
 ```yaml
 durable:
@@ -821,7 +825,32 @@ execution overlap inside the sandbox, not merely parallel scheduling in DTS.
 If the service cannot support that contract, return to design review rather
 than advertising parallel sandbox execution backed by a hidden serial queue.
 
-Qualify interrupted/ambiguous upload, digest mismatch, archive traversal,
+#### Observed bounded transport result
+
+A direct-SDK synthetic probe using `azure-containerapps-sandbox==0.1.0b4` and
+`azure-core==1.35.1` passed on one explicit public Python 3.13 base. The guest
+reported CPython 3.13, Linux x86_64, 64-bit, GIL enabled and SOABI
+`cpython-313-x86_64-linux-gnu`. Four execs and 20,391 uploaded bytes covered
+ABI probing, verified bundle/manifest activation and two independent guest
+processes with 3,392,168 ns of measured interval overlap.
+
+The same sandbox ID retained its marker/content across Memory suspend/resume.
+The driver then deleted only that owned resource and verified a subsequent
+404; the create count remained one, with no replacement. Total measured time
+including cleanup was 21.565105 seconds. This proves the recorded resource
+lookup absence, not physical-media or service-backup erasure.
+
+The caller used Azure CLI user identity, not managed identity. The case used
+one synthetic stdlib bundle, not the integrated Functions/Durable path or a
+representative native-dependency package. Restricted-identity negatives were
+not authorized/executed; private paths, Python 3.14 execution, long-running
+service limits and actual billing remain unproved. Do not repeat the primitive
+probe as a substitute for those specific production-profile gates.
+
+#### Remaining lifecycle and isolation requirements
+
+Carry the successful cases into product integration and add the remaining
+interrupted/ambiguous upload, digest mismatch, archive traversal,
 native ABI mismatch, lost invoke response, parallel invocations, worker
 reattachment, and attempts by untrusted tool code to tamper with runtime
 control records. A ready manifest is a compatibility check, not an attestation
@@ -925,6 +954,41 @@ host, not duplicated into agent YAML.
 | Native Python/host transport | Aggregate/protobuf/Base64/gRPC limits still apply; a 4 MiB client setting is not raised by Blob offload |
 | Application/model | Bound serialized state, receipts, requests/results, token context and replay memory independently; do not introduce a hidden default call-count ceiling |
 
+#### Library bounds versus native management transport
+
+Round 2 reproduced 54 offline checks: 11 Python checks, 16 against the actual
+pinned common C# library, and 27 native-probe preparation checks. Nine
+exact-size fixtures exercise UTF-8 serialization and envelope overhead.
+These are not native-host commit, failure-window or garbage-collection proof;
+the optional new native boundary case was not run.
+
+Under the explicit tested settings, the common library offloads at **greater
+than or equal to 262,144 serialized UTF-8 bytes** and rejects **greater than
+10,485,760 bytes**, before compression/upload. The installed common default
+threshold is separately 900,000 bytes. Standalone Python uses a different
+threshold-equality comparison and is not a substitute for this native path.
+
+S0's native management gRPC profile was **4,194,304 bytes**. A minimal real
+`GetEntityResponse` containing an exact-cap state serialized to **10,485,793
+bytes** offline, before additional real-world metadata. A provider's per-field
+offload cap therefore does not guarantee a hydrated full-state management
+read fits its independent client channel.
+
+The existing deployment option
+`extensions.durableTask.maxGrpcMessageSizeInBytes` is documented outside
+`storageProvider`; native b3 source maps a positive value to its client send
+and receive limits. The published support table explicitly names .NET-isolated
+and Java, so native Python support still needs owner confirmation and a tested
+profile. No value was raised or selected by this investigation. Do not add a
+parallel agent-author knob or treat zero as a qualified unlimited setting.
+
+An Entity operation can return a bounded digest/status/selected view when
+that is what the caller requires. It still materializes the full state and may
+produce another native snapshot. Client-side slicing after a full read cannot
+avoid the transport limit, and a digest/projection cannot silently replace
+required conversation history. Paging needs explicit consistency and response
+bounds. Neither projection nor tuning resolves native payload lifecycle.
+
 Measure actual serialized UTF-8 state and complete envelopes, including metadata
 and Base64 expansion where applicable. Set a qualified application state cap
 with room for admission/cancellation/deletion/error metadata. Do not adopt the
@@ -1019,6 +1083,20 @@ window. Do not parse private backend internals or apply age-only deletion that
 can remove live/replayable references. If no strategy meets the window, stop
 the release and revise the FRD with the user; do not silently substitute custom
 storage or weaken the promise.
+
+The follow-up public-API and library investigation evaluated one minimal
+candidate: application revocation/native state cleanup followed by an age-based
+Blob lifecycle rule. Executable counterexamples showed that this cannot
+distinguish live references from orphans, enumerate superseded/uncommitted
+uploads, fence native late writers, protect restore references or guarantee a
+bounded collection receipt. The candidate is rejected; no such rule is deployed.
+
+For the inspected versions, the missing platform contract must cover complete
+session-to-payload ownership, authoritative commit/reachability lifetime,
+native-writer fencing plus erasure completion, and coordinated restore/retention.
+This is a bounded finding about the inspected public surfaces, not a claim
+about every private platform capability or future release. Obtain the supported
+owner contract rather than inventing an API or guessing from Blob listings.
 
 The lifecycle gate includes **late native writers**, not just Entity updates.
 A running activity can return after revocation and cause host-managed history/
@@ -1198,11 +1276,13 @@ across durable agents. Fold control responsibilities into the registered
 orchestrator and model/tool/maintenance operations into one typed execution
 activity; keep the implementations in clear internal modules. Native b3 adds **two SDK
 registrations** unconditionally, for a **seven-function baseline** in a new
-durable-only app with built-in chat. This consolidation is a design proposal
-awaiting human confirmation, not an implemented metadata result.
-Feature metadata/routing still needs implementation qualification; the two
-SDK entries have already been observed in the native probe's metadata and
-verified against the pinned constructor source.
+durable-only app with built-in chat. This consolidation remains a design
+proposal awaiting human confirmation, not a shipped implementation.
+The real Python worker indexed a seven-definition prototype in Round 2, but
+host external configuration startup failed before readiness or
+any Durable submission. Indexing does not qualify routing, authentication,
+human input, drain behavior or client lifetime. The two SDK entries were also
+observed independently and verified against the pinned constructor source.
 
 | Registration | Trigger | Responsibility |
 | --- | --- | --- |
@@ -1245,6 +1325,8 @@ Every actual tool/model call remains individually scheduled/checkpointed.
 Separate model/tool modules and operation-specific tracing/display tags retain
 clarity; separate activity registrations were a diagnostic/versioning
 convenience, not a durability requirement.
+Native Functions Python display-tag support still needs platform clarification
+and live dashboard evidence; source wiring alone is not that support claim.
 The state registration has strict disjoint state kinds; its index does not
 own transcript content. Separate registrations would need a revised count.
 
@@ -1317,7 +1399,7 @@ the architecture gate or merging incomplete behavior.
 | **C2 - Durable HTTP core** | Adapt the spike's model/turn/session/HTTP primitives into the complete native config-to-execution slice, with a working Durable qualification fixture; based on C1 | Shared registrations, ownership/admission, foreground calls, parallel worker/MCP tools, paused input, TTL and approved lifecycle all carry their own tests/docs; no false-success deletion stub |
 | **C3 - Sandbox workspaces** | Reuse selected packaging/bootstrap/SDK transport code and tests; deliver parallel local execution, same-ID resume/loss/cleanup and current-checkout smoke adaptation; based on C2 | Optional workspace capability is complete; worker-side MCP and existing interpreter behavior stay explicit |
 | **C4 - Integrated release qualification** | Adapt the existing ACA deployed pipeline around the C2/C3 fixtures; integrate cross-layer qualification, operator runbooks and support matrix; based on C3 | Not a parking place for missing safety or tests that belong to C1-C3; required release checks cannot silently remain advisory |
-| **Q - Qualification/decision lane** | Existing nested session continues bounded A/B/C experiments, source-reuse inventory, pipeline adaptation preparation and platform-owner questions | Runs alongside FRD review and, after approval, implementation; no expanded resource permissions inferred |
+| **Q - Qualification/decision lane** | Carry forward the closed bounded A/B/C evidence, source-reuse inventory, pipeline adaptation preparation and remaining platform-owner questions | Runs alongside FRD review and, after approval, implementation; any new live experiment needs fresh scoped approval |
 
 The implementation chain is `main <- C1 <- C2 <- C3 <- C4`; D0 remains a
 separate documentation review. Each code PR targets the branch immediately
@@ -1607,6 +1689,18 @@ anonymous auth instructions, production secrets, or unsupported API promises.
   already-fixed upstream releases validated with synthetic SDK requests.
   These do not establish deployed production support, scale/failure-window
   behavior, private Sandbox paths, full erasure/restore or human-input safety.
+- **Round 2 closure:** A reproduced 14 offline checks and one source check,
+  then indexed seven Functions in the real worker; host startup remained
+  blocked before any test submission. The null-input/provider messages do not
+  identify the throwing component. An explicit five-minute `functionTimeout`
+  trial did not fix it and establishes no product default. B reproduced 54
+  offline checks, retained the lifecycle platform gap and did not execute its
+  optional native boundary case. C passed the bounded Python 3.13 synthetic
+  transport/resume/owned-cleanup case described in section 4.9.
+- **Operational closure:** Original access policy and exact-owned cleanup were
+  verified; prior S0 evidence was preserved. All live mutation receipts are
+  closed. Further live experiments require fresh scoped approval, and none of
+  these outcomes constitutes final architecture sign-off.
 
 ### Evidence and qualification references
 
@@ -1620,9 +1714,11 @@ access to local session artifacts:
 2. [Native Functions worker](https://github.com/microsoft/durabletask-python/blob/46602d5221591b6aaeff1238cd0ec952419e2e29/azure-functions-durable/azure/durable_functions/worker.py#L26-L51) and [Entity handoff](https://github.com/microsoft/durabletask-python/blob/46602d5221591b6aaeff1238cd0ec952419e2e29/azure-functions-durable/azure/durable_functions/worker.py#L120-L142).
 3. [Native Entity context](https://github.com/microsoft/durabletask-python/blob/46602d5221591b6aaeff1238cd0ec952419e2e29/durabletask/entities/entity_context.py) and [real-host Entity tests](https://github.com/microsoft/durabletask-python/blob/46602d5221591b6aaeff1238cd0ec952419e2e29/tests/azure-functions-durable/e2e/test_dtask_entities_e2e.py).
 4. [Published AzureManaged host 1.10.0](https://www.nuget.org/packages/Microsoft.Azure.WebJobs.Extensions.DurableTask.AzureManaged/1.10.0) and [payload adapter 1.10.0](https://www.nuget.org/packages/Microsoft.DurableTask.Extensions.AzureBlobPayloads.AzureManaged/1.10.0). Entity coverage was inspected in published metadata/IL; private source was not accessed.
-5. [Official large-payload guide](https://learn.microsoft.com/en-us/azure/durable-task/scheduler/durable-task-scheduler-large-payloads) and [version-pinned common payload options](https://github.com/microsoft/durabletask-dotnet/blob/0cd13b8171f01e7548d548696dc6e4aaa5130694/src/Extensions/AzureBlobPayloads/Options/LargePayloadStorageOptions.cs#L29-L117).
+5. [Official large-payload guide](https://learn.microsoft.com/en-us/azure/durable-task/scheduler/durable-task-scheduler-large-payloads), [common options at the inspected package commit](https://github.com/microsoft/durabletask-dotnet/blob/29d53ff5091ba1edeefb6b7798716a259d138ae6/src/Extensions/AzureBlobPayloads/Options/LargePayloadStorageOptions.cs), and [native common byte comparisons](https://github.com/microsoft/durabletask-dotnet/blob/29d53ff5091ba1edeefb6b7798716a259d138ae6/src/Extensions/AzureBlobPayloads/Interceptors/PayloadInterceptor.cs#L169-L190).
 6. [Durable programming guarantees](https://learn.microsoft.com/en-us/azure/durable-task/common/programming-model-overview), [Entity access](https://learn.microsoft.com/en-us/azure/durable-task/common/durable-task-entities#access-entities), and [Functions timeouts](https://learn.microsoft.com/en-us/azure/azure-functions/functions-scale#function-app-timeout-duration).
 7. [Trigger retry limitations](https://learn.microsoft.com/en-us/azure/azure-functions/functions-bindings-error-pages) and [timer retry behavior](https://learn.microsoft.com/en-us/azure/azure-functions/functions-bindings-timer#retry-behavior).
 8. [Sandbox overview](https://learn.microsoft.com/en-us/azure/container-apps/sandboxes-overview), [Python SDK reference](https://sandboxes.azure.com/docs/sandboxes/sdk-reference/python-sdk), [limits](https://sandboxes.azure.com/docs/sandboxes/limits), and [private endpoints](https://sandboxes.azure.com/docs/sandboxes/private-endpoints).
 9. [Azure encrypted reasoning guidance](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/responses#encrypted-reasoning-items) and [OpenAI 1.10.2 request serialization source](https://github.com/microsoft/agent-framework/blob/python-1.12.0/python/packages/openai/agent_framework_openai/_chat_client.py#L1530-L1675).
 10. [microsoft/agent-framework-durable-extension#59](https://github.com/microsoft/agent-framework-durable-extension/pull/59) and accepted ADR 0032 are history/compaction prior art, not a native-2-compatible replacement: the inspected prototype pins Durable <2 and does not checkpoint between individual tool calls.
+11. [Documented Durable host settings and language caveat](https://github.com/MicrosoftDocs/azure-docs/blob/0218ddd6708cbe75bdb874eac3b38528539870a0/includes/functions-host-json-durabletask.md#L154), [native host binding assignment](https://github.com/Azure/azure-functions-durable-extension/blob/15d277c7a220b8d752e47605d4208e6695cee8ca/src/WebJobs.Extensions.DurableTask/Bindings/BindingHelper.cs#L29-L57), and [b3 positive-value client limits](https://github.com/microsoft/durabletask-python/blob/46602d5221591b6aaeff1238cd0ec952419e2e29/azure-functions-durable/azure/durable_functions/client.py#L148-L182). These are source references, not a tuned-profile live pass.
+12. [Common payload-store public surface](https://github.com/microsoft/durabletask-dotnet/blob/29d53ff5091ba1edeefb6b7798716a259d138ae6/src/Extensions/AzureBlobPayloads/PayloadStore/PayloadStore.cs#L9-L33) and [native Blob upload/token handling](https://github.com/microsoft/durabletask-dotnet/blob/29d53ff5091ba1edeefb6b7798716a259d138ae6/src/Extensions/AzureBlobPayloads/PayloadStore/BlobPayloadStore.cs#L71-L196) support the bounded lifecycle-gap finding, not an application-owned reclamation API.
