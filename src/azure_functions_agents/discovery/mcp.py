@@ -19,6 +19,10 @@ type MCPTool = MCPStreamableHTTPTool
 
 _DISCOVERED_MCP_SERVERS_CACHE: dict[Path, dict[str, MCPTool]] = {}
 _DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS = 300
+# Matches the MCP SDK `sse_read_timeout` default, so the long-lived GET event
+# stream stays open.
+_MCP_HTTP_READ_TIMEOUT_SECONDS = 300.0
+_MCP_HTTP_CONNECT_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass
@@ -89,14 +93,23 @@ def _build_http_client(header_provider: Any) -> Any:
     if header_provider is None:
         return None
 
-    from httpx import AsyncClient
+    from httpx import AsyncClient, Timeout
 
     async def inject_headers(request: Any) -> None:
         headers = await asyncio.to_thread(header_provider, {})
         for key, value in headers.items():
             request.headers[key] = value
 
-    return AsyncClient(follow_redirects=True, event_hooks={"request": [inject_headers]})
+    # The MCP GET event stream is long-lived. The httpx default of 5 seconds
+    # closes it too early, so keep the read budget near the MCP SDK value.
+    return AsyncClient(
+        follow_redirects=True,
+        timeout=Timeout(
+            _MCP_HTTP_READ_TIMEOUT_SECONDS,
+            connect=_MCP_HTTP_CONNECT_TIMEOUT_SECONDS,
+        ),
+        event_hooks={"request": [inject_headers]},
+    )
 
 
 def _build_mcp_tool(name: str, server: dict[str, Any]) -> tuple[MCPTool | None, str | None]:

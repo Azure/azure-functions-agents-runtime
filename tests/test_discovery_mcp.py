@@ -598,3 +598,18 @@ def test_discover_inline_mix_in_url(
 
     assert isinstance(tool, MCPStreamableHTTPTool)
     assert tool.url == "https://example.com:8080/api"
+
+
+def test_build_http_client_sets_long_read_timeout() -> None:
+    def header_provider(_ctx: object) -> dict[str, str]:
+        return {"x-functions-key": "secret"}
+
+    client = mcp_discovery._build_http_client(header_provider)
+
+    assert client is not None
+    assert client.timeout.read == mcp_discovery._MCP_HTTP_READ_TIMEOUT_SECONDS
+    assert client.timeout.connect == mcp_discovery._MCP_HTTP_CONNECT_TIMEOUT_SECONDS
+
+
+def test_build_http_client_returns_none_without_header_provider() -> None:
+    assert mcp_discovery._build_http_client(None) is None
