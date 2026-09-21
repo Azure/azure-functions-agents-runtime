@@ -1569,7 +1569,6 @@ proposed field/default. Agent proposals remain reviewable until sign-off.
 | 16 | Turn execution | Agent in Entity / whole-loop activity / per-call orchestration | Per-turn orchestration, short Entity operations, one activity per model/tool call | Agent proposal | 2026-09-16 |
 | 17 | Tool concurrency | Default fanout / serial mutable session | Serial tools in v1; different sessions may run concurrently within quotas | Agent proposal | 2026-09-16 |
 | 18 | UI reuse | As-is / adapted optional UI / classic replacement | Adapt UX as optional API client; server history authoritative | Agent proposal | 2026-09-16 |
-| 19 | Delivery | Large blind port / reviewable vertical slices | P0-P6 with P1 and P5 hard technical/publication gates | Agent proposal | 2026-09-16 |
 | 20 | Generated-session retry address | Lookup Entity / stable scoped derivation | Stable SHA-256-derived request/session identity and accepted receipt in the session Entity | Agent proposal after review | 2026-09-16 |
 | 21 | Trusted trigger authorization | Payload ownership / implicit access / explicit operator grants | Typed binding service actor and exact owner/action grants; queue-created sessions owned by service actor | Agent proposal after review | 2026-09-16 |
 | 22 | Timer recovery boundary | Durable catch-up / normal source delivery | Normal Timer semantics before acceptance; Durable recovery after acceptance | Human | 2026-09-16 |
