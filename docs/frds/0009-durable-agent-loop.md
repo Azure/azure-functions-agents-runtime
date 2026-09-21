@@ -47,17 +47,18 @@ immortal workers/sandboxes.
 | Gate | Current evidence | Required resolution |
 | --- | --- | --- |
 | Native payload lifecycle | Large-state offload worked; native blobs survived Entity deletion/purge. The inspected public surfaces and executable counterexamples do not establish complete reclamation; age-only cleanup is rejected | **Blocking design/release decision:** a supported ownership/reference-lifecycle, native writer-fencing/erasure-completion and coordinated-restore contract, or an explicit revision of the proposed guarantee |
-| Shared runtime and human input | The real Python worker indexed exactly seven Functions, but host external configuration startup failed before readiness or any Durable submission | Identify the throwing startup component, then qualify routing/auth, client lifetime, per-call checkpoints, parallel execution and same-run answer/cancel/expiry recovery |
+| Shared runtime and human input | Seven Functions indexed. The Windows harness's long-path file-version lookup failure is now reproduced and repaired offline without SDK/product changes | Under fresh approval, validate the complete repaired host and then routing/auth, client lifetime, per-call checkpoints, parallel execution and same-run answer/cancel/expiry recovery |
 | Sandbox workspaces | A bounded live Python 3.13/Linux synthetic bundle passed activation, overlapping guest execution, same-ID suspend/resume and owned-resource deletion/404 | Qualify integrated Durable dispatch, managed identity/private paths, restricted-identity negatives, Python 3.14 execution, production dependencies and broader service limits |
 | Production profiles and limits | S0 native-offload and offline MAF results remain valid; B added 54 offline checks. Its optional native cap/read-transport case was not run | Qualify advertised deployed profiles and independent state/message bounds. Source-wired host tuning is not a tested native-Python mitigation or support commitment |
 | Final architecture and delivery approval | Separate FRD review and explicit spike/E2E reuse are requested; implementation slices are proposed in section 4.14 | Resolve the remaining decisions, review the current contracts and record human sign-off before status Finalized or product implementation |
 
 UI/SSE and non-HTTP research are outside the core release dependency chain.
-Round 2 is closed: runtime qualification is startup-blocked, payload lifecycle
-has a platform-contract gap, and the narrow Sandbox transport has a live pass.
-All mutation receipts are consumed/closed. Successful primitive evidence is
-not overall production qualification, a reusable access grant or a compliance
-certification.
+Round 2 closed with startup-blocked runtime qualification, a payload lifecycle
+platform-contract gap and a narrow Sandbox transport live pass. A subsequent
+local investigation reproduced and repaired the failing startup stage offline;
+full-host/live validation remains pending. Receipts from the closed rounds
+cannot authorize that follow-up. Primitive evidence is not overall production
+qualification, a reusable access grant or a compliance certification.
 
 ## 2. Motivation / problem
 
@@ -1279,10 +1280,13 @@ registrations** unconditionally, for a **seven-function baseline** in a new
 durable-only app with built-in chat. This consolidation remains a design
 proposal awaiting human confirmation, not a shipped implementation.
 The real Python worker indexed a seven-definition prototype in Round 2, but
-host external configuration startup failed before readiness or
-any Durable submission. Indexing does not qualify routing, authentication,
-human input, drain behavior or client lifetime. The two SDK entries were also
-observed independently and verified against the pinned constructor source.
+host external configuration startup failed before readiness or any Durable
+submission. The failure was subsequently reproduced as a Windows harness
+bundle-path/file-version lookup problem and repaired offline, not by changing
+the seven definitions or SDK binaries. Indexing and that local repair do not
+qualify routing, authentication, human input, drain behavior or client lifetime.
+The two SDK entries were also observed independently and verified against the
+pinned constructor source.
 
 | Registration | Trigger | Responsibility |
 | --- | --- | --- |
@@ -1641,7 +1645,7 @@ for qualification.
 | UI | Auth, escaped untrusted content/CSP, server history, lost acknowledgement, explicit cancel/delete, reconnect/draft replacement, no secret browser persistence |
 | Compatibility | Ordinary behavior preserved when off; legacy interpreter allowed without a group, conflict with a group, isolated pool IDs; maintenance-only registration; refuse removal with retained state |
 | Reuse parity | Each selected spike primitive/helper has a source-to-target record and relevant ported tests; explicitly replace assertions coupled to legacy Durable, Table sessions, serial tools or demo ownership |
-| Qualification pipeline | Reused fixture/wheel assembly and exported dependencies; Python 3.13/3.14 Linux matrix; provenance mismatch stops later suites; async Entity/DTS-specific assertions; credential/trust boundaries; exact-owned cleanup; advisory/skipped results cannot satisfy required release checks |
+| Qualification pipeline | Reused fixture/wheel assembly and exported dependencies; Python 3.13/3.14 Linux matrix; Windows harness bundle-version metadata guard and rejection of offline-only subsets for live launch; provenance mismatch stops later suites; async Entity/DTS-specific assertions; credential/trust boundaries; exact-owned cleanup; advisory/skipped results cannot satisfy required release checks |
 
 The native probe must initially exclude MAF so storage/Entity correctness can
 be isolated. Then run the integrated model/tool/session recovery suite. Do not
@@ -1712,16 +1716,34 @@ anonymous auth instructions, production secrets, or unsupported API promises.
   behavior, private Sandbox paths, full erasure/restore or human-input safety.
 - **Round 2 closure:** A reproduced 14 offline checks and one source check,
   then indexed seven Functions in the real worker; host startup remained
-  blocked before any test submission. The null-input/provider messages do not
-  identify the throwing component. An explicit five-minute `functionTimeout`
-  trial did not fix it and establishes no product default. B reproduced 54
-  offline checks, retained the lifecycle platform gap and did not execute its
+  blocked before any test submission. At closure, the null-input/provider
+  messages did not identify the throwing component. An explicit five-minute
+  `functionTimeout` trial did not fix it and establishes no product default.
+  B reproduced 54 offline checks, retained the lifecycle platform gap and did not execute its
   optional native boundary case. C passed the bounded Python 3.13 synthetic
   transport/resume/owned-cleanup case described in section 4.9.
+- **Subsequent startup repair: source/offline proof, not a live pass.** On the
+  observed Windows stack, `FileVersionInfo.GetVersionInfo(...).FileVersion`
+  returned null for the harness's 263-character Durable DLL path despite
+  byte-identical contents. The pinned host's
+  `ScriptStartupTypeLocator.ValidateExtensionRequirements` passed that null
+  into `Version.Parse`, reproducing the exact `input` exception through the
+  actual installed `UseExternalConfigurationStartup` dispatcher. The same DLL
+  bytes at a 175-character path returned version `3.14.0` and passed the same
+  offline dispatcher. This is an observed path/API failure, not a universal
+  filesystem-length rule or evidence that native b3 is unsupported.
+  The harness repair uses a short bundle location and checks actual parseable
+  file-version metadata before launch; it does not bypass minimum-version
+  validation or change product/SDK/host binaries. Existing behavior and metadata
+  checks remain intact. The offline subset is deliberately not a complete live
+  bundle. Provider services, authentication, leases, HTTP readiness and live
+  Durable behavior still require a freshly authorized complete-bundle run.
+  The secondary null-`provider` error has not been independently diagnosed.
 - **Operational closure:** Original access policy and exact-owned cleanup were
-  verified; prior S0 evidence was preserved. All live mutation receipts are
-  closed. Further live experiments require fresh scoped approval, and none of
-  these outcomes constitutes final architecture sign-off.
+  verified; prior S0 evidence was preserved. Mutation receipts for S0 and
+  Round 2 are closed and are not reusable for the repair follow-up. Further
+  live experiments require fresh scoped approval, and none of these outcomes
+  constitutes final architecture sign-off.
 
 ### Evidence and qualification references
 
@@ -1743,3 +1765,4 @@ access to local session artifacts:
 10. [microsoft/agent-framework-durable-extension#59](https://github.com/microsoft/agent-framework-durable-extension/pull/59) and accepted ADR 0032 are history/compaction prior art, not a native-2-compatible replacement: the inspected prototype pins Durable <2 and does not checkpoint between individual tool calls.
 11. [Documented Durable host settings and language caveat](https://github.com/MicrosoftDocs/azure-docs/blob/0218ddd6708cbe75bdb874eac3b38528539870a0/includes/functions-host-json-durabletask.md#L154), [native host binding assignment](https://github.com/Azure/azure-functions-durable-extension/blob/15d277c7a220b8d752e47605d4208e6695cee8ca/src/WebJobs.Extensions.DurableTask/Bindings/BindingHelper.cs#L29-L57), and [b3 positive-value client limits](https://github.com/microsoft/durabletask-python/blob/46602d5221591b6aaeff1238cd0ec952419e2e29/azure-functions-durable/azure/durable_functions/client.py#L148-L182). These are source references, not a tuned-profile live pass.
 12. [Common payload-store public surface](https://github.com/microsoft/durabletask-dotnet/blob/29d53ff5091ba1edeefb6b7798716a259d138ae6/src/Extensions/AzureBlobPayloads/PayloadStore/PayloadStore.cs#L9-L33) and [native Blob upload/token handling](https://github.com/microsoft/durabletask-dotnet/blob/29d53ff5091ba1edeefb6b7798716a259d138ae6/src/Extensions/AzureBlobPayloads/PayloadStore/BlobPayloadStore.cs#L71-L196) support the bounded lifecycle-gap finding, not an application-owned reclamation API.
+13. [Pinned host file-version validation](https://github.com/Azure/azure-functions-host/blob/44f991fe48d881fd0649e4c9c2e784fea28b9939/src/WebJobs.Script/DependencyInjection/ScriptStartupTypeLocator.cs#L336-L357) and [embedded extension requirements](https://github.com/Azure/azure-functions-host/blob/44f991fe48d881fd0649e4c9c2e784fea28b9939/src/WebJobs.Script/extensionrequirements.json) locate the reproduced Windows harness startup failure; the subsequent offline repair does not establish full-host readiness.
