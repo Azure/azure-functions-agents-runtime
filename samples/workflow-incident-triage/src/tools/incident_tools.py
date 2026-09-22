@@ -9,8 +9,10 @@ and no plain public normal tool is exported from this module.
 Design notes:
 
 - Each handler takes a single ``args`` dict and returns a
-  JSON-serializable dict. These sample handlers are synchronous;
-  ``async def`` handlers are also supported.
+  JSON-serializable dict. ``fetch_deploys`` is an ``async def`` handler
+  that awaits a simulated deploy-history API call; the other handlers
+  are synchronous. The workflow Activity awaits async handlers and runs
+  synchronous handlers in a worker thread.
 - Outputs are deterministic functions of their inputs so workflow
   replays produce stable results and so the demo narrative is
   reproducible. (Durable journals activity output, so this isn't a
@@ -49,6 +51,7 @@ Collection (data-driven) tools — Issue #1276:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from typing import Any, Dict, List
 
@@ -146,9 +149,12 @@ def fetch_metrics(args: Dict[str, Any]) -> Dict[str, Any]:
         "deploys: [{id, actor, summary, minutes_ago}]}."
     )
 )
-def fetch_deploys(args: Dict[str, Any]) -> Dict[str, Any]:
+async def fetch_deploys(args: Dict[str, Any]) -> Dict[str, Any]:
     service = _require_service(args, "fetch_deploys")
     lookback_hours = int(args.get("lookback_hours") or 24)
+
+    # Stands in for an async deploy-history API call (for example, with aiohttp).
+    await asyncio.sleep(0.1)
 
     seed = f"{service}:{lookback_hours}:deploys"
     base_age = _seeded_int(seed + ":age", 8, 90)
