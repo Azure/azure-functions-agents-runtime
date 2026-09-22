@@ -407,13 +407,13 @@ durable:
 | Method/path under `/agents/{slug}` | Contract |
 | --- | --- |
 | `POST /chat` or authored HTTP entry | Durable acceptance, not synchronous answer |
-| `GET /runs/{run_id}` | Bounded status/result/pending question |
-| `POST /runs/{run_id}/cancel` | Idempotent cooperative cancel |
-| `POST /runs/{run_id}/input/{question_id}` | Authenticated idempotent answer to the stored question |
-| `GET /sessions` | Owner-scoped paginated discovery |
-| `GET /sessions/{session_id}/history` | Authorized conversation, not raw Durable history |
-| `DELETE /sessions/{session_id}` | Start deletion or return its existing receipt/progress; §4.12 |
-| Optional `GET /runs/{run_id}/events` | Run-scoped SSE observations |
+| `GET /manage/runs/{run_id}` | Bounded status/result/pending question |
+| `POST /manage/runs/{run_id}/cancel` | Idempotent cooperative cancel |
+| `POST /manage/runs/{run_id}/input/{question_id}` | Authenticated idempotent answer to the stored question |
+| `GET /manage/sessions` | Owner-scoped paginated discovery |
+| `GET /manage/sessions/{session_id}/history` | Authorized conversation, not raw Durable history |
+| `DELETE /manage/sessions/{session_id}` | Start deletion or return its existing receipt/progress; §4.12 |
+| Optional `GET /manage/runs/{run_id}/events` | Run-scoped SSE observations |
 
 - Return `session_id` and `x-ms-session-id`; relative runtime-owned status links.
 - No accidental direct-run `chatstream`/inbound MCP registration for durable agents.
@@ -433,9 +433,10 @@ durable:
 - SDK helpers are outbound machinery, not inbound APIs or model background polling.
 - Shared registration does not merge checkpoints, serialize activities or let
   model arguments select maintenance operations.
-- Two HTTP patterns: `agents/{slug}/chat`, `agents/{slug}/{*path}`.
-  Recommend separate handlers so admission can drain independently; management
-  rejects submission paths. Single-router alternative requires route-level gating.
+- Two non-overlapping HTTP patterns: `agents/{slug}/chat` and
+  `agents/{slug}/manage/{*path}`; admission drains independently.
+- Never rely on literal-over-wildcard route priority. The Linux fixture exposed
+  wildcard shadowing; management rejects submission paths.
 - One/many durable agents: 7; UI/SSE/group: +0; custom ingress: +C;
   custom-only: 6+C. Existing workflow engine: separate 3; SDK helpers counted once.
 - Total `F = O + 2I + 3W + D(4+B) + C`: ordinary O; native app I;
@@ -565,6 +566,7 @@ durable:
 | 60 | V1 timeouts | Authored / platform-only | No user timeouts or ordinary fallback; shared platform ceiling only if necessary; supersedes 36 | Human; Agent validation detail | 2026-09-21 |
 | 61 | Request identity | Ambiguous / explicit | Validated client key; deterministic scoped session/request IDs; §4.3 | Human; Agent validation detail | 2026-09-21 |
 | 62 | Deletion progress | New endpoint / repeat DELETE | Original owner repeats DELETE for same receipt and pending/completed/failed status | Human; Agent HTTP detail | 2026-09-21 |
+| 63 | HTTP route isolation | Shared dispatcher / separate namespaces | Two HTTP handlers; management under `/agents/{slug}/manage/...`; seven registrations retained | Human | 2026-09-21 |
 
 ## 6. Test plan
 
@@ -586,7 +588,7 @@ durable:
 | Sandbox | Digest/ABI/archive validation; structured args; guest-control tampering; interrupted setup; same-ID resume; permanent loss; actual owned cleanup |
 | State/transport | Low-compressibility >1 MiB; threshold/cap/envelope bounds; cold hydration; storage failures; management-read limit separately |
 | Lifecycle | Idle/wait expiry; stale timers; no read/retry renewal; active protection; revocation; late work; retained retry authority; repeated-DELETE identity, owner checks and pending/completed/failed outcomes |
-| Registration/API | Exact once-only inventory; auth/methods/routes; wildcard/encoded paths; client/generator lifetime; independent drain; optional UI/SSE |
+| Registration/API | Exact once-only inventory; auth/methods/routes; chat cannot be shadowed by management; encoded paths; client/generator lifetime; independent drain; optional UI/SSE |
 | Reuse/CI | Source-to-target regressions; fixture/wheel provenance; matrix/trust boundaries; required versus advisory results |
 
 ## 7. Docs impact
@@ -607,7 +609,8 @@ durable:
 
 - **In review**; public PR #226 targets `feature/durable-agent-loop`.
 - Architecture **not finalized**; human sign-off outstanding.
-- Full native runtime qualification **pending**; primitive/offline evidence is narrower.
+- **Linux normal path passed:** scripted model/tool checkpoints, parallel tools,
+  Entity-backed human pause and same-execution completion. Broader qualification remains open.
 - Further experiments have separate consent; none authorized by this edit.
 - Mark Implemented only after qualified feature promotion to `main`.
 
@@ -618,13 +621,16 @@ durable:
 | S0; [native b3][native], [payload library][payload] | Native >1 MiB state/IO/query hydration and cold restore passed on local host/live DTS | Deployed profiles, failure/scale limits, MI/private networking |
 | MAF [microsoft/agent-framework#7233][maf-fix], [microsoft/agent-framework#7536][maf-foundry] | Old defects reproduced; compatible wire state preserved offline | Supported live provider/options and integrated recovery |
 | Sandbox SDK `0.1.0b4`, `azure-core==1.35.1` | Narrow Python 3.13/Linux bundle, overlapping guest calls, same-ID resume, owned deletion passed | Integrated Durable path, MI/private/restricted identity, Python 3.14/native dependencies |
-| Native runtime; [Entity API][entity], [registrations][registrations] | Native handoff API available; seven definitions indexed | Full native HTTP/parallel/human-input runtime qualification pending. |
+| Linux normal-path fixture; [native b3][native], [registrations][registrations] | Seven bindings; five separate scripted activity completions; 1.997s tool overlap; Entity-backed human pause/resume in one public execution ID; app-MI/DTS connectivity | Admission/crash/retry, cancel/expiry, production Entra auth, real models and broader profiles |
+| Native admission; [Entity API][entity] | State/reply/start API available; public execution ID observed on the Linux stack | Same-job handoff recovery and provider failure guarantees |
 | [Common byte bounds][payload], [b3 client][native-client] | Offline library/envelope checks | Native management-read profile, host-setting support |
 
 - S0 pins: Python `3.13.15`; `azure-functions-durable==2.0.0b3`;
   `durabletask==1.10.0`; Core Tools `4.13.0`; host `4.1051.300.26316`;
   bundle `4.38.1`; Durable extension `3.14.0`; AzureManaged host/backend/adapter
   `1.10.0`; common payload library `1.24.2`.
+- Linux normal-path pins: Python `3.13.14`, `azure-functions==2.3.0`,
+  `azure-functions-durable==2.0.0b3`, `durabletask==1.10.0`; scripted calls only.
 
 [native]: https://github.com/microsoft/durabletask-python/blob/46602d5221591b6aaeff1238cd0ec952419e2e29/azure-functions-durable/pyproject.toml
 [entity]: https://github.com/microsoft/durabletask-python/blob/46602d5221591b6aaeff1238cd0ec952419e2e29/durabletask/entities/entity_context.py#L131-L164
