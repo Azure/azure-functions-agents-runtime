@@ -4,3 +4,11 @@
 # some tooling chokes on.
 host*.json   text eol=lf
 local.settings*.json* text eol=lf
+
+# Vendored third-party runtime. Keep it exactly as published so it can be
+# compared against the upstream file.
+src/azure_functions_agents/public/assets/rive.js -text
+
+# Binary chat UI assets. Git must not change their bytes.
+src/azure_functions_agents/public/assets/*.riv binary
+src/azure_functions_agents/public/assets/*.png binary

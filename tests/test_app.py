@@ -337,6 +337,7 @@ def test_create_function_app_allows_endpoint_agent_without_trigger(
 
     assert _function_names(functions) == [
         "agent_main_builtin_chat_page",
+        "agent_main_builtin_chat_assets",
         "agent_main_builtin_chat",
         "agent_main_builtin_chatstream",
         "agent_main_builtin_history",
@@ -344,6 +345,7 @@ def test_create_function_app_allows_endpoint_agent_without_trigger(
     ]
     assert _http_routes(functions) == [
         "agents/main/",
+        "agents/main/assets/{filename}",
         "agents/main/chat",
         "agents/main/chatstream",
         "agents/main/history",
@@ -492,6 +494,7 @@ def test_create_function_app_regression_pre_existing_multi_agent_fixture_unaffec
 
     assert _function_names(functions) == [
         "agent_main_builtin_chat_page",
+        "agent_main_builtin_chat_assets",
         "agent_main_builtin_chat",
         "agent_main_builtin_chatstream",
         "agent_main_builtin_history",
@@ -501,6 +504,7 @@ def test_create_function_app_regression_pre_existing_multi_agent_fixture_unaffec
     ]
     assert _http_routes(functions) == [
         "agents/main/",
+        "agents/main/assets/{filename}",
         "agents/main/chat",
         "agents/main/chatstream",
         "agents/main/history",

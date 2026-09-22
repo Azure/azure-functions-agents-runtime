@@ -71,7 +71,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/registration/_handlers.py` | Builds the callable closures that turn incoming trigger data or HTTP bodies into runner prompts, threading the `AgentCatalog` through to the runner and combining tool-error heuristics with explicit delegate-error accounting; delegates non-HTTP binding payloads to the trigger serializer. `make_http_agent_handler()` applies the shared `_auth` Entra guard to the request before any processing when the trigger's `auth` policy is `entra`. | `make_agent_handler()`, `make_http_agent_handler()`, `build_sandbox_tools_for_session()`, `_total_tool_error_count()` |
 | `azure_functions_agents/registration/_trigger_serialization.py` | Uses native data contracts and public Azure Functions binding adapters to produce JSON-safe non-HTTP trigger payloads. | `serialize_trigger_data()`, `TriggerBindingSerializer` |
 | `azure_functions_agents/registration/triggers.py` | Registers each agent trigger, dispatching between the runtime HTTP adapter and Azure Functions trigger decorators. Resolves an `http_trigger`'s inbound auth (nested `auth`, deprecated flat `auth_level`) into the shared `EndpointAuthConfig` and applies the `_auth` route `AuthLevel`. | `register_agent()` |
-| `azure_functions_agents/registration/endpoints.py` | Registers debug chat UI, REST chat, SSE streaming, and MCP tools for agents with built-in endpoints. | `register_builtin_endpoints()` |
+| `azure_functions_agents/registration/endpoints.py` | Registers debug chat UI, its static assets (`agents/{slug}/assets/{filename}`, allowlisted by suffix and name), REST chat, SSE streaming, and MCP tools for agents with built-in endpoints. | `register_builtin_endpoints()` |
 | `azure_functions_agents/registration/_auth.py` | Enforces inbound endpoint auth: maps the configured `auth.mode` to a Functions `AuthLevel` (API key / anonymous) and enforces Entra ID identity by trusting the platform-validated Easy Auth `x-ms-client-principal` header (never validating tokens in-app), with optional tenant/audience/client-id allowlists. Because `entra` routes are anonymous, the header is trusted only with non-spoofable evidence Easy Auth is enforced (`WEBSITE_AUTH_ENABLED` / `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH`); fails closed (401) otherwise. | `resolve_endpoint_auth_level()`, `authorize_entra_request()` |
 | `azure_functions_agents/system_tools/sandbox.py` | Builds the ACA Dynamic Sessions-backed `execute_python` tool for a resolved agent/session, using a fresh GUID when no explicit session id is provided. | `create_sandbox_tools()` |
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
@@ -338,6 +338,30 @@ path, the scheduler discards recorded wave outcomes and restores the wave.
 - **HTTP agent:** `registration/triggers.py` routes `http_trigger` to `make_http_agent_handler()`, which enforces the trigger's inbound `auth` policy (via the shared `_auth` module, identical to built-in endpoints — the route `AuthLevel` for key/anonymous modes and the in-app Easy Auth `x-ms-client-principal` check for `entra`), validates JSON input, and optionally validates the model's JSON-shaped response before replying. The registered function name is the agent's identity slug, already guaranteed unique at stage 6 — a colliding sanitized stem is a startup error, not an auto-suffixed name.
 - **Built-in trigger:** `registration/triggers.py` calls `make_agent_handler()`, which uses the native-contract-first, adapter-based trigger serializer (`registration/_trigger_serialization.py`) to turn public binding data into JSON before sending the prompt to `runner.run_agent()`.
 - **Connector trigger:** `connector_trigger` uses the Azure Functions Python `app.connector_trigger(...)` decorator when available, falling back to the equivalent generic `connectorTrigger` binding on older Azure Functions packages. It then reuses the same `make_agent_handler()` closure pattern as the built-in trigger path.
+
+### Built-in chat UI assets
+
+`debug_chat_ui` serves `src/azure_functions_agents/public/index.html` at
+`agents/{slug}/` and everything in `src/azure_functions_agents/public/assets/`
+at `agents/{slug}/assets/{filename}`. The asset route is anonymous and
+read-only: it accepts only a bare file name with a known suffix (`.js`, `.png`,
+`.riv`, `.svg`) that resolves inside the assets directory, so it cannot reach
+package source.
+
+The animated assistant avatar (FRD 0009) lives entirely in that folder and keeps
+two layers apart:
+
+- `assets/assistant-avatar.js` owns the generic `AssistantVisualState`
+  (`idle`, `reacting`, `working`, `success`, `error`), the priority order, and
+  the debounced draft-reaction plumbing. It names no character and no animation.
+- `assets/yoho-renderer.js` is the default renderer. It alone knows the Rive
+  file, its state-machine inputs, and the CSS classes of the static fallback.
+  It loads `assets/yoho.riv`, selects the `Yoho` artboard and the `YohoState`
+  state machine, and uses `assets/yoho.png` if that file cannot load.
+
+The chat page reports lifecycle facts only (`onRequestStarted`,
+`onRequestCompleted`, `onRequestFailed`, `onDraftChanged`). A renderer that
+fails to load never affects chat.
 
 ### Where MCP, sandbox, and web_request tools enter
 

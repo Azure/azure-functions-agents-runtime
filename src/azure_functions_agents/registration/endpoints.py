@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -87,8 +88,48 @@ def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
     return f"mcp-{digest}"
 
 
+def _public_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "public"
+
+
 def _index_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "public" / "index.html"
+    return _public_dir() / "index.html"
+
+
+def _assets_dir() -> Path:
+    return _public_dir() / "assets"
+
+
+# Static files the chat page may request. The suffix decides the media type, so
+# an unknown suffix is simply not servable.
+_ASSET_MEDIA_TYPES = {
+    ".js": "text/javascript; charset=utf-8",
+    ".png": "image/png",
+    ".riv": "application/octet-stream",
+    ".svg": "image/svg+xml",
+}
+
+_ASSET_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _resolve_asset_path(name: str) -> Path | None:
+    """Map a requested asset name to a file inside ``public/assets``.
+
+    Returns ``None`` when the name is malformed, points outside the assets
+    directory, has an unsupported suffix, or does not exist.
+    """
+    if not _ASSET_NAME_PATTERN.match(name) or ".." in name:
+        return None
+
+    if Path(name).suffix.lower() not in _ASSET_MEDIA_TYPES:
+        return None
+
+    assets_dir = _assets_dir()
+    candidate = (assets_dir / name).resolve()
+    if candidate.parent != assets_dir.resolve() or not candidate.is_file():
+        return None
+
+    return candidate
 
 
 def _resolve_builtin_endpoints_session_id(session_id: str | None) -> str:
@@ -277,6 +318,34 @@ def _register_chat_page(
         methods=["GET"],
         auth_level=func.AuthLevel.ANONYMOUS,
     )(agent_chat_page)
+    app.function_name(name=function_name)(decorated)
+
+
+def _register_chat_assets(
+    app: func.FunctionApp,
+    function_name: str,
+    route: str,
+) -> None:
+    """Serve the static files the built-in chat page loads (avatar, runtime)."""
+
+    def agent_chat_asset(req: Request) -> Response:
+        name = req.url.path.rsplit("/", 1)[-1]
+        asset_path = _resolve_asset_path(name)
+        if asset_path is None:
+            return Response("Asset not found", status_code=404)
+
+        return Response(
+            asset_path.read_bytes(),
+            status_code=200,
+            media_type=_ASSET_MEDIA_TYPES[asset_path.suffix.lower()],
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+
+    decorated = app.route(
+        route=route,
+        methods=["GET"],
+        auth_level=func.AuthLevel.ANONYMOUS,
+    )(agent_chat_asset)
     app.function_name(name=function_name)(decorated)
 
 
@@ -761,6 +830,11 @@ def register_builtin_endpoints(
             resolved,
             function_name=f"{base_function_name}_chat_page",
             route=route,
+        )
+        _register_chat_assets(
+            app,
+            function_name=f"{base_function_name}_chat_assets",
+            route=f"agents/{slug}/assets/{{filename}}",
         )
 
     if builtin_endpoints.chat_api:

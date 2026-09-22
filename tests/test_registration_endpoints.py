@@ -239,6 +239,75 @@ def test_register_builtin_endpoints_serves_agent_aware_debug_chat_ui(
     assert 'return "/agents/main"' in html
 
 
+def _asset_request(path: str) -> SimpleNamespace:
+    return SimpleNamespace(url=SimpleNamespace(path=path), path_params={})
+
+
+@pytest.mark.parametrize(
+    ("filename", "media_type", "signature"),
+    [
+        ("assistant-avatar.js", "text/javascript; charset=utf-8", b""),
+        ("yoho.riv", "application/octet-stream", b"RIVE"),
+    ],
+)
+def test_register_builtin_endpoints_serves_chat_assets(
+    tmp_path: Path, filename: str, media_type: str, signature: bytes
+) -> None:
+    app = FakeFunctionApp()
+    source_file = tmp_path / "main.agent.md"
+    source_file.write_text("---\nname: Main\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Main",
+        is_main=True,
+        builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
+        source_file=source_file,
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
+
+    assets_route = app.routes[1]
+    assert assets_route["route"] == "agents/main/assets/{filename}"
+    assert assets_route["methods"] == ["GET"]
+    assert assets_route["auth_level"] == func.AuthLevel.ANONYMOUS
+
+    response = assets_route["handler"](_asset_request(f"/agents/main/assets/{filename}"))
+
+    assert response.status_code == 200
+    assert response.media_type == media_type
+    assert response.body
+    assert bytes(response.body).startswith(signature)
+
+
+@pytest.mark.parametrize(
+    "requested",
+    [
+        "missing.js",
+        "..%2Fendpoints.py",
+        "../endpoints.py",
+        "index.html",
+        "",
+    ],
+)
+def test_register_builtin_endpoints_rejects_unservable_assets(
+    tmp_path: Path, requested: str
+) -> None:
+    app = FakeFunctionApp()
+    source_file = tmp_path / "main.agent.md"
+    source_file.write_text("---\nname: Main\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Main",
+        is_main=True,
+        builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
+        source_file=source_file,
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
+
+    response = app.routes[1]["handler"](_asset_request(f"/agents/main/assets/{requested}"))
+
+    assert response.status_code == 404
+
+
 def test_register_builtin_endpoints_uses_filename_slug_for_duplicate_display_names(
     tmp_path: Path,
 ) -> None:
@@ -271,10 +340,12 @@ def test_register_builtin_endpoints_uses_filename_slug_for_duplicate_display_nam
 
     assert [route["route"] for route in app.routes] == [
         "agents/daily_report_a/",
+        "agents/daily_report_a/assets/{filename}",
         "agents/daily_report_a/chat",
         "agents/daily_report_a/chatstream",
         "agents/daily_report_a/history",
         "agents/daily_report_b/",
+        "agents/daily_report_b/assets/{filename}",
         "agents/daily_report_b/chat",
         "agents/daily_report_b/chatstream",
         "agents/daily_report_b/history",
@@ -405,6 +476,7 @@ def test_register_builtin_endpoints_chat_also_registers_http_routes_for_non_main
 
     assert [route["route"] for route in app.routes] == [
         "agents/secondary_agent/",
+        "agents/secondary_agent/assets/{filename}",
         "agents/secondary_agent/chat",
         "agents/secondary_agent/chatstream",
         "agents/secondary_agent/history",
@@ -428,6 +500,7 @@ def test_register_builtin_endpoints_chat_and_http_do_not_double_register_routes(
 
     assert [route["route"] for route in app.routes] == [
         "agents/secondary_agent/",
+        "agents/secondary_agent/assets/{filename}",
         "agents/secondary_agent/chat",
         "agents/secondary_agent/chatstream",
         "agents/secondary_agent/history",
@@ -451,12 +524,14 @@ def test_register_builtin_endpoints_main_agent_uses_regular_agent_routes(
 
     assert [route["route"] for route in app.routes] == [
         "agents/main/",
+        "agents/main/assets/{filename}",
         "agents/main/chat",
         "agents/main/chatstream",
         "agents/main/history",
     ]
     assert [route["function_name"] for route in app.routes] == [
         "agent_main_builtin_chat_page",
+        "agent_main_builtin_chat_assets",
         "agent_main_builtin_chat",
         "agent_main_builtin_chatstream",
         "agent_main_builtin_history",

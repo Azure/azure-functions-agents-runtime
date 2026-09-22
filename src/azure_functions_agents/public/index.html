@@ -425,8 +425,73 @@
 			background: #fff;
 			padding: 10px;
 			display: grid;
-			grid-template-columns: 1fr auto;
+			grid-template-columns: auto 1fr auto;
 			gap: 8px;
+		}
+
+		.assistant-avatar {
+			width: 56px;
+			height: 56px;
+			align-self: end;
+			position: relative;
+			flex: 0 0 auto;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			/* A renderer may zoom its own content. Keep it inside the box. */
+			overflow: hidden;
+			border-radius: 10px;
+			animation: avatar-breathe 4s ease-in-out infinite;
+		}
+
+		.assistant-avatar[hidden] { display: none; }
+
+		.assistant-avatar-image,
+		.assistant-avatar-canvas {
+			width: 100%;
+			height: 100%;
+			object-fit: contain;
+			display: block;
+		}
+
+		.assistant-avatar.is-working { animation: avatar-work 0.9s ease-in-out infinite; }
+		.assistant-avatar.is-success { animation: avatar-success 0.6s ease-out 2; }
+		.assistant-avatar.is-error { animation: avatar-error 0.45s ease-in-out 3; }
+		.assistant-avatar.expr-positive { filter: saturate(1.25) brightness(1.06); }
+		.assistant-avatar.expr-concerned { filter: saturate(0.85); }
+		.assistant-avatar.expr-annoyed { filter: saturate(0.7) brightness(0.94); }
+
+		/* Rive controls its own motion and colors. */
+		.assistant-avatar.has-rive { animation: none; filter: none; }
+		.assistant-avatar.is-reduced-motion { animation: none; }
+
+		@keyframes avatar-breathe {
+			0%, 100% { transform: translateY(0) scale(1); }
+			50% { transform: translateY(-3px) scale(1.02); }
+		}
+
+		@keyframes avatar-work {
+			0%, 100% { transform: translateY(0) rotate(-3deg); }
+			50% { transform: translateY(-5px) rotate(3deg); }
+		}
+
+		@keyframes avatar-success {
+			0% { transform: scale(1); }
+			45% { transform: scale(1.16) translateY(-4px); }
+			100% { transform: scale(1); }
+		}
+
+		@keyframes avatar-error {
+			0%, 100% { transform: translateX(0); }
+			25% { transform: translateX(-4px) rotate(-4deg); }
+			75% { transform: translateX(4px) rotate(4deg); }
+		}
+
+		@media (prefers-reduced-motion: reduce) {
+			.assistant-avatar,
+			.assistant-avatar.is-working,
+			.assistant-avatar.is-success,
+			.assistant-avatar.is-error { animation: none; }
 		}
 
 		textarea {
@@ -714,6 +779,7 @@
 		<section id="chat" class="chat" aria-live="polite"></section>
 
 		<form id="composer" class="composer">
+			<div id="assistantAvatar" class="assistant-avatar"></div>
 			<textarea id="promptInput" placeholder="Type your message..." required></textarea>
 			<button id="sendBtn" class="send-btn" type="submit">Send</button>
 		</form>
@@ -791,6 +857,7 @@
 		const sessionBarEl = document.getElementById("sessionBar");
 		const sessionIdValueEl = document.getElementById("sessionIdValue");
 		const copySessionBtnEl = document.getElementById("copySessionBtn");
+		const assistantAvatarEl = document.getElementById("assistantAvatar");
 
 		const settingsBackdropEl = document.getElementById("settingsBackdrop");
 		const baseUrlInputEl = document.getElementById("baseUrlInput");
@@ -2815,9 +2882,39 @@
 			};
 		}
 
+		// --- Assistant avatar -------------------------------------------------
+		// The chat lifecycle only reports what happened. The avatar modules
+		// decide the visual state, and the renderer decides how it looks.
+		let assistantAvatar = null;
+
+		function signalAssistant(name) {
+			try {
+				assistantAvatar?.[name]?.();
+			} catch (_error) {
+				// A broken avatar must never break chat.
+			}
+		}
+
+		(async () => {
+			const assetsBase = `${getApiBasePath()}/assets`;
+			try {
+				const [avatarModule, rendererModule] = await Promise.all([
+					import(`${assetsBase}/assistant-avatar.js`),
+					import(`${assetsBase}/yoho-renderer.js`)
+				]);
+				assistantAvatar = await avatarModule.mountAssistantAvatar({
+					mount: assistantAvatarEl,
+					assetsBase,
+					createRenderer: rendererModule.createDefaultYohoRenderer
+				});
+			} catch (_error) {
+				assistantAvatar = null;
+				assistantAvatarEl.hidden = true;
+			}
+		})();
+
 		composerEl.addEventListener("submit", async (event) => {
 			event.preventDefault();
-
 			if (!state.baseUrl || (requiresFunctionKey(state.baseUrl) && !state.key)) {
 				showSettings(true);
 				setStatus("Set your base URL and key before chatting.", true);
@@ -2838,6 +2935,7 @@
 
 			renderBubble("you", prompt, "You");
 			promptInputEl.value = "";
+			signalAssistant("onRequestStarted");
 			setLoading(true, { showWaitingBubble: false });
 			const streamingBubble = renderBubble("assistant", "", "Assistant • streaming...");
 			const liveDetails = {
@@ -2897,18 +2995,28 @@
 				} else {
 					setStatus("Connected");
 				}
+				signalAssistant("onRequestCompleted");
 			} catch (error) {
 				setBubbleText(streamingBubble.bubble, "assistant", `Request failed. ${error.message}`);
 				setBubbleIntermediates(streamingBubble.bubble, []);
 				setBubbleMeta(streamingBubble.bubble, "assistant");
 				attachBubbleDetails(streamingBubble.bubble, null);
 				setStatus(error.message, true);
+				signalAssistant("onRequestFailed");
 			} finally {
 				setLoading(false);
 				promptInputEl.focus();
 				// If a workflow completed while the user's turn was
 				// streaming, drain the queue now that we're idle.
 				drainCompletionQueueIfIdle();
+			}
+		});
+
+		promptInputEl.addEventListener("input", () => {
+			try {
+				assistantAvatar?.onDraftChanged(promptInputEl.value);
+			} catch (_error) {
+				// A broken avatar must never break typing.
 			}
 		});
 
