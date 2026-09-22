@@ -40,6 +40,7 @@ The full lifecycle that produces an FRD lives in [`AGENTS.md`](https://github.co
 | [0009](0009-copilot-sdk-harness.md) | Copilot SDK agent harness | Finalized |
 | [0010](0010-agent-evaluations.md) | Vally-first agent evaluations | Finalized |
 | [0011](0011-hosted-skill-binding.md) | HostedSkill binding | Finalized |
+| [0012](0012-durable-agent-loop.md) | Public Durable Agent Loop | In review |
 
 > `_template.md` is the template, not an FRD — the leading underscore keeps it
 > sorted first and excludes it from numbering.
