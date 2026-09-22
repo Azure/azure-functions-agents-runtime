@@ -112,10 +112,16 @@ durable:
 
 - Shared validators; reject unknown keys, boolean/nonpositive counts,
   nonfinite durations and incompatible settings.
-- No default `max_model_steps`, `max_tool_calls`, model/tool timeout or turn
-  deadline; no hidden ordinary-runner 900-second deadline.
-- Authored `model_timeout_seconds`/`tool_timeout_seconds` respect an authored
-  turn `timeout`; platform/provider limits remain independent.
+- No default `max_model_steps` or `max_tool_calls`; `durable.limits` contains
+  optional call-count ceilings only, not user-configurable timeouts.
+- V1 adds no model/tool/turn duration deadline. Resolved Durable policy has no
+  user-timeout fields and never consumes `ResolvedAgent.timeout` or the ordinary
+  runner's environment/900-second fallback.
+- Translation rejects per-agent `timeout` when Durable is enabled. Global
+  `timeout` continues to apply only to ordinary agents; their behavior is unchanged.
+- If a platform ceiling is necessary, use one platform-owned per-call limit
+  shared by model and tool calls, not authoring knobs. No value is selected here.
+- Hosting, SDK and provider constraints still apply; session idle TTL is separate.
 - Count logical scheduled calls per turn, including model-based compaction;
   replay does not recount; ContinueAsNew carries counts.
 - Initial effective prompt states configured budgets; later prompts state
@@ -134,12 +140,20 @@ durable:
 - Reject malformed, blank, non-string or conflicting IDs; no recursive
   business-payload searches or per-agent correlation mappings.
 - Session ID is correlation, **not authentication**.
+- `Idempotency-Key` is the sole client retry key (`logical_request_id`):
+  case-sensitive, full-match `[A-Za-z0-9._-]{1,128}`. Missing/invalid keys return
+  400 before admission; no body alias, trimming or case folding.
 - Retries recover the same generated session; a new request key creates another
   session unless the caller supplies the returned session ID to continue the conversation.
-- Namespace: deployment/app + trusted tenant + agent slug; transport is not identity.
-- Missing ID: stable, opaque SHA-256 derivation from length-delimited deployment,
-  tenant, agent, submitter, trusted producer scope and request key.
-- Persist the returned ID/receipt; exclude volatile delivery/attempt metadata.
+- Identity scope: deployment/app, trusted tenant, agent slug, verified caller
+  object ID and trusted producer scope; no delivery/attempt metadata.
+- `H(tag, fields...)` is lowercase SHA-256 of domain-tagged, length-prefixed
+  UTF-8 fields; `scope` expands to the ordered fields above.
+  Normalize `session_id` first: supplied ID, otherwise
+  `H("session", scope, Idempotency-Key)`.
+- Return `request_id = H("request", scope, session_id, Idempotency-Key)`;
+  never a fresh random request ID. Retrying with the returned session ID
+  preserves this mapping. Persist the accepted receipt.
 - Caller IDs are allowed; atomic creation binds owner and immutable incarnation.
   Another owner cannot claim an existing ID.
 - Use non-revealing internal IDs; mask missing/unauthorized resources consistently.
@@ -161,6 +175,8 @@ durable:
 ### 4.5 Admission, idempotency and reliable handoff
 
 - Require `Idempotency-Key` and normalized request-body fingerprint.
+- Remove the root `x-session-id` carrier before fingerprinting; the normalized
+  target session is already part of request identity.
 - Entity serializes authorization, lifecycle checks, accepted-request lookup
   and the one-active-turn decision; no process lock or separate ordering service.
 - Request acceptance and arranging execution must be **one reliable durable
@@ -190,14 +206,17 @@ durable:
 | Different request while active | 409 `session_busy`; no implicit queue |
 | Busy rejection retried later | Fresh admission attempt; may now succeed |
 | Acknowledgement unknown | Explicit unknown outcome; retry same key/job |
-| Deleted session | 410 after authorization; original key cannot recreate |
+| Deleted session | 410 after authorization; retained tombstone prevents original-key recreation |
 | Capacity exhausted | Bounded 429/503 before allocating new resources |
 
 - Concurrent first submissions converge on one session/accepted receipt.
-- Document accepted-receipt retry horizon; no indefinite exactly-once promise.
+- Retain non-content request/deletion tombstones through the documented retry
+  horizon. Purging run history does not remove retry authority; administrative
+  removal of both receipt and tombstone ends the retry guarantee.
 - Pinned-provider qualification: lost response; crashes before/after native
   completion/start, including fast completion; duplicate/changed/busy requests;
-  completed/purged/deleted lookups. Assert **same execution/job**, not just ID string.
+  completed/purged/deleted lookups with retry authority retained.
+  Assert **same execution/job**, not just ID string.
 
 ### 4.6 Turn execution and human input
 
@@ -223,7 +242,8 @@ durable:
 #### Paused human input
 
 - Reserved `request_human_input`: question, optional choices/free text, response schema.
-- One pending question; Entity stores question and authenticated complete-answer receipt.
+- One pending question; Entity stores its `question_id` and authenticated
+  complete-answer receipt. Question ID is distinct from the turn's `request_id`.
 - Same Entity serializes answer/cancel/expiry/delete in [**Entity operation order**][input-order],
   not HTTP-arrival order. Operations may share a batch; no separate-commit-per-operation promise.
 - Check question deadline/generation and lifecycle in the Entity.
@@ -232,7 +252,8 @@ durable:
 - Wait through Durable events/timers, not a held HTTP connection/activity/worker.
 - Resume only the **same run, session and sandbox**; the receiver validates/consumes
   the original Entity receipt before continuing.
-- Answer POST requires `Idempotency-Key`; persist the complete receipt before acknowledging.
+- Answer POST uses the same `Idempotency-Key` validation, scoped to the question;
+  persist the complete receipt before acknowledging.
 - Receipt acceptance and original-run consumption are not one transaction;
   **accepted receipt != resumed/executed work**.
 - [`send_event`][input-event] is one-way; an absent target may drop the wake event.
@@ -361,13 +382,20 @@ durable:
 - Runtime timestamps/generations guard stale timers.
 - Reads, polling, rejected requests and duplicate receipts never renew TTL.
 - Human wait starts TTL when question is durably opened; timely accepted answer
-  invalidates that wait generation. Authored turn deadline may shorten the wait.
+  invalidates that wait generation.
 - Unanswered wait ends **run and session**, with no second TTL.
 - Unknown/quarantined work cannot receive indefinite active-work exemption.
 - Owner-authorized deletion atomically revokes access/admission; reject stale
   completion/answer attempts; remove logical conversation/run/index/UI records
-  and clean up the actual sandbox. Retain minimal non-content tombstones/audit.
-- Report asynchronous deletion progress without exposing another owner's records.
+  and clean up the actual sandbox. Retain a non-content, owner-bound deletion
+  receipt/tombstone; completion means these runtime-owned tasks finished.
+- Repeated `DELETE` for the same session incarnation returns the same
+  `deletion_id` and progress; no new cleanup operation or TTL renewal.
+- Return `202` + `pending`, `200` + `completed`, or `500` + `failed` with a
+  sanitized error. A failed operation is not reported complete or silently restarted.
+- Current endpoint authorization and original-owner checks still apply after
+  revocation. The owner may read deletion progress through `DELETE`, not
+  revoked history/execution; other callers cannot inspect the receipt.
 - Least privilege and private connectivity qualify independently for DTS,
   storage, models, MCP and sandbox paths.
 - No secrets/content in default logs, labels, status or metrics; no credentials
@@ -381,10 +409,10 @@ durable:
 | `POST /chat` or authored HTTP entry | Durable acceptance, not synchronous answer |
 | `GET /runs/{run_id}` | Bounded status/result/pending question |
 | `POST /runs/{run_id}/cancel` | Idempotent cooperative cancel |
-| `POST /runs/{run_id}/input/{request_id}` | Authenticated idempotent answer |
+| `POST /runs/{run_id}/input/{question_id}` | Authenticated idempotent answer to the stored question |
 | `GET /sessions` | Owner-scoped paginated discovery |
 | `GET /sessions/{session_id}/history` | Authorized conversation, not raw Durable history |
-| `DELETE /sessions/{session_id}` | Revocation/deletion receipt |
+| `DELETE /sessions/{session_id}` | Start deletion or return its existing receipt/progress; §4.12 |
 | Optional `GET /runs/{run_id}/events` | Run-scoped SSE observations |
 
 - Return `session_id` and `x-ms-session-id`; relative runtime-owned status links.
@@ -510,7 +538,7 @@ durable:
 | 33 | Remote MCP | Sandbox / worker | Worker credentials; remote execution | Human | 2026-09-17 |
 | 34 | Delivery configuration | DSL / platform | At-least-once; no public tool-policy framework | Human | 2026-09-17 |
 | 35 | Sandbox base | Fixed / authored | `disk`/`disk_id`; qualified Python ABI | Human | 2026-09-17 |
-| 36 | Call deadlines | Default / authored | Unset unless authored | Human; Agent clarification | 2026-09-17 |
+| 36 | Call deadlines | Default / authored | Authored-deadline proposal **SUPERSEDED by 60** | Human; Agent clarification | 2026-09-17 |
 | 37 | Evidence | Assumption / probe | Native offload probe; independent upstream MAF check | Human | 2026-09-17 |
 | 38 | UI/SSE | Core / optional | Optional; Blob observations acceptable | Human | 2026-09-18 |
 | 39 | Registration proposal | Split / consolidate | Eight-function proposal **SUPERSEDED by 45** | Agent proposal | 2026-09-18 |
@@ -534,6 +562,9 @@ durable:
 | 57 | Answer/terminal ordering | Extra coordinator / Entity | Native Entity operation order; acceptance != consumption; cancellation policy in 59 | Agent source clarification | 2026-09-21 |
 | 58 | Review format | Narrative / compact | Bullets/tables/snippets; preserve numbering; remain In review | Human | 2026-09-21 |
 | 59 | Cancellation after accepted answer | Reject cancellation / honor cancellation | Honor cancellation; retain accepted-answer receipt; no execution/rollback claim; resolves 57's policy question | Human | 2026-09-21 |
+| 60 | V1 timeouts | Authored / platform-only | No user timeouts or ordinary fallback; shared platform ceiling only if necessary; supersedes 36 | Human; Agent validation detail | 2026-09-21 |
+| 61 | Request identity | Ambiguous / explicit | Validated client key; deterministic scoped session/request IDs; §4.3 | Human; Agent validation detail | 2026-09-21 |
+| 62 | Deletion progress | New endpoint / repeat DELETE | Original owner repeats DELETE for same receipt and pending/completed/failed status | Human; Agent HTTP detail | 2026-09-21 |
 
 ## 6. Test plan
 
@@ -546,15 +577,15 @@ durable:
 
 | Area | Required coverage |
 | --- | --- |
-| Config/compatibility | Inheritance/clear/invalid settings; ordinary path unchanged; unsupported graph combinations |
-| Identity/admission | ID parsing; spoofing/cross-owner negatives; concurrent turns; lost ack; same-job retries; busy-then-admit; fingerprint conflicts |
+| Config/compatibility | Inheritance/clear/invalid settings; ordinary timeout unchanged and never applied to Durable; reject authored Durable timeouts; unsupported graph combinations |
+| Identity/admission | ID/key bounds and case; spoofing/cross-owner negatives; deterministic returned IDs with/without session carrier; lost ack; same-job retries; busy-then-admit; fingerprint conflicts |
 | Handoff | Pinned-provider fault matrix in §4.5; no orphan reservation or replacement execution/job |
-| Model/replay | Per-call boundary; actual pinned wire fidelity; cold restore; partial dependency groups; compaction; count/time budgets |
+| Model/replay | Per-call boundary; actual pinned wire fidelity; cold restore; partial dependency groups; compaction; count budgets; platform-profile limits |
 | Human input | Same-run/session/sandbox; Entity batch order; duplicate/conflicting/lost answers; cancel accepted-but-unconsumed answer while retaining receipt; reject new answers to closed questions; terminal ordering; mixed batches dispatch none |
 | Tools | Overlapping activities/guest processes; ordered results; stable operation IDs; at-least-once window; worker MCP; no hidden retry |
 | Sandbox | Digest/ABI/archive validation; structured args; guest-control tampering; interrupted setup; same-ID resume; permanent loss; actual owned cleanup |
 | State/transport | Low-compressibility >1 MiB; threshold/cap/envelope bounds; cold hydration; storage failures; management-read limit separately |
-| Lifecycle | Idle/wait expiry; stale timers; no read/retry renewal; active protection; revocation; late work; logical deletion |
+| Lifecycle | Idle/wait expiry; stale timers; no read/retry renewal; active protection; revocation; late work; retained retry authority; repeated-DELETE identity, owner checks and pending/completed/failed outcomes |
 | Registration/API | Exact once-only inventory; auth/methods/routes; wildcard/encoded paths; client/generator lifetime; independent drain; optional UI/SSE |
 | Reuse/CI | Source-to-target regressions; fixture/wheel provenance; matrix/trust boundaries; required versus advisory results |
 
