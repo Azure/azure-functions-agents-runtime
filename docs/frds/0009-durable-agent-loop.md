@@ -4,7 +4,7 @@ title: Public Durable Agent Loop
 status: In review
 author: larohra
 created: 2026-09-16
-updated: 2026-09-21
+updated: 2026-09-22
 issues: []
 pull_requests: [226]
 branch: larohra/durable-agent-loop
@@ -40,8 +40,11 @@ branch: larohra/durable-agent-loop
 | Native offload; complete model state; explicit capacity failures | Silent truncation; custom transcript store |
 | Qualified identity, isolation, networking and operational profiles | GA/compliance claims from preview evidence |
 
-- V1 excludes non-HTTP triggers, inbound MCP agent exposure, chat/workflow
-  subagent combinations, and durable-loop/Dynamic-Workflow composition.
+- V1 excludes non-HTTP triggers and inbound MCP agent exposure.
+- **Post-v1:** Durable Agent Loop composition with Dynamic Workflows (FRD 0004),
+  `subagents:` delegation (FRD 0007), or `workflows.subagents`.
+- Independent ordinary, workflow-enabled and durable agents may coexist in one
+  app; the restriction is composition, not app-wide coexistence.
 - Reject unsupported configurations and references before registration;
   never fall back to the ordinary runner.
 - No ingress/tool-policy DSL or tool-action approval engine.
@@ -112,6 +115,13 @@ durable:
 
 - Shared validators; reject unknown keys, boolean/nonpositive counts,
   nonfinite durations and incompatible settings.
+- Before registration, reject effective `durable.enabled: true` with
+  `workflows.enabled: true`, nonempty `subagents`, or nonempty `workflows.subagents`.
+- Do not inject workflow-management tools (including `start_workflow`) or
+  `delegate_<slug>` wrappers into durable agents. Explicit tool references
+  resolving to those runtime capabilities are invalid; prompt text is not scanned.
+- Reject any `subagents` or `workflows.subagents` reference targeting a durable
+  agent, including from an ordinary agent; no whole-loop delegation bypass.
 - No default `max_model_steps` or `max_tool_calls`; `durable.limits` contains
   optional call-count ceilings only, not user-configurable timeouts.
 - V1 adds no model/tool/turn duration deadline. Resolved Durable policy has no
@@ -441,6 +451,8 @@ durable:
   custom-only: 6+C. Existing workflow engine: separate 3; SDK helpers counted once.
 - Total `F = O + 2I + 3W + D(4+B) + C`: ordinary O; native app I;
   workflow engine W; durable engine D; built-in durable chat B; custom ingress C.
+- V1 composition exclusions add no registrations; `3W` still covers independent
+  workflow-enabled agents in the same app.
 - JSON clients request-scoped; SSE client lives inside generator; static assets
   need none. Preserve auth/route precedence; reject conflicting reserved paths.
 
@@ -467,7 +479,12 @@ durable:
 | C3 | C2 | Sandbox packaging, parallel execution, affinity/loss/cleanup |
 | C4 | C3 | Integrated qualification, support matrix, runbooks |
 | Promotion | Feature branch → `main` | Separate reviewed/qualified final PR |
+| Post-v1 composition | Separate design | Dynamic Workflows and subagents; evaluate DTS sub-orchestrations |
 
+- Defer composition design/implementation to post-v1: existing delegation runs
+  a whole MAF loop, bypassing per-call checkpoints and call budgets.
+- DTS sub-orchestrations are a candidate, not a selected implementation.
+  Decide their registration impact in that later design; no v1 gate or count change.
 - Integration branch originates from `main`; no feature increments directly to `main`.
 - Stack: `feature/durable-agent-loop <- C1 <- C2 <- C3 <- C4`; D0 separate.
 - Start dependent layers from recorded buildable pushed parents; overlap review,
@@ -567,6 +584,7 @@ durable:
 | 61 | Request identity | Ambiguous / explicit | Validated client key; deterministic scoped session/request IDs; §4.3 | Human; Agent validation detail | 2026-09-21 |
 | 62 | Deletion progress | New endpoint / repeat DELETE | Original owner repeats DELETE for same receipt and pending/completed/failed status | Human; Agent HTTP detail | 2026-09-21 |
 | 63 | HTTP route isolation | Shared dispatcher / separate namespaces | Two HTTP handlers; management under `/agents/{slug}/manage/...`; seven registrations retained | Human | 2026-09-21 |
+| 64 | Workflow/subagent composition | Support in v1 / defer | Post-v1; reject §4.2 combinations/references; evaluate DTS sub-orchestrations later; independent app coexistence allowed | Human | 2026-09-22 |
 
 ## 6. Test plan
 
@@ -580,6 +598,7 @@ durable:
 | Area | Required coverage |
 | --- | --- |
 | Config/compatibility | Inheritance/clear/invalid settings; ordinary timeout unchanged and never applied to Durable; reject authored Durable timeouts; unsupported graph combinations |
+| Composition exclusions | Reject durable + enabled workflows/nonempty subagents, runtime workflow/delegate tool references, and delegation targeting durable agents; allow independent same-app coexistence |
 | Identity/admission | ID/key bounds and case; spoofing/cross-owner negatives; deterministic returned IDs with/without session carrier; lost ack; same-job retries; busy-then-admit; fingerprint conflicts |
 | Handoff | Pinned-provider fault matrix in §4.5; no orphan reservation or replacement execution/job |
 | Model/replay | Per-call boundary; actual pinned wire fidelity; cold restore; partial dependency groups; compaction; count budgets; platform-profile limits |
