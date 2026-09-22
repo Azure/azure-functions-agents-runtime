@@ -558,6 +558,7 @@ Tools from configured MCP servers are automatically available to the agent at ru
 - **`headers`** — optional HTTP headers (e.g. for authentication)
 - **`tools`** — optional array of tool name patterns to allow (default: `["*"]`)
 - **`auth`** — optional Azure Identity authentication configuration. Set `auth.scope` to the token scope required by the MCP server. The runtime uses `DefaultAzureCredential` to acquire the token.
+- **`timeout`** — optional HTTP timeout in seconds (default: `300`). This is the read budget for the long-lived MCP event stream. Increase it for servers with slow tools. The value applies only to entries that use `headers` or `auth`, because only those entries use a runtime-built HTTP client.
 
 The runtime loads MCP tools and skips MCP prompts. This avoids startup/runtime failures from connector-backed MCP servers that support tools but reject `prompts/list`.
 

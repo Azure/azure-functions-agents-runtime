@@ -89,7 +89,35 @@ def _build_header_provider(server: dict[str, Any]) -> Any:
     return default_credential_header_provider
 
 
-def _build_http_client(header_provider: Any) -> Any:
+def _resolve_timeout_seconds(server: dict[str, Any], name: str) -> float:
+    """Read the optional per-server 'timeout' (seconds) from an mcp.json entry."""
+    raw = server.get("timeout")
+    if raw is None:
+        return _MCP_HTTP_READ_TIMEOUT_SECONDS
+
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "MCP server '%s': invalid 'timeout' value %r; using %.0f seconds",
+            name,
+            raw,
+            _MCP_HTTP_READ_TIMEOUT_SECONDS,
+        )
+        return _MCP_HTTP_READ_TIMEOUT_SECONDS
+
+    if timeout <= 0:
+        logger.warning(
+            "MCP server '%s': 'timeout' must be greater than 0; using %.0f seconds",
+            name,
+            _MCP_HTTP_READ_TIMEOUT_SECONDS,
+        )
+        return _MCP_HTTP_READ_TIMEOUT_SECONDS
+
+    return timeout
+
+
+def _build_http_client(header_provider: Any, timeout_seconds: float | None = None) -> Any:
     if header_provider is None:
         return None
 
@@ -102,11 +130,12 @@ def _build_http_client(header_provider: Any) -> Any:
 
     # The MCP GET event stream is long-lived. The httpx default of 5 seconds
     # closes it too early, so keep the read budget near the MCP SDK value.
+    read_timeout = _MCP_HTTP_READ_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     return AsyncClient(
         follow_redirects=True,
         timeout=Timeout(
-            _MCP_HTTP_READ_TIMEOUT_SECONDS,
-            connect=_MCP_HTTP_CONNECT_TIMEOUT_SECONDS,
+            read_timeout,
+            connect=min(_MCP_HTTP_CONNECT_TIMEOUT_SECONDS, read_timeout),
         ),
         event_hooks={"request": [inject_headers]},
     )
@@ -157,7 +186,9 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> tuple[MCPTool | None, 
             load_tools=True,
             load_prompts=False,
             header_provider=header_provider,
-            http_client=_build_http_client(header_provider),
+            http_client=_build_http_client(
+                header_provider, _resolve_timeout_seconds(server, name)
+            ),
         ), None
 
     if server_type:
