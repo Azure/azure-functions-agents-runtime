@@ -37,6 +37,12 @@ dependencies = [
 monitor = [
     "azure-monitor-opentelemetry==1.8.8",
 ]
+# Draft sentiment for the built-in chat avatar — optional. Install
+# `azurefunctions-agents-runtime[jev]` and set TYPESAFE_API_KEY to let the
+# avatar react while the user types. Without it the avatar stays neutral.
+jev = [
+    "typesafe-sdk>=0.5.7,<1",
+]
 dev = [
     "ruff>=0.15.22,<1",
     "mypy>=2.1.0,<3",
@@ -126,6 +132,7 @@ module = [
     "azure.functions_connectors.*",
     "frontmatter",
     "aiohttp",
+    "typesafe_sdk",
 ]
 ignore_missing_imports = true
 

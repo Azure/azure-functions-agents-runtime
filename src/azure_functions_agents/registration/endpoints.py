@@ -805,6 +805,47 @@ def _register_history_endpoint(
     app.function_name(name=f"{base_function_name}_history")(decorated)
 
 
+def _register_sentiment_endpoint(
+    app: func.FunctionApp,
+    *,
+    slug: str,
+    base_function_name: str,
+) -> None:
+    """Register the draft sentiment endpoint the chat avatar calls while typing.
+
+    The endpoint exists only when draft sentiment is configured. The chat page
+    probes it and stays inert when it is absent, so a deployment without a
+    TypeSafe API key keeps the plain avatar.
+    """
+
+    async def classify_draft_sentiment(req: Request) -> Response:
+        from ..sentiment import NEUTRAL_RESULT, classify_draft
+
+        try:
+            body = await req.json()
+        except Exception:
+            body = None
+
+        draft = body.get("draft") if isinstance(body, dict) else None
+        if not isinstance(draft, str):
+            return Response(
+                json.dumps(NEUTRAL_RESULT),
+                media_type="application/json",
+            )
+
+        return Response(
+            json.dumps(await classify_draft(draft)),
+            media_type="application/json",
+        )
+
+    decorated = app.route(
+        route=f"agents/{slug}/sentiment",
+        methods=["POST"],
+        auth_level=func.AuthLevel.ANONYMOUS,
+    )(classify_draft_sentiment)
+    app.function_name(name=f"{base_function_name}_sentiment")(decorated)
+
+
 def register_builtin_endpoints(
     app: func.FunctionApp,
     resolved: ResolvedAgent,
@@ -836,6 +877,14 @@ def register_builtin_endpoints(
             function_name=f"{base_function_name}_chat_assets",
             route=f"agents/{slug}/assets/{{filename}}",
         )
+        from ..sentiment import sentiment_enabled
+
+        if sentiment_enabled():
+            _register_sentiment_endpoint(
+                app,
+                slug=slug,
+                base_function_name=base_function_name,
+            )
 
     if builtin_endpoints.chat_api:
         chat_route = f"agents/{slug}/chat"

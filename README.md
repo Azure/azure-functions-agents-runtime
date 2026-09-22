@@ -497,8 +497,47 @@ The settings dialog also keeps a **Recent sessions** list (most-recent first, up
 
 When you resume a session — whether by pasting an id or picking one from **Recent sessions** — the chat window reloads that conversation's earlier messages from the server (via a `GET /agents/{slug}/history` endpoint) so its history is visible right away, not just carried invisibly into your next turn. The replay is capped at the 200 most recent user and assistant messages; the UI shows a notice when older messages were omitted. Intermediate tool activity is not replayed. This requires the app's blob-backed [session storage](#session-storage) to be configured; without it — or on an older runtime that predates the history endpoint — the window simply starts empty and the resumed session still continues on your next message.
 
-### HTTP Chat API
+#### Assistant avatar
 
+The chat page shows a small animated assistant next to the input box. It is a
+demo aid: it makes a local run easier to read, because you can see at a glance
+whether the agent is working, finished, or failed. Nothing needs to be
+configured, and a browser that cannot load the animation shows a still image
+instead.
+
+The avatar can also react while you type. This is optional and off by default.
+Turn it on with a [TypeSafe](https://typesafe.ai) API key, which lets the Jev
+model pick one of four moods from your draft:
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
+pip install "azurefunctions-agents-runtime[jev]"
+```
+
+Add the key to `local.settings.json` (or to your app settings when deployed)
+and restart the host:
+
+```json
+{
+  "Values": {
+    "TYPESAFE_API_KEY": "<your key>"
+  }
+}
+```
+
+| You type | The avatar shows |
+| --- | --- |
+| `That worked perfectly, thanks!` | positive |
+| `Please update the configuration file.` | neutral |
+| `Something seems wrong here. I think this breaks production.` | concerned |
+| `Why does this keep failing? I already told you twice.` | annoyed |
+
+The draft is sent 700 ms after you stop typing, and only when it is at least 12
+characters long. Without the key the endpoint is not registered and the avatar
+keeps its neutral face, so the chat works the same either way.
+
+### HTTP Chat API
 POST endpoints for programmatic access:
 
 - **Any agent with `builtin_endpoints.chat_api: true`:** `POST /agents/{slug}/chat` and `POST /agents/{slug}/chatstream`

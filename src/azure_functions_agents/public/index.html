@@ -2895,6 +2895,31 @@
 			}
 		}
 
+		// Draft sentiment is optional. The endpoint exists only when the server
+		// has a TypeSafe API key, so the first 404 turns the probe off for good.
+		let sentimentAvailable = true;
+
+		async function classifyDraftSentiment(draft) {
+			if (!sentimentAvailable || !state.baseUrl) return null;
+
+			const endpoint = `${state.baseUrl}${getApiBasePath()}/sentiment${buildAuthQuery()}`;
+			try {
+				const resp = await fetch(endpoint, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", "Accept": "application/json" },
+					body: JSON.stringify({ draft })
+				});
+				if (resp.status === 404) {
+					sentimentAvailable = false;
+					return null;
+				}
+				if (!resp.ok) return null;
+				return await resp.json();
+			} catch (_error) {
+				return null;
+			}
+		}
+
 		(async () => {
 			const assetsBase = `${getApiBasePath()}/assets`;
 			try {
@@ -2905,7 +2930,8 @@
 				assistantAvatar = await avatarModule.mountAssistantAvatar({
 					mount: assistantAvatarEl,
 					assetsBase,
-					createRenderer: rendererModule.createDefaultYohoRenderer
+					createRenderer: rendererModule.createDefaultYohoRenderer,
+					classifyDraft: classifyDraftSentiment
 				});
 			} catch (_error) {
 				assistantAvatar = null;

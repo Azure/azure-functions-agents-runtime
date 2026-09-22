@@ -14,6 +14,10 @@
 | 6 | Names inside `yoho.riv` | Keep the `Assistant` name from the design / use the names in the authored file | Artboard `Yoho` and state machine `YohoState`; the renderer asks for both by name | Human | 2026-09-21 |
 | 7 | Reduced-motion behavior | Show the static image / show Rive but stop the continuous movement / always play Rive | Always play Rive; the image stays only for a load failure. A still avatar made the demo look broken, and the movement is small and local | Human | 2026-09-21 |
 | 8 | Dark edge around the avatar | Change the artboard background in the Rive Editor and export again / crop the artboard margin in the browser | Crop in the browser: `yoho-renderer.js` zooms its canvas and `.assistant-avatar` clips it. No new export is needed, and the renderer keeps all Yoho-specific numbers | Agent | 2026-09-21 |
+| 9 | Where the Jev classifier runs | In the browser / in the Functions app | In the Functions app, behind `POST agents/{slug}/sentiment`. The API key never reaches the browser | Human | 2026-09-21 |
+| 10 | How Jev is enabled | New front-matter key / environment variable only | `TYPESAFE_API_KEY` only. The endpoint is registered only when the key is set, and the page turns its probe off after one 404. No schema change | Human | 2026-09-21 |
+| 11 | The Jev question shape | Free text / one `Choice` question | One `Choice` over `neutral`, `positive`, `concerned`, `annoyed`, with the reported confidence. The model returns a value the UI already knows | Human | 2026-09-21 |
+| 12 | The `typesafe-sdk` dependency | Required / optional extra | Optional `jev` extra, imported inside the handler. A runtime without the key or the package keeps the plain avatar | Agent | 2026-09-21 |
 
 ## 1. Overview
 
@@ -693,6 +697,21 @@ Recommended schema:
 ```
 
 The sentiment values map directly to generic `AssistantExpression` values.
+
+## 20.1 As built
+
+`src/azure_functions_agents/sentiment.py` holds the classifier. It asks the
+TypeSafe System One API (the Jev model) one `Choice` question over the four
+values above and returns the selected value with the reported confidence.
+
+`POST agents/{slug}/sentiment` exposes it, with the body `{"draft": "..."}`.
+The endpoint is registered only when `TYPESAFE_API_KEY` is set, so a
+deployment without a key keeps the plain avatar and the chat page turns its
+probe off after the first 404.
+
+The module never raises. A missing key, a missing `typesafe-sdk` package, a
+timeout, or an answer outside the four values all return
+`{"sentiment": "neutral", "confidence": 0.0}`.
 
 The classifier must not produce animation names.
 

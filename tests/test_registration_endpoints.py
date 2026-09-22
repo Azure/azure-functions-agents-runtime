@@ -278,6 +278,81 @@ def test_register_builtin_endpoints_serves_chat_assets(
     assert bytes(response.body).startswith(signature)
 
 
+def _sentiment_agent(tmp_path: Path) -> ResolvedAgent:
+    source_file = tmp_path / "main.agent.md"
+    source_file.write_text("---\nname: Main\n---\n", encoding="utf-8")
+    return _resolved_agent(
+        name="Main",
+        is_main=True,
+        builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
+        source_file=source_file,
+    )
+
+
+def test_sentiment_endpoint_is_absent_without_an_api_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    app = FakeFunctionApp()
+
+    register_builtin_endpoints(app, _sentiment_agent(tmp_path), AgentCapabilities())
+
+    assert all(route["route"] != "agents/main/sentiment" for route in app.routes)
+
+
+def _sentiment_route(app: FakeFunctionApp) -> dict[str, Any]:
+    return next(route for route in app.routes if route["route"] == "agents/main/sentiment")
+
+
+def test_sentiment_endpoint_classifies_a_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TYPESAFE_API_KEY", "key")
+    app = FakeFunctionApp()
+
+    register_builtin_endpoints(app, _sentiment_agent(tmp_path), AgentCapabilities())
+
+    route = _sentiment_route(app)
+    assert route["methods"] == ["POST"]
+    assert route["auth_level"] == func.AuthLevel.ANONYMOUS
+
+    async def _fake_classify(draft: str) -> dict[str, Any]:
+        return {"sentiment": "positive", "confidence": 0.8, "echo": draft}
+
+    monkeypatch.setattr("azure_functions_agents.sentiment.classify_draft", _fake_classify)
+
+    response = asyncio.run(route["handler"](_json_request({"draft": "That worked, thanks!"})))
+
+    assert response.status_code == 200
+    payload = json.loads(_response_text(response))
+    assert payload["sentiment"] == "positive"
+    assert payload["echo"] == "That worked, thanks!"
+
+
+@pytest.mark.parametrize("body", [None, {}, {"draft": 12}, "not json"])
+def test_sentiment_endpoint_is_neutral_for_a_bad_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: Any
+) -> None:
+    monkeypatch.setenv("TYPESAFE_API_KEY", "key")
+    app = FakeFunctionApp()
+
+    register_builtin_endpoints(app, _sentiment_agent(tmp_path), AgentCapabilities())
+
+    response = asyncio.run(_sentiment_route(app)["handler"](_json_request(body)))
+
+    assert response.status_code == 200
+    assert json.loads(_response_text(response)) == {"sentiment": "neutral", "confidence": 0.0}
+
+
+def _json_request(body: Any) -> SimpleNamespace:
+    async def _json() -> Any:
+        if body is None:
+            raise ValueError("no body")
+        return body
+
+    return SimpleNamespace(json=_json, path_params={}, headers={})
+
+
 @pytest.mark.parametrize(
     "requested",
     [

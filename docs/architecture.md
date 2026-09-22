@@ -363,6 +363,14 @@ The chat page reports lifecycle facts only (`onRequestStarted`,
 `onRequestCompleted`, `onRequestFailed`, `onDraftChanged`). A renderer that
 fails to load never affects chat.
 
+`onDraftChanged` can also drive the expression while the user types. The chat
+page sends the draft to `agents/{slug}/sentiment`, which is registered only
+when `TYPESAFE_API_KEY` is set. `sentiment.py` asks the TypeSafe System One API
+(the Jev model) one `Choice` question and returns a bounded
+`{"sentiment", "confidence"}` pair. Registration is the only Azure-aware stage,
+so the module holds no Azure type; it is imported lazily and every failure
+returns `neutral`. Install the optional `jev` extra to enable it.
+
 ### Where MCP, sandbox, and web_request tools enter
 
 - MCP server definitions are read from `mcp.json`, translated into MAF MCP tool wrappers by `discover_mcp_servers()`, and filtered per agent through capability settings.
