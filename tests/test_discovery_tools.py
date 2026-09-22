@@ -338,6 +338,28 @@ def test_workflow_tool_rejects_invalid_timeout(timeout: str) -> None:
         workflow_tool(timeout=timeout)
 
 
+def test_async_workflow_tool_flows_into_handler_catalog(tmp_path: Path) -> None:
+    from azure_functions_agents.workflows import integration
+
+    _write_tool_file(
+        tmp_path,
+        "async_workflow_tool",
+        """
+        from azure_functions_agents import workflow_tool
+
+        @workflow_tool(description="Fetch a record.")
+        async def fetch_record(args: dict[str, object]) -> dict[str, object]:
+            return {"args": args}
+        """,
+    )
+
+    [discovered] = discover_project_tools(tmp_path).workflow_tools
+    catalog = integration.build_workflow_handler_catalog([discovered])
+
+    assert list(catalog) == ["fetch_record"]
+    assert catalog["fetch_record"].handler is discovered.handler
+
+
 def test_multiple_workflow_tools_can_be_declared_in_one_file(tmp_path: Path) -> None:
     _write_tool_file(
         tmp_path,

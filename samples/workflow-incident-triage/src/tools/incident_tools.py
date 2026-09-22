@@ -8,9 +8,9 @@ and no plain public normal tool is exported from this module.
 
 Design notes:
 
-- Each handler is synchronous, takes a single ``args`` dict, and
-  returns a JSON-serializable dict. This is the contract enforced by
-  ``register_workflow_tool``; async handlers are rejected.
+- Each handler takes a single ``args`` dict and returns a
+  JSON-serializable dict. These sample handlers are synchronous;
+  ``async def`` handlers are also supported.
 - Outputs are deterministic functions of their inputs so workflow
   replays produce stable results and so the demo narrative is
   reproducible. (Durable journals activity output, so this isn't a

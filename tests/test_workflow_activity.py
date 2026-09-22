@@ -123,6 +123,42 @@ async def test_external_cancellation_is_not_reported_as_timeout() -> None:
         await invocation
 
 
+@pytest.mark.asyncio
+async def test_async_retryable_error_requests_durable_retry() -> None:
+    from azure_functions_agents import WorkflowRetryableError
+
+    async def busy(_: dict[str, Any]) -> None:
+        await asyncio.sleep(0)
+        raise WorkflowRetryableError("service_busy", "Try again.")
+
+    with pytest.raises(DurableRetryableActivityError, match="service_busy"):
+        await activity.invoke_policy_handler(busy, {}, task=_task(), target="probe")
+
+
+@pytest.mark.asyncio
+async def test_async_unexpected_error_is_sanitized() -> None:
+    async def explode(_: dict[str, Any]) -> None:
+        await asyncio.sleep(0)
+        raise RuntimeError("private connection string")
+
+    outcome = await activity.invoke_policy_handler(explode, {}, task=_task(), target="probe")
+
+    assert outcome["ok"] is False
+    assert outcome["failure"]["kind"] == "execution_unknown"
+    assert "private connection string" not in outcome["failure"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_async_non_json_result_is_a_contract_failure() -> None:
+    async def opaque(_: dict[str, Any]) -> object:
+        return object()
+
+    outcome = await activity.invoke_policy_handler(opaque, {}, task=_task(), target="probe")
+
+    assert outcome["ok"] is False
+    assert outcome["failure"]["kind"] == "handler_contract"
+
+
 def test_invalid_persisted_timeout_is_a_contract_failure() -> None:
     invalid = activity.validate_policy_activity_input(
         _task(timeout_ms=999),

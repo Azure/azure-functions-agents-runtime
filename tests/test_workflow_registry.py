@@ -179,12 +179,15 @@ def test_reserved_names_match_management_tools():
     assert actual == set(registry.RESERVED_TOOL_NAMES)
 
 
-def test_register_workflow_tool_rejects_async_handler():
+def test_register_workflow_tool_accepts_async_handler():
     async def async_handler(args):
         return {}
 
-    with pytest.raises(ValueError, match="async handlers are not supported"):
-        registry.register_workflow_tool("asynctool", "no", async_handler)
+    registry.register_workflow_tool("asynctool", "yes", async_handler)
+
+    entry = registry.get_entry("asynctool")
+    assert entry is not None
+    assert entry.handler is async_handler
 
 
 def test_register_workflow_tool_rejects_non_callable():

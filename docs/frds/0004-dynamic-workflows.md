@@ -552,7 +552,8 @@ def _require_service(args: dict[str, object]) -> str:
 
 For v1, a workflow tool handler must:
 
-- be synchronous;
+- be synchronous or `async` (the Activity awaits `async` handlers; see
+  [#139](https://github.com/Azure/azure-functions-agents-runtime/issues/139));
 - accept one `dict[str, Any]` argument;
 - return a JSON-serializable value;
 - avoid relying on chat-turn-local runtime state;
@@ -560,7 +561,7 @@ For v1, a workflow tool handler must:
   parallel execution.
 
 The runtime should warn and skip functions that are clearly incompatible, such
-as async handlers, declaration-only tools, reserved names, duplicate names, or
+as declaration-only tools, reserved names, duplicate names, or
 handlers whose signature cannot accept the workflow `dict` argument.
 
 Reserved workflow tool names are the workflow management tools injected by the
