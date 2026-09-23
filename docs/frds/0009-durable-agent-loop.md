@@ -566,6 +566,10 @@ durable:
 - No secrets/content in default logs, labels, status or metrics; no credentials
   checkpointed. Track bounded admission/retry/failure/size/cleanup diagnostics
   and actual model attempts without replay double-counting.
+- Where supported by the pinned native stack, attach bounded non-sensitive
+  orchestration tags (agent slug and operation kind) for DTS dashboard display.
+  Verify tag propagation in qualification; never include prompts, credentials
+  or owner identifiers. Dashboard tags are observability, not authorization.
 - Pending human input is not a ContinueAsNew boundary. Purging a live waiting
   instance can prevent continuation; report that explicitly rather than starting
   a replacement run. Deployment/version retention remains the user's choice
@@ -686,16 +690,13 @@ durable:
 - Fakes remain test doubles under `tests/`, never a shipped execution path.
   Every merged layer must be usable and retain its tests/docs; do not add temporary
   authoring restrictions just to make mechanical module splits possible.
-- **Delivery target: Friday, 2026-09-25 (EoW), not a guaranteed completion date.**
-  Aim for C1 and core interface agreement on Sep 23, C2 integration plus C3
-  preparation on Sep 24, and C3 integration/C4 evidence on Sep 25. Parallelize
-  isolated core work, sandbox source preparation and qualification preparation;
+- Parallelize isolated core work, sandbox source preparation and qualification preparation;
   create stacked layer branches only from committed/pushed parents. Keep reviews
   continuous rather than serializing six core PRs.
-- The harness investigation runs alongside this schedule and does not block
+- The harness investigation runs in parallel and does not block
   FRD approval/merge. A discovered breaking issue gets a focused follow-up PR.
-  EoW pressure does not turn skipped tests, unapproved cloud runs or missing
-  release evidence into passes; report slippage or blockers explicitly.
+  Skipped tests, unapproved cloud runs and missing release evidence are not
+  passes; report blockers explicitly.
 - Architecture sign-off precedes product implementation; cloud runs require
   separate consent. Branch targeting does not establish required-check policy.
 
@@ -827,7 +828,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | 76 | HTTP function-key scope | Shared management / co-located paths | Each agent HTTP entry owns submission and management in one function so its individual function key works for both; no host-wide-key requirement; supersedes shared-handler topology in 63/66 | Human; Agent routing detail | 2026-09-23 |
 | 77 | Harness investigation gate | Block FRD / side investigation | Verify actual pinned harness/skills behavior separately; do not block FRD approval/merge; breaking findings go to a follow-up PR without silent capability removal | Human | 2026-09-23 |
 | 78 | Cross-deployment compatibility | Version pin/gate / user-owned compatibility | Preserve session state/identity/order across deployments without catalog/deployment pinning; users own breaking-change handling and migrations, and real errors surface explicitly; extends 54 | Human | 2026-09-23 |
-| 79 | Usable and accelerated delivery | Six fragmented core layers / coherent core plus parallel work packages | Replace C2a-C2f with one usable C2 core PR, followed by optional Sandbox C3 and qualification C4; EoW target Sep 25, no waived gates; supersedes 71 | Human; Agent delivery plan | 2026-09-23 |
+| 79 | Usable delivery slices | Six fragmented core layers / coherent core plus parallel work packages | Replace C2a-C2f with one usable C2 core PR, followed by optional Sandbox C3 and qualification C4; no waived gates; supersedes 71 | Human; Agent delivery plan | 2026-09-23 |
 
 ## 6. Test plan
 
