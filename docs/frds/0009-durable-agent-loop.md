@@ -625,16 +625,61 @@ durable:
 - SDK helpers are outbound machinery, not inbound APIs or model background polling.
 - Shared registration does not merge checkpoints, serialize activities or let
   model arguments select maintenance operations.
-- Each built-in entry owns one route `agents/<literal-slug>/{*path}`. Its
+- Each built-in entry owns one constrained route based on
+  `agents/<literal-slug>/{*path}`, admitting only enabled operation paths. Its
   dispatcher accepts `POST chat` and the specified `manage/...` method/path
   combinations only; optional UI/SSE adds explicit paths, never permissive
   catch-all execution. Register no competing ordinary endpoints for that slug.
   Unknown paths/methods return 404/405. Admission drain checks apply to submission
   only; owners can still manage existing runs through the same function.
-- An authored HTTP entry likewise owns a disjoint route namespace containing
-  its submit and management paths in the same function; return links for that
-  originating entry. Validate route expansion and reserved-path collisions
-  before app mutation; never rely on wildcard priority or cross-function keys.
+- Declarative `http_trigger` routes are still runtime-generated handlers, not
+  customer-written HTTP code. They retain the same-function key/Entra guarantee.
+  Customer-written handlers outside this registration pipeline own their routing
+  and authorization; this runtime never returns raw Durable system-key URLs.
+- For an authored submit route `R`, preserve its submission URL and place
+  management below `R/manage/...`, using the operations in the table above.
+  For example, `orders/{customer}/ask` accepts submission at
+  `orders/acme/ask` and returns a status link at
+  `orders/acme/ask/manage/runs/<run_id>`. Keeping `ask` in the management
+  prefix avoids capturing sibling paths such as `orders/acme/invoices`.
+- Register exactly one HTTP trigger for that entry, conceptually
+  `R/{*operation}` with a host constraint matching only the empty submission
+  suffix or the enabled management path shapes. This is one constrained route
+  template, not multiple triggers on one function. The exact constrained
+  catch-all syntax and empty-suffix behavior require the local-host probe below;
+  do not publish an unverified regex as supported configuration.
+- Retain authored submission methods. The trigger's method list is their union
+  with the required management methods (`GET`, `POST`, `DELETE`); the dispatcher
+  then checks the exact method/path pair. A management-method addition must not
+  enable that method for submission. Unknown paths return 404 and unsupported
+  methods on known paths return 405. No captured operation name can dynamically
+  select an orchestrator, activity, Entity operation or arbitrary callable.
+- Compile links from the matched originating entry and its bound route
+  parameters, encoding each parameter once as a path segment. Preserve parameter
+  constraints; never derive links from untrusted forwarded hosts or copy
+  credentials into them. Recheck owner and agent scope on every operation;
+  a matching route parameter is not authorization.
+- The initial route-expansion contract covers fixed-depth paths with required
+  single-segment parameters and a final literal segment. Existing catch-alls,
+  optional/defaulted segments, or shapes whose submit and management languages
+  cannot be separated are not silently rewritten or broadly matched. Report
+  the authored route and the ambiguity before app mutation; use the built-in
+  entry or a separately reviewed explicit mapping for those shapes. This
+  qualification concerns generated Durable entries only; ordinary routes remain
+  unchanged.
+- Validate reserved-path and inter-entry collisions before registration,
+  including enabled built-ins and ordinary routes; never rely on registration
+  order or wildcard priority. If disjointness cannot be established, report
+  that conflict rather than registering an unrestricted catch-all.
+- **Side validation (advisory for this FRD):** a tiny real Python Functions host
+  probe must show that the constrained route accepts submission without a
+  trailing slash and the enumerated management paths, rejects unrelated/extra
+  segments, and leaves sibling routes reachable. Record host/SDK versions,
+  encoded-path and method cases, and the actual registration inventory.
+  Documentation or Python binding metadata alone is not a pass. This is not
+  evidence of hosted key/Entra enforcement. A failed probe requires a routing
+  design follow-up, not silent fallback to broad routing, host-only keys or
+  extra management functions; C2 must qualify the selected mapping before ship.
 - One built-in Durable chat agent: 6; many: `5+B`; UI/SSE/group: +0;
   custom-only: `5+C`. Existing workflow engine: separate 3; SDK helpers counted once.
 - Total `F = O + 2I + 3W + 3D + B + C`: ordinary registrations O; native
@@ -849,6 +894,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | 78 | Cross-deployment compatibility | Version pin/gate / user-owned compatibility | Preserve session state/identity/order across deployments without catalog/deployment pinning; users own breaking-change handling and migrations, and real errors surface explicitly; extends 54 | Human | 2026-09-23 |
 | 79 | Usable delivery slices | Six fragmented core layers / coherent core plus parallel work packages | Replace C2a-C2f with one usable C2 core PR, followed by optional Sandbox C3 and qualification C4; no waived gates; supersedes 71 | Human; Agent delivery plan | 2026-09-23 |
 | 80 | Debug UI compatibility | Separate/deferred UI / reuse existing UI | Keep existing debug UI in v1; detect Durable mode and automatically poll results through its authorized entry. Include working enabled-flag behavior in C2; only richer enhancements/SSE remain optional | Human | 2026-09-23 |
+| 81 | Limited same-function routes | Separate management function / unrestricted catch-all / constrained single-function dispatch | Keep individual function-key and Entra support; expose only explicit operations through one constrained route and method/path allowlist. Validate host syntax separately without blocking FRD review; never expose system-key management URLs. Authored mapping and conservative ambiguity checks are specified in §4.13 | Human direction; Agent mapping | 2026-09-23 |
 
 ## 6. Test plan
 
@@ -877,6 +923,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | Lifecycle | Idle/wait expiry; stale timers; no read/retry renewal; post-acknowledgement orchestration loss expires through the Entity-held deadline without permitting late commits; duplicate acknowledgement never extends deadline; active protection; revocation; late work; retained retry authority; repeated-DELETE identity, owner checks and pending/completed/failed outcomes |
 | Registration/API | Exact once-only inventory with no inbound Durable MCP handlers; reject unsupported MCP exposure without ordinary-runner fallback; preserve ordinary MCP and outbound MCP tools; auth/methods/routes; chat cannot be shadowed by management; encoded paths; client/generator lifetime; independent drain; optional UI/SSE |
 | Debug UI | Existing enabled page renders; ordinary streaming unchanged; Durable admission and automatic polling with stable retry key; terminal/error/question display; authorized history; stale responses discarded after agent/session switch; no duplicate run on polling failure |
+| Authored HTTP routing | One trigger per entry; unchanged submit URL/methods; parameter-bound same-entry links; management method union cannot broaden submission; host-constrained suffix plus dispatcher allowlist; empty suffix; encoded/extra paths; ambiguous shapes and collisions rejected before registration; sibling routes not shadowed |
 | Reuse/CI | Source-to-target regressions; fixture/wheel provenance; matrix/trust boundaries; required versus advisory results |
 
 | Blocking gate | Layer | Environment | Required evidence |
