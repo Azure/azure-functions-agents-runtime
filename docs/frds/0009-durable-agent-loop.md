@@ -69,6 +69,7 @@ branch: larohra/durable-agent-loop
 | Session | New `durable/{session,contracts,intake}.py` | Entity authority; admission; versioned envelopes |
 | Sandbox/lifecycle | New `durable/{sandbox,lifecycle}.py` | Binding, packaging, resume, expiry, cleanup |
 | Debug UI | Existing `public/index.html`, endpoint adapter | Public API client; automatic polling for Durable agents |
+| Shared retry mechanics | New `_durable_retry.py`; workflow and Durable adapters | SDK retry mapping and bounded sanitized envelope codec; no workflow-plan or agent-outcome imports |
 
 - Validate the complete agent graph before app mutation; clients remain lazy.
 - Registration remains Azure-aware; no YAML reparsing or discovery-time provisioning.
@@ -432,7 +433,17 @@ durable:
   idempotency; recorded-result replay differs from lost completion.
 - Reuse matching sandbox request/result receipts after lost responses;
   no extra blind retry around unknown effects or false termination claim.
-- All model/tool activities use the existing retryable-versus-terminal bridge:
+- Extract generic mechanics from `workflows/native_retry.py` into shared
+  `_durable_retry.py`: SDK retry-policy mapping and the bounded sanitized
+  exception-envelope codec. The shared module imports neither workflow nor
+  Durable-agent schemas; each engine adapter validates its own policy/outcome
+  types before encoding and after decoding. Workflow result validation stays
+  in the workflow layer; Durable-agent result validation belongs to
+  `durable/contracts.py`. Preserve existing workflow envelope versions and
+  persisted exception identity compatibility with adapter shims and regressions.
+  The new engine must not import `workflows/native_retry.py` or
+  `workflows/activity.py` directly.
+- All model/tool activities use that shared retryable-versus-terminal mechanism:
   terminal failures return structured outcomes; only sanitized, explicitly
   retryable failures are raised into native retry policy. Unknown-effect tool
   outcomes are not retried unless a matching downstream receipt proves reuse safe.
@@ -593,14 +604,25 @@ durable:
 | Optional `GET /manage/runs/{run_id}/events` | Run-scoped SSE observations |
 
 - Return `session_id` and `x-ms-session-id`; relative runtime-owned status links.
-- Resolve the effective Durable auth policy from
-  `builtin_endpoints.http_auth` when built-ins are enabled, otherwise from the
-  authored HTTP trigger's `trigger.args.http_auth`. Each entry uses that policy
-  for both submission and management within its one HTTP function registration.
-- Durable agents suppress the separate ordinary chat page, chatstream,
-  blob-backed history and workflow-status registrations. When
-  `builtin_endpoints.debug_chat_ui` is enabled, the agent dispatcher serves the
-  existing `public/index.html` UI with the Durable polling behavior below.
+- Resolve auth independently for every HTTP entry, even when an agent exposes
+  both built-in and authored entries. Built-in APIs use
+  `builtin_endpoints.http_auth`; authored APIs preserve
+  `_resolve_http_trigger_auth` precedence: `trigger.args.http_auth`, otherwise
+  legacy `auth_level` with its existing warning, otherwise function auth.
+  Neither entry overrides the other. Capture entry-specific policies in the
+  catalog and propagate the originating entry identity through admission and
+  management so reauthorization selects the correct policy.
+  Each entry uses its own policy for submission and management within its one
+  HTTP function registration.
+- Durable agents suppress ordinary chatstream, blob-backed history and
+  workflow-status registrations. When `builtin_endpoints.debug_chat_ui` is
+  enabled, retain the existing separate GET chat-page function with Functions
+  `AuthLevel.ANONYMOUS`, serving `public/index.html` at `agents/<slug>/`.
+  This permits the existing API-key prompt to load before credentials are
+  supplied. Platform Easy Auth still applies where configured; this does not
+  bypass platform authentication. The page contains only static UI and
+  non-secret endpoint/mode configuration, never run data or credentials.
+  All data requests use the protected dispatcher and its owner checks.
   The flag is never silently accepted without a working page.
 
 #### Inbound MCP: post-v1
@@ -613,7 +635,8 @@ durable:
 
 | Registration | Trigger |
 | --- | --- |
-| `agents_<slug>_durable_http_v1` | Per-agent HTTP dispatch: submit, management and optional UI/SSE |
+| `agents_<slug>_durable_http_v1` | Per-entry HTTP dispatch: submit, management and optional SSE |
+| Existing built-in chat-page function, when enabled | Separate anonymous-at-Functions-layer GET; static debug UI only |
 | `agents_durable_orchestrator_v1` | Independent typed admission/turn/input/lifecycle instances |
 | `agents_durable_state_v1` | Entity; disjoint session/owner-index kinds |
 | `agents_durable_execute_v1` | Activity; typed model/tool/maintenance operation |
@@ -621,15 +644,18 @@ durable:
 | `BuiltIn__HttpPollOrchestrator` | SDK outbound-HTTP polling orchestration |
 
 - **Three shared execution registrations + one HTTP dispatcher per entry +
-  two native SDK helpers.** One built-in Durable chat agent therefore registers six.
+  two native SDK helpers, plus enabled static chat pages.** One built-in
+  Durable chat agent registers six without its page, seven with its page.
 - SDK helpers are outbound machinery, not inbound APIs or model background polling.
 - Shared registration does not merge checkpoints, serialize activities or let
   model arguments select maintenance operations.
 - Each built-in entry owns one constrained route based on
   `agents/<literal-slug>/{*path}`, admitting only enabled operation paths. Its
   dispatcher accepts `POST chat` and the specified `manage/...` method/path
-  combinations only; optional UI/SSE adds explicit paths, never permissive
-  catch-all execution. Register no competing ordinary endpoints for that slug.
+  combinations only; optional SSE adds an explicit path, never permissive
+  catch-all execution. Exclude the empty page path from this dispatcher; it
+  belongs to the separate static-page registration. Register no competing
+  ordinary data endpoints for that slug.
   Unknown paths/methods return 404/405. Admission drain checks apply to submission
   only; owners can still manage existing runs through the same function.
 - Declarative `http_trigger` routes are still runtime-generated handlers, not
@@ -696,11 +722,13 @@ durable:
   This proves the minimal local routing mechanism, not the full management
   surface, key/Entra enforcement, cloud behavior or arbitrary authored route
   shapes. Owned probe processes were stopped; no product code changed.
-- One built-in Durable chat agent: 6; many: `5+B`; UI/SSE/group: +0;
+- One built-in Durable chat agent: 6 without its page, 7 with it;
+  many: `5+B+U`; each enabled page: +1; SSE/group: +0;
   custom-only: `5+C`. Existing workflow engine: separate 3; SDK helpers counted once.
-- Total `F = O + 2I + 3W + 3D + B + C`: ordinary registrations O; native
+- Total `F = O + 2I + 3W + 3D + B + C + U`: ordinary registrations O; native
   helper pair I; workflow engine W; Durable shared engine D; built-in Durable
-  HTTP entries B; custom HTTP entries C. Ordinary MCP registrations remain part of O;
+  HTTP entries B; custom HTTP entries C; Durable static chat pages U (ordinary
+  pages remain in O). Ordinary MCP registrations remain part of O;
   outbound MCP tools add no inbound function registrations.
 - V1 composition exclusions add no registrations; `3W` still covers independent
   workflow-enabled agents in the same app.
@@ -911,6 +939,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | 79 | Usable delivery slices | Six fragmented core layers / coherent core plus parallel work packages | Replace C2a-C2f with one usable C2 core PR, followed by optional Sandbox C3 and qualification C4; no waived gates; supersedes 71 | Human; Agent delivery plan | 2026-09-23 |
 | 80 | Debug UI compatibility | Separate/deferred UI / reuse existing UI | Keep existing debug UI in v1; detect Durable mode and automatically poll results through its authorized entry. Include working enabled-flag behavior in C2; only richer enhancements/SSE remain optional | Human | 2026-09-23 |
 | 81 | Limited same-function routes | Separate management function / unrestricted catch-all / constrained single-function dispatch | Keep individual function-key and Entra support; expose only explicit operations through one constrained route and method/path allowlist. Validate host syntax separately without blocking FRD review; never expose system-key management URLs. Authored mapping and conservative ambiguity checks are specified in §4.13 | Human direction; Agent mapping | 2026-09-23 |
+| 82 | Entry auth, retry boundaries and UI bootstrap corrections | Agent-wide policy / per-entry policy; direct workflow imports / shared mechanics; protected page / existing static page | Preserve independent entry auth; extract generic retry mechanics with engine-owned validation; retain separate static page and count it as U. Refines Decisions 76/80/81 without weakening data-endpoint auth | Human | 2026-09-23 |
 
 ## 6. Test plan
 
@@ -938,7 +967,8 @@ newly deferred by this table. None is a core-v1 release gate.
 | State/transport | Low-compressibility >1 MiB; threshold/cap/envelope bounds; cold hydration; storage failures; management-read limit separately |
 | Lifecycle | Idle/wait expiry; stale timers; no read/retry renewal; post-acknowledgement orchestration loss expires through the Entity-held deadline without permitting late commits; duplicate acknowledgement never extends deadline; active protection; revocation; late work; retained retry authority; repeated-DELETE identity, owner checks and pending/completed/failed outcomes |
 | Registration/API | Exact once-only inventory with no inbound Durable MCP handlers; reject unsupported MCP exposure without ordinary-runner fallback; preserve ordinary MCP and outbound MCP tools; auth/methods/routes; chat cannot be shadowed by management; encoded paths; client/generator lifetime; independent drain; optional UI/SSE |
-| Debug UI | Existing enabled page renders; ordinary streaming unchanged; Durable admission and automatic polling with stable retry key; terminal/error/question display; authorized history; stale responses discarded after agent/session switch; no duplicate run on polling failure |
+| Debug UI | Page loads without a Functions key and can prompt for one; no secrets/run data in page; data endpoints still require auth; exact +1 page inventory; ordinary streaming unchanged; Durable admission and automatic polling with stable retry key; terminal/error/question display; authorized history; stale responses discarded after agent/session switch; no duplicate run on polling failure |
+| Entry auth and retry boundaries | Same agent with distinct built-in/authored policies; preserved legacy/default auth precedence; originating-entry reauthorization; no Durable-to-workflow implementation imports; existing persisted workflow retry envelope/exception compatibility |
 | Authored HTTP routing | One trigger per entry; unchanged submit URL/methods; parameter-bound same-entry links; management method union cannot broaden submission; host-constrained suffix plus dispatcher allowlist; empty suffix; encoded/extra paths; ambiguous shapes and collisions rejected before registration; sibling routes not shadowed |
 | Reuse/CI | Source-to-target regressions; fixture/wheel provenance; matrix/trust boundaries; required versus advisory results |
 
