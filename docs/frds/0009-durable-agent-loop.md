@@ -50,7 +50,8 @@ branch: larohra/durable-agent-loop
 - Reject unsupported configurations and references before registration;
   never fall back to the ordinary runner.
 - No ingress/tool-policy DSL or tool-action approval engine.
-- UI/SSE and Timer research remain outside core release dependencies.
+- The existing debug UI gains Durable result polling in v1 when enabled.
+  Richer UI/SSE and Timer research remain outside core release dependencies.
 - §4.15 tracks post-v1 fast-follows and distinguishes agreed deferrals from
   optional work and uncommitted candidates.
 
@@ -67,7 +68,7 @@ branch: larohra/durable-agent-loop
 | Execute | New `durable/{engine,activities,model,tools}.py` | Native orchestration; separate model/tool checkpoints |
 | Session | New `durable/{session,contracts,intake}.py` | Entity authority; admission; versioned envelopes |
 | Sandbox/lifecycle | New `durable/{sandbox,lifecycle}.py` | Binding, packaging, resume, expiry, cleanup |
-| Optional UI | `public/durable-chat/`, endpoint adapter | Public API client only |
+| Debug UI | Existing `public/index.html`, endpoint adapter | Public API client; automatic polling for Durable agents |
 
 - Validate the complete agent graph before app mutation; clients remain lazy.
 - Registration remains Azure-aware; no YAML reparsing or discovery-time provisioning.
@@ -596,9 +597,11 @@ durable:
   `builtin_endpoints.http_auth` when built-ins are enabled, otherwise from the
   authored HTTP trigger's `trigger.args.http_auth`. Each entry uses that policy
   for both submission and management within its one HTTP function registration.
-- Durable agents suppress ordinary chat page, chatstream, blob-backed history,
-  and workflow-status registrations. Optional Durable UI is served only through
-  the management adapter.
+- Durable agents suppress the separate ordinary chat page, chatstream,
+  blob-backed history and workflow-status registrations. When
+  `builtin_endpoints.debug_chat_ui` is enabled, the agent dispatcher serves the
+  existing `public/index.html` UI with the Durable polling behavior below.
+  The flag is never silently accepted without a working page.
 
 #### Inbound MCP: post-v1
 
@@ -643,12 +646,28 @@ durable:
 - JSON clients request-scoped; SSE client lives inside generator; static assets
   need none. Preserve auth/route precedence; reject conflicting reserved paths.
 
-#### Optional UI/SSE
+#### Existing debug UI and optional SSE
 
-- Adapt `larohra/durable-loop-chat-ui`; Entity history is authoritative;
-  browser cache optional, no default sensitive/credential persistence.
-- UI remains optional through `builtin_endpoints.debug_chat_ui`.
-- Polling-only UI uses status, questions, session discovery/history; no journal.
+- V1 reuses `public/index.html`, not a separate Durable UI. The UI remains
+  opt-in through `builtin_endpoints.debug_chat_ui`, but its implementation is
+  part of C2, not a deferred capability.
+- Supply the resolved agent's Durable-enabled flag and relative endpoint paths
+  as non-secret page configuration. Ordinary agents retain their existing
+  chat/stream behavior. For Durable agents, send to the admission endpoint with
+  one `Idempotency-Key` per user submission (reuse it on retry), retain the
+  returned session/run IDs, and automatically poll the returned status link.
+  Never discover mode by submitting the same prompt to both execution paths.
+- Reuse existing chat presentation for results and errors; an accepted run
+  handle is not an assistant answer. Poll with bounded backoff, honor server
+  retry guidance, and stop at completion/failure/cancellation/timeout or when
+  the selected agent/session changes. A browser disconnect or polling failure
+  does not cancel or resubmit the run; surface errors and allow resuming status.
+- Use the same authorized entry for polling and Entity-backed history. Display
+  pending human questions and submit answers through the existing input contract
+  with idempotent retries; do not start another turn to answer a question.
+  Preserve existing UI auth handling and add no default credential persistence.
+- Entity history remains authoritative; no observation journal or Durable SSE
+  is needed for v1 polling.
 - Another client or cleared browser cache restores from server history.
 - SSE publishes bounded provisional foreground observations; retry epochs replace
   drafts. Disconnect/publisher failure never restarts execution or renews TTL.
@@ -663,7 +682,7 @@ durable:
 | D0 | FRD-only #226 | None | Design only | Architecture |
 | C0 | Characterize ordinary/workflow registration inventory and runner behavior | D0 | No product change | Regression baseline |
 | C1 | Bump Durable b2→b3 + `durabletask==1.10.0`; move MAF trio to `1.17.0/1.14.2/1.12.0` | C0 | Existing workflow/runner suites unchanged on 3.13/3.14 | Dependency blast radius |
-| C2 | Complete HTTP Durable core: schema/catalog, real MAF model/tool execution and skills, budgets/compaction, Entity admission/history, same-function auth/management, human input, whole-run deadline, TTL/deletion | C1 | Usable real turns with complete lifecycle; generated reference/spec, architecture, API/auth and observability docs together | Review work packages below; no dead flags or fake shipped engine |
+| C2 | Complete HTTP Durable core: schema/catalog, real MAF model/tool execution and skills, budgets/compaction, Entity admission/history, same-function auth/management, human input, whole-run deadline, TTL/deletion, existing debug UI with automatic Durable polling | C1 | Usable real turns with complete lifecycle and enabled debug UI; generated reference/spec, architecture, API/auth and observability docs together | Review work packages below; no dead flags or fake shipped engine |
 | C3 | Sandbox packaging, parallel execution, affinity/loss/cleanup; introduce Sandbox fields here | C2; #196/#197 merged or pinned assets vendored with source SHA | Optional workspace capability and sandbox deployment guide | Isolation and ambiguous effects |
 | C4 | Enumerated deployed qualification profiles and support matrix only | C3 | Runbooks, observability, README/onboarding | Required evidence |
 | Promotion | Feature branch → `main` after all blocking gates | C4 | Final coherent docs | Qualified public preview |
@@ -705,7 +724,7 @@ durable:
 | `larohra/durable-loop-leadership-demo@d3ebac5afadeb8cb6d59f54a53177a39de4275f5` | `experimental/durable_loop_*` and tests → C2 native model/session/receipt/HTTP primitives |
 | `feature/aca-sandboxes@88f553ed6a67e399a8fb660cf7aaef15905f0590` + leadership | `controller/{package,bootstrap_delivery,sandbox_config}.py`, `harness/bootstrap.py`, `transport/aca_sdk.py`, manifests/tests → C3 |
 | Same ACA pin; [#196][e2e-assets], [#197][e2e-ci] | Fixture/wheel assembly, dependency export, smoke/provenance, deployed suites and Python matrix → C2–C4 |
-| `larohra/durable-loop-chat-ui@9fe3edb8df1292533508e3742df13b42ad8c3e33` | `experimental/durable_chat_*`, `public/durable-chat/`, browser/history tests → optional API adapter |
+| `larohra/durable-loop-chat-ui@9fe3edb8df1292533508e3742df13b42ad8c3e33` | Reference for selective polling/history test reuse; v1 extends existing `public/index.html`, not a separate UI |
 
 - Source module paths are relative to `src/azure_functions_agents/`.
 - Record source SHA/files → destination, port/adapt/omit rationale and tests;
@@ -734,7 +753,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | FF2 | Dynamic Workflows composition | Combine Durable turns with FRD 0004 workflows without hidden agent loops | **Deferred to post-v1**; Decision 64 | Define supported directions of composition, shared identity, budgets, retry/cancel semantics and per-call recovery. Evaluate DTS sub-orchestrations; they are not yet selected. |
 | FF3 | Agent delegation and workflow subagents | Support `subagents:` and `workflows.subagents` while preserving checkpoints inside specialists | **Deferred to post-v1**; Decision 64 / FRD 0007 | Replace whole-loop delegation with a checkpoint-aware contract; define parent/child ownership, call accounting, cancellation and any registration changes. Coordinate with FF2. |
 | FF4 | Timer and other non-HTTP ingress | Start Durable work from trusted scheduled/event producers | **Research; outside v1**; Decisions 21/22/31 | Define producer/service-actor ownership, stable delivery identity, retries and Timer catch-up behavior; qualify one trigger at a time. Earlier service-actor grants are not a selected v1 design. |
-| FF5 | Optional Durable chat UI | Restore runs, questions and conversation from server state rather than browser-only history | **Optional, independently deliverable**; Decisions 18/38/44, §4.13 | Adapt the existing UI to asynchronous admission and owner-authorized management; preserve no-default-sensitive-persistence rules. Polling alone must work; SSE is not a prerequisite. |
+| FF5 | Richer Durable UI enhancements | Add dedicated run/session browsing and richer views beyond the existing chat UI | **Optional enhancements only**; §4.13, Decision 80 | Basic automatic polling, result/question handling and Entity-backed chat history ship in C2. Scope additional UI separately; do not make a new UI or SSE a prerequisite for v1. |
 | FF6 | Optional SSE and observation journal | Provide live provisional output and reconnectable observations | **Optional, independently deliverable**; Decision 38, §4.13 | Qualify authenticated stream lifetime, retry epochs and disconnect behavior; if a Blob journal is used, define bounded retention/cursors and cleanup separately from authoritative Entity history. |
 | FF7 | A2A transport | Evaluate a protocol designed for long-running agent interactions | **Candidate only**; non-blocking suggestion in #234 | Compare supported client task/status/input semantics with the HTTP core and FF1; decide whether to pursue a separate adapter. No commitment to replace MCP. |
 
@@ -829,6 +848,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | 77 | Harness investigation gate | Block FRD / side investigation | Verify actual pinned harness/skills behavior separately; do not block FRD approval/merge; breaking findings go to a follow-up PR without silent capability removal | Human | 2026-09-23 |
 | 78 | Cross-deployment compatibility | Version pin/gate / user-owned compatibility | Preserve session state/identity/order across deployments without catalog/deployment pinning; users own breaking-change handling and migrations, and real errors surface explicitly; extends 54 | Human | 2026-09-23 |
 | 79 | Usable delivery slices | Six fragmented core layers / coherent core plus parallel work packages | Replace C2a-C2f with one usable C2 core PR, followed by optional Sandbox C3 and qualification C4; no waived gates; supersedes 71 | Human; Agent delivery plan | 2026-09-23 |
+| 80 | Debug UI compatibility | Separate/deferred UI / reuse existing UI | Keep existing debug UI in v1; detect Durable mode and automatically poll results through its authorized entry. Include working enabled-flag behavior in C2; only richer enhancements/SSE remain optional | Human | 2026-09-23 |
 
 ## 6. Test plan
 
@@ -856,6 +876,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | State/transport | Low-compressibility >1 MiB; threshold/cap/envelope bounds; cold hydration; storage failures; management-read limit separately |
 | Lifecycle | Idle/wait expiry; stale timers; no read/retry renewal; post-acknowledgement orchestration loss expires through the Entity-held deadline without permitting late commits; duplicate acknowledgement never extends deadline; active protection; revocation; late work; retained retry authority; repeated-DELETE identity, owner checks and pending/completed/failed outcomes |
 | Registration/API | Exact once-only inventory with no inbound Durable MCP handlers; reject unsupported MCP exposure without ordinary-runner fallback; preserve ordinary MCP and outbound MCP tools; auth/methods/routes; chat cannot be shadowed by management; encoded paths; client/generator lifetime; independent drain; optional UI/SSE |
+| Debug UI | Existing enabled page renders; ordinary streaming unchanged; Durable admission and automatic polling with stable retry key; terminal/error/question display; authorized history; stale responses discarded after agent/session switch; no duplicate run on polling failure |
 | Reuse/CI | Source-to-target regressions; fixture/wheel provenance; matrix/trust boundaries; required versus advisory results |
 
 | Blocking gate | Layer | Environment | Required evidence |
