@@ -645,15 +645,19 @@ durable:
 - Register exactly one HTTP trigger for that entry, conceptually
   `R/{*operation}` with a host constraint matching only the empty submission
   suffix or the enabled management path shapes. This is one constrained route
-  template, not multiple triggers on one function. The exact constrained
-  catch-all syntax and empty-suffix behavior require the local-host probe below;
-  do not publish an unverified regex as supported configuration.
+  template, not multiple triggers on one function. The local-host probe below
+  verifies a minimal mapping; the full generated operation set still needs C2
+  qualification.
 - Retain authored submission methods. The trigger's method list is their union
   with the required management methods (`GET`, `POST`, `DELETE`); the dispatcher
   then checks the exact method/path pair. A management-method addition must not
   enable that method for submission. Unknown paths return 404 and unsupported
   methods on known paths return 405. No captured operation name can dynamically
   select an orchestrator, activity, Entity operation or arbitrary callable.
+- Validate captured path segments before dispatch, including encoded separators
+  and normalization ambiguities. The host regex alone does not enforce these
+  boundaries; do not repeatedly decode captured values or allow encoded input
+  to introduce extra operation segments.
 - Compile links from the matched originating entry and its bound route
   parameters, encoding each parameter once as a path segment. Preserve parameter
   constraints; never derive links from untrusted forwarded hosts or copy
@@ -680,6 +684,18 @@ durable:
   evidence of hosted key/Entra enforcement. A failed probe requires a routing
   design follow-up, not silent fallback to broad routing, host-only keys or
   extra management functions; C2 must qualify the selected mapping before ship.
+- **Local probe result (2026-09-23): PASS, 26/26 real HTTP checks**, on Core
+  Tools 4.13.0, Functions host 4.1051.300.26316 and Python 3.13.15. One target
+  HTTP function plus an unrelated sibling loaded. The minimal working template
+  was `orders/{customer}/ask/{*operation:regex(^(manage/runs/[^/]+(/cancel)?)?$)=}`.
+  The initial version without the empty default (`=`) returned 404 for
+  submission; adding that default allowed submission without a trailing slash.
+  Submit/status/cancel succeeded, the sibling remained reachable, unrelated
+  suffixes/extra segments returned 404 and wrong methods returned 405.
+  Encoded-separator probes required dispatcher guards, not regex alone.
+  This proves the minimal local routing mechanism, not the full management
+  surface, key/Entra enforcement, cloud behavior or arbitrary authored route
+  shapes. Owned probe processes were stopped; no product code changed.
 - One built-in Durable chat agent: 6; many: `5+B`; UI/SSE/group: +0;
   custom-only: `5+C`. Existing workflow engine: separate 3; SDK helpers counted once.
 - Total `F = O + 2I + 3W + 3D + B + C`: ordinary registrations O; native
