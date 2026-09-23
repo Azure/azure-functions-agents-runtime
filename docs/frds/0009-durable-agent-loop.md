@@ -223,27 +223,19 @@ durable:
 
 ### 4.4 Ownership
 
-- The canonical app namespace is the required deployment setting
-  `AZURE_FUNCTIONS_AGENTS_APP_ID` for Durable-enabled apps: an operator-generated
-  UUID, validated and normalized to lowercase hyphenated form before app
-  registration. It is non-secret, identical on every worker serving the same
-  logical app, and never generated at worker startup or inferred from a host
-  name, slot name, key, code version or user-supplied request.
-  Missing/invalid values fail registration explicitly; ordinary apps do not
-  require this setting. All "deployment/app" identity fields in §4.3 refer to
-  this exact value, including the key-owner fingerprint domain.
-- Give independent apps and independent staging slots different UUIDs and
-  isolated task hubs. A slot taking over the same logical production app uses
-  the production UUID and backend namespace; configure the setting as
-  slot-sticky and validate the slot/backend pairing before swap. Renaming the
-  hosting resource or deploying code preserves the UUID for the same logical
-  app. Sharing this value is not authorization to share sessions across apps.
-- Changing the UUID creates a new namespace; it does not transfer ownership or
-  make old sessions discoverable. Preserve the old UUID and backend to continue
-  existing sessions. Moving to another namespace requires an operator-owned,
-  explicit migration of scoped IDs/receipts/ownership references; v1 supplies
-  no automatic reassignment or migration. The UUID is app isolation, not a
-  substitute for the caller identity below.
+- **Namespace selection reopened:** no new required
+  `AZURE_FUNCTIONS_AGENTS_APP_ID` setting. Decision 83's user-maintained UUID
+  proposal is withdrawn by Decision 85. App isolation remains required and
+  separate from caller identity, but the exact source is not yet finalized.
+  Evaluate the existing backend/task-hub isolation boundary first, then
+  platform-provided identity or a backend-persisted runtime-generated namespace.
+  Do not silently introduce a new fallback or implement an unselected formula.
+- Any selected namespace must be consistent across workers and code deployments,
+  define slot/backend pairing and migration behavior, and never use request
+  headers, credentials or per-worker random values as the app identity.
+  Independent apps/slots must not share a task hub as an isolation shortcut.
+  The "deployment/app" fields in §4.3 remain subject to this decision; they
+  must be made precise before implementing scoped IDs and key fingerprints.
 - Normalize every authenticated ingress to a non-secret owner ID:
   - Entra: verified `(tenant_id, object_id)`; `_auth.py` requires exactly one
     `tid` and one `oid`, and absent or multi-valued claims fail closed with 401.
@@ -541,7 +533,13 @@ durable:
   logical run deadline or delay its terminal state. Do not close shared clients
   or kill a worker to cancel one operation.
 - Cancellation must reach the activity owning the call, not merely cancel the
-  orchestrator's wait. Activities receive the absolute run deadline and enforce
+  orchestrator's wait. **This is required new C2 adapter work, not an existing
+  verified end-to-end capability.** Existing workflow cancellation stops
+  scheduling; it does not establish cancellation delivery to an already-running
+  model/tool call on another worker. Do not assume orchestration termination,
+  an external event, or cancelling a Durable task automatically cancels that
+  activity's local Python task or remote execution.
+  Activities receive the absolute run deadline and enforce
   it locally. For explicit cancellation they observe the Entity's persisted
   terminal/generation state through a bounded worker-side check while a call is
   active, then cancel the local awaitable and invoke any supported remote
@@ -549,6 +547,12 @@ durable:
   delivery claim is required. Qualify the check cadence and transport in C2;
   the five-second budget starts when the owning worker observes cancellation,
   not when a management request is received by another worker.
+- C2 must demonstrate cancellation issued through one worker being observed
+  by a different worker running a harmless blocking async operation, with
+  local cleanup and an ignored-cancellation negative case. Verify the pinned
+  SDK's worker-side Entity-read/client capability before choosing that transport;
+  if unavailable, revise this delivery mechanism explicitly. Mocks or the
+  existing orchestration-only cancellation path are not sufficient evidence.
 - For foreground model/HTTP calls, cancelling the local task and closing that
   request is sufficient best effort; do not claim provider compute stopped.
   Arbitrary synchronous Python tools cannot be force-killed safely in-process.
@@ -1001,6 +1005,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | 82 | Entry auth, retry boundaries and UI bootstrap corrections | Agent-wide policy / per-entry policy; direct workflow imports / shared mechanics; protected page / existing static page | Preserve independent entry auth; extract generic retry mechanics with engine-owned validation; retain separate static page and count it as U. Refines Decisions 76/80/81 without weakening data-endpoint auth | Human | 2026-09-23 |
 | 83 | Canonical app namespace | Inferred hosting identifier / explicit persistent UUID | Require deployment-level AZURE_FUNCTIONS_AGENTS_APP_ID for Durable apps; preserve across code deployments, define slot/rename/migration behavior separately from caller identity | Human direction; Agent contract | 2026-09-23 |
 | 84 | Cancellation scope | Mandatory quarantine / bounded best effort then continue | Request supported cancellation, wait briefly for stop evidence, abandon the local wait and allow subsequent turns; retain unknown outcomes and generation fencing, not effect isolation. Five-second internal cleanup budget; cross-worker observation and sandbox control require qualification. Supersedes mandatory quarantine language | Human direction; Agent contract | 2026-09-23 |
+| 85 | App identity configuration burden | Required user UUID / reuse backend or platform identity | Withdraw required AZURE_FUNCTIONS_AGENTS_APP_ID from Decision 83. Select a no-new-required-setting namespace after comparing existing backend/task-hub scope, platform identity and backend-generated identity; selection remains open | Human | 2026-09-23 |
 
 ## 6. Test plan
 
@@ -1030,7 +1035,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | Registration/API | Exact once-only inventory with no inbound Durable MCP handlers; reject unsupported MCP exposure without ordinary-runner fallback; preserve ordinary MCP and outbound MCP tools; auth/methods/routes; chat cannot be shadowed by management; encoded paths; client/generator lifetime; independent drain; optional UI/SSE |
 | Debug UI | Page loads without a Functions key and can prompt for one; no secrets/run data in page; data endpoints still require auth; exact +1 page inventory; ordinary streaming unchanged; Durable admission and automatic polling with stable retry key; terminal/error/question display; authorized history; stale responses discarded after agent/session switch; no duplicate run on polling failure |
 | Entry auth and retry boundaries | Same agent with distinct built-in/authored policies; preserved legacy/default auth precedence; originating-entry reauthorization; no Durable-to-workflow implementation imports; existing persisted workflow retry envelope/exception compatibility |
-| App namespace | Missing/invalid UUID fails only for Durable apps; identical identity across workers/deployments; independent app/slot isolation; production slot swap retains namespace/backend pairing; rename preserves UUID; changed UUID cannot silently adopt old ownership |
+| App namespace | No new mandatory identity setting; selected namespace consistent across workers/deployments; independent app/slot isolation; slot/backend pairing; explicit rename/migration behavior; no silent adoption of another namespace's ownership (exact source pending Decision 85) |
 | Bounded cancellation | Deadline enforced by call-owning activity; explicit cancel observed across workers; bounded parallel cleanup, not per-call serial waits; ignored/unavailable cancellation allows subsequent turns; late commits fenced; unknown outcomes retained; local request closure does not imply remote stop; sandbox signal uses owned operation handle and distinguishes request acknowledgement from process exit |
 | Authored HTTP routing | One trigger per entry; unchanged submit URL/methods; parameter-bound same-entry links; management method union cannot broaden submission; host-constrained suffix plus dispatcher allowlist; empty suffix; encoded/extra paths; ambiguous shapes and collisions rejected before registration; sibling routes not shadowed |
 | Reuse/CI | Source-to-target regressions; fixture/wheel provenance; matrix/trust boundaries; required versus advisory results |
@@ -1060,7 +1065,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | `docs/triggers.md`, `docs/workflows.md` | HTTP/chat v1 scope; inbound MCP deferral versus supported outbound MCP; composition restrictions |
 | `docs/observability.md` | Cross-activity trace continuity, replay-safe counts and sensitive-data gating |
 | New Durable guide | API, support/size matrix, auth, retry/cancel/TTL/cleanup runbooks |
-| Durable deployment/runbook sections | Same-function key access; required persistent app UUID and slot/backend pairing; session continuity without deployment pinning; user-owned compatibility/migrations and post-cancellation effects; supported-provider verification |
+| Durable deployment/runbook sections | Same-function key access; selected automatic namespace and slot/backend pairing; session continuity without deployment pinning; user-owned compatibility/migrations and post-cancellation effects; supported-provider verification |
 | README, docs landing/onboarding | Secure preview setup; ordinary compatibility |
 | FRD index, `mkdocs.yml`, samples | Navigation; HTTP/group/worker-MCP examples |
 
