@@ -209,9 +209,19 @@ durable:
   400 before admission; no body alias, trimming or case folding.
 - Retries recover the same generated session; a new request key creates another
   session unless the caller supplies the returned session ID to continue the conversation.
-- Identity scope within the bound backend/task hub: agent slug, normalized
-  owner identity from §4.4 and trusted producer scope; no delivery/attempt
-  metadata or separately hashed app identifier.
+- Identity scope within the bound backend/task hub is exactly the ordered
+  tuple `(agent_slug, normalized_owner_id, entry_id)`. V1 `entry_id` is
+  `builtin` for the built-in chat entry or `http_trigger` for the agent's
+  authored HTTP trigger, assigned by registration, never accepted from the
+  request. Route parameter values, route text, credentials, delivery/attempt
+  metadata and a separate app identifier are not additional scope fields.
+  Use these same entry IDs in registration names and policy lookup.
+- Retries are scoped to the originating entry. The same owner/session/key
+  submitted through the other entry does not deduplicate to the original run;
+  generated session/request IDs and internal session lookup remain entry-scoped.
+  Return management links for the originating entry and use its auth policy.
+  Renaming a route does not change its entry ID; adding multiple authored
+  HTTP entries per agent would require a separately defined stable-ID contract.
 - `H(tag, fields...)` is lowercase SHA-256 of domain-tagged, length-prefixed
   UTF-8 fields; `scope` expands to the ordered fields above.
   Normalize `session_id` first: supplied ID, otherwise
@@ -1038,6 +1048,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | 84 | Cancellation scope | Mandatory quarantine / bounded best effort then continue | Request supported cancellation, wait briefly for stop evidence, abandon the local wait and allow subsequent turns; retain unknown outcomes and generation fencing, not effect isolation. Five-second internal cleanup budget; cross-worker observation and sandbox control require qualification. Supersedes mandatory quarantine language | Human direction; Agent contract | 2026-09-23 |
 | 85 | App identity configuration burden | Required user UUID / reuse backend or platform identity | Withdraw required AZURE_FUNCTIONS_AGENTS_APP_ID from Decision 83. Select a no-new-required-setting namespace after comparing existing backend/task-hub scope, platform identity and backend-generated identity; selection remains open | Human | 2026-09-23 |
 | 86 | Namespace selection and early sandbox cancellation assessment | Extra app identifier / existing backend-hub boundary; defer all sandbox investigation / assess in C2 | Use bound backend/task hub as state namespace, no extra app identifier in hashes or new setting; C2 verifies confinement and assesses existing sandbox cancellation primitives, C3 implements and qualifies them. Closes Decision 85's selection | Human | 2026-09-23 |
+| 87 | HTTP retry identity | Cross-entry deduplication / originating-entry scope | Scope session/request identity to agent slug, owner and registration-assigned entry ID (builtin or http_trigger) within the backend/hub. Switching entries does not deduplicate; management retains originating-entry auth | Human | 2026-09-23 |
 
 ## 6. Test plan
 
@@ -1067,6 +1078,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | Registration/API | Exact once-only inventory with no inbound Durable MCP handlers; reject unsupported MCP exposure without ordinary-runner fallback; preserve ordinary MCP and outbound MCP tools; auth/methods/routes; chat cannot be shadowed by management; encoded paths; client/generator lifetime; independent drain; optional UI/SSE |
 | Debug UI | Page loads without a Functions key and can prompt for one; no secrets/run data in page; data endpoints still require auth; exact +1 page inventory; ordinary streaming unchanged; Durable admission and automatic polling with stable retry key; terminal/error/question display; authorized history; stale responses discarded after agent/session switch; no duplicate run on polling failure |
 | Entry auth and retry boundaries | Same agent with distinct built-in/authored policies; preserved legacy/default auth precedence; originating-entry reauthorization; no Durable-to-workflow implementation imports; existing persisted workflow retry envelope/exception compatibility |
+| Entry retry identity | Same-entry retries return original receipt; same owner/session/key on another entry is separately scoped; registration-assigned entry ID cannot be spoofed; route rename preserves entry identity; management links and policy stay with originating entry |
 | App namespace | No new identity setting or app-ID hash field; same IDs in separate backend/hubs cannot cross-read/write; all workers for one hub share state; request cannot override bound namespace; cache confinement; slot/backend pairing; deployment/rename continuity with unchanged backend/hub; explicit migration on namespace change |
 | Bounded cancellation | Deadline enforced by call-owning activity; explicit cancel observed across workers; bounded parallel cleanup, not per-call serial waits; ignored/unavailable cancellation allows subsequent turns; late commits fenced; unknown outcomes retained; local request closure does not imply remote stop; sandbox signal uses owned operation handle and distinguishes request acknowledgement from process exit |
 | Sandbox cancellation assessment (C2) | SDK/API evidence for operation handle, independent cancel/signal request, exit acknowledgement and HTTP-disconnect behavior; simplest supported adapter handed to C3, or explicit unsupported finding; no inferred process-stop guarantee |
