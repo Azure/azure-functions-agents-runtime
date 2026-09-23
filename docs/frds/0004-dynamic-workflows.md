@@ -506,13 +506,14 @@ def get_service_health(args: dict[str, object]) -> dict[str, object]:
     return {"service": args["service"], "status": "healthy"}
 ```
 
-The single-callable "both" pattern is only viable for synchronous callables that
-can satisfy both the MAF and workflow Activity contracts. Async normal tools must
-use the separate-adapter pattern below for workflow support.
+The single-callable "both" pattern supports synchronous and async callables that
+satisfy both the MAF and workflow Activity contracts. With `@tool(schema=Params)`,
+the runtime converts the workflow argument dictionary to the Pydantic model
+before it calls the handler. Both decorator orders are supported.
 
 When normal tools use a Pydantic model but workflow Activities use `dict`
-arguments, authors should share internal business logic and expose separate
-adapters:
+arguments, authors can also share internal business logic and expose separate
+adapters when the input or output contracts differ:
 
 ```python
 from pydantic import BaseModel
@@ -1387,7 +1388,7 @@ results remain unchanged.
     normal and workflow tool inventories.
 - [ ] Unit: workflow discovery/registry tests
   - compatible `@workflow_tool` handlers register automatically;
-  - async/incompatible handlers are skipped with warning logs;
+  - async handlers are accepted; incompatible handlers are skipped with warning logs;
   - duplicate/reserved names are handled with clear warnings/errors;
   - `@workflow_tool` using a reserved runtime management name such as
     `start_workflow` is rejected;

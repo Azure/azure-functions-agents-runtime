@@ -231,7 +231,9 @@ The Activity runner calls the handler as `handler(args)`. A handler can be
 synchronous (`def`) or asynchronous (`async def`). It must accept a single
 dictionary argument and return a JSON-serializable value. The Activity
 awaits async handlers and runs synchronous handlers in a worker thread.
-Retry, timeout, and failure rules are the same for both kinds of handler.
+Retry and failure rules are the same for both kinds of handler. A timeout
+cancels an async handler, but it cannot stop a synchronous worker thread.
+External work can continue in either case.
 Reserved workflow-management names and duplicate workflow names are
 skipped during startup.
 
@@ -263,6 +265,10 @@ from azure_functions_agents import tool, workflow_tool
 def summarize(args: dict[str, object]) -> dict[str, object]:
     return {"summary": "..."}
 ```
+
+Both decorator orders are supported. With `@tool(schema=Params)`, the runtime
+converts the workflow argument dictionary to the Pydantic model before it calls
+the handler. The handler can be synchronous or asynchronous.
 
 Use `_`-prefixed helper functions for code that should be neither a
 normal tool nor a workflow tool.
