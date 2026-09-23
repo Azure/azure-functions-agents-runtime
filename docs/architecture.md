@@ -4,6 +4,12 @@
 
 `azure-functions-agents-runtime` turns a markdown-first agent project into an `azure.functions.FunctionApp`. The design goal is that you write `.agent.md` files plus a small amount of supporting configuration, and the runtime translates that authoring format into Azure Functions triggers, HTTP routes, MCP surfaces, and tool wiring. At startup, the runtime follows a three-stage pipeline: **discover** project files and inventories, **translate** them into typed runtime objects, and **register** the resulting agents on a Function App. The authoritative implementation of that pipeline lives in `src/azure_functions_agents/app.py:create_function_app()`.
 
+Agent evaluation is external and cross-cutting rather than a startup pipeline stage. The preview
+`azure_functions_agents.evaluation` client invokes an agent's existing opt-in synchronous chat
+route under Core Tools or in staging and translates its response/tool evidence into public Microsoft
+Agent Framework evaluation inputs. It does not discover, compose, register, or execute agents by a
+second path, and it makes no server-side endpoint or payload changes (FRD 0009).
+
 One agent can also declare a `subagents:` list so its own model can call other agents as `delegate_<slug>` tools during a normal `agent.run()` — chat-time multi-agent delegation (FRD 0007). That feature layers a small amount of extra structure onto the same pipeline (an app-wide identity index and an immutable, slug-keyed catalog built before any `FunctionApp` mutation) rather than introducing a new one; see Section 5, "Multi-agent delegation (subagents)".
 
 ## 2. High-level data flow
@@ -48,6 +54,8 @@ A few boundaries are worth calling out explicitly:
   workflow runtime once, and registers agent surfaces (FRDs 0004 and 0007).
 - **Registration is Azure-specific.** This is the first stage that knows about `azure.functions.FunctionApp`, decorators, routes, and trigger bindings.
 - **Execution is deferred.** The runner is not part of startup registration; it is called later by handler closures when an HTTP route or trigger actually fires.
+- **Evaluation remains outside startup.** The preview target adapter consumes the registered chat
+  contract; MAF and pytest/CI own checks, repetitions, reports, and gates.
 
 ## 3. Module map
 
@@ -87,6 +95,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/_function_tool.py` | Thin local shim around MAF `FunctionTool` creation so project tools can use `@tool`, plus `@workflow_tool` metadata for Dynamic Workflow Activity targets. | `tool()`, `workflow_tool()` |
 | `azure_functions_agents/_logger.py` | Shared package logger used across discovery, registration, and runtime code. | `logger` |
 | `azure_functions_agents/_observability.py` | Cross-cutting OpenTelemetry bootstrap and conventions: enables MAF `gen_ai` instrumentation and, when the optional `[monitor]` extra is installed, the Azure Monitor exporter, provides the `af.*` span/attribute helpers (fault domain, lifecycle stage), the resolved sensitive-data flag from `ENABLE_SENSITIVE_DATA`, minimal dynamic-session and delegate-call metrics, and third-party log-noise control. | `configure_observability()`, `start_span()`, `current_span()`, `FaultDomain`, `LifecycleStage`, `record_delegate_call()` |
+| `azure_functions_agents/evaluation/` | Preview development-time adapter from the existing synchronous built-in chat endpoint to MAF's public `SupportsAgentRun`/`AgentResponse` contracts. It owns target authentication, fresh session IDs, transport failure classification, and evidence conversion—not evaluator or result contracts. | `FunctionAgentTarget`, `AnonymousAuth`, `FunctionKeyAuth`, `EntraTokenAuth` |
 
 ### How the packages line up
 
@@ -97,6 +106,7 @@ A few boundaries are worth calling out explicitly:
 - `system_tools/` answers **"which runtime-provided tools can be attached on demand?"**
 - `runner.py` and `client_manager.py` answer **"once invoked, how does an agent call the model and its tools — including any specialist it delegates to?"**
 - `_observability.py` (cross-cutting) answers **"what did the run do, and is a failure the app's, runtime's, platform's, or a delegated specialist's fault?"**
+- `evaluation/` (external tooling) answers **"how can MAF evaluate authored behavior through the same hosted chat surface?"**
 
 ### Typical startup trace
 

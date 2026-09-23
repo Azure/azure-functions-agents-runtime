@@ -13,6 +13,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Build custom tools in plain Python** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and pull in any package you need
 - **Run agents on durable workflows** *(experimental, see [`docs/workflows.md`](docs/workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
+- **Evaluate authored behavior** *(preview)* — run MAF checks against the same chat surface under Core Tools or in staging, with optional Foundry grading
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
 - **Harness-only execution controls** — set portable output limits and optional Microsoft Agent Framework token-budget conversation compaction
@@ -156,6 +157,15 @@ Any `.agent.md` file can opt into built-in endpoints with `builtin_endpoints`. T
 - **Session persistence** — multi-turn conversations stored in Azure Blob Storage via the runtime's `BlobHistoryProvider`, reusing the function app's `AzureWebJobsStorage` account
 
 If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint-only agents as well as triggered agents that also expose a chat UI or API. `builtin_endpoints.debug_chat_ui: true` automatically enables the backing chat APIs. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints, including the MCP tool. See [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
+
+### Agent evaluations (preview)
+
+The `azure_functions_agents.evaluation` module provides a thin MAF-compatible target for testing
+an agent through its existing synchronous chat API. The same pytest suite can target a local Core
+Tools host or a deployed staging Function App by changing its complete endpoint URL and
+authentication. MAF owns deterministic checks, repetitions, evaluator providers, and results;
+Foundry grading is optional. See the [evaluation guide](docs/evaluation.md) and
+[evaluation sample](samples/agent-evaluation/).
 
 ### Agent configuration
 

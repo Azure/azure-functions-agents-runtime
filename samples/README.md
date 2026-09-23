@@ -22,6 +22,12 @@ two non-main workflow-enabled agents share one Durable engine while retaining
 separate policies. Run it locally with Azurite and use either agent's browser
 chat UI to start and observe an independent workflow.
 
+Development tooling samples:
+
+- [agent-evaluation](agent-evaluation/) — runnable receipt-agent Function App plus JSONL-driven MAF
+	checks against its local or staging chat endpoint, with pytest/JUnit output and optional Foundry
+	grading.
+
 ## Run Locally (optional)
 
 Each sample is set up to be deployed and run easily in Azure. Running in Azure is the most friction-free option to try out these samples.
