@@ -17,6 +17,7 @@ import asyncio
 import json
 import shutil
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -156,20 +157,28 @@ def _await_terminal(base_url: str, workflow_id: str, *, timeout: float = 180.0) 
     deadline = time.monotonic() + timeout
     body: dict[str, Any] = {}
     while time.monotonic() < deadline:
-        with urllib.request.urlopen(
-            f"{base_url}/runtime/webhooks/durabletask/instances/{workflow_id}", timeout=30
-        ) as response:
-            body = json.loads(response.read().decode())
-        if body.get("runtimeStatus") in {"Completed", "Failed", "Terminated"}:
-            return body
+        try:
+            with urllib.request.urlopen(
+                f"{base_url}/runtime/webhooks/durabletask/instances/{workflow_id}", timeout=30
+            ) as response:
+                body = json.loads(response.read().decode())
+        except urllib.error.HTTPError as exc:
+            # The new instance can be briefly invisible to the status API.
+            if exc.code != 404:
+                raise
+        else:
+            if body.get("runtimeStatus") in {"Completed", "Failed", "Terminated"}:
+                return body
         time.sleep(2)
     raise AssertionError(f"workflow {workflow_id} never reached a terminal state: {body}")
 
 
 def test_async_workflow_tool_completes_on_functions_host() -> None:
     workflow_id, payload = _triage_submission()
+    # A dedicated task hub keeps other E2E hosts' instances and leases out of this run.
+    hub_env = {"AzureFunctionsJobHost__extensions__durableTask__hubName": "AsyncToolE2E"}
 
-    with running_host(SAMPLE_APP) as host:
+    with running_host(SAMPLE_APP, env=hub_env) as host:
         _start_workflow(host.base_url, workflow_id, payload)
         status = _await_terminal(host.base_url, workflow_id)
         host_output = host.read_output()
