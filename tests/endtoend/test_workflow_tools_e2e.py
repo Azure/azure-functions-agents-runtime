@@ -1,4 +1,4 @@
-"""End-to-end test for an async ``@workflow_tool`` driven by a live agent.
+"""End-to-end test for sync and async ``@workflow_tool`` handlers driven by a live agent.
 
 Boots the ``workflow-incident-triage`` sample under ``func start`` with a live
 model provider. A chat prompt asks the agent to investigate an incident; the agent
@@ -7,9 +7,9 @@ session's workflow through the runtime's ``/agents/main/workflows`` endpoint.
 
 The sample's ``fetch_deploys`` handler is ``async def``; ``fetch_logs``,
 ``fetch_metrics``, and ``summarize_findings`` are synchronous. A ``Completed``
-workflow that contains the ``fetch_deploys`` result shows that the host
-discovered the async handler, exposed it to the agent, scheduled the Durable
-Activity, awaited the handler, and serialized its result.
+workflow that contains the results of both kinds of handler shows that the host
+discovered them, exposed them to the agent, scheduled the Durable Activities,
+ran the sync handlers, awaited the async handler, and serialized the results.
 
 Provider configuration matches ``test_samples_agentic.py``: CI pipeline variables
 are copied into the sample's gitignored ``local.settings.json``. The module skips
@@ -66,7 +66,7 @@ def triage_host() -> Iterator[HostHandle]:
             "(or another provider) to run the workflow agentic E2E test"
         )
     # A dedicated task hub keeps other E2E hosts' instances and leases out of this run.
-    env = {"AzureFunctionsJobHost__extensions__durableTask__hubName": "AsyncToolE2E"}
+    env = {"AzureFunctionsJobHost__extensions__durableTask__hubName": "WorkflowToolsE2E"}
     with running_host(SAMPLE_APP, env=env) as handle:
         wait_until_responsive(handle.base_url)
         yield handle
@@ -96,9 +96,7 @@ def _await_terminal_workflow(
             # One slow or dropped status request must not fail the run.
             last_error = exc
         else:
-            if workflows and all(
-                w.get("runtime_status") in _TERMINAL_STATUSES for w in workflows
-            ):
+            if workflows and all(w.get("runtime_status") in _TERMINAL_STATUSES for w in workflows):
                 return workflows[0]
         time.sleep(2)
     raise AssertionError(
@@ -107,18 +105,16 @@ def _await_terminal_workflow(
     )
 
 
-def _deploy_results(results: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return ``fetch_deploys`` results; the agent chooses the task ids."""
+def _results_with(results: dict[str, Any], *keys: str) -> list[dict[str, Any]]:
+    """Return task results that have all ``keys``; the agent chooses the task ids."""
     return [
         value
         for value in results.values()
-        if isinstance(value, dict)
-        and isinstance(value.get("deploys"), list)
-        and "lookback_hours" in value
+        if isinstance(value, dict) and all(key in value for key in keys)
     ]
 
 
-def test_agent_workflow_runs_async_tool_to_completion(triage_host: HostHandle) -> None:
+def test_agent_workflow_runs_sync_and_async_tools(triage_host: HostHandle) -> None:
     session_id = f"e2e-{uuid.uuid4().hex}"
 
     reply = chat(triage_host.base_url, AGENT_SLUG, _PROMPT, session_id=session_id, timeout=180)
@@ -132,7 +128,15 @@ def test_agent_workflow_runs_async_tool_to_completion(triage_host: HostHandle) -
     )
 
     results = workflow["output"]["results"]
-    deploys = _deploy_results(results)
+    deploys = _results_with(results, "deploys", "lookback_hours")
     assert deploys, f"the workflow did not run the async fetch_deploys tool: {results}"
     assert deploys[0]["service"] == SERVICE
     assert len(deploys[0]["deploys"]) == 2
+
+    logs = _results_with(results, "lines", "errors", "warnings")
+    assert logs, f"the workflow did not run the sync fetch_logs tool: {results}"
+    assert logs[0]["service"] == SERVICE
+
+    metrics = _results_with(results, "cpu_p99", "latency_p99_ms")
+    assert metrics, f"the workflow did not run the sync fetch_metrics tool: {results}"
+    assert metrics[0]["service"] == SERVICE

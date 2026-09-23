@@ -1404,12 +1404,13 @@ results remain unchanged.
   - `tools/` contains normal-only, workflow-only, both, and helper functions.
 - [ ] Sample tests: update `tests/test_incident_tools.py` for the decorator-based
   sample layout.
-- [x] E2E: `tests/endtoend/test_workflow_async_tool_e2e.py` runs the
+- [x] E2E: `tests/endtoend/test_workflow_tools_e2e.py` runs the
   `workflow-incident-triage` sample under `func start` with Azurite/Durable
   storage and a live Foundry model. A chat prompt makes the agent write the
   plan and call `start_workflow`. The test then confirms that the workflow
-  completes and that the Durable Activity awaited the async `fetch_deploys`
-  handler and returned its result.
+  completes and that the Durable Activities ran the sync `fetch_logs` and
+  `fetch_metrics` handlers, awaited the async `fetch_deploys` handler, and
+  returned their results.
 - [x] Evolution #112: workflow-enabled HTTP and non-HTTP handlers receive the
   Durable client and trigger addendum while workflow-disabled handlers keep
   their existing signatures.
