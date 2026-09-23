@@ -207,8 +207,9 @@ durable:
   400 before admission; no body alias, trimming or case folding.
 - Retries recover the same generated session; a new request key creates another
   session unless the caller supplies the returned session ID to continue the conversation.
-- Identity scope: deployment/app, agent slug, normalized owner identity from
-  §4.4 and trusted producer scope; no delivery/attempt metadata.
+- Identity scope within the bound backend/task hub: agent slug, normalized
+  owner identity from §4.4 and trusted producer scope; no delivery/attempt
+  metadata or separately hashed app identifier.
 - `H(tag, fields...)` is lowercase SHA-256 of domain-tagged, length-prefixed
   UTF-8 fields; `scope` expands to the ordered fields above.
   Normalize `session_id` first: supplied ID, otherwise
@@ -223,19 +224,29 @@ durable:
 
 ### 4.4 Ownership
 
-- **Namespace selection reopened:** no new required
-  `AZURE_FUNCTIONS_AGENTS_APP_ID` setting. Decision 83's user-maintained UUID
-  proposal is withdrawn by Decision 85. App isolation remains required and
-  separate from caller identity, but the exact source is not yet finalized.
-  Evaluate the existing backend/task-hub isolation boundary first, then
-  platform-provided identity or a backend-persisted runtime-generated namespace.
-  Do not silently introduce a new fallback or implement an unselected formula.
-- Any selected namespace must be consistent across workers and code deployments,
-  define slot/backend pairing and migration behavior, and never use request
-  headers, credentials or per-worker random values as the app identity.
-  Independent apps/slots must not share a task hub as an isolation shortcut.
-  The "deployment/app" fields in §4.3 remain subject to this decision; they
-  must be made precise before implementing scoped IDs and key fingerprints.
+- **App isolation uses the existing bound backend/task-hub namespace.** No
+  additional app ID is serialized into identity hashes, and no new setting or
+  runtime-generated UUID is required. A task-hub name alone is not globally
+  unique: the configured provider/backend and hub together locate the state.
+  The client binding selects that namespace; do not reconstruct it by hashing
+  connection strings, credentials, hostnames or deployment metadata.
+- Scope every orchestration, Entity, receipt, owner index and management lookup
+  to that same bound namespace. Request parameters cannot override the backend,
+  connection or hub. Identical logical IDs in different backend/hub namespaces
+  are valid and confer no cross-namespace access. Any process-local caches must
+  likewise remain isolated by bound client context.
+- Independent apps and deployment slots require isolated task hubs; sharing one
+  means sharing execution/state infrastructure, not achieving app isolation.
+  Keep the production backend/hub configuration slot-sticky where slots are
+  used. Code deployment or hosting-resource rename does not change identity
+  while the bound backend/hub remains the same. Changing a configured or
+  default-derived hub/backend selects a different state namespace, not an
+  automatic ownership transfer; moving state requires explicit operator-owned
+  migration. Backend access authorization and caller ownership are separate.
+- C2 must verify namespace confinement on the pinned client/Entity stack:
+  identical IDs in two isolated hubs cannot cross-read/write, all workers for
+  one hub see the same state, and compatible deployments retain that state.
+  This is a qualification requirement, not a claim that those tests have run.
 - Normalize every authenticated ingress to a non-secret owner ID:
   - Entra: verified `(tenant_id, object_id)`; `_auth.py` requires exactly one
     `tid` and one `oid`, and absent or multi-valued claims fail closed with 401.
@@ -243,8 +254,9 @@ durable:
     the operator-only `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH` assertion is not
     sufficient for Durable ownership.
   - Function/admin: a domain-separated SHA-256 fingerprint of the credential
-    presented on the host-authorized request, scoped to the stable deployment/app
-    identity, not a code version or auth-level label. All callers
+    presented on the host-authorized request: `H("key-owner", credential)`,
+    using §4.3's encoding. It is interpreted only inside the bound backend/hub,
+    not salted with a code version, app ID or auth-level label. All callers
     presenting the same key share one owner and may access that key owner's runs;
     rotating the key creates a new owner and does not transfer old runs.
     The raw key is never logged, checkpointed or returned.
@@ -566,6 +578,16 @@ durable:
   an unrelated process or the entire shared sandbox; qualify the selected
   provider's control/exit acknowledgement in C3. The existing Dynamic Sessions
   synchronous executions adapter is not evidence of such a signal API.
+- **C2 sandbox cancellation assessment:** inspect the selected exec SDK/API for
+  the simplest supported operation-scoped cancel/signal mechanism, stable
+  execution handle, process-exit acknowledgement and disconnect semantics.
+  Record whether SIGTERM/equivalent can be sent independently of the active
+  exec HTTP request and how it fits the bounded cleanup contract. Prefer the
+  existing provider primitive over a new supervisor/control service. Hand C3
+  an evidence-backed adapter choice or an explicit unsupported-capability
+  finding; do not assume HTTP disconnect kills the process. C3 still owns
+  sandbox implementation and real process-stop qualification. Assessment alone
+  does not authorize cloud provisioning or add premature sandbox schema fields.
 - A cancellation-request acknowledgement is not a process-exit acknowledgement.
   Retain operation-level confirmed-stop versus `outcome_unknown` results and
   surface sanitized cancellation failures. Late results cannot reopen the run
@@ -834,7 +856,7 @@ durable:
 | D0 | FRD-only #226 | None | Design only | Architecture |
 | C0 | Characterize ordinary/workflow registration inventory and runner behavior | D0 | No product change | Regression baseline |
 | C1 | Bump Durable b2→b3 + `durabletask==1.10.0`; move MAF trio to `1.17.0/1.14.2/1.12.0` | C0 | Existing workflow/runner suites unchanged on 3.13/3.14 | Dependency blast radius |
-| C2 | Complete HTTP Durable core: schema/catalog, real MAF model/tool execution and skills, budgets/compaction, Entity admission/history, same-function auth/management, human input, whole-run deadline, TTL/deletion, existing debug UI with automatic Durable polling | C1 | Usable real turns with complete lifecycle and enabled debug UI; generated reference/spec, architecture, API/auth and observability docs together | Review work packages below; no dead flags or fake shipped engine |
+| C2 | Complete HTTP Durable core: schema/catalog, real MAF model/tool execution and skills, budgets/compaction, Entity admission/history, same-function auth/management, human input, whole-run deadline, cross-worker cancellation, TTL/deletion, existing debug UI with automatic Durable polling; assess simplest sandbox cancellation API for C3 | C1 | Usable real turns with complete lifecycle and enabled debug UI; generated reference/spec, architecture, API/auth and observability docs together | Backend/hub confinement and cancellation evidence; review work packages below; no dead flags or fake shipped engine |
 | C3 | Sandbox packaging, parallel execution, affinity/loss/cleanup; introduce Sandbox fields here | C2; #196/#197 merged or pinned assets vendored with source SHA | Optional workspace capability and sandbox deployment guide | Isolation and ambiguous effects |
 | C4 | Enumerated deployed qualification profiles and support matrix only | C3 | Runbooks, observability, README/onboarding | Required evidence |
 | Promotion | Feature branch → `main` after all blocking gates | C4 | Final coherent docs | Qualified public preview |
@@ -1006,6 +1028,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | 83 | Canonical app namespace | Inferred hosting identifier / explicit persistent UUID | Require deployment-level AZURE_FUNCTIONS_AGENTS_APP_ID for Durable apps; preserve across code deployments, define slot/rename/migration behavior separately from caller identity | Human direction; Agent contract | 2026-09-23 |
 | 84 | Cancellation scope | Mandatory quarantine / bounded best effort then continue | Request supported cancellation, wait briefly for stop evidence, abandon the local wait and allow subsequent turns; retain unknown outcomes and generation fencing, not effect isolation. Five-second internal cleanup budget; cross-worker observation and sandbox control require qualification. Supersedes mandatory quarantine language | Human direction; Agent contract | 2026-09-23 |
 | 85 | App identity configuration burden | Required user UUID / reuse backend or platform identity | Withdraw required AZURE_FUNCTIONS_AGENTS_APP_ID from Decision 83. Select a no-new-required-setting namespace after comparing existing backend/task-hub scope, platform identity and backend-generated identity; selection remains open | Human | 2026-09-23 |
+| 86 | Namespace selection and early sandbox cancellation assessment | Extra app identifier / existing backend-hub boundary; defer all sandbox investigation / assess in C2 | Use bound backend/task hub as state namespace, no extra app identifier in hashes or new setting; C2 verifies confinement and assesses existing sandbox cancellation primitives, C3 implements and qualifies them. Closes Decision 85's selection | Human | 2026-09-23 |
 
 ## 6. Test plan
 
@@ -1035,8 +1058,9 @@ newly deferred by this table. None is a core-v1 release gate.
 | Registration/API | Exact once-only inventory with no inbound Durable MCP handlers; reject unsupported MCP exposure without ordinary-runner fallback; preserve ordinary MCP and outbound MCP tools; auth/methods/routes; chat cannot be shadowed by management; encoded paths; client/generator lifetime; independent drain; optional UI/SSE |
 | Debug UI | Page loads without a Functions key and can prompt for one; no secrets/run data in page; data endpoints still require auth; exact +1 page inventory; ordinary streaming unchanged; Durable admission and automatic polling with stable retry key; terminal/error/question display; authorized history; stale responses discarded after agent/session switch; no duplicate run on polling failure |
 | Entry auth and retry boundaries | Same agent with distinct built-in/authored policies; preserved legacy/default auth precedence; originating-entry reauthorization; no Durable-to-workflow implementation imports; existing persisted workflow retry envelope/exception compatibility |
-| App namespace | No new mandatory identity setting; selected namespace consistent across workers/deployments; independent app/slot isolation; slot/backend pairing; explicit rename/migration behavior; no silent adoption of another namespace's ownership (exact source pending Decision 85) |
+| App namespace | No new identity setting or app-ID hash field; same IDs in separate backend/hubs cannot cross-read/write; all workers for one hub share state; request cannot override bound namespace; cache confinement; slot/backend pairing; deployment/rename continuity with unchanged backend/hub; explicit migration on namespace change |
 | Bounded cancellation | Deadline enforced by call-owning activity; explicit cancel observed across workers; bounded parallel cleanup, not per-call serial waits; ignored/unavailable cancellation allows subsequent turns; late commits fenced; unknown outcomes retained; local request closure does not imply remote stop; sandbox signal uses owned operation handle and distinguishes request acknowledgement from process exit |
+| Sandbox cancellation assessment (C2) | SDK/API evidence for operation handle, independent cancel/signal request, exit acknowledgement and HTTP-disconnect behavior; simplest supported adapter handed to C3, or explicit unsupported finding; no inferred process-stop guarantee |
 | Authored HTTP routing | One trigger per entry; unchanged submit URL/methods; parameter-bound same-entry links; management method union cannot broaden submission; host-constrained suffix plus dispatcher allowlist; empty suffix; encoded/extra paths; ambiguous shapes and collisions rejected before registration; sibling routes not shadowed |
 | Reuse/CI | Source-to-target regressions; fixture/wheel provenance; matrix/trust boundaries; required versus advisory results |
 
