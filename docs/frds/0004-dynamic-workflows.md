@@ -1404,8 +1404,11 @@ results remain unchanged.
   - `tools/` contains normal-only, workflow-only, both, and helper functions.
 - [ ] Sample tests: update `tests/test_incident_tools.py` for the decorator-based
   sample layout.
-- [ ] E2E: run the `workflow-incident-triage` sample locally with Azurite/Durable
-  storage and confirm a workflow can start, execute sample tools, and complete.
+- [x] E2E: `tests/endtoend/test_workflow_async_tool_e2e.py` runs the
+  `workflow-incident-triage` sample under `func start` with Azurite/Durable
+  storage. It starts a workflow in which the async `fetch_deploys` and
+  synchronous tools feed `summarize_findings`, and it confirms that the
+  workflow completes.
 - [x] Evolution #112: workflow-enabled HTTP and non-HTTP handlers receive the
   Durable client and trigger addendum while workflow-disabled handlers keep
   their existing signatures.
