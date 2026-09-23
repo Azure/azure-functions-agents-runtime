@@ -165,7 +165,8 @@ durable:
   channel; otherwise dispatched work may continue. Reject late conversation
   commits by turn generation and retain unfinished call IDs as `outcome_unknown`.
   This fences state updates, not external effects or shared-workspace writes.
-  Apply §4.11's quarantine/reconciliation rule before new mutating work.
+  Use §4.11's bounded best-effort cancellation; unknown external effects do
+  not impose a quarantine gate on subsequent turns.
   Session idle TTL starts after the timed-out turn is committed.
 - Provider, Functions-host and infrastructure ceilings may terminate an
   individual attempt earlier, but do not replace or extend the user-visible
@@ -222,6 +223,27 @@ durable:
 
 ### 4.4 Ownership
 
+- The canonical app namespace is the required deployment setting
+  `AZURE_FUNCTIONS_AGENTS_APP_ID` for Durable-enabled apps: an operator-generated
+  UUID, validated and normalized to lowercase hyphenated form before app
+  registration. It is non-secret, identical on every worker serving the same
+  logical app, and never generated at worker startup or inferred from a host
+  name, slot name, key, code version or user-supplied request.
+  Missing/invalid values fail registration explicitly; ordinary apps do not
+  require this setting. All "deployment/app" identity fields in §4.3 refer to
+  this exact value, including the key-owner fingerprint domain.
+- Give independent apps and independent staging slots different UUIDs and
+  isolated task hubs. A slot taking over the same logical production app uses
+  the production UUID and backend namespace; configure the setting as
+  slot-sticky and validate the slot/backend pairing before swap. Renaming the
+  hosting resource or deploying code preserves the UUID for the same logical
+  app. Sharing this value is not authorization to share sessions across apps.
+- Changing the UUID creates a new namespace; it does not transfer ownership or
+  make old sessions discoverable. Preserve the old UUID and backend to continue
+  existing sessions. Moving to another namespace requires an operator-owned,
+  explicit migration of scoped IDs/receipts/ownership references; v1 supplies
+  no automatic reassignment or migration. The UUID is app isolation, not a
+  substitute for the caller identity below.
 - Normalize every authenticated ingress to a non-secret owner ID:
   - Entra: verified `(tenant_id, object_id)`; `_auth.py` requires exactly one
     `tid` and one `oid`, and absent or multi-valued claims fail closed with 401.
@@ -508,8 +530,45 @@ durable:
 ### 4.11 Cancellation, recovery and deployments
 
 - Cancellation is acknowledged intent, not rollback or guaranteed remote termination.
-- Stop new steps; preserve late results/unknown effects. New mutating work
-  waits for completion, supported fencing or explicit quarantine/reconciliation.
+- Persist terminal intent, stop new steps/retries and fence late conversation
+  updates by turn generation. Release the active-turn slot on terminal commit;
+  subsequent turns are allowed without quarantine or mandatory reconciliation,
+  even when an earlier operation's external outcome is unknown.
+- Request cancellation of each outstanding operation where supported, wait at
+  most five seconds in total (in parallel, not per operation), then stop waiting
+  and close/cancel the operation's local request/stream. This fixed internal
+  cleanup budget introduces no frontmatter field and does not extend the
+  logical run deadline or delay its terminal state. Do not close shared clients
+  or kill a worker to cancel one operation.
+- Cancellation must reach the activity owning the call, not merely cancel the
+  orchestrator's wait. Activities receive the absolute run deadline and enforce
+  it locally. For explicit cancellation they observe the Entity's persisted
+  terminal/generation state through a bounded worker-side check while a call is
+  active, then cancel the local awaitable and invoke any supported remote
+  cancellation operation. No in-memory cross-worker task registry or reliable
+  delivery claim is required. Qualify the check cadence and transport in C2;
+  the five-second budget starts when the owning worker observes cancellation,
+  not when a management request is received by another worker.
+- For foreground model/HTTP calls, cancelling the local task and closing that
+  request is sufficient best effort; do not claim provider compute stopped.
+  Arbitrary synchronous Python tools cannot be force-killed safely in-process.
+  If a tool ignores cancellation or its worker is unavailable, record an
+  unconfirmed outcome and move on rather than waiting indefinitely.
+- For sandbox exec operations, use an authenticated, operation-scoped process
+  control handle to request SIGTERM (or the provider's equivalent), when that
+  capability exists. Wait within the same cleanup budget for process exit,
+  then abandon the local HTTP wait if unconfirmed. Closing an exec HTTP request
+  does not itself signal or kill the guest process. Never signal a reused PID,
+  an unrelated process or the entire shared sandbox; qualify the selected
+  provider's control/exit acknowledgement in C3. The existing Dynamic Sessions
+  synchronous executions adapter is not evidence of such a signal API.
+- A cancellation-request acknowledgement is not a process-exit acknowledgement.
+  Retain operation-level confirmed-stop versus `outcome_unknown` results and
+  surface sanitized cancellation failures. Late results cannot reopen the run
+  or modify the next turn's conversation. Tool authors/operators own
+  cancellation cooperation, idempotency and effects that continue, including
+  overlapping external effects or workspace writes in a subsequent turn.
+  No rollback, remote termination or effect-isolation guarantee is made.
 - Native retries use captured policy and the structured retry bridge from §4.8;
   account separately for SDK transport retries.
 - Lifecycle recovery covers hard termination and crashes outside orchestration cleanup.
@@ -554,14 +613,14 @@ durable:
 - If that generation remains active when the deadline signal is processed, the
   Entity commits terminal `timed_out`, records unfinished calls as
   `outcome_unknown`, releases the slot and starts idle TTL. It fences late
-  conversation commits, not external effects; §4.11 quarantine/reconciliation
-  still applies before any new mutating work.
+  conversation commits, not external effects; §4.11 best-effort cancellation
+  does not prevent admission of the next turn.
 - Reads, polling, rejected requests and duplicate receipts never renew TTL.
 - Human wait neither starts nor renews session idle TTL. It is bounded by the
   whole-run deadline in §4.2; unanswered expiry ends the run as `timed_out`,
   not the session. Idle TTL starts at terminal turn commit. Superseded question
   generations cannot consume answers or reopen a terminal turn.
-- Unknown/quarantined work cannot receive indefinite active-work exemption.
+- Unknown work cannot receive indefinite active-work exemption.
 - Owner-authorized deletion atomically revokes access/admission; reject stale
   completion/answer attempts; remove logical conversation/run/index/UI records
   and clean up the actual sandbox. Retain a non-content, owner-bound deletion
@@ -940,6 +999,8 @@ newly deferred by this table. None is a core-v1 release gate.
 | 80 | Debug UI compatibility | Separate/deferred UI / reuse existing UI | Keep existing debug UI in v1; detect Durable mode and automatically poll results through its authorized entry. Include working enabled-flag behavior in C2; only richer enhancements/SSE remain optional | Human | 2026-09-23 |
 | 81 | Limited same-function routes | Separate management function / unrestricted catch-all / constrained single-function dispatch | Keep individual function-key and Entra support; expose only explicit operations through one constrained route and method/path allowlist. Validate host syntax separately without blocking FRD review; never expose system-key management URLs. Authored mapping and conservative ambiguity checks are specified in §4.13 | Human direction; Agent mapping | 2026-09-23 |
 | 82 | Entry auth, retry boundaries and UI bootstrap corrections | Agent-wide policy / per-entry policy; direct workflow imports / shared mechanics; protected page / existing static page | Preserve independent entry auth; extract generic retry mechanics with engine-owned validation; retain separate static page and count it as U. Refines Decisions 76/80/81 without weakening data-endpoint auth | Human | 2026-09-23 |
+| 83 | Canonical app namespace | Inferred hosting identifier / explicit persistent UUID | Require deployment-level AZURE_FUNCTIONS_AGENTS_APP_ID for Durable apps; preserve across code deployments, define slot/rename/migration behavior separately from caller identity | Human direction; Agent contract | 2026-09-23 |
+| 84 | Cancellation scope | Mandatory quarantine / bounded best effort then continue | Request supported cancellation, wait briefly for stop evidence, abandon the local wait and allow subsequent turns; retain unknown outcomes and generation fencing, not effect isolation. Five-second internal cleanup budget; cross-worker observation and sandbox control require qualification. Supersedes mandatory quarantine language | Human direction; Agent contract | 2026-09-23 |
 
 ## 6. Test plan
 
@@ -969,6 +1030,8 @@ newly deferred by this table. None is a core-v1 release gate.
 | Registration/API | Exact once-only inventory with no inbound Durable MCP handlers; reject unsupported MCP exposure without ordinary-runner fallback; preserve ordinary MCP and outbound MCP tools; auth/methods/routes; chat cannot be shadowed by management; encoded paths; client/generator lifetime; independent drain; optional UI/SSE |
 | Debug UI | Page loads without a Functions key and can prompt for one; no secrets/run data in page; data endpoints still require auth; exact +1 page inventory; ordinary streaming unchanged; Durable admission and automatic polling with stable retry key; terminal/error/question display; authorized history; stale responses discarded after agent/session switch; no duplicate run on polling failure |
 | Entry auth and retry boundaries | Same agent with distinct built-in/authored policies; preserved legacy/default auth precedence; originating-entry reauthorization; no Durable-to-workflow implementation imports; existing persisted workflow retry envelope/exception compatibility |
+| App namespace | Missing/invalid UUID fails only for Durable apps; identical identity across workers/deployments; independent app/slot isolation; production slot swap retains namespace/backend pairing; rename preserves UUID; changed UUID cannot silently adopt old ownership |
+| Bounded cancellation | Deadline enforced by call-owning activity; explicit cancel observed across workers; bounded parallel cleanup, not per-call serial waits; ignored/unavailable cancellation allows subsequent turns; late commits fenced; unknown outcomes retained; local request closure does not imply remote stop; sandbox signal uses owned operation handle and distinguishes request acknowledgement from process exit |
 | Authored HTTP routing | One trigger per entry; unchanged submit URL/methods; parameter-bound same-entry links; management method union cannot broaden submission; host-constrained suffix plus dispatcher allowlist; empty suffix; encoded/extra paths; ambiguous shapes and collisions rejected before registration; sibling routes not shadowed |
 | Reuse/CI | Source-to-target regressions; fixture/wheel provenance; matrix/trust boundaries; required versus advisory results |
 
@@ -997,7 +1060,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | `docs/triggers.md`, `docs/workflows.md` | HTTP/chat v1 scope; inbound MCP deferral versus supported outbound MCP; composition restrictions |
 | `docs/observability.md` | Cross-activity trace continuity, replay-safe counts and sensitive-data gating |
 | New Durable guide | API, support/size matrix, auth, retry/cancel/TTL/cleanup runbooks |
-| Durable deployment/runbook sections | Same-function key access; session continuity without deployment pinning; user-owned compatibility/migrations; supported-provider verification |
+| Durable deployment/runbook sections | Same-function key access; required persistent app UUID and slot/backend pairing; session continuity without deployment pinning; user-owned compatibility/migrations and post-cancellation effects; supported-provider verification |
 | README, docs landing/onboarding | Secure preview setup; ordinary compatibility |
 | FRD index, `mkdocs.yml`, samples | Navigation; HTTP/group/worker-MCP examples |
 
