@@ -1406,9 +1406,10 @@ results remain unchanged.
   sample layout.
 - [x] E2E: `tests/endtoend/test_workflow_async_tool_e2e.py` runs the
   `workflow-incident-triage` sample under `func start` with Azurite/Durable
-  storage. It starts a workflow in which the async `fetch_deploys` and
-  synchronous tools feed `summarize_findings`, and it confirms that the
-  workflow completes.
+  storage and a live Foundry model. A chat prompt makes the agent write the
+  plan and call `start_workflow`. The test then confirms that the workflow
+  completes and that the Durable Activity awaited the async `fetch_deploys`
+  handler and returned its result.
 - [x] Evolution #112: workflow-enabled HTTP and non-HTTP handlers receive the
   Durable client and trigger addendum while workflow-disabled handlers keep
   their existing signatures.

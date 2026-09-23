@@ -1,43 +1,54 @@
-"""End-to-end smoke test for an async ``@workflow_tool`` on a real Functions host.
+"""End-to-end test for an async ``@workflow_tool`` driven by a live agent.
 
-Boots the ``workflow-incident-triage`` sample under ``func start`` and runs a
-workflow through Durable's built-in orchestration HTTP API. The sample's
-``fetch_deploys`` handler is ``async def``; ``fetch_logs``, ``fetch_metrics``, and
-``summarize_findings`` are synchronous. The test is model-free: the orchestration
-input comes from the production ``start_workflow`` path, not from an agent.
+Boots the ``workflow-incident-triage`` sample under ``func start`` with a live
+model provider. A chat prompt asks the agent to investigate an incident; the agent
+authors a workflow plan and calls ``start_workflow``. The test then follows that
+session's workflow through the runtime's ``/agents/main/workflows`` endpoint.
 
-A ``Completed`` status shows that the host discovered the async handler,
-registered the workflow, scheduled the Durable Activity, awaited the handler, and
-serialized its result for the downstream synchronous task.
+The sample's ``fetch_deploys`` handler is ``async def``; ``fetch_logs``,
+``fetch_metrics``, and ``summarize_findings`` are synchronous. A ``Completed``
+workflow that contains the ``fetch_deploys`` result shows that the host
+discovered the async handler, exposed it to the agent, scheduled the Durable
+Activity, awaited the handler, and serialized its result.
+
+Provider configuration matches ``test_samples_agentic.py``: CI pipeline variables
+are copied into the sample's gitignored ``local.settings.json``. The module skips
+when no provider is configured.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import shutil
 import time
 import urllib.error
 import urllib.request
+import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from azure_functions_agents.config.loader import load_agent_specs, load_global_config
-from azure_functions_agents.config.merge import compose
-from azure_functions_agents.discovery.tools import discover_project_tools
-from azure_functions_agents.registration.capabilities import build_capabilities
-from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
-from azure_functions_agents.workflows import integration
-from azure_functions_agents.workflows import tools as workflow_tools
-from azure_functions_agents.workflows.schema import WorkflowPlanPolicy
-from tests.endtoend._func_host import running_host
+from tests.endtoend._agent_probe import chat, wait_until_responsive
+from tests.endtoend._func_host import (
+    HostHandle,
+    configured_provider,
+    overlay_provider_settings,
+    running_host,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SAMPLE_APP = REPO_ROOT / "samples" / "workflow-incident-triage" / "src"
+AGENT_SLUG = "main"
 SERVICE = "orders-api"
-_ORCHESTRATOR_NAME = "agents_workflow_orchestrator"
+_TERMINAL_STATUSES = {"Completed", "Failed", "Canceled", "Terminated"}
+_PROMPT = (
+    f"We're seeing latency spikes and intermittent 502s on the `{SERVICE}` service "
+    "for the last 20 minutes. Start a workflow now that pulls recent logs, metrics, "
+    "and the deploy history in parallel, then summarizes what you find. "
+    "Do not add a wait task."
+)
 
 pytestmark = [
     pytest.mark.e2e,
@@ -45,150 +56,83 @@ pytestmark = [
 ]
 
 
-def _sample_workflow_policy() -> WorkflowPlanPolicy:
-    """Build the sample policy through the production composition stages."""
-    global_config = load_global_config(SAMPLE_APP)
-    discovered = discover_project_tools(SAMPLE_APP)
-    entries: dict[str, CatalogEntry] = {}
-    for spec in load_agent_specs(SAMPLE_APP):
-        resolved = compose(
-            spec,
-            global_config,
-            discovered_mcp_names=[],
-            discovered_skill_names=[],
+@pytest.fixture(scope="module")
+def triage_host() -> Iterator[HostHandle]:
+    """Boot the sample with the resolved provider on a dedicated task hub."""
+    overlay_provider_settings(SAMPLE_APP)
+    if configured_provider(SAMPLE_APP) is None:
+        pytest.skip(
+            "no LLM provider configured — set FOUNDRY_PROJECT_ENDPOINT / FOUNDRY_MODEL "
+            "(or another provider) to run the workflow agentic E2E test"
         )
-        entries[resolved.slug] = CatalogEntry(
-            resolved,
-            build_capabilities(
-                resolved,
-                discovered_user_tools=discovered.user_tools,
-                discovered_workflow_tools=discovered.workflow_tools,
-                discovered_mcp_tools={},
-                discovered_skills={},
-            ),
-        )
-    handler_catalog = integration.build_workflow_handler_catalog(discovered.workflow_tools)
-    return integration.build_workflow_agent_policy_catalog(
-        build_catalog(entries),
-        handler_catalog,
-    )["main"]
+    # A dedicated task hub keeps other E2E hosts' instances and leases out of this run.
+    env = {"AzureFunctionsJobHost__extensions__durableTask__hubName": "AsyncToolE2E"}
+    with running_host(SAMPLE_APP, env=env) as handle:
+        wait_until_responsive(handle.base_url)
+        yield handle
 
 
-def _triage_submission() -> tuple[str, dict[str, Any]]:
-    """Capture orchestration input produced by the production ``start_workflow`` path."""
-    captured: dict[str, Any] = {}
-
-    class _CapturingClient:
-        async def get_status_all(self) -> list[Any]:
-            return []
-
-        async def schedule_new_orchestration(
-            self,
-            name: str,
-            *,
-            instance_id: str,
-            input: Any,
-            tags: dict[str, str],
-        ) -> str:
-            assert name == _ORCHESTRATOR_NAME
-            captured.update(input)
-            return instance_id
-
-    params = workflow_tools.StartWorkflowParams.model_validate(
-        {
-            "tasks": [
-                {"id": "logs", "type": "tool", "tool": "fetch_logs", "args": {"service": SERVICE}},
-                {
-                    "id": "metrics",
-                    "type": "tool",
-                    "tool": "fetch_metrics",
-                    "args": {"service": SERVICE},
-                },
-                {
-                    "id": "deploys",
-                    "type": "tool",
-                    "tool": "fetch_deploys",
-                    "args": {"service": SERVICE},
-                },
-                {
-                    "id": "summary",
-                    "type": "tool",
-                    "tool": "summarize_findings",
-                    "args": {
-                        "logs": "${logs.result}",
-                        "metrics": "${metrics.result}",
-                        "deploys": "${deploys.result}",
-                    },
-                    "depends_on": ["logs", "metrics", "deploys"],
-                },
-            ]
-        }
-    )
-    response = json.loads(
-        asyncio.run(
-            workflow_tools.start_workflow(
-                params,
-                workflow_tools.WorkflowSessionContext(
-                    workflow_agent_slug="main",
-                    session_id="async-tool-e2e",
-                    agent_name="main",
-                    durable_client=_CapturingClient(),  # type: ignore[arg-type]
-                ),
-                policy=_sample_workflow_policy(),
-            )
-        )
-    )
-    return response["workflow_id"], captured
-
-
-def _start_workflow(base_url: str, workflow_id: str, payload: dict[str, Any]) -> None:
+def _session_workflows(base_url: str, session_id: str) -> list[dict[str, Any]]:
     request = urllib.request.Request(
-        f"{base_url}/runtime/webhooks/durabletask/orchestrators"
-        f"/{_ORCHESTRATOR_NAME}/{workflow_id}",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+        f"{base_url}/agents/{AGENT_SLUG}/workflows",
+        headers={"x-ms-session-id": session_id},
     )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        assert response.status in {200, 202}
+    with urllib.request.urlopen(request, timeout=30) as response:
+        workflows = json.loads(response.read().decode())["workflows"]
+    assert isinstance(workflows, list)
+    return workflows
 
 
-def _await_terminal(base_url: str, workflow_id: str, *, timeout: float = 180.0) -> dict[str, Any]:
+def _await_terminal_workflow(
+    host: HostHandle, session_id: str, *, timeout: float = 240.0
+) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
-    body: dict[str, Any] = {}
+    workflows: list[dict[str, Any]] = []
+    last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(
-                f"{base_url}/runtime/webhooks/durabletask/instances/{workflow_id}", timeout=30
-            ) as response:
-                body = json.loads(response.read().decode())
-        except urllib.error.HTTPError as exc:
-            # The new instance can be briefly invisible to the status API.
-            if exc.code != 404:
-                raise
+            workflows = _session_workflows(host.base_url, session_id)
+        except (TimeoutError, urllib.error.URLError) as exc:
+            # One slow or dropped status request must not fail the run.
+            last_error = exc
         else:
-            if body.get("runtimeStatus") in {"Completed", "Failed", "Terminated"}:
-                return body
+            if workflows and all(
+                w.get("runtime_status") in _TERMINAL_STATUSES for w in workflows
+            ):
+                return workflows[0]
         time.sleep(2)
-    raise AssertionError(f"workflow {workflow_id} never reached a terminal state: {body}")
+    raise AssertionError(
+        f"session workflows never reached a terminal state: {workflows}; "
+        f"last request error: {last_error!r}\n--- func output ---\n{host.read_output()}"
+    )
 
 
-def test_async_workflow_tool_completes_on_functions_host() -> None:
-    workflow_id, payload = _triage_submission()
-    # A dedicated task hub keeps other E2E hosts' instances and leases out of this run.
-    hub_env = {"AzureFunctionsJobHost__extensions__durableTask__hubName": "AsyncToolE2E"}
+def _deploy_results(results: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return ``fetch_deploys`` results; the agent chooses the task ids."""
+    return [
+        value
+        for value in results.values()
+        if isinstance(value, dict)
+        and isinstance(value.get("deploys"), list)
+        and "lookback_hours" in value
+    ]
 
-    with running_host(SAMPLE_APP, env=hub_env) as host:
-        _start_workflow(host.base_url, workflow_id, payload)
-        status = _await_terminal(host.base_url, workflow_id)
-        host_output = host.read_output()
 
-    assert status["runtimeStatus"] == "Completed", f"{status}\n--- func output ---\n{host_output}"
-    results = status["output"]["results"]
-    deploys = results["deploys"]
-    assert deploys["service"] == SERVICE
-    assert deploys["lookback_hours"] == 24
-    assert len(deploys["deploys"]) == 2
-    assert results["logs"]["service"] == SERVICE
-    assert results["summary"]["service"] == SERVICE
-    assert any("deploy" in item for item in results["summary"]["evidence"])
+def test_agent_workflow_runs_async_tool_to_completion(triage_host: HostHandle) -> None:
+    session_id = f"e2e-{uuid.uuid4().hex}"
+
+    reply = chat(triage_host.base_url, AGENT_SLUG, _PROMPT, session_id=session_id, timeout=180)
+    assert reply.status == 200, f"chat request failed: {reply.status} {reply.body}"
+
+    workflow = _await_terminal_workflow(triage_host, session_id)
+    host_output = triage_host.read_output()
+    assert workflow["runtime_status"] == "Completed", (
+        f"{workflow}\n--- agent reply ---\n{reply.response_text}"
+        f"\n--- func output ---\n{host_output}"
+    )
+
+    results = workflow["output"]["results"]
+    deploys = _deploy_results(results)
+    assert deploys, f"the workflow did not run the async fetch_deploys tool: {results}"
+    assert deploys[0]["service"] == SERVICE
+    assert len(deploys[0]["deploys"]) == 2
