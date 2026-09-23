@@ -227,11 +227,29 @@ def fetch_logs(args: dict[str, Any]) -> dict[str, Any]:
     return {"service": service, "lines": ["..."]}
 ```
 
-The Activity runner calls the handler as `handler(args)`. v1 handlers
-must be synchronous, accept a single dictionary argument, and return a
-JSON-serializable value. Async handlers, reserved workflow-management
-names, and duplicate workflow names are rejected or skipped during
-startup.
+The Activity runner calls the handler as `handler(args)`. A handler can be
+synchronous (`def`) or asynchronous (`async def`). It must accept a single
+dictionary argument and return a JSON-serializable value. The Activity
+awaits async handlers and runs synchronous handlers in a worker thread.
+Retry and failure rules are the same for both kinds of handler. A timeout
+cancels an async handler, but it cannot stop a synchronous worker thread.
+External work can continue in either case.
+Reserved workflow-management names and duplicate workflow names are
+skipped during startup.
+
+```python
+import aiohttp
+
+
+@workflow_tool(description="Fetch an order from the order service.")
+async def fetch_order(args: dict[str, Any]) -> dict[str, Any]:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"https://orders.example/{args['id']}") as response:
+            return await response.json()
+```
+
+Only the workflow tool runs as async code. The Durable orchestrator
+continues to use `yield` and does not run tool I/O.
 
 Normal tools keep their existing behavior: a plain public function or an
 `@tool`/`FunctionTool` in `tools/*.py` becomes a normal MAF tool. Use both
@@ -247,6 +265,10 @@ from azure_functions_agents import tool, workflow_tool
 def summarize(args: dict[str, object]) -> dict[str, object]:
     return {"summary": "..."}
 ```
+
+Both decorator orders are supported. With `@tool(schema=Params)`, the runtime
+converts the workflow argument dictionary to the Pydantic model before it calls
+the handler. The handler can be synchronous or asynchronous.
 
 Use `_`-prefixed helper functions for code that should be neither a
 normal tool nor a workflow tool.

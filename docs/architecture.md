@@ -520,6 +520,12 @@ These tools enter the pipeline during discovery, are filtered in `build_capabili
 
 Dynamic Workflow Activity targets use the same folder but require explicit `@workflow_tool` opt-in. A function decorated only with `@workflow_tool` is workflow-only; a plain public function or `@tool` value is normal-tool-only; using both decorators exposes the same callable in both places. This keeps Durable Activity execution explicit while preserving the existing plain-function normal-tool UX.
 
+For tools that use both `@tool(schema=Params)` and `@workflow_tool`,
+`_function_tool.py` supplies a dictionary-to-model adapter. Discovery selects
+this adapter for workflow execution in either decorator order. It keeps the
+normal MAF keyword-argument wrapper unchanged. The Activity awaits async
+handlers and runs synchronous handlers in a worker thread.
+
 ### Per-agent capability filtering
 
 Each agent can narrow the shared inventory with front-matter `mcp`, `tools`, and `skills` settings; the runtime applies those filters when it builds `AgentCapabilities`. See `src/azure_functions_agents/registration/capabilities.py:build_capabilities()` and the detailed field reference in [`docs/front-matter-spec.md`](front-matter-spec.md).

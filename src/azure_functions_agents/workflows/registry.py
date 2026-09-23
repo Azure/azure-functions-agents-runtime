@@ -23,7 +23,6 @@ the workflow control plane.
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -36,12 +35,10 @@ from .schema import WorkflowRetryPolicy, workflow_timeout_ms
 class WorkflowToolEntry:
     """One row in the registry.
 
-    ``handler`` runs inside the orchestrator's activity. It must be a
-    plain (synchronous) callable taking a ``dict`` of args and returning
-    a JSON-serializable value. Async handlers are rejected at
-    registration time — supporting them needs a wrapper that doesn't
-    exist yet, and silently returning a coroutine to the activity would
-    surface as a confusing serialization error later.
+    ``handler`` runs inside the workflow tool Activity. It must be a
+    synchronous or ``async`` callable taking a ``dict`` of args and
+    returning a JSON-serializable value. The Activity awaits async
+    handlers and runs synchronous handlers off the event loop.
     """
 
     name: str
@@ -95,11 +92,6 @@ def make_workflow_tool_entry(
             f"workflow tool {name!r}: handler must be a callable taking a "
             "dict of args and returning a JSON-serializable value"
         )
-    if inspect.iscoroutinefunction(handler):
-        raise ValueError(
-            f"workflow tool {name!r}: async handlers are not supported; "
-            "register a synchronous wrapper instead"
-        )
     if retry is not None and not isinstance(retry, WorkflowRetryPolicy):
         raise ValueError(f"workflow tool {name!r}: retry must be a WorkflowRetryPolicy")
     if timeout is not None:
@@ -137,8 +129,7 @@ def register_workflow_tool(
 
     Raises :class:`ValueError` on collision with an existing entry, on a
     name that collides with a reserved workflow-management tool, or on
-    an obviously-wrong handler shape (async functions are rejected so
-    the orchestrator's activity can stay synchronous in M1).
+    an obviously-wrong handler shape.
     """
     if name in _REGISTRY:
         raise ValueError(f"workflow tool {name!r} is already registered")

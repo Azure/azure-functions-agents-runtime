@@ -506,13 +506,14 @@ def get_service_health(args: dict[str, object]) -> dict[str, object]:
     return {"service": args["service"], "status": "healthy"}
 ```
 
-The single-callable "both" pattern is only viable for synchronous callables that
-can satisfy both the MAF and workflow Activity contracts. Async normal tools must
-use the separate-adapter pattern below for workflow support.
+The single-callable "both" pattern supports synchronous and async callables that
+satisfy both the MAF and workflow Activity contracts. With `@tool(schema=Params)`,
+the runtime converts the workflow argument dictionary to the Pydantic model
+before it calls the handler. Both decorator orders are supported.
 
 When normal tools use a Pydantic model but workflow Activities use `dict`
-arguments, authors should share internal business logic and expose separate
-adapters:
+arguments, authors can also share internal business logic and expose separate
+adapters when the input or output contracts differ:
 
 ```python
 from pydantic import BaseModel
@@ -552,7 +553,8 @@ def _require_service(args: dict[str, object]) -> str:
 
 For v1, a workflow tool handler must:
 
-- be synchronous;
+- be synchronous or `async` (the Activity awaits `async` handlers; see
+  [#139](https://github.com/Azure/azure-functions-agents-runtime/issues/139));
 - accept one `dict[str, Any]` argument;
 - return a JSON-serializable value;
 - avoid relying on chat-turn-local runtime state;
@@ -560,7 +562,7 @@ For v1, a workflow tool handler must:
   parallel execution.
 
 The runtime should warn and skip functions that are clearly incompatible, such
-as async handlers, declaration-only tools, reserved names, duplicate names, or
+as declaration-only tools, reserved names, duplicate names, or
 handlers whose signature cannot accept the workflow `dict` argument.
 
 Reserved workflow tool names are the workflow management tools injected by the
@@ -1386,7 +1388,7 @@ results remain unchanged.
     normal and workflow tool inventories.
 - [ ] Unit: workflow discovery/registry tests
   - compatible `@workflow_tool` handlers register automatically;
-  - async/incompatible handlers are skipped with warning logs;
+  - async handlers are accepted; incompatible handlers are skipped with warning logs;
   - duplicate/reserved names are handled with clear warnings/errors;
   - `@workflow_tool` using a reserved runtime management name such as
     `start_workflow` is rejected;
@@ -1402,8 +1404,13 @@ results remain unchanged.
   - `tools/` contains normal-only, workflow-only, both, and helper functions.
 - [ ] Sample tests: update `tests/test_incident_tools.py` for the decorator-based
   sample layout.
-- [ ] E2E: run the `workflow-incident-triage` sample locally with Azurite/Durable
-  storage and confirm a workflow can start, execute sample tools, and complete.
+- [x] E2E: `tests/endtoend/test_workflow_tools_e2e.py` runs the
+  `workflow-incident-triage` sample under `func start` with Azurite/Durable
+  storage and a live Foundry model. A chat prompt makes the agent write the
+  plan and call `start_workflow`. The test then confirms that the workflow
+  completes and that the Durable Activities ran the sync `fetch_logs` and
+  `fetch_metrics` handlers, awaited the async `fetch_deploys` handler, and
+  returned their results.
 - [x] Evolution #112: workflow-enabled HTTP and non-HTTP handlers receive the
   Durable client and trigger addendum while workflow-disabled handlers keep
   their existing signatures.

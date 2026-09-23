@@ -4,7 +4,7 @@ import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import wraps
-from typing import Any, TypeVar, overload
+from typing import Any, TypeVar, cast, overload
 
 from agent_framework import FunctionTool
 from pydantic import BaseModel
@@ -15,6 +15,7 @@ __all__ = [
     "FunctionTool",
     "WorkflowTool",
     "WorkflowToolMetadata",
+    "get_workflow_tool_handler",
     "get_workflow_tool_metadata",
     "tool",
     "workflow_tool",
@@ -22,6 +23,7 @@ __all__ = [
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 _WORKFLOW_TOOL_METADATA_ATTR = "__azure_functions_agents_workflow_tool__"
+_WORKFLOW_TOOL_HANDLER_ATTR = "__azure_functions_agents_workflow_handler__"
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,14 @@ def get_workflow_tool_metadata(target: object) -> WorkflowToolMetadata | None:
     return None
 
 
+def get_workflow_tool_handler(target: Callable[..., Any]) -> Callable[..., Any]:
+    """Get the dictionary adapter for a schema-wrapped tool."""
+    handler = getattr(target, _WORKFLOW_TOOL_HANDLER_ATTR, None)
+    if callable(handler):
+        return cast("Callable[..., Any]", handler)
+    return target
+
+
 def _wrap_with_schema(  # noqa: UP047
     func: Callable[[SchemaT], Any],
     schema: type[SchemaT],
@@ -66,6 +76,17 @@ def _wrap_with_schema(  # noqa: UP047
             return await result
         return result
 
+    def workflow_handler(args: dict[str, Any]) -> Any:
+        return func(schema(**args))
+
+    async def async_workflow_handler(args: dict[str, Any]) -> Any:
+        return await wrapper(**args)
+
+    setattr(
+        wrapper,
+        _WORKFLOW_TOOL_HANDLER_ATTR,
+        async_workflow_handler if inspect.iscoroutinefunction(func) else workflow_handler,
+    )
     return wrapper
 
 
