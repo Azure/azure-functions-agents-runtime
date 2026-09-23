@@ -68,6 +68,16 @@ branch: larohra/durable-agent-loop
 - Validate the complete agent graph before app mutation; clients remain lazy.
 - Registration remains Azure-aware; no YAML reparsing or discovery-time provisioning.
 - Reuse workflow/auth/identity conventions without importing workflow-plan semantics.
+- `registration/catalog.py:build_catalog()` is followed by a side-effect-free
+  `durable/policy.py:build_durable_agent_policy_catalog(catalog)`. The immutable,
+  slug-keyed `DurableAgentPolicyCatalog` freezes resolved limits, effective auth,
+  model/deployment bindings, sandbox-group settings and manifest/package digests
+  in pass 1 before app creation. Durable execution reauthorizes by slug against
+  this catalog and never reads YAML, front matter or `GlobalConfig`.
+- `app.py:create_function_app()` selects one `DFApp` when either workflow or
+  Durable policies exist. Workflow and Durable app-wide runtimes register
+  independently and at most once before per-agent registration; neither reads
+  the other's policy catalog.
 
 ### 4.2 Authoring and inheritance
 
@@ -115,22 +125,34 @@ durable:
 
 - Shared validators; reject unknown keys, boolean/nonpositive counts,
   nonfinite durations and incompatible settings.
-- Before registration, reject effective `durable.enabled: true` with
-  `workflows.enabled: true`, nonempty `subagents`, or nonempty `workflows.subagents`.
+- `compose()` remains pure translation. It resolves Durable inheritance and
+  retains the existing required `ResolvedAgent.timeout` value populated by the
+  per-agent/global/environment/900-second chain.
+- Per-agent validation rejects effective `durable.enabled: true` with
+  `workflows.enabled: true`, nonempty `subagents`, nonempty
+  `workflows.subagents`, or explicit workflow/delegation capabilities.
+- App-wide validation runs beside duplicate-slug and subagent-reference checks
+  before capability construction. It rejects any `subagents` or
+  `workflows.subagents` reference targeting a Durable agent, including from an
+  ordinary or workflow-enabled coordinator.
 - Do not inject workflow-management tools (including `start_workflow`) or
   `delegate_<slug>` wrappers into durable agents. Explicit tool references
   resolving to those runtime capabilities are invalid; prompt text is not scanned.
-- Reject any `subagents` or `workflows.subagents` reference targeting a durable
-  agent, including from an ordinary agent; no whole-loop delegation bypass.
 - No default `max_model_steps` or `max_tool_calls`; `durable.limits` contains
-  optional call-count ceilings only, not user-configurable timeouts.
-- V1 adds no model/tool/turn duration deadline. Resolved Durable policy has no
-  user-timeout fields and never consumes `ResolvedAgent.timeout` or the ordinary
-  runner's environment/900-second fallback.
-- Translation rejects per-agent `timeout` when Durable is enabled. Global
-  `timeout` continues to apply only to ordinary agents; their behavior is unchanged.
-- If a platform ceiling is necessary, use one platform-owned per-call limit
-  shared by model and tool calls, not authoring knobs. No value is selected here.
+  optional call-count ceilings only and introduces no second timeout setting.
+- Preserve the existing authoring contract: effective `ResolvedAgent.timeout`
+  is the deadline for one complete logical agent run/turn, including model
+  steps, tools, retries and human-input waits. Durable orchestration records the
+  deadline from its deterministic start time and races unfinished work against
+  a Durable timer; replay never resets or extends it.
+- On expiry, stop scheduling new calls, durably record terminal `timed_out`,
+  request best-effort cancellation of supported in-flight work and fence late
+  completions. Timeout is not rollback and does not claim that an unknown
+  external effect was prevented. Session idle TTL remains a separate lifecycle
+  policy and starts after the timed-out turn is committed.
+- Provider, Functions-host and infrastructure ceilings may terminate an
+  individual attempt earlier, but do not replace or extend the user-visible
+  whole-run deadline.
 - Hosting, SDK and provider constraints still apply; session idle TTL is separate.
 - Count logical scheduled calls per turn, including model-based compaction;
   replay does not recount; ContinueAsNew carries counts.
@@ -142,11 +164,21 @@ durable:
 - Physical retries/billing are not bounded by logical call counts.
 - Native provider, task hub, offload and transport settings stay in
   `host.json`/app settings, not agent YAML.
+- Durable agents preserve the existing effective endpoint auth modes except
+  `anonymous`, which has no stable owner credential. Entra, function-key and
+  admin-key ingress all map to the owner model in §4.4.
+- `builtin_endpoints.mcp: true`, including through the
+  `builtin_endpoints: true` shorthand, registers a Durable-aware MCP adapter.
+  It uses the same Entity admission and checkpointed turn engine rather than
+  calling the ordinary runner. `chat_api` similarly means Durable admission;
+  ordinary `chatstream`, blob-backed history and workflow-status endpoints are
+  not registered.
 
 ### 4.3 HTTP session contract
 
-- Validate `x-ms-session-id` using full-match `[A-Za-z0-9._-]{1,128}`;
-  case-sensitive values. Root payload `x-session-id`, when supplied, must agree.
+- Validate `x-ms-session-id` through `_session_id.py`'s shared
+  `SESSION_ID_PATTERN`; case-sensitive values. Root payload `session_id`, when
+  supplied, must agree.
 - Reject malformed, blank, non-string or conflicting IDs; no recursive
   business-payload searches or per-agent correlation mappings.
 - Session ID is correlation, **not authentication**.
@@ -155,8 +187,8 @@ durable:
   400 before admission; no body alias, trimming or case folding.
 - Retries recover the same generated session; a new request key creates another
   session unless the caller supplies the returned session ID to continue the conversation.
-- Identity scope: deployment/app, trusted tenant, agent slug, verified caller
-  object ID and trusted producer scope; no delivery/attempt metadata.
+- Identity scope: deployment/app, agent slug, normalized owner identity from
+  §4.4 and trusted producer scope; no delivery/attempt metadata.
 - `H(tag, fields...)` is lowercase SHA-256 of domain-tagged, length-prefixed
   UTF-8 fields; `scope` expands to the ordered fields above.
   Normalize `session_id` first: supplied ID, otherwise
@@ -171,9 +203,19 @@ durable:
 
 ### 4.4 Ownership
 
-- Require platform-enforced Entra/Easy Auth and existing allowlists.
-- Typed principal: verified `(tenant_id, object_id)` for user/service principal;
-  app ID, function key, body claims or spoofable headers are insufficient.
+- Normalize every authenticated ingress to a non-secret owner ID:
+  - Entra: verified `(tenant_id, object_id)`; `_auth.py` requires exactly one
+    `tid` and one `oid`, and absent or multi-valued claims fail closed with 401.
+    Platform-enforced Easy Auth and a configured tenant allowlist are required;
+    the operator-only `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH` assertion is not
+    sufficient for Durable ownership.
+  - Function/admin: a domain-separated SHA-256 fingerprint of the credential
+    presented on the host-authorized request, scoped to deployment/app and auth
+    mode. The raw key is never logged, checkpointed or returned. All callers
+    presenting the same key share one owner and may access that key owner's runs;
+    rotating the key creates a new owner and does not transfer old runs.
+  - Anonymous: unsupported because it supplies no stable credential or principal.
+- App IDs, body claims and spoofable identity headers are not owner identity.
 - Preserve built-in global `http_auth` and custom `trigger.args.http_auth`
   precedence; reject incompatible effective auth instead of silently upgrading it.
 - Extend `_auth.py` without breaking its ordinary allow/error helper.
@@ -181,11 +223,14 @@ durable:
   captured descriptors cannot retain revoked permission.
 - No cross-owner delegation policy in v1.
 - Never expose system keys, raw DTS management URLs, Entity state or storage references.
+- The Functions host remains responsible for validating function/admin keys
+  before the handler runs. The runtime fingerprints only the validated presented
+  credential and fails closed if the hosting surface cannot provide it.
 
 ### 4.5 Admission, idempotency and reliable handoff
 
 - Require `Idempotency-Key` and normalized request-body fingerprint.
-- Remove the root `x-session-id` carrier before fingerprinting; the normalized
+- Remove the root `session_id` carrier before fingerprinting; the normalized
   target session is already part of request identity.
 - Entity serializes authorization, lifecycle checks, accepted-request lookup
   and the one-active-turn decision; no process lock or separate ordering service.
@@ -203,6 +248,11 @@ durable:
 - Missing/purged run lookup never authorizes replacement.
 - A stable instance-ID string does not prove the same execution;
   this Entity API has no client `reuse_id_policy`.
+- The turn orchestration acknowledges start to the Entity as its first durable
+  step. Admission also schedules a bounded, generation-tagged delayed self-signal.
+  If no start acknowledgement exists at reconciliation, the Entity transitions
+  the accepted turn to terminal `start_unconfirmed`/`outcome_unknown`, releases
+  the active-turn slot and starts idle TTL. It does not create a replacement run.
 - Short admission instances return authoritative Entity decisions; signal
   acknowledgements and stale reads are not admission results.
 - Admission-attempt identity is separate from accepted-request identity;
@@ -234,7 +284,9 @@ durable:
 2. Prepare context; schedule one foreground model step.
 3. Commit complete model output through the Entity.
 4. Schedule each tool separately; fan out the batch.
-5. Commit results by original call ID/order; continue or commit terminal outcome.
+5. Commit a completed parallel batch in one Entity operation, with results
+   ordered by original call ID; continue or commit terminal outcome. Do not
+   rewrite full Entity state once per tool result.
 
 - Orchestrator uses native tasks/time/timers only; no network, filesystem,
   credential lookup, ordinary clock/random or mutable configuration discovery.
@@ -254,6 +306,8 @@ durable:
 - Reserved `request_human_input`: question, optional choices/free text, response schema.
 - One pending question; Entity stores its `question_id` and authenticated
   complete-answer receipt. Question ID is distinct from the turn's `request_id`.
+- The question deadline is capped by the logical run deadline from §4.2; human
+  input cannot extend or pause `ResolvedAgent.timeout`.
 - Same Entity serializes answer/cancel/expiry/delete in [**Entity operation order**][input-order],
   not HTTP-arrival order. Operations may share a batch; no separate-commit-per-operation promise.
 - Check question deadline/generation and lifecycle in the Entity.
@@ -281,6 +335,11 @@ durable:
 
 - Fresh single-step MAF invocation; disable automatic tool loops at Agent/client
   layers; pass schemas, not executable wrappers.
+- Reuse a shared, role-agnostic extraction of `runner.py` agent construction:
+  `create_harness_agent`, `ResolvedAgent.agent_configuration` limits and
+  `ClientManager` acquisition. Durable execution never enters
+  `run_agent()`/`run_agent_stream()` or attaches their process-local
+  loop/timeout/history implementation.
 - No provider-hosted tools, hidden model calls or background submit/poll/cancel.
 - Responses-compatible providers: foreground, `store: false`; preserve full
   compatible reasoning/encrypted items, calls, arguments and outputs.
@@ -293,8 +352,9 @@ durable:
   retained transcript does not. Reject hidden-loop compaction combinations.
 - MAF OpenAI 1.10.2 reasoning defects reproduced offline; fixed in 1.11.0
   via [microsoft/agent-framework#7233][maf-fix]. Preserve wire/fresh-process regressions.
-- Qualify full sets: baseline core/OpenAI/Foundry `1.13.0/1.10.2/1.10.3`;
-  spike `1.17.0/1.14.2/1.12.0`. Foundry [microsoft/agent-framework#7536][maf-foundry] requires
+- V1 selects core/OpenAI/Foundry `1.17.0/1.14.2/1.12.0`; the exact trio moves
+  together in C1. The former `1.13.0/1.10.2/1.10.3` set remains a regression
+  baseline only. Foundry [microsoft/agent-framework#7536][maf-foundry] requires
   correct reasoning opt-in; offline fidelity is not live-provider qualification.
 
 ### 4.8 Tool execution
@@ -320,6 +380,10 @@ durable:
   idempotency; recorded-result replay differs from lost completion.
 - Reuse matching sandbox request/result receipts after lost responses;
   no extra blind retry around unknown effects or false termination claim.
+- All model/tool activities use the existing retryable-versus-terminal bridge:
+  terminal failures return structured outcomes; only sanitized, explicitly
+  retryable failures are raised into native retry policy. Unknown-effect tool
+  outcomes are not retried unless a matching downstream receipt proves reuse safe.
 
 ### 4.9 Sandbox lifecycle and packaging
 
@@ -331,6 +395,9 @@ durable:
   base, including Python 3.14/custom disks. No shared mutable disk across sessions.
 - Deterministic deployment bundle: tools, skills, needed modules/assets/dependencies;
   exclude credentials, settings, caches and repository metadata.
+- Build bundles only from frozen `AgentCapabilities` and the captured policy
+  manifest digest. Sandbox activities never call `discovery/*` or re-import
+  project tools; a cold-worker digest mismatch fails instead of repackaging.
 - Worker uploads through SDK file transport; guest validates digest, archive
   paths/size, ABI and binding before staged activation/readiness. No guest
   upload server or customer-deployed MCP server.
@@ -350,6 +417,8 @@ durable:
 ### 4.10 Entity history and size limits
 
 - Mandatory versioned Entity conversation; prefer native offload over custom references.
+- Durable execution attaches no `BlobHistoryProvider` or
+  `ScopedFileHistoryProvider`; the Entity is the only transcript authority.
 - **Native payload lifecycle belongs to the native Durable extension.**
 - Qualify exact host/provider stack and separate state, operation input/output,
   activity, query and aggregate-envelope limits.
@@ -365,13 +434,17 @@ durable:
   report explicit failure. Offload does not compact context or eliminate full-state cost.
 - ContinueAsNew only at acknowledged safe boundaries, without unfinished tools
   and with explicit pending-event policy; it does not reset Entity conversation.
+- Public preview supports the pinned AzureManaged/DTS provider profile. A known
+  incompatible provider fails startup; an unidentifiable provider fails Durable
+  admission explicitly rather than weakening the offload contract.
 
 ### 4.11 Cancellation, recovery and deployments
 
 - Cancellation is acknowledged intent, not rollback or guaranteed remote termination.
 - Stop new steps; preserve late results/unknown effects. New mutating work
   waits for completion, supported fencing or explicit quarantine/reconciliation.
-- Native retries use captured policy; account separately for SDK transport retries.
+- Native retries use captured policy and the structured retry bridge from §4.8;
+  account separately for SDK transport retries.
 - Lifecycle recovery covers hard termination and crashes outside orchestration cleanup.
 - Version persisted contracts; incompatible continuation fails explicitly.
 - **Deployment/version retention is the user's choice, not a runtime requirement
@@ -385,11 +458,13 @@ durable:
 
 - Require explicit positive `history.session_ttl`; ISO-8601 fixed-unit
   `PnDTnHnMnS` only. Reject numeric/object/null/calendar/overflow forms.
-- Reuse the workflow duration grammar, not its separate 24-hour wait cap.
+- Extract the fixed-unit ISO-8601 duration parser into a dependency-free shared
+  module consumed by workflows and Durable config; config does not import workflows.
 - Capture interval/policy at session creation; ordinary default edits do not migrate it.
 - Idle TTL starts at last completed turn, including failure/cancellation.
   Accepted active work invalidates old idle expiry; terminal completion renews it.
-- Runtime timestamps/generations guard stale timers.
+- Generation-tagged delayed Entity self-signals implement idle/wait expiry;
+  superseded generations are dropped when received.
 - Reads, polling, rejected requests and duplicate receipts never renew TTL.
 - Human wait starts TTL when question is durably opened; timely accepted answer
   invalidates that wait generation.
@@ -411,6 +486,11 @@ durable:
 - No secrets/content in default logs, labels, status or metrics; no credentials
   checkpointed. Track bounded admission/retry/failure/size/cleanup diagnostics
   and actual model attempts without replay double-counting.
+- Pending human input is not a ContinueAsNew boundary. Instance retention/purge
+  policy must exceed `session_ttl`.
+- Preserve the documented `af.*` contract as one logical `agent.run` trace per
+  turn across activities; replay does not double-count and content attributes
+  remain behind `ENABLE_SENSITIVE_DATA`.
 
 ### 4.13 API, registration footprint and optional UI
 
@@ -426,11 +506,39 @@ durable:
 | Optional `GET /manage/runs/{run_id}/events` | Run-scoped SSE observations |
 
 - Return `session_id` and `x-ms-session-id`; relative runtime-owned status links.
-- No accidental direct-run `chatstream`/inbound MCP registration for durable agents.
+- Resolve the effective Durable auth policy from
+  `builtin_endpoints.http_auth` when built-ins are enabled, otherwise from the
+  authored HTTP trigger's `trigger.args.http_auth`. Reject agents for which
+  management and ingress cannot resolve to the same owner-identity mode.
+- Durable agents suppress ordinary chat page, chatstream, blob-backed history,
+  and workflow-status registrations. Optional Durable UI is served only through
+  the management adapter.
+
+#### Built-in MCP adapter
+
+- Preserve the existing agent-as-MCP-tool surface. The MCP trigger parses the
+  prompt and transport session as today, then submits to the same Durable Entity
+  admission and turn orchestration; it never calls `run_agent()` directly.
+- The adapter derives its owner from the host-authorized MCP credential using
+  the same credential-fingerprint rule as function/admin HTTP ingress. If the
+  MCP binding cannot provide the validated credential to the handler, startup
+  fails for Durable MCP rather than assigning a shared anonymous owner.
+- Map the MCP transport session deterministically through the existing
+  `_extract_mcp_session_id()` convention. Map the protocol invocation/request ID
+  to the Durable idempotency key so transport retries recover the same run. The
+  implementation must qualify the exact MCP binding payload; absence of a stable
+  invocation ID is a C2c blocker, not permission to use prompt hashing.
+- MCP tool invocation remains request/response shaped: wait for the Durable run
+  up to the transport's response window. If it completes, return the existing
+  `{session_id,response,tool_calls}` result. If it remains active, return a
+  structured accepted result with session/run IDs and MCP-callable status,
+  input, cancel and history tools backed by the same management contracts.
+  Disconnect never cancels or restarts the Durable run.
 
 | Registration | Trigger |
 | --- | --- |
-| `agents_durable_submit_v1` | HTTP admission |
+| `agents_<slug>_durable_submit_v1` | Per-agent literal HTTP admission |
+| `agents_<slug>_durable_mcp_v1` | Per-agent Durable-aware MCP adapter when enabled |
 | `agents_durable_management_v1` | HTTP management/optional UI/SSE |
 | `agents_durable_orchestrator_v1` | Independent typed admission/turn/input/lifecycle instances |
 | `agents_durable_state_v1` | Entity; disjoint session/owner-index kinds |
@@ -438,19 +546,21 @@ durable:
 | `BuiltIn__HttpActivity` | SDK outbound-HTTP activity |
 | `BuiltIn__HttpPollOrchestrator` | SDK outbound-HTTP polling orchestration |
 
-- **Five owned + two native SDK helpers = seven** with built-in chat:
-  2 HTTP, 2 orchestration, 2 activity, 1 Entity.
+- **Four shared owned + one literal submit per built-in Durable chat agent +
+  one MCP adapter per MCP-exposed Durable agent + two native SDK helpers.**
+  One chat-only Durable agent therefore registers seven; chat + MCP registers eight.
 - SDK helpers are outbound machinery, not inbound APIs or model background polling.
 - Shared registration does not merge checkpoints, serialize activities or let
   model arguments select maintenance operations.
-- Two non-overlapping HTTP patterns: `agents/{slug}/chat` and
-  `agents/{slug}/manage/{*path}`; admission drains independently.
-- Never rely on literal-over-wildcard route priority. The Linux fixture exposed
-  wildcard shadowing; management rejects submission paths.
-- One/many durable agents: 7; UI/SSE/group: +0; custom ingress: +C;
-  custom-only: 6+C. Existing workflow engine: separate 3; SDK helpers counted once.
-- Total `F = O + 2I + 3W + D(4+B) + C`: ordinary O; native app I;
-  workflow engine W; durable engine D; built-in durable chat B; custom ingress C.
+- Per-agent submitters use literal `agents/<slug>/chat` routes, so they cannot
+  collide with ordinary literal routes or depend on literal-over-template
+  precedence. Shared management uses `agents/{slug}/manage/{*path}`, rejects
+  submission paths and resolves the slug against the frozen Durable catalog.
+- One chat-only Durable agent: 7; many: `6+B+M`; UI/SSE/group: +0;
+  custom-only: `6+C`. Existing workflow engine: separate 3; SDK helpers counted once.
+- Total `F = O + 2I + 3W + 4D + B + M + C`: ordinary registrations O; native
+  helper pair I; workflow engine W; Durable shared engine D; built-in Durable
+  chat agents B; Durable MCP exposures M; custom ingress C.
 - V1 composition exclusions add no registrations; `3W` still covers independent
   workflow-enabled agents in the same app.
 - JSON clients request-scoped; SSE client lives inside generator; static assets
@@ -471,26 +581,35 @@ durable:
 
 ### 4.14 Delivery and selective reuse
 
-| Layer | Base/target | Complete review unit |
-| --- | --- | --- |
-| D0 | `feature/durable-agent-loop` | FRD-only #226; In review |
-| C1 | `feature/durable-agent-loop` | Native/MAF baseline; ordinary regression coverage |
-| C2 | C1 | Config-to-HTTP core, ownership/handoff/input/TTL, fixtures |
-| C3 | C2 | Sandbox packaging, parallel execution, affinity/loss/cleanup |
-| C4 | C3 | Integrated qualification, support matrix, runbooks |
-| Promotion | Feature branch → `main` | Separate reviewed/qualified final PR |
-| Post-v1 composition | Separate design | Dynamic Workflows and subagents; evaluate DTS sub-orchestrations |
+| Layer | Purpose and scope | Dependencies | Compatibility/docs | Review focus |
+| --- | --- | --- | --- | --- |
+| D0 | FRD-only #226 | None | Design only | Architecture |
+| C0 | Characterize ordinary/workflow registration inventory and runner behavior | D0 | No product change | Regression baseline |
+| C1 | Bump Durable b2→b3 + `durabletask==1.10.0`; move MAF trio to `1.17.0/1.14.2/1.12.0` | C0 | Existing workflow/runner suites unchanged on 3.13/3.14 | Dependency blast radius |
+| C2a | Durable schema, merge, validation, cross-agent checks and fixtures | C1 | Generated reference/spec, workflows/triggers restrictions; zero new functions | Translation and rejection rules |
+| C2b | Frozen policy catalog plus Entity/contracts/engine over fake model/tools | C2a | Architecture module map | Determinism, replay, batches, budgets |
+| C2c | Per-agent HTTP/MCP admission, ownership and start reconciliation | C2b | Durable API/auth guide begins | Idempotency, auth, protocol adapters, route inventory |
+| C2d | Management API, history, TTL, deletion and tombstones | C2c | Lifecycle/runbook docs | Revocation and cleanup truthfulness |
+| C2e | Durable human-input protocol | C2d | Input API docs | Acceptance versus consumption/order |
+| C2f | Real foreground MAF adapter and compaction activity | C2e | Model support matrix | Wire fidelity and restored context |
+| C3 | Sandbox packaging, parallel execution, affinity/loss/cleanup | C2f; #196/#197 merged or pinned assets vendored with source SHA | Sandbox deployment guide | Isolation and ambiguous effects |
+| C4 | Enumerated deployed qualification profiles and support matrix only | C3 | Runbooks, observability, README/onboarding | Required evidence |
+| Promotion | Feature branch → `main` after all blocking gates | C4 | Final coherent docs | Qualified public preview |
+| Post-v1 | Dynamic Workflows/subagents composition design | Promotion | Separate FRD | DTS sub-orchestrations |
 
 - Defer composition design/implementation to post-v1: existing delegation runs
   a whole MAF loop, bypassing per-call checkpoints and call budgets.
 - DTS sub-orchestrations are a candidate, not a selected implementation.
   Decide their registration impact in that later design; no v1 gate or count change.
 - Integration branch originates from `main`; no feature increments directly to `main`.
-- Stack: `feature/durable-agent-loop <- C1 <- C2 <- C3 <- C4`; D0 separate.
+- Stack: `feature/durable-agent-loop <- C0 <- C1 <- C2a <- C2b <- C2c
+  <- C2d <- C2e <- C2f <- C3 <- C4`; D0 separate.
 - Start dependent layers from recorded buildable pushed parents; overlap review,
   implementation and qualification; owner-scoped bottom-up rebases.
 - Keep tests/docs with each layer; no broken/dead public flags or C4 catch-all.
 - Introduce Sandbox fields with C3, not before their implementation.
+- C1 must pass the complete existing workflow and runner suites unchanged before
+  C2a starts. C2a carries generated schema docs in the same change.
 - Architecture sign-off precedes product implementation; cloud runs require
   separate consent. Branch targeting does not establish required-check policy.
 
@@ -580,15 +699,28 @@ durable:
 | 57 | Answer/terminal ordering | Extra coordinator / Entity | Native Entity operation order; acceptance != consumption; cancellation policy in 59 | Agent source clarification | 2026-09-21 |
 | 58 | Review format | Narrative / compact | Bullets/tables/snippets; preserve numbering; remain In review | Human | 2026-09-21 |
 | 59 | Cancellation after accepted answer | Reject cancellation / honor cancellation | Honor cancellation; retain accepted-answer receipt; no execution/rollback claim; resolves 57's policy question | Human | 2026-09-21 |
-| 60 | V1 timeouts | Authored / platform-only | No user timeouts or ordinary fallback; shared platform ceiling only if necessary; supersedes 36 | Human; Agent validation detail | 2026-09-21 |
+| 60 | V1 timeouts | Authored / platform-only | Platform-only proposal **SUPERSEDED by 73**; previously superseded 36 | Human; Agent validation detail | 2026-09-21 |
 | 61 | Request identity | Ambiguous / explicit | Validated client key; deterministic scoped session/request IDs; §4.3 | Human; Agent validation detail | 2026-09-21 |
 | 62 | Deletion progress | New endpoint / repeat DELETE | Original owner repeats DELETE for same receipt and pending/completed/failed status | Human; Agent HTTP detail | 2026-09-21 |
 | 63 | HTTP route isolation | Shared dispatcher / separate namespaces | Two HTTP handlers; management under `/agents/{slug}/manage/...`; seven registrations retained | Human | 2026-09-21 |
 | 64 | Workflow/subagent composition | Support in v1 / defer | Post-v1; reject §4.2 combinations/references; evaluate DTS sub-orchestrations later; independent app coexistence allowed | Human | 2026-09-22 |
+| 65 | Policy ownership | Re-resolve / frozen catalog | Pass-1 immutable Durable policy catalog; activity-time reauthorization by slug | Agent architecture review | 2026-09-22 |
+| 66 | Mixed-app submit routing | Shared wildcard / per-agent literal / new namespace | Per-agent literal submit routes; shared management wildcard; supersedes the constant-seven part of 45/63 | Agent architecture review | 2026-09-22 |
+| 67 | Durable owner authentication | Existing modes / mandatory Entra | Entra-only proposal **SUPERSEDED by 74** | Agent architecture review | 2026-09-22 |
+| 68 | Unconfirmed start | Replace / remain busy / terminal reconcile | No replacement; generation-guarded reconciliation ends as `start_unconfirmed`/`outcome_unknown` and releases the slot | Agent architecture review | 2026-09-22 |
+| 69 | Activity retries | Retry every exception / classified bridge | Structured terminal outcomes; native retry only for sanitized retryable failures | Agent architecture review | 2026-09-22 |
+| 70 | Dependency baseline | Keep current / selected compatible set | Durable b3 + durabletask 1.10.0; MAF `1.17.0/1.14.2/1.12.0`; existing workflows/runner requalified first | Agent architecture review | 2026-09-22 |
+| 71 | Delivery split | C1-C4 / smaller stack | Add C0 and split C2 into config, engine, admission, lifecycle, input and MAF adapter slices | Agent architecture review | 2026-09-22 |
+| 72 | Durable call ceiling | New runtime value / external ceilings | No separate per-call setting; whole-run conclusion **SUPERSEDED by 73** | Agent architecture review | 2026-09-22 |
+| 73 | Timeout compatibility | Reject/ignore / preserve existing meaning | Honor effective `ResolvedAgent.timeout` across the complete logical Durable run using deterministic Durable time; no new front-matter variant | Human | 2026-09-22 |
+| 74 | Owner modes and inbound MCP | Entra-only/reject MCP / preserve existing authenticated surfaces | Entra principal or function/admin credential fingerprint owns runs; anonymous remains invalid; built-in MCP routes through Durable admission/checkpoints and exposes async management tools when not immediately complete; supersedes 67 and the earlier MCP rejection | Human | 2026-09-22 |
 
 ## 6. Test plan
 
 - Tests mirror modules; authoring fixtures under `tests/fixtures/config_scenarios/`.
+- Config fixtures include Durable inheritance/clear, timeout inheritance and
+  precedence, workflow/subagent rejection, authenticated owner modes, anonymous
+  rejection, MCP combinations and Sandbox-group compatibility scenarios.
 - Targeted tests with each layer, then canonical ruff/mypy/full pytest gate
   on Python 3.13/3.14; separate testing-review checkpoint.
 - Real-host/cloud qualification requires scoped approval and synthetic data.
@@ -597,18 +729,34 @@ durable:
 
 | Area | Required coverage |
 | --- | --- |
-| Config/compatibility | Inheritance/clear/invalid settings; ordinary timeout unchanged and never applied to Durable; reject authored Durable timeouts; unsupported graph combinations |
+| Config/compatibility | Inheritance/clear/invalid settings; unchanged timeout precedence for ordinary and Durable agents; unsupported graph combinations |
 | Composition exclusions | Reject durable + enabled workflows/nonempty subagents, runtime workflow/delegate tool references, and delegation targeting durable agents; allow independent same-app coexistence |
-| Identity/admission | ID/key bounds and case; spoofing/cross-owner negatives; deterministic returned IDs with/without session carrier; lost ack; same-job retries; busy-then-admit; fingerprint conflicts |
+| Identity/admission | Entra and function/admin key owners; key rotation; raw-key non-persistence; anonymous/spoofing/cross-owner negatives; ID/key bounds and case; deterministic returned IDs with/without session carrier; lost ack; same-job retries; busy-then-admit; fingerprint conflicts |
 | Handoff | Pinned-provider fault matrix in §4.5; no orphan reservation or replacement execution/job |
-| Model/replay | Per-call boundary; actual pinned wire fidelity; cold restore; partial dependency groups; compaction; count budgets; platform-profile limits |
+| Model/replay | Per-call boundary; whole-run timeout across replay/retry/human wait; late-result fencing; actual pinned wire fidelity; cold restore; partial dependency groups; compaction; count budgets; platform-profile limits |
 | Human input | Same-run/session/sandbox; Entity batch order; duplicate/conflicting/lost answers; cancel accepted-but-unconsumed answer while retaining receipt; reject new answers to closed questions; terminal ordering; mixed batches dispatch none |
 | Tools | Overlapping activities/guest processes; ordered results; stable operation IDs; at-least-once window; worker MCP; no hidden retry |
 | Sandbox | Digest/ABI/archive validation; structured args; guest-control tampering; interrupted setup; same-ID resume; permanent loss; actual owned cleanup |
 | State/transport | Low-compressibility >1 MiB; threshold/cap/envelope bounds; cold hydration; storage failures; management-read limit separately |
 | Lifecycle | Idle/wait expiry; stale timers; no read/retry renewal; active protection; revocation; late work; retained retry authority; repeated-DELETE identity, owner checks and pending/completed/failed outcomes |
-| Registration/API | Exact once-only inventory; auth/methods/routes; chat cannot be shadowed by management; encoded paths; client/generator lifetime; independent drain; optional UI/SSE |
+| Registration/API | Exact once-only inventory; auth/methods/routes; chat cannot be shadowed by management; Durable MCP immediate/accepted responses, protocol request-ID retry recovery and management tools; encoded paths; client/generator lifetime; independent drain; optional UI/SSE |
 | Reuse/CI | Source-to-target regressions; fixture/wheel provenance; matrix/trust boundaries; required versus advisory results |
+
+| Blocking gate | Layer | Environment | Required evidence |
+| --- | --- | --- | --- |
+| Ordinary/workflow behavior and exact registration inventory unchanged | C0/C1 | CI, Python 3.13/3.14 | Full existing workflow/runner/app suites |
+| Durable config and unsupported-combination matrix | C2a | CI, Python 3.13/3.14 | Named scenario fixtures and generated-reference check |
+| Replay, ordered fan-out, call budgets and state boundaries | C2b | CI plus pinned live DTS | Fake model/tool suite; 899,999/900,000/900,001-byte state cases; 10,485,759/10,485,760/10,485,761-byte cap cases |
+| Admission fault matrix and same execution | C2c | Pinned live DTS | Same instance ID, original creation time and one orchestration-written execution marker; no replacement on lost acknowledgement |
+| MCP transport compatibility | C2c | Pinned Functions MCP binding | Validated credential availability, stable protocol invocation ID, retry recovery, immediate completion and accepted-management flows |
+| Ownership, lifecycle and management reads | C2c/C2d | Deployed Entra + DTS | Spoofing/cross-owner negatives; 4,194,303/4,194,304/4,194,305-byte reads; deletion/TTL/tombstone outcomes |
+| Human-input ordering and cancellation | C2e | CI plus pinned live DTS | Accepted-versus-consumed receipt, same run/session, stale generation and cancellation cases |
+| Model wire fidelity and terminal/retry classification | C2f | Supported live providers | Restored reasoning/tool dependency groups; no retry for terminal outcomes |
+| Sandbox affinity, loss and cleanup | C3 | Deployed sandbox profile | Same-ID resume, digest/ABI checks, `workspace_lost`, owned-resource cleanup |
+| Supported hosting profiles | C4 | Flex/Premium, Python 3.13/3.14 | MI/private-network paths and published support matrix |
+
+- The promotion PR is blocked until every required gate above is green. Other
+  experiments are explicitly advisory and cannot substitute for a required gate.
 
 ## 7. Docs impact
 
@@ -617,6 +765,7 @@ durable:
 | `docs/architecture.md` | Module map, pipeline, Entity/checkpoint/workspace boundaries |
 | Front-matter spec/reference | Inheritance, examples, invalid combinations; regenerate reference |
 | `docs/triggers.md`, `docs/workflows.md` | HTTP-only scope; composition restrictions |
+| `docs/observability.md` | Cross-activity trace continuity, replay-safe counts and sensitive-data gating |
 | New Durable guide | API, support/size matrix, auth, retry/cancel/TTL/cleanup runbooks |
 | README, docs landing/onboarding | Secure preview setup; ordinary compatibility |
 | FRD index, `mkdocs.yml`, samples | Navigation; HTTP/group/worker-MCP examples |
