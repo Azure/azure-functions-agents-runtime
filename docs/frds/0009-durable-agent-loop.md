@@ -1,7 +1,7 @@
 ---
 frd: 0009
 title: Public Durable Agent Loop
-status: In review
+status: Finalized
 author: larohra
 created: 2026-09-16
 updated: 2026-09-23
@@ -18,7 +18,8 @@ branch: larohra/durable-agent-loop
 - HTTP/chat first; one authorized session Entity; one orchestration per turn.
 - One foreground model step or tool invocation per activity checkpoint.
 - Optional session-bound Sandbox Group; remote MCP stays worker-side.
-- **Review draft:** no final architecture sign-off or implementation authorization.
+- **Architecture finalized:** human sign-off recorded in §8; implementation
+  proceeds through the scoped delivery layers and required qualification gates.
 
 ## 2. Motivation / problem
 
@@ -1049,6 +1050,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | 85 | App identity configuration burden | Required user UUID / reuse backend or platform identity | Withdraw required AZURE_FUNCTIONS_AGENTS_APP_ID from Decision 83. Select a no-new-required-setting namespace after comparing existing backend/task-hub scope, platform identity and backend-generated identity; selection remains open | Human | 2026-09-23 |
 | 86 | Namespace selection and early sandbox cancellation assessment | Extra app identifier / existing backend-hub boundary; defer all sandbox investigation / assess in C2 | Use bound backend/task hub as state namespace, no extra app identifier in hashes or new setting; C2 verifies confinement and assesses existing sandbox cancellation primitives, C3 implements and qualifies them. Closes Decision 85's selection | Human | 2026-09-23 |
 | 87 | HTTP retry identity | Cross-entry deduplication / originating-entry scope | Scope session/request identity to agent slug, owner and registration-assigned entry ID (builtin or http_trigger) within the backend/hub. Switching entries does not deduplicate; management retains originating-entry auth | Human | 2026-09-23 |
+| 88 | Final architecture sign-off | Keep in review / finalize | Approve finalized architecture after focused independent review, corrections and closure of all 14 current PR review threads. Implementation and qualification gates remain required; supersedes Decision 58's review-status hold | Human (larohra) | 2026-09-23 |
 
 ## 6. Test plan
 
@@ -1119,10 +1121,13 @@ newly deferred by this table. None is a core-v1 release gate.
 
 ## 8. Status & sign-off
 
-- **In review**; #226 merged the initial FRD; revision PR #234 targets
+- **Finalized**; #226 merged the initial FRD; revision PR #234 targets
   `feature/durable-agent-loop`. C0 characterization tests are open draft #235;
   C1 has not started. Post-v1 tracking is in §4.15.
-- Architecture **not finalized**; human sign-off outstanding.
+- Human architecture sign-off: **larohra, 2026-09-23**, explicitly approved
+  after the focused Claude Opus 5 review and correction pass. All 14 current
+  PR review threads were resolved at sign-off. This approves the design, not
+  unexecuted runtime qualification or release promotion; §6 gates still apply.
 - **Linux normal path passed:** scripted model/tool checkpoints, parallel tools,
   Entity-backed human pause and same-execution completion. Broader qualification remains open.
 - Further experiments have separate consent; none authorized by this edit.
