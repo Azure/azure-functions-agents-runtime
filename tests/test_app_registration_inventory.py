@@ -89,6 +89,9 @@ def test_chat_api_only_registers_chat_chatstream_history_but_not_page_or_mcp(
         "agents/main/chatstream",
         "agents/main/history",
     ]
+    by_name = _functions_by_name(functions)
+    for name in _function_names(functions):
+        assert _binding_types(by_name[name]) == ["httpTrigger", "http"], name
 
 
 def test_mcp_only_registers_only_the_mcp_function(tmp_path: Path) -> None:
@@ -109,6 +112,7 @@ def test_mcp_only_registers_only_the_mcp_function(tmp_path: Path) -> None:
     assert _function_names(functions) == ["agent_main_builtin_mcp"]
     # The MCP endpoint is a tool trigger, not an HTTP route.
     assert _http_routes(functions) == []
+    assert _binding_types(functions[0]) == ["mcpToolTrigger"]
 
 
 def test_debug_chat_ui_alone_forces_chat_api_and_registers_full_http_surface(
@@ -142,6 +146,9 @@ def test_debug_chat_ui_alone_forces_chat_api_and_registers_full_http_surface(
         "agents/main/chatstream",
         "agents/main/history",
     ]
+    by_name = _functions_by_name(functions)
+    for name in _function_names(functions):
+        assert _binding_types(by_name[name]) == ["httpTrigger", "http"], name
 
 
 def test_all_builtin_endpoints_enabled_registers_the_complete_five_function_inventory(
@@ -176,6 +183,15 @@ def test_all_builtin_endpoints_enabled_registers_the_complete_five_function_inve
         "agents/main/chatstream",
         "agents/main/history",
     ]
+    by_name = _functions_by_name(functions)
+    for name in (
+        "agent_main_builtin_chat_page",
+        "agent_main_builtin_chat",
+        "agent_main_builtin_chatstream",
+        "agent_main_builtin_history",
+    ):
+        assert _binding_types(by_name[name]) == ["httpTrigger", "http"], name
+    assert _binding_types(by_name["agent_main_builtin_mcp"]) == ["mcpToolTrigger"]
 
 
 # ---------------------------------------------------------------------------
@@ -236,10 +252,14 @@ def test_mixed_ordinary_and_workflow_agents_share_one_durable_app_with_scoped_bi
 
     functions = app.get_functions()
     # Enabling workflows anywhere in the app also registers the shared
-    # workflow-engine functions once (the durable-client-bearing orchestrator
-    # and its two supporting activities, plus the generic HTTP-poll
+    # workflow-engine functions once (the orchestrator itself, which carries
+    # an `orchestrationTrigger` rather than a `durableClient` binding, plus
+    # its two supporting activities, and the generic HTTP-poll
     # activity/orchestrator pair) ahead of any per-agent endpoint —
-    # unaffected by "main" itself never enabling workflows.
+    # unaffected by "main" itself never enabling workflows. The
+    # `durableClient` binding shows up instead on the per-agent
+    # starter/management endpoints asserted below (chat/chatstream/
+    # workflows/workflow_status).
     assert _function_names(functions) == [
         "BuiltIn__HttpActivity",
         "BuiltIn__HttpPollOrchestrator",

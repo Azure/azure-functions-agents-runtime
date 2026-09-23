@@ -62,6 +62,39 @@ class _FakeResponse:
         self.messages: list[Any] = []
 
 
+class _StreamContent:
+    def __init__(self, type: str, **kwargs: Any) -> None:
+        self.type = type
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
+class _StreamUpdate:
+    def __init__(self, contents: list[_StreamContent]) -> None:
+        self.contents = contents
+
+
+class _FakeStreamingAgent:
+    """A minimal streaming-capable fake for ``run_agent_stream``, which calls
+    ``agent.run(prompt, stream=True, session=..., options=...)`` -- distinct
+    from ``_FakeAgent`` above, whose ``run()`` signature has no ``stream``
+    parameter and is only valid for the non-streaming ``run_agent`` path."""
+
+    def run(
+        self,
+        _prompt: str,
+        *,
+        stream: bool,
+        session: Any,
+        options: Any = None,
+    ) -> Any:
+        assert stream is True
+        return self._updates()
+
+    async def _updates(self) -> Any:
+        yield _StreamUpdate([_StreamContent("text", text="hello")])
+
+
 class _StallingAgent:
     """A fake agent whose ``run()`` coroutine never completes — used to
     trigger ``run_agent``'s ``asyncio.wait_for(agent.run(...), ...)`` timeout
@@ -121,9 +154,9 @@ def test_run_agent_stream_timeout_none_uses_module_default_timeout_for_its_deadl
 
     async def fake_build_agent_session(
         **kwargs: Any,
-    ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
+    ) -> tuple[_FakeStreamingAgent, object, str, None, InferenceTarget]:
         captured.append(kwargs)
-        return _FakeAgent(), object(), "s", None, InferenceTarget()
+        return _FakeStreamingAgent(), object(), "s", None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
@@ -134,7 +167,18 @@ def test_run_agent_stream_timeout_none_uses_module_default_timeout_for_its_deadl
     assert len(captured) == 1
     coordinator_deadline = captured[0]["coordinator_deadline"]
     assert coordinator_deadline > loop_time_before + 6_500.0
-    assert events[0] == {"type": "session", "session_id": "s"}
+    # `_FakeAgent` (used by every other test in this module) has no `stream`
+    # parameter on its `run()`, so it cannot stand in here: `run_agent_stream`
+    # calls `agent.run(prompt, stream=True, ...)`, which would raise
+    # `TypeError` and get silently absorbed into an `error` SSE event rather
+    # than proving the deadline actually drove a normal completion. Asserting
+    # the full event list (not just the first event) confirms the stream
+    # really did complete rather than error out after the `session` event.
+    assert events == [
+        {"type": "session", "session_id": "s"},
+        {"type": "delta", "content": "hello"},
+        {"type": "done"},
+    ]
 
 
 # ---------------------------------------------------------------------------
