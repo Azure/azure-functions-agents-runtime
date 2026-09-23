@@ -182,9 +182,11 @@ durable:
 - Physical retries/billing are not bounded by logical call counts.
 - Native provider, task hub, offload and transport settings stay in
   `host.json`/app settings, not agent YAML.
-- Durable agents preserve the existing effective endpoint auth modes except
-  `anonymous`, which has no stable owner credential. Entra, function-key and
-  admin-key ingress all map to the owner model in §4.4.
+- Durable agents preserve the existing effective endpoint auth modes for
+  admission and management endpoints except `anonymous`, which has no stable
+  owner credential. Entra, function-key and admin-key ingress all map to the
+  owner model in §4.4. The separate static debug page in §4.13 carries no run
+  data or credentials and is outside this admission-auth rule.
 - V1 rejects effective `durable.enabled: true` with
   `builtin_endpoints.mcp: true`, including the `builtin_endpoints: true`
   shorthand, with a diagnostic that inbound Durable MCP is deferred and that
@@ -709,6 +711,10 @@ durable:
   non-secret endpoint/mode configuration, never run data or credentials.
   All data requests use the protected dispatcher and its owner checks.
   The flag is never silently accepted without a working page.
+- Preserve `BuiltinEndpointsConfig.debug_chat_ui_requires_chat_api`: enabling
+  the debug page forces the effective `chat_api` flag true, even if authored
+  false. Inventory uses resolved flags, so a Durable page never exists without
+  its backing admission/management dispatcher.
 
 #### Inbound MCP: post-v1
 
@@ -720,7 +726,7 @@ durable:
 
 | Registration | Trigger |
 | --- | --- |
-| `agents_<slug>_durable_http_v1` | Per-entry HTTP dispatch: submit, management and optional SSE |
+| `agents_<slug>_<entry>_durable_http_v1` | One registration per HTTP entry, uniquely named: submit, management and optional SSE |
 | Existing built-in chat-page function, when enabled | Separate anonymous-at-Functions-layer GET; static debug UI only |
 | `agents_durable_orchestrator_v1` | Independent typed admission/turn/input/lifecycle instances |
 | `agents_durable_state_v1` | Entity; disjoint session/owner-index kinds |
@@ -754,8 +760,10 @@ durable:
   `orders/acme/ask/manage/runs/<run_id>`. Keeping `ask` in the management
   prefix avoids capturing sibling paths such as `orders/acme/invoices`.
 - Register exactly one HTTP trigger for that entry, conceptually
-  `R/{*operation}` with a host constraint matching only the empty submission
-  suffix or the enabled management path shapes. This is one constrained route
+  `R/{*operation}` with a host constraint matching only that entry's submission
+  suffix (empty for an authored route `R`; `chat` for a built-in entry, whose
+  empty suffix belongs to the static page) or the enabled management path
+  shapes. This is one constrained route
   template, not multiple triggers on one function. The local-host probe below
   verifies a minimal mapping; the full generated operation set still needs C2
   qualification.
@@ -805,7 +813,8 @@ durable:
   suffixes/extra segments returned 404 and wrong methods returned 405.
   Encoded-separator probes required dispatcher guards, not regex alone.
   This proves the minimal local routing mechanism, not the full management
-  surface, key/Entra enforcement, cloud behavior or arbitrary authored route
+  surface, built-in dispatcher/static-page coexistence, key/Entra enforcement,
+  cloud behavior or arbitrary authored route
   shapes. Owned probe processes were stopped; no product code changed.
 - One built-in Durable chat agent: 6 without its page, 7 with it;
   many: `5+B+U`; each enabled page: +1; SSE/group: +0;
@@ -1025,7 +1034,7 @@ newly deferred by this table. None is a core-v1 release gate.
 | 80 | Debug UI compatibility | Separate/deferred UI / reuse existing UI | Keep existing debug UI in v1; detect Durable mode and automatically poll results through its authorized entry. Include working enabled-flag behavior in C2; only richer enhancements/SSE remain optional | Human | 2026-09-23 |
 | 81 | Limited same-function routes | Separate management function / unrestricted catch-all / constrained single-function dispatch | Keep individual function-key and Entra support; expose only explicit operations through one constrained route and method/path allowlist. Validate host syntax separately without blocking FRD review; never expose system-key management URLs. Authored mapping and conservative ambiguity checks are specified in §4.13 | Human direction; Agent mapping | 2026-09-23 |
 | 82 | Entry auth, retry boundaries and UI bootstrap corrections | Agent-wide policy / per-entry policy; direct workflow imports / shared mechanics; protected page / existing static page | Preserve independent entry auth; extract generic retry mechanics with engine-owned validation; retain separate static page and count it as U. Refines Decisions 76/80/81 without weakening data-endpoint auth | Human | 2026-09-23 |
-| 83 | Canonical app namespace | Inferred hosting identifier / explicit persistent UUID | Require deployment-level AZURE_FUNCTIONS_AGENTS_APP_ID for Durable apps; preserve across code deployments, define slot/rename/migration behavior separately from caller identity | Human direction; Agent contract | 2026-09-23 |
+| 83 | Canonical app namespace | Inferred hosting identifier / explicit persistent UUID | Required-setting proposal **SUPERSEDED by 85/86**; previously required deployment-level AZURE_FUNCTIONS_AGENTS_APP_ID for Durable apps; preserve across code deployments, define slot/rename/migration behavior separately from caller identity | Human direction; Agent contract | 2026-09-23 |
 | 84 | Cancellation scope | Mandatory quarantine / bounded best effort then continue | Request supported cancellation, wait briefly for stop evidence, abandon the local wait and allow subsequent turns; retain unknown outcomes and generation fencing, not effect isolation. Five-second internal cleanup budget; cross-worker observation and sandbox control require qualification. Supersedes mandatory quarantine language | Human direction; Agent contract | 2026-09-23 |
 | 85 | App identity configuration burden | Required user UUID / reuse backend or platform identity | Withdraw required AZURE_FUNCTIONS_AGENTS_APP_ID from Decision 83. Select a no-new-required-setting namespace after comparing existing backend/task-hub scope, platform identity and backend-generated identity; selection remains open | Human | 2026-09-23 |
 | 86 | Namespace selection and early sandbox cancellation assessment | Extra app identifier / existing backend-hub boundary; defer all sandbox investigation / assess in C2 | Use bound backend/task hub as state namespace, no extra app identifier in hashes or new setting; C2 verifies confinement and assesses existing sandbox cancellation primitives, C3 implements and qualifies them. Closes Decision 85's selection | Human | 2026-09-23 |
@@ -1099,7 +1108,8 @@ newly deferred by this table. None is a core-v1 release gate.
 ## 8. Status & sign-off
 
 - **In review**; #226 merged the initial FRD; revision PR #234 targets
-  `feature/durable-agent-loop`. Post-v1 tracking is in §4.15.
+  `feature/durable-agent-loop`. C0 characterization tests are open draft #235;
+  C1 has not started. Post-v1 tracking is in §4.15.
 - Architecture **not finalized**; human sign-off outstanding.
 - **Linux normal path passed:** scripted model/tool checkpoints, parallel tools,
   Entity-backed human pause and same-execution completion. Broader qualification remains open.
