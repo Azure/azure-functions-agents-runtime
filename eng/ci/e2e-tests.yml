@@ -50,8 +50,6 @@ extends:
         dependsOn: Build
         jobs:
           - template: /eng/templates/official/jobs/e2e-tests.yml@self
-            # Secret variables are unavailable to pull requests from forks.
-            condition: and(succeeded(), ne(variables['System.PullRequest.IsFork'], 'True'))
             parameters:
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
               PoolName: 1es-pool-azfunc
