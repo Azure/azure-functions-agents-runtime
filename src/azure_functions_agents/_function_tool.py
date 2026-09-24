@@ -4,7 +4,7 @@ import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import wraps
-from typing import Any, TypeVar, overload
+from typing import Any, TypeVar, cast, overload
 
 from agent_framework import FunctionTool
 from pydantic import BaseModel
@@ -15,6 +15,7 @@ __all__ = [
     "FunctionTool",
     "WorkflowTool",
     "WorkflowToolMetadata",
+    "get_workflow_tool_handler",
     "get_workflow_tool_metadata",
     "tool",
     "workflow_tool",
@@ -22,6 +23,7 @@ __all__ = [
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 _WORKFLOW_TOOL_METADATA_ATTR = "__azure_functions_agents_workflow_tool__"
+_WORKFLOW_TOOL_HANDLER_ATTR = "__azure_functions_agents_workflow_handler__"
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,7 @@ class WorkflowToolMetadata:
     description: str | None = None
     public: bool = True
     retry: _package.WorkflowRetryPolicy | None = None
+    timeout: str | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,7 @@ class WorkflowTool:
     handler: Callable[..., Any] | None
     public: bool = True
     retry: _package.WorkflowRetryPolicy | None = None
+    timeout: str | None = None
 
 
 def get_workflow_tool_metadata(target: object) -> WorkflowToolMetadata | None:
@@ -50,6 +54,14 @@ def get_workflow_tool_metadata(target: object) -> WorkflowToolMetadata | None:
     if isinstance(metadata, WorkflowToolMetadata):
         return metadata
     return None
+
+
+def get_workflow_tool_handler(target: Callable[..., Any]) -> Callable[..., Any]:
+    """Get the dictionary adapter for a schema-wrapped tool."""
+    handler = getattr(target, _WORKFLOW_TOOL_HANDLER_ATTR, None)
+    if callable(handler):
+        return cast("Callable[..., Any]", handler)
+    return target
 
 
 def _wrap_with_schema(  # noqa: UP047
@@ -64,6 +76,17 @@ def _wrap_with_schema(  # noqa: UP047
             return await result
         return result
 
+    def workflow_handler(args: dict[str, Any]) -> Any:
+        return func(schema(**args))
+
+    async def async_workflow_handler(args: dict[str, Any]) -> Any:
+        return await wrapper(**args)
+
+    setattr(
+        wrapper,
+        _WORKFLOW_TOOL_HANDLER_ATTR,
+        async_workflow_handler if inspect.iscoroutinefunction(func) else workflow_handler,
+    )
     return wrapper
 
 
@@ -144,6 +167,7 @@ def workflow_tool[DecoratedT](
     description: str | None = None,
     public: bool = True,
     retry: _package.WorkflowRetryPolicy | None = None,
+    timeout: str | None = None,
     **kwargs: Any,
 ) -> DecoratedT: ...
 
@@ -155,6 +179,7 @@ def workflow_tool[DecoratedT](
     description: str | None = None,
     public: bool = True,
     retry: _package.WorkflowRetryPolicy | None = None,
+    timeout: str | None = None,
     **kwargs: Any,
 ) -> Callable[[DecoratedT], DecoratedT]: ...
 
@@ -166,6 +191,7 @@ def workflow_tool[DecoratedT](
     description: str | None = None,
     public: bool = True,
     retry: _package.WorkflowRetryPolicy | None = None,
+    timeout: str | None = None,
     **kwargs: Any,
 ) -> DecoratedT | Callable[[DecoratedT], DecoratedT]:
     """Mark a ``tools/`` callable as a Dynamic Workflow tool.
@@ -177,15 +203,21 @@ def workflow_tool[DecoratedT](
         unknown = ", ".join(sorted(kwargs))
         raise TypeError(f"unknown workflow_tool argument(s): {unknown}")
 
-    from .workflows.schema import WorkflowRetryPolicy
+    from .workflows.schema import WorkflowRetryPolicy, workflow_timeout_ms
 
     if retry is not None and not isinstance(retry, WorkflowRetryPolicy):
         raise TypeError("workflow_tool retry must be a WorkflowRetryPolicy")
+    if timeout is not None:
+        try:
+            workflow_timeout_ms(timeout)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f"workflow_tool timeout is invalid: {exc}") from exc
     metadata = WorkflowToolMetadata(
         name=name,
         description=description,
         public=public,
         retry=retry,
+        timeout=timeout,
     )
 
     def decorator(inner: DecoratedT) -> DecoratedT:

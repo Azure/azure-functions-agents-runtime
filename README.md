@@ -451,7 +451,8 @@ def fetch_logs(args: dict[str, Any]) -> dict[str, Any]:
 
 Use both `@tool` and `@workflow_tool` when the same callable should be
 available both directly in chat and inside workflows. A workflow tool can own
-the retry policy for an operation that is safe to repeat:
+the retry policy for an operation that is safe to repeat and the maximum wait
+for each attempt:
 
 ```python
 from azure_functions_agents import WorkflowRetryBackoff, WorkflowRetryPolicy
@@ -461,19 +462,22 @@ from azure_functions_agents import WorkflowRetryBackoff, WorkflowRetryPolicy
     retry=WorkflowRetryPolicy(
         max_attempts=3,
         backoff=WorkflowRetryBackoff(initial="PT1S", multiplier=2.0, max="PT4S"),
-    )
+    ),
+    timeout="PT30S",
 )
 def reserve_inventory(args: dict[str, Any]) -> dict[str, Any]:
     ...
 ```
 
-The decorator policy overrides plan-authored `execution.retry`. The tool raises
-`WorkflowRetryableError` when a failure is safe to retry; every other tool
-failure is terminal. See
+Decorator precedence applies separately to plan-authored `execution.retry` and
+`execution.timeout`. The tool raises `WorkflowRetryableError` when a failure is
+safe to retry. An expired attempt uses `workflow_task_timeout`. A plan can set
+`execution.continue_on_error: true` to give a bounded permitted failure result
+to dependent tasks after the attempt budget is complete. See
 [`docs/workflows.md`](docs/workflows.md) for the Activity handler
-contract, `workflows.exclude`, and the full retry contract. Any agent can enable
-workflows; triggers and built-in endpoints independently determine how that agent
-is invoked. See the
+contract, `workflows.exclude`, retry, timeout, continuation, and host limits.
+Any agent can enable workflows; triggers and built-in endpoints independently
+determine how that agent is invoked. See the
 [`per-agent-workflows`](samples/per-agent-workflows) sample for two independent
 non-main workflow-enabled agents sharing one Durable engine.
 
@@ -605,7 +609,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 - [`outlook-reply-agent`](samples/outlook-reply-agent) — connector-triggered agent that drafts replies to incoming Office 365 Outlook email
 - [`multi-agent-delegation`](samples/multi-agent-delegation) — HTTP coordinator that delegates to two specialists via `subagents:`, one of them endpoint-less
 - [`workflow-incident-triage`](samples/workflow-incident-triage) — interactive Dynamic Workflow with live progress
-- [`workflow-retry-policy`](samples/workflow-retry-policy) — order recovery whose inventory task retries transient failures on Durable
+- [`workflow-retry-policy`](samples/workflow-retry-policy) — order recovery with Durable retry, per-attempt timeout, and optional-task continuation
 - [`workflow-queue-p0-report`](samples/workflow-queue-p0-report) — queue-started fan-out workflow that publishes an HTML Blob report
 - [`workflow-subagents-preview`](samples/workflow-subagents-preview) — queue-started parallel PR analysis with isolated workflow specialists and a stable HTML Blob report
 - [`per-agent-workflows`](samples/per-agent-workflows) — Engineering Operations Hub with two non-main workflow-enabled agents and independent policies

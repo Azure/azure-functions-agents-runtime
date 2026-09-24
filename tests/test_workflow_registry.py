@@ -179,12 +179,15 @@ def test_reserved_names_match_management_tools():
     assert actual == set(registry.RESERVED_TOOL_NAMES)
 
 
-def test_register_workflow_tool_rejects_async_handler():
+def test_register_workflow_tool_accepts_async_handler():
     async def async_handler(args):
         return {}
 
-    with pytest.raises(ValueError, match="async handlers are not supported"):
-        registry.register_workflow_tool("asynctool", "no", async_handler)
+    registry.register_workflow_tool("asynctool", "yes", async_handler)
+
+    entry = registry.get_entry("asynctool")
+    assert entry is not None
+    assert entry.handler is async_handler
 
 
 def test_register_workflow_tool_rejects_non_callable():
@@ -199,6 +202,17 @@ def test_register_workflow_tool_rejects_invalid_retry_type() -> None:
             "no",
             _noop,
             retry="three attempts",  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("timeout", ["PT0.5S", "PT0S", "PT11M", "not-a-duration"])
+def test_register_workflow_tool_rejects_invalid_timeout(timeout: str) -> None:
+    with pytest.raises(ValueError, match="timeout is invalid"):
+        registry.register_workflow_tool(
+            "badtimeout",
+            "no",
+            _noop,
+            timeout=timeout,
         )
 
 
@@ -286,8 +300,16 @@ def _workflow_tool(
     *,
     public: bool = True,
     retry: schema.WorkflowRetryPolicy | None = None,
+    timeout: str | None = None,
 ) -> WorkflowTool:
-    return WorkflowTool(name, description, handler, public=public, retry=retry)
+    return WorkflowTool(
+        name,
+        description,
+        handler,
+        public=public,
+        retry=retry,
+        timeout=timeout,
+    )
 
 
 def _agent_catalog(**descriptions: str):
@@ -361,6 +383,21 @@ def test_integration_freezes_allowed_tool_retry_declarations() -> None:
         result.plan_policy.tool_execution["other"] = schema.WorkflowToolExecutionPolicy(  # type: ignore[index]
             retry=retry
         )
+
+
+def test_integration_freezes_allowed_tool_timeout_declarations() -> None:
+    result = integration.build_workflow_integration(
+        _FakeApp(),
+        _enable_metadata(exclude=["excluded"]),
+        workflow_tools=[
+            _workflow_tool("allowed", "Allowed", timeout="PT20S"),
+            _workflow_tool("excluded", "Excluded", timeout="PT30S"),
+        ],
+    )
+
+    assert result.plan_policy is not None
+    assert result.plan_policy.tool_execution["allowed"].timeout == "PT20S"
+    assert set(result.plan_policy.tool_execution) == {"allowed"}
 
 
 def test_agent_policy_catalog_keeps_retry_only_for_allowed_public_tools() -> None:
