@@ -1,0 +1,65 @@
+---
+applyTo: "src/**/*.py"
+---
+
+# Python source conventions
+
+`AGENTS.md` owns the development lifecycle. This instruction owns source-level
+Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
+
+## Types and trust boundaries
+
+- Use Pydantic v2 models for configuration and other external documents. Shared
+  fields and validators belong on the common model base.
+- Parse untrusted documents with `ConfigDict(extra=...)`, reject duplicate
+  JSON keys before `model_validate`, and translate `ValidationError` at the
+  trust boundary. Only add `strict=True` where the authoring format does not
+  rely on non-strict coercion (e.g. `resolve_env_vars_in_data` substitutes
+  environment variables as strings, so numeric front-matter fields such as
+  `$OUTPUT_LIMIT` depend on non-strict parsing today).
+- Do not defensively revalidate already typed SDK results or local dataclasses
+  with `getattr`, `isinstance`, casts, or `Any`; import the boundary type and
+  use its declared fields directly. This does not apply to declared,
+  intentionally dynamic extension points (e.g. `ClientManager.build_chat_client`,
+  which returns `Any` because the underlying SDK is pluggable) — narrow
+  runtime inspection is expected there.
+- Frozen dataclasses validate through a `create()` factory and module-level
+  normalization helpers, not `__post_init__` mutation.
+
+## Structure and naming
+
+- Prefer guard clauses, early returns, and helpers over deeply nested control
+  flow.
+- Give every source module (other than package initializers such as
+  `__init__.py`) a globally unique, intent-revealing basename. Source tests
+  mirror the module name as `tests/test_<module>.py`.
+- Use a module constant rather than repeating a named URL, API version, or path.
+- Declare each finite domain vocabulary once in its owning module. Use a
+  `StrEnum` when the vocabulary is a runtime concept or crosses a persistence,
+  serialization, logging, or API boundary; consumers should use named enum
+  members and `.value` at string boundaries. Use `Literal[...]` when the
+  vocabulary is type-only, local to a signature or model, and does not need
+  runtime identity or member access. Use frozensets or mappings when membership
+  or value lookup is the runtime operation. Consumers reuse these symbols rather
+  than redeclaring raw strings.
+
+## Documentation and logging
+
+- Default to a one-line docstring; the name and signature usually say enough.
+  Use a multi-line docstring only for a non-obvious durable contract or
+  invariant, and keep it to a summary line plus at most four short lines.
+- Never use a docstring (or comment) for a step-by-step algorithm walkthrough,
+  platform-specific mechanics, retry/error choreography, or design history —
+  that belongs in `docs/architecture.md` or the owning FRD's design section,
+  or, for a narrowly-scoped gotcha, a short comment placed at the exact line
+  it explains.
+- Keep docstrings and comments terse otherwise too. Explain a durable contract
+  or reason, not the next line of code or feature/PR history. Do not cite
+  phase labels, PR numbers, or mutable FRD decision numbers in source
+  comments, docstrings, or assertion messages.
+- When a change needs an FRD Decisions-log update, add the fewest durable
+  rows that cover it — group related choices into one row rather than one row
+  per test, review finding, or implementation correction, and keep mechanics
+  out of the row (they belong in the design section the decision governs).
+  See the add-feature skill for the full logging discipline.
+- Use the shared `azure_functions_agents._logger.logger`.
