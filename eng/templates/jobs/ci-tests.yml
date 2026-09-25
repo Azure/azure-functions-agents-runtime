@@ -26,6 +26,30 @@ jobs:
           python -m pip install -U -e .[dev]
         displayName: 'Install dependencies'
       - bash: |
+          python -m pip wheel --no-deps --wheel-dir .tmp-validation/a2a-wheel .
+          python -m venv .tmp-validation/a2a-venv
+          wheel=(.tmp-validation/a2a-wheel/*.whl)
+          venv_python=".tmp-validation/a2a-venv/Scripts/python.exe"
+          "$venv_python" -m pip install "${wheel[0]}[a2a]"
+          "$venv_python" -m pip check
+          "$venv_python" - <<'PY'
+          from importlib.metadata import version
+
+          import a2a
+          import agent_framework_hosting_a2a
+          import azure_functions_agents.registration.a2a
+          import sse_starlette
+
+          expected = {
+              "a2a-sdk": "1.1.2",
+              "agent-framework-core": "1.13.0",
+              "agent-framework-hosting": "1.0.0a260730",
+              "agent-framework-hosting-a2a": "1.0.0a260730",
+          }
+          assert {name: version(name) for name in expected} == expected
+          PY
+        displayName: 'Verify A2A wheel and dependency closure'
+      - bash: |
           python -m ruff check src tests
         displayName: 'Lint with ruff'
       - bash: |

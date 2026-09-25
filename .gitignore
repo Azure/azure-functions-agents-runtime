@@ -445,4 +445,5 @@ site/
 
 # E2E customer-dependency layout (created by the E2E pipeline)
 .e2e-python-packages/
+.e2e-a2a-client/
 .python_packages/
