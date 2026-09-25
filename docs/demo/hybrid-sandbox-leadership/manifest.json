@@ -176,13 +176,13 @@
     "reason": "The repository scene and deck use the latest exact-source measurement. The external live-capture video retains the historical qualification because regeneration would send prohibited additional Function requests."
   },
   "request_flow_diagram": {
-    "purpose": "Authoritative leadership-readable temporal flow for the hybrid Functions/APIM/ACA request lifecycle.",
-    "rendered_date": "2026-09-10",
+    "purpose": "Authoritative leadership-readable invocation flow for the hybrid Functions/APIM/ACA request.",
+    "rendered_date": "2026-09-24",
     "source": {
       "path": "request-flow.mmd",
       "format": "Mermaid sequence diagram",
-      "bytes": 3099,
-      "sha256": "54ce68bb0a3dc5fc11a0920121aaffe5aff6f1788134551a12eda8df2b8f5fa2"
+      "bytes": 1463,
+      "sha256": "fe395aaf3b397a47e53724c2b5b7077d08f85d1809d872ce131631b0def1e1cd"
     },
     "renderer": {
       "mermaid_cli_version": "11.12.0",
@@ -197,21 +197,21 @@
         "bytes": 80,
         "sha256": "9ca96d3d188095b333fb35fb52c1099b1f14ddbcf80851993ab39b1f343f9eeb"
       },
-      "raster_postprocess": "FFmpeg Lanczos contain-and-pad to exact 1920x1080 on #0B1220"
+      "raster_postprocess": "High-quality bicubic contain-and-pad to exact 1920x1080 on #0B1220"
     },
     "svg": {
       "path": "evidence/hybrid-request-flow.svg",
-      "width": 2493,
-      "height": 1683,
-      "bytes": 51191,
-      "sha256": "c0894742646807cd27734167d8886445e345e1bdeeaeaa18435e2f7fd40923bb"
+      "width": 1738,
+      "height": 936,
+      "bytes": 38922,
+      "sha256": "d7a8897baa0f9887af2703f9966d904e5d07237d324f6e0b67464665b81ba15e"
     },
     "png": {
       "path": "evidence/hybrid-request-flow.png",
       "width": 1920,
       "height": 1080,
-      "bytes": 465752,
-      "sha256": "d426d13169cebafe28d30659cbd36f5adc3b3a0eeac8b9c4e613c7303b888b9c"
+      "bytes": 349760,
+      "sha256": "df6d02adc62ecab05766e1dbb2a5c4962ec3e20913ab525a4fdf42f370ec0ebc"
     },
     "provenance": {
       "azure_calls": 0,
@@ -308,8 +308,8 @@
     {
       "path": "request-flow.mmd",
       "kind": "authoritative_mermaid_sequence_source",
-      "bytes": 3099,
-      "sha256": "54ce68bb0a3dc5fc11a0920121aaffe5aff6f1788134551a12eda8df2b8f5fa2"
+      "bytes": 1463,
+      "sha256": "fe395aaf3b397a47e53724c2b5b7077d08f85d1809d872ce131631b0def1e1cd"
     },
     {
       "path": "request-flow-mermaid-config.json",
@@ -326,18 +326,18 @@
     {
       "path": "evidence/hybrid-request-flow.svg",
       "kind": "request_flow_vector_export",
-      "width": 2493,
-      "height": 1683,
-      "bytes": 51191,
-      "sha256": "c0894742646807cd27734167d8886445e345e1bdeeaeaa18435e2f7fd40923bb"
+      "width": 1738,
+      "height": 936,
+      "bytes": 38922,
+      "sha256": "d7a8897baa0f9887af2703f9966d904e5d07237d324f6e0b67464665b81ba15e"
     },
     {
       "path": "evidence/hybrid-request-flow.png",
       "kind": "request_flow_deck_export",
       "width": 1920,
       "height": 1080,
-      "bytes": 465752,
-      "sha256": "d426d13169cebafe28d30659cbd36f5adc3b3a0eeac8b9c4e613c7303b888b9c"
+      "bytes": 349760,
+      "sha256": "df6d02adc62ecab05766e1dbb2a5c4962ec3e20913ab525a4fdf42f370ec0ebc"
     },
     {
       "path": "hybrid-sandbox-leadership-demo.pptx",

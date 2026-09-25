@@ -28,22 +28,25 @@ result, and native Application Insights Agent Trace.
 | `evidence/appinsights-agent-trace.png` | Telemetry-derived trace visualization retained as analysis |
 | `evidence/apim-foundry-mcp.png` | Live APIM policy configuration for model and MCP lanes |
 
-## Detailed request flow
+## Invocation flow
 
 [![Hybrid request flow](evidence/hybrid-request-flow.png)](evidence/hybrid-request-flow.svg)
 
 The [Mermaid source](request-flow.mmd) is authoritative because the diagram
-describes a temporal request lifecycle rather than a static component map. The
+describes the agent invocation rather than a static component map. The
 [SVG export](evidence/hybrid-request-flow.svg) preserves crisp text and lines
 for documentation and inspection; the
 [1920×1080 PNG](evidence/hybrid-request-flow.png) is the predictable,
 portable asset embedded in the PowerPoint appendix. The grouped colors mark
-client, trusted Functions control plane, governed external services, customer
-isolation, and observability trust zones.
+the client, Azure Functions, governed services, and invocation isolation
+zones. Sandbox setup internals, teardown branches, and observability details
+are intentionally omitted so the remote and local tool invocations remain
+central.
 
-The exports were generated locally with Mermaid CLI 11.12.0 and FFmpeg, without
-adding a repository dependency or contacting Azure. From the repository root
-in PowerShell, with `mmdc` 11.12.0, `ffmpeg`, and Chrome on `PATH`:
+The exports can be reproduced locally with Mermaid CLI 11.12.0 and FFmpeg,
+without adding a repository dependency or contacting Azure. From the
+repository root in PowerShell, with `mmdc` 11.12.0, `ffmpeg`, and Chrome on
+`PATH`:
 
 ```powershell
 $root = "docs\demo\hybrid-sandbox-leadership"
@@ -67,7 +70,7 @@ ffmpeg -y -v error -i $naturalPng `
 ```
 
 The Mermaid render is intentionally padded rather than cropped so the PNG
-retains every numbered interaction and note at a fixed 16:9 deck resolution.
+retains every numbered interaction at a fixed 16:9 deck resolution.
 
 The final MP4, silent master, contact sheet, raw Playwright recording, and
 redacted telemetry exports are intentionally kept outside git. The external
