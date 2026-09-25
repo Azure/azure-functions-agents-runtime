@@ -40,9 +40,19 @@ def _resolve_builtin_endpoints(
     if isinstance(builtin_endpoints, BuiltinEndpointsConfig):
         resolved = builtin_endpoints
     elif builtin_endpoints is True:
-        resolved = BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=True)
+        resolved = BuiltinEndpointsConfig(
+            debug_chat_ui=True,
+            chat_api=True,
+            mcp=True,
+            a2a=None,
+        )
     else:
-        resolved = BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=False, mcp=False)
+        resolved = BuiltinEndpointsConfig(
+            debug_chat_ui=False,
+            chat_api=False,
+            mcp=False,
+            a2a=None,
+        )
 
     # Inherit the app-wide auth default (agents.config.yaml `http_auth`) unless the
     # agent authored its own builtin_endpoints.http_auth, which always overrides.

@@ -201,3 +201,42 @@ def authorize_entra_request(
         return AuthError(401, "Entra authentication required.")
 
     return _check_allowlists(_flatten_claims(principal), entra)
+
+
+def resolve_authorized_request_scope(
+    get_header: HeaderGetter,
+    auth: EndpointAuthConfig,
+) -> tuple[AuthError | None, str | None]:
+    """Authorize a request and return the stable trust scope used for session isolation."""
+    auth_error = authorize_entra_request(get_header, auth)
+    if auth_error is not None:
+        return auth_error, None
+    if auth.mode != "entra":
+        # Function/admin/anonymous modes are one app-level trust domain because
+        # the Functions host does not surface a stable per-key caller identity.
+        return None, "functions-app"
+
+    principal_header = get_header(_EASY_AUTH_PRINCIPAL_HEADER)
+    principal = (
+        _decode_easy_auth_principal(principal_header)
+        if principal_header is not None
+        else None
+    )
+    if principal is None:
+        return AuthError(401, "Invalid client principal header."), None
+
+    flat = _flatten_claims(principal)
+    tenant = next(iter(flat.get("tid", ())), "")
+    identity = next(
+        iter(flat.get("oid", ()) or flat.get("appid", ()) or flat.get("azp", ())),
+        "",
+    )
+    if not tenant or not identity:
+        return (
+            AuthError(
+                401,
+                "Entra authentication requires stable tenant and caller identity claims.",
+            ),
+            None,
+        )
+    return None, f"entra:{tenant}:{identity}"

@@ -39,6 +39,25 @@ def _write_main_agent(tmp_path: Path, *, workflows: bool = False) -> None:
     _write_agent(tmp_path, "main.agent.md", name="Main", workflows=workflows)
 
 
+def _write_a2a_agent(tmp_path: Path, *, workflows: bool = False) -> None:
+    workflows_block = "workflows:\n  enabled: true\n" if workflows else ""
+    (tmp_path / "main.agent.md").write_text(
+        (
+            "---\n"
+            "name: Incident Triage\n"
+            "description: Produces a focused incident brief.\n"
+            "builtin_endpoints:\n"
+            "  a2a:\n"
+            "    mode: simple\n"
+            "    url: http://localhost:7071/api/agents/main/a2a\n"
+            f"{workflows_block}"
+            "---\n"
+            "Triage the incident.\n"
+        ),
+        encoding="utf-8",
+    )
+
+
 class _WorkflowRequest:
     session_id = "session-1"
 
@@ -82,6 +101,24 @@ def test_non_workflow_app_does_not_use_durable_function_app(tmp_path: Path):
     function_app = app_module.create_function_app(app_root=tmp_path)
 
     assert not isinstance(function_app, df.DFApp)
+
+
+def test_a2a_only_app_uses_plain_function_app_without_durable_bindings(
+    tmp_path: Path,
+):
+    _write_a2a_agent(tmp_path)
+
+    function_app = app_module.create_function_app(app_root=tmp_path)
+
+    assert not isinstance(function_app, df.DFApp)
+    assert _binding_types(function_app, "agent_main_a2a_card") == [
+        "httpTrigger",
+        "http",
+    ]
+    assert _binding_types(function_app, "agent_main_a2a_rpc") == [
+        "httpTrigger",
+        "http",
+    ]
 
 
 def test_workflow_app_uses_durable_function_app(tmp_path: Path):
@@ -160,6 +197,39 @@ def test_workflow_routes_register_durable_client_binding(tmp_path: Path):
             get_type_hints(_registered_function(function_app, function_name))["client"]
             is expected_client_type
         )
+
+
+def test_workflows_and_a2a_share_dfapp_without_changing_workflow_bindings(
+    tmp_path: Path,
+):
+    baseline_root = tmp_path / "baseline"
+    a2a_root = tmp_path / "a2a"
+    baseline_root.mkdir()
+    a2a_root.mkdir()
+    _write_main_agent(baseline_root, workflows=True)
+    _write_a2a_agent(a2a_root, workflows=True)
+
+    baseline_app = app_module.create_function_app(app_root=baseline_root)
+    a2a_app = app_module.create_function_app(app_root=a2a_root)
+
+    def workflow_bindings(function_app):
+        result = {}
+        for builder in function_app._function_builders:
+            bindings = [
+                binding.get_dict_repr()
+                for binding in builder._function._bindings
+            ]
+            if any(
+                binding["type"] in {"orchestrationTrigger", "activityTrigger"}
+                for binding in bindings
+            ):
+                result[builder._function._name] = bindings
+        return result
+
+    assert isinstance(a2a_app, df.DFApp)
+    assert workflow_bindings(a2a_app) == workflow_bindings(baseline_app)
+    assert "durableClient" in _binding_types(a2a_app, "agent_main_a2a_rpc")
+    assert "durableClient" not in _binding_types(a2a_app, "agent_main_a2a_card")
 
 
 def test_workflow_timer_trigger_registers_durable_client_binding(tmp_path: Path):
