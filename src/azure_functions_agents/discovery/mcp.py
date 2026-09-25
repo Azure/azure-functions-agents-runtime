@@ -19,6 +19,10 @@ type MCPTool = MCPStreamableHTTPTool
 
 _DISCOVERED_MCP_SERVERS_CACHE: dict[Path, dict[str, MCPTool]] = {}
 _DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS = 300
+# Matches the MCP SDK `sse_read_timeout` default, so the long-lived GET event
+# stream stays open.
+_MCP_HTTP_READ_TIMEOUT_SECONDS = 300.0
+_MCP_HTTP_CONNECT_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass
@@ -85,18 +89,56 @@ def _build_header_provider(server: dict[str, Any]) -> Any:
     return default_credential_header_provider
 
 
-def _build_http_client(header_provider: Any) -> Any:
+def _resolve_timeout_seconds(server: dict[str, Any], name: str) -> float:
+    """Read the optional per-server 'timeout' (seconds) from an mcp.json entry."""
+    raw = server.get("timeout")
+    if raw is None:
+        return _MCP_HTTP_READ_TIMEOUT_SECONDS
+
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "MCP server '%s': invalid 'timeout' value %r; using %.0f seconds",
+            name,
+            raw,
+            _MCP_HTTP_READ_TIMEOUT_SECONDS,
+        )
+        return _MCP_HTTP_READ_TIMEOUT_SECONDS
+
+    if timeout <= 0:
+        logger.warning(
+            "MCP server '%s': 'timeout' must be greater than 0; using %.0f seconds",
+            name,
+            _MCP_HTTP_READ_TIMEOUT_SECONDS,
+        )
+        return _MCP_HTTP_READ_TIMEOUT_SECONDS
+
+    return timeout
+
+
+def _build_http_client(header_provider: Any, timeout_seconds: float | None = None) -> Any:
     if header_provider is None:
         return None
 
-    from httpx import AsyncClient
+    from httpx import AsyncClient, Timeout
 
     async def inject_headers(request: Any) -> None:
         headers = await asyncio.to_thread(header_provider, {})
         for key, value in headers.items():
             request.headers[key] = value
 
-    return AsyncClient(follow_redirects=True, event_hooks={"request": [inject_headers]})
+    # The MCP GET event stream is long-lived. The httpx default of 5 seconds
+    # closes it too early, so keep the read budget near the MCP SDK value.
+    read_timeout = _MCP_HTTP_READ_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    return AsyncClient(
+        follow_redirects=True,
+        timeout=Timeout(
+            read_timeout,
+            connect=min(_MCP_HTTP_CONNECT_TIMEOUT_SECONDS, read_timeout),
+        ),
+        event_hooks={"request": [inject_headers]},
+    )
 
 
 def _build_mcp_tool(name: str, server: dict[str, Any]) -> tuple[MCPTool | None, str | None]:
@@ -144,7 +186,9 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> tuple[MCPTool | None, 
             load_tools=True,
             load_prompts=False,
             header_provider=header_provider,
-            http_client=_build_http_client(header_provider),
+            http_client=_build_http_client(
+                header_provider, _resolve_timeout_seconds(server, name)
+            ),
         ), None
 
     if server_type:
