@@ -8,7 +8,9 @@ in ``summarize_findings``.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -19,6 +21,23 @@ from azure_functions_agents.discovery.tools import (
     clear_tool_discovery_cache,
     discover_project_tools,
 )
+from azure_functions_agents.workflows import engine, integration
+from azure_functions_agents.workflows.schema import WorkflowPlanPolicy
+
+
+class _Blueprints:
+    def __init__(self) -> None:
+        self.blueprints: list = []
+
+    def register_blueprint(self, blueprint) -> None:
+        self.blueprints.append(blueprint)
+
+    def function(self, name: str):
+        [blueprint] = self.blueprints
+        for builder in blueprint._function_builders:
+            if builder._function._name == name:
+                return builder._function._func
+        raise AssertionError(f"workflow function {name!r} was not registered")
 
 _SAMPLE_SRC = Path(__file__).resolve().parents[1] / "samples" / "workflow-incident-triage" / "src"
 _SPEC = importlib.util.spec_from_file_location(
@@ -74,11 +93,45 @@ def test_fetch_metrics_shape():
     assert isinstance(out["cpu_p99"], float)
 
 
-def test_fetch_deploys_shape():
-    out = incident_tools.fetch_deploys({"service": "orders-api"})
+def test_fetch_deploys_is_async_and_keeps_shape():
+    assert inspect.iscoroutinefunction(incident_tools.fetch_deploys)
+    out = asyncio.run(incident_tools.fetch_deploys({"service": "orders-api"}))
     assert out["service"] == "orders-api"
     assert len(out["deploys"]) >= 1
     assert {"id", "actor", "summary", "minutes_ago"} <= set(out["deploys"][0])
+
+
+def test_sample_async_fetch_deploys_runs_through_workflow_activity():
+    clear_tool_discovery_cache()
+    discovered = discover_project_tools(_SAMPLE_SRC)
+    catalog = integration.build_workflow_handler_catalog(discovered.workflow_tools)
+    assert "fetch_deploys" in catalog
+
+    app = _Blueprints()
+    engine.register_workflows(
+        app,
+        handler_catalog=catalog,
+        workflow_agent_policies={
+            "main": WorkflowPlanPolicy(allowed_tools=frozenset({"fetch_deploys"}))
+        },
+    )
+    activity = app.function("agents_workflow_run_tool")
+
+    result = asyncio.run(
+        activity(
+            {
+                "id": "deploys",
+                "workflow_id": "workflow-1",
+                "workflow_agent_slug": "main",
+                "tool": "fetch_deploys",
+                "args": {"service": "orders-api"},
+            }
+        )
+    )
+
+    assert result["id"] == "deploys"
+    assert result["result"]["service"] == "orders-api"
+    assert result["result"]["deploys"]
 
 
 def test_fetch_logs_requires_service():
@@ -89,7 +142,7 @@ def test_fetch_logs_requires_service():
 def test_summarize_findings_with_full_results():
     logs = incident_tools.fetch_logs({"service": "orders-api"})
     metrics = incident_tools.fetch_metrics({"service": "orders-api"})
-    deploys = incident_tools.fetch_deploys({"service": "orders-api"})
+    deploys = asyncio.run(incident_tools.fetch_deploys({"service": "orders-api"}))
     out = incident_tools.summarize_findings(
         {"logs": logs, "metrics": metrics, "deploys": deploys}
     )

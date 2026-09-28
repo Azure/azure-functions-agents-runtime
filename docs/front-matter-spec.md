@@ -663,10 +663,12 @@ workflow-management tools (`start_workflow`, `get_workflow_status`,
 agent-allowed public `@workflow_tool` handlers discovered from `tools/*.py` as
 workflow task targets. No new role or starter fields are required; workflow
 identity comes from the agent's canonical slug.
-The v1 runtime currently requires workflow tool handlers to be synchronous,
-accept one dictionary argument, and return JSON-serializable values. This is an
-implementation constraint of the v1 registry and Activity runner, not a Durable
-Functions requirement.
+Workflow tool handlers can be synchronous (`def`) or asynchronous (`async def`).
+They must accept one dictionary argument and return a JSON-serializable value.
+The Activity awaits async handlers and runs synchronous handlers in a worker
+thread. The Durable orchestrator continues to use `yield`.
+For a handler that also uses `@tool(schema=Params)`, the runtime converts the
+dictionary to the Pydantic model before it calls the handler.
 
 Normal custom tools keep their existing behavior. Plain public functions and `@tool`/`FunctionTool` values in `tools/*.py` are normal MAF tools; `@workflow_tool` marks a callable for workflow execution. Use both decorators when a callable should be available both directly in chat and inside workflow tasks. Use `_`-prefixed helpers for functions that should be neither normal tools nor workflow tools.
 

@@ -142,6 +142,7 @@ class WorkflowToolExecutionPolicy:
     """Immutable workflow-tool declarations used at submission time."""
 
     retry: WorkflowRetryPolicy | None = None
+    timeout: str | None = None
 
 
 def freeze_workflow_tool_execution_policies(
@@ -172,6 +173,8 @@ MAX_BACKOFF_MS = 15 * 60 * 1_000
 # finite ``retry_timeout`` is intentionally unset because the SDK evaluates it
 # against wall-clock time while replaying history.
 MAX_POLICY_ELAPSED_MS = 60 * 60 * 1_000
+MIN_ATTEMPT_TIMEOUT_MS = 1_000
+MAX_ATTEMPT_TIMEOUT_MS = 10 * 60 * 1_000
 
 
 def _policy_duration_ms(value: str, *, field_name: str) -> int:
@@ -207,6 +210,14 @@ def _policy_duration_ms(value: str, *, field_name: str) -> int:
         return int(integral_ms)
     except (OverflowError, ValueError) as exc:
         raise ValueError(f"{field_name} is too large") from exc
+
+
+def workflow_timeout_ms(value: str) -> int:
+    """Return a validated workflow attempt timeout in milliseconds."""
+    timeout_ms = _policy_duration_ms(value, field_name="timeout")
+    if not MIN_ATTEMPT_TIMEOUT_MS <= timeout_ms <= MAX_ATTEMPT_TIMEOUT_MS:
+        raise ValueError("timeout must be between PT1S and PT10M")
+    return timeout_ms
 
 
 class WorkflowRetryBackoff(BaseModel):
@@ -261,7 +272,30 @@ class WorkflowTaskExecution(BaseModel):
         extra="forbid", frozen=True, strict=True, hide_input_in_errors=True
     )
 
-    retry: WorkflowRetryPolicy
+    retry: WorkflowRetryPolicy | None = None
+    timeout: str | None = None
+    continue_on_error: bool | None = None
+
+    @field_validator("timeout")
+    @classmethod
+    def validate_timeout(cls, value: str | None) -> str | None:
+        if value is not None:
+            workflow_timeout_ms(value)
+        return value
+
+    @field_validator("continue_on_error", mode="before")
+    @classmethod
+    def validate_continue_on_error(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("continue_on_error must be a boolean")
+        return value
+
+    @model_validator(mode="after")
+    def validate_policy(self) -> WorkflowTaskExecution:
+        continuation_declared = "continue_on_error" in self.model_fields_set
+        if self.retry is None and self.timeout is None and not continuation_declared:
+            raise ValueError("execution must declare retry, timeout, or continue_on_error")
+        return self
 
 
 class DurableRetryPolicyInput(TypedDict):
@@ -284,6 +318,8 @@ class EffectiveWorkflowTaskExecution(TypedDict):
 
     max_attempts: int
     durable_retry_policy: DurableRetryPolicyInput
+    timeout_ms: NotRequired[int]
+    continue_on_error: NotRequired[bool]
 
 
 def durable_retry_policy_input(retry: WorkflowRetryPolicy) -> DurableRetryPolicyInput:
@@ -439,6 +475,7 @@ def resolve_workflow_task_execution(
     task: WorkflowTask,
     *,
     decorator_retry: WorkflowRetryPolicy | None = None,
+    decorator_timeout: str | None = None,
 ) -> EffectiveWorkflowTaskExecution | None:
     """Freeze the effective retry policy for one task at submission time.
 
@@ -447,11 +484,11 @@ def resolve_workflow_task_execution(
     This keeps earlier histories on the legacy dispatch path during replay.
     """
     authored = "execution" in task.model_fields_set
-    if not authored and decorator_retry is None:
+    if not authored and decorator_retry is None and decorator_timeout is None:
         return None
     if authored and task.execution is None:
         raise PlanValidationError(
-            f"task {task.id!r}: 'execution' must contain a retry policy",
+            f"task {task.id!r}: 'execution' must contain an execution policy",
             error_code="workflow_retry_policy_invalid",
             node_id=task.id,
             path="execution",
@@ -463,24 +500,53 @@ def resolve_workflow_task_execution(
             node_id=task.id,
             path="execution.retry",
         )
+    if decorator_timeout is not None and task.type != TOOL_TASK_TYPE:
+        raise PlanValidationError(
+            f"task {task.id!r}: workflow tool timeout is only valid on type=tool tasks",
+            error_code="workflow_execution_policy_invalid",
+            node_id=task.id,
+            path="execution.timeout",
+        )
+    retry: WorkflowRetryPolicy | None
     if decorator_retry is not None:
         retry = decorator_retry
     else:
-        assert task.execution is not None
-        retry = task.execution.retry
+        retry = task.execution.retry if task.execution is not None else None
+    timeout: str | None
+    if decorator_timeout is not None:
+        timeout = decorator_timeout
+    else:
+        timeout = task.execution.timeout if task.execution is not None else None
+    continuation_declared = (
+        task.execution is not None
+        and "continue_on_error" in task.execution.model_fields_set
+    )
+    effective_retry = retry or WorkflowRetryPolicy(max_attempts=1)
+    timeout_ms = workflow_timeout_ms(timeout) if timeout is not None else None
     # Currently unreachable with per-field bounds (5 attempts and <= 15m max
     # backoff, ~50m worst case); kept as defense in depth if bounds widen.
-    if sum(native_retry_delays_ceiling_ms(retry)) > MAX_POLICY_ELAPSED_MS:
+    elapsed_ceiling_ms = sum(native_retry_delays_ceiling_ms(effective_retry))
+    if timeout_ms is not None:
+        elapsed_ceiling_ms += effective_retry.max_attempts * timeout_ms
+    if elapsed_ceiling_ms > MAX_POLICY_ELAPSED_MS:
         raise PlanValidationError(
-            f"task {task.id!r}: configured retry delays must not exceed PT1H in total",
+            f"task {task.id!r}: configured retry delays and attempt deadlines "
+            "must not exceed PT1H in total",
             error_code="workflow_retry_schedule_exceeded",
             node_id=task.id,
-            path="execution.retry.backoff",
+            path="execution",
         )
-    return EffectiveWorkflowTaskExecution(
-        max_attempts=retry.max_attempts,
-        durable_retry_policy=durable_retry_policy_input(retry),
+    effective = EffectiveWorkflowTaskExecution(
+        max_attempts=effective_retry.max_attempts,
+        durable_retry_policy=durable_retry_policy_input(effective_retry),
     )
+    if timeout_ms is not None:
+        effective["timeout_ms"] = timeout_ms
+    if continuation_declared:
+        assert task.execution is not None
+        assert task.execution.continue_on_error is not None
+        effective["continue_on_error"] = task.execution.continue_on_error
+    return effective
 
 
 class WorkflowPlan(BaseModel):
@@ -584,7 +650,7 @@ def validate_plan(
             and task.execution is None
         ):
             raise PlanValidationError(
-                f"task {task.id!r}: 'execution' must contain a retry policy",
+                f"task {task.id!r}: 'execution' must contain an execution policy",
                 error_code="workflow_retry_policy_invalid",
                 node_id=task.id,
                 path="execution",
@@ -769,7 +835,7 @@ def _schema_validation_metadata(
         if len(loc) < 3 or loc[0] != "tasks" or not isinstance(loc[1], int):
             continue
         field = loc[2]
-        if field not in {"when", "for_each"}:
+        if field not in {"when", "for_each", "execution"}:
             continue
         node_id: str | None = None
         tasks = raw.get("tasks")
@@ -783,8 +849,15 @@ def _schema_validation_metadata(
         metadata: PlanValidationMetadata
         if field == "when":
             metadata = {"error_code": "workflow_condition_invalid", "path": path}
-        else:
+        elif field == "for_each":
             metadata = {"error_code": "workflow_reference_unresolved", "path": path}
+        elif len(loc) > 3 and loc[3] == "retry":
+            metadata = {"error_code": "workflow_retry_policy_invalid", "path": path}
+        else:
+            metadata = {
+                "error_code": "workflow_execution_policy_invalid",
+                "path": path,
+            }
         if node_id is not None:
             metadata["node_id"] = node_id
         return metadata
@@ -1395,6 +1468,7 @@ def parse_iso8601_datetime(text: str) -> datetime:
 
 __all__ = [
     "ECHO_TOOL_NAME",
+    "MAX_ATTEMPT_TIMEOUT_MS",
     "MAX_BACKOFF_MS",
     "MAX_INITIAL_BACKOFF_MS",
     "MAX_NODES",
@@ -1402,6 +1476,7 @@ __all__ = [
     "MAX_POLICY_ATTEMPTS",
     "MAX_POLICY_ELAPSED_MS",
     "MAX_WAIT_DURATION",
+    "MIN_ATTEMPT_TIMEOUT_MS",
     "SUB_AGENT_TASK_TYPE",
     "SUPPORTED_TASK_TYPES",
     "TOOL_TASK_TYPE",
@@ -1429,4 +1504,5 @@ __all__ = [
     "resolve_template_value",
     "resolve_workflow_task_execution",
     "validate_plan",
+    "workflow_timeout_ms",
 ]

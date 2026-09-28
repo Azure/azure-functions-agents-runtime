@@ -5,13 +5,17 @@ workflow through Durable's built-in orchestration HTTP API. Going straight to
 Durable keeps both cases deterministic and model-free: what is under test is the
 runtime's retry behaviour, not an agent's ability to author a plan.
 
-Two behaviours are asserted against a real host:
+Five behaviors are asserted against a real host:
 
 * a task whose tool reports transient failures is retried by Durable and the
   workflow still reaches ``Completed`` with the expected result;
 * a task that keeps failing exhausts its attempt budget and the workflow reaches
   ``Failed`` carrying the application's own sanitized ``error_code`` rather than
   an opaque Durable ``TaskFailedError`` message.
+* a plan retry policy combines with a shorter decorator timeout, then retries
+  to success or commits sanitized timeout exhaustion when continuation is enabled;
+* a terminal optional-task failure commits a bounded result and its dependent runs;
+* cancellation discards a continued failure that completed earlier in the wave.
 """
 
 from __future__ import annotations
@@ -47,6 +51,9 @@ _ORCHESTRATOR_NAME = "agents_workflow_orchestrator"
 _EXPECTED_EXHAUSTION_FAILURE = (
     "task 'reserve_inventory': Inventory reservation is temporarily unavailable. "
     "(inventory_temporarily_unavailable)"
+)
+_EXPECTED_TIMEOUT_FAILURE = (
+    "task 'verify_carrier': Task attempt timed out. (workflow_task_timeout)"
 )
 _PRIVATE_RETRY_MARKERS = (
     '"outcome"',
@@ -144,11 +151,41 @@ def _order_recovery_submission() -> tuple[str, dict[str, Any]]:
                     "depends_on": ["load_order"],
                 },
                 {
+                    "id": "verify_carrier",
+                    "type": "tool",
+                    "tool": "verify_carrier",
+                    "args": {"reservation": "${reserve_inventory.result}"},
+                    "depends_on": ["reserve_inventory"],
+                    "execution": {
+                        "timeout": "PT10S",
+                        "continue_on_error": True,
+                        "retry": {
+                            "max_attempts": 2,
+                            "backoff": {
+                                "initial": "PT1S",
+                                "multiplier": 1.0,
+                                "max": "PT1S",
+                            },
+                        },
+                    },
+                },
+                {
+                    "id": "notify_customer",
+                    "type": "tool",
+                    "tool": "notify_customer",
+                    "args": {"reservation": "${reserve_inventory.result}"},
+                    "depends_on": ["reserve_inventory"],
+                    "execution": {"continue_on_error": True},
+                },
+                {
                     "id": "confirm_order",
                     "type": "tool",
                     "tool": "confirm_order",
-                    "args": {"reservation": "${reserve_inventory.result}"},
-                    "depends_on": ["reserve_inventory"],
+                    "args": {
+                        "carrier": "${verify_carrier.result}",
+                        "notice": "${notify_customer.result}",
+                    },
+                    "depends_on": ["verify_carrier", "notify_customer"],
                 },
             ]
         }
@@ -172,6 +209,33 @@ def _order_recovery_submission() -> tuple[str, dict[str, Any]]:
         task for task in captured["tasks"] if task["id"] == "reserve_inventory"
     )
     assert "durable_retry_policy" in retry_task["execution"]
+    timeout_task = next(
+        task for task in captured["tasks"] if task["id"] == "verify_carrier"
+    )
+    assert timeout_task["execution"] == {
+        "max_attempts": 2,
+        "durable_retry_policy": {
+            "first_retry_interval_ms": 1_000,
+            "max_number_of_attempts": 2,
+            "backoff_coefficient": 1.0,
+            "max_retry_interval_ms": 1_000,
+        },
+        "timeout_ms": 1_000,
+        "continue_on_error": True,
+    }
+    continuation_task = next(
+        task for task in captured["tasks"] if task["id"] == "notify_customer"
+    )
+    assert continuation_task["execution"] == {
+        "max_attempts": 1,
+        "durable_retry_policy": {
+            "first_retry_interval_ms": 0,
+            "max_number_of_attempts": 1,
+            "backoff_coefficient": 1.0,
+            "max_retry_interval_ms": 0,
+        },
+        "continue_on_error": True,
+    }
     assert captured["workflow_agent"] == {
         "workflow_agent_slug": "main",
         "session_id": "retry-e2e",
@@ -203,6 +267,69 @@ def _start_workflow(base_url: str, workflow_id: str, payload: dict[str, Any]) ->
     )
     with urllib.request.urlopen(request, timeout=60) as response:
         assert response.status in {200, 202}
+
+
+def _raise_event(base_url: str, workflow_id: str, event_name: str, payload: Any) -> None:
+    request = urllib.request.Request(
+        f"{base_url}/runtime/webhooks/durabletask/instances/{workflow_id}"
+        f"/raiseEvent/{event_name}",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        assert response.status in {200, 202}
+
+
+def _await_notice_attempt(workflow_id: str, *, timeout: float = 120.0) -> None:
+    from azure.core.exceptions import ResourceNotFoundError
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            incident = json.loads(_incident_blob(workflow_id).download_blob().readall())
+        except ResourceNotFoundError:
+            time.sleep(1)
+            continue
+        if incident.get("notice_attempts", 0) >= 1:
+            return
+        time.sleep(1)
+    raise AssertionError(f"workflow {workflow_id} did not run notify_customer")
+
+
+def _await_activity_outcome_processed(
+    host: Any,
+    workflow_id: str,
+    *,
+    log_start: int,
+    completed_activity_count: int,
+    timeout: float = 120.0,
+) -> None:
+    """Wait until the target Activity completes and its orchestrator replay yields."""
+    deadline = time.monotonic() + timeout
+    output = ""
+    activity_completed = "Executed 'Functions.agents_workflow_run_tool' (Succeeded"
+    replay_yielded = (
+        f"{workflow_id}: Orchestrator {_ORCHESTRATOR_NAME} yielded with "
+        "1 task(s) and 1 event(s) outstanding."
+    )
+    while time.monotonic() < deadline:
+        output = host.read_output()[log_start:]
+        lines = output.splitlines()
+        completed_indexes = [
+            index
+            for index, line in enumerate(lines)
+            if activity_completed in line
+        ]
+        if len(completed_indexes) >= completed_activity_count and any(
+            replay_yielded in line
+            for line in lines[completed_indexes[completed_activity_count - 1] + 1 :]
+        ):
+            return
+        time.sleep(1)
+    raise AssertionError(
+        f"workflow {workflow_id} did not process the target Activity outcome: {output}"
+    )
 
 
 def _await_terminal(base_url: str, workflow_id: str, *, timeout: float = 240.0) -> dict[str, Any]:
@@ -261,6 +388,7 @@ def _assert_decoded_exhaustion_failure(
     *,
     host_output: str,
     workflow_id: str,
+    expected_failure: str = _EXPECTED_EXHAUSTION_FAILURE,
 ) -> None:
     """Require the authoritative terminal failure to be the decoded application error."""
     failure_details = status.get("failureDetails")
@@ -292,8 +420,8 @@ def _assert_decoded_exhaustion_failure(
         else:
             failure_message = _final_orchestration_failure_from_log(host_output, workflow_id)
 
-    assert failure_message == _EXPECTED_EXHAUSTION_FAILURE, (
-        f"expected decoded final failure {_EXPECTED_EXHAUSTION_FAILURE!r}, "
+    assert failure_message == expected_failure, (
+        f"expected decoded final failure {expected_failure!r}, "
         f"got {failure_message!r}"
     )
     assert "Activity task #" not in failure_message
@@ -320,7 +448,17 @@ def test_transient_tool_failures_are_retried_and_the_workflow_completes(
     # reserved order at all means Durable re-delivered the Activity.
     assert results["reserve_inventory"]["reserved"] is True
     assert results["reserve_inventory"]["transient_failures_observed"] == 2
+    assert results["verify_carrier"]["timeout_attempts_observed"] == 1
+    assert results["notify_customer"] == {
+        "failed": True,
+        "error_code": "customer_notice_unavailable",
+        "error": "Customer notification is unavailable.",
+        "kind": "handler_terminal",
+    }
     assert results["confirm_order"]["status"] == "confirmed"
+    assert results["confirm_order"]["carrier"] == "Contoso Shipping"
+    assert results["confirm_order"]["carrier_verification_failed"] is False
+    assert results["confirm_order"]["customer_notice_failed"] is True
 
 
 def test_exhausted_retry_fails_with_the_application_error_code(
@@ -335,6 +473,8 @@ def test_exhausted_retry_fails_with_the_application_error_code(
                 "order_id": ORDER_ID,
                 "failures_remaining": 99,
                 "transient_failures_observed": 0,
+                "carrier_attempts": 0,
+                "notice_attempts": 0,
                 "status": "active",
             }
         ),
@@ -360,3 +500,140 @@ def test_exhausted_retry_fails_with_the_application_error_code(
         host_output=retry_sample_host.read_output()[log_start:],
         workflow_id=workflow_id,
     )
+
+
+@pytest.mark.parametrize("continue_on_error", [True, None])
+def test_attempt_timeout_exhaustion_preserves_failure_or_continues(
+    retry_sample_host: Any,
+    continue_on_error: bool | None,
+) -> None:
+    workflow_id, payload = _order_recovery_submission()
+    blob = _incident_blob(workflow_id)
+    blob.upload_blob(
+        json.dumps(
+            {
+                "order_id": ORDER_ID,
+                "failures_remaining": 0,
+                "transient_failures_observed": 0,
+                "carrier_attempts": 0,
+                "notice_attempts": 0,
+                "status": "active",
+            }
+        ),
+        overwrite=True,
+    )
+    timeout_task = next(
+        task for task in payload["tasks"] if task["id"] == "verify_carrier"
+    )
+    timeout_task["args"]["always_timeout"] = True
+    if continue_on_error is None:
+        del timeout_task["execution"]["continue_on_error"]
+
+    log_start = len(retry_sample_host.read_output())
+    _start_workflow(retry_sample_host.base_url, workflow_id, payload)
+    status = _await_terminal(retry_sample_host.base_url, workflow_id)
+
+    incident = json.loads(blob.download_blob().readall())
+    assert incident["carrier_attempts"] == 2
+    if continue_on_error is None:
+        assert status["runtimeStatus"] == "Failed", status
+        _assert_decoded_exhaustion_failure(
+            status,
+            host_output=retry_sample_host.read_output()[log_start:],
+            workflow_id=workflow_id,
+            expected_failure=_EXPECTED_TIMEOUT_FAILURE,
+        )
+        return
+
+    assert status["runtimeStatus"] == "Completed", status
+    results = status["output"]["results"]
+    assert results["verify_carrier"] == {
+        "failed": True,
+        "error_code": "workflow_task_timeout",
+        "error": "Task attempt timed out.",
+        "kind": "handler_transient",
+    }
+    assert results["confirm_order"]["status"] == "confirmed"
+    assert results["confirm_order"]["carrier_verification_failed"] is True
+    assert results["confirm_order"]["customer_notice_failed"] is True
+
+
+@pytest.mark.parametrize("continue_on_error", [True, None])
+def test_cancellation_discards_terminal_failure_completed_earlier_in_wave(
+    retry_sample_host: Any,
+    continue_on_error: bool | None,
+) -> None:
+    workflow_id, payload = _order_recovery_submission()
+    by_id = {task["id"]: task for task in payload["tasks"]}
+    notify = by_id["notify_customer"]
+    if continue_on_error is None:
+        del notify["execution"]["continue_on_error"]
+    payload["tasks"] = [
+        by_id["load_order"],
+        by_id["reserve_inventory"],
+        notify,
+        {
+            "id": "pause",
+            "type": "wait",
+            "duration": "PT5M",
+            "depends_on": ["reserve_inventory"],
+        },
+    ]
+
+    log_start = len(retry_sample_host.read_output())
+    _start_workflow(retry_sample_host.base_url, workflow_id, payload)
+    _await_notice_attempt(workflow_id)
+    _await_activity_outcome_processed(
+        retry_sample_host,
+        workflow_id,
+        log_start=log_start,
+        completed_activity_count=3,
+    )
+    _raise_event(
+        retry_sample_host.base_url,
+        workflow_id,
+        "cancel",
+        "user-request",
+    )
+    status = _await_terminal(retry_sample_host.base_url, workflow_id)
+
+    assert status["runtimeStatus"] == "Completed", status
+    output = status["output"]
+    assert output["canceled"] is True
+    assert output["reason"] == "user-request"
+    assert set(output["results"]) == {"load_order", "reserve_inventory"}
+    assert output["completed_count"] == 2
+    assert output["total_count"] == 4
+
+
+def test_host_timeout_logs_unclassified_activity_guidance(
+    tmp_path: Path,
+) -> None:
+    host_app = tmp_path / "workflow-host-timeout"
+    shutil.copytree(SAMPLE_APP, host_app)
+    host_config = json.loads((host_app / "host.json").read_text(encoding="utf-8"))
+    host_config["functionTimeout"] = "00:00:01"
+    host_config["extensions"]["durableTask"] = {"hubName": "TimeoutDiagnostics"}
+    (host_app / "host.json").write_text(
+        json.dumps(host_config, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    workflow_id, payload = _order_recovery_submission()
+    timeout_task = next(
+        task for task in payload["tasks"] if task["id"] == "verify_carrier"
+    )
+    timeout_task["args"]["always_timeout"] = True
+    timeout_task["execution"]["timeout_ms"] = 10_000
+
+    with running_host(host_app) as host:
+        _start_workflow(host.base_url, workflow_id, payload)
+        status = _await_terminal(host.base_url, workflow_id, timeout=300)
+        assert status["runtimeStatus"] == "Failed", status
+        assert host.wait_for_log(
+            "The workflow received an unclassified Activity failure.",
+            timeout=60,
+        ), host.read_output()
+        output = host.read_output()
+        assert "host.json" in output
+        assert "AzureFunctionsJobHost__functionTimeout" in output
