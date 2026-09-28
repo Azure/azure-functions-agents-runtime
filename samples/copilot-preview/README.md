@@ -70,7 +70,7 @@ $env:FUNCTIONS_WORKER_PROCESS_COUNT = "1"
 $env:AZURE_FUNCTIONS_AGENTS_SESSION_DIR = "$PWD\.preview-state"
 
 # Use a dedicated native-asset cache, not an interactive Copilot installation.
-$env:COPILOT_CLI_EXTRACT_DIR = "$PWD\.tmp-validation\copilot-runtime-1.0.85"
+$env:COPILOT_CLI_EXTRACT_DIR = "$PWD\.tmp-validation\runtime-1.0.85"
 .\.venv\Scripts\python.exe -m azure_functions_agents._copilot --setup
 .\.venv\Scripts\python.exe -m azure_functions_agents._copilot
 
@@ -233,8 +233,8 @@ Remove-Item .preview-state -Recurse
 Remove-Item .preview-evidence.json
 Remove-Item samples\copilot-preview\src\local.settings.json
 # Optional: remove this sample's isolated native asset cache, not shared caches.
-Get-Item .tmp-validation\copilot-runtime-1.0.85
-Remove-Item .tmp-validation\copilot-runtime-1.0.85 -Recurse
+Get-Item .tmp-validation\runtime-1.0.85
+Remove-Item .tmp-validation\runtime-1.0.85 -Recurse
 Remove-Item Env:\AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT
 Remove-Item Env:\COPILOT_CLI_EXTRACT_DIR
 ```
@@ -257,3 +257,37 @@ remove only the app-hash subdirectory shown by your locally inspected tree.
 The foundation owns shared source edits until its PR merges; later lanes
 should agree a handoff before editing these shared seams. The feature-only FRD
 is developed independently, not a stacked implementation dependency.
+
+## Recorded foundation evidence
+
+On **2026-09-28**, implementation commit
+`13d05700e92b6fb429ad990ea2eaf7b69566346d` passed the checked-in
+`verify.py --restart-host` flow on **Windows, Python 3.13.15, Core Tools 4.13.0,
+SDK 1.0.14, native 1.0.85/protocol 3**, against an explicitly approved existing
+**Foundry project / `gpt-5.4` deployment with Entra ID**. No project endpoint,
+credential, raw native journal or customer resource identifier is committed.
+
+| Observed check | Result |
+| --- | --- |
+| First HTTP request through discovered markdown and registered route | Real model reply; exactly one `make_receipt` call and verified result |
+| Second HTTP request after full Functions host/worker/native restart | Same public session ID; value-free recall matched the prior receipt; no new tool call |
+| Persisted native event evidence | Two user messages, three assistant API-call IDs, one tool start/completion, one resume |
+| Unknown supplied session / streaming / history | Explicit error / 501 / 501, no inference |
+| Flag off and host restarted | Original MAF HTTP/history behavior, no Copilot process, no additional inference |
+| Local state/cleanup | Completed marker `ready`; active Entra token absent from persisted files; zero owned native processes left |
+
+The separate native synthetic-provider tests passed for OpenAI Completions and
+Foundry Responses, including real custom schema/description and API output-cap
+checks, cold native resume, recoverable startup failure, and cancellation.
+The final lint, strict type-check and full coverage gates passed on both
+Python **3.13.15** and **3.14.7**: **1,345 passed**, 10 intentionally skipped,
+62 E2E cases deselected in the ordinary suite. All **six** explicitly enabled
+native qualification cases also passed on each Python version.
+The first output-cap check failed when relying only on SDK metadata; the
+committed HTTP-boundary enforcement above fixes that actual failure.
+An initial setup in the shared Windows SDK cache failed a directory rename;
+the documented dedicated cache succeeded without changing shared files.
+
+This is one bounded live flow, **not** production qualification, an exactly-once
+guarantee, proof of all provider/model combinations, or compaction/Blob recovery
+evidence. No production app flag, cloud resource or permission was changed.

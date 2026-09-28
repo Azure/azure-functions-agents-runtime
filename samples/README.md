@@ -22,6 +22,11 @@ two non-main workflow-enabled agents share one Durable engine while retaining
 separate policies. Run it locally with Azurite and use either agent's browser
 chat UI to start and observe an independent workflow.
 
+For the separate **local-only, default-off Copilot harness experiment**, use
+[`copilot-preview`](copilot-preview/README.md). Its pinned setup and two-turn
+receipt verifier exercise a real Functions-host restart; it is not an `azd up`
+deployment sample and does not require Azurite.
+
 ## Run Locally (optional)
 
 Each sample is set up to be deployed and run easily in Azure. Running in Azure is the most friction-free option to try out these samples.

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from azure_functions_agents import _harness, runner
+from azure_functions_agents._function_tool import FunctionTool
 from azure_functions_agents._harness import CopilotPreviewError, UnsupportedCapabilityError
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.config import paths
@@ -175,6 +176,19 @@ def test_maf_only_configuration_is_not_silently_discarded(preview):
         _harness.validate_configuration(
             AgentConfiguration(agent_framework=AgentFrameworkConfiguration())
         )
+
+
+@pytest.mark.parametrize("policy", [
+    {"max_invocations": 1},
+    {"max_invocation_exceptions": 1},
+    {"approval_mode": "always_require"},
+    {"result_parser": str},
+    {"func": None},
+])
+def test_unsupported_tool_policies_are_not_silently_lost(policy):
+    options = {"name": "bounded", "func": lambda value: value, **policy}
+    with pytest.raises(UnsupportedCapabilityError, match="simple FunctionTool"):
+        _harness.prepare_tools([FunctionTool(**options)])
 
 
 def test_direct_preview_forks_before_maf_construction_or_blob(preview, monkeypatch):
