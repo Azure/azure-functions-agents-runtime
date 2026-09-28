@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -122,27 +121,22 @@ def test_run_agent_timeout_none_uses_module_default_timeout_for_its_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(runner, "DEFAULT_TIMEOUT", 12_345.0)
-    captured: list[dict[str, Any]] = []
+    captured: list[tuple[dict[str, Any], float]] = []
 
     async def fake_build_agent_session(
         **kwargs: Any,
     ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
-        captured.append(kwargs)
+        captured.append((kwargs, asyncio.get_running_loop().time()))
         return _FakeAgent(), object(), "s", None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
-    loop_time_before = time.monotonic()
-
     result = asyncio.run(runner.run_agent("hello", timeout=None))
 
     assert len(captured) == 1
-    coordinator_deadline = captured[0]["coordinator_deadline"]
-    # `coordinator_deadline = loop.time() + timeout` — asserting it is
-    # (loosely) ~12345s out from "now" proves `DEFAULT_TIMEOUT`, not the
-    # hardcoded `900.0` fallback literal in `_runtime_timeout_default`'s own
-    # module-load-time computation, drove this call's budget.
-    assert coordinator_deadline > loop_time_before + 12_000.0
+    kwargs, builder_loop_time = captured[0]
+    coordinator_deadline = kwargs["coordinator_deadline"]
+    assert coordinator_deadline - builder_loop_time == pytest.approx(12_345.0)
     assert result.content == "hello"
 
 
@@ -150,23 +144,22 @@ def test_run_agent_stream_timeout_none_uses_module_default_timeout_for_its_deadl
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(runner, "DEFAULT_TIMEOUT", 6_789.0)
-    captured: list[dict[str, Any]] = []
+    captured: list[tuple[dict[str, Any], float]] = []
 
     async def fake_build_agent_session(
         **kwargs: Any,
     ) -> tuple[_FakeStreamingAgent, object, str, None, InferenceTarget]:
-        captured.append(kwargs)
+        captured.append((kwargs, asyncio.get_running_loop().time()))
         return _FakeStreamingAgent(), object(), "s", None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
 
-    loop_time_before = time.monotonic()
-
     events = asyncio.run(_collect_stream(runner.run_agent_stream("hello", timeout=None)))
 
     assert len(captured) == 1
-    coordinator_deadline = captured[0]["coordinator_deadline"]
-    assert coordinator_deadline > loop_time_before + 6_500.0
+    kwargs, builder_loop_time = captured[0]
+    coordinator_deadline = kwargs["coordinator_deadline"]
+    assert coordinator_deadline - builder_loop_time == pytest.approx(6_789.0)
     # `_FakeAgent` (used by every other test in this module) has no `stream`
     # parameter on its `run()`, so it cannot stand in here: `run_agent_stream`
     # calls `agent.run(prompt, stream=True, ...)`, which would raise

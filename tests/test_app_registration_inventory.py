@@ -275,22 +275,37 @@ def test_mixed_ordinary_and_workflow_agents_share_one_durable_app_with_scoped_bi
         "agent_main_builtin_chatstream",
         "agent_main_builtin_history",
     ]
+    assert _http_routes(functions) == [
+        "agents/worker/chat",
+        "agents/worker/chatstream",
+        "agents/worker/history",
+        "agents/worker/workflows",
+        "agents/worker/workflow-status",
+        "agents/main/chat",
+        "agents/main/chatstream",
+        "agents/main/history",
+    ]
 
     by_name = _functions_by_name(functions)
-    for name in (
-        "agent_main_builtin_chat",
-        "agent_main_builtin_chatstream",
-        "agent_main_builtin_history",
-    ):
-        assert "durableClient" not in _binding_types(by_name[name]), name
+    expected_binding_types = {
+        "BuiltIn__HttpActivity": ["activityTrigger"],
+        "BuiltIn__HttpPollOrchestrator": ["orchestrationTrigger"],
+        "agents_workflow_run_tool": ["activityTrigger"],
+        "agents_workflow_run_sub_agent": ["activityTrigger"],
+        "agents_workflow_orchestrator": ["orchestrationTrigger"],
+        "agent_worker_builtin_chat": ["durableClient", "httpTrigger", "http"],
+        "agent_worker_builtin_chatstream": ["durableClient", "httpTrigger", "http"],
+        "agent_worker_builtin_history": ["httpTrigger", "http"],
+        "agent_worker_builtin_workflows": ["durableClient", "httpTrigger", "http"],
+        "agent_worker_builtin_workflow_status": ["durableClient", "httpTrigger", "http"],
+        "agent_main_builtin_chat": ["httpTrigger", "http"],
+        "agent_main_builtin_chatstream": ["httpTrigger", "http"],
+        "agent_main_builtin_history": ["httpTrigger", "http"],
+    }
+    assert set(by_name) == set(expected_binding_types)
+    for name, expected_types in expected_binding_types.items():
+        assert _binding_types(by_name[name]) == expected_types, name
+
     # "history" reads request-scoped local/Blob transcript storage directly —
     # it never needs a durable-client binding even for a workflow-enabled
     # agent, unlike the other four worker endpoints.
-    assert "durableClient" not in _binding_types(by_name["agent_worker_builtin_history"])
-    for name in (
-        "agent_worker_builtin_chat",
-        "agent_worker_builtin_chatstream",
-        "agent_worker_builtin_workflows",
-        "agent_worker_builtin_workflow_status",
-    ):
-        assert "durableClient" in _binding_types(by_name[name]), name
