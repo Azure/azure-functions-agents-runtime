@@ -65,7 +65,8 @@ slice its own branch and worktree as described in `AGENTS.md`.
 2. When the FRD defines multiple PRs, implement only the approved delivery slice
    and keep its dependency and review scope explicit.
 3. Follow `AGENTS.md` §5 conventions (PEP 695 type aliases, strict typing,
-   Pydantic v2 base-class fields, MAF-only, shared `_logger`).
+   Pydantic v2 base-class fields, MAF default with only AGENTS.md's bounded
+   app-level Copilot preview exception, shared `_logger`).
 4. Run and pass:
    ```bash
    python -m ruff check src tests

@@ -28,6 +28,7 @@ flowchart LR
     J["client_manager.py<br/>ClientManager"] -.->|"chat client"| K["runner.py<br/>run_agent<br/>run_agent_stream<br/>build_subagent_tools"]
     H -.->|"handler closures + AgentCatalog"| K
     K -.->|"prompt + tools + session"| L["Microsoft Agent Framework"]
+    K -.->|"explicit app-level local preview"| P["_copilot.py<br/>native Copilot SDK stdio"]
 ```
 
 Read left to right: files on disk become typed config, typed config becomes a
@@ -77,6 +78,9 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming; builds per-request `delegate_<slug>` tools and fresh stateless workflow leaf agents; attempts one internal token-usage record through the shared runtime logger for each actual MAF invocation attempt. | `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
+| `azure_functions_agents/_harness.py` | Private once-per-app-root harness selection and explicit preview capability validation. Captured in capabilities/registration closures; standalone runner calls use the same selection. No SDK import/process side effects when off. | `AppHarness`, `HarnessRequest`, `get_harness()`, `validate_agent()` |
+| `azure_functions_agents/_copilot.py` | Lazy, pinned local Copilot stdio owner and non-streaming adapter. Owns setup, provider callbacks, custom-only catalog verification, session create/resume/detach, safe result/usage translation and native shutdown. | `run()`, `shutdown()`, private setup module command |
+| `azure_functions_agents/_copilot_state.py` | OS-locked single-writer preview namespace and completed-turn integrity marker for SDK-native files; never reads or writes MAF history. | `NativeState` |
 | `azure_functions_agents/workflows/integration.py` | Builds the complete immutable handler catalog, immutable slug-keyed workflow-agent policy catalog (including allowed tools' decorator-owned retry and timeout declarations), per-agent management tools/addenda, validates declared trigger support for workflow-enabled agents, and performs the one app-wide Durable registration. It also resolves the packaged `data-driven-workflows` skill used for progressive authoring guidance. | `build_workflow_handler_catalog()`, `build_workflow_agent_policy_catalog()`, `build_workflow_agent_integration()`, `data_driven_workflows_skill_path()`, `validate_workflow_agent_trigger()`, `register_workflow_runtime()` |
 | `azure_functions_agents/workflows/engine.py` | Registers one Durable blueprint per app and executes the native two-argument Durable Task orchestrator, workflow-tool Activity, and Workflow Sub Agent Activity. Orchestration and Activity schedules attach `durabletask.displayName` tags for readable DTS dashboard timelines without changing registered function names. Capability-bearing Activities reauthorize against the current workflow-agent policy before complete-catalog dispatch. Data-driven execution uses typed persisted-task/state contracts and deterministic phase helpers for `when` evaluation, bounded `for_each` materialization, runnable selection, ordered aggregation, result application, cancellation restoration, structured (`schema_version: 2`) status, and controlled-failure normalization. It selects retry and continuation behavior from persisted orchestration input. Static and dynamic schedulers share the continuation decision that commits bounded permitted failures. Waves without enabled continuation keep the earlier wait, failure, and cancellation order. Durable `yield` boundaries remain in the top-level orchestrator generator. | `register_workflows()` |
 | `azure_functions_agents/workflows/context.py` | Tracks invocation context by `(workflow_agent_slug, session_id)`, derives non-revealing 128-bit agent/session prefixes for Durable instance IDs, and exposes the per-delivery task context whose idempotency key is stable across retry attempts. | `session_instance_prefix()`, `new_workflow_instance_id()`, `workflow_matches_agent_session()`, `current_workflow_task_context()` |
@@ -103,6 +107,8 @@ A few boundaries are worth calling out explicitly:
 When the host imports your app module and calls `create_function_app()`, control usually moves through the codebase in this order:
 
 1. `app.py` resolves the project root.
+   `_harness.get_harness()` freezes the app-level preview choice here, before
+   discovery or telemetry bootstrap. It does not launch a native process.
 2. `config/loader.py` reads `agents.config.yaml`.
 3. `app.py` calls `_observability.configure_observability()`: when an Application Insights connection string is present, this bootstraps OpenTelemetry export + instrumentation once if the optional `[monitor]` exporter is available and no provider is already active; otherwise the runtime uses an already-active provider or no-ops.
 4. `config/loader.py` reads every agent markdown file (`*.agent.md`, bare `agent.md`/`CLAUDE.md`, and `*.claude.md`) and creates `AgentSpec` values.
@@ -204,7 +210,7 @@ Registration does not run the agent itself. Instead, `registration/_handlers.py`
 `config/merge.py` recursively combines global and per-agent `agent_configuration` fields, using
 authored `null` values to clear inherited leaves or subtrees,
 then validates the effective token limits. `ResolvedAgent.agent_configuration` is always a concrete
-configuration object. The runner unconditionally constructs every role with MAF's
+configuration object. With the default MAF harness, the runner constructs every role with MAF's
 `create_harness_agent`. Direct execution uses the runtime history provider, keyed by
 `(agent_slug, session_id)`, where endpoint registration supplies the same validated slug used in
 the route and the public session ID is returned to the caller and supplied on later turns. This
@@ -229,6 +235,59 @@ turns for the same agent/session pair. Earlier unscoped
 output limits configured, MAF compacts the externally
 loaded conversation history immediately before each model call. Agent instructions remain part of
 every call; compaction controls accumulated message-history growth.
+
+### Bounded Copilot migration preview
+
+`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` is the only harness selector. Unset,
+`false` or `0` selects the unchanged MAF path; `true` or `1` selects the
+local preview. Boolean text is case-insensitive and trimmed; a present empty
+value or any other value is an error. Each app construction captures a fresh
+immutable binding, carried as an internal `AgentCapabilities` handle into
+closures. Existing closures retain their selection. Standalone calls capture
+and retain a separate first-use default per resolved app root; app construction
+does not replace that default. Restart to switch an existing app/default.
+Legacy `runtime:` front matter remains ignored.
+
+The runner forks **before** MAF client, history, tool-loop or role construction.
+`ClientManager` remains the MAF provider extension point; it is not the new
+harness boundary. Copilot uses existing `InferenceTarget`, tool schemas and
+`AgentResult`, with SDK types kept inside `_copilot.py`. Capability validation
+runs before app mutation and again at standalone execution. The opt-in cannot
+silently fall back to MAF for roles or unsupported combinations.
+
+The initial subset is non-streaming HTTP, simple Python tools, Foundry project
+Responses with refreshable Entra auth (or explicit OpenAI BYOK completions), and
+completed-turn local native continuity. The custom-only tool allowlist is
+checked against the native catalog before every prompt. Empty mode disables
+ambient instructions/plugins/skills/telemetry/auth; ungranted native permission
+requests are denied. The SDK/native/protocol pins are validated by one lazy
+lifecycle owner. Setup is explicit; requests and flag-off imports never download
+native assets. Credential callbacks are host-owned and not persisted as static
+provider credentials. The SDK's HTTP request-handler seam enforces the active
+turn's exact provider URL, `store:false` and configured API generation cap;
+the pinned native version's output-limit metadata alone does not emit that cap.
+One host-owned async HTTP client is closed with the native lifecycle owner.
+
+Native state lives under
+`{session_dir}/copilot-preview/{app_hash}/native/session-state/{native_id}`;
+agent slug and public session ID determine the opaque native ID. A public ID
+supplied by the caller is strict resume, never create-if-missing; HTTP adapters
+carry a private newness signal for IDs they minted themselves so response
+headers and correlation stay intact. The completion marker outside the native
+tree records pinned format identity and file hashes. Missing/corrupt state or
+an unfinished turn fails closed. No MAF transcript is imported or mutated.
+One local OS writer lock and per-session async locks protect the namespace;
+multi-worker/Azure hosting is rejected. Cancellation aborts/detaches only that
+session; normal application shutdown and a process-handle exit hook own shared
+native cleanup.
+
+Debug UI, streaming/history projection, MCP, skills, delegation, workflows,
+system web/ACA tools and MAF-specific compaction settings are not supported.
+Stream/history routes return 501 rather than success-shaped empty output.
+Native compaction and interrupted-turn/Blob recovery are deferred; no host
+summarizer is introduced. The exact runnable subset, pins, setup, failure cases,
+rollback and handoff ledger are in the
+[sample](../samples/copilot-preview/README.md).
 
 Delegated and Workflow Sub Agent roles use the specialist's own resolved configuration, never the
 coordinator's overrides. Leaf roles remain fresh and single-task: specialists receive no persistent

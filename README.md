@@ -17,6 +17,17 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
 - **Harness-only execution controls** — set portable output limits and optional Microsoft Agent Framework token-budget conversation compaction
 
+### Experimental Copilot harness
+
+MAF remains the default. A separate, local-only
+[Copilot foundation sample](samples/copilot-preview/README.md) supports an explicit
+`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=true` opt-in for non-streaming HTTP,
+simple Python tools and completed-turn native-session continuity. It documents
+the pinned SDK/runtime, Foundry Entra setup, unsupported capabilities, real
+request/tool/follow-up verification and the flag-off restart path. This is not
+production activation or full provider/role/streaming parity; existing MAF
+history is untouched.
+
 ## Installation
 
 The package is published on PyPI as **`azurefunctions-agents-runtime`**.

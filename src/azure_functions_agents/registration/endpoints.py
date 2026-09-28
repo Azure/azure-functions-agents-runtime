@@ -6,6 +6,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +14,7 @@ import azure.functions as func
 from azure.durable_functions import DurableFunctionsClient
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
+from .._harness import AppHarness, get_harness, validate_agent
 from .._history_identity import validate_agent_slug
 from .._logger import logger
 from .._observability import FaultDomain, LifecycleStage, start_span
@@ -160,7 +162,10 @@ async def _run_builtin_agent(
     durable_client: Any | None = None,
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
+    _session_is_new: bool = False,
 ) -> Any:
+    harness = capabilities._harness or get_harness()
+    validate_agent(harness, resolved, capabilities)
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
     return await _run_agent(
@@ -183,6 +188,8 @@ async def _run_builtin_agent(
         agent_configuration=resolved.agent_configuration,
         subagents=resolved.subagents,
         catalog=catalog,
+        _harness=harness,
+        _session_is_new=_session_is_new or session_id is None,
     )
 
 
@@ -226,6 +233,7 @@ def _run_builtin_agent_stream(
         agent_configuration=resolved.agent_configuration,
         subagents=resolved.subagents,
         catalog=catalog,
+        _harness=capabilities._harness,
     )
 
 
@@ -294,8 +302,9 @@ def _register_http_chat(
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     async def handle_chat(req: Request, durable_client: Any | None) -> Response:
+        supplied_session_id = req.headers.get("x-ms-session-id")
         resolved_session_id = _resolve_builtin_endpoints_session_id(
-            req.headers.get("x-ms-session-id")
+            supplied_session_id
         )
         # This endpoint calls `run_agent` directly rather than going through
         # `_handlers.py`'s trigger-registered handlers, so — unlike a
@@ -333,6 +342,7 @@ def _register_http_chat(
                     durable_client=durable_client,
                     catalog=catalog,
                     workflow_policy=workflow_policy,
+                    _session_is_new=not supplied_session_id,
                 )
                 _set_run_result_attributes(span, result)
                 span.set_attribute("af.agent.outcome", "success")
@@ -398,6 +408,11 @@ def _register_http_chat_stream(
             auth_error = authorize_entra_request(req.headers.get, auth)
             if auth_error is not None:
                 return _sse_error_response(auth_error.message, status_code=auth_error.status_code)
+            if capabilities._harness is not None and capabilities._harness.name == "copilot":
+                return _sse_error_response(
+                    "Copilot preview does not support streaming; use the non-streaming chat route.",
+                    status_code=501,
+                )
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
             session_id = req.headers.get("x-ms-session-id")
@@ -660,6 +675,7 @@ def _register_history_endpoint(
     slug: str,
     base_function_name: str,
     auth: EndpointAuthConfig,
+    harness: AppHarness | None = None,
 ) -> None:
     """Register a read-only endpoint that returns a session's persisted transcript.
 
@@ -669,11 +685,18 @@ def _register_history_endpoint(
     older deployments (and local runs without storage) keep working.
     """
     auth_level = resolve_endpoint_auth_level(auth)
+    selected_harness = harness or get_harness()
 
     async def get_session_history(req: Request) -> Response:
         auth_error = authorize_entra_request(req.headers.get, auth)
         if auth_error is not None:
             return _json_error(auth_error.message, status_code=auth_error.status_code)
+        if selected_harness.name == "copilot":
+            return _json_error(
+                "Copilot preview does not support transcript replay. Native state is separate "
+                "from MAF history.",
+                status_code=501,
+            )
         session_id = req.headers.get("x-ms-session-id") or ""
         if not session_id:
             return Response(
@@ -748,6 +771,9 @@ def register_builtin_endpoints(
 ) -> None:
     """Register built-in debug chat UI, REST chat, and MCP endpoints for one agent."""
 
+    harness = capabilities._harness or get_harness()
+    validate_agent(harness, resolved, capabilities)
+    capabilities = replace(capabilities, _harness=harness)
     slug = validate_agent_slug(resolved.slug)
     builtin_endpoints = resolved.builtin_endpoints
 
@@ -795,6 +821,7 @@ def register_builtin_endpoints(
             slug=slug,
             base_function_name=base_function_name,
             auth=auth,
+            harness=harness,
         )
         if workflows_enabled:
             _register_workflow_status_endpoints(

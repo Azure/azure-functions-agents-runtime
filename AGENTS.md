@@ -141,8 +141,12 @@ Grounded in `pyproject.toml` and current code:
 - **Pydantic v2** for all config models (`config/schema.py`). When a field +
   validator is shared across provider/sub-models, declare it once on the common
   base class rather than duplicating per subclass.
-- **MAF is the only runtime.** The legacy `runtime:` frontmatter field is ignored
-  (one-time warning). Do not reintroduce runtime branching.
+- **MAF remains the default production runtime.** The only migration exception is the
+  internal, app-level `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` local preview
+  ([sample and limits](samples/copilot-preview/README.md)). Keep harness dispatch
+  behind that once-per-app boundary; no per-agent selectors, mixed-harness roles,
+  or automatic fallback. The legacy `runtime:` frontmatter field stays ignored
+  (one-time warning).
 - **Logging** goes through the shared `azure_functions_agents._logger.logger`.
 - **Respect the pipeline boundaries** (architecture.md §2): discovery is
   read-only; registration is the only Azure-aware stage; the runner executes

@@ -13,6 +13,7 @@ import azure.functions as func
 import jsonschema
 from azurefunctions.extensions.http.fastapi import Request, Response
 
+from .._harness import get_harness, validate_agent
 from .._logger import logger
 from .._observability import (
     ATTR_FAULT_DOMAIN,
@@ -238,6 +239,8 @@ def make_agent_handler(
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Callable[..., Any]:
     """Create an async handler function for a non-HTTP triggered agent."""
+    harness = capabilities._harness or get_harness()
+    validate_agent(harness, resolved, capabilities)
 
     # NOTE: deliberately omit a type annotation on `trigger_data`. The Azure
     # Functions Python worker validates annotations against the binding's
@@ -292,6 +295,8 @@ def make_agent_handler(
                     workflow_agent_slug=resolved.slug,
                     workflow_policy=workflow_policy,
                     agent_name=resolved.slug,
+                    _harness=harness,
+                    _session_is_new=True,
                 )
 
                 _set_run_result_attributes(span, result)
@@ -351,6 +356,8 @@ def make_http_agent_handler(
     Functions host key check via the route's ``AuthLevel``.
     """
     auth_policy = auth or EndpointAuthConfig()
+    harness = capabilities._harness or get_harness()
+    validate_agent(harness, resolved, capabilities)
 
     async def _handle(req: Request, durable_client: Any | None) -> Response:
         auth_error = authorize_entra_request(req.headers.get, auth_policy)
@@ -377,7 +384,8 @@ def make_http_agent_handler(
             },
         ) as span:
             try:
-                session_id = _request_header_value(req, _SESSION_ID_HEADER) or _new_session_id()
+                supplied_session_id = _request_header_value(req, _SESSION_ID_HEADER)
+                session_id = supplied_session_id or _new_session_id()
                 span.set_attribute("af.agent.session_id", session_id)
                 try:
                     body = await req.json()
@@ -435,6 +443,8 @@ def make_http_agent_handler(
                     workflow_agent_slug=resolved.slug,
                     workflow_policy=workflow_policy,
                     agent_name=resolved.slug,
+                    _harness=harness,
+                    _session_is_new=not supplied_session_id,
                 )
 
                 _set_run_result_attributes(span, result)

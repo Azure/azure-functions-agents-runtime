@@ -58,6 +58,7 @@ import asyncio
 import contextlib
 import json
 import sys
+import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,6 +69,16 @@ from pydantic import BaseModel, Field
 from ._blob_history import build_blob_provider_from_environment
 from ._file_history import ScopedFileHistoryProvider
 from ._function_tool import FunctionTool, tool
+from ._harness import (
+    AppHarness,
+    ExecutionRole,
+    HarnessRequest,
+    UnsupportedCapabilityError,
+    get_harness,
+    prepare_tools,
+    reject_unsupported,
+    validate_configuration,
+)
 from ._history_identity import validate_agent_slug
 from ._logger import logger
 from ._observability import (
@@ -140,7 +151,7 @@ DEFAULT_MODEL: str | None = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL") or
 # endpoint layer via ``_session_id`` so the two never drift.
 _SESSION_ID_PATTERN = SESSION_ID_PATTERN
 
-type _AgentExecutionRole = Literal["primary", "delegate", "workflow_subagent"]
+type _AgentExecutionRole = ExecutionRole
 
 _USAGE_FIELD_NAMES: dict[str, str] = {
     "input_token_count": "input_tokens",
@@ -556,6 +567,9 @@ async def run_leaf_agent_task(
     execution_role: Literal["delegate", "workflow_subagent"],
 ) -> str:
     """Run one fresh stateless specialist and return its response text."""
+    harness = capabilities._harness or get_harness()
+    if harness.name == "copilot":
+        reject_unsupported(**{execution_role: True})
     specialist_agent, inference_target = _build_delegated_agent(resolved, capabilities)
     usage_recorder = _AgentUsageRecorder(
         agent_name=resolved.slug,
@@ -966,6 +980,8 @@ async def run_agent(
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
+    _harness: AppHarness | None = None,
+    _session_is_new: bool = False,
 ) -> AgentResult:
     """Execute a single prompt against the configured agent backend.
 
@@ -1035,6 +1051,50 @@ async def run_agent(
     # session-lock wait itself by this same absolute deadline.
     loop = asyncio.get_running_loop()
     coordinator_deadline = loop.time() + timeout
+
+    harness = _harness or get_harness()
+    if harness.name == "copilot":
+        configuration = agent_configuration or AgentConfiguration()
+        validate_configuration(configuration)
+        resolved_mcp = (
+            list(discover_mcp_servers(harness.app_root).servers.values())
+            if mcp_tools is None
+            else mcp_tools
+        )
+        reject_unsupported(
+            mcp=bool(resolved_mcp),
+            skills=bool(skill_paths),
+            execute_python=bool(sandbox_tools),
+            web_request=bool(web_request_tools),
+            subagents=bool(subagents),
+            workflows=workflow_enabled or workflow_policy is not None,
+        )
+        resolved_model = model or harness.default_model
+        if not resolved_model:
+            raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
+        resolved_tools = prepare_tools(
+            list(discover_user_tools(harness.app_root).tools) if tools is None else list(tools)
+        )
+        validated_id = _validate_session_id(session_id)
+        effective_instructions = instructions.strip() if instructions and instructions.strip() else None
+        if system_addendum:
+            effective_instructions = (effective_instructions or "") + system_addendum
+        from ._copilot import run
+
+        return await run(
+            harness,
+            HarnessRequest(
+                prompt=prompt,
+                instructions=effective_instructions,
+                agent_slug=history_agent_slug,
+                session_id=validated_id or uuid.uuid4().hex,
+                new_session=validated_id is None or _session_is_new,
+                model=resolved_model,
+                tools=resolved_tools,
+                max_output_tokens=configuration.max_output_tokens,
+                deadline=coordinator_deadline,
+            ),
+        )
 
     agent, session, resolved_id, delegate_error_tracker, inference_target = (
         await _build_agent_session(
@@ -1170,6 +1230,7 @@ async def run_agent_stream(
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
+    _harness: AppHarness | None = None,
 ) -> AsyncIterator[str]:
     """SSE-formatted async generator yielding ``data: {...}\\n\\n`` lines.
 
@@ -1210,6 +1271,14 @@ async def run_agent_stream(
     * ``done``         — stream completed normally
     * ``error``        — terminal error message
     """
+    try:
+        harness = _harness or get_harness()
+        if harness.name == "copilot":
+            reject_unsupported(streaming=True)
+    except (ValueError, RuntimeError) as exc:
+        logger.error("Agent harness selection failed: %s", exc)
+        yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+        return
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
     history_agent_slug = validate_agent_slug(
         _resolve_history_agent_slug(agent_name, workflow_agent_slug)

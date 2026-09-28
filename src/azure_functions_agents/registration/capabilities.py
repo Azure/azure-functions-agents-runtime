@@ -5,13 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .._function_tool import WorkflowTool
 from .._logger import logger
 from .._slug import delegate_tool_name
 from ..config import ResolvedAgent
 from ..discovery.mcp import MCPTool
+
+if TYPE_CHECKING:
+    from .._harness import AppHarness
 
 # Hardcoded (not imported from system_tools.sandbox) to avoid pulling in
 # that module's heavy optional deps (aiohttp, azure.identity) — matches the
@@ -29,6 +32,7 @@ class AgentCapabilities:
     filtered_mcp_tools: list[MCPTool] | None = None
     enabled_skill_paths: list[Path] = field(default_factory=list)
     web_request_tools: list[Any] | None = None
+    _harness: AppHarness | None = field(default=None, repr=False, compare=False)
 
 
 def with_runtime_skill_paths(
