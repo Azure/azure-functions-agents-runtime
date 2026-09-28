@@ -99,18 +99,57 @@ Proposed normalization trims surrounding whitespace, but preserves whether the
 variable is present: an empty or whitespace-only value is invalid, not unset.
 The existing `runtime_env_value()` helper collapses that distinction and cannot
 be reused without preserving presence.
-Resolve the value once per app and carry the immutable selection through
-registration, direct execution, delegation, and workflow execution. Standalone
-`run_agent`, `run_agent_stream`, and leaf-runner entry points use the same
-app-scoped resolution, not independent module-level environment reads. Changing
-the environment does not switch an already initialized app.
+
+**Selection boundary and propagation.** The public app-creation boundary,
+`create_function_app()`, resolves the flag once before harness-specific bootstrap.
+It creates a small immutable internal app execution context containing the
+resolved app-root identity and the selected execution adapter. This is a bound
+execution interface, not a public harness registry; selecting it does not create
+a native client or start inference.
+
+Registration accepts that context explicitly and captures it in HTTP, streaming,
+MCP, non-HTTP trigger, and history-handler closures. `register_workflow_runtime()`
+passes the same context to `register_workflows()`, whose Activity closures retain
+it. The runner entry points `run_agent()`, `run_agent_stream()`, and
+`run_leaf_agent_task()` accept the context as a keyword argument and dispatch
+through its already-selected adapter. Delegate-tool closures pass their parent's
+context into leaf execution. None of these paths independently selects a harness
+or rereads the flag.
+
+Each constructed app gets its own context, including two apps constructed from
+the same root; there is no process-global "last registered app wins" selection.
+Standalone runner calls may supply a context explicitly. If omitted, the shared
+resolver creates a default standalone context on first use for that resolved app
+root and reuses it; constructing a FunctionApp does not replace that default.
+Changing the environment does not mutate any existing context. Callers needing a
+new standalone app lifetime create a fresh context through the same resolver.
 
 With the flag off, there is no Copilot native-process launch, runtime download,
 authentication, or telemetry bootstrap. Existing MAF client/tool extensions and
 MAF observability remain intact. With it on, missing SDK assets, unsupported
 configuration, or runtime failures are errors, never reasons to retry under MAF.
-All roles in an app use the selected harness; a Copilot coordinator cannot use a
-MAF specialist or Workflow Sub Agent.
+All roles served by one initialized app instance use its selected harness; a
+delegate cannot switch away from its parent's context. This is an app-instance
+guarantee, not a promise to pin a persisted workflow across deployments.
+
+**Durable lifecycle.** Follow the app's existing Durable Functions deployment,
+replay, retry, and version-routing behavior. A worker restart does not itself
+terminate persisted workflows: completed Activity results can be replayed, and
+pending or redelivered Activities can execute on a replacement worker. An Activity
+uses the execution context captured by the app instance serving it. If deployment
+routing sends later work to an app initialized with a different flag value, that
+work uses the new selection; we do not introduce a harness-mismatch rejection.
+Any coexistence or draining of old and new workers remains platform/deployment
+behavior, not something this feature promises to control.
+
+Do not persist the execution context or a new harness selector in orchestration
+history, read the flag during orchestrator replay, or add a custom workflow
+pinning, cancellation, migration, or restart controller. Preserve existing
+Activity contracts and at-least-once semantics. Breaking deployment changes
+still need the application's normal Durable compatibility/versioning practices;
+native-versus-MAF conversation-history incompatibility remains explicit under
+section 4.6. See Durable's [reliability model](https://learn.microsoft.com/en-us/azure/durable-task/common/durable-task-orchestrations#reliability)
+and [deployment/versioning guidance](https://learn.microsoft.com/en-us/azure/durable-task/durable-functions/durable-functions-versioning).
 
 An isolated preview may use only capabilities actually supported by its build.
 Validate effective configuration, including inherited and default-on features,
@@ -360,6 +399,8 @@ scope approval is not full architecture sign-off.
 | 6 | Native transport/lifetime | External stdio / embedded FFI | Propose lazy process-long stdio client per worker, consistent with assessment evidence; version/hosting contract still open | Agent proposal | 2026-09-28 |
 | 7 | Storage and compatibility details | Implicit reset/best effort / explicit failure contracts | Propose sections 4.5-4.6; concrete SDK/storage mappings remain open in section 4.8 | Agent proposal | 2026-09-28 |
 | 8 | Architecture-review clarifications | Assume SDK parity / retain explicit contracts | Clarify provider-side storage, approval behavior, selector presence, history projection, direct/leaf storage lifetimes, and packaging; retain unresolved mappings in section 4.8 | Agent review/proposal | 2026-09-28 |
+| 9 | App execution selection | Repeated environment reads / one bound app execution interface | Select once at the app boundary and propagate the same immutable context through handlers, delegates, and registered Activities; use the same resolution boundary for standalone calls | Human | 2026-09-28 |
+| 10 | Workflows across app restarts/deployments | Custom harness pinning/lifecycle rules / existing Durable behavior | Follow Durable replay, retry, worker lifetime, and configured deployment routing; each executing app instance supplies its own selection, with no new persisted harness pin or mismatch rejection | Human | 2026-09-28 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -371,6 +412,7 @@ where mocks cannot establish process, transport, authentication, or durability.
 | Area | Acceptance evidence |
 | --- | --- |
 | Selection/isolation | Exercise unset, `false`, `0`, `true`, `1`, mixed-case/padded text, empty/whitespace-only/invalid values, multiple app contexts, and standalone entry points. Off starts no Copilot process/download/auth/telemetry; on is uniform across all roles and never falls back. |
+| Context propagation/lifetime | Construct two apps with different flag snapshots, including the same root; delayed handlers, delegates, and Activity calls retain their own context after environment changes. Cover explicit/default standalone contexts. On worker replacement, completed Activity results replay normally and newly executed/redelivered Activities use the serving app's context, without adding harness state to Durable history or changing its scheduling/version-routing rules. |
 | Unsupported features | Effective inherited/default-on capabilities and unmapped configuration/extensions fail before provider inference or tool effects. Isolated previews of supported capabilities execute real SDK turns. |
 | Authoring/API | Existing precedence/null scenarios, tool `None`/empty semantics, routes/auth, response envelopes, structured-output validation/errors, history projection/degradation/errors/bounds, and SSE ordering/cancellation remain compatible. No native or specialist events leak. |
 | Models/extensions | Verify supported providers/Entra refresh, model metadata, disabled provider conversation storage, deadlines, output limits, and explicit custom-manager/tool compatibility, including a manager replaced after composition. MAF hooks remain intact off. |
@@ -405,6 +447,8 @@ this document does not introduce an unimplemented schema or rewrite runtime docs
   contract clarifications incorporated (decision 8). Section 4.8 remains open;
   section 6 defines behavioral evidence, not completed qualification.
 - **Human sign-off:** Feature scope and preview behavior were supplied as agreed
-  requirements. Full architecture approval has not been recorded.
+  requirements; the app-bound selection and platform-owned Durable lifecycle
+  decisions were approved on 2026-09-28 (decisions 9-10). Full architecture
+  approval has not been recorded.
 - **Finalization:** Resolve the open architecture decisions and record explicit
   human sign-off before marking this feature specification Finalized.
