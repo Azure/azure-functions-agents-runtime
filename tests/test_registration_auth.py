@@ -17,6 +17,7 @@ import pytest
 from azure_functions_agents.config.schema import EndpointAuthConfig, EntraAuthConfig
 from azure_functions_agents.registration._auth import (
     authorize_entra_request,
+    resolve_authorized_request_scope,
     resolve_endpoint_auth_level,
 )
 
@@ -69,6 +70,16 @@ def test_resolve_endpoint_auth_level(mode: str, expected: func.AuthLevel) -> Non
 def test_non_entra_modes_are_not_enforced_in_app(mode: str) -> None:
     auth = EndpointAuthConfig(mode=mode)  # type: ignore[arg-type]
     assert authorize_entra_request(_header_getter({}), auth) is None
+
+
+@pytest.mark.parametrize("mode", ["function", "admin", "anonymous"])
+def test_non_entra_modes_share_one_request_scope(mode: str) -> None:
+    auth = EndpointAuthConfig(mode=mode)  # type: ignore[arg-type]
+
+    error, scope = resolve_authorized_request_scope(_header_getter({}), auth)
+
+    assert error is None
+    assert scope == "functions-app"
 
 
 # --- entra: fail closed without a validated principal -----------------------
@@ -126,6 +137,38 @@ def test_entra_easy_auth_principal_authorized() -> None:
     auth = EndpointAuthConfig(mode="entra")
     headers = {"X-MS-CLIENT-PRINCIPAL": _principal_header([{"typ": "tid", "val": "t-1"}])}
     assert authorize_entra_request(_header_getter(headers), auth) is None
+
+
+def test_entra_request_scope_uses_validated_tenant_and_caller_identity() -> None:
+    auth = EndpointAuthConfig(mode="entra")
+    headers = {
+        "X-MS-CLIENT-PRINCIPAL": _principal_header(
+            [
+                {"typ": "tid", "val": "tenant-1"},
+                {"typ": "oid", "val": "caller-1"},
+            ]
+        )
+    }
+
+    error, scope = resolve_authorized_request_scope(_header_getter(headers), auth)
+
+    assert error is None
+    assert scope == "entra:tenant-1:caller-1"
+
+
+def test_entra_request_scope_rejects_missing_stable_identity_claims() -> None:
+    auth = EndpointAuthConfig(mode="entra")
+    headers = {
+        "X-MS-CLIENT-PRINCIPAL": _principal_header(
+            [{"typ": "tid", "val": "tenant-1"}]
+        )
+    }
+
+    error, scope = resolve_authorized_request_scope(_header_getter(headers), auth)
+
+    assert error is not None
+    assert error.status_code == 401
+    assert scope is None
 
 
 def test_entra_easy_auth_invalid_principal_header_is_unauthorized() -> None:
@@ -208,4 +251,3 @@ def test_entra_config_tenant_is_enforced_regardless_of_env(
     error = authorize_entra_request(_header_getter(bad), auth)
     assert error is not None
     assert error.status_code == 403
-

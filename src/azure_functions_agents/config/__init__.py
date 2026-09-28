@@ -27,6 +27,7 @@ from azure_functions_agents.config.paths import (
     set_app_root,
 )
 from azure_functions_agents.config.schema import (
+    A2AConfig,
     AgentSpec,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
@@ -52,6 +53,7 @@ __all__ = [
     "DEFAULT_TIMEOUT",
     "_INLINE_DOLLAR_PATTERN",
     "_INLINE_PERCENT_PATTERN",
+    "A2AConfig",
     "AgentSpec",
     "BuiltinEndpointsConfig",
     "DynamicSessionsCodeInterpreterConfig",

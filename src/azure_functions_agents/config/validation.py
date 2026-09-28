@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from azure_functions_agents._logger import logger as _logger
 
@@ -22,6 +24,63 @@ _UNSUPPORTED_TRIGGER_TYPES: dict[str, str] = {
     "schedule": "Use `timer_trigger` instead of the Azure Functions `schedule` decorator alias.",
     "warm_up_trigger": "Warm-up triggers are host lifecycle hooks and are not supported as agent triggers.",
 }
+
+
+def _is_loopback_hostname(hostname: str) -> bool:
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_a2a_url(resolved: ResolvedAgent) -> None:
+    a2a = resolved.builtin_endpoints.a2a
+    if a2a is None:
+        return
+
+    source_file = resolved.source_file or "<unknown>"
+    parsed = urlsplit(a2a.url)
+    hostname = parsed.hostname
+    if (
+        hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            _format_error(
+                source_file,
+                "builtin_endpoints.a2a.url",
+                "Must be an absolute URL without credentials, query parameters, or a fragment",
+                "#a2a-simple-server",
+            )
+        )
+
+    if parsed.scheme != "https" and not (
+        parsed.scheme == "http" and _is_loopback_hostname(hostname)
+    ):
+        raise ValueError(
+            _format_error(
+                source_file,
+                "builtin_endpoints.a2a.url",
+                "Must use HTTPS; HTTP is allowed only for loopback local development",
+                "#a2a-simple-server",
+            )
+        )
+
+    expected_suffix = f"/agents/{resolved.slug}/a2a"
+    if not parsed.path.rstrip("/").endswith(expected_suffix):
+        raise ValueError(
+            _format_error(
+                source_file,
+                "builtin_endpoints.a2a.url",
+                f"Path must end with `{expected_suffix}`",
+                "#a2a-simple-server",
+            )
+        )
 
 
 def _format_error(
@@ -54,7 +113,10 @@ def validate_resolved_agent(
 
     builtin_endpoints = resolved.builtin_endpoints
     has_builtin_endpoints = bool(
-        builtin_endpoints.debug_chat_ui or builtin_endpoints.chat_api or builtin_endpoints.mcp
+        builtin_endpoints.debug_chat_ui
+        or builtin_endpoints.chat_api
+        or builtin_endpoints.mcp
+        or builtin_endpoints.a2a is not None
     )
     if (
         resolved.trigger is None
@@ -69,6 +131,8 @@ def validate_resolved_agent(
                 "#trigger",
             )
         )
+
+    _validate_a2a_url(resolved)
 
     if resolved.trigger is not None:
         trigger_type = str(resolved.trigger.type or "").strip()

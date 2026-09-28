@@ -11,6 +11,12 @@ import sys
 from pathlib import Path
 
 
+def _venv_python(venv: Path) -> Path:
+    if sys.platform == "win32":
+        return venv / "Scripts" / "python.exe"
+    return venv / "bin" / "python"
+
+
 def _link_app_dependencies(repo_root: Path, shared_packages: Path) -> None:
     for search_root in (repo_root / "tests" / "endtoend" / "apps", repo_root / "samples"):
         for host_json in search_root.rglob("host.json"):
@@ -33,11 +39,28 @@ def main() -> None:
             "pip",
             "install",
             f"--target={shared_packages}",
-            str(repo_root),
+            f"{repo_root}[a2a]",
         ],
         check=True,
     )
     _link_app_dependencies(repo_root, shared_packages)
+
+    a2a_client_venv = repo_root / ".e2e-a2a-client"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--clear", str(a2a_client_venv)],
+        check=True,
+    )
+    subprocess.run(
+        [
+            str(_venv_python(a2a_client_venv)),
+            "-m",
+            "pip",
+            "install",
+            "-r",
+            str(repo_root / "samples" / "a2a-incident-triage" / "requirements-client.txt"),
+        ],
+        check=True,
+    )
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from azure_functions_agents.config.merge import (
     compose,
 )
 from azure_functions_agents.config.schema import (
+    A2AConfig,
     AgentConfiguration,
     AgentFrameworkCompactionConfig,
     AgentFrameworkConfiguration,
@@ -85,6 +86,32 @@ def test_resolve_builtin_endpoints_shorthand_is_not_main_special_cased() -> None
     assert _resolve_builtin_endpoints(
         AgentSpec(name="A", description="B", builtin_endpoints=True, is_main=True), GlobalConfig()
     ) == BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=True)
+
+
+def test_resolve_builtin_endpoints_shorthand_does_not_enable_a2a() -> None:
+    resolved = _resolve_builtin_endpoints(
+        AgentSpec(name="A", description="B", builtin_endpoints=True),
+        GlobalConfig(),
+    )
+
+    assert resolved.a2a is None
+
+
+def test_resolve_builtin_endpoints_preserves_explicit_a2a_and_inherits_auth() -> None:
+    a2a = A2AConfig(
+        url="https://agents.example.test/api/agents/triage/a2a"
+    )
+    resolved = _resolve_builtin_endpoints(
+        AgentSpec(
+            name="A",
+            description="B",
+            builtin_endpoints=BuiltinEndpointsConfig(a2a=a2a),
+        ),
+        GlobalConfig(http_auth=EndpointAuthConfig(mode="admin")),
+    )
+
+    assert resolved.a2a == a2a
+    assert resolved.http_auth.mode == "admin"
 
 
 def test_app_wide_auth_is_inherited_by_agents() -> None:
