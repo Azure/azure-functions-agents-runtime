@@ -14,7 +14,11 @@ import pytest
 
 from azure_functions_agents import _harness, runner
 from azure_functions_agents._function_tool import FunctionTool
-from azure_functions_agents._harness import CopilotPreviewError, UnsupportedCapabilityError
+from azure_functions_agents._harness import (
+    CopilotPreviewError,
+    HarnessKind,
+    UnsupportedCapabilityError,
+)
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.config import paths
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
@@ -80,7 +84,7 @@ def test_separate_app_construction_captures_a_fresh_binding(preview, monkeypatch
     assert standalone.name == "copilot"
 
 
-def test_missing_or_incompatible_sdk_is_explicit(preview, monkeypatch):
+def test_missing_sdk_is_explicit_without_forcing_a_second_version_check(preview, monkeypatch):
     def missing(_name):
         raise _harness.PackageNotFoundError
 
@@ -88,8 +92,7 @@ def test_missing_or_incompatible_sdk_is_explicit(preview, monkeypatch):
     with pytest.raises(CopilotPreviewError, match=r"\[copilot\]"):
         _harness.get_harness()
     monkeypatch.setattr(_harness, "version", lambda _: "0.0.0")
-    with pytest.raises(CopilotPreviewError, match=r"1\.0\.14"):
-        _harness.get_harness()
+    assert _harness.get_harness().name is HarnessKind.COPILOT
 
 
 @pytest.mark.parametrize(
@@ -178,6 +181,30 @@ def test_maf_only_configuration_is_not_silently_discarded(preview):
         )
 
 
+def test_unsupported_output_limit_fails_before_native_execution(preview):
+    with pytest.raises(UnsupportedCapabilityError, match="max_output_tokens"):
+        _harness.validate_configuration(AgentConfiguration(max_output_tokens=256))
+
+
+def test_standalone_output_limit_fails_before_native_execution(preview, monkeypatch):
+    from azure_functions_agents import _copilot
+
+    invoke = AsyncMock()
+    monkeypatch.setattr(_copilot, "run", invoke)
+
+    with pytest.raises(UnsupportedCapabilityError, match="max_output_tokens"):
+        asyncio.run(
+            runner.run_agent(
+                "no inference",
+                tools=[],
+                mcp_tools=[],
+                agent_configuration=AgentConfiguration(max_output_tokens=256),
+            )
+        )
+
+    invoke.assert_not_called()
+
+
 @pytest.mark.parametrize("policy", [
     {"max_invocations": 1},
     {"max_invocation_exceptions": 1},
@@ -236,13 +263,24 @@ def test_registered_app_captures_selection_and_newness(preview, monkeypatch):
     from azure_functions_agents import _copilot
 
     requests = []
+    validations = []
+    validate_agent = _harness.validate_agent
+
+    def validate_once(harness, resolved, capabilities):
+        validations.append(resolved.slug)
+        return validate_agent(harness, resolved, capabilities)
 
     async def invoke(harness, request):
         requests.append((harness, request))
         return runner.AgentResult(request.session_id, "reply")
 
+    monkeypatch.setattr(_harness, "validate_agent", validate_once)
+    monkeypatch.setattr(
+        sys.modules[create_function_app.__module__], "validate_agent", validate_once
+    )
     monkeypatch.setattr(_copilot, "run", invoke)
     app = create_function_app(SAMPLE)
+    assert validations == ["main"]
     functions = {function.get_function_name(): function.get_user_function() for function in app.get_functions()}
     chat = functions["agent_main_builtin_chat"]
     monkeypatch.setenv(_harness.FLAG, "false")
@@ -253,7 +291,7 @@ def test_registered_app_captures_selection_and_newness(preview, monkeypatch):
         first = await chat(SimpleNamespace(headers={}, json=AsyncMock(return_value={"prompt": "first"})))
         public_id = first.headers["x-ms-session-id"]
         second = await chat(SimpleNamespace(
-            headers={"x-ms-session-id": public_id},
+            headers={"X-Ms-SeSsIoN-Id": f" {public_id} "},
             json=AsyncMock(return_value={"prompt": "second"}),
         ))
         assert second.headers["x-ms-session-id"] == public_id
@@ -268,6 +306,7 @@ def test_registered_app_captures_selection_and_newness(preview, monkeypatch):
             ))
             assert response.status_code == 501
         assert len(requests) == 2
+        assert validations == ["main"]
 
     asyncio.run(call())
 

@@ -13,7 +13,7 @@ import azure.functions as func
 import jsonschema
 from azurefunctions.extensions.http.fastapi import Request, Response
 
-from .._harness import get_harness, validate_agent
+from .._harness import bind_harness
 from .._logger import logger
 from .._observability import (
     ATTR_FAULT_DOMAIN,
@@ -239,8 +239,7 @@ def make_agent_handler(
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Callable[..., Any]:
     """Create an async handler function for a non-HTTP triggered agent."""
-    harness = capabilities._harness or get_harness()
-    validate_agent(harness, resolved, capabilities)
+    harness = bind_harness(resolved, capabilities)
 
     # NOTE: deliberately omit a type annotation on `trigger_data`. The Azure
     # Functions Python worker validates annotations against the binding's
@@ -356,8 +355,7 @@ def make_http_agent_handler(
     Functions host key check via the route's ``AuthLevel``.
     """
     auth_policy = auth or EndpointAuthConfig()
-    harness = capabilities._harness or get_harness()
-    validate_agent(harness, resolved, capabilities)
+    harness = bind_harness(resolved, capabilities)
 
     async def _handle(req: Request, durable_client: Any | None) -> Response:
         auth_error = authorize_entra_request(req.headers.get, auth_policy)

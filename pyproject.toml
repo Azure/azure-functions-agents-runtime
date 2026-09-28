@@ -42,8 +42,8 @@ monitor = [
     "azure-monitor-opentelemetry==1.8.8",
 ]
 dev = [
-    # SDK is lightweight; tests never download/start native assets without explicit opt-in.
-    "github-copilot-sdk==1.0.14",
+    # Reuse the optional SDK version; dev tests never start the native runtime by default.
+    "azurefunctions-agents-runtime[copilot]",
     "ruff>=0.15.22,<1",
     "mypy>=2.1.0,<3",
     "pydantic>=2.13.4,<3",

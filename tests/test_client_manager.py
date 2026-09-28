@@ -259,3 +259,27 @@ async def test_foundry_stateless_request_does_not_include_encrypted_content() ->
     request_options = await client._prepare_options([], {})
 
     assert "reasoning.encrypted_content" not in request_options.get("include", [])
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_maf_manager_even_if_copilot_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    import azure_functions_agents._copilot as copilot
+    import azure_functions_agents.client_manager as managers
+
+    manager = MAFClientManager()
+    close = AsyncMock()
+    monkeypatch.setattr(manager, "close", close)
+    monkeypatch.setattr(managers, "_INSTANCE", manager)
+    monkeypatch.setattr(
+        copilot, "shutdown", AsyncMock(side_effect=RuntimeError("native cleanup failed"))
+    )
+
+    with pytest.raises(RuntimeError, match="native cleanup failed"):
+        await managers.shutdown_client_manager()
+
+    close.assert_awaited_once()
+    assert managers._INSTANCE is None

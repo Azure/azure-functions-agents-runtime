@@ -8,6 +8,7 @@ import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -22,11 +23,19 @@ if TYPE_CHECKING:
     from .registration.capabilities import AgentCapabilities
 
 FLAG = "AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT"
-SDK_VERSION = "1.0.14"
-RUNTIME_VERSION = "1.0.85"
-PROTOCOL_VERSION = 3
+SDK_DISTRIBUTION = "github-copilot-sdk"
 
 type ExecutionRole = Literal["primary", "delegate", "workflow_subagent"]
+
+
+class HarnessKind(StrEnum):
+    MAF = "maf"
+    COPILOT = "copilot"
+
+
+class ProviderKind(StrEnum):
+    OPENAI = "openai"
+    FOUNDRY = "foundry"
 
 
 class CopilotPreviewError(RuntimeError):
@@ -39,11 +48,11 @@ class UnsupportedCapabilityError(ValueError):
 
 @dataclass(frozen=True)
 class AppHarness:
-    name: Literal["maf", "copilot"]
+    name: HarnessKind
     app_root: Path
     storage_root: Path | None = None
     default_model: str | None = None
-    provider: Literal["openai", "foundry"] | None = None
+    provider: ProviderKind | None = None
     endpoint: str | None = field(default=None, repr=False)
 
 
@@ -79,14 +88,12 @@ def _flag_enabled(value: str | None) -> bool:
 
 def check_sdk_dependency() -> None:
     try:
-        installed = version("github-copilot-sdk")
+        version(SDK_DISTRIBUTION)
     except PackageNotFoundError:
         raise CopilotPreviewError(
             "Copilot preview requires azurefunctions-agents-runtime[copilot]. "
-            f"Install github-copilot-sdk=={SDK_VERSION}."
+            f"Install {SDK_DISTRIBUTION} through the optional extra."
         ) from None
-    if installed != SDK_VERSION:
-        raise CopilotPreviewError(f"Copilot preview requires github-copilot-sdk=={SDK_VERSION}.")
 
 
 def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHarness:
@@ -97,19 +104,21 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
         if existing is not None and not new_app:
             return existing
         if not _flag_enabled(os.environ.get(FLAG)):
-            selected = AppHarness("maf", root)
+            selected = AppHarness(HarnessKind.MAF, root)
         else:
             check_sdk_dependency()
-            provider = os.environ.get("AZURE_FUNCTIONS_AGENTS_PROVIDER", "").strip().lower()
-            if provider not in {"openai", "foundry"}:
+            raw_provider = os.environ.get("AZURE_FUNCTIONS_AGENTS_PROVIDER", "").strip().lower()
+            try:
+                provider = ProviderKind(raw_provider)
+            except ValueError:
                 raise UnsupportedCapabilityError(
                     "Copilot preview supports AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry "
                     "(project Responses + Entra) or openai (BYOK Chat Completions), "
                     "with external native stdio only."
-                )
+                ) from None
             endpoint = None
             default_model = os.environ.get("AZURE_FUNCTIONS_AGENTS_MODEL") or None
-            if provider == "foundry":
+            if provider is ProviderKind.FOUNDRY:
                 endpoint = os.environ.get("FOUNDRY_PROJECT_ENDPOINT", "").strip().rstrip("/")
                 try:
                     url = urlsplit(endpoint)
@@ -150,11 +159,11 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
             app_key = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:32]
             storage_root = Path(resolve_config_dir()).resolve() / "copilot-preview" / app_key
             selected = AppHarness(
-                "copilot",
+                HarnessKind.COPILOT,
                 root,
                 storage_root,
                 default_model,
-                "foundry" if provider == "foundry" else "openai",
+                provider,
                 endpoint,
             )
         if not new_app:
@@ -176,7 +185,10 @@ def reject_unsupported(**capabilities: bool) -> None:
 
 
 def validate_configuration(configuration: AgentConfiguration) -> None:
-    reject_unsupported(agent_framework=configuration.agent_framework is not None)
+    reject_unsupported(
+        agent_framework=configuration.agent_framework is not None,
+        max_output_tokens=configuration.max_output_tokens is not None,
+    )
 
 
 def prepare_tools(tools: list[FunctionTool | Callable[..., Any]]) -> list[FunctionTool]:
@@ -212,7 +224,7 @@ def validate_agent(
     harness: AppHarness, resolved: ResolvedAgent, capabilities: AgentCapabilities
 ) -> None:
     """Fail before FunctionApp mutation, native startup, or provider/tool execution."""
-    if harness.name == "maf":
+    if harness.name is HarnessKind.MAF:
         return
     validate_configuration(resolved.agent_configuration)
     reject_unsupported(
@@ -229,3 +241,13 @@ def validate_agent(
     if not (resolved.model or harness.default_model):
         raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
     prepare_tools(list(capabilities.filtered_user_tools or []))
+
+
+def bind_harness(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> AppHarness:
+    """Validate a direct registration once; reuse the binding for every request."""
+    if capabilities._harness is not None:
+        return capabilities._harness
+    harness = get_harness()
+    validate_agent(harness, resolved, capabilities)
+    capabilities._harness = harness
+    return harness

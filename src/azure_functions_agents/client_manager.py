@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import sys
 from abc import ABC, abstractmethod
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
 
@@ -279,12 +280,11 @@ def set_client_manager(manager: ClientManager) -> None:
 async def shutdown_client_manager() -> None:
     """Close the active manager (if any). Idempotent."""
     global _INSTANCE
-    if "azure_functions_agents._copilot" in sys.modules:
-        from ._copilot import shutdown
+    manager, _INSTANCE = _INSTANCE, None
+    async with AsyncExitStack() as cleanup:
+        if manager is not None:
+            cleanup.push_async_callback(manager.close)
+        if "azure_functions_agents._copilot" in sys.modules:
+            from ._copilot import shutdown
 
-        await shutdown()
-    if _INSTANCE is not None:
-        try:
-            await _INSTANCE.close()
-        finally:
-            _INSTANCE = None
+            cleanup.push_async_callback(shutdown)

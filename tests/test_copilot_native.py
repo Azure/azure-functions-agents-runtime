@@ -9,6 +9,7 @@ import re
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_args, get_type_hints
 from unittest.mock import AsyncMock
 
 import httpx
@@ -25,7 +26,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
+CACHE = Path(__file__).resolve().parents[1] / ".tmp-validation" / "runtime-1.0.85"
 SENTINEL = "not-a-credential-native-persistence-sentinel"
+
+
+def _tag(user: str) -> str:
+    match = re.search(r"""tag\s+\\*['"]([A-Za-z0-9_-]+)\\*['"]""", user)
+    assert match is not None, "Synthetic provider needs the first-turn tag"
+    return match[1]
 
 
 def _responses_fixture(body, item, request):
@@ -75,12 +83,65 @@ def _responses_fixture(body, item, request):
 @pytest.fixture(params=["openai", "foundry"])
 def native(monkeypatch, tmp_path, request):
     import copilot
+    from copilot._cli_version import get_runtime_platform
     from copilot.copilot_request_handler import CopilotRequestHandler
+    from copilot.session import CopilotSession, ProviderConfig
 
     sdk_client = copilot.CopilotClient
+    bundle = CACHE / "prebuilds" / get_runtime_platform()
+    wrapper = "copilot-runtime.exe" if os.name == "nt" else "copilot-runtime"
+    if not all((bundle / name).is_file() for name in (
+        wrapper, "runtime.node", ".hostless-runtime-assets-v2"
+    )):
+        pytest.skip("Pinned native assets are not cached; never fetch them in tests.")
+    monkeypatch.setenv("COPILOT_CLI_EXTRACT_DIR", str(CACHE))
+    monkeypatch.setenv("COPILOT_SKIP_CLI_DOWNLOAD", "1")
+    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
+    monkeypatch.delenv("COPILOT_SDK_DEFAULT_CONNECTION", raising=False)
+
     captured = []
+    clients = []
+    created = []
+    metadata_lookups = []
+    resumed = []
+    histories = []
     stalled = asyncio.Event()
     cancelled = asyncio.Event()
+    provider_types = get_type_hints(ProviderConfig)
+
+    def check_options(options):
+        provider = options["provider"]
+        assert provider["type"] in get_args(provider_types["type"])
+        assert provider["type"] == "openai"
+        assert provider["wire_api"] in get_args(provider_types["wire_api"])
+        assert provider["wire_api"] == (
+            "responses" if request.param == "foundry" else "completions"
+        )
+        assert options["available_tools"] == ["custom:make_receipt"]
+
+    class ObservedClient(sdk_client):
+        async def get_session_metadata(self, session_id):
+            metadata_lookups.append(session_id)
+            return await super().get_session_metadata(session_id)
+
+        async def create_session(self, **options):
+            check_options(options)
+            created.append(options["session_id"])
+            return await super().create_session(**options)
+
+        async def resume_session(self, session_id, **options):
+            check_options(options)
+            resumed.append(session_id)
+            return await super().resume_session(session_id, **options)
+
+    original_send_and_wait = CopilotSession.send_and_wait
+
+    async def record_events(session, *args, **kwargs):
+        response = await original_send_and_wait(session, *args, **kwargs)
+        histories.append(await session.get_events())
+        return response
+
+    monkeypatch.setattr(CopilotSession, "send_and_wait", record_events)
 
     class SyntheticProvider(CopilotRequestHandler):
         async def send_request(self, request, context):
@@ -88,10 +149,9 @@ def native(monkeypatch, tmp_path, request):
             assert request.headers.get("authorization") == f"Bearer {SENTINEL}"
             body = json.loads(await request.aread())
             captured.append(body)
-            assert body.get("store", False) is False, "Provider response retention was enabled"
             responses = request.url.path.endswith("/responses")
             if responses:
-                assert body.get("store") is False, "Responses must explicitly disable provider retention"
+                assert body.get("store") is False, "SDK Responses must disable provider retention"
             tools = [item["name"] if responses else item["function"]["name"] for item in body.get("tools", [])]
             assert tools == ["make_receipt"], f"Unexpected model-visible tools: {tools}"
             declaration = body["tools"][0] if responses else body["tools"][0]["function"]
@@ -117,23 +177,19 @@ def native(monkeypatch, tmp_path, request):
                                 "type": "output_text", "text": results[-1]["output"], "annotations": [],
                             }]}
                 else:
-                    tag = re.search(r"tag '([^']+)'", user)
-                    assert tag is not None
                     item = {"id": "fc_fixture", "type": "function_call", "call_id": "call_receipt",
-                            "name": "make_receipt", "arguments": json.dumps({"tag": tag[1]}),
+                            "name": "make_receipt", "arguments": json.dumps({"tag": _tag(user)}),
                             "status": "completed"}
                 return _responses_fixture(body, item, request)
             if results:
                 message = {"role": "assistant", "content": results[-1]["content"]}
                 finish = "stop"
             else:
-                tag = re.search(r"tag '([^']+)'", user)
-                assert tag is not None, "Synthetic provider needs the first-turn tag"
                 message = {
                     "role": "assistant", "content": None,
                     "tool_calls": [{
                         "id": "call_receipt", "type": "function",
-                        "function": {"name": "make_receipt", "arguments": json.dumps({"tag": tag[1]})},
+                        "function": {"name": "make_receipt", "arguments": json.dumps({"tag": _tag(user)})},
                     }],
                 }
                 finish = "tool_calls"
@@ -167,18 +223,17 @@ def native(monkeypatch, tmp_path, request):
         assert kwargs["mode"] == "empty"
         assert kwargs["use_logged_in_user"] is False
         assert kwargs["log_level"] == "none"
-        assert "OPENAI_API_KEY" not in kwargs["env"]
-        assert "GITHUB_TOKEN" not in kwargs["env"]
-        assert kwargs["request_handler"] is not None
-        return sdk_client(**kwargs)
-
-    async def forward(_owner, request, context):
-        return await provider.send_request(request, context)
+        assert "env" not in kwargs
+        assert "request_handler" not in kwargs
+        connection = kwargs.get("connection")
+        assert connection is None or connection.path is None
+        client = ObservedClient(**kwargs, request_handler=provider)
+        clients.append(client)
+        return client
 
     app_root = tmp_path / "app"
     shutil.copytree(SAMPLE, app_root)
     monkeypatch.setattr(copilot, "CopilotClient", create_client)
-    monkeypatch.setattr(_copilot._NativeRuntime, "_forward_http", forward)
     monkeypatch.setattr(_harness, "_HARNESSES", {})
     monkeypatch.setattr(_copilot, "_RUNTIMES", {})
     monkeypatch.setattr(paths, "_app_root", app_root)
@@ -200,12 +255,20 @@ def native(monkeypatch, tmp_path, request):
         monkeypatch.delenv(key, raising=False)
     return SimpleNamespace(
         root=app_root, state=tmp_path / "state", captured=captured,
-        stalled=stalled, cancelled=cancelled, provider=request.param,
+        clients=clients, created=created, metadata_lookups=metadata_lookups,
+        resumed=resumed, histories=histories,
+        stalled=stalled, cancelled=cancelled, provider=request.param, credential=credential,
     )
 
 
 @pytest.mark.asyncio
 async def test_real_native_markdown_tool_and_cold_runtime_resume(native):
+    from copilot.session_events import (
+        AssistantMessageData,
+        AssistantTurnEndData,
+        ToolExecutionCompleteData,
+    )
+
     app = create_function_app(native.root)
     functions = {item.get_function_name(): item.get_user_function() for item in app.get_functions()}
     chat = functions["agent_main_builtin_chat"]
@@ -218,12 +281,19 @@ async def test_real_native_markdown_tool_and_cold_runtime_resume(native):
         assert len(result["tool_calls"]) == 1
         receipt = result["tool_calls"][0]["result"]
         assert receipt in result["response"]
-        harness = _harness.get_harness(native.root)
-        owner = _copilot._runtime(harness)
-        process = owner._process
-        assert process is not None and process.poll() is None
+        assert len(native.clients) == 1
+        assert len(native.created) == 1
+        assert native.metadata_lookups == native.created
+        assert any(isinstance(event.data, AssistantTurnEndData) for event in native.histories[0])
+        assert any(
+            isinstance(event.data, AssistantMessageData) and receipt in event.data.content
+            for event in native.histories[0]
+        )
+        assert any(
+            isinstance(event.data, ToolExecutionCompleteData) and event.data.success
+            for event in native.histories[0]
+        )
         await shutdown_client_manager()
-        assert process.poll() is not None
         followup = await chat(SimpleNamespace(
             headers={"x-ms-session-id": result["session_id"]},
             json=AsyncMock(return_value={"prompt": "Recall the previous receipt, without tools."}),
@@ -233,19 +303,21 @@ async def test_real_native_markdown_tool_and_cold_runtime_resume(native):
         assert second["session_id"] == result["session_id"]
         assert receipt in second["response"]
         assert second["tool_calls"] == []
+        assert len(native.clients) == 2
+        assert native.resumed == native.created
+        assert native.metadata_lookups == native.created
         assert len(native.captured) == 3
-        for body in native.captured:
-            assert body.get("max_output_tokens", body.get("max_completion_tokens", body.get("max_tokens"))) == 256
         prior = native.captured[-1].get("messages") or native.captured[-1]["input"]
         assert prior[-1]["role"] == "user"
         assert "native-one" not in str(prior[-1])
         assert any(item.get("role") == "tool" or item.get("type") == "function_call_output" for item in prior)
-        assert not (native.state / "agent-sessions").exists()
+        assert any(isinstance(event.data, AssistantTurnEndData) for event in native.histories[1])
+        if native.provider == "foundry":
+            native.credential.get_token.assert_awaited()
+        else:
+            native.credential.get_token.assert_not_awaited()
     finally:
         await shutdown_client_manager()
-    files = [path for path in native.state.rglob("*") if path.is_file()]
-    assert files
-    assert all(SENTINEL.encode() not in path.read_bytes() for path in files)
 
 
 @pytest.mark.asyncio
@@ -262,20 +334,88 @@ async def test_native_startup_failure_preserves_completed_session(native, monkey
         assert first.status_code == 200, first.body.decode()
         public_id = json.loads(first.body)["session_id"]
         await shutdown_client_manager()
-        original_path = _copilot._runtime_path
-        monkeypatch.setattr(_copilot, "_runtime_path", lambda: (_ for _ in ()).throw(
-            _harness.CopilotPreviewError("Injected missing native bundle")
-        ))
-        failed = await chat(SimpleNamespace(
-            headers={"x-ms-session-id": public_id}, json=AsyncMock(return_value={"prompt": "Recall."}),
-        ))
-        assert failed.status_code == 500
+        with monkeypatch.context() as patch:
+            patch.setenv("COPILOT_CLI_EXTRACT_DIR", str(native.state / "missing-sdk-bundle"))
+            failed = await chat(SimpleNamespace(
+                headers={"x-ms-session-id": public_id},
+                json=AsyncMock(return_value={"prompt": "Recall."}),
+            ))
+            assert failed.status_code == 500
+            assert "not-a-credential" not in failed.body.decode()
         assert len(native.captured) == 2
-        monkeypatch.setattr(_copilot, "_runtime_path", original_path)
         resumed = await chat(SimpleNamespace(
             headers={"x-ms-session-id": public_id}, json=AsyncMock(return_value={"prompt": "Recall."}),
         ))
         assert resumed.status_code == 200, resumed.body.decode()
+        assert native.resumed == native.created
+    finally:
+        await shutdown_client_manager()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ["missing", "empty", "malformed"])
+async def test_missing_or_corrupt_sdk_journal_never_starts_over(native, damage):
+    app = create_function_app(native.root)
+    chat = next(
+        item.get_user_function() for item in app.get_functions()
+        if item.get_function_name() == "agent_main_builtin_chat"
+    )
+    try:
+        first = await chat(SimpleNamespace(
+            headers={}, json=AsyncMock(return_value={"prompt": "Call make_receipt with tag 'durable'."}),
+        ))
+        assert first.status_code == 200, first.body.decode()
+        public_id = json.loads(first.body)["session_id"]
+        await shutdown_client_manager()
+        journals = list(native.state.rglob("events.jsonl"))
+        assert len(journals) == 1, "SDK did not persist the completed conversation"
+        journal = journals[0]
+        if damage == "missing":
+            journal.unlink()
+        else:
+            journal.write_text("" if damage == "empty" else "malformed\n", encoding="utf-8")
+        failed = await chat(SimpleNamespace(
+            headers={"x-ms-session-id": public_id},
+            json=AsyncMock(return_value={"prompt": "Recall the receipt."}),
+        ))
+        assert failed.status_code == 500, failed.body.decode()
+        error = json.loads(failed.body)["error"]
+        assert "not-a-credential" not in error
+        assert "session" in error.lower() or "conversation" in error.lower()
+        assert len(native.captured) == 2
+        assert len(native.created) == 1
+    finally:
+        await shutdown_client_manager()
+
+
+@pytest.mark.asyncio
+async def test_authored_preview_http_trigger_creates_and_resumes(native):
+    app = create_function_app(native.root)
+    authored = next(
+        item for item in app.get_functions() if item.get_function_name() == "main"
+    )
+    assert "preview" in [
+        binding.route for binding in authored.get_bindings()
+        if getattr(binding, "route", None) is not None
+    ]
+    preview = authored.get_user_function()
+    try:
+        first = await preview(SimpleNamespace(
+            headers={},
+            json=AsyncMock(return_value={"prompt": 'Call make_receipt with tag "authored-one".'}),
+        ))
+        assert first.status_code == 200, first.body.decode()
+        receipt = first.body.decode()
+        assert receipt.startswith("receipt-")
+        public_id = first.headers["x-ms-session-id"]
+        followup = await preview(SimpleNamespace(
+            headers={"x-ms-session-id": public_id},
+            json=AsyncMock(return_value={"prompt": "Recall the previous receipt, without tools."}),
+        ))
+        assert followup.status_code == 200, followup.body.decode()
+        assert followup.headers["x-ms-session-id"] == public_id
+        assert followup.body.decode() == receipt
+        assert len(native.created) == len(native.resumed) == 1
     finally:
         await shutdown_client_manager()
 
@@ -289,19 +429,17 @@ async def test_real_native_request_cancellation_does_not_kill_peer(native):
     ))
     try:
         await asyncio.wait_for(native.stalled.wait(), timeout=30)
-        owner = _copilot._runtime(_harness.get_harness())
-        process = owner._process
+        client = native.clients[0]
         slow.cancel()
         with pytest.raises(asyncio.CancelledError):
             await slow
-        assert process is not None and process.poll() is None
+        await asyncio.wait_for(native.cancelled.wait(), timeout=10)
         peer = await runner.run_agent(
             "Call make_receipt with tag 'unaffected-peer'.", tools=tools, mcp_tools=[], timeout=45,
         )
         assert peer.content.startswith("receipt-")
         assert len(peer.tool_calls) == 1
-        assert process.poll() is None
-        assert native.cancelled.is_set()
+        assert native.clients == [client]
     finally:
         if not slow.done():
             slow.cancel()

@@ -72,6 +72,7 @@ from ._function_tool import FunctionTool, tool
 from ._harness import (
     AppHarness,
     ExecutionRole,
+    HarnessKind,
     HarnessRequest,
     UnsupportedCapabilityError,
     get_harness,
@@ -205,7 +206,7 @@ async def _stream_usage_details(stream: Any, *, remaining_timeout: float) -> Any
 
 @dataclass
 class _AgentUsageRecorder:
-    """Attempt at most one internal token-usage record for a MAF invocation."""
+    """Attempt at most one internal token-usage record per invocation."""
 
     agent_name: str
     execution_role: _AgentExecutionRole
@@ -213,20 +214,30 @@ class _AgentUsageRecorder:
     _emission_attempted: bool = field(default=False, init=False)
 
     def emit(self, usage_details: Any = None) -> None:
+        try:
+            usage = _normalize_usage_details(usage_details)
+        except Exception:
+            usage = {}
+        self.emit_counts(
+            input_tokens=usage.get("input_tokens"),
+            output_tokens=usage.get("output_tokens"),
+        )
+
+    def emit_counts(self, *, input_tokens: int | None, output_tokens: int | None) -> None:
+        """Record backend-neutral token counts without a MAF-shaped intermediate."""
         if self._emission_attempted:
             return
         self._emission_attempted = True
 
         try:
-            usage = _normalize_usage_details(usage_details)
             payload: dict[str, Any] = {
                 "agent_name": self.agent_name,
                 "event_name": "agent_token_usage",
                 "execution_role": self.execution_role,
-                "input_tokens": usage.get("input_tokens"),
+                "input_tokens": input_tokens,
                 "model": self.inference_target.model,
                 "model_publisher": _model_publisher(self.inference_target.provider),
-                "output_tokens": usage.get("output_tokens"),
+                "output_tokens": output_tokens,
                 "provider": self.inference_target.provider,
             }
             logger.info(
@@ -568,7 +579,7 @@ async def run_leaf_agent_task(
 ) -> str:
     """Run one fresh stateless specialist and return its response text."""
     harness = capabilities._harness or get_harness()
-    if harness.name == "copilot":
+    if harness.name is HarnessKind.COPILOT:
         reject_unsupported(**{execution_role: True})
     specialist_agent, inference_target = _build_delegated_agent(resolved, capabilities)
     usage_recorder = _AgentUsageRecorder(
@@ -1053,7 +1064,7 @@ async def run_agent(
     coordinator_deadline = loop.time() + timeout
 
     harness = _harness or get_harness()
-    if harness.name == "copilot":
+    if harness.name is HarnessKind.COPILOT:
         configuration = agent_configuration or AgentConfiguration()
         validate_configuration(configuration)
         resolved_mcp = (
@@ -1273,7 +1284,7 @@ async def run_agent_stream(
     """
     try:
         harness = _harness or get_harness()
-        if harness.name == "copilot":
+        if harness.name is HarnessKind.COPILOT:
             reject_unsupported(streaming=True)
     except (ValueError, RuntimeError) as exc:
         logger.error("Agent harness selection failed: %s", exc)
