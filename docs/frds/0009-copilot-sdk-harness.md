@@ -5,6 +5,10 @@ status: In review
 author: larohra
 created: 2026-09-28
 updated: 2026-09-28
+issues:
+  - https://github.com/Azure/azure-functions-bucees-planning/issues/1332
+pull_requests: []
+branch: null
 ---
 
 # FRD 0009 - Copilot SDK agent harness
