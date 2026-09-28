@@ -287,7 +287,7 @@ Stream/history routes return 501 rather than success-shaped empty output.
 Native compaction and interrupted-turn/Blob recovery are deferred; no host
 summarizer is introduced. The exact runnable subset, pins, setup, failure cases,
 rollback and handoff ledger are in the
-[sample](../samples/copilot-preview/README.md).
+[sample](https://github.com/Azure/azure-functions-agents-runtime/tree/main/samples/copilot-preview).
 
 Delegated and Workflow Sub Agent roles use the specialist's own resolved configuration, never the
 coordinator's overrides. Leaf roles remain fresh and single-task: specialists receive no persistent
