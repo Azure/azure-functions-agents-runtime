@@ -148,7 +148,9 @@ Remove-Item Env:\AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT, Env:\AZURE_FUNCTIONS_AGE
 ```
 
 Do not remove shared SDK caches, MAF `agent-sessions` or another run's state.
-At `13d05700` (2026-09-28; Windows/Python 3.13.15, Core Tools 4.13.0,
-SDK 1.0.14/native 1.0.85), an approved Foundry/Entra restart passed with the
-**old adapter**. This revision is **not newly live-qualified**; offline tests
-do not prove production parity.
+At `14c9c956` (2026-09-28; Windows/Python 3.13.15, Core Tools 4.13.0,
+SDK 1.0.14/native 1.0.85), an approved uncapped Foundry/Entra `gpt-5.4`
+run passed the receipt tool, cold host restart, value-free follow-up, and
+negative cases. Native events showed three model calls, one tool call and
+two user turns; no native process remained. This local result does not
+qualify Blob, compaction, Azure hosting or production parity.
