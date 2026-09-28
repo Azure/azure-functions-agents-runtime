@@ -1,7 +1,7 @@
 ---
 frd: 0009
 title: Copilot SDK agent harness
-status: In review
+status: Finalized
 author: larohra
 created: 2026-09-28
 updated: 2026-09-28
@@ -289,17 +289,24 @@ files, compaction checkpoints/references, and any referenced content. Do not
 whitelist only `events.jsonl`, edit journal records, or serialize native state as
 MAF `Message` JSONL.
 
-The following are proposed storage contracts, not claims about the demonstrated
-Blob adapter:
+Only one turn may execute at a time for a given agent/session. Concurrent requests
+must wait within their deadline or fail clearly. A failed startup that neither
+began a turn nor damaged session state must leave the previous conversation
+usable. If an interrupted turn cannot be continued safely, return an explicit
+error rather than silently resetting the conversation or replaying work.
+
+The storage guarantees below support that behavior; they are not claims about
+the demonstrated Blob adapter. Marker states, write ordering, and cleanup
+mechanics are implementation details, not prescribed by this specification.
 
 | Concern | Required contract |
 | --- | --- |
-| Ownership | One active owner per agent/session across workers, acquired before restore or inference and held through completion. Use storage-backed ownership with renewal and fencing, not only an `asyncio.Lock`. Contention waits within the request deadline or fails explicitly; independent sessions remain concurrent. |
+| Ownership | Enforce single-active-turn isolation across workers, not only within one process. Ownership protection must prevent stale owners from mutating session state; independent sessions remain concurrent. |
 | Lost ownership | Fence stale writes, deny new dispatch, and cancel the affected turn; never let an old owner publish completion after a replacement owner proceeds. Cancellation cannot undo an already-started external effect. |
 | Filesystem operations | Qualify every operation used by the selected native runtime, including append, replacement, rename, delete, listing, and missing-file behavior. Reads see acknowledged writes. Rename emulation must be crash-recoverable and protected from concurrent readers/writers; Blob is not assumed to provide POSIX rename. |
 | Acknowledgment | A successful persistent SessionFs mutation acknowledges durable storage, not a queued upload. A successful persistent turn requires acknowledged native state and all references, including background compaction writes. The exact SDK quiescence/flush signal and storage barrier must be established. |
-| Completion | Record that a turn is active before submitting its prompt; publish completed-turn metadata only after native completion and the storage barrier. Return non-streaming success or SSE `done` only afterward. Deltas before `done` are provisional. This metadata identifies safe continuation, not per-model/tool checkpoints or a recovery controller. |
-| Failure/interruption | Storage/ownership failures abort rather than become an ordinary model-visible tool result that permits continued inference. A session left active, corrupt, missing referenced state, or in an unsupported format must fail explicitly on restore, not reset, partially restore, or automatically replay tools. |
+| Completion | Non-streaming success or SSE `done` means the turn finished and the native state required for continuation is durably acknowledged. Earlier stream deltas are provisional. This is a completed-turn guarantee, not per-model/tool checkpoints or a recovery controller. |
+| Failure/interruption | Storage/ownership failures abort rather than become an ordinary model-visible tool result that permits continued inference. Uncertain turn progress, corruption, missing referenced state, or an unsupported format must fail explicitly on restore, not reset, partially restore, or automatically replay tools. A known-safe startup failure must not invalidate the last completed conversation. |
 | Restore | A clean worker reopens the complete acknowledged native state and accepts the next user prompt without host transcript injection. No automatic continuation of pending work, no empty `send_messages`, and no exactly-once guarantee. |
 
 Native compaction alone owns triggering, summarization, and context
@@ -358,7 +365,7 @@ success-shaped response or an automatic MAF fallback. Cancellation stays
 cancellation. Already-dispatched tool effects may remain after an unsuccessful
 turn; the feature does not claim transactional or exactly-once execution.
 
-### 4.8 Evidence limits and open architecture decisions
+### 4.8 Evidence limits and remaining implementation decisions
 
 The supplied 2026-09-25 assessment used SDK revision
 `4001c1da7d832c51bad1d38619c1a082af390efb`, runtime `1.0.84-5`, protocol 3.
@@ -376,7 +383,12 @@ structured-response parity, and content-safe telemetry remain unqualified.
 The assessment's mid-turn recovery experiments do not add those capabilities to
 this feature's scope.
 
-| Open decision | Required resolution before architecture finalization |
+Sign-off approves the feature-level contracts, not a production SDK pin or
+unverified compatibility mappings. The following implementation decisions and
+qualification obligations remain open. Unsupported capabilities must continue
+to follow the explicit preview-rejection rules.
+
+| Implementation item | Resolution or evidence required for supported behavior |
 | --- | --- |
 | SDK/runtime and hosting contract | Select version/protocol/assets, core-versus-optional packaging and dependency coexistence with MAF, provider/Entra mappings, and provider `store=false` enforcement. Define worker lifecycle and target Functions hosting constraints, including Linux/Flex not qualified by the Windows evidence. Do not promote the evidence SHA to a production pin by assumption. |
 | Native storage protocol | Specify ownership/fencing, rename/read consistency, completion metadata, SDK storage-error barriers, and acknowledgment/quiescence. Define local-versus-deployed storage selection, complete-session retention safety, corruption/version detection, and interrupted-session behavior against concrete SDK operations. |
@@ -386,8 +398,9 @@ this feature's scope.
 
 ## 5. Decisions log
 
-Dates below record decisions supplied or proposed for this specification;
-scope approval is not full architecture sign-off.
+Dates below record the original scope approvals and proposals. Decision 12
+records human sign-off on the feature specification, without claiming that its
+remaining implementation decisions or qualification obligations are complete.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
@@ -401,6 +414,8 @@ scope approval is not full architecture sign-off.
 | 8 | Architecture-review clarifications | Assume SDK parity / retain explicit contracts | Clarify provider-side storage, approval behavior, selector presence, history projection, direct/leaf storage lifetimes, and packaging; retain unresolved mappings in section 4.8 | Agent review/proposal | 2026-09-28 |
 | 9 | App execution selection | Repeated environment reads / one bound app execution interface | Select once at the app boundary and propagate the same immutable context through handlers, delegates, and registered Activities; use the same resolution boundary for standalone calls | Human | 2026-09-28 |
 | 10 | Workflows across app restarts/deployments | Custom harness pinning/lifecycle rules / existing Durable behavior | Follow Durable replay, retry, worker lifetime, and configured deployment routing; each executing app instance supplies its own selection, with no new persisted harness pin or mismatch rejection | Human | 2026-09-28 |
+| 11 | Session startup failures | Prescribe marker sequencing / specify observable behavior | Require one active turn per agent/session, safe retry after a startup failure that did not begin a turn or damage state, and explicit errors for uncertain continuation; leave marker ordering and cleanup to implementation | Human | 2026-09-28 |
+| 12 | Feature specification sign-off | Keep In review / finalize the agreed feature contracts | Finalized after approving decision 11; section 4.8 remains an explicit record of unresolved implementation choices and required evidence, not a claim of parity or production readiness | Human (larohra) | 2026-09-28 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -422,13 +437,14 @@ where mocks cannot establish process, transport, authentication, or durability.
 | System tools | Exercise `web_request` defaults/exclusion/SSRF/budgets/errors and real ACA `execute_python` scoping/results without substituting local execution. |
 | Completed-turn restore | On Blob and local storage, complete a real tool-using turn, replace Python and native processes, and continue by the same agent/session identity without restating prior values. Inspect outbound provider context/state reuse, not just a plausible answer. |
 | Compacted restore | Force native compaction, acknowledge complete state, replace both processes, restore in a clean worker, and prove saved-summary/reference reuse without another compaction LLM call. |
-| Storage failures/concurrency | Fault-inject append/replace/rename/read/ack errors, partial references, corrupt/unsupported state, crashes before completion, lease loss, stale writers, and two-worker same-session contention. No silent reset, continued inference after a storage barrier failure, or false success/`done`; independent sessions still progress. |
+| Storage failures/concurrency | Fault-inject append/replace/rename/read/ack errors, partial references, corrupt/unsupported state, crashes before completion, lease loss, stale writers, and two-worker same-session contention. For known pre-turn create/resume, validation, or startup-deadline failures that leave native state valid, verify no inference/tool effects and a successful retry on the same session ID. Uncertain submission or unsafe state must still fail explicitly. No silent reset, continued inference after a storage barrier failure, or false success/`done`; independent sessions still progress. |
 | History break | MAF bytes remain unchanged. Incompatible IDs fail explicitly; native and MAF namespaces never cross-read as execution state. Verify documented rollback behavior and native history rendering without importing MAF messages. |
 | Hosting/telemetry | Demonstrate supported Functions deployment assets, lazy single-client startup, concurrent isolation, bounded cancellation/shutdown, and no orphan native process. Verify usage/correlation/error accounting and sensitive-data-off behavior in host and native telemetry. |
 
 ## 7. Docs impact
 
-This specification and its FRD index entry describe proposed behavior only.
+This specification and its FRD index entry describe intended behavior, not
+shipped implementation.
 Implementation documentation must change with the behavior it documents:
 `docs/architecture.md` for the adapter/lifecycle/storage boundaries;
 `docs/front-matter-spec.md` for preserved contracts and explicit incompatible
@@ -442,13 +458,14 @@ this document does not introduce an unimplemented schema or rewrite runtime docs
 
 ## 8. Status & sign-off
 
-- **Status:** In review; a feature specification, not a claim of implementation.
+- **Status:** Finalized; the feature specification is approved, not implemented
+  or production-qualified.
 - **Architecture review:** Dedicated agent review completed on 2026-09-28;
-  contract clarifications incorporated (decision 8). Section 4.8 remains open;
-  section 6 defines behavioral evidence, not completed qualification.
-- **Human sign-off:** Feature scope and preview behavior were supplied as agreed
-  requirements; the app-bound selection and platform-owned Durable lifecycle
-  decisions were approved on 2026-09-28 (decisions 9-10). Full architecture
-  approval has not been recorded.
-- **Finalization:** Resolve the open architecture decisions and record explicit
-  human sign-off before marking this feature specification Finalized.
+  review clarifications cover app-bound selection, Durable lifecycle, and safe
+  startup failure behavior (decisions 8-11).
+- **Human sign-off:** Laveesh Rohra (`larohra`), 2026-09-28, explicitly approved
+  the behavior-focused session contract and requested sign-off on the FRD
+  (decision 12).
+- **Remaining qualification:** Section 4.8 retains unresolved implementation
+  choices and evidence requirements. Section 6 defines acceptance, not results
+  already achieved.
