@@ -119,10 +119,6 @@ class CopilotProvider(ABC):
     def auth_label(self) -> str:
         """Safe authentication label for diagnostics."""
 
-    @property
-    def token_scope(self) -> str | None:
-        return None
-
     @abstractmethod
     def setup_diagnostic(self) -> str:
         """Return the safe provider-setup diagnostic."""
@@ -188,10 +184,6 @@ class AzureOpenAIProvider(CopilotProvider):
     def auth_label(self) -> str:
         return EnvVar.AZURE_OPENAI_API_KEY if self.api_key else "Azure credential"
 
-    @property
-    def token_scope(self) -> str | None:
-        return None if self.api_key else _AZURE_OPENAI_SCOPE
-
     def setup_diagnostic(self) -> str:
         return (
             "Copilot Azure OpenAI provider setup failed. Check "
@@ -236,10 +228,6 @@ class FoundryProvider(CopilotProvider):
     @property
     def auth_label(self) -> str:
         return "Azure credential"
-
-    @property
-    def token_scope(self) -> str | None:
-        return _FOUNDRY_SCOPE
 
     def setup_diagnostic(self) -> str:
         return (

@@ -350,7 +350,6 @@ def test_azure_provider_auth_mode_is_frozen(monkeypatch):
     monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
 
     assert provider.auth_label == "AZURE_OPENAI_API_KEY"
-    assert provider.token_scope is None
     assert provider.api_key == "frozen-secret"
 
 
