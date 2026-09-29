@@ -13,9 +13,11 @@ from uuid import uuid4
 
 import pytest
 from azure.core.credentials import AccessToken
+from pydantic import BaseModel, Field
 
 from azure_functions_agents import _copilot, _harness
 from azure_functions_agents._copilot_session_fs import NativeSession, SessionState
+from azure_functions_agents._function_tool import tool, workflow_tool
 from azure_functions_agents._harness import (
     AppHarness,
     CopilotPreviewError,
@@ -94,6 +96,204 @@ async def _seed_completed(preview):
         await owner.complete()
     finally:
         await owner.close()
+
+
+async def _invoke_native_tool(function, arguments):
+    from copilot.tools import ToolInvocation
+
+    calls = []
+    native_tool = _copilot._tool(function, calls)
+    assert native_tool.handler is not None
+    result = await native_tool.handler(
+        ToolInvocation(
+            session_id="native-session",
+            tool_call_id="call-1",
+            tool_name=function.name,
+            arguments=arguments,
+        )
+    )
+    return result, calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True])
+async def test_tool_adapter_runs_sync_and_async_callables(is_async):
+    effects = []
+
+    if is_async:
+
+        async def candidate(value: str) -> str:
+            await asyncio.sleep(0)
+            effects.append(value)
+            return f"async:{value}"
+
+    else:
+
+        def candidate(value: str) -> str:
+            effects.append(value)
+            return f"sync:{value}"
+
+    [function] = _harness.prepare_tools([candidate])
+    result, calls = await _invoke_native_tool(function, {"value": "ok"})
+
+    assert result.result_type == "success"
+    assert result.text_result_for_llm == f"{'async' if is_async else 'sync'}:ok"
+    assert effects == ["ok"]
+    assert calls[0]["result"] == result.text_result_for_llm
+
+
+class _PositiveInput(BaseModel):
+    count: int = Field(gt=0)
+
+
+@pytest.mark.asyncio
+async def test_tool_adapter_validates_pydantic_before_effect():
+    effects = []
+
+    @tool(schema=_PositiveInput)
+    def validated(params: _PositiveInput) -> str:
+        effects.append(params.count)
+        return str(params.count)
+
+    result, calls = await _invoke_native_tool(validated, {"count": 0})
+
+    assert result.result_type == "failure"
+    assert effects == []
+    assert calls[0]["result"] == '{"error":"Custom tool failed or returned unsupported content."}'
+
+
+@pytest.mark.asyncio
+async def test_tool_adapter_supports_both_workflow_decorator_orders():
+    def tool_outer(value: str) -> str:
+        return f"outer:{value}"
+
+    def workflow_outer(value: str) -> str:
+        return f"workflow:{value}"
+
+    first = tool(name="tool_outer")(workflow_tool(tool_outer))
+    second = workflow_tool(tool(name="workflow_outer")(workflow_outer))
+    prepared = _harness.prepare_tools([first, second])
+
+    first_result, _ = await _invoke_native_tool(prepared[0], {"value": "ok"})
+    second_result, _ = await _invoke_native_tool(prepared[1], {"value": "ok"})
+
+    assert first_result.text_result_for_llm == "outer:ok"
+    assert second_result.text_result_for_llm == "workflow:ok"
+
+
+@pytest.mark.asyncio
+async def test_tool_adapter_returns_recoverable_failure():
+    @tool
+    def broken() -> str:
+        raise RuntimeError("private tool detail")
+
+    result, calls = await _invoke_native_tool(broken, {})
+
+    assert result.result_type == "failure"
+    assert "private tool detail" not in result.text_result_for_llm
+    assert calls[0]["result"] == result.text_result_for_llm
+
+
+@pytest.mark.asyncio
+async def test_tool_adapter_propagates_cancellation():
+    started = asyncio.Event()
+
+    @tool
+    async def wait_forever() -> str:
+        started.set()
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    from copilot.tools import ToolInvocation
+
+    calls = []
+    native_tool = _copilot._tool(wait_forever, calls)
+    assert native_tool.handler is not None
+    task = asyncio.create_task(
+        native_tool.handler(
+            ToolInvocation(
+                session_id="native-session",
+                tool_call_id="call-cancel",
+                tool_name="wait_forever",
+                arguments={},
+            )
+        )
+    )
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls == [
+        {
+            "type": "tool_start",
+            "tool_call_id": "call-cancel",
+            "tool_name": "wait_forever",
+            "arguments": {},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sdk_receives_only_combined_custom_catalog(preview, monkeypatch):
+    import copilot
+    from copilot.generated.rpc import CurrentToolMetadata
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    functions = [
+        tool(name="user_tool")(lambda: "user"),
+        tool(name="execute_python")(lambda code: code),
+        tool(name="web_request")(lambda url: url),
+    ]
+    client = _fake_client()
+    client.create_session.return_value.rpc.tools.get_current_metadata.return_value = SimpleNamespace(
+        tools=[
+            CurrentToolMetadata(description="", name=function.name)
+            for function in functions
+        ]
+    )
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        await _copilot.run(preview, replace(_request(), tools=functions))
+        options = client.create_session.call_args.kwargs
+        assert options["available_tools"] == [
+            "custom:user_tool",
+            "custom:execute_python",
+            "custom:web_request",
+        ]
+        assert [item.name for item in options["tools"]] == [
+            "user_tool",
+            "execute_python",
+            "web_request",
+        ]
+        assert options["enable_config_discovery"] is False
+        assert options["tool_search"]["enabled"] is False
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_sdk_rejects_ambient_catalog_before_prompt(preview, monkeypatch):
+    import copilot
+    from copilot.generated.rpc import CurrentToolMetadata
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    function = tool(name="allowed_tool")(lambda: "ok")
+    client = _fake_client()
+    session = client.create_session.return_value
+    session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(
+        tools=[
+            CurrentToolMetadata(description="", name="allowed_tool"),
+            CurrentToolMetadata(description="", name="shell"),
+        ]
+    )
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(CopilotPreviewError, match="tool catalog differs"):
+            await _copilot.run(preview, replace(_request(), tools=[function]))
+        session.send_and_wait.assert_not_awaited()
+    finally:
+        await _copilot.shutdown()
 
 
 @pytest.mark.asyncio

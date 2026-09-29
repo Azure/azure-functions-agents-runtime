@@ -595,8 +595,9 @@ this document does not introduce an unimplemented schema or rewrite runtime docs
 
 ## 8. Status & sign-off
 
-- **Status:** Finalized; the feature specification is approved, not implemented
-  or production-qualified.
+- **Status:** Finalized; the approved feature specification describes intended
+  behavior, not delivery order or production qualification. The parent migration
+  is not complete or production-qualified.
 - **Architecture review:** Dedicated agent review completed on 2026-09-28;
   review clarifications cover app-bound selection, Durable lifecycle, and safe
   startup failure behavior (decisions 8-11).

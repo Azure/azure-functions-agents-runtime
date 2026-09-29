@@ -18,7 +18,7 @@ tools: true
 workflows:
   enabled: false
 system_tools:
-  web_request: false
+  web_request: true
   dynamic_sessions_code_interpreter: false
 ---
 You are a small receipt assistant. When the user supplies a tag, call

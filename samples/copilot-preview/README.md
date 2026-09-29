@@ -1,18 +1,18 @@
 # Local Copilot preview
 
-This **default-off, local-only** Functions sample runs `main.agent.md` through
-discovery, HTTP registration and the Copilot SDK (1.0.14, native 1.0.85,
-protocol 3, stdio). It supports non-streaming built-in chat, the authored
-`/preview` route, one `make_receipt` tool and SDK-owned local sessions.
-Use Python 3.13/3.14, Core Tools 4 and an approved Foundry deployment with
-Azure sign-in. Model calls incur charges; setup does not prove project access.
+This **default-off, local-only** Functions sample exercises non-streaming
+Copilot chat and the authored `/preview` HTTP route with `make_receipt` and
+`web_request` (limited to `example.com`). It preserves completed-turn sessions
+across a local restart. ACA `execute_python` is disabled in the checked-in
+configuration; real Copilot-to-ACA execution is not qualified.
+
+Requires Python 3.13/3.14, Azure Functions Core Tools 4, `uv`, an approved
+Foundry deployment and Azure sign-in. Model calls incur charges.
 
 ## Run (PowerShell, repository root)
 
-`requirements.txt` installs this checkout with `[copilot]`. It installs the
-Python SDK, **not** native assets: the SDK downloads its pinned runtime on first
-enabled client construction if uncached, so the first request may be slower.
-There is no separate CLI setting or download step.
+`requirements.txt` installs this checkout with `[copilot]`. The SDK downloads
+its native runtime on first use if uncached.
 
 ```powershell
 uv venv .venv --python 3.13
@@ -34,14 +34,9 @@ Push-Location samples\copilot-preview\src
 func start --port 7071
 ```
 
-Expect `Agent harness selected: harness=copilot`. For safe version diagnostics,
-run `func --version` and
-`.\.venv\Scripts\python.exe -c "import importlib.metadata as m; print(m.version('github-copilot-sdk'))"`
-from the repository root.
-
 ## Verify
 
-In a **second terminal at the repository root**, use an approved deployment:
+In a **second terminal at the repository root**:
 
 ```powershell
 .\.venv\Scripts\python.exe samples\copilot-preview\verify.py --phase first --evidence .preview-evidence.json
@@ -50,9 +45,8 @@ In a **second terminal at the repository root**, use an approved deployment:
 .\.venv\Scripts\python.exe samples\copilot-preview\verify.py --phase negative
 ```
 
-Expect `PASS first` (one `make_receipt` call), `PASS followup` (same session,
-no tool), `PASS negative` (unknown ID fails; stream/history return 501).
-To exercise the authored route while the host runs:
+Expect `PASS first`, `PASS followup`, and `PASS negative`. To exercise the
+authored route while the host runs:
 
 ```powershell
 $first = Invoke-RestMethod http://127.0.0.1:7071/agents/main/chat -Method Post `
@@ -65,15 +59,26 @@ $again.Content
 $again.Headers["x-ms-session-id"] # Matches $first.session_id.
 ```
 
-No Azure hosting, multiple workers, MAF history import, streaming, MCP,
-skills, delegation, workflows, or interrupted-turn recovery guarantee.
-Configured `max_output_tokens` is rejected instead of silently ignored.
+To exercise the configured `web_request` tool:
+
+```powershell
+$web = Invoke-RestMethod http://127.0.0.1:7071/agents/main/chat -Method Post `
+  -ContentType application/json `
+  -Body '{"prompt":"Call web_request exactly once with method GET and URL https://example.com/. Summarize its status."}'
+$web.tool_calls | ConvertTo-Json -Depth 8
+```
+
+This local preview does not support streaming, MCP, skills, delegation,
+workflows, Azure hosting, or MAF history import. See
+[the architecture guide](../../docs/architecture.md#bounded-copilot-migration-preview)
+for the capability boundary.
 
 ## Flag off and cleanup
 
-Stop the host; in its terminal set the flag to `false` and start it again.
-MAF is restored (history no longer returns 501). Do not reuse a Copilot ID.
-After stopping MAF, run `Pop-Location` to return to the repository root.
+Stop the host; set the flag to `false` and restart to restore MAF. Do not
+reuse a Copilot session ID in MAF. After stopping MAF, run `Pop-Location`
+to return to the repository root. Review `$run` and the cleanup block before
+running it; it removes only that run's state and sample evidence:
 
 ```powershell
 $env:AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT = "false"
@@ -92,12 +97,9 @@ if (@($parent) + @($target) | Where-Object {
     $null -ne $_ -and (-not $_.PSIsContainer -or
         ($_.Attributes -band [IO.FileAttributes]::ReparsePoint))
 }) { throw "Refusing to remove a file or linked directory." }
-# Inspect the printed path before removing only this run's state.
 Remove-Item -LiteralPath $state -Recurse -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath .preview-evidence.json, samples\copilot-preview\src\local.settings.json `
   -ErrorAction SilentlyContinue
 ```
 
-Do not delete SDK caches or MAF history. At `14c9c956` on Windows, an approved
-Foundry/Entra run passed the receipt, full host restart and negative checks;
-this does not qualify Azure hosting or production use.
+Do not delete SDK caches or MAF history.

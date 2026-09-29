@@ -117,7 +117,7 @@ def native(monkeypatch, tmp_path, request):
         assert provider["wire_api"] == (
             "responses" if request.param == "foundry" else "completions"
         )
-        assert options["available_tools"] == ["custom:make_receipt"]
+        assert options["available_tools"] == ["custom:make_receipt", "custom:web_request"]
 
     class ObservedClient(sdk_client):
         async def get_session_metadata(self, session_id):
@@ -153,7 +153,7 @@ def native(monkeypatch, tmp_path, request):
             if responses:
                 assert body.get("store") is False, "SDK Responses must disable provider retention"
             tools = [item["name"] if responses else item["function"]["name"] for item in body.get("tools", [])]
-            assert tools == ["make_receipt"], f"Unexpected model-visible tools: {tools}"
+            assert tools == ["make_receipt", "web_request"], f"Unexpected model-visible tools: {tools}"
             declaration = body["tools"][0] if responses else body["tools"][0]["function"]
             assert "harmless demonstration tag" in declaration["description"]
             assert declaration["parameters"]["properties"]["tag"]["type"] == "string"

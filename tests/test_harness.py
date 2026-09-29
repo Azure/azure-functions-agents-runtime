@@ -15,6 +15,7 @@ import pytest
 from azure_functions_agents import _harness, runner
 from azure_functions_agents._function_tool import FunctionTool
 from azure_functions_agents._harness import (
+    AppHarness,
     CopilotPreviewError,
     HarnessKind,
     UnsupportedCapabilityError,
@@ -27,8 +28,14 @@ from azure_functions_agents.config.schema import (
     AgentConfiguration,
     AgentFrameworkCompactionConfig,
     AgentFrameworkConfiguration,
+    BuiltinEndpointsConfig,
+    DynamicSessionsCodeInterpreterConfig,
+    SubagentRef,
+    TriggerSpec,
+    WorkflowConfig,
 )
 from azure_functions_agents.discovery.tools import discover_user_tools
+from azure_functions_agents.registration._handlers import make_http_agent_handler
 from azure_functions_agents.registration.capabilities import build_capabilities
 
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
@@ -132,7 +139,7 @@ def test_preview_sample_uses_normal_typed_discovery(preview):
     _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
     assert [item.name for item in capabilities.filtered_user_tools] == ["make_receipt"]
     assert resolved.enabled_mcp_names == resolved.enabled_skills_names == []
-    assert capabilities.web_request_tools == []
+    assert [item.name for item in capabilities.web_request_tools] == ["web_request"]
     assert not resolved.builtin_endpoints.debug_chat_ui
 
 
@@ -169,12 +176,152 @@ def test_foundry_configuration_is_frozen_without_authentication(preview, monkeyp
     assert not selected.storage_root.exists()
 
 
-@pytest.mark.parametrize("field", ["web_request_tools", "filtered_mcp_tools", "enabled_skill_paths"])
+@pytest.mark.parametrize("field", ["filtered_mcp_tools", "enabled_skill_paths"])
 def test_enabled_unsupported_capabilities_fail(preview, field):
     resolved, capabilities = _sample()
     capabilities = replace(capabilities, **{field: [object()]})
     with pytest.raises(UnsupportedCapabilityError):
         _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
+
+
+def test_direct_preview_keeps_other_roles_and_surfaces_rejected(preview):
+    resolved, capabilities = _sample()
+    cases = [
+        (
+            "non_http_trigger",
+            resolved.model_copy(update={"trigger": TriggerSpec(type="queue_trigger")}),
+        ),
+        (
+            "debug_chat_ui",
+            resolved.model_copy(
+                update={
+                    "builtin_endpoints": BuiltinEndpointsConfig(
+                        debug_chat_ui=True,
+                        chat_api=True,
+                        mcp=False,
+                    )
+                }
+            ),
+        ),
+        (
+            "mcp_endpoint",
+            resolved.model_copy(
+                update={
+                    "builtin_endpoints": BuiltinEndpointsConfig(
+                        debug_chat_ui=False,
+                        chat_api=True,
+                        mcp=True,
+                    )
+                }
+            ),
+        ),
+        (
+            "subagents",
+            resolved.model_copy(update={"subagents": [SubagentRef(agent="specialist")]}),
+        ),
+        (
+            "workflows",
+            resolved.model_copy(update={"workflows": WorkflowConfig(enabled=True)}),
+        ),
+    ]
+
+    for diagnostic, candidate in cases:
+        with pytest.raises(UnsupportedCapabilityError, match=diagnostic):
+            _harness.validate_agent(_harness.get_harness(), candidate, capabilities)
+
+
+def test_direct_preview_accepts_explicit_host_system_tools(preview):
+    resolved, capabilities = _sample()
+    web_request = FunctionTool(name="web_request", func=lambda url: url)
+    capabilities = replace(capabilities, web_request_tools=[web_request])
+    resolved = resolved.model_copy(
+        update={
+            "sandbox_config": DynamicSessionsCodeInterpreterConfig(
+                endpoint="https://fixture.dynamicsessions.io"
+            ),
+        }
+    )
+
+    _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
+
+
+@pytest.mark.parametrize(
+    ("configuration", "expected_names"),
+    [
+        ("tools: true\n", ["web_request"]),
+        ("tools: true\nsystem_tools:\n  web_request: false\n", []),
+        ("tools: false\n", []),
+    ],
+)
+def test_copilot_web_request_default_and_optouts(
+    preview,
+    tmp_path,
+    configuration,
+    expected_names,
+):
+    root = tmp_path / "web-request-policy"
+    root.mkdir()
+    (root / "main.agent.md").write_text(
+        "---\n"
+        "name: Tool policy\n"
+        "description: Exercise Copilot host-tool policy.\n"
+        "builtin_endpoints:\n"
+        "  chat_api: true\n"
+        "  debug_chat_ui: false\n"
+        "  mcp: false\n"
+        "mcp: false\n"
+        "skills: false\n"
+        "workflows:\n"
+        "  enabled: false\n"
+        f"{configuration}"
+        "---\n"
+        "Use only configured tools.\n",
+        encoding="utf-8",
+    )
+    resolved = compose(
+        load_agent_specs(root)[0],
+        load_global_config(root),
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+    capabilities = build_capabilities(
+        resolved,
+        discovered_user_tools=[],
+        discovered_mcp_tools={},
+        discovered_skills={},
+    )
+
+    _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
+
+    assert [function.name for function in capabilities.web_request_tools or []] == expected_names
+
+
+def test_sandbox_name_collision_fails_during_registration(preview):
+    resolved, capabilities = _sample()
+    resolved = resolved.model_copy(
+        update={
+            "sandbox_config": DynamicSessionsCodeInterpreterConfig(
+                endpoint="https://fixture.dynamicsessions.io"
+            ),
+        }
+    )
+    capabilities = replace(
+        capabilities,
+        filtered_user_tools=[FunctionTool(name="execute_python", func=lambda code: code)],
+    )
+
+    with pytest.raises(UnsupportedCapabilityError, match="unique custom tool names"):
+        _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
+
+
+def test_maf_keeps_tool_objects_that_copilot_cannot_adapt(tmp_path):
+    resolved, capabilities = _sample()
+    maf_only = FunctionTool(name="bounded", func=lambda: "ok", max_invocations=1)
+    capabilities = replace(capabilities, filtered_user_tools=[maf_only])
+
+    _harness.validate_agent(AppHarness(HarnessKind.MAF, tmp_path), resolved, capabilities)
+
+    assert capabilities.filtered_user_tools == [maf_only]
 
 
 def test_maf_only_configuration_is_not_silently_discarded(preview):
@@ -247,9 +394,96 @@ def test_standalone_unsupported_call_fails_before_backend(preview, monkeypatch):
 
     invoke = AsyncMock()
     monkeypatch.setattr(_copilot, "run", invoke)
-    with pytest.raises(UnsupportedCapabilityError, match="web_request"):
-        asyncio.run(runner.run_agent("hello", tools=[], mcp_tools=[], web_request_tools=[object()]))
+    with pytest.raises(UnsupportedCapabilityError, match="skills"):
+        asyncio.run(
+            runner.run_agent(
+                "hello",
+                tools=[],
+                mcp_tools=[],
+                skill_paths=[preview / "unsupported-skill"],
+            )
+        )
     invoke.assert_not_called()
+
+
+def test_direct_preview_composes_host_tools_in_maf_order(preview, monkeypatch):
+    from azure_functions_agents import _copilot
+
+    user = FunctionTool(name="user_tool", func=lambda: "user")
+    sandbox = FunctionTool(name="execute_python", func=lambda code: code)
+    web = FunctionTool(name="web_request", func=lambda url: url)
+    invoke = AsyncMock(return_value=runner.AgentResult("public-id", "native reply"))
+    monkeypatch.setattr(_copilot, "run", invoke)
+
+    result = asyncio.run(
+        runner.run_agent(
+            "hello",
+            tools=[user],
+            mcp_tools=[],
+            sandbox_tools=[sandbox],
+            web_request_tools=[web],
+        )
+    )
+
+    request = invoke.call_args.args[1]
+    assert result.session_id == "public-id"
+    assert [function.name for function in request.tools] == [
+        "user_tool",
+        "execute_python",
+        "web_request",
+    ]
+
+
+def test_combined_tool_collision_fails_before_native_startup(preview, monkeypatch):
+    from azure_functions_agents import _copilot
+
+    invoke = AsyncMock()
+    monkeypatch.setattr(_copilot, "run", invoke)
+    duplicate = FunctionTool(name="web_request", func=lambda: "duplicate")
+
+    with pytest.raises(UnsupportedCapabilityError, match="unique custom tool names"):
+        asyncio.run(
+            runner.run_agent(
+                "hello",
+                tools=[duplicate],
+                mcp_tools=[],
+                web_request_tools=[duplicate],
+            )
+        )
+
+    invoke.assert_not_called()
+
+
+def test_workflow_management_tools_qualify_for_adapter_but_workflows_stay_rejected(
+    preview,
+):
+    from azure_functions_agents.workflows.tools import build_workflow_tools
+
+    durable_client = AsyncMock()
+    workflow_tools = build_workflow_tools(
+        session_id="public-session",
+        workflow_agent_slug="main",
+        agent_name="main",
+        durable_client=durable_client,
+    )
+
+    assert [function.name for function in _harness.prepare_tools(workflow_tools)] == [
+        "start_workflow",
+        "get_workflow_status",
+        "list_workflows",
+        "cancel_workflow",
+        "terminate_workflow",
+    ]
+    with pytest.raises(UnsupportedCapabilityError, match="workflows"):
+        asyncio.run(
+            runner.run_agent(
+                "hello",
+                tools=[],
+                mcp_tools=[],
+                workflow_enabled=True,
+                workflow_durable_client=durable_client,
+            )
+        )
 
 
 def test_stream_and_leaf_roles_never_fall_back(preview, monkeypatch):
@@ -318,9 +552,54 @@ def test_registered_app_captures_selection_and_newness(preview, monkeypatch):
     asyncio.run(call())
 
 
+def test_copilot_sandbox_tool_uses_public_http_session_id(preview, monkeypatch):
+    from azure_functions_agents import _copilot
+    from azure_functions_agents.registration import _handlers
+
+    resolved, capabilities = _sample()
+    resolved = resolved.model_copy(
+        update={
+            "sandbox_config": DynamicSessionsCodeInterpreterConfig(
+                endpoint="https://fixture.dynamicsessions.io"
+            ),
+        }
+    )
+    capabilities._harness = _harness.get_harness()
+    requests = []
+
+    def build_sandbox(_resolved, session_id):
+        return [
+            FunctionTool(
+                name="execute_python",
+                func=lambda code: f"{session_id}:{code}",
+            )
+        ]
+
+    async def invoke(_selected, request):
+        requests.append(request)
+        return runner.AgentResult(request.session_id, "reply")
+
+    monkeypatch.setattr(_handlers, "build_sandbox_tools_for_session", build_sandbox)
+    monkeypatch.setattr(_copilot, "run", invoke)
+    handler = make_http_agent_handler(resolved, capabilities)
+    response = asyncio.run(
+        handler(SimpleNamespace(headers={}, json=AsyncMock(return_value={"prompt": "calculate"})))
+    )
+
+    public_id = response.headers["x-ms-session-id"]
+    assert requests[0].session_id == public_id
+    assert [function.name for function in requests[0].tools] == [
+        "make_receipt",
+        "execute_python",
+        "web_request",
+    ]
+    contents = asyncio.run(requests[0].tools[1].invoke(arguments={"code": "6 * 7"}))
+    assert contents[0].text == f"{public_id}:6 * 7"
+
+
 def test_off_import_and_index_do_not_import_sdk_or_launch_process(tmp_path):
     script = """
-import sys, subprocess, platform
+import platform, sys, subprocess
 from pathlib import Path
 platform.platform()
 class NoProcess(subprocess.Popen):

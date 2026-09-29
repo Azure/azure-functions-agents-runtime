@@ -1082,16 +1082,21 @@ async def run_agent(
         reject_unsupported(
             mcp=bool(resolved_mcp),
             skills=bool(skill_paths),
-            execute_python=bool(sandbox_tools),
-            web_request=bool(web_request_tools),
             subagents=bool(subagents),
             workflows=workflow_enabled or workflow_policy is not None,
         )
         resolved_model = model or harness.default_model
         if not resolved_model:
             raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
-        resolved_tools = prepare_tools(
+        user_tools = (
             list(discover_user_tools(harness.app_root).tools) if tools is None else list(tools)
+        )
+        resolved_tools = prepare_tools(
+            [
+                *user_tools,
+                *list(sandbox_tools or []),
+                *list(web_request_tools or []),
+            ]
         )
         validated_id = _validate_session_id(session_id)
         effective_instructions = instructions.strip() if instructions and instructions.strip() else None
