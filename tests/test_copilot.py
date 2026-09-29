@@ -182,6 +182,27 @@ async def test_sdk_resume_failure_is_safe_and_never_creates_a_session(preview, m
 
 
 @pytest.mark.asyncio
+async def test_sdk_transient_resume_failure_can_retry_same_session(preview, monkeypatch):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    session = client.resume_session.return_value
+    client.resume_session.side_effect = [RuntimeError("temporary native error"), session]
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(CopilotPreviewError, match="could not resume"):
+            await _copilot.run(preview, _request(new_session=False))
+        retry = await _copilot.run(preview, _request(new_session=False))
+        assert retry.session_id == "example"
+        assert retry.content == "synthetic reply"
+        assert client.resume_session.await_count == 2
+        client.create_session.assert_not_awaited()
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_sdk_metadata_rejects_existing_id_before_create(preview, monkeypatch):
     import copilot
 

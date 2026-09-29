@@ -390,6 +390,16 @@ async def test_missing_or_corrupt_sdk_journal_never_starts_over(native, damage):
 
 @pytest.mark.asyncio
 async def test_authored_preview_http_trigger_creates_and_resumes(native):
+    agent = native.root / "main.agent.md"
+    agent.write_text(
+        agent.read_text(encoding="utf-8").replace(
+            "tools: true\n",
+            "tools: true\ninput_schema:\n  type: object\n  required: [prompt]\n"
+            "  properties:\n    prompt:\n      type: string\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
     app = create_function_app(native.root)
     authored = next(
         item for item in app.get_functions() if item.get_function_name() == "main"
@@ -400,6 +410,12 @@ async def test_authored_preview_http_trigger_creates_and_resumes(native):
     ]
     preview = authored.get_user_function()
     try:
+        invalid_new = await preview(SimpleNamespace(
+            headers={}, json=AsyncMock(return_value={"prompt": 123}),
+        ))
+        assert invalid_new.status_code == 400
+        assert "x-ms-session-id" not in invalid_new.headers
+        assert native.clients == []
         first = await preview(SimpleNamespace(
             headers={},
             json=AsyncMock(return_value={"prompt": 'Call make_receipt with tag "authored-one".'}),
@@ -408,6 +424,12 @@ async def test_authored_preview_http_trigger_creates_and_resumes(native):
         receipt = first.body.decode()
         assert receipt.startswith("receipt-")
         public_id = first.headers["x-ms-session-id"]
+        invalid_existing = await preview(SimpleNamespace(
+            headers={"x-ms-session-id": public_id},
+            json=AsyncMock(return_value={"prompt": 123}),
+        ))
+        assert invalid_existing.status_code == 400
+        assert invalid_existing.headers["x-ms-session-id"] == public_id
         followup = await preview(SimpleNamespace(
             headers={"x-ms-session-id": public_id},
             json=AsyncMock(return_value={"prompt": "Recall the previous receipt, without tools."}),

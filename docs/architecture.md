@@ -283,8 +283,11 @@ while embedded retained native resources.
 
 The SDK owns local native session files under an app-scoped local directory.
 A caller-supplied public session ID requests a strict resume, not a new
-conversation; HTTP adapters retain the ID in response headers. The host does
-not hash completed files, keep a pending/ready overlay or take an OS file lock.
+conversation. An authored HTTP validation or startup error does not return a
+newly generated Copilot ID that has no completed native turn; supplied IDs
+remain in error headers for retry, and MAF header behavior is unchanged. The
+host does not hash completed files, keep a pending/ready overlay or take an OS
+file lock.
 No MAF transcript is imported or mutated. The preview remains one local worker
 and does not qualify multi-worker or Azure hosting; interrupted-turn recovery
 is not guaranteed. Cancellation is session-scoped; application shutdown stops

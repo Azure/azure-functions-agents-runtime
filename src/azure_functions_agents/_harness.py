@@ -24,6 +24,9 @@ if TYPE_CHECKING:
 
 FLAG = "AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT"
 SDK_DISTRIBUTION = "github-copilot-sdk"
+PROVIDER_ENV = "AZURE_FUNCTIONS_AGENTS_PROVIDER"
+FOUNDRY_ENDPOINT_ENV = "FOUNDRY_PROJECT_ENDPOINT"
+WORKER_COUNT_ENV = "FUNCTIONS_WORKER_PROCESS_COUNT"
 
 type ExecutionRole = Literal["primary", "delegate", "workflow_subagent"]
 
@@ -107,19 +110,19 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
             selected = AppHarness(HarnessKind.MAF, root)
         else:
             check_sdk_dependency()
-            raw_provider = os.environ.get("AZURE_FUNCTIONS_AGENTS_PROVIDER", "").strip().lower()
+            raw_provider = os.environ.get(PROVIDER_ENV, "").strip().lower()
             try:
                 provider = ProviderKind(raw_provider)
             except ValueError:
                 raise UnsupportedCapabilityError(
-                    "Copilot preview supports AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry "
+                    f"Copilot preview supports {PROVIDER_ENV}=foundry "
                     "(project Responses + Entra) or openai (BYOK Chat Completions), "
                     "with external native stdio only."
                 ) from None
             endpoint = None
             default_model = os.environ.get("AZURE_FUNCTIONS_AGENTS_MODEL") or None
             if provider is ProviderKind.FOUNDRY:
-                endpoint = os.environ.get("FOUNDRY_PROJECT_ENDPOINT", "").strip().rstrip("/")
+                endpoint = os.environ.get(FOUNDRY_ENDPOINT_ENV, "").strip().rstrip("/")
                 try:
                     url = urlsplit(endpoint)
                     port = url.port
@@ -138,13 +141,13 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
                     or not re.fullmatch(r"/api/projects/[A-Za-z0-9_-]+", url.path)
                 ):
                     raise UnsupportedCapabilityError(
-                        "Copilot Foundry preview requires FOUNDRY_PROJECT_ENDPOINT in the form "
+                        f"Copilot Foundry preview requires {FOUNDRY_ENDPOINT_ENV} in the form "
                         "https://<resource>.services.ai.azure.com/api/projects/<project>."
                     )
                 default_model = os.environ.get("FOUNDRY_MODEL") or default_model
-            if os.environ.get("FUNCTIONS_WORKER_PROCESS_COUNT", "1").strip() != "1":
+            if os.environ.get(WORKER_COUNT_ENV, "1").strip() != "1":
                 raise UnsupportedCapabilityError(
-                    "Copilot local preview requires FUNCTIONS_WORKER_PROCESS_COUNT=1."
+                    f"Copilot local preview requires {WORKER_COUNT_ENV}=1."
                 )
             if os.environ.get("WEBSITE_INSTANCE_ID"):
                 raise UnsupportedCapabilityError(
