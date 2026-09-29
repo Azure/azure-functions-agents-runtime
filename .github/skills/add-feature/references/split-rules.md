@@ -1,8 +1,9 @@
 # Splitting feature work into reviewable PRs
 
 Use this guide when a medium+ feature is too large or risky for one pull
-request. Plan the split in the FRD before implementation so reviewers can
-evaluate both the overall design and each delivery slice.
+request. Plan the split separately from the FRD: the FRD describes intended
+feature behavior, while PR descriptions or a separate delivery plan describe
+the proposed sequence, dependencies, and per-PR scope.
 
 The goal is not the fewest changed lines. The goal is a sequence of focused,
 independently reviewable changes that keeps the repository working after every
@@ -23,10 +24,9 @@ Prefer the smallest coherent PR, not an artificially small PR. Keep tightly
 coupled code, tests, and documentation together when separating them would make
 the change incomplete or harder to understand.
 
-## Plan the split in the FRD
+## Plan the split outside the FRD
 
-Add a delivery plan to the FRD's proposed design when multiple PRs are needed.
-For each PR, record:
+In PR descriptions or a separate delivery plan, record:
 
 | Field | What to capture |
 | --- | --- |
@@ -36,9 +36,9 @@ For each PR, record:
 | Compatibility | How the repository remains usable after this PR |
 | Review focus | The design or behavior reviewers should evaluate |
 
-Record consequential slicing decisions in the FRD Decisions log. Architecture
-review must approve the complete design, even when implementation is delivered
-through several PRs.
+Do not record slicing decisions in the FRD Decisions log. Architecture review
+approves the intended feature contract; PR review checks each delivery slice
+against that contract and verifies that intermediate states remain usable.
 
 ## Choose a split strategy
 
@@ -116,7 +116,7 @@ Do not:
 - separate tests from the behavior they verify;
 - divide work by arbitrary line or file counts;
 - merge temporary no-op branches, dead flags, or unused APIs;
-- hide required follow-up work outside the FRD or PR description;
+- hide required follow-up work outside the PR description or delivery plan;
 - place unrelated cleanup into an otherwise focused feature PR;
 - create a dependency chain when independent vertical slices are possible.
 

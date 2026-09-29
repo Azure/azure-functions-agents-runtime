@@ -22,12 +22,17 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 MAF remains the default. A separate, local-only
 [Copilot foundation sample](samples/copilot-preview/README.md) supports an explicit
 `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=true` opt-in for non-streaming HTTP,
-simple Python tools and completed-turn native-session continuity. It documents
-the pinned SDK/runtime, Foundry Entra setup, unsupported capabilities, real
-request/tool/follow-up verification and the flag-off restart path. This is not
-production activation or full provider/role/streaming parity; existing MAF
-history is untouched. Configured output-token caps are not supported in this
-Copilot preview; MAF retains its output-limit controls.
+filtered explicit Python tools, the configured `web_request` tool, session-bound
+ACA `execute_python` adapter wiring, host-validated structured results on
+authored HTTP-trigger routes, and completed-turn native-session continuity. ACA
+catalog/session scoping is unit-qualified; real Copilot-to-ACA execution remains
+a separately gated acceptance item. It documents the pinned SDK/runtime,
+Foundry Entra setup, supported tool policy, unsupported capabilities, real
+request/tool/follow-up verification and the flag-off restart path. Ambient SDK
+shell/file/web/todo/task/human-input tools are disabled. This is not production
+activation or provider/session persistence/MCP/skills/role/streaming parity;
+existing MAF history is untouched. Configured output-token caps are not
+supported in this Copilot preview; MAF retains its output-limit controls.
 
 ## Installation
 
