@@ -13,6 +13,10 @@ from typing import TYPE_CHECKING, Any, TypedDict
 
 from ._credential import build_async_credential
 from ._harness import (
+    AZURE_OPENAI_API_VERSION_ENV,
+    AZURE_OPENAI_ENDPOINT_ENV,
+    FOUNDRY_ENDPOINT_ENV,
+    OPENAI_API_KEY_ENV,
     AppHarness,
     CopilotPreviewError,
     HarnessKind,
@@ -45,6 +49,7 @@ if TYPE_CHECKING:
 
 _AZURE_OPENAI_SCOPE = "https://cognitiveservices.azure.com/.default"
 _FOUNDRY_SCOPE = "https://ai.azure.com/.default"
+_AZURE_OPENAI_API_KEY_ENV = "AZURE_OPENAI_API_KEY"
 
 
 class _SessionOptions(TypedDict):
@@ -209,9 +214,11 @@ async def shutdown() -> None:
 
 
 def _token(_args: ProviderTokenArgs) -> str:
-    token = os.environ.get("OPENAI_API_KEY", "").strip()
+    token = os.environ.get(OPENAI_API_KEY_ENV, "").strip()
     if not token:
-        raise CopilotPreviewError("Copilot OpenAI preview requires OPENAI_API_KEY in the host environment.")
+        raise CopilotPreviewError(
+            f"Copilot OpenAI preview requires {OPENAI_API_KEY_ENV} in the host environment."
+        )
     return token
 
 
@@ -284,7 +291,7 @@ def _build_provider(harness: AppHarness, owner: _NativeRuntime, model: str) -> P
         )
         if harness.azure_api_version is not None:
             provider["azure"] = {"api_version": harness.azure_api_version}
-        api_key = os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
+        api_key = os.environ.get(_AZURE_OPENAI_API_KEY_ENV, "").strip()
         if api_key:
             provider["api_key"] = api_key
         else:
@@ -305,33 +312,31 @@ def _build_provider(harness: AppHarness, owner: _NativeRuntime, model: str) -> P
 
 
 def _provider(harness: AppHarness, owner: _NativeRuntime, model: str) -> ProviderConfig:
-    api_key = (
-        harness.provider == ProviderKind.AZURE_OPENAI
-        and bool(os.environ.get("AZURE_OPENAI_API_KEY", "").strip())
-    )
     try:
         return _build_provider(harness, owner, model)
     except CopilotPreviewError:
         raise
     except Exception:
         if harness.provider == ProviderKind.AZURE_OPENAI:
-            authentication = "AZURE_OPENAI_API_KEY" if api_key else "Azure credential"
+            api_key = bool(os.environ.get(_AZURE_OPENAI_API_KEY_ENV, "").strip())
+            authentication = _AZURE_OPENAI_API_KEY_ENV if api_key else "Azure credential"
             diagnostic = (
-                "Copilot Azure OpenAI provider setup failed. Check AZURE_OPENAI_ENDPOINT, "
-                "AZURE_OPENAI_API_VERSION, the deployment, and the approved "
+                "Copilot Azure OpenAI provider setup failed. Check "
+                f"{AZURE_OPENAI_ENDPOINT_ENV}, {AZURE_OPENAI_API_VERSION_ENV}, "
+                "the deployment, and the approved "
                 f"{authentication} configuration."
             )
         elif harness.provider == ProviderKind.FOUNDRY:
             authentication = "Azure credential"
             diagnostic = (
-                "Copilot Foundry provider setup failed. Check FOUNDRY_PROJECT_ENDPOINT, "
+                f"Copilot Foundry provider setup failed. Check {FOUNDRY_ENDPOINT_ENV}, "
                 "the deployment, and the approved Azure credential configuration."
             )
         else:
-            authentication = "OPENAI_API_KEY"
+            authentication = OPENAI_API_KEY_ENV
             diagnostic = (
                 "Copilot OpenAI provider setup failed. Check the model and "
-                "OPENAI_API_KEY configuration."
+                f"{OPENAI_API_KEY_ENV} configuration."
             )
         logger.error(
             "Copilot provider setup failed: provider=%s authentication=%s; "

@@ -263,8 +263,8 @@ execution rechecks in case `set_client_manager()` replaced it later. Rejection i
 an explicit migration diagnostic with no custom MAF client construction or
 fallback.
 
-Copilot SDK 1.0.14 uses the stable singular `ProviderConfig` on both create and
-resume:
+The Copilot SDK version pinned in `pyproject.toml` uses the stable singular
+`ProviderConfig` on both create and resume:
 
 | Target | SDK provider | Authentication and model mapping |
 | --- | --- | --- |
@@ -284,18 +284,18 @@ The supported subset remains non-streaming HTTP, simple Python tools and local
 native-session continuity. The custom-only tool allowlist is checked against the
 native catalog before every prompt. Empty mode disables ambient instructions,
 plugins, skills, telemetry and authentication; ungranted native permission
-requests are denied. In SDK 1.0.14/native 1.0.85, output-limit metadata does not
-emit a provider API generation cap; configured `max_output_tokens` is therefore
-rejected for this opt-in, not silently dropped. Default MAF controls remain
-unchanged.
+requests are denied. In the pinned SDK/native runtime, output-limit metadata
+does not emit a provider API generation cap; configured `max_output_tokens` is
+therefore rejected for this opt-in, not silently dropped. Default MAF controls
+remain unchanged.
 
-The SDK 1.0.14 wheel contains Python code but no native assets. The SDK obtains
-native 1.0.85 lazily on first client construction if it is not already cached,
-so the first Copilot-enabled request can incur download and extraction time.
-Later clients with access to the same cache reuse it. The app adds no separate
-CLI setup or download settings; default-off MAF never constructs the SDK
-client. A requirements-only Functions build installs the Python dependency but
-does not prepackage native assets. Install-time delivery through a Python
+The pinned SDK wheel contains Python code but no native assets. The SDK obtains
+native assets lazily on first client construction if they are not already
+cached, so the first Copilot-enabled request can incur download and extraction
+time. Later clients with access to the same cache reuse it. The app adds no
+separate CLI setup or download settings; default-off MAF never constructs the
+SDK client. A requirements-only Functions build installs the Python dependency
+but does not prepackage native assets. Install-time delivery through a Python
 runtime dependency is tracked upstream in
 [github/copilot-sdk#2789](https://github.com/github/copilot-sdk/issues/2789).
 External stdio remains the transport: experimental embedded FFI still needs

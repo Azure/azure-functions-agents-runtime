@@ -202,6 +202,20 @@ def native(monkeypatch, tmp_path, request):
             assert request.url.host == expected_route[0]
             assert request.url.path == expected_route[1]
             assert dict(request.url.params) == expected_route[2]
+            headers = dict(request.headers)
+            bearer = "Bearer " + SENTINEL
+            expected_auth = {
+                "openai": ("authorization", bearer),
+                "azure_openai_entra_versionless": ("authorization", bearer),
+                "azure_openai_api_key_versioned": ("api-key", SENTINEL),
+                "foundry": ("authorization", bearer),
+            }[provider_case]
+            raw_header_names = {name.decode("ascii") for name, _value in request.headers.raw}
+            assert expected_auth[0] in raw_header_names
+            assert headers[expected_auth[0]] == expected_auth[1]
+            if provider_case == "azure_openai_api_key_versioned":
+                assert "authorization" not in headers
+                assert "authorization" not in raw_header_names
             body = json.loads(await request.aread())
             captured.append(body)
             responses = request.url.path.endswith("/responses")

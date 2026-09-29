@@ -45,6 +45,8 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
   mirror the module name as `tests/test_<module>.py`.
 - Use a module constant rather than repeating a named URL, API version, package
   distribution, environment variable, or path.
+- Avoid duplicated logic: when two code paths share the same validation or parsing
+  shape, extract a shared helper and keep only caller-specific policy separate.
 - Declare each finite domain vocabulary once in its owning module. Use a
   `StrEnum` when the vocabulary is a runtime concept or crosses a persistence,
   serialization, logging, or API boundary; consumers should use named enum

@@ -42,6 +42,9 @@ bug fixes.
 5. If the implementation is too large or risky for one reviewable PR, read
    [`references/split-rules.md`](references/split-rules.md). Add the proposed PR
    sequence and dependencies to the FRD before architecture review.
+6. Keep the FRD focused on intended behavior, contracts, and durable decisions.
+   Do not encode delivery mechanics such as PR numbers, commit SHAs, temporary
+   slice/phasing labels, or package versions already owned by `pyproject.toml`.
 
 ## Phase 2 — Architecture review (planning mode)  *(gate: human sign-off → `status: Finalized`)*
 

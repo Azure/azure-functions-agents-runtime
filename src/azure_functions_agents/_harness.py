@@ -112,56 +112,62 @@ def validate_copilot_client_manager() -> None:
         )
 
 
-def _foundry_endpoint() -> str:
-    endpoint = os.environ.get(FOUNDRY_ENDPOINT_ENV, "").strip().rstrip("/")
+def _validated_https_endpoint(
+    env_name: str,
+    *,
+    host_check: Callable[[str], bool],
+    path_check: Callable[[str], bool],
+    allowed_ports: frozenset[int | None] | None,
+    invalid_url_diagnostic: str,
+    invalid_shape_diagnostic: str,
+) -> str:
+    endpoint = os.environ.get(env_name, "").strip().rstrip("/")
     try:
         url = urlsplit(endpoint)
         port = url.port
     except ValueError:
-        raise UnsupportedCapabilityError(
-            "Copilot Foundry preview requires a valid HTTPS project endpoint."
-        ) from None
+        raise UnsupportedCapabilityError(invalid_url_diagnostic) from None
     if (
         url.scheme != "https"
-        or not (url.hostname or "").endswith(".services.ai.azure.com")
+        or not host_check(url.hostname or "")
         or url.username is not None
         or url.password is not None
         or url.query
         or url.fragment
-        or port not in {None, 443}
-        or not re.fullmatch(r"/api/projects/[A-Za-z0-9_-]+", url.path)
+        or not path_check(url.path)
+        or (allowed_ports is not None and port not in allowed_ports)
+        or (allowed_ports is None and port == 0)
     ):
-        raise UnsupportedCapabilityError(
+        raise UnsupportedCapabilityError(invalid_shape_diagnostic)
+    return endpoint
+
+
+def _foundry_endpoint() -> str:
+    return _validated_https_endpoint(
+        FOUNDRY_ENDPOINT_ENV,
+        host_check=lambda host: host.endswith(".services.ai.azure.com"),
+        path_check=lambda path: bool(re.fullmatch(r"/api/projects/[A-Za-z0-9_-]+", path)),
+        allowed_ports=frozenset({None, 443}),
+        invalid_url_diagnostic="Copilot Foundry preview requires a valid HTTPS project endpoint.",
+        invalid_shape_diagnostic=(
             f"Copilot Foundry preview requires {FOUNDRY_ENDPOINT_ENV} in the form "
             "https://<resource>.services.ai.azure.com/api/projects/<project>."
-        )
-    return endpoint
+        ),
+    )
 
 
 def _azure_openai_endpoint() -> str:
-    endpoint = os.environ.get(AZURE_OPENAI_ENDPOINT_ENV, "").strip().rstrip("/")
-    try:
-        url = urlsplit(endpoint)
-        port = url.port
-    except ValueError:
-        raise UnsupportedCapabilityError(
-            f"Copilot Azure OpenAI requires a valid host-only {AZURE_OPENAI_ENDPOINT_ENV}."
-        ) from None
-    if (
-        url.scheme != "https"
-        or not url.hostname
-        or any(character.isspace() for character in url.hostname)
-        or url.username is not None
-        or url.password is not None
-        or url.path not in {"", "/"}
-        or url.query
-        or url.fragment
-        or port == 0
-    ):
-        raise UnsupportedCapabilityError(
-            f"Copilot Azure OpenAI requires a valid host-only {AZURE_OPENAI_ENDPOINT_ENV}."
-        )
-    return endpoint
+    diagnostic = (
+        f"Copilot Azure OpenAI requires a valid host-only {AZURE_OPENAI_ENDPOINT_ENV}."
+    )
+    return _validated_https_endpoint(
+        AZURE_OPENAI_ENDPOINT_ENV,
+        host_check=lambda host: bool(host) and not any(character.isspace() for character in host),
+        path_check=lambda path: path in {"", "/"},
+        allowed_ports=None,
+        invalid_url_diagnostic=diagnostic,
+        invalid_shape_diagnostic=diagnostic,
+    )
 
 
 def _azure_openai_api_version() -> str | None:
