@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 WIDTH: Final = 1200
 HEIGHT: Final = 675
 FRAME_COUNT: Final = 60
+STANDARD_FRAME_COUNT: Final = 96
 FRAME_DURATION_MS: Final = 75
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -211,7 +212,7 @@ def _save(frames: list[Image.Image], path: Path) -> None:
 def _agent_loop_frame(frame: int) -> Image.Image:
     image = _base_frame().convert("RGBA")
     draw = ImageDraw.Draw(image)
-    phase_length = FRAME_COUNT / 3
+    phase_length = STANDARD_FRAME_COUNT / 3
     round_index = min(2, int(frame / phase_length))
     round_progress = (frame % phase_length) / phase_length
     stage = min(3, int(round_progress * 4))
@@ -221,14 +222,15 @@ def _agent_loop_frame(frame: int) -> Image.Image:
     _text(
         draw,
         (55, 91),
-        "Every tool step returns through the model — and resends a growing context.",
+        "The model calls three tools one at a time. Each result returns through the model.",
         font=FONT_SUBTITLE,
         fill=MUTED,
     )
 
     context_box = (55, 165, 350, 453)
     llm_box = (465, 205, 715, 365)
-    tool_box = (850, 205, 1145, 365)
+    tool_boxes = [(850, 150 + index * 85, 1145, 220 + index * 85) for index in range(3)]
+    tool_names = ["search()", "inspect()", "act()"]
     history_box = (465, 455, 715, 580)
 
     active = [stage == index for index in range(4)]
@@ -246,12 +248,18 @@ def _agent_loop_frame(frame: int) -> Image.Image:
         glow=BLUE,
         glow_strength=0.8 if active[0] or active[3] else 0,
     )
-    _panel(
-        image,
-        tool_box,
-        glow=PURPLE,
-        glow_strength=0.8 if active[1] else 0,
-    )
+    for index, box in enumerate(tool_boxes):
+        calling = index == round_index and stage == 1
+        done = index < round_index or (index == round_index and stage >= 2)
+        _panel(
+            image,
+            box,
+            fill="#10243a" if calling or done else PANEL,
+            outline=PURPLE if calling else GREEN if done else "#29435e",
+            radius=14,
+            glow=PURPLE,
+            glow_strength=0.9 if calling else 0,
+        )
     _panel(
         image,
         history_box,
@@ -287,15 +295,35 @@ def _agent_loop_frame(frame: int) -> Image.Image:
             ("one model round-trip", FONT_SMALL, MUTED),
         ],
     )
-    _centered_lines(
-        draw,
-        tool_box,
-        [
-            ("TOOL CALL", FONT_HEADING, TEXT),
-            (["search()", "inspect()", "act()"][round_index], FONT_MONO, PURPLE),
-            ("raw result", FONT_SMALL, MUTED),
-        ],
-    )
+    for index, box in enumerate(tool_boxes):
+        x1, y1, x2, y2 = box
+        mid_y = (y1 + y2) // 2
+        calling = index == round_index and stage == 1
+        done = index < round_index or (index == round_index and stage >= 2)
+        badge_fill = PURPLE if calling else GREEN if done else "#29435e"
+        draw.ellipse((x1 + 16, mid_y - 15, x1 + 46, mid_y + 15), fill=badge_fill)
+        _text(draw, (x1 + 31, mid_y), str(index + 1), font=FONT_HEADING, fill=TEXT, anchor="mm")
+        _text(
+            draw,
+            (x1 + 62, mid_y - 11),
+            f"TOOL {index + 1}",
+            font=FONT_SMALL,
+            fill=MUTED,
+            anchor="lm",
+        )
+        _text(
+            draw,
+            (x1 + 62, mid_y + 12),
+            tool_names[index],
+            font=FONT_MONO,
+            fill=TEXT if calling or done else "#526a80",
+            anchor="lm",
+        )
+        status, status_color = (
+            ("calling…", PURPLE) if calling else ("result", GREEN) if done else ("waiting", MUTED)
+        )
+        _text(draw, (x2 - 16, mid_y), status, font=FONT_SMALL, fill=status_color, anchor="rm")
+
     _centered_lines(
         draw,
         history_box,
@@ -305,16 +333,22 @@ def _agent_loop_frame(frame: int) -> Image.Image:
         ],
     )
 
-    arrows = [
+    tool_mid = (tool_boxes[round_index][1] + tool_boxes[round_index][3]) // 2
+    _arrow(draw, (350, 285), (465, 285), fill="#35536f")
+    for box in tool_boxes:
+        _arrow(draw, (715, 285), (850, (box[1] + box[3]) // 2), fill="#35536f")
+    _arrow(draw, (850, tool_mid + 12), (715, 500), fill="#6b5634")
+    _arrow(draw, (590, 455), (590, 365), fill="#35536f")
+
+    particles = [
         ((350, 285), (465, 285), CYAN),
-        ((715, 285), (850, 285), PURPLE),
-        ((998, 365), (715, 500), AMBER),
+        ((715, 285), (850, tool_mid), PURPLE),
+        ((850, tool_mid + 12), (715, 500), AMBER),
         ((590, 455), (590, 365), BLUE),
     ]
-    for index, (start, end, color) in enumerate(arrows):
-        _arrow(draw, start, end, fill="#35536f")
-        if stage == index:
-            _particle(image, start, end, _ease(stage_progress), color)
+    start, end, color = particles[stage]
+    _particle(image, start, end, _ease(stage_progress), color)
+    draw = ImageDraw.Draw(image)
 
     _metric(draw, (55, 505, 350, 580), "Model round-trips", f"{round_index + 1} and growing", RED)
     token_fraction = (0.34, 0.65, 0.94)[round_index]
@@ -580,7 +614,7 @@ def _dynamic_workflow_frame(frame: int) -> Image.Image:
 
 
 def main() -> None:
-    standard_frames = [_agent_loop_frame(frame) for frame in range(FRAME_COUNT)]
+    standard_frames = [_agent_loop_frame(frame) for frame in range(STANDARD_FRAME_COUNT)]
     workflow_frames = [_dynamic_workflow_frame(frame) for frame in range(FRAME_COUNT)]
     _save(standard_frames, OUTPUT_DIR / "standard-agent-loop.gif")
     _save(workflow_frames, OUTPUT_DIR / "dynamic-workflow.gif")
