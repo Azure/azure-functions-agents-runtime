@@ -1,12 +1,13 @@
 ---
 frd: 0009
 title: Copilot SDK agent harness
-status: Finalized
+status: In review
 author: larohra
 created: 2026-09-28
-updated: 2026-09-28
+updated: 2026-09-29
 issues:
   - https://github.com/Azure/azure-functions-bucees-planning/issues/1332
+  - https://github.com/Azure/azure-functions-bucees-planning/issues/1336
 pull_requests: []
 branch: null
 ---
@@ -247,6 +248,143 @@ SSRF controls, budgets, and error shape. Keep ACA Dynamic Sessions
 `execute_python` endpoint/authentication/session scoping and result/error behavior;
 do not replace remote execution with a local SDK shell or code interpreter.
 
+#### 4.3.1 Issue #1336 MCP and skills compatibility slice
+
+This amendment proposes one direct-run MCP/skills compatibility slice. It keeps
+`github-copilot-sdk` 1.0.14, native runtime 1.0.85, and protocol 3 pinned for the
+slice, with no dependency-manifest or schema change. MAF remains the default;
+Copilot remains an app-level, default-off, local-only preview with no automatic
+fallback. All choices in this subsection await explicit human sign-off.
+
+**Neutral discovery and registration boundary.** MCP discovery returns an
+immutable, harness-neutral remote descriptor alongside the existing MAF wrapper.
+It contains the literal authored server name and URL, transport normalized to
+HTTP, repr-hidden static headers, a tool filter represented as all/none/a finite
+set, and optional Entra scope and client ID. Discovery remains read-only.
+Registration remains the authority for per-agent filtering, and `HarnessRequest`
+receives only the descriptors already filtered for that execution role.
+
+**Copilot MCP staging.** Use only the public-but-experimental `copilot.rpc` and
+`copilot.session_events` APIs; do not read private SDK or MAF attributes. The
+high-level `mcp_servers` option starts servers before refreshable headers can be
+served, so create or resume the session with no MCP servers, register interest in
+`mcp.headers_refresh_required`, then call
+`session.rpc.mcp.start_server(MCPSerializableServerConfig(...))` with
+`headers_refresh_ttl_ms=0`. Repeat event registration and server start after
+every resume.
+
+For a server without an `auth` descriptor, all authored static headers pass
+through unchanged, including `Authorization`. For a server with an `auth`
+descriptor, reject any authored header whose name collides case-insensitively
+with `Authorization`; pass the remaining static headers through and supply
+`Authorization` only through the dynamic header broker. The broker accepts only
+an exact configured server-name and URL pair, uses only that descriptor's
+configured scope and client ID, and caches a token only until its five-minute
+refresh window. An auth-failed signal closes and replaces the credential before
+another attempt. Refresh failures return one constant redacted failure and never
+log header or token values. If the staged event-registration/start sequence
+cannot be established, an authenticated server fails before any prompt. There
+is no interactive OAuth, inferred scope, upscope, or other fallback.
+
+Before a prompt, poll each staged server from pending to connected, then use
+`list_tools` plus `CurrentToolMetadata` provenance to verify the effective
+catalog. Reject missing, failed, needs-auth, or extra servers; a missing member
+of a finite allowlist; any tool exposure for a none/empty filter; collisions
+after native name flattening; and any unexpected native tool. The native
+model-facing MCP name `<server>-<raw-tool>` is documented as a preview-only
+naming difference. `available_tools` may include `mcp:*` only because empty-mode
+and config discovery are disabled, the exact server configs are staged, the
+catalog is verified, and permission callbacks remain authoritative.
+
+Approve an MCP request only when its configured server and raw tool match and
+`managed_approval_required` is not true. When managed approval is required,
+return the stable headless user-unavailable/deny result. Deny every ambient or
+unattributed request.
+
+**Skills adaptation.** Do not use SDK-native skills, `builtin:skill`, native
+file/read/shell tools, or `disabled_skills`. For each Copilot role and run, use
+the public MAF 1.13 `FileSkillsSource` with only its already-filtered exact roots
+and the bounded runner to obtain the `FileSkill` sequence. Verify every skill's
+frontmatter name and canonical path against the expected exact-root inventory,
+then construct `SkillsProvider` from that verified sequence and call its public
+`before_run` into public `AgentSession`/`SessionContext`. The shared provider
+factory for ordinary MAF construction may use `SkillsProvider.from_paths` with
+the same validator and runner. Reuse the provider's progressive-disclosure
+instructions and its exact three `FunctionTool` objects (`load_skill`,
+`read_skill_resource`, and `run_skill_script`) unchanged through the existing
+Copilot custom-tool adapter. Empty tool mode allowlists only those custom names
+for the skills portion of the catalog. Reserve all three names against other
+custom, system, delegate, and flattened MCP tool names.
+
+Fail closed on any inventory difference. Do not add a global skill/provider
+cache: provider, session, context, instructions, and tools are per-role and
+per-run. The adapter remains role-local and consumes only supplied paths.
+Catalog leaves therefore retain project skills, while a direct
+workflow-capability copy may add `data-driven-workflows` only after those
+execution roles are enabled.
+
+**Shared file-skill script runner.** Add one bounded runner used by both MAF and
+Copilot so the documented autonomous skill contract is real in both harnesses.
+MAF currently exposes `run_skill_script` without a runner; correcting that
+flag-off behavior is tightly coupled to this slice and requires human approval,
+despite the general flag-off compatibility rule.
+
+Skills are trusted, deployment-owned application code with the same trust level
+as `tools/*.py`; this runner is not an OS sandbox. Adversarially mutable or
+untrusted skill trees remain unsupported. A model may invoke only a discovered,
+in-root `.py` script by its exact name. Repeat canonical containment and symlink
+checks at invocation. Invoke `sys.executable` without a shell, using literal
+`list[str]` arguments; object arguments fail validation. Close stdin, use the
+discovered skill root as fixed cwd, inherit the host environment, and never log
+script arguments or output.
+
+The execution deadline is `min(30 seconds, request remaining)`, with at most 128
+arguments, 16 KiB of encoded arguments, and 64 KiB of combined stdout/stderr.
+On timeout, cancellation, or output overflow, terminate and reap the full
+process tree: a POSIX process group, or a Windows Job Object. Fail closed before
+execution if Windows containment cannot be established. Spawn failures and
+nonzero exits return stable redacted errors.
+
+Skill discovery must fail explicitly at startup for a symlinked root,
+`SKILL.md`, or tree entry; canonical path escape; directory/frontmatter name
+mismatch; malformed metadata; or duplicate name. This replaces MAF's silent
+dropping. Migration guidance must tell authors to replace links with
+deployment-owned in-root files, align directory and frontmatter names, correct
+metadata, and remove duplicates before startup.
+
+**Role boundary and compatibility matrix.** This slice removes MCP/skills
+rejection only for otherwise-supported direct Copilot runs. Copilot chat
+delegation, Dynamic Workflows, and Workflow Sub Agent execution remain
+explicitly rejected because their runner/session milestones are owned by other
+slices. Do not special-case or bypass those rejections, and do not claim runtime
+workflow execution here.
+
+| Capability/role | Flag off (MAF) | Copilot preview in this slice |
+| --- | --- | --- |
+| Direct remote HTTP MCP | Existing filtered behavior | Proposed staged, verified behavior above |
+| Direct project skills | Existing behavior plus the proposed shared runner and fail-fast discovery correction | Proposed exact-root, three-tool adaptation plus the shared runner |
+| Chat delegate or Workflow Sub Agent MCP/skills | Existing role policy | Explicitly rejected |
+| Dynamic Workflow execution/management | Existing Durable behavior | Explicitly rejected |
+| SDK-native skills or native file/read/shell tools | Not introduced | Disabled/not used |
+
+Add structural tests that direct capability copies cannot mutate catalog leaves,
+leaves receive only project skill roots, and future direct workflow-capability
+copies cannot leak `data-driven-workflows` into leaf roles.
+
+**Delivery boundary.** One combined compatibility PR is proposed for issue
+#1336 because MCP and skills share `HarnessRequest`, session-option, catalog,
+permission, documentation, and sample gates. This exception to the normal
+smaller-slice preference needs explicit human reviewer agreement. It changes no
+schema or dependency manifest.
+
+The PR gate includes pinned-native no-model tests and create/resume parity;
+authenticated local HTTP MCP, all/none/finite filters, catalog provenance,
+collisions, approvals, and safe failures; skill load/resource/script behavior,
+script bounds/containment, and role isolation; and flag-off regressions.
+Documentation must publish the matrix above and the preview-only MCP naming
+difference. The local preview sample must provide copy/paste setup, request,
+expected failure, and cleanup for both authenticated MCP and skill execution.
+
 ### 4.4 Native runtime lifetime
 
 The proposed default is the external native Rust runtime over stdio, with one
@@ -378,15 +516,18 @@ it was not an Azure Functions deployment qualification.
 
 The Blob evidence did not establish distributed ownership or concurrent-reader
 safe rename. A storage-error path allowed inference before acknowledgment.
-Compacted cold restore, Functions hosting, MCP, scoped skills, public streaming/
-structured-response parity, and content-safe telemetry remain unqualified.
-The assessment's mid-turn recovery experiments do not add those capabilities to
-this feature's scope.
+Compacted cold restore, Functions hosting, public streaming/structured-response
+parity, and content-safe telemetry remain unqualified. MCP and scoped skills now
+have the proposed issue #1336 mapping in section 4.3.1, but it remains
+unimplemented, unqualified, and pending human sign-off. The assessment's
+mid-turn recovery experiments do not add those capabilities to this feature's
+scope.
 
-Sign-off approves the feature-level contracts, not a production SDK pin or
-unverified compatibility mappings. The following implementation decisions and
-qualification obligations remain open. Unsupported capabilities must continue
-to follow the explicit preview-rejection rules.
+The 2026-09-28 sign-off approves the original feature-level contracts, not the
+2026-09-29 compatibility amendment, its slice pin, or its mapping. The following
+implementation decisions and qualification obligations remain open.
+Unsupported capabilities must continue to follow the explicit preview-rejection
+rules.
 
 | Implementation item | Resolution or evidence required for supported behavior |
 | --- | --- |
@@ -395,12 +536,15 @@ to follow the explicit preview-rejection rules.
 | Native continuation and presentation | Establish a supported native history projection, compaction/reference preservation and cold-restore evidence, and metadata-only incompatible-history detection/rollback behavior. Rendering history must not become a second execution-state authority. |
 | Configuration compatibility | Decide the enforceable portable output limit and treatment/replacement of MAF-specific compaction configuration, preserving recursive inheritance/null behavior without claiming equivalent algorithms. |
 | Extension compatibility | Define the supported custom `ClientManager` contract and MAF `FunctionTool` conversion boundary, including authored decorator kwargs, approval semantics, unsupported hooks/options, and construction-time validation. Preserve MAF extensions with the flag off. |
+| Issue #1336 MCP/skills compatibility | **Proposed, pending human sign-off:** use the pinned 1.0.14/1.0.85/protocol-3 public experimental staging and verification seam, neutral filtered MCP descriptors, exact-root public-MAF skill adaptation, and the bounded shared script runner in section 4.3.1. Qualification must establish create/resume parity, authenticated refresh, catalog/permission enforcement, process containment, and flag-off safety. |
+| Issue #1336 delivery | **Proposed, pending human sign-off:** one combined direct-run compatibility PR with no schema/dependency change; retain explicit Copilot delegate/workflow rejection and require the tests, matrix, documentation, and copy/paste sample named in sections 4.3.1, 6, and 7. |
 
 ## 5. Decisions log
 
 Dates below record the original scope approvals and proposals. Decision 12
 records human sign-off on the feature specification, without claiming that its
 remaining implementation decisions or qualification obligations are complete.
+Decisions 13-17 append the 2026-09-29 agent proposal and await human sign-off.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
@@ -416,6 +560,11 @@ remaining implementation decisions or qualification obligations are complete.
 | 10 | Workflows across app restarts/deployments | Custom harness pinning/lifecycle rules / existing Durable behavior | Follow Durable replay, retry, worker lifetime, and configured deployment routing; each executing app instance supplies its own selection, with no new persisted harness pin or mismatch rejection | Human | 2026-09-28 |
 | 11 | Session startup failures | Prescribe marker sequencing / specify observable behavior | Require one active turn per agent/session, safe retry after a startup failure that did not begin a turn or damage state, and explicit errors for uncertain continuation; leave marker ordering and cleanup to implementation | Human | 2026-09-28 |
 | 12 | Feature specification sign-off | Keep In review / finalize the agreed feature contracts | Finalized after approving decision 11; section 4.8 remains an explicit record of unresolved implementation choices and required evidence, not a claim of parity or production readiness | Human (larohra) | 2026-09-28 |
+| 13 | Issue #1336 version/API seam | Upgrade or loosen versions / retain the slice pin and public experimental staging | Retain `github-copilot-sdk` 1.0.14, native 1.0.85, and protocol 3; create/resume without MCP, then register refresh interest and start exact configs through public `copilot.rpc`/`copilot.session_events` APIs | Agent proposal/pending human sign-off | 2026-09-29 |
+| 14 | MCP authority and safety | SDK discovery/ambient permissions / host-filtered descriptors and verified catalog | Keep registration authoritative, stage only filtered neutral descriptors, dynamically broker only configured auth, verify server/tool provenance before prompt, and deny ambient or managed-approval requests | Agent proposal/pending human sign-off | 2026-09-29 |
+| 15 | Skills and script execution | SDK-native skills or exposed tools without execution / exact public-MAF adaptation and shared runner | Adapt exact per-role roots into the existing custom-tool seam and add the bounded contained file-skill runner plus fail-fast discovery for both harnesses; this flag-off correction requires explicit approval | Agent proposal/pending human sign-off | 2026-09-29 |
+| 16 | Compatibility role boundary | Enable workflow/delegate roles opportunistically / direct supported runs only | Remove MCP/skills rejection only for direct Copilot runs; retain delegation, Dynamic Workflow, and Workflow Sub Agent rejection without bypasses, with structural non-leakage tests | Agent proposal/pending human sign-off | 2026-09-29 |
+| 17 | Issue #1336 delivery shape | Separate MCP/skills PRs / one combined compatibility PR | Propose one combined PR because the capabilities share request/session/catalog/permission/sample gates; no schema/dependency change, and the larger-slice exception requires human reviewer agreement | Agent proposal/pending human sign-off | 2026-09-29 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -431,7 +580,10 @@ where mocks cannot establish process, transport, authentication, or durability.
 | Unsupported features | Effective inherited/default-on capabilities and unmapped configuration/extensions fail before provider inference or tool effects. Isolated previews of supported capabilities execute real SDK turns. |
 | Authoring/API | Existing precedence/null scenarios, tool `None`/empty semantics, routes/auth, response envelopes, structured-output validation/errors, history projection/degradation/errors/bounds, and SSE ordering/cancellation remain compatible. No native or specialist events leak. |
 | Models/extensions | Verify supported providers/Entra refresh, model metadata, disabled provider conversation storage, deadlines, output limits, and explicit custom-manager/tool compatibility, including a manager replaced after composition. MAF hooks remain intact off. |
-| Tools/MCP/skills | Cover sync/async, Pydantic, both decorator orders, workflow-only tools, approval options, allowlists, HTTP MCP headers/refresh/errors, lazy scoped skills/resources/scripts, and denied ambient capabilities. Assert callable/effect counts and no unexpected interactive approval gate. |
+| Tools | Cover sync/async, Pydantic, both decorator orders, workflow-only tools, approval options, and denied ambient capabilities. Assert callable/effect counts and no unexpected interactive approval gate. |
+| MCP compatibility slice | At the pinned SDK/native/protocol versions, run no-model tests for event-interest-before-start and exact config on both create and resume. Exercise an authenticated local HTTP server, static versus dynamic headers, five-minute refresh, auth-failed credential replacement, all/none/finite filters, pending-to-connected polling, `list_tools`/`CurrentToolMetadata` provenance, flattened-name collisions, missing/extra/needs-auth servers/tools, managed approval, ambient denial, and constant redacted failures. Assert no prompt before successful verification and no OAuth/upscope fallback. |
+| Skills compatibility slice | Exercise exact-root load, progressive instructions, `load_skill`, `read_skill_resource`, and `run_skill_script`; name collisions; inventory mismatch; every fail-fast discovery case and migration fixture; literal argument validation; deadline/cancellation/output bounds; process-tree containment/reaping; redacted spawn/nonzero failures; and no content logs. Run against both harnesses where the shared correction applies. |
+| Compatibility/role isolation | Verify flag-off MCP/tool behavior and, if approved, the proposed MAF discovery/runner correction without Copilot startup. Structurally prove per-run provider state, direct-copy/catalog-leaf non-mutation, project-skill retention, no `data-driven-workflows` leakage, and unchanged rejection of Copilot delegation, workflows, and Workflow Sub Agents. |
 | Delegation/workflows | Prove fresh same-specialist concurrent sessions, catalog/role isolation, no child SSE, parent cancellation and specialist-local errors, Workflow Sub Agent grants/results, existing management/Activity retry/timeout/authorization, and at-least-once semantics. |
 | Role storage/trigger execution | Run a non-HTTP trigger with its generated identity, serialization, logging/error behavior, and direct capabilities. Persistent direct state is isolated; delegates/Workflow Sub Agents leave no persistent native tree and dispose ephemeral state. |
 | System tools | Exercise `web_request` defaults/exclusion/SSRF/budgets/errors and real ACA `execute_python` scoping/results without substituting local execution. |
@@ -456,16 +608,30 @@ preview use and the history break. Update the current MAF-only statements in
 requires regenerating the configuration reference and synchronizing examples;
 this document does not introduce an unimplemented schema or rewrite runtime docs.
 
+For the issue #1336 PR, update `README.md`, `docs/architecture.md`,
+`docs/front-matter-spec.md`, the preview compatibility matrix, and the local
+Copilot preview sample. Document the pinned native versions, create/resume MCP
+staging, authenticated local MCP and filters, safe failures, the
+`<server>-<raw-tool>` preview name, exact-root skill load/resource/script
+behavior, trusted-code/non-sandbox boundary, runner limits, migration from
+invalid skill trees, role rejection/isolation, and flag-off behavior. The sample
+must be copy/paste complete for setup, request, expected failure, and cleanup.
+No schema/reference generation or dependency update is planned.
+
 ## 8. Status & sign-off
 
-- **Status:** Finalized; the feature specification is approved, not implemented
-  or production-qualified.
-- **Architecture review:** Dedicated agent review completed on 2026-09-28;
-  review clarifications cover app-bound selection, Durable lifecycle, and safe
-  startup failure behavior (decisions 8-11).
-- **Human sign-off:** Laveesh Rohra (`larohra`), 2026-09-28, explicitly approved
-  the behavior-focused session contract and requested sign-off on the FRD
-  (decision 12).
+- **Status:** In review; the 2026-09-29 issue #1336 MCP/skills amendment is an
+  agent proposal and is not approved for implementation.
+- **Architecture review:** The dedicated review completed on 2026-09-28 remains
+  historical for the original app-bound selection, Durable lifecycle, and safe
+  startup failure behavior (decisions 8-11). The amendment in decision 13-17
+  awaits review.
+- **Historical human sign-off:** Laveesh Rohra (`larohra`), 2026-09-28,
+  approved the behavior-focused session contract in decision 12. That sign-off
+  does not approve this 2026-09-29 mapping, shared flag-off correction, pin, or
+  combined delivery slice.
+- **Amendment sign-off:** Explicit human sign-off is pending for decisions
+  13-17; status must not return to `Finalized` before it is recorded.
 - **Remaining qualification:** Section 4.8 retains unresolved implementation
   choices and evidence requirements. Section 6 defines acceptance, not results
   already achieved.
