@@ -15,6 +15,11 @@ import pytest
 from azure.core.credentials import AccessToken
 
 from azure_functions_agents import _copilot, _harness, runner
+from azure_functions_agents._copilot_providers import (
+    AzureOpenAIProvider,
+    FoundryProvider,
+    OpenAIProvider,
+)
 from azure_functions_agents._harness import (
     AppHarness,
     CopilotPreviewError,
@@ -38,7 +43,11 @@ SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "
 def preview(monkeypatch, tmp_path):
     monkeypatch.setattr(_copilot, "_RUNTIMES", {})
     return AppHarness(
-        HarnessKind.COPILOT, tmp_path, tmp_path / "state", "gpt-4.1-mini", ProviderKind.OPENAI
+        HarnessKind.COPILOT,
+        tmp_path,
+        tmp_path / "state",
+        "gpt-4.1-mini",
+        OpenAIProvider("not-a-credential"),
     )
 
 
@@ -143,9 +152,9 @@ async def test_shutdown_closes_every_app_owner_even_if_one_fails(preview, monkey
 @pytest.mark.parametrize(
     ("provider", "wire_api", "provider_type"),
     [
-        (ProviderKind.OPENAI, "completions", "openai"),
-        (ProviderKind.AZURE_OPENAI, "completions", "azure"),
-        (ProviderKind.FOUNDRY, "responses", "openai"),
+        (OpenAIProvider("not-a-credential"), "responses", "openai"),
+        (AzureOpenAIProvider("https://fixture.openai.azure.com"), "responses", "azure"),
+        (FoundryProvider("https://fixture.services.ai.azure.com/api/projects/test"), "responses", "openai"),
     ],
 )
 async def test_provider_options_use_sdk_declared_types(
@@ -154,17 +163,7 @@ async def test_provider_options_use_sdk_declared_types(
     import copilot
     from copilot.session import ProviderConfig
 
-    selected = replace(
-        preview,
-        provider=provider,
-        endpoint=(
-            "https://fixture.openai.azure.com"
-            if provider is ProviderKind.AZURE_OPENAI
-            else "https://fixture.services.ai.azure.com/api/projects/test"
-        ),
-    )
-    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
-    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "not-a-credential")
+    selected = replace(preview, provider=provider)
     credential = SimpleNamespace(
         get_token=AsyncMock(return_value=AccessToken("not-a-credential", 9999999999)),
         close=AsyncMock(),
@@ -192,39 +191,40 @@ async def test_provider_options_use_sdk_declared_types(
             assert options["model"] == "gpt-4.1-mini"
             assert options["available_tools"] == []
             assert "max_output_tokens" not in provider_options
-            if provider is ProviderKind.AZURE_OPENAI:
+            if provider.kind is ProviderKind.AZURE_OPENAI:
                 assert "azure" not in provider_options
     finally:
         await _copilot.shutdown()
 
 
-def test_openai_provider_callback_supports_key_rotation(preview, monkeypatch):
+def test_openai_provider_callback_uses_frozen_startup_key(preview, monkeypatch):
     owner = _copilot._runtime(preview)
     monkeypatch.setenv("OPENAI_API_KEY", "sentinel-one")
     provider = _copilot._provider(preview, owner, "per-agent-model")
 
     assert provider == {
         "type": "openai",
-        "wire_api": "completions",
+        "wire_api": "responses",
         "base_url": "https://api.openai.com/v1",
         "model_id": "per-agent-model",
         "wire_model": "per-agent-model",
         "bearer_token_provider": provider["bearer_token_provider"],
     }
     callback = provider["bearer_token_provider"]
-    assert callback(SimpleNamespace()) == "sentinel-one"
+    assert callback(SimpleNamespace()) == "not-a-credential"
     monkeypatch.setenv("OPENAI_API_KEY", "sentinel-two")
-    assert callback(SimpleNamespace()) == "sentinel-two"
+    assert callback(SimpleNamespace()) == "not-a-credential"
 
 
 def test_azure_api_key_provider_avoids_credential_construction(preview, monkeypatch):
     selected = replace(
         preview,
-        provider=ProviderKind.AZURE_OPENAI,
-        endpoint="https://fixture.openai.azure.com",
-        azure_api_version="2024-10-21",
+        provider=AzureOpenAIProvider(
+            "https://fixture.openai.azure.com",
+            "2024-10-21",
+            "sentinel-not-a-secret",
+        ),
     )
-    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "sentinel-not-a-secret")
     monkeypatch.setattr(
         _copilot,
         "build_async_credential",
@@ -235,7 +235,7 @@ def test_azure_api_key_provider_avoids_credential_construction(preview, monkeypa
 
     assert provider == {
         "type": "azure",
-        "wire_api": "completions",
+        "wire_api": "responses",
         "base_url": "https://fixture.openai.azure.com",
         "model_id": "azure-deployment",
         "wire_model": "azure-deployment",
@@ -249,12 +249,12 @@ def test_azure_api_key_provider_avoids_credential_construction(preview, monkeypa
     ("provider", "endpoint", "scope"),
     [
         (
-            ProviderKind.AZURE_OPENAI,
+            AzureOpenAIProvider,
             "https://fixture.openai.azure.com",
             "https://cognitiveservices.azure.com/.default",
         ),
         (
-            ProviderKind.FOUNDRY,
+            FoundryProvider,
             "https://fixture.services.ai.azure.com/api/projects/test",
             "https://ai.azure.com/.default",
         ),
@@ -263,8 +263,7 @@ def test_azure_api_key_provider_avoids_credential_construction(preview, monkeypa
 async def test_entra_callbacks_refresh_overlap_and_close(
     preview, monkeypatch, provider, endpoint, scope
 ):
-    selected = replace(preview, provider=provider, endpoint=endpoint)
-    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    selected = replace(preview, provider=provider(endpoint))
     issued = 0
 
     async def get_token(received_scope):
@@ -299,10 +298,8 @@ async def test_entra_callbacks_refresh_overlap_and_close(
 async def test_entra_callback_failure_is_sanitized(preview, monkeypatch):
     selected = replace(
         preview,
-        provider=ProviderKind.AZURE_OPENAI,
-        endpoint="https://fixture.openai.azure.com",
+        provider=AzureOpenAIProvider("https://fixture.openai.azure.com"),
     )
-    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
     credential = SimpleNamespace(
         get_token=AsyncMock(side_effect=RuntimeError("sentinel-private-credential-detail")),
         close=AsyncMock(),
@@ -465,7 +462,7 @@ async def test_provider_config_is_resupplied_on_resume(preview, monkeypatch):
     resumed = client.resume_session.call_args.kwargs["provider"]
     assert created["model_id"] == resumed["model_id"] == "gpt-4.1-mini"
     assert created["wire_model"] == resumed["wire_model"] == "gpt-4.1-mini"
-    assert created["wire_api"] == resumed["wire_api"] == "completions"
+    assert created["wire_api"] == resumed["wire_api"] == "responses"
 
 
 @pytest.mark.asyncio

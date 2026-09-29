@@ -7,12 +7,11 @@ import os
 import re
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlsplit
 
 from ._function_tool import FunctionTool, tool
 from ._logger import logger
@@ -25,15 +24,13 @@ from .config.paths import get_app_root, resolve_config_dir
 from .config.schema import AgentConfiguration, ResolvedAgent
 
 if TYPE_CHECKING:
+    from ._copilot_providers import CopilotProvider
     from .registration.capabilities import AgentCapabilities
 
 FLAG = "AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT"
 SDK_DISTRIBUTION = "github-copilot-sdk"
 PROVIDER_ENV = "AZURE_FUNCTIONS_AGENTS_PROVIDER"
-FOUNDRY_ENDPOINT_ENV = "FOUNDRY_PROJECT_ENDPOINT"
 OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
-AZURE_OPENAI_ENDPOINT_ENV = "AZURE_OPENAI_ENDPOINT"
-AZURE_OPENAI_API_VERSION_ENV = "AZURE_OPENAI_API_VERSION"
 WORKER_COUNT_ENV = "FUNCTIONS_WORKER_PROCESS_COUNT"
 
 type ExecutionRole = Literal["primary", "delegate", "workflow_subagent"]
@@ -58,9 +55,7 @@ class AppHarness:
     app_root: Path
     storage_root: Path | None = None
     default_model: str | None = None
-    provider: ProviderKind | None = None
-    endpoint: str | None = field(default=None, repr=False)
-    azure_api_version: str | None = field(default=None, repr=False)
+    provider: CopilotProvider | None = None
 
 
 @dataclass(frozen=True)
@@ -112,76 +107,6 @@ def validate_copilot_client_manager() -> None:
         )
 
 
-def _validated_https_endpoint(
-    env_name: str,
-    *,
-    host_check: Callable[[str], bool],
-    path_check: Callable[[str], bool],
-    allowed_ports: frozenset[int | None] | None,
-    invalid_url_diagnostic: str,
-    invalid_shape_diagnostic: str,
-) -> str:
-    endpoint = os.environ.get(env_name, "").strip().rstrip("/")
-    try:
-        url = urlsplit(endpoint)
-        port = url.port
-    except ValueError:
-        raise UnsupportedCapabilityError(invalid_url_diagnostic) from None
-    if (
-        url.scheme != "https"
-        or not host_check(url.hostname or "")
-        or url.username is not None
-        or url.password is not None
-        or url.query
-        or url.fragment
-        or not path_check(url.path)
-        or (allowed_ports is not None and port not in allowed_ports)
-        or (allowed_ports is None and port == 0)
-    ):
-        raise UnsupportedCapabilityError(invalid_shape_diagnostic)
-    return endpoint
-
-
-def _foundry_endpoint() -> str:
-    return _validated_https_endpoint(
-        FOUNDRY_ENDPOINT_ENV,
-        host_check=lambda host: host.endswith(".services.ai.azure.com"),
-        path_check=lambda path: bool(re.fullmatch(r"/api/projects/[A-Za-z0-9_-]+", path)),
-        allowed_ports=frozenset({None, 443}),
-        invalid_url_diagnostic="Copilot Foundry preview requires a valid HTTPS project endpoint.",
-        invalid_shape_diagnostic=(
-            f"Copilot Foundry preview requires {FOUNDRY_ENDPOINT_ENV} in the form "
-            "https://<resource>.services.ai.azure.com/api/projects/<project>."
-        ),
-    )
-
-
-def _azure_openai_endpoint() -> str:
-    diagnostic = (
-        f"Copilot Azure OpenAI requires a valid host-only {AZURE_OPENAI_ENDPOINT_ENV}."
-    )
-    return _validated_https_endpoint(
-        AZURE_OPENAI_ENDPOINT_ENV,
-        host_check=lambda host: bool(host) and not any(character.isspace() for character in host),
-        path_check=lambda path: path in {"", "/"},
-        allowed_ports=None,
-        invalid_url_diagnostic=diagnostic,
-        invalid_shape_diagnostic=diagnostic,
-    )
-
-
-def _azure_openai_api_version() -> str | None:
-    value = os.environ.get(AZURE_OPENAI_API_VERSION_ENV, "").strip()
-    if not value:
-        return None
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
-        raise UnsupportedCapabilityError(
-            f"Copilot Azure OpenAI requires {AZURE_OPENAI_API_VERSION_ENV} "
-            "to be a valid API-version token."
-        )
-    return value
-
-
 def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHarness:
     """Capture each app independently; standalone calls retain a first-use root default."""
     root = (app_root or get_app_root()).resolve()
@@ -204,18 +129,9 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
                     f"Copilot preview supports {PROVIDER_ENV}=openai, azure_openai, or foundry "
                     "with the existing explicit-or-autodetected provider settings."
                 ) from None
-            endpoint = None
-            api_version = None
-            if provider is ProviderKind.OPENAI:
-                if not (os.environ.get(OPENAI_API_KEY_ENV) or "").strip():
-                    raise UnsupportedCapabilityError(
-                        f"Copilot OpenAI requires {OPENAI_API_KEY_ENV}."
-                    )
-            elif provider is ProviderKind.AZURE_OPENAI:
-                endpoint = _azure_openai_endpoint()
-                api_version = _azure_openai_api_version()
-            if provider is ProviderKind.FOUNDRY:
-                endpoint = _foundry_endpoint()
+            from ._copilot_providers import _PROVIDERS
+
+            copilot_provider = _PROVIDERS[provider].from_environment()
             if os.environ.get(WORKER_COUNT_ENV, "1").strip() != "1":
                 raise UnsupportedCapabilityError(
                     f"Copilot local preview requires {WORKER_COUNT_ENV}=1."
@@ -237,9 +153,7 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
                 root,
                 storage_root,
                 target.model,
-                provider,
-                endpoint,
-                api_version,
+                copilot_provider,
             )
         if not new_app:
             _HARNESSES[root] = selected

@@ -38,6 +38,8 @@ Copy-Item samples\copilot-preview\src\local.settings.template.json `
 Choose exactly one provider block. Values entered with `Read-Host -MaskInput`
 remain process environment values; prefer your organization's approved local
 secret injection when available. Never commit them.
+Provider settings, API keys, and Azure OpenAI API-key-vs-Entra mode are captured
+when the Functions app starts; restart the host to rotate them.
 
 ### OpenAI API key
 

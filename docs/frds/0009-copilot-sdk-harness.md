@@ -403,23 +403,25 @@ merge and `null` semantics. Storage, history, hosting, and tool behavior remain
 bounded by the feature-level contracts above until separately qualified.
 
 Copilot consumes a runtime-owned, pure typed target through the singular stable
-provider API. `_copilot.py` lazily constructs the SDK `ProviderConfig`; shared and
-default-off code must not optionally import the SDK. The approved mappings are:
+provider API. `_copilot_providers.py` freezes provider settings at harness
+selection and lazily constructs the SDK `ProviderConfig`; shared and default-off
+code must not optionally import the SDK. The approved mappings are:
 
 | Provider | SDK mapping and authentication |
 | --- | --- |
-| OpenAI API key | `type=openai`, `wire_api=completions`, `https://api.openai.com/v1`; use the configured API key. |
-| Azure OpenAI | `type=azure`, `wire_api=completions`; require a host-only `AZURE_OPENAI_ENDPOINT`; pass the resolved deployment/model as `model_id` and `wire_model`. Use optional `AZURE_OPENAI_API_VERSION`, or versionless v1 when absent. Prefer a nonblank `AZURE_OPENAI_API_KEY`; otherwise use a refreshable bearer callback that acquires each request with Azure Identity and scope `https://cognitiveservices.azure.com/.default`. |
+| OpenAI API key | `type=openai`, `wire_api=responses`, `https://api.openai.com/v1`; use the configured API key frozen at harness selection. |
+| Azure OpenAI | `type=azure`, `wire_api=responses`; require a host-only `AZURE_OPENAI_ENDPOINT`; pass the resolved deployment/model as `model_id` and `wire_model`. Use optional `AZURE_OPENAI_API_VERSION`, or versionless v1 when absent. Prefer a nonblank `AZURE_OPENAI_API_KEY` frozen at harness selection; otherwise use a refreshable bearer callback that acquires each request with Azure Identity and scope `https://cognitiveservices.azure.com/.default`. |
 | Foundry project | `type=openai`, `wire_api=responses`, `<project endpoint>/openai/v1`; pass the resolved model as `model_id` and `wire_model`, use `store=false`, and use a refreshable bearer callback that acquires each request with Azure Identity and scope `https://ai.azure.com/.default`. |
 
 The installed MAF `OpenAIChatClient` and `FoundryChatClient` both use the
-Responses API; this mapping is the Copilot SDK provider contract for the preview
-and does not claim wire-transport parity with MAF for OpenAI or Azure OpenAI.
+Responses API, and these Copilot SDK mappings now use Responses for all
+supported providers to preserve that wire-API parity.
 
 Unsupported providers or settings fail explicitly without fallback. Credentials
-are re-supplied on resume; callbacks may overlap and acquire per request through
-Azure Identity. Credentials must not be persisted, added to session metadata or
-launch arguments, or logged, while acknowledging the native request memory boundary.
+are re-supplied on resume from the frozen provider object; Entra callbacks may
+overlap and acquire per request through Azure Identity because tokens expire.
+Credentials must not be persisted, added to session metadata or launch
+arguments, or logged, while acknowledging the native request memory boundary.
 
 Custom `ClientManager` behavior is unchanged on MAF. For this provider contract,
 Copilot accepts only the exact built-in manager, rejects replacements before app
@@ -455,9 +457,9 @@ feature-wide implementation or qualification obligations are complete.
 | 12 | Feature specification sign-off | Keep In review / finalize the agreed feature contracts | Finalized after approving decision 11; section 4.8 remains an explicit record of unresolved implementation choices and required evidence, not a claim of parity or production readiness | Human (larohra) | 2026-09-28 |
 | 13 | Provider contract boundary | Reopen the full harness migration / define the bounded provider contract | Define the OpenAI, Azure OpenAI, and Foundry provider mappings while leaving storage, history, hosting, and tool behavior governed by the feature-level contracts above | Agent | 2026-09-29 |
 | 14 | Existing behavior compatibility | Adjust MAF or precedence / preserve both exactly | Keep MAF behavior and provider/model precedence byte-for-byte behaviorally unchanged, including provider selection and authored/per-agent merge/`null` semantics | Agent | 2026-09-29 |
-| 15 | Copilot provider boundary | SDK types in shared code / runtime-owned target | Use one stable singular pure typed target and lazily construct SDK `ProviderConfig` in `_copilot.py`; do not optionally import the SDK in shared/default-off code | Agent | 2026-09-29 |
-| 16 | Copilot provider mappings | Generic/fallback mapping / explicit matrix | Map OpenAI, Azure OpenAI, and Foundry exactly as section 4.8.1 specifies; reject unsupported providers/settings without fallback | Agent | 2026-09-29 |
-| 17 | Credential lifecycle | Persist credentials / re-supply and refresh | Re-supply credentials on resume; permit overlapping callbacks that acquire per request through Azure Identity; exclude credentials from persistence, session metadata, launch arguments, and logs while acknowledging native request memory | Agent | 2026-09-29 |
+| 15 | Copilot provider boundary | SDK types in shared code / runtime-owned target | Use one stable singular pure typed target and lazily construct SDK `ProviderConfig` in `_copilot_providers.py`; do not optionally import the SDK in shared/default-off code | Agent | 2026-09-29 |
+| 16 | Copilot provider mappings | Generic/fallback mapping / explicit matrix | Map OpenAI, Azure OpenAI, and Foundry exactly as section 4.8.1 specifies with Responses for all supported providers; reject unsupported providers/settings without fallback | Agent | 2026-09-29 |
+| 17 | Credential lifecycle | Persist credentials / re-supply and refresh | Freeze provider settings at harness selection, re-supply credentials on resume from that provider object, permit overlapping Entra callbacks that acquire per request through Azure Identity, and exclude credentials from persistence, session metadata, launch arguments, and logs while acknowledging native request memory | Agent | 2026-09-29 |
 | 18 | Custom `ClientManager` migration | Adapt custom managers / built-in only on Copilot | Leave MAF unchanged; on Copilot accept only the exact built-in manager, reject replacement before app mutation, and recheck before execution. `build_chat_client`-only managers remain MAF-only; this is not a future extension hook | Agent | 2026-09-29 |
 | 19 | SDK and release evidence | Broaden qualification / retain bounded preview | Use the SDK version pinned in `pyproject.toml` and retain local-only, single-worker, and output-limit restrictions; leave target-host and managed-identity qualification to the external hosting release gate | Agent | 2026-09-29 |
 

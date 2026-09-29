@@ -128,9 +128,7 @@ def native(monkeypatch, tmp_path, request):
         assert provider["type"] in get_args(provider_types["type"])
         assert provider["type"] == ("azure" if provider_name == "azure_openai" else "openai")
         assert provider["wire_api"] in get_args(provider_types["wire_api"])
-        assert provider["wire_api"] == (
-            "responses" if provider_name == "foundry" else "completions"
-        )
+        assert provider["wire_api"] == "responses"
         assert provider["model_id"] == "gpt-4.1-mini"
         assert provider["wire_model"] == "gpt-4.1-mini"
         assert options["model"] == "gpt-4.1-mini"
@@ -182,15 +180,15 @@ def native(monkeypatch, tmp_path, request):
     class SyntheticProvider(CopilotRequestHandler):
         async def send_request(self, request, context):
             expected_route = {
-                "openai": ("api.openai.com", "/v1/chat/completions", {}),
+                "openai": ("api.openai.com", "/v1/responses", {}),
                 "azure_openai_entra_versionless": (
                     "fixture.openai.azure.com",
-                    "/openai/v1/chat/completions",
+                    "/openai/v1/responses",
                     {},
                 ),
                 "azure_openai_api_key_versioned": (
                     "fixture.openai.azure.com",
-                    "/openai/deployments/gpt-4.1-mini/chat/completions",
+                    "/openai/responses",
                     {"api-version": "2024-10-21"},
                 ),
                 "foundry": (

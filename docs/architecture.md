@@ -79,8 +79,9 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming; builds per-request `delegate_<slug>` tools and fresh stateless workflow leaf agents; attempts one internal token-usage record through the shared runtime logger for each actual MAF invocation attempt. | `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable MAF inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. Its pure internal built-in resolver preserves MAF provider/model precedence without constructing a chat client; an identity check protects Copilot from custom-manager fallback. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
-| `azure_functions_agents/_harness.py` | Private once-per-app-root harness selection and explicit preview capability/provider validation, including rejection of unsupported configured output caps and custom client managers before app mutation. Captured in capabilities/registration closures; standalone runner calls use the same selection. No SDK import/process side effects when off. | `AppHarness`, `HarnessRequest`, `get_harness()`, `validate_agent()` |
-| `azure_functions_agents/_copilot.py` | Lazy, pinned local Copilot SDK stdio adapter. Uses SDK-owned runtime acquisition, native session create/resume/disconnect and persistence; supplies provider credential callbacks, checks the custom-only tool catalog, translates results/usage and stops the SDK client on shutdown. No host completion marker, OS file lock, broad child-environment filter, cache-layout inspection or outbound HTTP rewrite. | `run()`, `shutdown()` |
+| `azure_functions_agents/_harness.py` | Private once-per-app-root harness selection and explicit preview capability validation, including rejection of unsupported configured output caps and custom client managers before app mutation. Captures one frozen Copilot provider from `_copilot_providers.py`; standalone runner calls use the same selection. No SDK import/process side effects when off. | `AppHarness`, `HarnessRequest`, `get_harness()`, `validate_agent()` |
+| `azure_functions_agents/_copilot_providers.py` | Defines the Copilot provider interface, registry, sanitized provider-setting validation, and frozen OpenAI / Azure OpenAI / Foundry SDK provider mappings. Reads only the provider environment at harness selection; imports the Copilot SDK lazily when building per-request config. | `CopilotProvider`, `OpenAIProvider`, `AzureOpenAIProvider`, `FoundryProvider`, `_PROVIDERS` |
+| `azure_functions_agents/_copilot.py` | Lazy, pinned local Copilot SDK stdio adapter. Uses SDK-owned runtime acquisition, native session create/resume/disconnect and persistence; supplies provider token callbacks, checks the custom-only tool catalog, translates results/usage and stops the SDK client on shutdown. No host completion marker, OS file lock, broad child-environment filter, cache-layout inspection or outbound HTTP rewrite. | `run()`, `shutdown()` |
 | `azure_functions_agents/workflows/integration.py` | Builds the complete immutable handler catalog, immutable slug-keyed workflow-agent policy catalog (including allowed tools' decorator-owned retry and timeout declarations), per-agent management tools/addenda, validates declared trigger support for workflow-enabled agents, and performs the one app-wide Durable registration. It also resolves the packaged `data-driven-workflows` skill used for progressive authoring guidance. | `build_workflow_handler_catalog()`, `build_workflow_agent_policy_catalog()`, `build_workflow_agent_integration()`, `data_driven_workflows_skill_path()`, `validate_workflow_agent_trigger()`, `register_workflow_runtime()` |
 | `azure_functions_agents/workflows/engine.py` | Registers one Durable blueprint per app and executes the native two-argument Durable Task orchestrator, workflow-tool Activity, and Workflow Sub Agent Activity. Orchestration and Activity schedules attach `durabletask.displayName` tags for readable DTS dashboard timelines without changing registered function names. Capability-bearing Activities reauthorize against the current workflow-agent policy before complete-catalog dispatch. Data-driven execution uses typed persisted-task/state contracts and deterministic phase helpers for `when` evaluation, bounded `for_each` materialization, runnable selection, ordered aggregation, result application, cancellation restoration, structured (`schema_version: 2`) status, and controlled-failure normalization. It selects retry and continuation behavior from persisted orchestration input. Static and dynamic schedulers share the continuation decision that commits bounded permitted failures. Waves without enabled continuation keep the earlier wait, failure, and cancellation order. Durable `yield` boundaries remain in the top-level orchestrator generator. | `register_workflows()` |
 | `azure_functions_agents/workflows/context.py` | Tracks invocation context by `(workflow_agent_slug, session_id)`, derives non-revealing 128-bit agent/session prefixes for Durable instance IDs, and exposes the per-delivery task context whose idempotency key is stable across retry attempts. | `session_instance_prefix()`, `new_workflow_instance_id()`, `workflow_matches_agent_session()`, `current_workflow_task_context()` |
@@ -253,7 +254,9 @@ The built-in manager's pure target resolver selects provider/model without
 constructing or inspecting a MAF chat client. It preserves the existing explicit
 provider override, autodetection order (`AZURE_OPENAI_ENDPOINT` → Foundry
 endpoint → OpenAI key), model precedence, blank handling, and per-agent composed
-model handoff. SDK types remain inside `_copilot.py`.
+model handoff. `_copilot_providers.py` freezes the selected Copilot provider
+settings at harness selection; SDK types remain inside `_copilot.py` and the
+provider module's lazy config builders.
 
 `ClientManager` remains the MAF provider extension point, not the new harness
 boundary. Flag-off custom managers and subclasses retain their existing behavior.
@@ -268,17 +271,18 @@ The Copilot SDK version pinned in `pyproject.toml` uses the stable singular
 
 | Target | SDK provider | Authentication and model mapping |
 | --- | --- | --- |
-| OpenAI | `type=openai`, `wire_api=completions`, `https://api.openai.com/v1` | Host callback reads `OPENAI_API_KEY` per request; the resolved model is the session model, `model_id`, and `wire_model`. |
-| Azure OpenAI | `type=azure`, `wire_api=completions`, host-only `AZURE_OPENAI_ENDPOINT` | A nonblank API key wins. Otherwise a refreshable callback uses `https://cognitiveservices.azure.com/.default`. Optional nonblank API version is passed under `azure`; omission uses versionless v1. The deployment/model is supplied in all three model positions. |
+| OpenAI | `type=openai`, `wire_api=responses`, `https://api.openai.com/v1` | The configured API key is frozen at startup and supplied by callback; the resolved model is the session model, `model_id`, and `wire_model`. |
+| Azure OpenAI | `type=azure`, `wire_api=responses`, host-only `AZURE_OPENAI_ENDPOINT` | Startup freezes endpoint, optional API version, and auth mode. A nonblank API key wins and is frozen; otherwise a refreshable callback uses `https://cognitiveservices.azure.com/.default`. Optional nonblank API version is passed under `azure`; omission uses versionless v1. The deployment/model is supplied in all three model positions. |
 | Foundry project | `type=openai`, `wire_api=responses`, normalized `<project-endpoint>/openai/v1` | A refreshable callback uses `https://ai.azure.com/.default`; model metadata is explicit and SDK Responses requests use `store=false`. |
 
 Endpoints and API-version tokens are validated before registration without
-echoing their values. Token callbacks may overlap and acquire a fresh token for
-each request; their credential owner is shared for that local worker and closed
-at shutdown. Credentials are not persisted, placed in session metadata or launch
-arguments, or logged. Authentication failures are sanitized and identify the
-provider/configuration action. Unsupported providers/settings fail without
-fallback.
+echoing their values. Secret values and API-key-vs-Entra mode are frozen once
+at startup; Entra token callbacks may overlap and acquire a fresh token for each
+request because tokens expire. The credential owner is shared for that local
+worker and closed at shutdown. Credentials are not persisted, placed in session
+metadata or launch arguments, or logged. Authentication failures are sanitized
+and identify the provider/configuration action. Unsupported providers/settings
+fail without fallback.
 
 The supported subset remains non-streaming HTTP, simple Python tools and local
 native-session continuity. The custom-only tool allowlist is checked against the

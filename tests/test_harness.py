@@ -14,10 +14,17 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from azure_functions_agents import _harness, runner
+from azure_functions_agents._copilot_providers import (
+    _PROVIDERS,
+    AzureOpenAIProvider,
+    FoundryProvider,
+    OpenAIProvider,
+)
 from azure_functions_agents._function_tool import FunctionTool
 from azure_functions_agents._harness import (
     CopilotPreviewError,
     HarnessKind,
+    ProviderKind,
     UnsupportedCapabilityError,
 )
 from azure_functions_agents.app import create_function_app
@@ -222,7 +229,8 @@ def test_provider_target_is_resolved_without_maf_client_construction(
 
     selected = _harness.get_harness()
 
-    assert selected.provider == provider
+    assert selected.provider is not None
+    assert selected.provider.kind == provider
     assert selected.default_model == expected_model
     maf.assert_not_called()
 
@@ -264,6 +272,42 @@ def test_invalid_provider_settings_are_sanitized(
         _harness.get_harness()
 
     assert "do-not-log" not in str(error.value)
+
+
+def test_copilot_provider_registry_freezes_environment(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://fixture.openai.azure.com")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "azure-secret")
+    monkeypatch.setenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
+    monkeypatch.setenv(
+        "FOUNDRY_PROJECT_ENDPOINT",
+        "https://fixture.services.ai.azure.com/api/projects/test",
+    )
+
+    openai = _PROVIDERS[ProviderKind.OPENAI].from_environment()
+    azure = _PROVIDERS[ProviderKind.AZURE_OPENAI].from_environment()
+    foundry = _PROVIDERS[ProviderKind.FOUNDRY].from_environment()
+
+    assert isinstance(openai, OpenAIProvider)
+    assert isinstance(azure, AzureOpenAIProvider)
+    assert isinstance(foundry, FoundryProvider)
+    assert azure.api_version == "2024-10-21"
+    assert azure.auth_label == "AZURE_OPENAI_API_KEY"
+    for provider in (openai, azure, foundry):
+        rendered = repr(provider)
+        assert "secret" not in rendered
+        assert "fixture" not in rendered
+
+
+def test_azure_provider_auth_mode_is_frozen(monkeypatch):
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://fixture.openai.azure.com")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "frozen-secret")
+    provider = AzureOpenAIProvider.from_environment()
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+
+    assert provider.auth_label == "AZURE_OPENAI_API_KEY"
+    assert provider.token_scope is None
+    assert provider.api_key == "frozen-secret"
 
 
 def test_custom_manager_is_rejected_before_function_app_construction(
@@ -324,7 +368,8 @@ def test_foundry_configuration_is_frozen_without_authentication(preview, monkeyp
     monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://fixture.services.ai.azure.com/api/projects/test")
     monkeypatch.setenv("FOUNDRY_MODEL", "deployed-model")
     selected = _harness.get_harness()
-    assert selected.provider == "foundry"
+    assert selected.provider is not None
+    assert selected.provider.kind == "foundry"
     assert selected.default_model == "deployed-model"
     assert "fixture.services.ai.azure.com" not in repr(selected)
     assert not selected.storage_root.exists()
