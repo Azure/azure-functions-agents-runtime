@@ -842,6 +842,7 @@ async def _build_agent_session(
     catalog: AgentCatalog | None = None,
     coordinator_deadline: float | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
+    app_root: Path | None = None,
 ) -> tuple[Any, Any, str, _DelegateErrorTracker | None, InferenceTarget]:
     """Construct an agent/session using MAF's ``create_harness_agent``.
 
@@ -865,6 +866,12 @@ async def _build_agent_session(
         session = AgentSession(session_id=resolved_id)
 
     history_agent_slug = _resolve_history_agent_slug(agent_name, workflow_agent_slug)
+    from ._native_session_identity import guard_opposite_history, resolve_route
+
+    await guard_opposite_history(
+        resolve_route(app_root or get_app_root(), for_guard=True),
+        history_agent_slug, resolved_id, native=False,
+    )
     history_provider = _build_history_provider(history_agent_slug)
 
     delegate_tools: list[FunctionTool] | None = None
@@ -1127,6 +1134,7 @@ async def run_agent(
             catalog=catalog,
             coordinator_deadline=coordinator_deadline,
             workflow_policy=workflow_policy,
+            app_root=harness.app_root,
         )
     )
 
@@ -1322,6 +1330,7 @@ async def run_agent_stream(
                 catalog=catalog,
                 coordinator_deadline=deadline,
                 workflow_policy=workflow_policy,
+                app_root=harness.app_root,
             )
         )
     except Exception as exc:

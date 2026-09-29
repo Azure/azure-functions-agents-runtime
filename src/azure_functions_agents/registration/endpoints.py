@@ -16,6 +16,7 @@ from azurefunctions.extensions.http.fastapi import Request, Response, StreamingR
 from .._harness import AppHarness, HarnessKind, bind_harness, get_harness
 from .._history_identity import validate_agent_slug
 from .._logger import logger
+from .._native_session_identity import NativeSessionError
 from .._observability import FaultDomain, LifecycleStage, start_span
 from .._session_id import SESSION_ID_PATTERN
 from .._source_marker import source_marker
@@ -360,6 +361,10 @@ def _register_http_chat(
                     media_type="application/json",
                     headers={_SESSION_ID_HEADER: result.session_id},
                 )
+            except NativeSessionError as exc:
+                span.set_attribute("af.agent.outcome", "error")
+                span.set_error(str(exc), fault_domain=FaultDomain.UNKNOWN)
+                return _json_error(str(exc), status_code=exc.status_code)
             except ValueError as exc:
                 span.set_attribute("af.agent.outcome", "error")
                 span.set_error(str(exc), fault_domain=FaultDomain.APP)

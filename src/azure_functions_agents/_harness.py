@@ -20,6 +20,7 @@ from .config.paths import get_app_root, resolve_config_dir
 from .config.schema import AgentConfiguration, ResolvedAgent
 
 if TYPE_CHECKING:
+    from ._native_session_identity import StorageRoute
     from .registration.capabilities import AgentCapabilities
 
 FLAG = "AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT"
@@ -57,6 +58,7 @@ class AppHarness:
     default_model: str | None = None
     provider: ProviderKind | None = None
     endpoint: str | None = field(default=None, repr=False)
+    session_storage: StorageRoute | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,8 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
         if not _flag_enabled(os.environ.get(FLAG)):
             selected = AppHarness(HarnessKind.MAF, root)
         else:
+            from ._native_session_identity import resolve_route
+
             check_sdk_dependency()
             raw_provider = os.environ.get(PROVIDER_ENV, "").strip().lower()
             try:
@@ -145,14 +149,7 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
                         "https://<resource>.services.ai.azure.com/api/projects/<project>."
                     )
                 default_model = os.environ.get("FOUNDRY_MODEL") or default_model
-            if os.environ.get(WORKER_COUNT_ENV, "1").strip() != "1":
-                raise UnsupportedCapabilityError(
-                    f"Copilot local preview requires {WORKER_COUNT_ENV}=1."
-                )
-            if os.environ.get("WEBSITE_INSTANCE_ID"):
-                raise UnsupportedCapabilityError(
-                    "Copilot preview supports local execution only; Azure hosting is not qualified."
-                )
+            route = resolve_route(root)
             for name in (
                 "AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT",
                 "AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY",
@@ -168,6 +165,7 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
                 default_model,
                 provider,
                 endpoint,
+                route,
             )
         if not new_app:
             _HARNESSES[root] = selected
