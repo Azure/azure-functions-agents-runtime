@@ -170,6 +170,46 @@ def test_http_handler_response_schema_invalid_output_returns_500(monkeypatch: An
     }
 
 
+def test_copilot_http_handler_keeps_host_owned_structured_output_validation(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    contents = iter(['{"message":"ok"}', '{"message":123}', "not-json"])
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            content=next(contents),
+            session_id=kwargs["session_id"],
+            tool_calls=[],
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    handler = make_http_agent_handler(
+        _resolved_agent(
+            response_schema={
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+            }
+        ),
+        AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path)),
+    )
+
+    valid = asyncio.run(handler(DummyRequest({"prompt": "valid"})))
+    mismatch = asyncio.run(handler(DummyRequest({"prompt": "mismatch"})))
+    invalid = asyncio.run(handler(DummyRequest({"prompt": "invalid"})))
+
+    assert valid.status_code == 200
+    assert json.loads(valid.body) == {"message": "ok"}
+    assert mismatch.status_code == 500
+    assert json.loads(mismatch.body)["error"] == "Agent response validation failed"
+    assert invalid.status_code == 500
+    assert json.loads(invalid.body)["error"] == "Agent returned invalid JSON"
+
+
 def test_http_handler_records_input_validation_failed_event(monkeypatch: Any) -> None:
     span = _install_recording_span(monkeypatch)
 

@@ -19,6 +19,8 @@ from azure.core.credentials import AccessToken
 from azure_functions_agents import _copilot, _harness, runner, shutdown_client_manager
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.config import paths
+from azure_functions_agents.config.schema import WebRequestConfig
+from azure_functions_agents.system_tools.web_request import create_web_request_tools
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("AZURE_FUNCTIONS_AGENTS_TEST_NATIVE_COPILOT") != "1",
@@ -132,7 +134,7 @@ def native(monkeypatch, tmp_path, request):
         assert provider["model_id"] == "gpt-4.1-mini"
         assert provider["wire_model"] == "gpt-4.1-mini"
         assert options["model"] == "gpt-4.1-mini"
-        assert options["available_tools"] == ["custom:make_receipt"]
+        assert options["available_tools"] == ["custom:make_receipt", "custom:web_request"]
         if provider_name == "openai":
             assert provider["base_url"] == "https://api.openai.com/v1"
         elif provider_name == "foundry":
@@ -221,7 +223,7 @@ def native(monkeypatch, tmp_path, request):
                 assert body.get("store") is False, "SDK Responses must disable provider retention"
             assert body["model"] == "gpt-4.1-mini"
             tools = [item["name"] if responses else item["function"]["name"] for item in body.get("tools", [])]
-            assert tools == ["make_receipt"], f"Unexpected model-visible tools: {tools}"
+            assert tools == ["make_receipt", "web_request"], f"Unexpected model-visible tools: {tools}"
             declaration = body["tools"][0] if responses else body["tools"][0]["function"]
             assert "harmless demonstration tag" in declaration["description"]
             assert declaration["parameters"]["properties"]["tag"]["type"] == "string"
@@ -566,7 +568,10 @@ async def test_authored_preview_http_trigger_creates_and_resumes(native):
 @pytest.mark.asyncio
 async def test_real_native_request_cancellation_does_not_kill_peer(native):
     create_function_app(native.root)
-    tools = runner.discover_user_tools(native.root).tools
+    tools = [
+        *runner.discover_user_tools(native.root).tools,
+        *create_web_request_tools(WebRequestConfig(allowed_hosts=["example.com"])),
+    ]
     slow = asyncio.create_task(runner.run_agent(
         "STALL_NATIVE_TEST", tools=tools, mcp_tools=[], timeout=45,
     ))

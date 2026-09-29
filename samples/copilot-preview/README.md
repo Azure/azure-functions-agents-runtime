@@ -1,21 +1,19 @@
 # Local Copilot preview
 
-This **default-off, local-only, one-worker** sample runs `main.agent.md` through
-normal discovery/registration and Copilot SDK 1.0.14 (native 1.0.85, protocol 3,
-external stdio). It supports non-streaming HTTP, one Python tool, OpenAI, Azure
-OpenAI, Foundry project inference, and SDK-owned completed-turn local sessions.
-It is based on foundation commit `64ad4fb418d80b503c1b47e655cc0c6a88f03fc1`.
+This **default-off, local-only** Functions sample exercises non-streaming
+Copilot chat and the authored `/preview` HTTP route with `make_receipt` and
+`web_request` (limited to `example.com`). It preserves completed-turn sessions
+across a local restart. ACA `execute_python` is disabled in the checked-in
+configuration.
 
-Use Python 3.13/3.14 and Azure Functions Core Tools 4. Model calls incur charges.
-You need one approved target: an OpenAI API key/model, an Azure OpenAI resource
+Requires Python 3.13/3.14, Azure Functions Core Tools 4, and `uv`. Model calls
+incur charges. You need one approved target: an OpenAI API key/model, an Azure OpenAI resource
 and deployment, or a Foundry project and deployment. Azure Entra callers need
 the target data-plane role (for example, Cognitive Services OpenAI User for
 Azure OpenAI or the project role approved by your Foundry administrator).
 
-## Install and common setup (PowerShell, repository root)
-
-`requirements.txt` installs this checkout with `[copilot]`. The SDK downloads its
-pinned native runtime on the first enabled request when it is not cached.
+`requirements.txt` installs this checkout with `[copilot]`. The SDK downloads
+its native runtime on first use if uncached.
 
 ```powershell
 uv venv .venv --python 3.13
@@ -104,21 +102,13 @@ Push-Location samples\copilot-preview\src
 func start --port 7071
 ```
 
-The startup log reports `harness=copilot`; each request reports only the selected
-provider/model (`Copilot request target`). A malformed endpoint or unsupported
-setting fails startup/composition with a sanitized diagnostic. Request-time
-401/403 responses and credential failures return a sanitized provider/auth
-`error` response. Neither path prints credentials or underlying exception text.
-Safe version checks are:
+Startup logs `harness=copilot`. Invalid provider settings fail startup, and
+request-time credential failures return a sanitized `error` response; neither
+prints credentials.
 
-```powershell
-func --version
-.\.venv\Scripts\python.exe -c "import importlib.metadata as m; print(m.version('github-copilot-sdk'))"
-```
+## Verify
 
-## Verify, including the negative case
-
-In a second repository-root terminal:
+In a **second terminal at the repository root**:
 
 ```powershell
 .\.venv\Scripts\python.exe samples\copilot-preview\verify.py --phase first --evidence .preview-evidence.json
@@ -127,9 +117,8 @@ In a second repository-root terminal:
 .\.venv\Scripts\python.exe samples\copilot-preview\verify.py --phase negative
 ```
 
-Expect `PASS first` (one tool call), `PASS followup` (same session, no tool), and
-`PASS negative` (unknown ID fails; stream/history return 501). To inspect the
-authored route:
+Expect `PASS first`, `PASS followup`, and `PASS negative`. To exercise the
+authored route while the host runs:
 
 ```powershell
 $first = Invoke-RestMethod http://127.0.0.1:7071/agents/main/chat -Method Post `
@@ -143,12 +132,27 @@ $again.Content
 $again.Headers["x-ms-session-id"]
 ```
 
-## Custom manager migration, flag off, and cleanup
+To exercise the configured `web_request` tool:
 
-Custom/replaced/subclassed `ClientManager` instances are MAF-only. Copilot
-rejects one before registration and rechecks before execution; it never builds
-the custom MAF client or falls back. Disable Copilot and restart to keep using a
-custom manager. Do not reuse a Copilot session ID under MAF.
+```powershell
+$web = Invoke-RestMethod http://127.0.0.1:7071/agents/main/chat -Method Post `
+  -ContentType application/json `
+  -Body '{"prompt":"Call web_request exactly once with method GET and URL https://example.com/. Summarize its status."}'
+$web.tool_calls | ConvertTo-Json -Depth 8
+```
+
+This local preview does not support streaming, MCP, skills, delegation,
+workflows, Azure hosting, or MAF history import. Custom `ClientManager`
+instances are MAF-only and are rejected when Copilot is on. See
+[the architecture guide](../../docs/architecture.md#bounded-copilot-migration-preview)
+for the capability boundary.
+
+## Flag off and cleanup
+
+Stop the host; set the flag to `false` and restart to restore MAF. Do not
+reuse a Copilot session ID in MAF. After stopping MAF, run `Pop-Location`
+to return to the repository root. Review `$run` and the cleanup block before
+running it; it removes only that run's state and sample evidence:
 
 ```powershell
 # Stop the host.
@@ -174,16 +178,4 @@ Remove-Item -LiteralPath .preview-evidence.json, `
 Remove-Item Env:OPENAI_API_KEY, Env:AZURE_OPENAI_API_KEY -ErrorAction SilentlyContinue
 ```
 
-Do not delete shared SDK caches or MAF history.
-
-## Known limits and release evidence
-
-No Azure Functions hosting, multiple workers, MAF history import, streaming,
-history projection, MCP, skills, delegation, workflows, system tools, native
-Blob persistence, or interrupted-turn recovery guarantee is included. Configured
-`max_output_tokens` is rejected. Ambient Copilot login is disabled. The SDK is
-the native process owner; this sample adds no process manager.
-
-These commands establish local behavior only. Target-host deployment and
-managed-identity evidence remain an **external release gate**; this sample makes
-no production or Azure-host support claim.
+Do not delete SDK caches or MAF history.

@@ -7,7 +7,8 @@ description: "Use when adding a medium or larger feature (or a non-trivial chang
 
 This skill operationalizes the lifecycle in [`AGENTS.md`](../../../AGENTS.md) §1
 for **medium+ features**. Run the phases in order; each has an exit gate — do not
-advance until it is met. Record every non-trivial choice in the FRD Decisions log.
+advance until it is met. Record consequential **feature-behavior** choices in
+the FRD Decisions log, not delivery or PR-management decisions.
 
 ## When to use
 
@@ -36,12 +37,15 @@ bug fixes.
 1. Determine the next FRD number: highest `docs/frds/NNNN-*.md` + 1, zero-padded.
 2. Copy `docs/frds/_template.md` → `docs/frds/<NNNN>-<slug>.md`.
 3. Fill every section. Map the **Proposed design** onto the pipeline stages
-   (discover → translate → register → execute) and name the modules touched.
-4. Seed the **Decisions log** with the initial choices and who made them
-   (Human vs Agent).
+   (discover → translate → register → execute) and describe the intended
+   behavior, compatibility boundaries, and acceptance criteria. Do not describe
+   the PR sequence, slice scope, ownership, schedule, or rollout plan in the FRD.
+4. Seed the **Decisions log** with feature-contract choices and who made them
+   (Human vs Agent). Do not record implementation or delivery planning there.
 5. If the implementation is too large or risky for one reviewable PR, read
-   [`references/split-rules.md`](references/split-rules.md). Add the proposed PR
-   sequence and dependencies to the FRD before architecture review.
+   [`references/split-rules.md`](references/split-rules.md). Discuss the PR
+   sequence and dependencies in PR descriptions or a separate delivery plan,
+   never in the FRD.
 6. Keep the FRD focused on intended behavior, contracts, and durable decisions.
    Do not encode delivery mechanics such as PR numbers, commit SHAs, temporary
    slice/phasing labels, or package versions already owned by `pyproject.toml`.
@@ -65,8 +69,8 @@ slice its own branch and worktree as described in `AGENTS.md`.
 
 1. Implement **product changes only**, per the finalized FRD. Keep diffs surgical;
    no unrelated refactors.
-2. When the FRD defines multiple PRs, implement only the approved delivery slice
-   and keep its dependency and review scope explicit.
+2. For multi-PR delivery, implement only the agreed delivery slice and keep its
+   dependency and review scope explicit in the PR, not the FRD.
 3. Follow `AGENTS.md` §5 conventions (PEP 695 type aliases, strict typing,
    Pydantic v2 base-class fields, MAF default with only AGENTS.md's bounded
    app-level Copilot preview exception, shared `_logger`).
@@ -110,7 +114,7 @@ slice its own branch and worktree as described in `AGENTS.md`.
 ## Guardrails
 
 - Never skip a gate. If a gate fails, fix before advancing.
-- Keep the Decisions log current — it is the durable record that justifies the FRD.
+- Keep the Decisions log focused on the feature contract; it is not a delivery diary.
 - Keep implementation diffs surgical and scoped to the FRD.
 - This skill is repo dev-tooling under `.github/skills/`; it is unrelated to the
   runtime's user-authored agent skills discovered from an app's `skills/` folder.
