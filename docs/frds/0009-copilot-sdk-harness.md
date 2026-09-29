@@ -4,7 +4,7 @@ title: Copilot SDK agent harness
 status: Finalized
 author: larohra
 created: 2026-09-28
-updated: 2026-09-28
+updated: 2026-09-29
 issues:
   - https://github.com/Azure/azure-functions-bucees-planning/issues/1332
 pull_requests: []
@@ -250,10 +250,11 @@ do not replace remote execution with a local SDK shell or code interpreter.
 ### 4.4 Native runtime lifetime
 
 The proposed default is the external native Rust runtime over stdio, with one
-lazily initialized, process-long SDK client per Functions worker, reused across
-invocations with isolated sessions. Concurrent initialization must not launch
-duplicate runtimes. Request cancellation must not close the shared client or
-poison unrelated sessions; worker shutdown must release its client/process.
+lazily initialized, process-long SDK client per frozen app/storage context in a
+Functions worker, reused across invocations with isolated sessions. Concurrent
+initialization must not launch duplicate runtimes for the same context.
+Request cancellation must not close the shared client or poison unrelated
+sessions; worker shutdown must release its client/process.
 Initialization, ownership waits, execution, and final persistence acknowledgments
 are bounded by the request deadline.
 
@@ -268,10 +269,18 @@ Continuation means a later user turn resumes the same native conversation
 **after a completed turn**, including after replacement of both Python worker
 and native runtime. It does not mean resuming an interrupted tool/model operation.
 Use the SDK's SessionFs seam with Blob Storage in Azure and a local-development
-filesystem implementation. Reuse configured Functions storage/identity settings
-where applicable; do not fall back to ephemeral disk on an Azure storage error
-or missing Azure storage configuration. The concrete local-versus-deployed
-selection rule must be defined, not inferred from a failed Blob connection.
+filesystem implementation. `AZURE_FUNCTIONS_AGENTS_COPILOT_SESSION_STORAGE`
+accepts only `local` or `blob` (trimmed, case-insensitive; an empty/invalid
+value fails). When unset, select `local` without `WEBSITE_INSTANCE_ID` and
+`blob` with it. Reject `local` on a deployed instance. Deployed or explicit
+`blob` requires the existing `AzureWebJobsStorage` connection string or
+`AzureWebJobsStorage__blobServiceUri` (with storage-specific identity precedence);
+missing settings or any Blob failure is an error, never a local-disk fallback.
+Resolve and freeze mode, account/credential selection, container and app
+namespace in the immutable `AppHarness`/app context, not per request. Include
+that complete configuration (secrets represented by a digest, never raw keys)
+in the native client identity: two same-root contexts with different settings
+must not reuse one SDK connection. Off-path MAF selection remains unchanged.
 
 Persistent native state applies to direct runs, including the fresh IDs used by
 non-HTTP triggers, whose current MAF path also writes history. This preserves
@@ -282,12 +291,23 @@ never prune live compaction references. Delegates and Workflow Sub Agents instea
 use fresh ephemeral native storage, disposed at call end; they do not populate
 the persistent namespace or require its completed-turn storage barrier.
 
-Use a separate, versioned native namespace keyed by `(agent_slug, session_id)`.
-Validate both identity components and contain every native relative path within
-that namespace. Persist **all** SDK-owned files: journals, metadata, workspace
-files, compaction checkpoints/references, and any referenced content. Do not
-whitelist only `events.jsonl`, edit journal records, or serialize native state as
-MAF `Message` JSONL.
+Use a separate, versioned native namespace keyed by validated logical
+`(agent_slug, session_id)`. In the existing session container and beneath the
+local session directory use the state path
+`copilot-native/v1/{app_key}/{agent_key}/{session_key}/state.json`.
+Derive each opaque key as an unpadded URL-safe Base64 encoding of SHA-256 over
+UTF-8 `copilot-native/v1:<kind>\0<identity>` with fixed `a_`, `g_`, or `s_`
+prefix for `kind=a`, `g`, or `s`, respectively; never interpolate raw identities
+into native paths.
+For deployed app identity, use `WEBSITE_SITE_NAME`, NUL and
+`WEBSITE_SLOT_NAME` (default `production`; fail if the site name is missing);
+locally use the resolved app root. Never use a worker-specific ID. Validate
+both logical components before encoding and retain them in envelope identity
+fields to detect mismatches. Canonicalize SDK paths, including absolute virtual
+paths, and reject escapes, invalid components, and local symlink traversal.
+Persist **all** SDK-owned files: journals, metadata, workspace files, compaction
+checkpoints/references and their targets. Do not whitelist only `events.jsonl`,
+edit journal records, or serialize native state as MAF `Message` JSONL.
 
 Only one turn may execute at a time for a given agent/session. Concurrent requests
 must wait within their deadline or fail clearly. A failed startup that neither
@@ -295,9 +315,8 @@ began a turn nor damaged session state must leave the previous conversation
 usable. If an interrupted turn cannot be continued safely, return an explicit
 error rather than silently resetting the conversation or replaying work.
 
-The storage guarantees below support that behavior; they are not claims about
-the demonstrated Blob adapter. Marker states, write ordering, and cleanup
-mechanics are implementation details, not prescribed by this specification.
+The storage guarantees below are the human-approved contract, not claims about
+the demonstrated Blob adapter.
 
 | Concern | Required contract |
 | --- | --- |
@@ -309,6 +328,109 @@ mechanics are implementation details, not prescribed by this specification.
 | Failure/interruption | Storage/ownership failures abort rather than become an ordinary model-visible tool result that permits continued inference. Uncertain turn progress, corruption, missing referenced state, or an unsupported format must fail explicitly on restore, not reset, partially restore, or automatically replay tools. A known-safe startup failure must not invalidate the last completed conversation. |
 | Restore | A clean worker reopens the complete acknowledged native state and accepts the next user prompt without host transcript injection. No automatic continuation of pending work, no empty `send_messages`, and no exactly-once guarantee. |
 
+The mechanics below are **Agent-proposed for architecture review**; they do
+not extend the existing human sign-off.
+
+**Storage schema and file operations.** A session has exactly one mutable
+Blob/local-file envelope, `state.json`, containing `schema_version=1`,
+`sdk_version="1.0.14"`, `native_version="1.0.85"`, `protocol_version=3`,
+`app_key`, validated logical `agent_slug` and `session_id`, `native_session_id`,
+monotonic `owner_epoch` and `revision`, `state`
+(`empty|preparing|active|ready|uncertain|deleted`),
+`handoff_may_have_started` (Boolean), nullable `working` and `completed`
+logical SessionFs trees, and `integrity_sha256` over the canonical envelope
+excluding that field. Each tree contains canonical-path-keyed `directories`
+with `birthtime`/`mtime` and `files` with full UTF-8 `content`, `size_bytes`,
+`birthtime` and `mtime`. `empty` and `deleted` have neither tree; `ready` has
+`completed` and no `working`; `preparing`/`active`/`uncertain` keep an
+independent `working` copy and any prior `completed` tree. Conditionally create
+a content-free `empty` envelope for a new ID, then acquire ownership before
+any SDK writes. This first-time conditional creation is the sole unleased
+write; it carries no SDK file content. An `empty` first-create retry is
+allowed; never reset a completed identity.
+Resume requires `ready` with a complete `completed` tree. Start a turn by
+fenced-copying `completed` (or an empty tree) into `working` and setting
+`preparing`; reset the handoff marker on this transition, rollback and
+completion.
+
+**Atomicity and ownership.** A per-session async lock serializes every
+SessionFs callback, including reads, and every envelope revision. Owner
+reads/stat/listing use the in-memory `working` tree during a turn; other
+readers project only `completed`. `exists` uses only the already-loaded
+owner tree. Under a finite lease on `state.json`, every Blob
+write/append/mkdir/remove/rename and state transition replaces the **entire**
+envelope with a single-request conditional Put Blob using the current lease ID
+and prior ETag, never staged blocks or side blobs. Increment `revision` and
+update in-memory state only after acknowledgment.
+Azure's strong consistency provides read-after-write; rename is one
+replacement, never a multi-blob copy. Cap the serialized envelope at a
+qualified single-put/memory budget and reject over-limit mutations before
+acknowledgment. Local mode uses the same envelope and serial lock, a stable
+data-free sidecar for a deadline-bounded cross-process OS lock across the turn
+(never lock the replaceable state inode), and atomic replace plus file/directory
+`fsync` on each mutation. A crash exposes either the old or new full tree.
+A conflict, ambiguous acknowledgment or lost lease aborts rather than
+silently continuing; renewal runs through SDK detach and
+the storage barrier. Acquiring a lease advances the fenced owner epoch.
+Competing turns wait within their deadline or fail clearly. No SDK state is
+written outside the leased object; a stale lease ID cannot upload content,
+replace state or publish completion. Never release another owner's lease.
+
+**Handoff and completion.** Create/resume may mutate `working` in `preparing`.
+Mark `active` durably before dispatch, then persist
+`handoff_may_have_started=true` under the lease before creating any send task
+or invoking a send RPC. Separately track in process whether either was actually
+created; no unmarked send is permitted. Cancellation, deadline or fault before
+any send task/RPC exists, including after `active`, may roll back only after
+detaching/disposing any initialized SDK session and proving send/RPC and
+callback quiescence plus valid ownership, even if a failed create/resume RPC
+returned no handle. Conditionally replace the envelope with `empty` for a
+same-ID first-create retry, or `ready` with the unchanged prior `completed`
+tree; discard `working`. Qualify SDK cleanup/recreation of a never-dispatched
+session with the same deterministic native ID. Once a send task/RPC may have
+started, or its absence/quiescence cannot be proved (including after a crash),
+retain `active`/mark `uncertain` and fail closed, without replaying tools. A
+persisted handoff marker alone is conservative after restart; a live owner
+may roll back despite that marker only on proof no send task/RPC was created.
+After a verified completed turn, await SDK detach and drain all provider
+in-flight callbacks under valid ownership, then conditionally replace the
+envelope with `completed=working`, `working=null`, `state=ready` before success.
+Qualify that detach prevents further background writes; otherwise require a
+supported SDK flush/quiescence signal before shipping.
+
+**Failure barrier.** The provider latches and re-raises every callback failure,
+including exceptions in `exists` path normalization, validation or in-memory
+lookup. Only a successfully normalized, authoritative lookup may return
+`true`/`false`; `exists` performs no remote probe. Although the SDK can convert
+an `exists` exception to `false`, the orchestration independently checks the
+latch and ownership before dispatch, races execution with subsequent latch/
+lease loss to abort promptly, and re-checks through detach, storage barrier
+and completion, independent of SDK results. Load/validate the entire envelope
+before exposing callbacks; do not advertise SQLite support. Never allow
+further inference on a known storage failure; SDK behavior that defeats this
+barrier blocks this slice.
+
+**Versions and lifecycle.** Validate the envelope schema, SDK/native/protocol
+triple, logical identity, digest, file sizes and state before resume. Only the
+pinned triple is compatible with `v1` until a reviewed compatibility rule says
+otherwise. Unknown/newer formats, version mismatches, corruption and
+`active`/`uncertain`/`deleted` fail explicitly; `preparing` requires fenced,
+proven pre-dispatch recovery before retry. There is no migration or partial
+restore. Persist native compaction state through the same barrier. Enable
+`InfiniteSessionConfig` with its native defaults; do not translate MAF token
+limits into native compaction thresholds. Effective non-null
+`agent_configuration.agent_framework` compaction settings remain rejected,
+while null/unset settings permit native defaults; the separately unsupported
+portable output cap remains rejected. Retention is customer-controlled:
+for customer-initiated whole-session deletion, acquire the lease/OS lock and
+atomically replace the entire envelope with a minimal `deleted` tombstone
+(schema, versions, identity, owner epoch, revision, digest; no file content).
+Repeat safely if already tombstoned; never reuse that ID. Current stale lease
+IDs cannot write after replacement. Blob soft-delete, versioning and backup
+retention remain customer-controlled: replacing the live blob does **not**
+claim to erase service-retained versions. Document targeted deletion and no
+automatic TTL; never prune a live compaction reference independently.
+
 Native compaction alone owns triggering, summarization, and context
 transformation. Native compaction references and their targets are part of the
 same durability obligation as conversation history. Acceptance requires a real
@@ -319,14 +441,17 @@ Separate passing compaction and uncompacted-restore tests do not prove this.
 ### 4.6 Compatibility and history break
 
 Existing MAF files and blobs remain untouched. There is no automatic conversion,
-import, dual-write, or merge between formats. A continuation request whose
-identity has only incompatible harness history must fail explicitly instead of
-silently starting an empty conversation; a fresh session ID starts a new native
-conversation. Switching back to MAF can continue existing MAF history only,
-never the turns recorded under Copilot. Copilot-only conversations require a new
-MAF session ID. An older binary unaware of the native namespace cannot enforce
-that guard, so rollback to it requires fresh IDs rather than an assumption of
-history continuity. Cross-namespace detection must not parse or modify MAF JSONL.
+import, dual-write, or merge between formats. This slice adds **bidirectional,
+metadata-only** existence guards: Copilot checks the scoped MAF file/blob
+before creating/resuming, and current MAF checks existence of the scoped native
+state file/blob before creating/continuing. If only opposite-harness history
+exists for the same logical ID, reject it explicitly; never parse or modify
+either format.
+Failed/indeterminate metadata probes fail closed, not as "absent". A fresh ID
+starts a new conversation. Where both formats already exist, each harness
+uses only its own history. Switching back to MAF can continue existing MAF
+history only; Copilot-only sessions require new MAF IDs. Older rollback binaries
+cannot enforce this guard, so operational rollback requires fresh IDs.
 
 The portable `agent_configuration.max_output_tokens` contract must be enforced
 through a verified SDK/provider mapping or rejected as unsupported. The exact
@@ -390,11 +515,22 @@ to follow the explicit preview-rejection rules.
 
 | Implementation item | Resolution or evidence required for supported behavior |
 | --- | --- |
-| SDK/runtime and hosting contract | Select version/protocol/assets, core-versus-optional packaging and dependency coexistence with MAF, provider/Entra mappings, and provider `store=false` enforcement. Define worker lifecycle and target Functions hosting constraints, including Linux/Flex not qualified by the Windows evidence. Do not promote the evidence SHA to a production pin by assumption. |
-| Native storage protocol | Specify ownership/fencing, rename/read consistency, completion metadata, SDK storage-error barriers, and acknowledgment/quiescence. Define local-versus-deployed storage selection, complete-session retention safety, corruption/version detection, and interrupted-session behavior against concrete SDK operations. |
-| Native continuation and presentation | Establish a supported native history projection, compaction/reference preservation and cold-restore evidence, and metadata-only incompatible-history detection/rollback behavior. Rendering history must not become a second execution-state authority. |
-| Configuration compatibility | Decide the enforceable portable output limit and treatment/replacement of MAF-specific compaction configuration, preserving recursive inheritance/null behavior without claiming equivalent algorithms. |
+| SDK/runtime and hosting contract | The foundation pins SDK `1.0.14` / native `1.0.85` / protocol `3` for this storage schema; verify the actual assets and qualify deployment acquisition, dependency coexistence, provider/Entra mappings, provider `store=false`, worker lifecycle and target Functions hosting (including Linux/Flex). The earlier assessment SHA is not a production pin. |
+| Native storage protocol | Section 4.5 proposes one lease-fenced session envelope, handoff tracking, callback serialization/latching, atomic rename, first-create recovery, completion and tombstone deletion. Review single-put size/performance, version-retention write amplification and SDK/storage feasibility; prove the pinned runtime stops inference on SessionFs failures and issues no writes after detach/barrier. Verify lease loss, pre-handoff faults, post-handoff uncertainty, retry and crash boundaries on real Blob and local storage; document service-retained versions. |
+| Native continuation and presentation | This slice implements metadata-only incompatible-history guards and proves compaction/reference preservation on cold restore. A supported native history projection remains a later parity item and must not become a second execution-state authority. |
+| Configuration compatibility | MAF-specific compaction remains rejected when effective/non-null; null/unset selects native defaults without threshold mapping. The portable output-limit mapping remains unresolved and the preview continues to reject it. |
 | Extension compatibility | Define the supported custom `ClientManager` contract and MAF `FunctionTool` conversion boundary, including authored decorator kwargs, approval semantics, unsupported hooks/options, and construction-time validation. Preserve MAF extensions with the flag off. |
+
+### 4.9 Delivery plan
+
+Each implementation slice carries its own tests and accurate behavior docs;
+later slices do not excuse a failing gate or weaken the default-off MAF path.
+
+| Slice | Scope and evidence | Dependency / review focus |
+| --- | --- | --- |
+| [PR #241](https://github.com/Azure/azure-functions-agents-runtime/pull/241) — foundation (merged) | Default-off, local-only SDK stdio, supported non-streaming HTTP/tools, native local resume and explicit preview rejections. | No Blob, compaction or multi-worker qualification; preserve its MAF isolation. |
+| Native sessions, Blob persistence and compaction (this issue) | Add an internal native SessionFs module, integrate it in `_copilot.py`/`_harness.py` and add bidirectional metadata-only guards at the runner boundary; implement the single-envelope local/Blob protocol, lease-fenced handoff/rollback, `exists` failure latch, completion/tombstone and native defaults. Add mirrored storage/harness/runner, handoff fault and real compacted cold-restore tests; update architecture, operations and sample docs. Retain other preview capability rejections. | Depends on #241. Re-review revised mechanics and SDK error/quiescence evidence **before implementation**; qualify deployed hosting; no partial-success release. |
+| Further parity (separate reviewable PRs) | Native history projection/streaming, MCP/scoped skills, delegation/workflows, system tools, model/output controls, extension mappings and telemetry as each obtains evidence; update its tests/docs with each behavior. | Depends on the relevant qualified foundation/sessions behavior. Keep unsupported features explicitly rejected until their own slice passes review. |
 
 ## 5. Decisions log
 
@@ -416,6 +552,7 @@ remaining implementation decisions or qualification obligations are complete.
 | 10 | Workflows across app restarts/deployments | Custom harness pinning/lifecycle rules / existing Durable behavior | Follow Durable replay, retry, worker lifetime, and configured deployment routing; each executing app instance supplies its own selection, with no new persisted harness pin or mismatch rejection | Human | 2026-09-28 |
 | 11 | Session startup failures | Prescribe marker sequencing / specify observable behavior | Require one active turn per agent/session, safe retry after a startup failure that did not begin a turn or damage state, and explicit errors for uncertain continuation; leave marker ordering and cleanup to implementation | Human | 2026-09-28 |
 | 12 | Feature specification sign-off | Keep In review / finalize the agreed feature contracts | Finalized after approving decision 11; section 4.8 remains an explicit record of unresolved implementation choices and required evidence, not a claim of parity or production readiness | Human (larohra) | 2026-09-28 |
+| 13 | Native session delivery and persistence | Shared MAF JSONL or fragmented native Blob tree / one isolated lease-fenced envelope | Propose sections 4.5/4.9's encoded identities, frozen context, single-object local/Blob SessionFs, serialized/latching callbacks, safe pre-handoff rollback, uncertain post-handoff state, metadata-only history guards, tombstone deletion and native compaction after #241. Dedicated architecture-agent re-review APPROVED these mechanics on 2026-09-29 after two REVISE reviews; qualification remains open. Human-approved contracts/status are unchanged. | Agent proposal; architecture-agent approval | 2026-09-29 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -426,8 +563,8 @@ where mocks cannot establish process, transport, authentication, or durability.
 
 | Area | Acceptance evidence |
 | --- | --- |
-| Selection/isolation | Exercise unset, `false`, `0`, `true`, `1`, mixed-case/padded text, empty/whitespace-only/invalid values, multiple app contexts, and standalone entry points. Off starts no Copilot process/download/auth/telemetry; on is uniform across all roles and never falls back. |
-| Context propagation/lifetime | Construct two apps with different flag snapshots, including the same root; delayed handlers, delegates, and Activity calls retain their own context after environment changes. Cover explicit/default standalone contexts. On worker replacement, completed Activity results replay normally and newly executed/redelivered Activities use the serving app's context, without adding harness state to Durable history or changing its scheduling/version-routing rules. |
+| Selection/isolation | Exercise unset, `false`, `0`, `true`, `1`, mixed-case/padded text, empty/whitespace-only/invalid values, multiple app contexts, and standalone entry points. Test local/cloud storage defaults, explicit overrides, missing Blob settings and no fallback. Off starts no Copilot process/download/auth/telemetry; on is uniform across all roles and never falls back. |
+| Context propagation/lifetime | Construct two same-root app contexts with different frozen storage settings; assert neither changes on environment mutation nor shares a native client. Delayed handlers, delegates and Activities retain their context. Cover explicit/default standalone contexts and normal Durable replay/routing across worker replacement, without persisting harness selection into orchestration history. |
 | Unsupported features | Effective inherited/default-on capabilities and unmapped configuration/extensions fail before provider inference or tool effects. Isolated previews of supported capabilities execute real SDK turns. |
 | Authoring/API | Existing precedence/null scenarios, tool `None`/empty semantics, routes/auth, response envelopes, structured-output validation/errors, history projection/degradation/errors/bounds, and SSE ordering/cancellation remain compatible. No native or specialist events leak. |
 | Models/extensions | Verify supported providers/Entra refresh, model metadata, disabled provider conversation storage, deadlines, output limits, and explicit custom-manager/tool compatibility, including a manager replaced after composition. MAF hooks remain intact off. |
@@ -437,8 +574,8 @@ where mocks cannot establish process, transport, authentication, or durability.
 | System tools | Exercise `web_request` defaults/exclusion/SSRF/budgets/errors and real ACA `execute_python` scoping/results without substituting local execution. |
 | Completed-turn restore | On Blob and local storage, complete a real tool-using turn, replace Python and native processes, and continue by the same agent/session identity without restating prior values. Inspect outbound provider context/state reuse, not just a plausible answer. |
 | Compacted restore | Force native compaction, acknowledge complete state, replace both processes, restore in a clean worker, and prove saved-summary/reference reuse without another compaction LLM call. |
-| Storage failures/concurrency | Fault-inject append/replace/rename/read/ack errors, partial references, corrupt/unsupported state, crashes before completion, lease loss, stale writers, and two-worker same-session contention. For known pre-turn create/resume, validation, or startup-deadline failures that leave native state valid, verify no inference/tool effects and a successful retry on the same session ID. Uncertain submission or unsafe state must still fail explicitly. No silent reset, continued inference after a storage barrier failure, or false success/`done`; independent sessions still progress. |
-| History break | MAF bytes remain unchanged. Incompatible IDs fail explicitly; native and MAF namespaces never cross-read as execution state. Verify documented rollback behavior and native history rendering without importing MAF messages. |
+| Storage failures/concurrency | Test `.`/`..` identity isolation, concurrent callbacks/no lost appends or renames, coherent reads, and `exists` validation/normalization/lookup exceptions latched and re-raised (simulate SDK converting them to `false`); only valid lookups return a Boolean. Fault-inject before/after conditional envelope replacement, oversize writes, SDK success despite a latched error, create/resume RPC failure, OS-lock contention, ETag/lease loss, stale writers and two-worker contention. Inject cancellation/deadline/fault after `active` before handoff marking, after marking but before task/RPC creation, and immediately after creation; prove verified same-ID/new or prior-`completed` rollback only without a created send task/RPC, with uncertain fail-closed after possible handoff or crash. Verify one-write rename, idempotent content-free tombstone, no stale-lease content writes and no claim of service-version erasure; independent sessions still progress. |
+| History break | Metadata-only native and MAF guards reject opposite-only IDs in both directions, without parsing or modifying either format; failed existence probes fail closed. Verify older-binary rollback guidance requires fresh IDs; native history rendering remains a later parity slice. |
 | Hosting/telemetry | Demonstrate supported Functions deployment assets, lazy single-client startup, concurrent isolation, bounded cancellation/shutdown, and no orphan native process. Verify usage/correlation/error accounting and sensitive-data-off behavior in host and native telemetry. |
 
 ## 7. Docs impact
@@ -466,6 +603,10 @@ this document does not introduce an unimplemented schema or rewrite runtime docs
 - **Human sign-off:** Laveesh Rohra (`larohra`), 2026-09-28, explicitly approved
   the behavior-focused session contract and requested sign-off on the FRD
   (decision 12).
-- **Remaining qualification:** Section 4.8 retains unresolved implementation
-  choices and evidence requirements. Section 6 defines acceptance, not results
-  already achieved.
+- **Implementation design:** Section 4.5 mechanics and section 4.9 slicing
+  received dedicated architecture-agent APPROVE on 2026-09-29 after two REVISE
+  reviews (decision 13). This approves design, not implementation or production
+  qualification; existing human-approved feature contracts remain unchanged.
+- **Pre-release qualification:** Real pinned SDK error/quiescence, Blob lease/
+  fencing/durability, Functions hosting, and compacted cold-restore evidence
+  remain required (§4.8 and §6). Acceptance is not yet demonstrated.
