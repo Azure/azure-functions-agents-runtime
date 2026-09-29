@@ -6,7 +6,7 @@ import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, Protocol, Self
+from typing import TYPE_CHECKING, ClassVar, Final, Literal, Protocol, Self
 from urllib.parse import urlsplit
 
 from ._harness import UnsupportedCapabilityError
@@ -17,9 +17,16 @@ if TYPE_CHECKING:
     from copilot.session import ProviderConfig, ProviderTokenArgs
 
 BearerTokenProvider = Callable[["ProviderTokenArgs"], Awaitable[str]]
+type ProviderWireType = Literal["openai", "azure"]
+type WireApi = Literal["responses"]
 
 _AZURE_OPENAI_SCOPE = "https://cognitiveservices.azure.com/.default"
 _FOUNDRY_SCOPE = "https://ai.azure.com/.default"
+_PROVIDER_WIRE_OPENAI: Final[ProviderWireType] = "openai"
+_PROVIDER_WIRE_AZURE: Final[ProviderWireType] = "azure"
+_WIRE_API_RESPONSES: Final[WireApi] = "responses"
+_OPENAI_BASE_URL: Final = "https://api.openai.com/v1"
+_FOUNDRY_OPENAI_V1_SUFFIX: Final = "/openai/v1"
 
 
 class ProviderTokenSource(Protocol):
@@ -152,9 +159,9 @@ class OpenAIProvider(CopilotProvider):
         from copilot.session import ProviderConfig
 
         return ProviderConfig(
-            type="openai",
-            wire_api="responses",
-            base_url="https://api.openai.com/v1",
+            type=_PROVIDER_WIRE_OPENAI,
+            wire_api=_WIRE_API_RESPONSES,
+            base_url=_OPENAI_BASE_URL,
             model_id=model,
             wire_model=model,
             bearer_token_provider=lambda _args: self.api_key,
@@ -197,8 +204,8 @@ class AzureOpenAIProvider(CopilotProvider):
         from copilot.session import ProviderConfig
 
         provider = ProviderConfig(
-            type="azure",
-            wire_api="responses",
+            type=_PROVIDER_WIRE_AZURE,
+            wire_api=_WIRE_API_RESPONSES,
             base_url=self.endpoint,
             model_id=model,
             wire_model=model,
@@ -244,9 +251,9 @@ class FoundryProvider(CopilotProvider):
         from copilot.session import ProviderConfig
 
         return ProviderConfig(
-            type="openai",
-            wire_api="responses",
-            base_url=f"{self.endpoint}/openai/v1",
+            type=_PROVIDER_WIRE_OPENAI,
+            wire_api=_WIRE_API_RESPONSES,
+            base_url=f"{self.endpoint}{_FOUNDRY_OPENAI_V1_SUFFIX}",
             model_id=model,
             wire_model=model,
             bearer_token_provider=tokens.bearer_token_provider(
