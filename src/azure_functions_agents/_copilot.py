@@ -19,6 +19,7 @@ from ._harness import (
     HarnessRequest,
     ProviderKind,
     UnsupportedCapabilityError,
+    validate_copilot_client_manager,
 )
 from ._logger import logger
 from .client_manager import InferenceTarget
@@ -41,6 +42,9 @@ if TYPE_CHECKING:
 
     from ._function_tool import FunctionTool
     from .runner import AgentResult
+
+_AZURE_OPENAI_SCOPE = "https://cognitiveservices.azure.com/.default"
+_FOUNDRY_SCOPE = "https://ai.azure.com/.default"
 
 
 class _SessionOptions(TypedDict):
@@ -142,17 +146,31 @@ class _NativeRuntime:
         if failed:
             raise CopilotPreviewError("Copilot preview shutdown did not complete cleanly.")
 
-    async def foundry_token(self, _args: ProviderTokenArgs) -> str:
+    def credential(self) -> AsyncTokenCredential:
         if self._credential is None:
             self._credential = build_async_credential()
+        return self._credential
+
+    async def _entra_token(self, scope: str, diagnostic: str) -> str:
         try:
-            token = await self._credential.get_token("https://ai.azure.com/.default")
+            token = await self.credential().get_token(scope)
         except Exception:
-            raise CopilotPreviewError(
-                "Copilot Foundry preview could not acquire an Entra token. "
-                "Check the existing Azure sign-in and project access."
-            ) from None
+            raise CopilotPreviewError(diagnostic) from None
         return token.token
+
+    async def azure_openai_token(self, _args: ProviderTokenArgs) -> str:
+        return await self._entra_token(
+            _AZURE_OPENAI_SCOPE,
+            "Copilot Azure OpenAI could not acquire an Entra token. "
+            "Check the approved Azure credential configuration and deployment access.",
+        )
+
+    async def foundry_token(self, _args: ProviderTokenArgs) -> str:
+        return await self._entra_token(
+            _FOUNDRY_SCOPE,
+            "Copilot Foundry preview could not acquire an Entra token. "
+            "Check the approved Azure credential configuration and project access.",
+        )
 
     def _exit(self) -> None:
         """Best-effort SDK fallback when the host does not await shutdown."""
@@ -244,7 +262,7 @@ def _tool(function: FunctionTool, calls: list[dict[str, Any]]) -> Tool:
     )
 
 
-def _provider(harness: AppHarness, owner: _NativeRuntime) -> ProviderConfig:
+def _build_provider(harness: AppHarness, owner: _NativeRuntime, model: str) -> ProviderConfig:
     from copilot.session import ProviderConfig
 
     if harness.provider == ProviderKind.OPENAI:
@@ -252,16 +270,76 @@ def _provider(harness: AppHarness, owner: _NativeRuntime) -> ProviderConfig:
             type="openai",
             wire_api="completions",
             base_url="https://api.openai.com/v1",
+            model_id=model,
+            wire_model=model,
             bearer_token_provider=_token,
         )
+    if harness.provider == ProviderKind.AZURE_OPENAI and harness.endpoint is not None:
+        provider = ProviderConfig(
+            type="azure",
+            wire_api="completions",
+            base_url=harness.endpoint,
+            model_id=model,
+            wire_model=model,
+        )
+        if harness.azure_api_version is not None:
+            provider["azure"] = {"api_version": harness.azure_api_version}
+        api_key = os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
+        if api_key:
+            provider["api_key"] = api_key
+        else:
+            owner.credential()
+            provider["bearer_token_provider"] = owner.azure_openai_token
+        return provider
     if harness.provider == ProviderKind.FOUNDRY and harness.endpoint is not None:
+        owner.credential()
         return ProviderConfig(
             type="openai",
             wire_api="responses",
             base_url=f"{harness.endpoint}/openai/v1",
+            model_id=model,
+            wire_model=model,
             bearer_token_provider=owner.foundry_token,
         )
     raise CopilotPreviewError("Copilot preview has no valid provider target.")
+
+
+def _provider(harness: AppHarness, owner: _NativeRuntime, model: str) -> ProviderConfig:
+    api_key = (
+        harness.provider == ProviderKind.AZURE_OPENAI
+        and bool(os.environ.get("AZURE_OPENAI_API_KEY", "").strip())
+    )
+    try:
+        return _build_provider(harness, owner, model)
+    except CopilotPreviewError:
+        raise
+    except Exception:
+        if harness.provider == ProviderKind.AZURE_OPENAI:
+            authentication = "AZURE_OPENAI_API_KEY" if api_key else "Azure credential"
+            diagnostic = (
+                "Copilot Azure OpenAI provider setup failed. Check AZURE_OPENAI_ENDPOINT, "
+                "AZURE_OPENAI_API_VERSION, the deployment, and the approved "
+                f"{authentication} configuration."
+            )
+        elif harness.provider == ProviderKind.FOUNDRY:
+            authentication = "Azure credential"
+            diagnostic = (
+                "Copilot Foundry provider setup failed. Check FOUNDRY_PROJECT_ENDPOINT, "
+                "the deployment, and the approved Azure credential configuration."
+            )
+        else:
+            authentication = "OPENAI_API_KEY"
+            diagnostic = (
+                "Copilot OpenAI provider setup failed. Check the model and "
+                "OPENAI_API_KEY configuration."
+            )
+        logger.error(
+            "Copilot provider setup failed: provider=%s authentication=%s; "
+            "underlying details were not logged.",
+            harness.provider,
+            authentication,
+        )
+        raise CopilotPreviewError(diagnostic) from None
 
 
 def _completed_turn(events: list[SessionEvent]) -> bool:
@@ -334,6 +412,7 @@ async def _session_context(session: CopilotSession) -> AsyncIterator[CopilotSess
 
 
 async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
+    validate_copilot_client_manager()
     if request.max_output_tokens is not None:
         raise UnsupportedCapabilityError(
             "Copilot preview cannot enforce max_output_tokens with the pinned SDK/runtime. "
@@ -345,7 +424,6 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     from .runner import AgentResult, _AgentUsageRecorder, _session_lock_bounded_by
 
     owner = _runtime(harness)
-    provider = _provider(harness, owner)
     native_id = _native_id(request.agent_slug, request.session_id)
     calls: list[dict[str, Any]] = []
     messages: list[str] = []
@@ -372,6 +450,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     output_tokens = (output_tokens or 0) + used_output
 
     try:
+        provider = _provider(harness, owner, request.model)
         async with _session_lock_bounded_by(
             native_id, request.deadline, agent_slug=request.agent_slug
         ), asyncio.timeout_at(request.deadline):
@@ -445,7 +524,10 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                         case AssistantMessageData(content=content) if content.strip():
                             await _verify_completed_turn(session)
                         case _:
-                            raise CopilotPreviewError("Copilot returned no final model reply.")
+                            raise CopilotPreviewError(
+                                "Copilot returned no final model reply. Check provider "
+                                "authentication and model/deployment access."
+                            )
                 except BaseException:
                     if invocation_started:
                         await _abort(session)

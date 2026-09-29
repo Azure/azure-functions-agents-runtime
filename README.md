@@ -23,11 +23,13 @@ MAF remains the default. A separate, local-only
 [Copilot foundation sample](samples/copilot-preview/README.md) supports an explicit
 `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=true` opt-in for non-streaming HTTP,
 simple Python tools and completed-turn native-session continuity. It documents
-the pinned SDK/runtime, Foundry Entra setup, unsupported capabilities, real
+the pinned SDK/runtime, OpenAI key, Azure OpenAI key/Entra, Foundry Entra,
+unsupported capabilities, real
 request/tool/follow-up verification and the flag-off restart path. This is not
 production activation or full provider/role/streaming parity; existing MAF
 history is untouched. Configured output-token caps are not supported in this
-Copilot preview; MAF retains its output-limit controls.
+Copilot preview; MAF retains its output-limit controls. Custom `ClientManager`
+implementations remain MAF-only and are rejected explicitly when Copilot is on.
 
 ## Installation
 

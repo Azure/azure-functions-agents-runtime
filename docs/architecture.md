@@ -78,8 +78,8 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/system_tools/sandbox.py` | Builds the ACA Dynamic Sessions-backed `execute_python` tool for a resolved agent/session, using a fresh GUID when no explicit session id is provided. | `create_sandbox_tools()` |
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming; builds per-request `delegate_<slug>` tools and fresh stateless workflow leaf agents; attempts one internal token-usage record through the shared runtime logger for each actual MAF invocation attempt. | `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
-| `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
-| `azure_functions_agents/_harness.py` | Private once-per-app-root harness selection and explicit preview capability validation, including rejection of unsupported configured output caps. Captured in capabilities/registration closures; standalone runner calls use the same selection. No SDK import/process side effects when off. | `AppHarness`, `HarnessRequest`, `get_harness()`, `validate_agent()` |
+| `azure_functions_agents/client_manager.py` | Defines the pluggable MAF inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. Its pure internal built-in resolver preserves MAF provider/model precedence without constructing a chat client; an identity check protects Copilot from custom-manager fallback. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
+| `azure_functions_agents/_harness.py` | Private once-per-app-root harness selection and explicit preview capability/provider validation, including rejection of unsupported configured output caps and custom client managers before app mutation. Captured in capabilities/registration closures; standalone runner calls use the same selection. No SDK import/process side effects when off. | `AppHarness`, `HarnessRequest`, `get_harness()`, `validate_agent()` |
 | `azure_functions_agents/_copilot.py` | Lazy, pinned local Copilot SDK stdio adapter. Uses SDK-owned runtime acquisition, native session create/resume/disconnect and persistence; supplies provider credential callbacks, checks the custom-only tool catalog, translates results/usage and stops the SDK client on shutdown. No host completion marker, OS file lock, broad child-environment filter, cache-layout inspection or outbound HTTP rewrite. | `run()`, `shutdown()` |
 | `azure_functions_agents/workflows/integration.py` | Builds the complete immutable handler catalog, immutable slug-keyed workflow-agent policy catalog (including allowed tools' decorator-owned retry and timeout declarations), per-agent management tools/addenda, validates declared trigger support for workflow-enabled agents, and performs the one app-wide Durable registration. It also resolves the packaged `data-driven-workflows` skill used for progressive authoring guidance. | `build_workflow_handler_catalog()`, `build_workflow_agent_policy_catalog()`, `build_workflow_agent_integration()`, `data_driven_workflows_skill_path()`, `validate_workflow_agent_trigger()`, `register_workflow_runtime()` |
 | `azure_functions_agents/workflows/engine.py` | Registers one Durable blueprint per app and executes the native two-argument Durable Task orchestrator, workflow-tool Activity, and Workflow Sub Agent Activity. Orchestration and Activity schedules attach `durabletask.displayName` tags for readable DTS dashboard timelines without changing registered function names. Capability-bearing Activities reauthorize against the current workflow-agent policy before complete-catalog dispatch. Data-driven execution uses typed persisted-task/state contracts and deterministic phase helpers for `when` evaluation, bounded `for_each` materialization, runnable selection, ordered aggregation, result application, cancellation restoration, structured (`schema_version: 2`) status, and controlled-failure normalization. It selects retry and continuation behavior from persisted orchestration input. Static and dynamic schedulers share the continuation decision that commits bounded permitted failures. Waves without enabled continuation keep the earlier wait, failure, and cancellation order. Durable `yield` boundaries remain in the top-level orchestrator generator. | `register_workflows()` |
@@ -249,24 +249,45 @@ does not replace that default. Restart to switch an existing app/default.
 Legacy `runtime:` front matter remains ignored.
 
 The runner forks **before** MAF client, history, tool-loop or role construction.
-`ClientManager` remains the MAF provider extension point; it is not the new
-harness boundary. Copilot uses existing `InferenceTarget`, tool schemas and
-`AgentResult`, with SDK types kept inside `_copilot.py`. Capability validation
-runs before app mutation and again at standalone execution. The opt-in cannot
-silently fall back to MAF for roles or unsupported combinations.
+The built-in manager's pure target resolver selects provider/model without
+constructing or inspecting a MAF chat client. It preserves the existing explicit
+provider override, autodetection order (`AZURE_OPENAI_ENDPOINT` → Foundry
+endpoint → OpenAI key), model precedence, blank handling, and per-agent composed
+model handoff. SDK types remain inside `_copilot.py`.
 
-The initial subset is non-streaming HTTP, simple Python tools, Foundry project
-Responses with refreshable Entra auth (or explicit OpenAI BYOK completions), and
-local native-session continuity. The custom-only tool allowlist is checked
-against the native catalog before every prompt. Empty mode disables ambient
-instructions/plugins/skills/telemetry/auth; ungranted native permission
-requests are denied. Provider credentials come from host-owned callbacks rather
-than static session configuration. The SDK, not a host HTTP request handler,
-sends provider requests: the host does not rewrite them to force `store:false`
-or an output cap. In SDK 1.0.14/native 1.0.85, output-limit metadata does not
+`ClientManager` remains the MAF provider extension point, not the new harness
+boundary. Flag-off custom managers and subclasses retain their existing behavior.
+Copilot accepts only the exact runtime-created built-in manager: selection and
+catalog validation reject a replacement before `FunctionApp` mutation, and
+execution rechecks in case `set_client_manager()` replaced it later. Rejection is
+an explicit migration diagnostic with no custom MAF client construction or
+fallback.
+
+Copilot SDK 1.0.14 uses the stable singular `ProviderConfig` on both create and
+resume:
+
+| Target | SDK provider | Authentication and model mapping |
+| --- | --- | --- |
+| OpenAI | `type=openai`, `wire_api=completions`, `https://api.openai.com/v1` | Host callback reads `OPENAI_API_KEY` per request; the resolved model is the session model, `model_id`, and `wire_model`. |
+| Azure OpenAI | `type=azure`, `wire_api=completions`, host-only `AZURE_OPENAI_ENDPOINT` | A nonblank API key wins. Otherwise a refreshable callback uses `https://cognitiveservices.azure.com/.default`. Optional nonblank API version is passed under `azure`; omission uses versionless v1. The deployment/model is supplied in all three model positions. |
+| Foundry project | `type=openai`, `wire_api=responses`, normalized `<project-endpoint>/openai/v1` | A refreshable callback uses `https://ai.azure.com/.default`; model metadata is explicit and SDK Responses requests use `store=false`. |
+
+Endpoints and API-version tokens are validated before registration without
+echoing their values. Token callbacks may overlap and acquire a fresh token for
+each request; their credential owner is shared for that local worker and closed
+at shutdown. Credentials are not persisted, placed in session metadata or launch
+arguments, or logged. Authentication failures are sanitized and identify the
+provider/configuration action. Unsupported providers/settings fail without
+fallback.
+
+The supported subset remains non-streaming HTTP, simple Python tools and local
+native-session continuity. The custom-only tool allowlist is checked against the
+native catalog before every prompt. Empty mode disables ambient instructions,
+plugins, skills, telemetry and authentication; ungranted native permission
+requests are denied. In SDK 1.0.14/native 1.0.85, output-limit metadata does not
 emit a provider API generation cap; configured `max_output_tokens` is therefore
-rejected for this opt-in, not silently dropped. Default MAF output controls
-remain unchanged.
+rejected for this opt-in, not silently dropped. Default MAF controls remain
+unchanged.
 
 The SDK 1.0.14 wheel contains Python code but no native assets. The SDK obtains
 native 1.0.85 lazily on first client construction if it is not already cached,
@@ -575,6 +596,10 @@ This split keeps parsing, policy, Azure binding registration, and runtime execut
 ### Custom inference client
 
 To plug in a different chat backend, implement the `ClientManager` interface and register it once with `set_client_manager(...)`; after that, `runner.run_agent()` and `runner.run_agent_stream()` use your implementation for every call. See `src/azure_functions_agents/client_manager.py` and the README section [Plugging in a custom client manager](https://github.com/Azure/azure-functions-agents-runtime/blob/main/README.md#plugging-in-a-custom-client-manager).
+
+This remains a MAF-only extension contract. The local Copilot migration preview
+rejects a custom, replaced, or subclassed manager before registration and
+rechecks before execution; disable the flag to continue using that manager.
 
 This extension point is deliberately below the registration layer: no trigger or endpoint code needs to change when you swap providers. The `ResolvedAgent.model` value is still the hand-off contract, but your manager decides how to interpret it. Delegated specialists resolve their model through the same `ClientManager`, so a custom implementation applies uniformly to coordinators and specialists alike.
 

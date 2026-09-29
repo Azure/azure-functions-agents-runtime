@@ -78,6 +78,7 @@ def test_sample_entrypoint_uses_functions_script_root(monkeypatch: Any, tmp_path
     monkeypatch.setenv(_harness.FLAG, "true")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_MODEL", "gpt-4.1-mini")
+    monkeypatch.setenv("OPENAI_API_KEY", "sentinel-not-a-secret")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_DIR", str(tmp_path / "state"))
     monkeypatch.delenv("WEBSITE_INSTANCE_ID", raising=False)
     monkeypatch.delenv("FUNCTIONS_WORKER_PROCESS_COUNT", raising=False)
