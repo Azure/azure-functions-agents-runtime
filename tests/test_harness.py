@@ -35,6 +35,7 @@ from azure_functions_agents.client_manager import (
     set_client_manager,
 )
 from azure_functions_agents.config import paths
+from azure_functions_agents.config.env import EnvVar
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
 from azure_functions_agents.config.merge import compose
 from azure_functions_agents.config.schema import AgentConfiguration, AgentFrameworkConfiguration
@@ -135,6 +136,49 @@ def test_unsupported_app_settings(preview, monkeypatch, name, value, diagnostic)
     monkeypatch.setenv(name, value)
     with pytest.raises(UnsupportedCapabilityError, match=diagnostic):
         _harness.get_harness()
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "allowed", "diagnostic"),
+    [
+        (EnvVar.ENABLE_COPILOT, None, True, ""),
+        (EnvVar.ENABLE_COPILOT, "", False, "must be true"),
+        (EnvVar.ENABLE_COPILOT, "   ", False, "must be true"),
+        (EnvVar.ENABLE_COPILOT, "true", True, ""),
+        (EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT, None, True, ""),
+        (EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT, "", False, "one|=1"),
+        (EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT, "   ", False, "one|=1"),
+        (EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT, "1", True, ""),
+        (EnvVar.WEBSITE_INSTANCE_ID, None, True, ""),
+        (EnvVar.WEBSITE_INSTANCE_ID, "", True, ""),
+        (EnvVar.WEBSITE_INSTANCE_ID, "   ", False, "local execution"),
+        (EnvVar.WEBSITE_INSTANCE_ID, "cloud-instance", False, "local execution"),
+        (EnvVar.REASONING_EFFORT, None, True, ""),
+        (EnvVar.REASONING_EFFORT, "", True, ""),
+        (EnvVar.REASONING_EFFORT, "   ", False, "REASONING_EFFORT"),
+        (EnvVar.REASONING_EFFORT, "high", False, "REASONING_EFFORT"),
+        (EnvVar.REASONING_SUMMARY, None, True, ""),
+        (EnvVar.REASONING_SUMMARY, "", True, ""),
+        (EnvVar.REASONING_SUMMARY, "   ", False, "REASONING_SUMMARY"),
+        (EnvVar.REASONING_SUMMARY, "detailed", False, "REASONING_SUMMARY"),
+    ],
+)
+def test_copilot_environment_edge_semantics(preview, monkeypatch, name, value, allowed, diagnostic):
+    monkeypatch.setenv(EnvVar.ENABLE_COPILOT, "true")
+    if value is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, value)
+
+    if allowed:
+        harness = _harness.get_harness(preview, new_app=True)
+        assert harness.name is (
+            HarnessKind.MAF if name is EnvVar.ENABLE_COPILOT and value is None else HarnessKind.COPILOT
+        )
+    else:
+        error_type = ValueError if name is EnvVar.ENABLE_COPILOT else UnsupportedCapabilityError
+        with pytest.raises(error_type, match=diagnostic):
+            _harness.get_harness(preview, new_app=True)
 
 
 def _sample():

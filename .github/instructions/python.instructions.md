@@ -47,7 +47,8 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
   distribution, environment variable, or path.
 - New runtime code reads environment variables through
   `config.env.runtime_env_value()` with a named `EnvVar`, not string literals;
-  existing modules migrate opportunistically.
+  existing modules migrate opportunistically. Use `raw_env_value()` when unset
+  and blank values have different behavior.
 - Avoid duplicated logic: when two code paths share the same validation or parsing
   shape, extract a shared helper and keep only caller-specific policy separate.
 - When behavior varies by a provider/backend/kind enum, prefer an interface with

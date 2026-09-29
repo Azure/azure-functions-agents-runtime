@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import threading
 from collections.abc import Callable
@@ -20,6 +19,7 @@ from .client_manager import (
     _is_active_client_manager_builtin,
     _resolve_builtin_inference_target,
 )
+from .config.env import EnvVar, raw_env_value
 from .config.paths import get_app_root, resolve_config_dir
 from .config.schema import AgentConfiguration, ResolvedAgent
 
@@ -27,11 +27,10 @@ if TYPE_CHECKING:
     from ._copilot_providers import CopilotProvider
     from .registration.capabilities import AgentCapabilities
 
-FLAG = "AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT"
+FLAG = EnvVar.ENABLE_COPILOT
 SDK_DISTRIBUTION = "github-copilot-sdk"
-PROVIDER_ENV = "AZURE_FUNCTIONS_AGENTS_PROVIDER"
-OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
-WORKER_COUNT_ENV = "FUNCTIONS_WORKER_PROCESS_COUNT"
+PROVIDER_ENV = EnvVar.PROVIDER
+WORKER_COUNT_ENV = EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT
 
 type ExecutionRole = Literal["primary", "delegate", "workflow_subagent"]
 
@@ -114,7 +113,7 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
         existing = _HARNESSES.get(root)
         if existing is not None and not new_app:
             return existing
-        if not _flag_enabled(os.environ.get(FLAG)):
+        if not _flag_enabled(raw_env_value(EnvVar.ENABLE_COPILOT)):
             selected = AppHarness(HarnessKind.MAF, root)
         else:
             validate_copilot_client_manager()
@@ -132,19 +131,17 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
             from ._copilot_providers import _PROVIDERS
 
             copilot_provider = _PROVIDERS[provider].from_environment()
-            if os.environ.get(WORKER_COUNT_ENV, "1").strip() != "1":
+            worker_count = raw_env_value(EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT)
+            if (worker_count if worker_count is not None else "1").strip() != "1":
                 raise UnsupportedCapabilityError(
                     f"Copilot local preview requires {WORKER_COUNT_ENV}=1."
                 )
-            if os.environ.get("WEBSITE_INSTANCE_ID"):
+            if raw_env_value(EnvVar.WEBSITE_INSTANCE_ID):
                 raise UnsupportedCapabilityError(
                     "Copilot preview supports local execution only; Azure hosting is not qualified."
                 )
-            for name in (
-                "AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT",
-                "AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY",
-            ):
-                if os.environ.get(name):
+            for name in (EnvVar.REASONING_EFFORT, EnvVar.REASONING_SUMMARY):
+                if raw_env_value(name):
                     raise UnsupportedCapabilityError(f"Copilot preview does not support {name}.")
             app_key = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:32]
             storage_root = Path(resolve_config_dir()).resolve() / "copilot-preview" / app_key
