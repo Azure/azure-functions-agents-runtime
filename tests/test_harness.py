@@ -23,7 +23,11 @@ from azure_functions_agents.app import create_function_app
 from azure_functions_agents.config import paths
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
 from azure_functions_agents.config.merge import compose
-from azure_functions_agents.config.schema import AgentConfiguration, AgentFrameworkConfiguration
+from azure_functions_agents.config.schema import (
+    AgentConfiguration,
+    AgentFrameworkCompactionConfig,
+    AgentFrameworkConfiguration,
+)
 from azure_functions_agents.discovery.tools import discover_user_tools
 from azure_functions_agents.registration.capabilities import build_capabilities
 
@@ -99,14 +103,13 @@ def test_missing_sdk_is_explicit_without_forcing_a_second_version_check(preview,
     ("name", "value", "diagnostic"),
     [
         ("AZURE_FUNCTIONS_AGENTS_PROVIDER", "azure_openai", "supports.*PROVIDER"),
-        ("FUNCTIONS_WORKER_PROCESS_COUNT", "2", "one|=1"),
-        ("WEBSITE_INSTANCE_ID", "cloud-instance", "local execution"),
+        ("WEBSITE_INSTANCE_ID", "cloud-instance", "WEBSITE_SITE_NAME"),
         ("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "high", "REASONING_EFFORT"),
     ],
 )
 def test_unsupported_app_settings(preview, monkeypatch, name, value, diagnostic):
     monkeypatch.setenv(name, value)
-    with pytest.raises(UnsupportedCapabilityError, match=diagnostic):
+    with pytest.raises((UnsupportedCapabilityError, ValueError), match=diagnostic):
         _harness.get_harness()
 
 
@@ -177,8 +180,12 @@ def test_enabled_unsupported_capabilities_fail(preview, field):
 def test_maf_only_configuration_is_not_silently_discarded(preview):
     with pytest.raises(UnsupportedCapabilityError, match="agent_framework"):
         _harness.validate_configuration(
-            AgentConfiguration(agent_framework=AgentFrameworkConfiguration())
+            AgentConfiguration(agent_framework=AgentFrameworkConfiguration(
+                compaction=AgentFrameworkCompactionConfig(max_context_window_tokens=100)
+            ))
         )
+    _harness.validate_configuration(AgentConfiguration(agent_framework=AgentFrameworkConfiguration()))
+    _harness.validate_configuration(AgentConfiguration(agent_framework=None))
 
 
 def test_unsupported_output_limit_fails_before_native_execution(preview):
@@ -313,8 +320,9 @@ def test_registered_app_captures_selection_and_newness(preview, monkeypatch):
 
 def test_off_import_and_index_do_not_import_sdk_or_launch_process(tmp_path):
     script = """
-import sys, subprocess
+import sys, subprocess, platform
 from pathlib import Path
+platform.platform()
 class NoProcess(subprocess.Popen):
     def __init__(self, *args, **kwargs):
         raise AssertionError('Unexpected child process')

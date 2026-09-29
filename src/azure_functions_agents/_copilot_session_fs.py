@@ -26,7 +26,7 @@ from azure.core.exceptions import (
 )
 from copilot.generated.rpc import DebugCollectLogsEntryKind, SessionFSReaddirWithTypesEntry
 from copilot.session_fs_provider import SessionFsFileInfo, SessionFsProvider
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from ._native_session_identity import (
     NAMESPACE,
@@ -146,12 +146,20 @@ class StateEnvelope(_Document):
     completed: WorkingTree | None = None
     integrity_sha256: str = ""
 
+    @field_validator("state", mode="before")
+    @classmethod
+    def parse_state(cls, state: object) -> SessionState:
+        if isinstance(state, str):
+            return SessionState(state)
+        raise ValueError("Invalid native session state.")
+
     @model_validator(mode="after")
     def valid_state(self) -> StateEnvelope:
         validate_identity(self.agent_slug, self.session_id)
         if (
             self.state in {SessionState.EMPTY, SessionState.DELETED}
-            and (self.working is not None or self.completed is not None)
+            and (self.working is not None or self.completed is not None
+                 or self.handoff_may_have_started)
         ) or (
             self.state is SessionState.READY
             and (self.working is not None or self.completed is None or self.handoff_may_have_started)
@@ -230,19 +238,22 @@ class _LocalStore:
         self.path = path
         self._fd: int | None = None
 
+    def _safe_paths(self) -> None:
+        base = self.path.parents[len(Path(NAMESPACE).parts) + 2]
+        if any(part.is_symlink() for part in (self.path, self.path.with_suffix(".lock"),
+                                               self.path.parent, *self.path.parents)
+               if part == base or base in part.parents):
+            raise PersistenceUnavailableError("Native local storage cannot traverse symlinks.")
+
     async def acquire(self, deadline: float) -> None:
         if sys.platform != "linux":
             raise PersistenceUnavailableError("Native local locking supports Linux only.")
         import fcntl
 
         try:
-            base = self.path.parents[len(Path(NAMESPACE).parts) + 2]
-            if any(part.is_symlink() for part in (self.path.parent, *self.path.parents)
-                   if part == base or base in part.parents):
-                raise PersistenceUnavailableError("Native local storage cannot traverse symlinks.")
+            self._safe_paths()
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            if self.path.is_symlink() or self.path.with_suffix(".lock").is_symlink():
-                raise PersistenceUnavailableError("Native local storage cannot traverse symlinks.")
+            self._safe_paths()
             fd = os.open(self.path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             while True:
                 try:
@@ -259,12 +270,14 @@ class _LocalStore:
             raise
 
     async def load(self) -> tuple[bytes | None, str | None]:
+        self._safe_paths()
         try:
             return self.path.read_bytes(), None
         except FileNotFoundError:
             return None, None
 
     async def save(self, data: bytes, _etag: str | None) -> str | None:
+        self._safe_paths()
         temp: str | None = None
         try:
             with tempfile.NamedTemporaryFile(dir=self.path.parent, prefix=".state-",
@@ -348,7 +361,9 @@ class _BlobStore:
                 match_condition=MatchConditions.IfNotModified,
             )
             return str(response["etag"])
-        except (ResourceModifiedError, ResourceNotFoundError):
+        except (ResourceModifiedError, ResourceNotFoundError, HttpResponseError):
+            self.failure = LeaseLostError("Native session lease or state changed while owned.")
+            self.failed.set()
             raise LeaseLostError("Native session lease or state changed while owned.") from None
 
     async def check(self) -> None:
@@ -448,6 +463,9 @@ class NativeSession:
             self.failure = error if isinstance(error, NativeSessionError) else PersistenceUnavailableError(
                 "Native SessionFs callback failed; the turn cannot continue."
             )
+            if isinstance(self.store, _BlobStore):
+                self.store.failure = LeaseLostError("Native session ownership is no longer assured.")
+                self.store.failed.set()
             self.failed.set()
 
     async def _save(self, candidate: StateEnvelope) -> None:

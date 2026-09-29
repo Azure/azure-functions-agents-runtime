@@ -31,6 +31,7 @@ from ._native_session_identity import (
     IncompatibleSessionError,
     NativeSessionError,
     PersistenceUnavailableError,
+    SessionConflictError,
     guard_opposite_history,
 )
 from .client_manager import InferenceTarget
@@ -79,8 +80,8 @@ def _native_id(agent_slug: str, session_id: str) -> str:
 class _NativeRuntime:
     """One SDK-managed stdio client per app worker."""
 
-    def __init__(self, root: Path) -> None:
-        self.native_root = root / "native"
+    def __init__(self, root: Path, namespace: str) -> None:
+        self.native_root = root / "native" / namespace
         self._client: CopilotClient | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._start_lock = asyncio.Lock()
@@ -193,7 +194,8 @@ def _runtime(harness: AppHarness) -> _NativeRuntime:
            harness.provider, harness.endpoint)
     owner = _RUNTIMES.get(key)
     if owner is None:
-        owner = _NativeRuntime(harness.storage_root)
+        namespace = uuid.uuid5(uuid.NAMESPACE_URL, repr(key)).hex
+        owner = _NativeRuntime(harness.storage_root, namespace)
         _RUNTIMES[key] = owner
     return owner
 
@@ -329,16 +331,18 @@ async def _verify_completed_turn(session: CopilotSession) -> None:
         )
 
 
-async def _abort(session: CopilotSession) -> None:
+async def _abort(session: CopilotSession, deadline: float) -> None:
     try:
-        await asyncio.wait_for(session.abort(), timeout=5)
+        await asyncio.wait_for(
+            session.abort(), timeout=max(0.0, min(5.0, deadline - asyncio.get_running_loop().time()))
+        )
     except Exception:
         logger.error("Copilot session abort failed.")
 
 
 @asynccontextmanager
 async def _session_context(
-    session: CopilotSession, on_detach: Callable[[], None]
+    session: CopilotSession, on_detach: Callable[[], None], deadline: float
 ) -> AsyncIterator[CopilotSession]:
     """Bound SDK session detachment without stopping the shared client."""
     await session.__aenter__()
@@ -346,7 +350,10 @@ async def _session_context(
         yield session
     finally:
         try:
-            await asyncio.wait_for(session.__aexit__(None, None, None), timeout=5)
+            await asyncio.wait_for(
+                session.__aexit__(None, None, None),
+                timeout=max(0.0, min(5.0, deadline - asyncio.get_running_loop().time())),
+            )
             on_detach()
         except Exception:
             logger.error("Copilot session detach failed.")
@@ -427,22 +434,22 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 await storage.check()
                 tools = [_tool(function, calls) for function in request.tools]
                 options = _SessionOptions(
-                model=request.model,
-                tools=tools,
-                available_tools=[f"custom:{function.name}" for function in request.tools],
-                system_message=SystemMessageReplaceConfig(
-                    mode="replace", content=request.instructions or ""
-                ),
-                provider=provider,
-                streaming=False,
-                enable_config_discovery=False,
-                enable_session_telemetry=False,
-                request_extensions=False,
-                infinite_sessions=InfiniteSessionConfig(enabled=True),
-                tool_search=ToolSearchConfig(enabled=False),
-                on_event=on_event,
-                create_session_fs_handler=lambda _session: NativeSessionFs(storage),
-            )
+                    model=request.model,
+                    tools=tools,
+                    available_tools=[f"custom:{function.name}" for function in request.tools],
+                    system_message=SystemMessageReplaceConfig(
+                        mode="replace", content=request.instructions or ""
+                    ),
+                    provider=provider,
+                    streaming=False,
+                    enable_config_discovery=False,
+                    enable_session_telemetry=False,
+                    request_extensions=False,
+                    infinite_sessions=InfiniteSessionConfig(enabled=True),
+                    tool_search=ToolSearchConfig(enabled=False),
+                    on_event=on_event,
+                    create_session_fs_handler=lambda _session: NativeSessionFs(storage),
+                )
                 rpc_attempted = True
                 if storage.envelope.completed is None:
                     session = await client.create_session(
@@ -463,7 +470,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     nonlocal detached
                     detached = True
 
-                async with _session_context(session, mark_detached):
+                async with _session_context(session, mark_detached, request.deadline):
                     if storage.envelope.completed is not None:
                         await _verify_completed_turn(session)
                     metadata = await session.rpc.tools.get_current_metadata()
@@ -507,7 +514,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                         if lease_task is not None:
                             lease_task.cancel()
                         if not send_task.done():
-                            await _abort(session)
+                            await _abort(session, request.deadline)
                             send_task.cancel()
                         await asyncio.gather(send_task, fail_task, *([lease_task] if lease_task else []),
                                              return_exceptions=True)
@@ -529,7 +536,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 if storage.envelope.state in {SessionState.PREPARING, SessionState.ACTIVE}:
                     if session is not None and send_created and not detached:
                         with contextlib.suppress(Exception):
-                            await _abort(session)
+                            await _abort(session, request.deadline)
                     if not send_created and (not rpc_attempted or detached):
                         with contextlib.suppress(Exception):
                             await storage.rollback()
@@ -542,11 +549,10 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     except asyncio.CancelledError:
         raise
     except TimeoutError:
-        raise CopilotPreviewError(
-            "Copilot preview request timed out during a turn. This session may be unfinished."
-            if invocation_started
-            else "Copilot preview timed out before starting this turn. "
-            "Retry after the active session operation completes."
+        if storage is None:
+            raise SessionConflictError("Native session is busy or startup exceeded its deadline.") from None
+        raise PersistenceUnavailableError(
+            "Copilot native turn exceeded its deadline; completion was not acknowledged."
         ) from None
     except (CopilotPreviewError, NativeSessionError):
         raise

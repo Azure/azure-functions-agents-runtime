@@ -187,7 +187,11 @@ def reject_unsupported(**capabilities: bool) -> None:
 
 def validate_configuration(configuration: AgentConfiguration) -> None:
     reject_unsupported(
-        agent_framework=configuration.agent_framework is not None,
+        agent_framework=(
+            configuration.agent_framework is not None
+            and configuration.agent_framework.compaction is not None
+            and configuration.agent_framework.compaction.max_context_window_tokens is not None
+        ),
         max_output_tokens=configuration.max_output_tokens is not None,
     )
 

@@ -15,6 +15,7 @@ import pytest
 from azure.core.credentials import AccessToken
 
 from azure_functions_agents import _copilot, _harness
+from azure_functions_agents._copilot_session_fs import NativeSession, SessionState
 from azure_functions_agents._harness import (
     AppHarness,
     CopilotPreviewError,
@@ -23,6 +24,7 @@ from azure_functions_agents._harness import (
     ProviderKind,
     UnsupportedCapabilityError,
 )
+from azure_functions_agents._native_session_identity import IncompatibleSessionError, resolve_route
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.config import paths
 
@@ -32,8 +34,12 @@ SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "
 @pytest.fixture
 def preview(monkeypatch, tmp_path):
     monkeypatch.setattr(_copilot, "_RUNTIMES", {})
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("AzureWebJobsStorage", raising=False)
+    monkeypatch.delenv("AzureWebJobsStorage__blobServiceUri", raising=False)
     return AppHarness(
-        HarnessKind.COPILOT, tmp_path, tmp_path / "state", "gpt-4.1-mini", ProviderKind.OPENAI
+        HarnessKind.COPILOT, tmp_path, tmp_path / "state", "gpt-4.1-mini", ProviderKind.OPENAI,
+        session_storage=resolve_route(tmp_path),
     )
 
 
@@ -75,6 +81,19 @@ def _fake_client():
         create_session=AsyncMock(return_value=session),
         resume_session=AsyncMock(return_value=session),
     )
+
+
+async def _seed_completed(preview):
+    owner = await NativeSession.open(
+        preview, "main", "example", _copilot._native_id("main", "example"),
+        asyncio.get_running_loop().time() + 5,
+    )
+    try:
+        await owner.prepare(new_session=True)
+        await owner.transition(state=SessionState.ACTIVE)
+        await owner.complete()
+    finally:
+        await owner.close()
 
 
 @pytest.mark.asyncio
@@ -168,6 +187,7 @@ async def test_sdk_resume_failure_is_safe_and_never_creates_a_session(preview, m
 
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
     client = _fake_client()
+    await _seed_completed(preview)
     client.resume_session.side_effect = RuntimeError(f"{failure}: private-sdk-details")
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
@@ -182,21 +202,21 @@ async def test_sdk_resume_failure_is_safe_and_never_creates_a_session(preview, m
 
 
 @pytest.mark.asyncio
-async def test_sdk_transient_resume_failure_can_retry_same_session(preview, monkeypatch):
+async def test_sdk_resume_failure_without_detach_is_uncertain(preview, monkeypatch):
     import copilot
 
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
     client = _fake_client()
+    await _seed_completed(preview)
     session = client.resume_session.return_value
     client.resume_session.side_effect = [RuntimeError("temporary native error"), session]
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
         with pytest.raises(CopilotPreviewError, match="could not resume"):
             await _copilot.run(preview, _request(new_session=False))
-        retry = await _copilot.run(preview, _request(new_session=False))
-        assert retry.session_id == "example"
-        assert retry.content == "synthetic reply"
-        assert client.resume_session.await_count == 2
+        with pytest.raises(IncompatibleSessionError, match="not safely resumable"):
+            await _copilot.run(preview, _request(new_session=False))
+        assert client.resume_session.await_count == 1
         client.create_session.assert_not_awaited()
     finally:
         await _copilot.shutdown()
@@ -211,7 +231,7 @@ async def test_sdk_metadata_rejects_existing_id_before_create(preview, monkeypat
     client.get_session_metadata.return_value = SimpleNamespace(session_id="existing")
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
-        with pytest.raises(CopilotPreviewError, match="already exists"):
+        with pytest.raises(IncompatibleSessionError, match="older native session"):
             await _copilot.run(preview, _request())
         client.get_session_metadata.assert_awaited_once()
         client.create_session.assert_not_awaited()
