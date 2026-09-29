@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from ._function_tool import FunctionTool, tool
 from ._logger import logger
 from .config.paths import get_app_root, resolve_config_dir
-from .config.schema import AgentConfiguration, ResolvedAgent
+from .config.schema import HTTP_TRIGGER_TYPE, AgentConfiguration, ResolvedAgent
 
 if TYPE_CHECKING:
     from .registration.capabilities import AgentCapabilities
@@ -233,7 +233,7 @@ def validate_agent(
         return
     validate_configuration(resolved.agent_configuration)
     reject_unsupported(
-        non_http_trigger=resolved.trigger is not None and resolved.trigger.type != "http_trigger",
+        non_http_trigger=resolved.trigger is not None and resolved.trigger.type != HTTP_TRIGGER_TYPE,
         debug_chat_ui=resolved.builtin_endpoints.debug_chat_ui,
         mcp_endpoint=resolved.builtin_endpoints.mcp,
         mcp=bool(capabilities.filtered_mcp_tools),

@@ -396,30 +396,6 @@ to follow the explicit preview-rejection rules.
 | Configuration compatibility | Decide the enforceable portable output limit and treatment/replacement of MAF-specific compaction configuration, preserving recursive inheritance/null behavior without claiming equivalent algorithms. |
 | Extension compatibility | Define the supported custom `ClientManager` contract and MAF `FunctionTool` conversion boundary, including authored decorator kwargs, approval semantics, unsupported hooks/options, and construction-time validation. Preserve MAF extensions with the flag off. |
 
-### 4.9 Dependency-ordered delivery plan
-
-The feature ships as dependency-ordered, independently gated slices. Each slice
-keeps MAF as the flag-off default and rejects capabilities that have not reached
-their own supported slice. Merging one row does not imply completion of this FRD
-or of the parent migration issue.
-
-| Order | Delivery | Purpose and scope | Dependency / compatibility boundary | Review focus |
-| --- | --- | --- | --- | --- |
-| 1 | #241 - harness foundation | Add the app-level selector, bounded local native adapter, explicit custom-tool catalog check, and completed-turn local preview. | Foundation for every later slice; MAF remains unchanged when the flag is off. | Selection isolation, no fallback, native lifetime, and exact catalog enforcement. |
-| 2 | #242 - provider integration | Qualify the supported provider/authentication matrix, Entra refresh, provider storage settings, and custom-client compatibility. | Depends on #241; later execution slices consume its provider target rather than owning provider policy. | Credential safety, refresh/concurrency, BYOK fidelity, and unsupported-manager rejection. |
-| 3 | #244 - native sessions | Implement the approved native session, persistence, ownership, completion, compaction, and history-compatibility contracts. | Depends on #241 and the provider contract from #242; later role slices consume its session boundary rather than inventing persistence. | Durable acknowledgment, fencing, restore/corruption behavior, and public-session identity. |
-| 4 | #245 - MCP and skills | Adapt configured remote MCP and scoped skills, including filtering and autonomous approval behavior. | Depends on #241 plus the provider/session milestones it consumes; unrelated ambient SDK capabilities remain disabled. | Exact MCP catalog/transport and lazy, role-scoped skill execution. |
-| 5 | #243 - direct non-streaming host tools and HTTP results | Give the primary direct, non-streaming Copilot role the allowed explicit user tools plus configured `web_request` and session-bound ACA `execute_python`, while preserving host-owned HTTP result validation. | Depends on #241 and is integrated after #242, #244, and #245 so it consumes rather than edits their ownership surfaces. Streaming, MCP, skills, workflows, and leaf roles remain rejected. | Tool order/policy/session scope, no ambient tools, pre-start collisions, adapter behavior, cancellation, and HTTP validation. |
-| 6 | Later SSE slice | Translate native events into the existing public SSE vocabulary and terminal behavior. | Depends on the direct provider/session/tool catalog being stable through #243. Non-HTTP and leaf/workflow roles remain unsupported until their slices. | Event ordering/correlation, cancellation, no hidden event leakage, and no false `done`. |
-| 7 | Later leaf and workflow-role slices | Add non-HTTP direct execution, chat-time delegation, Workflow Sub Agents, and Dynamic Workflow management/Activities in explicitly reviewed increments. | Depends on direct/SSE foundations and on MCP/skills role-scoping where those capabilities are enabled. No role may silently inherit another role's session or tools. | Role isolation, authorization, durable replay semantics, specialist errors/deadlines, and at-least-once effects. |
-
-For #243, automated ACA evidence qualifies the generic Copilot tool adapter,
-combined catalog, and binding of `execute_python` to the public HTTP session ID.
-The existing sandbox transport tests use fakes, and no current agentic E2E test
-makes a real Copilot-to-ACA call. Section 6's real ACA system-tool acceptance
-item therefore remains open and separately gated; this slice does not claim
-production ACA qualification.
-
 ## 5. Decisions log
 
 Dates below record the original scope approvals and proposals. Decision 12
@@ -440,8 +416,6 @@ remaining implementation decisions or qualification obligations are complete.
 | 10 | Workflows across app restarts/deployments | Custom harness pinning/lifecycle rules / existing Durable behavior | Follow Durable replay, retry, worker lifetime, and configured deployment routing; each executing app instance supplies its own selection, with no new persisted harness pin or mismatch rejection | Human | 2026-09-28 |
 | 11 | Session startup failures | Prescribe marker sequencing / specify observable behavior | Require one active turn per agent/session, safe retry after a startup failure that did not begin a turn or damage state, and explicit errors for uncertain continuation; leave marker ordering and cleanup to implementation | Human | 2026-09-28 |
 | 12 | Feature specification sign-off | Keep In review / finalize the agreed feature contracts | Finalized after approving decision 11; section 4.8 remains an explicit record of unresolved implementation choices and required evidence, not a claim of parity or production readiness | Human (larohra) | 2026-09-28 |
-| 13 | Multi-PR delivery order | Parallel ownership without an integration order / dependency-ordered slices | Deliver #241 foundation, #242 providers, #244 sessions, #245 MCP/skills, #243 direct non-streaming host tools/HTTP results, then SSE and leaf/workflow-role slices; each slice remains gated and does not complete the parent feature | Agent implementation decision | 2026-09-29 |
-| 14 | #243 direct-tool and result boundary | Rebuild tools in the SDK, expose ambient tools, or reuse host objects / adapt only allowed host tools | Compose only explicit host user tools, configured `web_request`, and session-bound ACA `execute_python` in existing direct-role order; retain SDK ambient-tool disablement, exact catalog validation, and all MAF objects/behavior with the flag off. Keep authored HTTP-trigger structured-output validation host-owned and reject unsupported capabilities before inference or tool effects. Unit-qualify ACA catalog/session wiring while leaving real ACA execution as an open gated acceptance item. | Agent implementation decision | 2026-09-29 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -484,9 +458,9 @@ this document does not introduce an unimplemented schema or rewrite runtime docs
 
 ## 8. Status & sign-off
 
-- **Status:** Finalized; the feature specification is approved and is being
-  delivered through section 4.9's gated slices. The parent migration is not
-  complete or production-qualified.
+- **Status:** Finalized; the approved feature specification describes intended
+  behavior, not delivery order or production qualification. The parent migration
+  is not complete or production-qualified.
 - **Architecture review:** Dedicated agent review completed on 2026-09-28;
   review clarifications cover app-bound selection, Durable lifecycle, and safe
   startup failure behavior (decisions 8-11).
