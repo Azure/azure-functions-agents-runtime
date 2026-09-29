@@ -23,6 +23,13 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
   intentionally dynamic extension points (e.g. `ClientManager.build_chat_client`,
   which returns `Any` because the underlying SDK is pluggable) — narrow
   runtime inspection is expected there.
+- For fixed-shape data, reuse an SDK-provided schema when available; otherwise
+  define a `TypedDict` or dataclass for trusted internal payloads and use
+  Pydantic for untrusted documents. Avoid ad hoc string-keyed dictionaries and
+  parallel schemas for values that already have a declared type.
+- Prefer SDK-exported enums and constants for SDK-owned names and values when
+  available. Do not invent SDK exports or depend on private symbols merely to
+  avoid a literal.
 - Frozen dataclasses validate through a `create()` factory and module-level
   normalization helpers, not `__post_init__` mutation.
 
@@ -30,10 +37,14 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
 
 - Prefer guard clauses, early returns, and helpers over deeply nested control
   flow.
+- When callers share validation, normalization, or identity rules, extend one
+  existing helper and use it at every relevant surface. Do not duplicate its
+  logic or force distinct contracts through a helper that does not fit them.
 - Give every source module (other than package initializers such as
   `__init__.py`) a globally unique, intent-revealing basename. Source tests
   mirror the module name as `tests/test_<module>.py`.
-- Use a module constant rather than repeating a named URL, API version, or path.
+- Use a module constant rather than repeating a named URL, API version, package
+  distribution, environment variable, or path.
 - Declare each finite domain vocabulary once in its owning module. Use a
   `StrEnum` when the vocabulary is a runtime concept or crosses a persistence,
   serialization, logging, or API boundary; consumers should use named enum

@@ -13,6 +13,7 @@ import azure.functions as func
 import jsonschema
 from azurefunctions.extensions.http.fastapi import Request, Response
 
+from .._harness import HarnessKind, bind_harness
 from .._logger import logger
 from .._observability import (
     ATTR_FAULT_DOMAIN,
@@ -238,6 +239,7 @@ def make_agent_handler(
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Callable[..., Any]:
     """Create an async handler function for a non-HTTP triggered agent."""
+    harness = bind_harness(resolved, capabilities)
 
     # NOTE: deliberately omit a type annotation on `trigger_data`. The Azure
     # Functions Python worker validates annotations against the binding's
@@ -292,6 +294,8 @@ def make_agent_handler(
                     workflow_agent_slug=resolved.slug,
                     workflow_policy=workflow_policy,
                     agent_name=resolved.slug,
+                    _harness=harness,
+                    _session_is_new=True,
                 )
 
                 _set_run_result_attributes(span, result)
@@ -351,6 +355,7 @@ def make_http_agent_handler(
     Functions host key check via the route's ``AuthLevel``.
     """
     auth_policy = auth or EndpointAuthConfig()
+    harness = bind_harness(resolved, capabilities)
 
     async def _handle(req: Request, durable_client: Any | None) -> Response:
         auth_error = authorize_entra_request(req.headers.get, auth_policy)
@@ -377,7 +382,12 @@ def make_http_agent_handler(
             },
         ) as span:
             try:
-                session_id = _request_header_value(req, _SESSION_ID_HEADER) or _new_session_id()
+                supplied_session_id = _request_header_value(req, _SESSION_ID_HEADER)
+                session_id = supplied_session_id or _new_session_id()
+                echo_failed_session_id = (
+                    harness.name is HarnessKind.MAF or supplied_session_id is not None
+                )
+                turn_completed = False
                 span.set_attribute("af.agent.session_id", session_id)
                 try:
                     body = await req.json()
@@ -407,7 +417,8 @@ def make_http_agent_handler(
                             "af.http.status_code": validation_error.status_code,
                         },
                     )
-                    validation_error.headers[_SESSION_ID_HEADER] = session_id
+                    if echo_failed_session_id:
+                        validation_error.headers[_SESSION_ID_HEADER] = session_id
                     return validation_error
 
                 parts: list[str] = []
@@ -435,7 +446,10 @@ def make_http_agent_handler(
                     workflow_agent_slug=resolved.slug,
                     workflow_policy=workflow_policy,
                     agent_name=resolved.slug,
+                    _harness=harness,
+                    _session_is_new=not supplied_session_id,
                 )
+                turn_completed = True
 
                 _set_run_result_attributes(span, result)
                 span.add_event("af.agent.invoke.completed")
@@ -531,7 +545,11 @@ def make_http_agent_handler(
                     content=json.dumps({"error": str(exc)}),
                     status_code=500,
                     media_type="application/json",
-                    headers={_SESSION_ID_HEADER: session_id},
+                    headers=(
+                        {_SESSION_ID_HEADER: session_id}
+                        if echo_failed_session_id or turn_completed
+                        else None
+                    ),
                 )
 
     async def _handler_with_client(req: Request, client: str) -> Response:
