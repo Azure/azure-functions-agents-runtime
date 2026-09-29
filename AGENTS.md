@@ -108,14 +108,18 @@ Required for medium+ features. **Location:** committed to the repo at
 `docs/frds/0001-agents-folder-indexing.md`) — treated like a lightweight ADR so
 the Decisions log is durable history. Start from
 [`docs/frds/_template.md`](docs/frds/_template.md); see
-[`docs/frds/README.md`](docs/frds/README.md) for numbering. Recommended sections:
+[`docs/frds/README.md`](docs/frds/README.md) for numbering. FRDs describe
+intended feature behavior and acceptance, never delivery discussion, PR/slice
+scope, sequencing, ownership, schedule, or rollout plans. Keep those in PR
+descriptions or a separate delivery plan. Recommended sections:
 
 1. **Summary** — one paragraph: what and why.
 2. **Motivation / problem** — the pain today (e.g. AgentApps with many agents).
 3. **Goals / Non-goals** — explicit scope boundaries.
 4. **Proposed design** — modules touched, mapped to the `docs/architecture.md`
    stages (discover → translate → register → execute).
-5. **Decisions log** — append-only table; record *who* decided:
+5. **Decisions log** — append-only feature-contract choices; record *who* decided,
+   not delivery decisions:
 
    | # | Decision | Options considered | Choice | Decided by | Date |
    | - | -------- | ------------------ | ------ | ---------- | ---- |

@@ -363,8 +363,10 @@ ResolvedAgent.model_rebuild()
 # Used by eng/scripts/generate_config_reference.py for generating trigger reference docs.
 # Each trigger type maps to its field specifications and optional notes.
 # Format: "trigger_type": {"fields": {field_name: (type, required, default, description)}, "note": "..."}
+HTTP_TRIGGER_TYPE = "http_trigger"
+
 TRIGGER_TYPES: dict[str, dict[str, Any]] = {
-    "http_trigger": {
+    HTTP_TRIGGER_TYPE: {
         "fields": {
             "route": ("string", True, "N/A", "URL path for the HTTP endpoint"),
             "methods": ("string[]", False, '`["POST"]`', "Array of HTTP methods (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)"),

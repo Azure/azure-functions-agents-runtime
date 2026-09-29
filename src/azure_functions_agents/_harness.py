@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from ._function_tool import FunctionTool, tool
 from ._logger import logger
 from .config.paths import get_app_root, resolve_config_dir
-from .config.schema import AgentConfiguration, ResolvedAgent
+from .config.schema import HTTP_TRIGGER_TYPE, AgentConfiguration, ResolvedAgent
 
 if TYPE_CHECKING:
     from .registration.capabilities import AgentCapabilities
@@ -227,23 +227,34 @@ def validate_agent(
     harness: AppHarness, resolved: ResolvedAgent, capabilities: AgentCapabilities
 ) -> None:
     """Fail before FunctionApp mutation, native startup, or provider/tool execution."""
+    from .registration.capabilities import SANDBOX_TOOL_NAME
+
     if harness.name is HarnessKind.MAF:
         return
     validate_configuration(resolved.agent_configuration)
     reject_unsupported(
-        non_http_trigger=resolved.trigger is not None and resolved.trigger.type != "http_trigger",
+        non_http_trigger=resolved.trigger is not None and resolved.trigger.type != HTTP_TRIGGER_TYPE,
         debug_chat_ui=resolved.builtin_endpoints.debug_chat_ui,
         mcp_endpoint=resolved.builtin_endpoints.mcp,
         mcp=bool(capabilities.filtered_mcp_tools),
         skills=bool(capabilities.enabled_skill_paths),
-        web_request=bool(capabilities.web_request_tools),
-        execute_python=resolved.sandbox_config is not None and not resolved.tools_disabled,
         subagents=bool(resolved.subagents),
         workflows=resolved.workflows is not None and resolved.workflows.enabled,
     )
     if not (resolved.model or harness.default_model):
         raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
-    prepare_tools(list(capabilities.filtered_user_tools or []))
+    prepared = prepare_tools(
+        [
+            *list(capabilities.filtered_user_tools or []),
+            *list(capabilities.web_request_tools or []),
+        ]
+    )
+    if (
+        resolved.sandbox_config is not None
+        and not resolved.tools_disabled
+        and any(function.name == SANDBOX_TOOL_NAME for function in prepared)
+    ):
+        raise UnsupportedCapabilityError("Copilot preview requires unique custom tool names.")
 
 
 def bind_harness(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> AppHarness:

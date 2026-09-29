@@ -68,9 +68,9 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
   or reason, not the next line of code or feature/PR history. Do not cite
   phase labels, PR numbers, or mutable FRD decision numbers in source
   comments, docstrings, or assertion messages.
-- When a change needs an FRD Decisions-log update, add the fewest durable
-  rows that cover it — group related choices into one row rather than one row
-  per test, review finding, or implementation correction, and keep mechanics
-  out of the row (they belong in the design section the decision governs).
+- When a change needs an FRD Decisions-log update, record only consequential
+  feature-contract choices, with the fewest durable rows that cover them.
+  Do not record PR sequencing, slice scope, or implementation corrections in
+  the FRD; put delivery details in PR descriptions or a separate plan.
   See the add-feature skill for the full logging discipline.
 - Use the shared `azure_functions_agents._logger.logger`.
