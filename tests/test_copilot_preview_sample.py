@@ -9,6 +9,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from azure_functions_agents import _harness
+from azure_functions_agents.config import paths
+
 
 def test_restart_verifier_uses_sdk_default_native_resolution(
     monkeypatch: Any, tmp_path: Path,
@@ -63,3 +66,27 @@ def test_restart_verifier_uses_sdk_default_native_resolution(
 
     assert len(starts) == 2
     assert phases == ["first", "followup", "negative"]
+
+
+def test_sample_entrypoint_uses_functions_script_root(monkeypatch: Any, tmp_path: Path) -> None:
+    source = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src" / "function_app.py"
+    monkeypatch.setattr(paths, "_app_root", None)
+    monkeypatch.setattr(_harness, "_HARNESSES", {})
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_APP_ROOT", raising=False)
+    monkeypatch.setenv("AzureWebJobsScriptRoot", str(source.parent))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(_harness.FLAG, "true")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_MODEL", "gpt-4.1-mini")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("WEBSITE_INSTANCE_ID", raising=False)
+    monkeypatch.delenv("FUNCTIONS_WORKER_PROCESS_COUNT", raising=False)
+    spec = importlib.util.spec_from_file_location("copilot_preview_function_app", source)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    names = {item.get_function_name() for item in module.app.get_functions()}
+    assert paths.get_app_root() == source.parent.resolve()
+    assert "main" in names
+    assert "agent_main_builtin_chat" in names
