@@ -4,7 +4,7 @@ title: Copilot SDK agent harness
 status: Finalized
 author: larohra
 created: 2026-09-28
-updated: 2026-09-28
+updated: 2026-09-29
 issues:
   - https://github.com/Azure/azure-functions-bucees-planning/issues/1332
 pull_requests: []
@@ -383,24 +383,57 @@ structured-response parity, and content-safe telemetry remain unqualified.
 The assessment's mid-turn recovery experiments do not add those capabilities to
 this feature's scope.
 
-Sign-off approves the feature-level contracts, not a production SDK pin or
-unverified compatibility mappings. The following implementation decisions and
-qualification obligations remain open. Unsupported capabilities must continue
-to follow the explicit preview-rejection rules.
+Sign-off approves the feature-level contracts. The provider slice below resolves
+its SDK pin and compatibility mappings; the following feature-wide implementation
+and qualification obligations otherwise remain open. Unsupported capabilities
+must continue to follow the explicit preview-rejection rules.
 
 | Implementation item | Resolution or evidence required for supported behavior |
 | --- | --- |
-| SDK/runtime and hosting contract | Select version/protocol/assets, core-versus-optional packaging and dependency coexistence with MAF, provider/Entra mappings, and provider `store=false` enforcement. Define worker lifecycle and target Functions hosting constraints, including Linux/Flex not qualified by the Windows evidence. Do not promote the evidence SHA to a production pin by assumption. |
+| SDK/runtime and hosting contract | Retain SDK 1.0.14 for the provider slice and the local-only, single-worker restrictions below. Runtime assets, worker lifecycle, and target Functions hosting qualification remain external release-gate evidence; Linux/Flex is not qualified by the Windows evidence. |
 | Native storage protocol | Specify ownership/fencing, rename/read consistency, completion metadata, SDK storage-error barriers, and acknowledgment/quiescence. Define local-versus-deployed storage selection, complete-session retention safety, corruption/version detection, and interrupted-session behavior against concrete SDK operations. |
 | Native continuation and presentation | Establish a supported native history projection, compaction/reference preservation and cold-restore evidence, and metadata-only incompatible-history detection/rollback behavior. Rendering history must not become a second execution-state authority. |
-| Configuration compatibility | Decide the enforceable portable output limit and treatment/replacement of MAF-specific compaction configuration, preserving recursive inheritance/null behavior without claiming equivalent algorithms. |
-| Extension compatibility | Define the supported custom `ClientManager` contract and MAF `FunctionTool` conversion boundary, including authored decorator kwargs, approval semantics, unsupported hooks/options, and construction-time validation. Preserve MAF extensions with the flag off. |
+| Configuration compatibility | Preserve the existing provider/model precedence, recursive inheritance/null behavior, and provider-slice output-limit restriction. Treatment/replacement of MAF-specific compaction configuration remains open without claiming equivalent algorithms. |
+| Extension compatibility | Use only the exact built-in `ClientManager` on Copilot and preserve custom managers on MAF. The MAF `FunctionTool` conversion boundary, including authored decorator kwargs, approval semantics, and unsupported hooks/options, remains open. |
+
+#### 4.8.1 Architecture-approved provider slice
+
+PR #241 is the merged foundation dependency. This issue delivers one vertical
+provider slice; storage, history, hosting, and tool work remain open. MAF behavior
+and provider/model precedence remain byte-for-byte behaviorally unchanged,
+including explicit/autodetected provider selection and authored/per-agent model
+merge and `null` semantics.
+
+Copilot consumes a runtime-owned, pure typed target through the singular stable
+provider API. `_copilot.py` lazily constructs the SDK `ProviderConfig`; shared and
+default-off code must not optionally import the SDK. The approved mappings are:
+
+| Provider | SDK mapping and authentication |
+| --- | --- |
+| OpenAI API key | `type=openai`, `wire_api=completions`, `https://api.openai.com/v1`; use the configured API key. |
+| Azure OpenAI | `type=azure`, `wire_api=completions`; require a host-only `AZURE_OPENAI_ENDPOINT`; pass the resolved deployment/model as `model_id` and `wire_model`. Use optional `AZURE_OPENAI_API_VERSION`, or versionless v1 when absent. Prefer a nonblank `AZURE_OPENAI_API_KEY`; otherwise use a refreshable bearer callback that acquires each request with Azure Identity and scope `https://cognitiveservices.azure.com/.default`. |
+| Foundry project | `type=openai`, `wire_api=responses`, `<project endpoint>/openai/v1`; pass the resolved model as `model_id` and `wire_model`, use `store=false`, and use a refreshable bearer callback that acquires each request with Azure Identity and scope `https://ai.azure.com/.default`. |
+
+Unsupported providers or settings fail explicitly without fallback. Credentials
+are re-supplied on resume; callbacks may overlap and acquire per request through
+Azure Identity. Credentials must not be persisted, added to session metadata or
+launch arguments, or logged, while acknowledging the native request memory boundary.
+
+Custom `ClientManager` behavior is unchanged on MAF. For this slice Copilot accepts
+only the exact built-in manager, rejects replacements before app mutation, and
+rechecks before execution. Managers that only implement `build_chat_client` remain
+MAF-only. This is a migration contract, not a future Copilot extension hook.
+
+Retain SDK 1.0.14 and the local-only, single-worker, and output-limit restrictions.
+Do not claim target-host or managed-identity qualification; that release evidence
+is owned by the external hosting gate.
 
 ## 5. Decisions log
 
 Dates below record the original scope approvals and proposals. Decision 12
-records human sign-off on the feature specification, without claiming that its
-remaining implementation decisions or qualification obligations are complete.
+records human sign-off on the feature specification; decisions 13-19 record the
+architecture-approved provider slice without claiming that remaining feature-wide
+implementation or qualification obligations are complete.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
@@ -416,6 +449,13 @@ remaining implementation decisions or qualification obligations are complete.
 | 10 | Workflows across app restarts/deployments | Custom harness pinning/lifecycle rules / existing Durable behavior | Follow Durable replay, retry, worker lifetime, and configured deployment routing; each executing app instance supplies its own selection, with no new persisted harness pin or mismatch rejection | Human | 2026-09-28 |
 | 11 | Session startup failures | Prescribe marker sequencing / specify observable behavior | Require one active turn per agent/session, safe retry after a startup failure that did not begin a turn or damage state, and explicit errors for uncertain continuation; leave marker ordering and cleanup to implementation | Human | 2026-09-28 |
 | 12 | Feature specification sign-off | Keep In review / finalize the agreed feature contracts | Finalized after approving decision 11; section 4.8 remains an explicit record of unresolved implementation choices and required evidence, not a claim of parity or production readiness | Human (larohra) | 2026-09-28 |
+| 13 | Provider-slice delivery boundary | Reopen the full harness migration / one dependent vertical slice | Use merged PR #241 as the foundation and deliver one provider slice; leave storage, history, hosting, and tool work open | Agent | 2026-09-29 |
+| 14 | Existing behavior compatibility | Adjust MAF or precedence / preserve both exactly | Keep MAF behavior and provider/model precedence byte-for-byte behaviorally unchanged, including provider selection and authored/per-agent merge/`null` semantics | Agent | 2026-09-29 |
+| 15 | Copilot provider boundary | SDK types in shared code / runtime-owned target | Use one stable singular pure typed target and lazily construct SDK `ProviderConfig` in `_copilot.py`; do not optionally import the SDK in shared/default-off code | Agent | 2026-09-29 |
+| 16 | Copilot provider mappings | Generic/fallback mapping / explicit matrix | Map OpenAI, Azure OpenAI, and Foundry exactly as section 4.8.1 specifies; reject unsupported providers/settings without fallback | Agent | 2026-09-29 |
+| 17 | Credential lifecycle | Persist credentials / re-supply and refresh | Re-supply credentials on resume; permit overlapping callbacks that acquire per request through Azure Identity; exclude credentials from persistence, session metadata, launch arguments, and logs while acknowledging native request memory | Agent | 2026-09-29 |
+| 18 | Custom `ClientManager` migration | Adapt custom managers / built-in only on Copilot | Leave MAF unchanged; on Copilot accept only the exact built-in manager, reject replacement before app mutation, and recheck before execution. `build_chat_client`-only managers remain MAF-only; this is not a future extension hook | Agent | 2026-09-29 |
+| 19 | Slice version and release evidence | Broaden qualification / retain bounded preview | Retain SDK 1.0.14 and local-only, single-worker, and output-limit restrictions; leave target-host and managed-identity qualification to the external hosting release gate | Agent | 2026-09-29 |
 
 ## 6. Feature-level acceptance and test plan
 
