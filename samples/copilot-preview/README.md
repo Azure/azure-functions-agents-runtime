@@ -36,7 +36,6 @@ $env:FOUNDRY_MODEL = "<approved-deployment-name>"
 $env:FUNCTIONS_WORKER_PROCESS_COUNT = "1"
 $run = [Guid]::NewGuid().ToString("N")
 $env:AZURE_FUNCTIONS_AGENTS_SESSION_DIR = "$PWD\.preview-state\$run"
-$env:COPILOT_CLI_EXTRACT_DIR = "$PWD\.tmp-validation\copilot-$run"
 if (Test-Path samples\copilot-preview\src\local.settings.json) { throw "Do not overwrite local settings." }
 Copy-Item samples\copilot-preview\src\local.settings.template.json samples\copilot-preview\src\local.settings.json
 ```
@@ -51,17 +50,11 @@ uv pip install --python ..\..\..\.venv\Scripts\python.exe -r requirements.txt
 Pop-Location
 ```
 
-The SDK wheel has Python code, **not** native assets. Optionally prefetch native
-`1.0.85` using its public command *after* installing the extra:
-
-```powershell
-.\.venv\Scripts\python.exe -m copilot download-runtime
-$env:COPILOT_SKIP_CLI_DOWNLOAD = "1" # Only after a successful prefetch
-```
-
-If downloads are disabled by `COPILOT_SKIP_CLI_DOWNLOAD=1`, prefetch into the
-same isolated cache where permitted **before running**; do not unset that policy.
-Otherwise the first request may download. No host `--setup`/cache check.
+The `[copilot]` extra installs the Python SDK, not native assets. On the first
+Copilot-enabled request, the SDK automatically downloads its pinned native
+runtime if it is not cached; this can add cold-start time. Later requests with
+access to the same cache reuse it. The flag-off MAF path does not download it.
+No separate CLI setup or download setting is needed for this sample.
 
 ```powershell
 Push-Location samples\copilot-preview\src
@@ -123,11 +116,10 @@ if ($run -notmatch '^[a-f0-9]{32}$' -or
 }
 $repo = (Get-Location).ProviderPath
 $state = Join-Path $repo ".preview-state\$run"
-$cache = Join-Path $repo ".tmp-validation\copilot-$run"
-$parents = Get-Item -LiteralPath (Split-Path $state), (Split-Path $cache) -ErrorAction SilentlyContinue
-$targets = Get-Item -LiteralPath $state,$cache -ErrorAction SilentlyContinue
-$targets | Select-Object FullName, LinkType, Target
-$items = @($parents) + @($targets)
+$parent = Get-Item -LiteralPath (Split-Path $state) -ErrorAction SilentlyContinue
+$target = Get-Item -LiteralPath $state -ErrorAction SilentlyContinue
+$target | Select-Object FullName, LinkType, Target
+$items = @($parent) + @($target)
 if ($items | Where-Object {
     $null -ne $_ -and (-not $_.PSIsContainer -or
         ($_.Attributes -band [IO.FileAttributes]::ReparsePoint))
@@ -136,15 +128,15 @@ if ($items | Where-Object {
 }
 ```
 
-After inspecting the printed full paths, remove only this run's directories
-(never a shared SDK cache or a parent `.preview-state`/`.tmp-validation`):
+After inspecting the printed full path, remove only this run's session
+directory (never the SDK cache or the parent `.preview-state`):
 
 ```powershell
-Remove-Item -LiteralPath $state, $cache -Recurse -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $state -Recurse -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath .preview-evidence.json, samples\copilot-preview\src\local.settings.json `
   -ErrorAction SilentlyContinue
-Remove-Item Env:\AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT, Env:\AZURE_FUNCTIONS_AGENTS_SESSION_DIR, `
-  Env:\COPILOT_CLI_EXTRACT_DIR -ErrorAction SilentlyContinue
+Remove-Item Env:\AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT, Env:\AZURE_FUNCTIONS_AGENTS_SESSION_DIR `
+  -ErrorAction SilentlyContinue
 ```
 
 Do not remove shared SDK caches, MAF `agent-sessions` or another run's state.

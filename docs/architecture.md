@@ -270,11 +270,13 @@ remain unchanged.
 
 The SDK 1.0.14 wheel contains Python code but no native assets. The SDK obtains
 native 1.0.85 lazily on first client construction if it is not already cached,
-so an unprefetched first request can download assets and incur cold-start
-latency. A build/deployment step can prefetch through the SDK's public
-`python -m copilot download-runtime` command after installing the `[copilot]`
-extra; `COPILOT_SKIP_CLI_DOWNLOAD=1` then fails clearly if the assets are
-absent. No host `--setup` command or manual cache-layout check is needed.
+so the first Copilot-enabled request can incur download and extraction time.
+Later clients with access to the same cache reuse it. The app adds no separate
+CLI setup or download settings; default-off MAF never constructs the SDK
+client. A requirements-only Functions build installs the Python dependency but
+does not prepackage native assets. Install-time delivery through a Python
+runtime dependency is tracked upstream in
+[github/copilot-sdk#2789](https://github.com/github/copilot-sdk/issues/2789).
 External stdio remains the transport: experimental embedded FFI still needs
 native assets, and prior Linux/Windows spikes found stdio competitive or faster
 while embedded retained native resources.

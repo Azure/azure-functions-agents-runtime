@@ -90,8 +90,7 @@ def main() -> None:
             parser.error("--restart-host runs all phases.")
         if os.environ.get("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT", "").strip().lower() not in {"true", "1"}:
             parser.error("--restart-host requires the explicit Copilot preview flag.")
-        required = ["AZURE_FUNCTIONS_AGENTS_PROVIDER", "AZURE_FUNCTIONS_AGENTS_SESSION_DIR",
-                    "COPILOT_CLI_EXTRACT_DIR"]
+        required = ["AZURE_FUNCTIONS_AGENTS_PROVIDER", "AZURE_FUNCTIONS_AGENTS_SESSION_DIR"]
         if os.environ.get("AZURE_FUNCTIONS_AGENTS_PROVIDER") == "foundry":
             required.extend(["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"])
         else:
