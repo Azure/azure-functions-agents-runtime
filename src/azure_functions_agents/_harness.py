@@ -227,6 +227,8 @@ def validate_agent(
     harness: AppHarness, resolved: ResolvedAgent, capabilities: AgentCapabilities
 ) -> None:
     """Fail before FunctionApp mutation, native startup, or provider/tool execution."""
+    from .registration.capabilities import SANDBOX_TOOL_NAME
+
     if harness.name is HarnessKind.MAF:
         return
     validate_configuration(resolved.agent_configuration)
@@ -236,14 +238,23 @@ def validate_agent(
         mcp_endpoint=resolved.builtin_endpoints.mcp,
         mcp=bool(capabilities.filtered_mcp_tools),
         skills=bool(capabilities.enabled_skill_paths),
-        web_request=bool(capabilities.web_request_tools),
-        execute_python=resolved.sandbox_config is not None and not resolved.tools_disabled,
         subagents=bool(resolved.subagents),
         workflows=resolved.workflows is not None and resolved.workflows.enabled,
     )
     if not (resolved.model or harness.default_model):
         raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
-    prepare_tools(list(capabilities.filtered_user_tools or []))
+    prepared = prepare_tools(
+        [
+            *list(capabilities.filtered_user_tools or []),
+            *list(capabilities.web_request_tools or []),
+        ]
+    )
+    if (
+        resolved.sandbox_config is not None
+        and not resolved.tools_disabled
+        and any(function.name == SANDBOX_TOOL_NAME for function in prepared)
+    ):
+        raise UnsupportedCapabilityError("Copilot preview requires unique custom tool names.")
 
 
 def bind_harness(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> AppHarness:

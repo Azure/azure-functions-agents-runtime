@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 # that module's heavy optional deps (aiohttp, azure.identity) — matches the
 # lazy-import convention used by `_build_web_request_tools` below. The
 # sandbox tool's name is fixed as "execute_python" by its `@tool` decorator.
-_SANDBOX_TOOL_NAME = "execute_python"
+SANDBOX_TOOL_NAME = "execute_python"
 
 
 @dataclass
@@ -151,7 +151,7 @@ def existing_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities
     names.update(_tool_name(tool) for tool in capabilities.filtered_workflow_tools or [])
     names.update(_tool_name(tool) for tool in capabilities.web_request_tools or [])
     if resolved.sandbox_config is not None and not resolved.tools_disabled:
-        names.add(_SANDBOX_TOOL_NAME)
+        names.add(SANDBOX_TOOL_NAME)
     names.discard("")
     return names
 
