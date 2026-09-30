@@ -44,6 +44,13 @@ def test_agent_evaluation_receipt_tool_matches_eval_contract() -> None:
     }
 
 
+def test_agent_evaluation_instructions_require_tool_for_unknown_total() -> None:
+    instructions = (SAMPLE_SRC / "receipt.agent.md").read_text(encoding="utf-8")
+
+    assert "42.18" not in instructions
+    assert "Call `read_receipt`" in instructions
+
+
 def test_agent_evaluation_sample_uses_native_vally_spec() -> None:
     document = cast("dict[str, Any]", yaml.safe_load(EVAL_SPEC.read_text(encoding="utf-8")))
 
@@ -72,7 +79,7 @@ def test_agent_evaluation_sample_uses_native_vally_spec() -> None:
                     {
                         "name": "^read_receipt$",
                         "args": {"currency": "^USD$"},
-                        "result": '\"total\":42\\.18',
+                        "result": '\"total\":\\s*42\\.18',
                     }
                 ]
             },

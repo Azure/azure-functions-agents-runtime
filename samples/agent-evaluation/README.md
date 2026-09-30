@@ -37,9 +37,10 @@ provider credentials.
 From the repository root, install the app and the executor:
 
 ```powershell
-python -m pip install -r samples/agent-evaluation/src/requirements.txt
-Copy-Item samples/agent-evaluation/src/local.settings.template.json `
-  samples/agent-evaluation/src/local.settings.json
+Push-Location samples/agent-evaluation/src
+python -m pip install -r requirements.txt
+Copy-Item local.settings.template.json local.settings.json
+Pop-Location
 Push-Location integrations/vally-executor-azure-functions
 npm ci
 npm run build

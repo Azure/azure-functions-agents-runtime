@@ -23,7 +23,7 @@ stimuli:
             - name: ^read_receipt$
               args:
                 currency: ^USD$
-              result: '"total":42\.18'
+              result: '"total":\s*42\.18'
   - name: receipt-memory
     turns:
       - Remember confirmation code BLUE-ORBIT-731. Acknowledge with only OK.
