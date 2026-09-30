@@ -19,20 +19,27 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 
 ### Experimental Copilot harness
 
-MAF remains the default. A separate, local-only
-[Copilot foundation sample](samples/copilot-preview/README.md) supports an explicit
+MAF remains the default. A separate
+[Copilot preview sample](samples/copilot-preview/README.md) supports an explicit
 `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=true` opt-in for non-streaming HTTP,
 filtered explicit Python tools, the configured `web_request` tool, session-bound
 ACA `execute_python` adapter wiring, host-validated structured results on
-authored HTTP-trigger routes, and completed-turn native-session continuity. ACA
-catalog/session scoping is unit-qualified; real Copilot-to-ACA execution remains
-a separately gated acceptance item. It documents the pinned SDK/runtime,
-Foundry Entra setup, supported tool policy, unsupported capabilities, real
-request/tool/follow-up verification and the flag-off restart path. Ambient SDK
-shell/file/web/todo/task/human-input tools are disabled. This is not production
-activation or provider/session persistence/MCP/skills/role/streaming parity;
-existing MAF history is untouched. Configured output-token caps are not
-supported in this Copilot preview; MAF retains its output-limit controls.
+authored HTTP-trigger routes, and completed-turn native-session continuity. The
+flag is read once per app: **restart the host** to opt in or out, and switching
+it off restores MAF without migrating any native session. Native sessions are
+stored as one versioned object per session in a local file or Azure Blob
+(`AZURE_FUNCTIONS_AGENTS_COPILOT_SESSION_STORAGE`), separate from MAF history,
+which is never read, converted or modified. A session ID that only has the other
+harness's history is rejected explicitly, so rollback plans need fresh session
+IDs. ACA catalog/session scoping is unit-qualified; real Copilot-to-ACA
+execution remains a separately gated acceptance item. Ambient SDK
+shell/file/web/todo/task/human-input tools are disabled. This is **not**
+production activation: real storage-account, deployed-host and compacted
+cold-restore evidence is still outstanding, and MCP/skills/role/streaming parity
+is unchanged. Configured output-token caps are not supported in this Copilot
+preview; MAF retains its output-limit controls. See
+[`docs/copilot-preview-operations.md`](docs/copilot-preview-operations.md) for
+storage settings, inspection, error codes, retention and cleanup.
 
 ## Installation
 
@@ -178,8 +185,9 @@ If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint
 
 By default, agents execute through Microsoft Agent Framework's harness-agent mechanism. Optional global
 defaults and recursive per-agent overrides configure model output and conversation compaction
-limits. The local Copilot opt-in rejects configured output limits rather than silently
-dropping them.
+limits. The Copilot opt-in rejects configured output limits rather than silently
+dropping them, and rejects a non-null `max_context_window_tokens`; clearing that
+value with `null` selects Copilot's native compaction defaults.
 
 ```yaml
 # agents.config.yaml

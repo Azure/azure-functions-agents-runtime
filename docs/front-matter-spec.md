@@ -234,6 +234,12 @@ these controls are intentionally not author-configurable. For configured skills,
 `load_skill`, `read_skill_resource`, and `run_skill_script` without approval so autonomous turns can
 continue.
 
+On the experimental Copilot opt-in (`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`), a non-null effective
+`max_context_window_tokens` is rejected before inference rather than mapped to a different threshold;
+omitting it or clearing it with `null` selects Copilot's native compaction defaults. Configured
+`max_output_tokens` is rejected on that path. Both fields behave as described above on the default
+MAF path. See [`copilot-preview-operations.md`](copilot-preview-operations.md).
+
 `max_context_window_tokens` is the budget used by compaction and may be lower than the model's
 physical context window. The default strategy begins truncating older non-system message groups at
 80% of the input budget, where input budget is `max_context_window_tokens - max_output_tokens`.
