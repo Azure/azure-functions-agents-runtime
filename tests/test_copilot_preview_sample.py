@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -115,6 +116,47 @@ def test_blob_restart_requires_explicit_disposable_storage_and_host_settings(
     with pytest.raises(SystemExit, match="2"):
         module.main()
     assert "local.settings.json" in capsys.readouterr().err
+
+
+def test_blob_restart_with_entra_service_uri_rejects_shadowing_settings(
+    monkeypatch: Any, tmp_path: Path, capsys: Any,
+) -> None:
+    module = _load_verifier()
+    monkeypatch.setattr(module, "__file__", str(tmp_path / "verify.py"))
+    (tmp_path / "src").mkdir()
+    settings = tmp_path / "src" / "local.settings.json"
+    uri = "https://account.blob.core.windows.net"
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT", "true")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_COPILOT_SESSION_STORAGE", "blob")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER", "disposable")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB", "1")
+    monkeypatch.setenv("AzureWebJobsStorage__blobServiceUri", uri)
+    monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
+    monkeypatch.delenv("FOUNDRY_PROJECT_ENDPOINT", raising=False)
+    monkeypatch.setattr(sys, "argv", ["verify.py", "--restart-host"])
+
+    with pytest.raises(SystemExit, match="2"):
+        module.main()
+    assert "exactly one of AzureWebJobsStorage" in capsys.readouterr().err
+
+    monkeypatch.delenv("AzureWebJobsStorage")
+    for values in (
+        {"AzureWebJobsStorage": "UseDevelopmentStorage=true"},
+        {"AzureWebJobsStorage": "", "AzureWebJobsStorage__blobServiceUri": uri + "/other"},
+    ):
+        settings.write_text(json.dumps({"Values": values}), encoding="utf-8")
+        with pytest.raises(SystemExit, match="2"):
+            module.main()
+        assert "Entra ID service URI" in capsys.readouterr().err
+
+    # Blank connection plus the matching URI passes the storage gate (then stops on Foundry settings).
+    settings.write_text(json.dumps({"Values": {"AzureWebJobsStorage": ""}}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="2"):
+        module.main()
+    err = capsys.readouterr().err
+    assert "FOUNDRY_PROJECT_ENDPOINT" in err
+    assert uri not in err
 
 
 def test_sample_entrypoint_uses_functions_script_root(monkeypatch: Any, tmp_path: Path) -> None:

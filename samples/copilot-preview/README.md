@@ -61,12 +61,17 @@ Expect `PASS negative`; the unknown session check requires HTTP 409 with
 
 These commands are **opt-in** and are not part of the local-only walkthrough.
 Use a pre-existing, dedicated disposable container and an explicitly selected
-storage connection (Azurite is fine). Never point them at customer session
-storage. The integration tests use a fresh random app namespace on each run,
+storage target: **either** a connection string (Azurite is fine) **or** an
+`https` Blob service URI authenticated with Microsoft Entra ID through
+`DefaultAzureCredential` (for accounts with shared-key access disabled). Never
+point them at customer session storage. The tests and verifier never create
+containers. The integration tests use a fresh random app namespace on each run,
 create only session `state.json` objects, and delete only those exact objects;
 storage versions, soft-deleted copies and snapshots may be retained by the
 service. No native SDK process, model or Functions host is needed for these
 storage-protocol tests:
+
+Connection string (for example Azurite):
 
 ```powershell
 $env:AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB = "1"
@@ -74,6 +79,22 @@ $env:AZURE_FUNCTIONS_AGENTS_TEST_BLOB_CONNECTION_STRING = $env:AzureWebJobsStora
 $env:AZURE_FUNCTIONS_AGENTS_TEST_BLOB_CONTAINER = "<pre-existing-disposable-container>"
 .\.venv\Scripts\python.exe -m pytest tests\test_copilot_session_fs_integration.py -q -rs
 ```
+
+Microsoft Entra ID (no keys or SAS): sign in with an identity that has
+**Storage Blob Data Contributor** on the disposable container or account
+(`DefaultAzureCredential` picks up `az login`), and set exactly one target:
+
+```powershell
+az login
+Remove-Item Env:AZURE_FUNCTIONS_AGENTS_TEST_BLOB_CONNECTION_STRING -ErrorAction SilentlyContinue
+$env:AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB = "1"
+$env:AZURE_FUNCTIONS_AGENTS_TEST_BLOB_SERVICE_URI = "https://<account>.blob.core.windows.net"
+$env:AZURE_FUNCTIONS_AGENTS_TEST_BLOB_CONTAINER = "<pre-existing-disposable-container>"
+.\.venv\Scripts\python.exe -m pytest tests\test_copilot_session_fs_integration.py -q -rs
+```
+
+Setting both target variables, an `http` URI or a URI with a query string
+(SAS) fails the tests instead of guessing.
 
 For a **real SDK/model completed-turn cold restore**, configure the same
 disposable container for the sample host and run the verifier with a fresh
@@ -89,6 +110,23 @@ commit credentials or populate the checked-in template.
 ```powershell
 $env:AZURE_FUNCTIONS_AGENTS_COPILOT_SESSION_STORAGE = "blob"
 $env:AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER = $env:AZURE_FUNCTIONS_AGENTS_TEST_BLOB_CONTAINER
+.\.venv\Scripts\python.exe samples\copilot-preview\verify.py --restart-host `
+  --evidence .preview-blob-evidence.json
+```
+
+For Entra ID instead, use the identity-based Functions setting and **no**
+connection string (a connection string always wins over `blobServiceUri`).
+The verifier requires exactly one of the two and rejects a non-blank
+`AzureWebJobsStorage` or a different `AzureWebJobsStorage__blobServiceUri`
+in `src\local.settings.json`; the host and worker authenticate with
+`DefaultAzureCredential` (your `az login`):
+
+```powershell
+Remove-Item Env:AzureWebJobsStorage -ErrorAction SilentlyContinue
+$env:AzureWebJobsStorage__blobServiceUri = "https://<account>.blob.core.windows.net"
+$env:AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB = "1"
+$env:AZURE_FUNCTIONS_AGENTS_COPILOT_SESSION_STORAGE = "blob"
+$env:AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER = "<pre-existing-disposable-container>"
 .\.venv\Scripts\python.exe samples\copilot-preview\verify.py --restart-host `
   --evidence .preview-blob-evidence.json
 ```

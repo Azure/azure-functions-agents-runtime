@@ -97,21 +97,36 @@ def main() -> None:
             required.append("AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER")
             if os.environ.get("AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB") != "1":
                 parser.error("Blob restart requires AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB=1.")
-            if not (os.environ.get("AzureWebJobsStorage") or
-                    os.environ.get("AzureWebJobsStorage__blobServiceUri")):
-                parser.error("Blob restart requires AzureWebJobsStorage or AzureWebJobsStorage__blobServiceUri.")
+            connection = os.environ.get("AzureWebJobsStorage", "").strip()
+            service_uri = os.environ.get("AzureWebJobsStorage__blobServiceUri", "").strip()
+            if bool(connection) == bool(service_uri):
+                parser.error(
+                    "Blob restart requires exactly one of AzureWebJobsStorage or "
+                    "AzureWebJobsStorage__blobServiceUri."
+                )
             settings = app / "local.settings.json"
             if not settings.exists():
                 parser.error(
                     "Create untracked src/local.settings.json from the sample template and remove "
                     "its blank AzureWebJobsStorage entry before Blob restart."
                 )
-            if os.environ.get("AzureWebJobsStorage"):
-                value = json.loads(settings.read_text(encoding="utf-8"))["Values"].get("AzureWebJobsStorage")
+            values = json.loads(settings.read_text(encoding="utf-8"))["Values"]
+            if connection:
+                value = values.get("AzureWebJobsStorage")
                 if value is not None and value != os.environ["AzureWebJobsStorage"]:
                     parser.error(
                         "Remove the blank/mismatched AzureWebJobsStorage entry from local.settings.json "
                         "so the worker inherits the explicit connection from the environment."
+                    )
+            else:
+                # A connection string always wins over blobServiceUri, so none may be inherited.
+                uri_value = values.get("AzureWebJobsStorage__blobServiceUri")
+                if values.get("AzureWebJobsStorage") or (
+                    uri_value is not None and uri_value != os.environ["AzureWebJobsStorage__blobServiceUri"]
+                ):
+                    parser.error(
+                        "Remove AzureWebJobsStorage and any mismatched AzureWebJobsStorage__blobServiceUri "
+                        "entry from local.settings.json so the worker uses the explicit Entra ID service URI."
                     )
         elif storage == "local":
             required.append("AZURE_FUNCTIONS_AGENTS_SESSION_DIR")

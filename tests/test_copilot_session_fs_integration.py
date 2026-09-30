@@ -6,11 +6,13 @@ import asyncio
 import contextlib
 import os
 import uuid
+from collections.abc import Mapping
+from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 import pytest_asyncio
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
-from azure.storage.blob.aio import BlobServiceClient
 
 from azure_functions_agents import _copilot_session_fs as fs
 from azure_functions_agents._harness import AppHarness, HarnessKind, ProviderKind
@@ -19,34 +21,64 @@ from azure_functions_agents._native_session_identity import (
     SessionConflictError,
     StorageMode,
     StorageRoute,
+    _open_owned_blob_service,
     opaque_key,
     state_name,
 )
 
 CONNECTION = "AZURE_FUNCTIONS_AGENTS_TEST_BLOB_CONNECTION_STRING"
+SERVICE_URI = "AZURE_FUNCTIONS_AGENTS_TEST_BLOB_SERVICE_URI"
 CONTAINER = "AZURE_FUNCTIONS_AGENTS_TEST_BLOB_CONTAINER"
 OPT_IN = "AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB"
 NATIVE_ID = "integration-native-id"
 
 
-@pytest_asyncio.fixture
-async def blob_case(tmp_path):
-    if os.environ.get(OPT_IN) != "1" or not all(
-        os.environ.get(name) for name in (CONNECTION, CONTAINER)
-    ):
-        pytest.skip(
-            f"Real Blob tests require {OPT_IN}=1 and explicit {CONNECTION} and {CONTAINER} "
-            "(a pre-existing disposable container; Azurite is supported)."
-        )
-    route = StorageRoute(
+def integration_route(environ: Mapping[str, str], local_dir: Path) -> StorageRoute | None:
+    """Return a fresh test-owned route, or ``None`` when real Blob tests are not opted in.
+
+    Exactly one target is required: a connection string (Azurite/shared key) or an
+    ``https`` Blob service URI authenticated with ``DefaultAzureCredential``.
+    Raised messages never include the configured values.
+    """
+    container = environ.get(CONTAINER, "").strip()
+    connection = environ.get(CONNECTION, "").strip()
+    uri = environ.get(SERVICE_URI, "").strip()
+    if environ.get(OPT_IN) != "1" or not container or not (connection or uri):
+        return None
+    if connection and uri:
+        raise ValueError(f"Set exactly one of {CONNECTION} or {SERVICE_URI}.")
+    if uri:
+        parts = urlsplit(uri)
+        if parts.scheme != "https" or not parts.netloc or parts.query or parts.fragment:
+            raise ValueError(
+                f"{SERVICE_URI} must be an https Blob service URI without a query (no SAS)."
+            )
+    return StorageRoute(
         mode=StorageMode.BLOB,
         app_key=opaque_key("a", "integration-" + uuid.uuid4().hex),
-        local_dir=tmp_path / "unused-local",
-        container=os.environ[CONTAINER],
+        local_dir=local_dir,
+        container=container,
         identity_key=uuid.uuid4().hex,
-        connection_string=os.environ[CONNECTION],
+        connection_string=connection or None,
+        blob_uri=uri or None,
     )
-    service = BlobServiceClient.from_connection_string(route.connection_string)
+
+
+@pytest_asyncio.fixture
+async def blob_case(tmp_path):
+    try:
+        route = integration_route(os.environ, tmp_path / "unused-local")
+    except ValueError as exc:
+        pytest.fail(str(exc))
+    if route is None:
+        pytest.skip(
+            f"Real Blob tests require {OPT_IN}=1, {CONTAINER} (a pre-existing disposable "
+            f"container) and exactly one of {CONNECTION} (Azurite is supported) or "
+            f"{SERVICE_URI} (Entra ID via DefaultAzureCredential)."
+        )
+    # Reuse the product's owned client so any Entra credential is closed with the service.
+    owned = await _open_owned_blob_service(route)
+    service = owned.service
     names: set[str] = set()
     try:
         # Never let NativeSession.open create a container in an unintended account.
@@ -75,7 +107,7 @@ async def blob_case(tmp_path):
                     with contextlib.suppress(ResourceNotFoundError):
                         await blob.delete_blob(delete_snapshots="include")
         finally:
-            await service.close()
+            await owned.close()
 
 
 async def open_owner(harness, session_id="conversation", *, new=True, timeout=5):
@@ -196,3 +228,58 @@ async def test_real_blob_completed_tree_restores_from_new_client(blob_case):
         await second.rollback()
     finally:
         await second.close()
+
+
+def test_integration_route_requires_explicit_opt_in_and_target(tmp_path):
+    base = {OPT_IN: "1", CONTAINER: "disposable", SERVICE_URI: "https://acct.blob.core.windows.net"}
+    assert integration_route({}, tmp_path) is None
+    assert integration_route({**base, OPT_IN: "true"}, tmp_path) is None
+    assert integration_route({k: v for k, v in base.items() if k != CONTAINER}, tmp_path) is None
+    assert integration_route({OPT_IN: "1", CONTAINER: "disposable"}, tmp_path) is None
+
+
+def test_integration_route_selects_service_uri_with_default_credential(tmp_path):
+    route = integration_route({
+        OPT_IN: "1", CONTAINER: " disposable ",
+        SERVICE_URI: " https://acct.blob.core.windows.net/ ",
+    }, tmp_path)
+    assert route is not None
+    assert route.mode is StorageMode.BLOB
+    assert route.container == "disposable"
+    assert route.blob_uri == "https://acct.blob.core.windows.net/"
+    assert route.connection_string is None
+    assert route.client_id is None
+    assert "acct" not in repr(route)
+    other = integration_route({
+        OPT_IN: "1", CONTAINER: "disposable",
+        SERVICE_URI: "https://acct.blob.core.windows.net/",
+    }, tmp_path)
+    assert other.app_key != route.app_key
+
+
+def test_integration_route_keeps_connection_string_support(tmp_path):
+    route = integration_route({
+        OPT_IN: "1", CONTAINER: "disposable", CONNECTION: "UseDevelopmentStorage=true",
+    }, tmp_path)
+    assert route is not None
+    assert route.connection_string == "UseDevelopmentStorage=true"
+    assert route.blob_uri is None
+
+
+@pytest.mark.parametrize("uri", [
+    "http://acct.blob.core.windows.net",
+    "https://acct.blob.core.windows.net/?sv=secret-sas",
+    "acct.blob.core.windows.net",
+])
+def test_integration_route_rejects_unsafe_service_uri_without_echoing_it(tmp_path, uri):
+    with pytest.raises(ValueError, match=SERVICE_URI) as exc:
+        integration_route({OPT_IN: "1", CONTAINER: "disposable", SERVICE_URI: uri}, tmp_path)
+    assert "secret" not in str(exc.value) and "acct" not in str(exc.value)
+
+
+def test_integration_route_rejects_ambiguous_target(tmp_path):
+    with pytest.raises(ValueError, match="exactly one"):
+        integration_route({
+            OPT_IN: "1", CONTAINER: "disposable", CONNECTION: "AccountKey=secret",
+            SERVICE_URI: "https://acct.blob.core.windows.net",
+        }, tmp_path)
