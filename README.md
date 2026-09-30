@@ -34,10 +34,12 @@ harness's history is rejected explicitly, so rollback plans need fresh session
 IDs. ACA catalog/session scoping is unit-qualified; real Copilot-to-ACA
 execution remains a separately gated acceptance item. Ambient SDK
 shell/file/web/todo/task/human-input tools are disabled. This is **not**
-production activation: real storage-account, deployed-host and compacted
-cold-restore evidence is still outstanding, and MCP/skills/role/streaming parity
-is unchanged. Configured output-token caps are not supported in this Copilot
-preview; MAF retains its output-limit controls. See
+production activation: #1335 qualified real Entra Blob lease/fencing,
+replacement-process tool-result continuation and compacted semantic-summary
+cold restore, but deployed-host and dual-harness end-to-end qualification
+remain in #1357 and final rollout remains in #1337. MCP/skills/role/streaming
+parity is unchanged. Configured output-token caps are not supported in this
+Copilot preview; MAF retains its output-limit controls. See
 [`docs/copilot-preview-operations.md`](docs/copilot-preview-operations.md) for
 storage settings, inspection, error codes, retention and cleanup.
 

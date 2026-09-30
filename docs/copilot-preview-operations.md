@@ -18,9 +18,9 @@ directories in `tests/`; it is not storage or hosting qualification.
 | Environment | What exists today | What is **not** established |
 | --- | --- | --- |
 | Local file storage | Unit tests over real temporary files (envelope integrity, atomic replace, OS-lock conflict, symlink rejection, rollback/recovery states) and the sample's documented local two-turn restart flow (not re-executed for this slice). | Multi-process contention beyond the single-owner lock test; long-running or large-session behavior. |
-| Azure Blob storage | Unit tests against an in-process fake blob client covering lease acquire/renew, ETag-conditional single-put, stale-owner rejection and lease-loss latching. | **No evidence against a real storage account**: no live lease/fencing, durability, throughput, size or soft-delete behavior; no clean replacement-worker restore. |
+| Azure Blob storage | Unit coverage plus a 15-test Microsoft Entra-authenticated suite against a disposable, pre-existing container: two-client exclusion, lease loss, ETag-interrupted write/rename, cross-client completed-tree restore and zero leftovers. A real tool-using turn was also restored by replacement Python/native processes under a different worker root. | No deployed Functions or multi-worker-host qualification; no long-running, throughput, maximum-size, soft-delete/version-retention or backup-policy claim. |
 | Target Functions host | None. | No deployed Functions (Consumption/Premium/Flex/Linux) run, no multi-worker run, no native-asset acquisition on the host, no scale-in/out behavior. |
-| Native compaction | Compaction is enabled in the SDK session options (`InfiniteSessionConfig(enabled=True)`). | No compacted cold-restore evidence (see [Compaction evidence](#compaction-evidence)). |
+| Native compaction | A real qualification run forced one compaction, persisted one checkpoint, then restored in fresh Python/native processes using native defaults and reused the semantic summary with no new compaction event. | Qualification does not establish verbatim retention of arbitrary opaque tokens or filenames; deployed-host behavior remains unqualified. |
 
 Mid-turn recovery is explicitly out of scope: only **completed** turns are
 guaranteed to be continuable, and no exactly-once tool effect is claimed.
@@ -150,11 +150,15 @@ credentials) and map to HTTP status codes on the built-in chat route:
 
 A storage failure aborts the turn; it never becomes a model-visible tool result
 or a success-shaped empty response, and it never silently resets a conversation.
+Expected filesystem result errors such as `ENOENT`, `EEXIST`, `ENOTEMPTY`,
+`EISDIR` and `ENOTDIR` are normal SessionFs callback responses and do not latch
+a storage failure. Unexpected callback exceptions and persistence, lease/ETag
+or envelope-corruption failures still fail closed.
 
 ## Versions, legacy IDs and rollback
 
 The envelope pins `schema_version=1` with SDK `1.0.14`, native `1.0.85` and
-protocol `3`. Only that triple is resumable under `v1`: unknown or newer
+protocol 4. Only that triple is resumable under `v1`: unknown or newer
 formats, mismatched versions, digest failures and identity mismatches fail
 explicitly. There is no migration and no partial restore.
 
@@ -213,8 +217,20 @@ passing tests:
 5. Send a follow-up that depends on pre-compaction content and show the saved
    summary/references were reused **without another compaction model call**.
 
-This sequence has not been demonstrated for the current code. Until it is, treat
-compaction continuity as unproven.
+Issue #1335 demonstrated this sequence with a real model and Blob-backed state.
+A qualification-only forced threshold produced exactly one compaction start and
+one successful completion and persisted one checkpoint. A later fresh
+Python/native process, using production native defaults and a different worker
+root, returned `READY` and followed a standing rule present only in the saved
+summary, with zero new compaction events and unchanged checkpoint, summary and
+event identifiers. Revision advanced `36 -> 45`, owner epoch `2 -> 3`, and the
+exact test-owned blob was deleted.
+
+The arbitrary opaque nonce and checkpoint filename used during the run were
+not retained or exposed. The supported evidence is semantic summary reuse, not
+verbatim arbitrary-token retention. The forced threshold was qualification
+instrumentation only: it is not user-facing configuration and does not change
+the production contract of native defaults with no MAF threshold mapping.
 
 ## Negative-case walkthrough
 

@@ -353,6 +353,12 @@ success means the continuation state is durably acknowledged. Native compaction
 runs with SDK defaults and its checkpoints and references live inside the same
 envelope, so a session is retained or removed as a whole unit.
 
+Expected filesystem result errors (`ENOENT`, `EEXIST`, `ENOTEMPTY`, `EISDIR`,
+`ENOTDIR` and equivalent operation outcomes) are normal SessionFs callback
+responses and do not latch a storage failure. Unexpected callback exceptions,
+envelope corruption, and persistence or lease/ETag failures still latch and
+fail closed.
+
 A caller-supplied public session ID requests a strict resume, not a new
 conversation, and concurrent turns for one `(agent, session)` wait for ownership
 within their deadline or fail with an explicit conflict. Bidirectional
@@ -369,9 +375,11 @@ is imported or mutated. Cancellation is session-scoped; application shutdown
 stops the SDK client.
 
 This slice removed the foundation's startup rejection of multi-worker and
-deployed instances, but neither a real storage account, a deployed Functions
-host, nor compacted cold restore has been exercised: that evidence is labeled
-per environment in
+deployed instances. Issue #1335 qualified real Entra-authenticated Blob
+lease/fencing and cross-client restore, replacement-process tool-result
+continuation, and compacted semantic-summary cold restore. It did not qualify a
+deployed Functions host or multi-worker hosting; evidence is labeled per
+environment in
 [Copilot preview: session storage operations](copilot-preview-operations.md),
 which also covers opt-in/opt-out restarts, storage inspection, error codes,
 legacy IDs and targeted cleanup. Interrupted-turn recovery remains out of scope.
@@ -392,9 +400,11 @@ routes return 501 rather than success-shaped empty output. A non-null effective
 still rejected; clearing it with `null`, or omitting it, now selects native
 compaction defaults instead of failing. Host-owned local and Azure Blob
 completed-turn persistence and native compaction are implemented in this slice,
-but real-storage, deployed-host and compacted cold-restore evidence is still
-outstanding, and interrupted-turn recovery remains deferred. No host summarizer
-is introduced. The runnable subset, setup, verification and rollback are in the
+and real Blob plus compacted cold-restore qualification is recorded for #1335.
+Deployed-host and dual-harness end-to-end qualification remain in #1357, and
+final rollout/production activation remains in #1337. Interrupted-turn recovery
+remains deferred. No host summarizer is introduced. The runnable subset, setup,
+verification and rollback are in the
 [sample](https://github.com/Azure/azure-functions-agents-runtime/tree/main/samples/copilot-preview).
 
 Delegated and Workflow Sub Agent roles use the specialist's own resolved configuration, never the

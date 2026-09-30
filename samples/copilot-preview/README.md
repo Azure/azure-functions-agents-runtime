@@ -5,7 +5,8 @@ the authored `/preview` HTTP route with `make_receipt` and `web_request`
 (limited to `example.com`). It preserves completed-turn sessions across a local
 restart, storing each session as one `state.json` file under
 `$env:AZURE_FUNCTIONS_AGENTS_SESSION_DIR`. Run it locally only: Azure Blob
-session storage and deployed hosting are implemented but not qualified. ACA
+session storage has real-service protocol and replacement-process
+qualification, but deployed Functions hosting is not qualified. ACA
 `execute_python` is disabled in the checked-in configuration; real
 Copilot-to-ACA execution is not qualified.
 
@@ -135,7 +136,9 @@ This driver does **not** delete the model conversation: use the saved
 `session_id` from the evidence file and `state_name(route, "main", session_id)`
 as in the inspection example below to identify that *one* test-owned blob,
 then remove it manually only after the host stops. Native compaction is not
-forced or qualified by this two-turn driver.
+forced by this two-turn driver. Separate #1335 qualification demonstrated
+semantic compacted-summary reuse across fresh Python/native processes; its
+forced threshold was qualification-only and is not user-facing configuration.
 
 To inspect the stored session (read-only) after `PASS first`, from a terminal
 with the same `AZURE_FUNCTIONS_AGENTS_SESSION_DIR`:
@@ -176,8 +179,9 @@ $web.tool_calls | ConvertTo-Json -Depth 8
 ```
 
 This local preview does not support streaming, MCP, skills, delegation,
-workflows, or MAF history import, and Blob storage and Azure hosting are not
-qualified. See
+workflows, or MAF history import. Blob storage is qualified for the documented
+#1335 protocol and replacement-process flows; Azure Functions hosting remains
+unqualified. See
 [the architecture guide](../../docs/architecture.md#bounded-copilot-migration-preview)
 for the capability boundary.
 
@@ -214,7 +218,7 @@ Remove-Item -LiteralPath .preview-evidence.json, samples\copilot-preview\src\loc
   -ErrorAction SilentlyContinue
 ```
 
-Do not delete SDK caches or MAF history. This sample never uses Blob storage;
-for Blob-backed sessions, and for storage settings, error codes, versioning and
-retention, see
+Do not delete SDK caches or MAF history. The default walkthrough uses local
+storage; for the optional Blob flow, storage settings, error codes, versioning
+and retention, see
 [`docs/copilot-preview-operations.md`](../../docs/copilot-preview-operations.md).

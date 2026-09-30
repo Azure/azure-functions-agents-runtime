@@ -399,17 +399,21 @@ envelope with `completed=working`, `working=null`, `state=ready` before success.
 Qualify that detach prevents further background writes; otherwise require a
 supported SDK flush/quiescence signal before shipping.
 
-**Failure barrier.** The provider latches and re-raises every callback failure,
-including exceptions in `exists` path normalization, validation or in-memory
-lookup. Only a successfully normalized, authoritative lookup may return
-`true`/`false`; `exists` performs no remote probe. Although the SDK can convert
-an `exists` exception to `false`, the orchestration independently checks the
-latch and ownership before dispatch, races execution with subsequent latch/
-lease loss to abort promptly, and re-checks through detach, storage barrier
-and completion, independent of SDK results. Load/validate the entire envelope
-before exposing callbacks; do not advertise SQLite support. Never allow
-further inference on a known storage failure; SDK behavior that defeats this
-barrier blocks this slice.
+**Failure barrier.** Expected filesystem result errors such as `ENOENT`,
+`EEXIST`, `ENOTEMPTY`, `EISDIR` and `ENOTDIR` are ordinary callback responses:
+they report that the requested filesystem operation could not be applied and
+do not latch a storage failure. The provider latches and re-raises unexpected
+callback exceptions, including path-normalization, validation and in-memory
+invariant failures. Only a successfully normalized, authoritative `exists`
+lookup may return `true`/`false`; `exists` performs no remote probe. Although
+the SDK can convert an `exists` exception to `false`, the orchestration
+independently checks the latch and ownership before dispatch, races execution
+with subsequent latch/lease loss to abort promptly, and re-checks through
+detach, storage barrier and completion, independent of SDK results.
+Persistence, lease/ETag, corruption and unexpected callback failures therefore
+still fail closed. Load/validate the entire envelope before exposing callbacks;
+do not advertise SQLite support. Never allow further inference on a known
+storage failure; SDK behavior that defeats this barrier blocks this slice.
 
 **Versions and lifecycle.** Validate the envelope schema, SDK/native/protocol
 triple, logical identity, digest, file sizes and state before resume. Only the
@@ -491,7 +495,7 @@ success-shaped response or an automatic MAF fallback. Cancellation stays
 cancellation. Already-dispatched tool effects may remain after an unsuccessful
 turn; the feature does not claim transactional or exactly-once execution.
 
-### 4.8 Evidence limits and remaining implementation decisions
+### 4.8 Qualification evidence and remaining implementation decisions
 
 The supplied 2026-09-25 assessment used SDK revision
 `4001c1da7d832c51bad1d38619c1a082af390efb`, runtime `1.0.84-5`, protocol 3.
@@ -502,23 +506,47 @@ contracts above. Native `custom_agents`/`task` delegation did not match the host
 contract. A Functions-shaped Windows transport comparison favored external stdio;
 it was not an Azure Functions deployment qualification.
 
-The Blob evidence did not establish distributed ownership or concurrent-reader
-safe rename. A storage-error path allowed inference before acknowledgment.
-Compacted cold restore, Functions hosting, MCP, scoped skills, public streaming/
-structured-response parity, and content-safe telemetry remain unqualified.
-The assessment's mid-turn recovery experiments do not add those capabilities to
-this feature's scope.
+That assessment did not establish distributed ownership, concurrent-reader-safe
+rename or compacted cold restore, and one storage-error path allowed inference
+before acknowledgment. Issue #1335 subsequently qualified the implemented
+storage and compaction slice with sanitized, real-service evidence:
+
+- A 15-test Microsoft Entra-authenticated Blob integration suite used a
+  disposable, pre-existing container and passed two-client exclusion, lease
+  loss, ETag-interrupted write/rename, cross-client completed-tree restore and
+  zero-leftover cleanup cases.
+- With SDK `1.0.14`, native runtime `1.0.85` and a real model, a host-free
+  tool-using turn completed against Blob. A new Python process and native
+  process, using a different worker root, resumed the same state and recalled
+  the tool result with zero new tool calls. Protocol 4 advanced revision
+  `20 -> 29` and owner epoch `1 -> 2`; the exact test-owned blob was then
+  deleted.
+- A qualification-only forced threshold produced exactly one native compaction
+  start and one successful completion and persisted one checkpoint. A later
+  fresh Python/native process using native defaults returned `READY` and
+  followed a standing rule present only in the persisted compaction summary,
+  with zero new compaction events and unchanged checkpoint, summary and event
+  identifiers. Revision advanced `36 -> 45`, owner epoch `2 -> 3`, and the
+  exact test-owned blob was then deleted.
+
+The arbitrary opaque nonce and checkpoint filename used during qualification
+were intentionally not retained or exposed. This proves semantic reuse of the
+persisted native summary, not verbatim retention of arbitrary tokens.
+Functions hosting, dual-harness end-to-end qualification, MCP, scoped skills,
+public streaming/structured-response parity and content-safe telemetry remain
+unqualified. The assessment's mid-turn recovery experiments do not add those
+capabilities to this feature's scope.
 
 Sign-off approves the feature-level contracts, not a production SDK pin or
-unverified compatibility mappings. The following implementation decisions and
-qualification obligations remain open. Unsupported capabilities must continue
-to follow the explicit preview-rejection rules.
+unverified compatibility mappings. The following table records the resolved
+#1335 items and the obligations that remain open. Unsupported capabilities must
+continue to follow the explicit preview-rejection rules.
 
 | Implementation item | Resolution or evidence required for supported behavior |
 | --- | --- |
-| SDK/runtime and hosting contract | The foundation pins SDK `1.0.14` / native `1.0.85` / protocol `3` for this storage schema; verify the actual assets and qualify deployment acquisition, dependency coexistence, provider/Entra mappings, provider `store=false`, worker lifecycle and target Functions hosting (including Linux/Flex). The earlier assessment SHA is not a production pin. |
-| Native storage protocol | Section 4.5 proposes one lease-fenced session envelope, handoff tracking, callback serialization/latching, atomic rename, first-create recovery, completion and tombstone deletion. Review single-put size/performance, version-retention write amplification and SDK/storage feasibility; prove the pinned runtime stops inference on SessionFs failures and issues no writes after detach/barrier. Verify lease loss, pre-handoff faults, post-handoff uncertainty, retry and crash boundaries on real Blob and local storage; document service-retained versions. |
-| Native continuation and presentation | This slice implements metadata-only incompatible-history guards and proves compaction/reference preservation on cold restore. A supported native history projection remains a later parity item and must not become a second execution-state authority. |
+| SDK/runtime and hosting contract | SDK `1.0.14` / native `1.0.85` / protocol 4 are qualified for the host-free Blob continuation flow above. Deployment acquisition, dependency coexistence, provider `store=false`, worker lifecycle and target Functions hosting (including Linux/Flex) remain for #1357. The earlier assessment SHA is not a production pin. |
+| Native storage protocol | Section 4.5's lease-fenced envelope passed the real Entra Blob integration suite described above, including two-client exclusion, lease loss, interrupted conditional replacement/rename and cross-client restore. Expected filesystem result errors remain ordinary callback results; actual persistence, lease/ETag, corruption and unexpected callback failures fail closed. Service-retained versions, long-running/large-session limits and deployed multi-worker behavior are not claimed. |
+| Native continuation and presentation | This slice proves real tool-result continuation and compacted semantic-summary reuse across replacement Python/native processes and worker roots. A supported native history projection remains a later parity item and must not become a second execution-state authority. |
 | Configuration compatibility | MAF-specific compaction remains rejected when effective/non-null; null/unset selects native defaults without threshold mapping. The portable output-limit mapping remains unresolved and the preview continues to reject it. |
 | Extension compatibility | Define the supported custom `ClientManager` contract and MAF `FunctionTool` conversion boundary, including authored decorator kwargs, approval semantics, unsupported hooks/options, and construction-time validation. Preserve MAF extensions with the flag off. |
 
@@ -530,7 +558,7 @@ later slices do not excuse a failing gate or weaken the default-off MAF path.
 | Slice | Scope and evidence | Dependency / review focus |
 | --- | --- | --- |
 | [PR #241](https://github.com/Azure/azure-functions-agents-runtime/pull/241) — foundation (merged) | Default-off, local-only SDK stdio, supported non-streaming HTTP/tools, native local resume and explicit preview rejections. | No Blob, compaction or multi-worker qualification; preserve its MAF isolation. |
-| Native sessions, Blob persistence and compaction (this issue) | Add an internal native SessionFs module, integrate it in `_copilot.py`/`_harness.py` and add bidirectional metadata-only guards at the runner boundary; implement the single-envelope local/Blob protocol, lease-fenced handoff/rollback, `exists` failure latch, completion/tombstone and native defaults. Add mirrored storage/harness/runner, handoff fault and real compacted cold-restore tests; update architecture, operations and sample docs. Retain other preview capability rejections. | Depends on #241. Re-review revised mechanics and SDK error/quiescence evidence **before implementation**; qualify deployed hosting; no partial-success release. |
+| Native sessions, Blob persistence and compaction (#1335, complete) | Added the internal native SessionFs module, integration and metadata-only guards; implemented the single-envelope local/Blob protocol, lease-fenced handoff/rollback, completion/tombstone and native defaults. Real Entra Blob, replacement-process tool-result continuation and compacted semantic-summary restore qualification passed as recorded in section 4.8. | Depends on #241. This completion does not qualify Functions hosting or production activation; those remain explicitly in #1357 and #1337. |
 | Further parity (separate reviewable PRs) | Native history projection/streaming, MCP/scoped skills, delegation/workflows, system tools, model/output controls, extension mappings and telemetry as each obtains evidence; update its tests/docs with each behavior. | Depends on the relevant qualified foundation/sessions behavior. Keep unsupported features explicitly rejected until their own slice passes review. |
 
 ## 5. Decisions log
@@ -553,8 +581,9 @@ remaining implementation decisions or qualification obligations are complete.
 | 10 | Workflows across app restarts/deployments | Custom harness pinning/lifecycle rules / existing Durable behavior | Follow Durable replay, retry, worker lifetime, and configured deployment routing; each executing app instance supplies its own selection, with no new persisted harness pin or mismatch rejection | Human | 2026-09-28 |
 | 11 | Session startup failures | Prescribe marker sequencing / specify observable behavior | Require one active turn per agent/session, safe retry after a startup failure that did not begin a turn or damage state, and explicit errors for uncertain continuation; leave marker ordering and cleanup to implementation | Human | 2026-09-28 |
 | 12 | Feature specification sign-off | Keep In review / finalize the agreed feature contracts | Finalized after approving decision 11; section 4.8 remains an explicit record of unresolved implementation choices and required evidence, not a claim of parity or production readiness | Human (larohra) | 2026-09-28 |
+| 13 | Native session delivery and persistence | Shared MAF JSONL or fragmented native Blob tree / one isolated lease-fenced envelope | Propose sections 4.5/4.9's encoded identities, frozen context, single-object local/Blob SessionFs, serialized/latching callbacks, safe pre-handoff rollback, uncertain post-handoff state, metadata-only history guards, tombstone deletion and native compaction after #241. Dedicated architecture-agent re-review APPROVED these mechanics on 2026-09-29 after two REVISE reviews; qualification was still open at this decision and is completed by decision 15. Human-approved contracts/status are unchanged. | Agent proposal; architecture-agent approval | 2026-09-29 |
 | 14 | Recorded host workspace on resume | Fuzzy suffix matching of recorded paths / persist the creating worker's workspace and alias it | The runtime resolves the recorded initial working directory through SessionFs before loading events, so the envelope records `workspace_path` and the provider maps that alias plus the current worker's directory to the virtual `/workspace`; unaliased host-qualified paths still fail closed and `protocol_version` moves to 4 so pre-alias envelopes are rejected | Agent proposal | 2026-09-30 |
-| 13 | Native session delivery and persistence | Shared MAF JSONL or fragmented native Blob tree / one isolated lease-fenced envelope | Propose sections 4.5/4.9's encoded identities, frozen context, single-object local/Blob SessionFs, serialized/latching callbacks, safe pre-handoff rollback, uncertain post-handoff state, metadata-only history guards, tombstone deletion and native compaction after #241. Dedicated architecture-agent re-review APPROVED these mechanics on 2026-09-29 after two REVISE reviews; qualification remains open. Human-approved contracts/status are unchanged. | Agent proposal; architecture-agent approval | 2026-09-29 |
+| 15 | #1335 qualification boundary | Treat mocked/local evidence as sufficient / qualify real Blob continuation and compaction while retaining later gates | Accept the sanitized section 4.8 evidence as completing #1335: real Entra Blob protocol tests, replacement-process tool-result continuation and semantic compacted-summary reuse. Do not claim verbatim arbitrary-token retention, Functions hosting, dual-harness end-to-end qualification or production activation; retain those gates in #1357/#1337. | Human (supplied qualification evidence) | 2026-09-30 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -574,9 +603,9 @@ where mocks cannot establish process, transport, authentication, or durability.
 | Delegation/workflows | Prove fresh same-specialist concurrent sessions, catalog/role isolation, no child SSE, parent cancellation and specialist-local errors, Workflow Sub Agent grants/results, existing management/Activity retry/timeout/authorization, and at-least-once semantics. |
 | Role storage/trigger execution | Run a non-HTTP trigger with its generated identity, serialization, logging/error behavior, and direct capabilities. Persistent direct state is isolated; delegates/Workflow Sub Agents leave no persistent native tree and dispose ephemeral state. |
 | System tools | Exercise `web_request` defaults/exclusion/SSRF/budgets/errors and real ACA `execute_python` scoping/results without substituting local execution. |
-| Completed-turn restore | On Blob and local storage, complete a real tool-using turn, replace Python and native processes, and continue by the same agent/session identity without restating prior values. Inspect outbound provider context/state reuse, not just a plausible answer. |
-| Compacted restore | Force native compaction, acknowledge complete state, replace both processes, restore in a clean worker, and prove saved-summary/reference reuse without another compaction LLM call. |
-| Storage failures/concurrency | Test `.`/`..` identity isolation, concurrent callbacks/no lost appends or renames, coherent reads, and `exists` validation/normalization/lookup exceptions latched and re-raised (simulate SDK converting them to `false`); only valid lookups return a Boolean. Fault-inject before/after conditional envelope replacement, oversize writes, SDK success despite a latched error, create/resume RPC failure, OS-lock contention, ETag/lease loss, stale writers and two-worker contention. Inject cancellation/deadline/fault after `active` before handoff marking, after marking but before task/RPC creation, and immediately after creation; prove verified same-ID/new or prior-`completed` rollback only without a created send task/RPC, with uncertain fail-closed after possible handoff or crash. Verify one-write rename, idempotent content-free tombstone, no stale-lease content writes and no claim of service-version erasure; independent sessions still progress. |
+| Completed-turn restore | **#1335 complete.** A real tool-using Blob turn was resumed by fresh Python/native processes under a different worker root; the result was recalled with zero tool calls and protocol/revision/epoch continuity was inspected. Local mirrored coverage remains in the test suite. |
+| Compacted restore | **#1335 complete.** Qualification forced native compaction once, persisted one checkpoint, then restored in fresh processes using production native defaults. A rule available only through the saved semantic summary was followed with zero new compaction events and unchanged checkpoint/summary/event identifiers. This does not claim verbatim arbitrary-token retention. |
+| Storage failures/concurrency | **#1335 real-Blob items complete.** The 15-test Entra suite covered two-client exclusion, lease loss, ETag-interrupted write/rename, cross-client completed-tree restore and zero leftovers. Expected filesystem result errors (`ENOENT`, `EEXIST`, and peers) are normal callback responses and do not latch storage failure; path/invariant exceptions and persistence, lease/ETag or corruption failures still fail closed. Broader long-running, service-retention and deployed multi-worker qualification remains outside #1335. |
 | History break | Metadata-only native and MAF guards reject opposite-only IDs in both directions, without parsing or modifying either format; failed existence probes fail closed. Verify older-binary rollback guidance requires fresh IDs; native history rendering remains a later parity slice. |
 | Hosting/telemetry | Demonstrate supported Functions deployment assets, lazy single-client startup, concurrent isolation, bounded cancellation/shutdown, and no orphan native process. Verify usage/correlation/error accounting and sensitive-data-off behavior in host and native telemetry. |
 
@@ -610,6 +639,9 @@ this document does not introduce an unimplemented schema or rewrite runtime docs
   received dedicated architecture-agent APPROVE on 2026-09-29 after two REVISE
   reviews (decision 13). This approves design, not implementation or production
   qualification; existing human-approved feature contracts remain unchanged.
-- **Pre-release qualification:** Real pinned SDK error/quiescence, Blob lease/
-  fencing/durability, Functions hosting, and compacted cold-restore evidence
-  remain required (§4.8 and §6). Acceptance is not yet demonstrated.
+- **#1335 qualification:** Complete for real Entra Blob lease/fencing and
+  cross-client durability, replacement-process tool-result continuation, and
+  compacted semantic-summary cold restore (§4.8 and §6).
+- **Remaining release gates:** Deployed-host and dual-harness end-to-end
+  qualification remain in #1357; final rollout/production activation remains
+  in #1337. This FRD does not claim either.
