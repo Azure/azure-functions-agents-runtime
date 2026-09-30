@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from azure_functions_agents import _harness
 from azure_functions_agents.config import paths
 
@@ -91,6 +93,28 @@ def test_negative_verifier_matches_unknown_native_session_contract() -> None:
             return SimpleNamespace(status_code=501)
 
     module.negative(Client())
+
+
+def test_blob_restart_requires_explicit_disposable_storage_and_host_settings(
+    monkeypatch: Any, tmp_path: Path, capsys: Any,
+) -> None:
+    module = _load_verifier()
+    monkeypatch.setattr(module, "__file__", str(tmp_path / "verify.py"))
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT", "true")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_COPILOT_SESSION_STORAGE", "blob")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
+    monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER", "disposable")
+    monkeypatch.setattr(sys, "argv", ["verify.py", "--restart-host"])
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB", raising=False)
+    with pytest.raises(SystemExit, match="2"):
+        module.main()
+    assert "AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB=1" in capsys.readouterr().err
+
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB", "1")
+    with pytest.raises(SystemExit, match="2"):
+        module.main()
+    assert "local.settings.json" in capsys.readouterr().err
 
 
 def test_sample_entrypoint_uses_functions_script_root(monkeypatch: Any, tmp_path: Path) -> None:

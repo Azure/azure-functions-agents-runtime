@@ -57,6 +57,48 @@ Expect `PASS first` and `PASS followup`. Run the negative checks directly:
 Expect `PASS negative`; the unknown session check requires HTTP 409 with
 `Native session has no completed turn to resume.`.
 
+## Optional disposable Blob / Azurite verification
+
+These commands are **opt-in** and are not part of the local-only walkthrough.
+Use a pre-existing, dedicated disposable container and an explicitly selected
+storage connection (Azurite is fine). Never point them at customer session
+storage. The integration tests use a fresh random app namespace on each run,
+create only session `state.json` objects, and delete only those exact objects;
+storage versions, soft-deleted copies and snapshots may be retained by the
+service. No native SDK process, model or Functions host is needed for these
+storage-protocol tests:
+
+```powershell
+$env:AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB = "1"
+$env:AZURE_FUNCTIONS_AGENTS_TEST_BLOB_CONNECTION_STRING = $env:AzureWebJobsStorage
+$env:AZURE_FUNCTIONS_AGENTS_TEST_BLOB_CONTAINER = "<pre-existing-disposable-container>"
+.\.venv\Scripts\python.exe -m pytest tests\test_copilot_session_fs_integration.py -q -rs
+```
+
+For a **real SDK/model completed-turn cold restore**, configure the same
+disposable container for the sample host and run the verifier with a fresh
+evidence filename. This restarts the local Functions host (and its native
+process) between turns; the first turn uses a real tool and the second recalls
+its result without restating it. It incurs model charges. Keep the Foundry
+settings from the setup above; set `AzureWebJobsStorage` in the process
+environment to your disposable storage connection and remove the **blank**
+`AzureWebJobsStorage` entry from the untracked
+`src\local.settings.json` if it shadows that environment variable. Do not
+commit credentials or populate the checked-in template.
+
+```powershell
+$env:AZURE_FUNCTIONS_AGENTS_COPILOT_SESSION_STORAGE = "blob"
+$env:AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER = $env:AZURE_FUNCTIONS_AGENTS_TEST_BLOB_CONTAINER
+.\.venv\Scripts\python.exe samples\copilot-preview\verify.py --restart-host `
+  --evidence .preview-blob-evidence.json
+```
+
+This driver does **not** delete the model conversation: use the saved
+`session_id` from the evidence file and `state_name(route, "main", session_id)`
+as in the inspection example below to identify that *one* test-owned blob,
+then remove it manually only after the host stops. Native compaction is not
+forced or qualified by this two-turn driver.
+
 To inspect the stored session (read-only) after `PASS first`, from a terminal
 with the same `AZURE_FUNCTIONS_AGENTS_SESSION_DIR`:
 

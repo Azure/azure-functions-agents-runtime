@@ -90,7 +90,33 @@ def main() -> None:
             parser.error("--restart-host runs all phases.")
         if os.environ.get("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT", "").strip().lower() not in {"true", "1"}:
             parser.error("--restart-host requires the explicit Copilot preview flag.")
-        required = ["AZURE_FUNCTIONS_AGENTS_PROVIDER", "AZURE_FUNCTIONS_AGENTS_SESSION_DIR"]
+        app = Path(__file__).resolve().parent / "src"
+        required = ["AZURE_FUNCTIONS_AGENTS_PROVIDER"]
+        storage = os.environ.get("AZURE_FUNCTIONS_AGENTS_COPILOT_SESSION_STORAGE", "local").strip().lower()
+        if storage == "blob":
+            required.append("AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER")
+            if os.environ.get("AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB") != "1":
+                parser.error("Blob restart requires AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB=1.")
+            if not (os.environ.get("AzureWebJobsStorage") or
+                    os.environ.get("AzureWebJobsStorage__blobServiceUri")):
+                parser.error("Blob restart requires AzureWebJobsStorage or AzureWebJobsStorage__blobServiceUri.")
+            settings = app / "local.settings.json"
+            if not settings.exists():
+                parser.error(
+                    "Create untracked src/local.settings.json from the sample template and remove "
+                    "its blank AzureWebJobsStorage entry before Blob restart."
+                )
+            if os.environ.get("AzureWebJobsStorage"):
+                value = json.loads(settings.read_text(encoding="utf-8"))["Values"].get("AzureWebJobsStorage")
+                if value is not None and value != os.environ["AzureWebJobsStorage"]:
+                    parser.error(
+                        "Remove the blank/mismatched AzureWebJobsStorage entry from local.settings.json "
+                        "so the worker inherits the explicit connection from the environment."
+                    )
+        elif storage == "local":
+            required.append("AZURE_FUNCTIONS_AGENTS_SESSION_DIR")
+        else:
+            parser.error("Session storage must be local or blob.")
         if os.environ.get("AZURE_FUNCTIONS_AGENTS_PROVIDER") == "foundry":
             required.extend(["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"])
         else:
@@ -102,7 +128,6 @@ def main() -> None:
         sys.path.insert(0, str(repository / "tests" / "endtoend"))
         from _func_host import running_host
 
-        app = Path(__file__).resolve().parent / "src"
         with running_host(app, timeout=120) as host:
             with httpx.Client(base_url=host.base_url, timeout=75, trust_env=False) as client:
                 first(client, args.evidence)
