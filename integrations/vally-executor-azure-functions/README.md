@@ -44,9 +44,10 @@ Specify exactly one of `endpointUrl` or `endpointUrlEnv`. Authentication can be:
 - `function-key` with `keyEnv` naming the variable containing a Functions key;
 - `entra` with either `scope` or `scopeEnv`, using `DefaultAzureCredential`.
 
-Literal keys, bearer tokens, arbitrary headers, non-HTTP(S) URLs, URL credentials/query strings,
-unknown fields, and missing referenced environment variables are rejected. Resolved credentials are
-never included in trajectories or executor errors.
+Literal keys, bearer tokens, arbitrary headers, non-HTTP(S) URLs, cleartext HTTP URLs for
+non-loopback hosts, URL credentials/query strings, unknown fields, and missing referenced
+environment variables are rejected. Redirects are not followed, and resolved credentials are never
+included in trajectories or executor errors.
 
 Run it with `vally eval --executor-plugin <path-to-dist/index.js>`. Plug-in paths are resolved
 relative to the eval specification. See the repository evaluation guide and sample for complete

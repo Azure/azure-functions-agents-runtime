@@ -84,8 +84,9 @@ python -m pytest -m e2e tests/endtoend/test_vally_sample.py -q
 
 ## Target staging
 
-Set `AGENT_EVAL_TARGET_URL` to the complete staging chat endpoint. If its route requires a Functions
-key, change the eval's auth block to:
+Set `AGENT_EVAL_TARGET_URL` to the complete HTTPS staging chat endpoint. The executor accepts
+cleartext HTTP only for local loopback targets and rejects redirects. If the staging route requires
+a Functions key, change the eval's auth block to:
 
 ```yaml
 auth:

@@ -44,8 +44,8 @@ jobs:
     steps:
       - task: NodeTool@0
         inputs:
-          versionSpec: '22.12.x'
-        displayName: 'Use Node.js 22.12'
+          versionSpec: '22.x'
+        displayName: 'Use Node.js 22'
       - bash: npm ci
         workingDirectory: integrations/vally-executor-azure-functions
         displayName: 'Install locked dependencies'

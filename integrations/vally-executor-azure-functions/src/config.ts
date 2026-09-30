@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+
 export type AzureFunctionsAgentAuth =
   | { type?: "anonymous" }
   | { type: "function-key"; keyEnv: string }
@@ -72,6 +74,16 @@ function validateEndpoint(value: string): URL {
   if (!url.hostname || url.username || url.password || url.search || url.hash) {
     throw new Error(
       "executor endpoint must not contain user information, a query, or a fragment",
+    );
+  }
+  const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const isLoopback =
+    hostname === "localhost" ||
+    (isIP(hostname) === 4 && hostname.startsWith("127.")) ||
+    (isIP(hostname) === 6 && hostname === "::1");
+  if (url.protocol === "http:" && !isLoopback) {
+    throw new Error(
+      "executor endpoint must use HTTPS unless it targets a loopback host",
     );
   }
   return url;

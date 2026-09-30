@@ -100,6 +100,18 @@ describe("AzureFunctionsAgentExecutor", () => {
     assert.throws(
       () =>
         executor.validateConfig({
+          endpointUrl: "http://example.test/agents/main/chat",
+        }),
+      /HTTPS.*loopback/,
+    );
+    assert.doesNotThrow(() =>
+      executor.validateConfig({
+        endpointUrl: "http://[::1]:7071/agents/main/chat",
+      }),
+    );
+    assert.throws(
+      () =>
+        executor.validateConfig({
           endpointUrl: "https://example.test/agents/main/chat?code=secret",
         }),
       /must not contain.*query/,
@@ -144,6 +156,7 @@ describe("AzureFunctionsAgentExecutor", () => {
       "http://127.0.0.1:7071/api/agents/main/chat",
     );
     assert.equal(requests[0]?.init.method, "POST");
+    assert.equal(requests[0]?.init.redirect, "error");
     assert.equal(
       new Headers(requests[0]?.init.headers).get("content-type"),
       "application/json",
@@ -278,7 +291,11 @@ describe("AzureFunctionsAgentExecutor", () => {
 
   it("rejects response session mismatches", async () => {
     const executor = new AzureFunctionsAgentExecutor({
-      fetch: async () => runtimeResponse("wrong-session"),
+      fetch: async () => {
+        const response = runtimeResponse("body-secret");
+        response.headers.set("x-ms-session-id", "header-secret");
+        return response;
+      },
     });
 
     await assert.rejects(
@@ -289,9 +306,16 @@ describe("AzureFunctionsAgentExecutor", () => {
           { sessionID: "expected" },
         ),
       ),
-      (error: unknown) =>
-        error instanceof AzureFunctionsAgentExecutorError &&
-        error.code === "session",
+      (error: unknown) => {
+        assert.ok(error instanceof AzureFunctionsAgentExecutorError);
+        assert.equal(error.code, "session");
+        assert.doesNotMatch(
+          error.message,
+          /body-secret|header-secret|expected/,
+        );
+        assert.match(error.message, /body mismatched, header mismatched/);
+        return true;
+      },
     );
 
     const missingHeader = new AzureFunctionsAgentExecutor({

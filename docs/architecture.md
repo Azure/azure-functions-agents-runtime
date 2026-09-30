@@ -8,7 +8,7 @@ Agent evaluation is external and cross-cutting rather than a startup pipeline st
 Vally executor invokes an agent's existing opt-in synchronous chat route under Core Tools or in
 staging and translates generic runtime response/tool evidence into a Vally trajectory. Vally owns
 stimuli, graders, repeated trials, scores, reports, and CI verdicts. The executor does not discover,
-compose, register, or execute agents by a second path (FRD 0009).
+compose, register, or execute agents by a second path (FRD 0010).
 
 One agent can also declare a `subagents:` list so its own model can call other agents as `delegate_<slug>` tools during a normal `agent.run()` — chat-time multi-agent delegation (FRD 0007). That feature layers a small amount of extra structure onto the same pipeline (an app-wide identity index and an immutable, slug-keyed catalog built before any `FunctionApp` mutation) rather than introducing a new one; see Section 5, "Multi-agent delegation (subagents)".
 

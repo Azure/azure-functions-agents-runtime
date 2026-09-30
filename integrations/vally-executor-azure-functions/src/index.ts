@@ -415,6 +415,7 @@ export class AzureFunctionsAgentExecutor implements Executor {
         },
         body: JSON.stringify({ prompt }),
         signal,
+        redirect: "error",
       });
     } catch {
       throw new AzureFunctionsAgentExecutorError(
@@ -446,9 +447,17 @@ export class AzureFunctionsAgentExecutor implements Executor {
     const runtime = parseRuntimeResponse(value);
     const headerSession = response.headers.get("x-ms-session-id");
     if (runtime.session_id !== sessionID || headerSession !== sessionID) {
+      const bodyStatus =
+        runtime.session_id === sessionID ? "matched" : "mismatched";
+      const headerStatus =
+        headerSession === null
+          ? "missing"
+          : headerSession === sessionID
+            ? "matched"
+            : "mismatched";
       throw new AzureFunctionsAgentExecutorError(
         "session",
-        `chat endpoint session mismatch (expected ${sessionID}, body ${runtime.session_id}, header ${headerSession ?? "missing"})`,
+        `chat endpoint session mismatch (body ${bodyStatus}, header ${headerStatus})`,
       );
     }
     return runtime;

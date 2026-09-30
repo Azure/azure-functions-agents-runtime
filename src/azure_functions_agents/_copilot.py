@@ -230,8 +230,10 @@ def _tool(function: FunctionTool, calls: list[dict[str, Any]]) -> Tool:
             logger.warning("Copilot custom tool failed: tool=%s", function.name)
             text = '{"error":"Custom tool failed or returned unsupported content."}'
             record["result"] = text
+            record["success"] = False
             return ToolResult(text_result_for_llm=text, result_type="failure")
         record["result"] = text
+        record["success"] = True
         return ToolResult(text_result_for_llm=text, result_type="success")
 
     return Tool(
@@ -455,6 +457,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 content=content,
                 content_intermediate=messages[:-1],
                 tool_calls=calls,
+                model=request.model,
             )
     except asyncio.CancelledError:
         raise

@@ -1217,6 +1217,8 @@ async def run_agent(
                 elif ctype == "function_result":
                     # Attach result to most recent matching tool_start
                     call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+                    if not call_id:
+                        continue
                     matched = next(
                         (tc for tc in reversed(tool_calls) if tc.get("tool_call_id") == call_id),
                         None,

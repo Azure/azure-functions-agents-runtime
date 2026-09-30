@@ -25,6 +25,10 @@ The endpoint URL must be complete because the Functions route prefix is configur
 - `http://localhost:7071/agents/receipt/chat` with an empty prefix
 - `https://<staging-app>.azurewebsites.net/agents/receipt/chat`
 
+HTTP is accepted only for loopback development targets such as `localhost`, `127.0.0.1`, and
+`[::1]`. Staging targets must use HTTPS. The executor rejects redirects so Functions keys and Entra
+tokens are never forwarded to another location.
+
 Install and build the pinned executor from the repository root:
 
 ```powershell

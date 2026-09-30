@@ -244,8 +244,9 @@ defaults:
 Configuration validation is fail-closed:
 
 - Specify exactly one of `endpointUrl` or `endpointUrlEnv`.
-- A resolved endpoint must be absolute HTTP(S), with a host and without user information, a query,
-  or a fragment. This prevents literal Functions keys from being embedded as `?code=...`.
+- A resolved endpoint must be absolute HTTPS, except that HTTP is accepted for loopback hosts during
+  local development. It must have a host and no user information, query, or fragment. This prevents
+  cleartext remote transport and literal Functions keys from being embedded as `?code=...`.
 - Authentication is exactly one of:
   - `anonymous` (the default);
   - `function-key`, with `keyEnv` naming an ambient process environment variable;
@@ -266,7 +267,8 @@ spawn or reconfigure the Function App process.
 2. Use `options.sessionID` when present; otherwise generate a runtime-valid session ID.
 3. Resolve prompts with `stimulusPrompts(stimulus)`.
 4. Send each prompt sequentially to the non-streaming built-in chat route
-  (`POST /agents/{slug}/chat`) with the same `x-ms-session-id`.
+  (`POST /agents/{slug}/chat`) with the same `x-ms-session-id`. Reject redirects rather than risk
+  forwarding authentication headers to another location.
 5. Apply one hard `options.timeout` deadline across all configured turns. Abort the active HTTP
    request when the deadline expires.
 6. Verify every response is successful JSON, matches the generic contract, and echoes the requested
@@ -391,6 +393,7 @@ document the Vally pivot.
 | 22 | Model-response batch identity | Call ID / assistant-message index / configured turn | Deterministic assistant-message index (`response-<n>`) | Agent review | 2026-09-18 |
 | 23 | Session contract checking | Trust body / compare body only / compare body and response header | Executor compares requested ID with body and response header | Agent review | 2026-09-18 |
 | 24 | Vally-first FRD approval | Request changes / approve finalized design | Approve and continue to implementation | Human | 2026-09-18 |
+| 25 | Endpoint transport security | Any HTTP(S) / HTTPS only / HTTPS with loopback HTTP | Require HTTPS except for loopback HTTP and reject redirects | Agent review | 2026-09-30 |
 
 ## 7. Test plan
 

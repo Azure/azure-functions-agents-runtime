@@ -665,10 +665,15 @@ def test_run_agent_does_not_guess_batch_or_result_evidence(monkeypatch: Any) -> 
             ],
         ),
         SimpleNamespace(
+            role="assistant",
+            contents=[SimpleNamespace(type="function_call", name="anonymous", arguments={})],
+        ),
+        SimpleNamespace(
             role="tool",
             contents=[
                 SimpleNamespace(type="function_result", call_id="call-1"),
                 SimpleNamespace(type="function_result", call_id="missing", result="ignored"),
+                SimpleNamespace(type="function_result", result="must-not-attach"),
             ],
         ),
     ]
@@ -699,6 +704,13 @@ def test_run_agent_does_not_guess_batch_or_result_evidence(monkeypatch: Any) -> 
             "tool_call_id": "call-2",
             "tool_name": "unbatched",
             "arguments": {},
+        },
+        {
+            "type": "tool_start",
+            "tool_call_id": None,
+            "tool_name": "anonymous",
+            "arguments": {},
+            "turn_id": "response-1",
         },
     ]
 
