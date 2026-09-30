@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from azure.core.exceptions import ResourceNotFoundError
 
 from azure_functions_agents import _harness
 from azure_functions_agents._native_session_identity import (
@@ -123,3 +126,43 @@ async def test_indeterminate_metadata_probe_fails_closed(configured, monkeypatch
     monkeypatch.setattr(identity, "_blob_metadata_exists", broken)
     with pytest.raises(PersistenceUnavailableError):
         await guard_opposite_history(route, "agent", "session", native=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [(None, True), (ResourceNotFoundError("missing"), False), (RuntimeError("failed"), None)],
+)
+async def test_blob_metadata_probe_closes_owned_service_and_credential(
+    configured, monkeypatch, result, expected
+):
+    from azure.storage.blob import aio
+
+    from azure_functions_agents import _credential
+    from azure_functions_agents import _native_session_identity as identity
+
+    closed = []
+    properties = AsyncMock(side_effect=result if isinstance(result, BaseException) else None)
+    credential = SimpleNamespace(close=AsyncMock(side_effect=lambda: closed.append("credential")))
+    service = SimpleNamespace(
+        close=AsyncMock(side_effect=lambda: closed.append("service")),
+        get_blob_client=lambda **_kwargs: SimpleNamespace(get_blob_properties=properties),
+    )
+    monkeypatch.setattr(
+        _credential, "build_async_credential_with_client_id", lambda _client_id: credential
+    )
+    monkeypatch.setattr(aio, "BlobServiceClient", lambda **_kwargs: service)
+    route = replace(
+        resolve_route(configured),
+        mode=StorageMode.BLOB,
+        connection_string=None,
+        blob_uri="https://example.blob.core.windows.net",
+    )
+
+    if expected is None:
+        with pytest.raises(PersistenceUnavailableError):
+            await identity._blob_metadata_exists(route, "state")
+    else:
+        assert await identity._blob_metadata_exists(route, "state") is expected
+
+    assert closed == ["service", "credential"]

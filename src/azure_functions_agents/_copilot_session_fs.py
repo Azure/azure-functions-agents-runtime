@@ -37,6 +37,8 @@ from ._native_session_identity import (
     SessionConflictError,
     StorageMode,
     StorageRoute,
+    _open_owned_blob_service,
+    _OwnedBlobService,
     state_name,
     validate_identity,
 )
@@ -337,8 +339,11 @@ class _LocalStore:
 
 
 class _BlobStore:
-    def __init__(self, blob: BlobClient) -> None:
+    def __init__(
+        self, blob: BlobClient, owned_service: _OwnedBlobService | None = None
+    ) -> None:
         self.blob = blob
+        self._owned_service = owned_service
         self.lease: BlobLeaseClient | None = None
         self._renewal: asyncio.Task[None] | None = None
         self.failure: LeaseLostError | None = None
@@ -399,36 +404,46 @@ class _BlobStore:
             raise LeaseLostError("Native session lease was lost.")
 
     async def release(self) -> None:
-        if self._renewal is not None:
-            self._renewal.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._renewal
-        if self.lease is not None and self.failure is None:
-            with contextlib.suppress(Exception):
-                await self.lease.release()
-        self.lease = None
+        try:
+            if self._renewal is not None:
+                self._renewal.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._renewal
+                self._renewal = None
+            if self.lease is not None and self.failure is None:
+                with contextlib.suppress(Exception):
+                    await self.lease.release()
+            self.lease = None
+        finally:
+            owned_service, self._owned_service = self._owned_service, None
+            if owned_service is not None:
+                await owned_service.close()
 
 
 type _Store = _LocalStore | _BlobStore
 
 
-async def _blob_client(route: StorageRoute, name: str) -> BlobClient:
-    from azure.storage.blob.aio import BlobServiceClient
-
-    if route.connection_string:
-        service = BlobServiceClient.from_connection_string(route.connection_string)
-    else:
-        from ._credential import build_async_credential_with_client_id
-
-        assert route.blob_uri is not None
-        service = BlobServiceClient(
-            account_url=route.blob_uri,
-            credential=build_async_credential_with_client_id(route.client_id or ""),
+async def _blob_client(
+    route: StorageRoute, name: str
+) -> tuple[BlobClient, _OwnedBlobService]:
+    owned = await _open_owned_blob_service(route)
+    try:
+        container = owned.service.get_container_client(route.container)
+        with contextlib.suppress(ResourceExistsError):
+            await container.create_container()
+        return (
+            owned.service.get_blob_client(container=route.container, blob=name),
+            owned,
         )
-    container = service.get_container_client(route.container)
-    with contextlib.suppress(ResourceExistsError):
-        await container.create_container()
-    return service.get_blob_client(container=route.container, blob=name)
+    except BaseException as error:
+        try:
+            await owned.close()
+        except BaseException as close_error:
+            raise BaseExceptionGroup(
+                "Blob client setup and resource cleanup failed.",
+                [error, close_error],
+            ) from None
+        raise
 
 
 class NativeSession:
@@ -454,15 +469,16 @@ class NativeSession:
                 store: _Store = _LocalStore(route.local_dir / name)
                 await store.acquire(deadline)
             else:
-                blob = await _blob_client(route, name)
-                with contextlib.suppress(ResourceExistsError):
-                    await blob.upload_blob(
-                        serialize(_new_envelope(route, slug, session_id, native_id)),
-                        overwrite=False,
-                    )
-                store = _BlobStore(blob)
-                await store.acquire(deadline)
+                blob, owned_service = await _blob_client(route, name)
+                store = _BlobStore(blob, owned_service)
             try:
+                if isinstance(store, _BlobStore):
+                    with contextlib.suppress(ResourceExistsError):
+                        await store.blob.upload_blob(
+                            serialize(_new_envelope(route, slug, session_id, native_id)),
+                            overwrite=False,
+                        )
+                    await store.acquire(deadline)
                 data, etag = await store.load()
                 envelope = (
                     deserialize(data, route, slug, session_id, native_id)
@@ -534,7 +550,7 @@ class NativeSession:
 
     async def recover_preparing(self) -> None:
         """Discard an unhanded-off tree under the newly acquired owner fence."""
-        if (self.envelope.state is not SessionState.PREPARING
+        if (self.envelope.state not in {SessionState.PREPARING, SessionState.ACTIVE}
                 or self.envelope.handoff_may_have_started):
             raise IncompatibleSessionError("Native session is not safely resumable; use a new ID.")
         await self.rollback()

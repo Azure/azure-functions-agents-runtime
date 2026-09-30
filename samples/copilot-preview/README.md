@@ -48,21 +48,14 @@ In a **second terminal at the repository root**:
 .\.venv\Scripts\python.exe samples\copilot-preview\verify.py --phase followup --evidence .preview-evidence.json
 ```
 
-Expect `PASS first` and `PASS followup`. `verify.py --phase negative` still
-asserts the earlier foundation wording for an unknown session ID; native session
-storage now answers that case with HTTP 409 `Native session has no completed turn to
-resume.`, so check it directly instead:
+Expect `PASS first` and `PASS followup`. Run the negative checks directly:
 
 ```powershell
-try {
-  Invoke-RestMethod http://127.0.0.1:7071/agents/main/chat -Method Post `
-    -ContentType application/json -Headers @{"x-ms-session-id"="unknown-$([Guid]::NewGuid().ToString('N'))"} `
-    -Body '{"prompt":"This must fail before any model call."}'
-} catch { $_.Exception.Response.StatusCode; $_.ErrorDetails.Message }
-(Invoke-WebRequest http://127.0.0.1:7071/agents/main/chatstream -Method Post -SkipHttpErrorCheck `
-  -ContentType application/json -Body '{"prompt":"Do not call a model."}').StatusCode  # 501
-(Invoke-WebRequest http://127.0.0.1:7071/agents/main/history -SkipHttpErrorCheck).StatusCode  # 501
+.\.venv\Scripts\python.exe samples\copilot-preview\verify.py --phase negative
 ```
+
+Expect `PASS negative`; the unknown session check requires HTTP 409 with
+`Native session has no completed turn to resume.`.
 
 To inspect the stored session (read-only) after `PASS first`, from a terminal
 with the same `AZURE_FUNCTIONS_AGENTS_SESSION_DIR`:

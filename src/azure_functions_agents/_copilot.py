@@ -419,7 +419,10 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
             )
             try:
                 client = await owner.client()
-                if storage.envelope.state is SessionState.PREPARING:
+                if storage.envelope.state in {
+                    SessionState.PREPARING,
+                    SessionState.ACTIVE,
+                }:
                     if storage.envelope.handoff_may_have_started:
                         raise IncompatibleSessionError(
                             "Native session handoff is uncertain; use a new ID."

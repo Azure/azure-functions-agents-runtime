@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from azure.core.exceptions import ResourceExistsError, ResourceModifiedError
@@ -335,11 +336,129 @@ class AsyncRead:
 
 
 @pytest.mark.asyncio
+async def test_blob_open_closes_owned_service_and_credential(harness, monkeypatch):
+    from azure.storage.blob import aio
+
+    from azure_functions_agents import _credential
+
+    blob = FakeBlob()
+    credential = SimpleNamespace(close=AsyncMock())
+    service = SimpleNamespace(
+        close=AsyncMock(),
+        get_container_client=lambda _name: SimpleNamespace(
+            create_container=AsyncRead(None)
+        ),
+        get_blob_client=lambda **_kwargs: blob,
+    )
+    monkeypatch.setattr(
+        _credential, "build_async_credential_with_client_id", lambda _client_id: credential
+    )
+    monkeypatch.setattr(aio, "BlobServiceClient", lambda **_kwargs: service)
+    selected = replace(
+        harness,
+        session_storage=replace(
+            harness.session_storage,
+            mode=StorageMode.BLOB,
+            connection_string=None,
+            blob_uri="https://example.blob.core.windows.net",
+        ),
+    )
+
+    owner = await open_session(selected)
+    await owner.close()
+
+    service.close.assert_awaited_once()
+    credential.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_blob_open_failure_closes_owned_service_and_credential(harness, monkeypatch):
+    from azure.storage.blob import aio
+
+    from azure_functions_agents import _credential
+
+    closed = []
+    credential = SimpleNamespace(close=AsyncMock(side_effect=lambda: closed.append("credential")))
+    service = SimpleNamespace(
+        close=AsyncMock(side_effect=lambda: closed.append("service")),
+        get_container_client=lambda _name: SimpleNamespace(
+            create_container=AsyncMock(side_effect=RuntimeError("container unavailable"))
+        ),
+    )
+    monkeypatch.setattr(
+        _credential, "build_async_credential_with_client_id", lambda _client_id: credential
+    )
+    monkeypatch.setattr(aio, "BlobServiceClient", lambda **_kwargs: service)
+    selected = replace(
+        harness,
+        session_storage=replace(
+            harness.session_storage,
+            mode=StorageMode.BLOB,
+            connection_string=None,
+            blob_uri="https://example.blob.core.windows.net",
+        ),
+    )
+
+    with pytest.raises(PersistenceUnavailableError):
+        await open_session(selected)
+
+    assert closed == ["service", "credential"]
+
+
+@pytest.mark.asyncio
+async def test_blob_release_does_not_close_external_blob():
+    blob = FakeBlob()
+    blob.close = AsyncMock()
+
+    await fs._BlobStore(blob).release()
+
+    blob.close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_blob_release_reports_close_error_and_still_closes_credential(
+    harness, monkeypatch
+):
+    from azure.storage.blob import aio
+
+    from azure_functions_agents import _credential
+
+    blob = FakeBlob()
+    credential = SimpleNamespace(close=AsyncMock())
+    service = SimpleNamespace(
+        close=AsyncMock(side_effect=RuntimeError("service close failed")),
+        get_container_client=lambda _name: SimpleNamespace(
+            create_container=AsyncRead(None)
+        ),
+        get_blob_client=lambda **_kwargs: blob,
+    )
+    monkeypatch.setattr(
+        _credential, "build_async_credential_with_client_id", lambda _client_id: credential
+    )
+    monkeypatch.setattr(aio, "BlobServiceClient", lambda **_kwargs: service)
+    selected = replace(
+        harness,
+        session_storage=replace(
+            harness.session_storage,
+            mode=StorageMode.BLOB,
+            connection_string=None,
+            blob_uri="https://example.blob.core.windows.net",
+        ),
+    )
+    owner = await open_session(selected)
+
+    with pytest.raises(RuntimeError, match="service close failed"):
+        await owner.close()
+
+    credential.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_blob_lease_etag_single_put_stale_owner_and_renew(harness, monkeypatch):
     blob = FakeBlob()
 
     async def get_blob(_route, _name):
-        return blob
+        return blob, None
 
     monkeypatch.setattr(fs, "_blob_client", get_blob)
     monkeypatch.setattr(fs, "LEASE_SECONDS", .06)
@@ -371,7 +490,7 @@ async def test_blob_renewal_loss_latches_without_stale_release(harness, monkeypa
     blob = FakeBlob()
 
     async def get_blob(_route, _name):
-        return blob
+        return blob, None
 
     monkeypatch.setattr(fs, "_blob_client", get_blob)
     monkeypatch.setattr(fs, "LEASE_SECONDS", .03)
@@ -394,7 +513,7 @@ async def test_blob_renewal_loss_during_put_never_acknowledges_mutation(harness,
     blob = FakeBlob()
 
     async def get_blob(_route, _name):
-        return blob
+        return blob, None
 
     monkeypatch.setattr(fs, "_blob_client", get_blob)
     selected = replace(harness, session_storage=replace(

@@ -63,10 +63,10 @@ def negative(client: httpx.Client) -> None:
         headers={"x-ms-session-id": "unknown-" + uuid.uuid4().hex},
         json={"prompt": "This must fail before any model call."},
     )
-    assert response.status_code >= 400, "Unknown preview session silently started a conversation"
+    assert response.status_code == 409, "Unknown preview session did not return HTTP 409"
     error = response.json()["error"].lower()
-    assert "could not resume this session" in error and "no replacement session" in error, (
-        "Missing strict-resume diagnostic"
+    assert "native session has no completed turn to resume" in error, (
+        "Missing unknown native session diagnostic"
     )
     stream = client.post("/agents/main/chatstream", json={"prompt": "Do not call a model."})
     assert stream.status_code == 501, "Unsupported streaming did not fail explicitly"

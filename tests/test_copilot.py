@@ -128,6 +128,87 @@ async def test_preparing_before_dispatch_recovers_same_id(preview, monkeypatch, 
 
 
 @pytest.mark.asyncio
+async def test_active_before_handoff_recovers_after_persisted_transition_fault(
+    preview, monkeypatch
+):
+    import copilot
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    original_transition = NativeSession.transition
+    original_rollback = NativeSession.rollback
+    faulted = False
+
+    async def fault_after_active(self, **fields):
+        nonlocal faulted
+        await original_transition(self, **fields)
+        if fields.get("state") is SessionState.ACTIVE and not faulted:
+            faulted = True
+            raise SimulatedCrash
+
+    async def interrupted_rollback(self):
+        return None
+
+    monkeypatch.setattr(NativeSession, "transition", fault_after_active)
+    monkeypatch.setattr(NativeSession, "rollback", interrupted_rollback)
+    try:
+        with pytest.raises(SimulatedCrash):
+            await _copilot.run(preview, _request())
+        client.create_session.return_value.send_and_wait.assert_not_awaited()
+        client.create_session.return_value.__aexit__.assert_awaited_once()
+        owner = await NativeSession.open(
+            preview, "main", "example", _copilot._native_id("main", "example"),
+            asyncio.get_running_loop().time() + 5,
+        )
+        try:
+            assert owner.envelope.state is SessionState.ACTIVE
+            assert owner.envelope.handoff_may_have_started is False
+        finally:
+            await owner.close()
+
+        monkeypatch.setattr(NativeSession, "transition", original_transition)
+        monkeypatch.setattr(NativeSession, "rollback", original_rollback)
+        result = await _copilot.run(preview, _request())
+        assert result.content == "synthetic reply"
+        assert client.create_session.await_count == 2
+        assert client.create_session.return_value.send_and_wait.await_count == 1
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_active_after_handoff_remains_fail_closed(preview, monkeypatch):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    owner = await NativeSession.open(
+        preview, "main", "example", _copilot._native_id("main", "example"),
+        asyncio.get_running_loop().time() + 5,
+    )
+    try:
+        await owner.prepare(new_session=True)
+        await owner.transition(
+            state=SessionState.ACTIVE, handoff_may_have_started=True
+        )
+    finally:
+        await owner.close()
+    client = _fake_client()
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(IncompatibleSessionError, match="handoff is uncertain"):
+            await _copilot.run(preview, _request())
+        client.get_session_metadata.assert_not_awaited()
+        client.create_session.assert_not_awaited()
+        client.resume_session.assert_not_awaited()
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_preparing_with_existing_uncompleted_sdk_id_fails_closed(preview, monkeypatch):
     import copilot
 

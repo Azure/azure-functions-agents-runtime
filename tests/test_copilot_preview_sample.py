@@ -13,14 +13,19 @@ from azure_functions_agents import _harness
 from azure_functions_agents.config import paths
 
 
-def test_restart_verifier_uses_sdk_default_native_resolution(
-    monkeypatch: Any, tmp_path: Path,
-) -> None:
+def _load_verifier():
     source = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "verify.py"
     spec = importlib.util.spec_from_file_location("copilot_preview_verify", source)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def test_restart_verifier_uses_sdk_default_native_resolution(
+    monkeypatch: Any, tmp_path: Path,
+) -> None:
+    module = _load_verifier()
 
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT", "true")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
@@ -66,6 +71,26 @@ def test_restart_verifier_uses_sdk_default_native_resolution(
 
     assert len(starts) == 2
     assert phases == ["first", "followup", "negative"]
+
+
+def test_negative_verifier_matches_unknown_native_session_contract() -> None:
+    module = _load_verifier()
+
+    class Client:
+        def post(self, path: str, **_kwargs: Any) -> Any:
+            if path == "/agents/main/chat":
+                return SimpleNamespace(
+                    status_code=409,
+                    json=lambda: {
+                        "error": "Native session has no completed turn to resume."
+                    },
+                )
+            return SimpleNamespace(status_code=501)
+
+        def get(self, _path: str) -> Any:
+            return SimpleNamespace(status_code=501)
+
+    module.negative(Client())
 
 
 def test_sample_entrypoint_uses_functions_script_root(monkeypatch: Any, tmp_path: Path) -> None:

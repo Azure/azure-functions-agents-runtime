@@ -8,7 +8,7 @@ import os
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from azure.core.exceptions import ResourceNotFoundError
 
@@ -16,11 +16,64 @@ from ._history_identity import validate_agent_slug
 from ._session_id import SESSION_ID_PATTERN
 from .config.paths import resolve_config_dir
 
+if TYPE_CHECKING:
+    from azure.storage.blob.aio import BlobServiceClient
+
 STORAGE_ENV = "AZURE_FUNCTIONS_AGENTS_COPILOT_SESSION_STORAGE"
 CONNECTION_ENV = "AzureWebJobsStorage"
 BLOB_URI_ENV = "AzureWebJobsStorage__blobServiceUri"
 CLIENT_ID_ENV = "AzureWebJobsStorage__clientId"
 NAMESPACE = "copilot-native/v1"
+
+
+class _AsyncCloseable(Protocol):
+    async def close(self) -> None: ...
+
+
+@dataclass
+class _OwnedBlobService:
+    service: BlobServiceClient
+    credential: _AsyncCloseable | None = None
+
+    async def close(self) -> None:
+        errors: list[BaseException] = []
+        for resource in (self.service, self.credential):
+            if resource is None:
+                continue
+            try:
+                await resource.close()
+            except BaseException as exc:
+                errors.append(exc)
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise BaseExceptionGroup("Blob resources could not be closed.", errors)
+
+
+async def _open_owned_blob_service(route: StorageRoute) -> _OwnedBlobService:
+    from azure.storage.blob.aio import BlobServiceClient
+
+    credential: _AsyncCloseable | None = None
+    try:
+        if route.connection_string:
+            service = BlobServiceClient.from_connection_string(route.connection_string)
+        else:
+            from ._credential import build_async_credential_with_client_id
+
+            assert route.blob_uri is not None
+            credential = build_async_credential_with_client_id(route.client_id or "")
+            service = BlobServiceClient(account_url=route.blob_uri, credential=credential)
+        return _OwnedBlobService(service, credential)
+    except BaseException as error:
+        if credential is not None:
+            try:
+                await credential.close()
+            except BaseException as close_error:
+                raise BaseExceptionGroup(
+                    "Blob client creation and credential cleanup failed.",
+                    [error, close_error],
+                ) from None
+        raise
 
 
 class NativeSessionError(RuntimeError):
@@ -130,21 +183,15 @@ def state_name(route: StorageRoute, agent_slug: str, session_id: str) -> str:
 
 
 async def _blob_metadata_exists(route: StorageRoute, name: str) -> bool:
-    from azure.storage.blob.aio import BlobServiceClient
-
     try:
-        if route.connection_string:
-            service = BlobServiceClient.from_connection_string(route.connection_string)
-        else:
-            from ._credential import build_async_credential_with_client_id
-
-            assert route.blob_uri is not None
-            service = BlobServiceClient(
-                account_url=route.blob_uri,
-                credential=build_async_credential_with_client_id(route.client_id or ""),
-            )
-        await service.get_blob_client(container=route.container, blob=name).get_blob_properties()
-        return True
+        owned = await _open_owned_blob_service(route)
+        try:
+            await owned.service.get_blob_client(
+                container=route.container, blob=name
+            ).get_blob_properties()
+            return True
+        finally:
+            await owned.close()
     except ResourceNotFoundError:
         return False
     except Exception:
