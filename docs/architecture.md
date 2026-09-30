@@ -321,6 +321,17 @@ connection string or `blobServiceUri` - a missing setting or Blob failure is an
 error, never a local-disk fallback. Mode, credentials, container and app
 namespace are frozen per app context and included in native client identity.
 
+The pinned native runtime validates a session's initial working directory
+against the real host filesystem, so the host passes an existing per-worker
+directory under the native root and declares the matching host path convention
+(`windows` on Windows, `posix` elsewhere). That host path is only the SDK's
+working directory: it is never a SessionFs key. When the runtime echoes
+host-convention separators back through SessionFs callbacks, the provider
+translates only the declared platform separator at the boundary and then applies
+the unchanged canonicalization, so persisted keys stay canonical POSIX paths,
+drive-qualified and UNC paths are rejected, and traversal and invalid components
+still fail closed on every platform.
+
 The envelope carries `schema_version=1`, the pinned SDK/native/protocol triple,
 the validated logical identity, a monotonic owner epoch and revision, a handoff
 marker, an integrity digest, and the `completed` (plus in-turn `working`)

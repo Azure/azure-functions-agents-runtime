@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import time
@@ -77,6 +78,20 @@ def normalize_path(path: str) -> str:
             raise ValueError("Native filesystem path escapes its virtual root.")
         parts.append(part)
     return "/" + "/".join(parts)
+
+
+type PathConventions = Literal["posix", "windows"]
+
+HOST_PATH_CONVENTIONS: PathConventions = "windows" if os.name == "nt" else "posix"
+
+
+def normalize_callback_path(path: str, conventions: PathConventions) -> str:
+    """Canonicalize one SDK path, translating only the separator the host declared."""
+    if conventions == "windows" and isinstance(path, str):
+        if path.startswith("\\\\") or re.match(r"[A-Za-z]:", path):
+            raise ValueError("Invalid native filesystem path.")
+        path = path.replace("\\", "/")
+    return normalize_path(path)
 
 
 class _Document(BaseModel):
@@ -601,8 +616,11 @@ class _PathResultError(OSError):
 class NativeSessionFs(SessionFsProvider):
     """SDK filesystem callbacks, scoped to the owned working tree."""
 
-    def __init__(self, owner: NativeSession) -> None:
+    def __init__(
+        self, owner: NativeSession, conventions: PathConventions = "posix"
+    ) -> None:
         self.owner = owner
+        self.conventions = conventions
 
     def _fail(self, error: BaseException) -> None:
         if not isinstance(error, _PathResultError):
@@ -610,7 +628,7 @@ class NativeSessionFs(SessionFsProvider):
 
     def _path(self, path: str) -> str:
         try:
-            return normalize_path(path)
+            return normalize_callback_path(path, self.conventions)
         except BaseException as exc:
             self._fail(exc)
             raise

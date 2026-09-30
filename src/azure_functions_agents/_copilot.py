@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from ._copilot_session_fs import (
+    HOST_PATH_CONVENTIONS,
     NativeSession,
     NativeSessionFs,
     SessionState,
@@ -82,6 +83,7 @@ class _NativeRuntime:
 
     def __init__(self, root: Path, namespace: str) -> None:
         self.native_root = root / "native" / namespace
+        self.workspace = self.native_root / "workspace"
         self._client: CopilotClient | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._start_lock = asyncio.Lock()
@@ -97,7 +99,7 @@ class _NativeRuntime:
         async with self._start_lock:
             if self._client is not None:
                 return self._client
-            self.native_root.mkdir(parents=True, exist_ok=True)
+            self.workspace.mkdir(parents=True, exist_ok=True)
             from copilot import CopilotClient, RuntimeConnection
 
             client = CopilotClient(
@@ -109,9 +111,9 @@ class _NativeRuntime:
                 log_level="none",
                 telemetry=None,
                 session_fs={
-                    "initial_working_directory": "/workspace",
+                    "initial_working_directory": str(self.workspace),
                     "session_state_path": "/session-state",
-                    "conventions": "posix",
+                    "conventions": HOST_PATH_CONVENTIONS,
                 },
             )
             try:
@@ -469,7 +471,9 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     infinite_sessions=InfiniteSessionConfig(enabled=True),
                     tool_search=ToolSearchConfig(enabled=False),
                     on_event=on_event,
-                    create_session_fs_handler=lambda _session: NativeSessionFs(storage),
+                    create_session_fs_handler=lambda _session: NativeSessionFs(
+                        storage, HOST_PATH_CONVENTIONS
+                    ),
                 )
                 rpc_attempted = True
                 if storage.envelope.completed is None:

@@ -694,3 +694,89 @@ async def test_blob_renewal_loss_during_put_never_acknowledges_mutation(harness,
         assert owner.envelope.revision == original
     finally:
         await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_windows_conventions_callbacks_persist_canonical_posix_paths(harness):
+    """The pinned runtime emits host-convention separators; persisted keys stay POSIX."""
+    owner = await open_session(harness)
+    provider = fs.NativeSessionFs(owner, "windows")
+    try:
+        await provider.mkdir("\\session-state", False)
+        await provider.write_file("\\session-state\\workspace.yaml", "cwd: host")
+        await provider.mkdir("/session-state", False)
+        assert await provider.exists("/session-state/workspace.yaml")
+        assert await provider.read_file("\\session-state\\workspace.yaml") == "cwd: host"
+        await provider.write_file("\\session-state\\workspace.yaml.tmp", "cwd: host")
+        await provider.rename(
+            "\\session-state\\workspace.yaml.tmp", "\\session-state\\workspace.yaml"
+        )
+        assert sorted(owner.envelope.working.files) == ["/session-state/workspace.yaml"]
+        assert sorted(owner.envelope.working.directories) == ["/", "/session-state"]
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_windows_conventions_reject_traversal_drive_and_unc_paths(harness):
+    paths = (
+        "\\session-state\\..\\..\\outside",
+        "C:\\session-state",
+        "\\\\server\\share",
+        "\\session-state\\a\x00b",
+    )
+    for index, path in enumerate(paths):
+        owner = await open_session(harness, session_id=f"invalid-{index}")
+        provider = fs.NativeSessionFs(owner, "windows")
+        try:
+            handler = create_session_fs_adapter(provider)
+            assert not (await handler.exists(SimpleNamespace(path=path))).exists
+            with pytest.raises(PersistenceUnavailableError):
+                await owner.check()
+        finally:
+            await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_posix_conventions_stay_strict_regardless_of_host(harness):
+    """Default conventions keep cross-platform determinism: backslashes are never paths."""
+    owner = await open_session(harness)
+    provider = fs.NativeSessionFs(owner)
+    assert provider.conventions == "posix"
+    try:
+        handler = create_session_fs_adapter(provider)
+        assert not (await handler.exists(SimpleNamespace(path="\\session-state"))).exists
+        with pytest.raises(PersistenceUnavailableError):
+            await owner.check()
+    finally:
+        await owner.close()
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("\\session-state\\files", "/session-state/files"),
+        ("/session-state", "/session-state"),
+        ("\\session-state\\.\\plan.md", "/session-state/plan.md"),
+    ],
+)
+def test_normalize_callback_path_translates_only_windows_separators(path, expected):
+    assert fs.normalize_callback_path(path, "windows") == expected
+    if "\\" in path:
+        with pytest.raises(ValueError):
+            fs.normalize_callback_path(path, "posix")
+
+
+@pytest.mark.parametrize(
+    "path", ["C:\\x", "c:/x", "\\\\server\\share", "\\a\\..\\..\\b", "\\a\x00"]
+)
+def test_normalize_callback_path_rejects_host_qualified_and_escaping_paths(path):
+    with pytest.raises(ValueError):
+        fs.normalize_callback_path(path, "windows")
+
+
+def test_host_path_conventions_matches_the_running_host():
+    import os
+
+    expected = "windows" if os.name == "nt" else "posix"
+    assert expected == fs.HOST_PATH_CONVENTIONS

@@ -656,3 +656,27 @@ def test_sdk_events_require_a_completed_uninterrupted_turn():
     assert not _copilot._completed_turn([user, finished, user])
     assert not _copilot._completed_turn([user, aborted, finished])
     assert not _copilot._completed_turn([user, finished, error])
+
+
+@pytest.mark.asyncio
+async def test_native_client_uses_an_existing_host_working_directory(preview, monkeypatch):
+    """The pinned runtime validates the session cwd against the real host filesystem."""
+    import copilot
+
+    from azure_functions_agents._copilot_session_fs import HOST_PATH_CONVENTIONS
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    factory = Mock(return_value=client)
+    monkeypatch.setattr(copilot, "CopilotClient", factory)
+    try:
+        await _copilot.run(preview, _request(new_session=True))
+    finally:
+        await _copilot.shutdown()
+
+    session_fs = factory.call_args.kwargs["session_fs"]
+    working_directory = Path(session_fs["initial_working_directory"])
+    assert working_directory.is_absolute()
+    assert working_directory.is_dir()
+    assert session_fs["conventions"] == HOST_PATH_CONVENTIONS
+    assert session_fs["session_state_path"] == "/session-state"
