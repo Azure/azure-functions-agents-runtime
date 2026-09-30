@@ -118,6 +118,18 @@ spans and the sandbox/`web_request` tool spans together.
 
 Plus `af.lifecycle_stage=agent_run`, and `af.fault_domain` if the run fails.
 
+#### Stable agent ID
+
+MAF `gen_ai.*` spans set `gen_ai.agent.id` to a deterministic UUIDv5 derived from the
+Function App resource identity plus the agent slug. The resource identity resolves in this
+order: non-blank `AZURE_FUNCTIONS_AGENTS_RESOURCE_ID`; full Azure Functions website
+environment (`WEBSITE_OWNER_NAME`, `WEBSITE_RESOURCE_GROUP`, `WEBSITE_SITE_NAME`);
+site-name-only fallback (`/providers/Microsoft.Web/sites/{site}`); then `local`.
+
+The same value is emitted in the `agent_runtime_indexed` startup summary as `agent_id` so
+operators can copy it when registering agents with external services such as A2A,
+Agent 365, or Foundry.
+
 #### Span events (runtime lifecycle milestones)
 
 These `agent.run {name}` span events mark runtime-owned input/output-contract boundaries. They carry

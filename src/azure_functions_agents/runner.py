@@ -66,6 +66,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
+from ._agent_identity import agent_id
 from ._blob_history import build_blob_provider_from_environment
 from ._file_history import ScopedFileHistoryProvider
 from ._function_tool import FunctionTool, tool
@@ -506,6 +507,7 @@ def _build_role_agent(
         warnings.simplefilter("ignore", category=ExperimentalWarning)
         return create_harness_agent(
             chat_client,
+            id=agent_id(agent_name or "main"),
             name=agent_name,
             harness_instructions="",
             agent_instructions=agent_instructions,

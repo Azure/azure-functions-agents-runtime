@@ -19,6 +19,7 @@ from agent_framework import (
 )
 
 from azure_functions_agents import runner
+from azure_functions_agents._agent_identity import RESOURCE_ID_ENV, agent_id
 from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
@@ -139,6 +140,39 @@ def test_build_agent_session_forces_provider_managed_history(
 
     assert captured[0]["default_options"] == {"store": False}
     assert history_calls == ["main"]
+
+
+def test_build_role_agent_uses_stable_agent_id(monkeypatch: Any) -> None:
+    """Fresh harness agents for the same slug keep the same MAF agent id."""
+    captured: list[dict[str, Any]] = []
+
+    def fake_create_harness_agent(_client: Any, **kwargs: Any) -> _FakeAgent:
+        captured.append(kwargs)
+        return _FakeAgent()
+
+    import agent_framework
+
+    monkeypatch.setenv(RESOURCE_ID_ENV, "/subscriptions/sub/resourceGroups/rg/sites/app")
+    monkeypatch.setattr(
+        agent_framework,
+        "create_harness_agent",
+        fake_create_harness_agent,
+        raising=False,
+    )
+
+    for _ in range(2):
+        runner._build_role_agent(
+            object(),
+            agent_instructions=None,
+            tools=[],
+            skill_paths=None,
+            agent_name="billing",
+            history_provider=None,
+            agent_configuration=AgentConfiguration(),
+        )
+
+    assert [options["id"] for options in captured] == [agent_id("billing")] * 2
+    assert captured[0]["name"] == "billing"
 
 
 def test_build_agent_session_forwards_system_instructions(monkeypatch: Any) -> None:
