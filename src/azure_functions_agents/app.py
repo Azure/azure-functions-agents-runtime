@@ -9,6 +9,7 @@ from typing import Any, cast
 import azure.durable_functions as df
 import azure.functions as func
 
+from ._harness import get_harness, validate_agent
 from ._logger import logger
 from ._observability import configure_observability
 from ._source_marker import source_marker
@@ -109,6 +110,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     if app_root is not None:
         set_app_root(app_root)
     resolved_root = get_app_root()
+    harness = get_harness(resolved_root, new_app=True)
 
     global_config = load_global_config(resolved_root)
 
@@ -203,6 +205,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             discovered_skills=skills,
         )
         validate_subagent_tool_names(resolved, capabilities)
+        validate_agent(harness, resolved, capabilities)
+        capabilities._harness = harness
         catalog_entries[resolved.slug] = CatalogEntry(resolved, capabilities)
 
     catalog: AgentCatalog = build_catalog(catalog_entries)

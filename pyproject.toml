@@ -27,6 +27,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Experimental local Copilot harness. MAF remains the default and does not import this SDK.
+copilot = [
+    "github-copilot-sdk==1.0.14",
+]
 # Azure Monitor exporter — optional. Install `azurefunctions-agents-runtime[monitor]` to export the
 # runtime's OpenTelemetry spans/metrics to Application Insights. Without it the runtime emits spans
 # only when another OpenTelemetry provider is already active (e.g. the Functions worker) and exports
@@ -38,6 +42,8 @@ monitor = [
     "azure-monitor-opentelemetry==1.8.8",
 ]
 dev = [
+    # Reuse the optional SDK version; dev tests never start the native runtime by default.
+    "azurefunctions-agents-runtime[copilot]",
     "ruff>=0.15.22,<1",
     "mypy>=2.1.0,<3",
     "pydantic>=2.13.4,<3",
