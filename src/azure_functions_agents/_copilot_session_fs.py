@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import json
 import math
@@ -590,17 +591,28 @@ class NativeSession:
         await self.store.release()
 
 
+class _PathResultError(OSError):
+    """An expected POSIX path result for the SDK, never a storage or ownership failure."""
+
+    def __init__(self, code: int, path: str) -> None:
+        super().__init__(code, os.strerror(code), path)
+
+
 class NativeSessionFs(SessionFsProvider):
     """SDK filesystem callbacks, scoped to the owned working tree."""
 
     def __init__(self, owner: NativeSession) -> None:
         self.owner = owner
 
+    def _fail(self, error: BaseException) -> None:
+        if not isinstance(error, _PathResultError):
+            self.owner.latch(error)
+
     def _path(self, path: str) -> str:
         try:
             return normalize_path(path)
         except BaseException as exc:
-            self.owner.latch(exc)
+            self._fail(exc)
             raise
 
     async def _read(self, operation: Callable[[WorkingTree], object]) -> object:
@@ -612,7 +624,7 @@ class NativeSessionFs(SessionFsProvider):
                     raise IncompatibleSessionError("Native session has no working tree.")
                 return operation(tree)
         except BaseException as exc:
-            self.owner.latch(exc)
+            self._fail(exc)
             raise
 
     async def _mutate(self, operation: Callable[[WorkingTree], None]) -> None:
@@ -626,7 +638,7 @@ class NativeSessionFs(SessionFsProvider):
                 candidate = StateEnvelope.model_validate(candidate.model_dump())
                 await self.owner._save(candidate)
         except BaseException as exc:
-            self.owner.latch(exc)
+            self._fail(exc)
             raise
 
     async def read_file(self, path: str) -> str:
@@ -634,7 +646,7 @@ class NativeSessionFs(SessionFsProvider):
 
         def read(tree: WorkingTree) -> str:
             if name not in tree.files:
-                raise FileNotFoundError(name)
+                raise _PathResultError(errno.ENOENT, name)
             return tree.files[name].content
 
         return str(await self._read(read))
@@ -648,7 +660,7 @@ class NativeSessionFs(SessionFsProvider):
 
             def write(tree: WorkingTree) -> None:
                 if name in tree.directories:
-                    raise IsADirectoryError(name)
+                    raise _PathResultError(errno.EISDIR, name)
                 parent = name.rpartition("/")[0] or "/"
                 self._parents(tree, parent)
                 now = time.time()
@@ -660,7 +672,7 @@ class NativeSessionFs(SessionFsProvider):
 
             await self._mutate(write)
         except BaseException as exc:
-            self.owner.latch(exc)
+            self._fail(exc)
             raise
 
     async def append_file(self, path: str, content: str, mode: int | None = None) -> None:
@@ -672,7 +684,7 @@ class NativeSessionFs(SessionFsProvider):
 
             def append(tree: WorkingTree) -> None:
                 if name in tree.directories:
-                    raise IsADirectoryError(name)
+                    raise _PathResultError(errno.EISDIR, name)
                 self._parents(tree, name.rpartition("/")[0] or "/")
                 now = time.time()
                 previous = tree.files.get(name)
@@ -684,7 +696,7 @@ class NativeSessionFs(SessionFsProvider):
 
             await self._mutate(append)
         except BaseException as exc:
-            self.owner.latch(exc)
+            self._fail(exc)
             raise
 
     @staticmethod
@@ -693,7 +705,7 @@ class NativeSessionFs(SessionFsProvider):
         for part in name.strip("/").split("/") if name != "/" else []:
             path += "/" + part
             if path in tree.files:
-                raise NotADirectoryError(path)
+                raise _PathResultError(errno.ENOTDIR, path)
             if path not in tree.directories:
                 now = time.time()
                 tree.directories[path] = FileMetadata(birthtime=now, mtime=now)
@@ -705,7 +717,7 @@ class NativeSessionFs(SessionFsProvider):
                 lambda tree: name in tree.files or name in tree.directories
             ))
         except BaseException as exc:
-            self.owner.latch(exc)
+            self._fail(exc)
             raise
 
     async def stat(self, path: str) -> SessionFsFileInfo:
@@ -716,7 +728,7 @@ class NativeSessionFs(SessionFsProvider):
                 file = tree.files.get(name)
                 item: FileMetadata | None = file or tree.directories.get(name)
                 if item is None:
-                    raise FileNotFoundError(name)
+                    raise _PathResultError(errno.ENOENT, name)
                 return SessionFsFileInfo(
                     is_file=file is not None, is_directory=file is None,
                     size=file.size_bytes if file else 0,
@@ -728,7 +740,7 @@ class NativeSessionFs(SessionFsProvider):
             assert isinstance(result, SessionFsFileInfo)
             return result
         except BaseException as exc:
-            self.owner.latch(exc)
+            self._fail(exc)
             raise
 
     async def mkdir(self, path: str, recursive: bool, mode: int | None = None) -> None:
@@ -738,15 +750,15 @@ class NativeSessionFs(SessionFsProvider):
 
             def create(tree: WorkingTree) -> None:
                 if name in tree.files:
-                    raise FileExistsError(name)
+                    raise _PathResultError(errno.EEXIST, name)
                 parent = name.rpartition("/")[0] or "/"
                 if parent not in tree.directories and not recursive:
-                    raise FileNotFoundError(parent)
+                    raise _PathResultError(errno.ENOENT, parent)
                 self._parents(tree, name)
 
             await self._mutate(create)
         except BaseException as exc:
-            self.owner.latch(exc)
+            self._fail(exc)
             raise
 
     async def readdir(self, path: str) -> list[str]:
@@ -755,7 +767,7 @@ class NativeSessionFs(SessionFsProvider):
 
             def listing(tree: WorkingTree) -> list[str]:
                 if name not in tree.directories:
-                    raise FileNotFoundError(name)
+                    raise _PathResultError(errno.ENOTDIR if name in tree.files else errno.ENOENT, name)
                 return sorted(p.rpartition("/")[2] for p in (*tree.directories, *tree.files)
                               if p != name and (p.rpartition("/")[0] or "/") == name)
 
@@ -763,7 +775,7 @@ class NativeSessionFs(SessionFsProvider):
             assert isinstance(result, list)
             return result
         except BaseException as exc:
-            self.owner.latch(exc)
+            self._fail(exc)
             raise
 
     async def readdir_with_types(self, path: str) -> Sequence[SessionFSReaddirWithTypesEntry]:
@@ -772,7 +784,7 @@ class NativeSessionFs(SessionFsProvider):
 
             def listing(tree: WorkingTree) -> list[SessionFSReaddirWithTypesEntry]:
                 if name not in tree.directories:
-                    raise FileNotFoundError(name)
+                    raise _PathResultError(errno.ENOTDIR if name in tree.files else errno.ENOENT, name)
                 return [
                     SessionFSReaddirWithTypesEntry(
                         name=entry,
@@ -788,7 +800,7 @@ class NativeSessionFs(SessionFsProvider):
             assert isinstance(result, list)
             return result
         except BaseException as exc:
-            self.owner.latch(exc)
+            self._fail(exc)
             raise
 
     async def rm(self, path: str, recursive: bool, force: bool) -> None:
@@ -804,10 +816,10 @@ class NativeSessionFs(SessionFsProvider):
                 if name not in tree.directories:
                     if force:
                         return
-                    raise FileNotFoundError(name)
+                    raise _PathResultError(errno.ENOENT, name)
                 nested = [p for p in (*tree.directories, *tree.files) if p.startswith(name + "/")]
                 if nested and not recursive:
-                    raise OSError("Native directory is not empty.")
+                    raise _PathResultError(errno.ENOTEMPTY, name)
                 for path in nested:
                     tree.files.pop(path, None)
                     tree.directories.pop(path, None)
@@ -815,7 +827,7 @@ class NativeSessionFs(SessionFsProvider):
 
             await self._mutate(remove)
         except BaseException as exc:
-            self.owner.latch(exc)
+            self._fail(exc)
             raise
 
     async def rename(self, src: str, dest: str) -> None:
@@ -825,14 +837,14 @@ class NativeSessionFs(SessionFsProvider):
                 raise ValueError("Invalid native rename.")
             def move(tree: WorkingTree) -> None:
                 if source not in tree.files and source not in tree.directories:
-                    raise FileNotFoundError(source)
+                    raise _PathResultError(errno.ENOENT, source)
                 if source == target:
                     return
                 parent = target.rpartition("/")[0] or "/"
                 if parent not in tree.directories:
-                    raise FileNotFoundError(parent)
+                    raise _PathResultError(errno.ENOENT, parent)
                 if target in tree.directories:
-                    raise FileExistsError(target)
+                    raise _PathResultError(errno.EEXIST, target)
                 tree.files.pop(target, None)
                 for key in [p for p in tree.directories if p == source or p.startswith(source + "/")]:
                     tree.directories[target + key[len(source):]] = tree.directories.pop(key)
@@ -841,5 +853,5 @@ class NativeSessionFs(SessionFsProvider):
 
             await self._mutate(move)
         except BaseException as exc:
-            self.owner.latch(exc)
+            self._fail(exc)
             raise

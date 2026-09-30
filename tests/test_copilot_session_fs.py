@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from azure.core.exceptions import HttpResponseError, ResourceExistsError, ResourceModifiedError
 from azure.storage.blob import StorageErrorCode
+from copilot.generated.rpc import SessionFSErrorCode
 from copilot.session_fs_provider import create_session_fs_adapter
 
 from azure_functions_agents import _copilot_session_fs as fs
@@ -186,6 +187,89 @@ async def test_rename_to_same_path_preserves_file_and_directory(harness):
     finally:
         await owner.close()
 
+
+@pytest.mark.asyncio
+async def test_native_startup_missing_path_probe_is_enoent_without_latching(harness):
+    owner = await open_session(harness)
+    handler = create_session_fs_adapter(fs.NativeSessionFs(owner))
+    try:
+        missing = await handler.read_file(SimpleNamespace(path="/session-state/workspace.yaml"))
+        assert missing.error.code is SessionFSErrorCode.ENOENT
+        assert (await handler.stat(SimpleNamespace(path="/session-state"))).error.code is (
+            SessionFSErrorCode.ENOENT
+        )
+        assert (await handler.readdir(SimpleNamespace(path="/session-state"))).error.code is (
+            SessionFSErrorCode.ENOENT
+        )
+        assert (await handler.readdir_with_types(
+            SimpleNamespace(path="/session-state")
+        )).error.code is SessionFSErrorCode.ENOENT
+        assert await handler.mkdir(
+            SimpleNamespace(path="/session-state/checkpoints", recursive=True, mode=448)
+        ) is None
+        await owner.check()
+        assert "/session-state/checkpoints" in owner.envelope.working.directories
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("operation", "code"), [
+    (lambda p: p.rm("/missing", recursive=False, force=False), SessionFSErrorCode.ENOENT),
+    (lambda p: p.rename("/missing", "/other"), SessionFSErrorCode.ENOENT),
+    (lambda p: p.rename("/file", "/missing/target"), SessionFSErrorCode.ENOENT),
+    (lambda p: p.mkdir("/missing/child", False), SessionFSErrorCode.ENOENT),
+    (lambda p: p.mkdir("/file", False), SessionFSErrorCode.UNKNOWN),
+    (lambda p: p.write_file("/directory", "x"), SessionFSErrorCode.UNKNOWN),
+    (lambda p: p.write_file("/file/child", "x"), SessionFSErrorCode.UNKNOWN),
+    (lambda p: p.append_file("/directory", "x"), SessionFSErrorCode.UNKNOWN),
+    (lambda p: p.rm("/directory", recursive=False, force=False), SessionFSErrorCode.UNKNOWN),
+    (lambda p: p.rename("/file", "/directory"), SessionFSErrorCode.UNKNOWN),
+    (lambda p: p.readdir("/file"), SessionFSErrorCode.UNKNOWN),
+])
+async def test_filesystem_results_are_not_persisted_or_latched(harness, operation, code):
+    owner = await open_session(harness)
+    provider = fs.NativeSessionFs(owner)
+    try:
+        await provider.write_file("/file", "content")
+        await provider.write_file("/directory/nested", "content")
+        revision = owner.envelope.revision
+        with pytest.raises(OSError) as raised:
+            await operation(provider)
+        assert fs_error_code(raised.value) is code
+        assert owner.envelope.revision == revision
+        await owner.check()
+        await provider.write_file("/after", "still writable")
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_latched_owner_rejects_filesystem_probes_with_latched_failure(harness, monkeypatch):
+    owner = await open_session(harness)
+    provider = fs.NativeSessionFs(owner)
+
+    async def broken(_data, _etag):
+        raise FileNotFoundError("state directory disappeared")
+
+    monkeypatch.setattr(owner.store, "save", broken)
+    try:
+        with pytest.raises(FileNotFoundError):
+            await provider.write_file("/events.jsonl", "not acknowledged")
+        with pytest.raises(PersistenceUnavailableError):
+            await owner.check()
+        with pytest.raises(PersistenceUnavailableError):
+            await provider.read_file("/missing")
+        with pytest.raises(PersistenceUnavailableError):
+            await provider.stat("/missing")
+    finally:
+        await owner.close()
+
+
+def fs_error_code(error):
+    from copilot.session_fs_provider import _to_session_fs_error
+
+    return _to_session_fs_error(error).code
 
 @pytest.mark.asyncio
 async def test_atomic_write_failure_latches_and_does_not_ack(harness, monkeypatch):
