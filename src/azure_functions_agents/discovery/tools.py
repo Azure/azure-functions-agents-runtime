@@ -10,7 +10,12 @@ from typing import Any, cast, get_type_hints
 from agent_framework import FunctionTool
 from pydantic import BaseModel
 
-from .._function_tool import WorkflowTool, get_workflow_tool_metadata, tool
+from .._function_tool import (
+    WorkflowTool,
+    get_workflow_tool_handler,
+    get_workflow_tool_metadata,
+    tool,
+)
 from .._logger import logger
 
 type _CachedProjectTools = tuple[tuple[FunctionTool, ...], tuple[WorkflowTool, ...]]
@@ -101,6 +106,9 @@ def _workflow_tool_from_member(module_name: str, name: str, obj: object) -> Work
     if metadata is None:
         return None
 
+    if handler is not None:
+        handler = get_workflow_tool_handler(handler)
+
     tool_name = metadata.name or default_tool_name
     description = metadata.description or default_description
     return WorkflowTool(
@@ -109,6 +117,7 @@ def _workflow_tool_from_member(module_name: str, name: str, obj: object) -> Work
         handler=handler,
         public=metadata.public,
         retry=metadata.retry,
+        timeout=metadata.timeout,
     )
 
 

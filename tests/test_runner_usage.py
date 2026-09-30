@@ -220,6 +220,25 @@ def test_usage_recorder_logs_available_token_counts_independently(caplog: Any) -
     assert payload["output_tokens"] is None
 
 
+def test_usage_recorder_accepts_backend_neutral_counts_once(caplog: Any) -> None:
+    recorder = runner._AgentUsageRecorder(
+        agent_name="main",
+        execution_role="primary",
+        inference_target=InferenceTarget("foundry", "gpt-preview"),
+    )
+
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        recorder.emit_counts(input_tokens=7, output_tokens=3)
+        recorder.emit({"input_token_count": 99, "output_token_count": 99})
+
+    records = [record for record in caplog.records if record.message.startswith("Agent token usage")]
+    assert len(records) == 1
+    payload = _usage_payload(records[0])
+    assert payload["input_tokens"] == 7
+    assert payload["output_tokens"] == 3
+    assert payload["provider"] == "foundry"
+
+
 def test_usage_recorder_never_changes_agent_behavior_when_logging_fails(monkeypatch: Any) -> None:
     logging_attempts = 0
 

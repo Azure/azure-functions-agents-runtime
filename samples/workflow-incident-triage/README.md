@@ -183,7 +183,12 @@ from that module:
 | `summarize_scan` | `{incident?, findings}` (whole ordered `${node.result}` aggregate of `{index, status, result}` envelopes) | `{incident, scanned, skipped, unhealthy: [str], headline}` |
 
 Outputs are deterministic functions of inputs so the demo narrative is
-reproducible across runs and replays. The summary tools deliberately
+reproducible across runs and replays.
+
+`fetch_deploys` is an `async def` handler. It awaits a simulated
+deploy-history API call to show that workflow tools can use async I/O.
+The workflow Activity awaits it; the Durable orchestrator does not change.
+The other tools are synchronous. The summary tools deliberately
 consume the whole upstream result via `${node.result}` — there is no
 need (and no benefit) to drill into nested paths from the plan.
 `discover_services` always returns at least one out-of-scope service so

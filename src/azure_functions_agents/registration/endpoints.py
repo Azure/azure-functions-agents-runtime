@@ -13,6 +13,7 @@ import azure.functions as func
 from azure.durable_functions import DurableFunctionsClient
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
+from .._harness import AppHarness, HarnessKind, bind_harness, get_harness
 from .._history_identity import validate_agent_slug
 from .._logger import logger
 from .._observability import FaultDomain, LifecycleStage, start_span
@@ -20,7 +21,12 @@ from .._session_id import SESSION_ID_PATTERN
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
 from ._auth import authorize_entra_request, resolve_endpoint_auth_level
-from ._handlers import _set_run_result_attributes, build_sandbox_tools_for_session
+from ._handlers import (
+    _SESSION_ID_HEADER,
+    _request_header_value,
+    _set_run_result_attributes,
+    build_sandbox_tools_for_session,
+)
 from ._naming import _safe_function_name
 from .capabilities import AgentCapabilities
 from .catalog import AgentCatalog
@@ -160,7 +166,9 @@ async def _run_builtin_agent(
     durable_client: Any | None = None,
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
+    _session_is_new: bool = False,
 ) -> Any:
+    harness = bind_harness(resolved, capabilities)
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
     return await _run_agent(
@@ -183,6 +191,8 @@ async def _run_builtin_agent(
         agent_configuration=resolved.agent_configuration,
         subagents=resolved.subagents,
         catalog=catalog,
+        _harness=harness,
+        _session_is_new=_session_is_new or session_id is None,
     )
 
 
@@ -226,6 +236,7 @@ def _run_builtin_agent_stream(
         agent_configuration=resolved.agent_configuration,
         subagents=resolved.subagents,
         catalog=catalog,
+        _harness=capabilities._harness,
     )
 
 
@@ -294,8 +305,9 @@ def _register_http_chat(
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     async def handle_chat(req: Request, durable_client: Any | None) -> Response:
+        supplied_session_id = _request_header_value(req, _SESSION_ID_HEADER)
         resolved_session_id = _resolve_builtin_endpoints_session_id(
-            req.headers.get("x-ms-session-id")
+            supplied_session_id
         )
         # This endpoint calls `run_agent` directly rather than going through
         # `_handlers.py`'s trigger-registered handlers, so — unlike a
@@ -333,6 +345,7 @@ def _register_http_chat(
                     durable_client=durable_client,
                     catalog=catalog,
                     workflow_policy=workflow_policy,
+                    _session_is_new=not supplied_session_id,
                 )
                 _set_run_result_attributes(span, result)
                 span.set_attribute("af.agent.outcome", "success")
@@ -346,7 +359,7 @@ def _register_http_chat(
                         }
                     ),
                     media_type="application/json",
-                    headers={"x-ms-session-id": result.session_id},
+                    headers={_SESSION_ID_HEADER: result.session_id},
                 )
             except ValueError as exc:
                 span.set_attribute("af.agent.outcome", "error")
@@ -399,9 +412,14 @@ def _register_http_chat_stream(
             auth_error = authorize_entra_request(req.headers.get, auth)
             if auth_error is not None:
                 return _sse_error_response(auth_error.message, status_code=auth_error.status_code)
+            if capabilities._harness is not None and capabilities._harness.name is HarnessKind.COPILOT:
+                return _sse_error_response(
+                    "Copilot preview does not support streaming; use the non-streaming chat route.",
+                    status_code=501,
+                )
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
-            session_id = req.headers.get("x-ms-session-id")
+            session_id = _request_header_value(req, _SESSION_ID_HEADER)
 
             def run_stream(durable_client: DurableFunctionsClient | None) -> AsyncIterator[str]:
                 return _run_builtin_agent_stream(
@@ -662,6 +680,7 @@ def _register_history_endpoint(
     slug: str,
     base_function_name: str,
     auth: EndpointAuthConfig,
+    harness: AppHarness | None = None,
 ) -> None:
     """Register a read-only endpoint that returns a session's persisted transcript.
 
@@ -671,12 +690,19 @@ def _register_history_endpoint(
     older deployments (and local runs without storage) keep working.
     """
     auth_level = resolve_endpoint_auth_level(auth)
+    selected_harness = harness or get_harness()
 
     async def get_session_history(req: Request) -> Response:
         auth_error = authorize_entra_request(req.headers.get, auth)
         if auth_error is not None:
             return _json_error(auth_error.message, status_code=auth_error.status_code)
-        session_id = req.headers.get("x-ms-session-id") or ""
+        if selected_harness.name is HarnessKind.COPILOT:
+            return _json_error(
+                "Copilot preview does not support transcript replay. Native state is separate "
+                "from MAF history.",
+                status_code=501,
+            )
+        session_id = _request_header_value(req, _SESSION_ID_HEADER) or ""
         if not session_id:
             return Response(
                 json.dumps({"messages": [], "truncated": False}),
@@ -750,6 +776,7 @@ def register_builtin_endpoints(
 ) -> None:
     """Register built-in debug chat UI, REST chat, and MCP endpoints for one agent."""
 
+    harness = bind_harness(resolved, capabilities)
     slug = validate_agent_slug(resolved.slug)
     builtin_endpoints = resolved.builtin_endpoints
 
@@ -797,6 +824,7 @@ def register_builtin_endpoints(
             slug=slug,
             base_function_name=base_function_name,
             auth=auth,
+            harness=harness,
         )
         if workflows_enabled:
             _register_workflow_status_endpoints(

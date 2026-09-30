@@ -920,6 +920,45 @@ async def test_sync_tool_handlers_run_off_the_activity_event_loop(
     assert handler_threads[0] != event_loop_thread
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy_aware", [False, True])
+async def test_async_tool_handlers_are_awaited_by_the_activity(
+    policy_aware: bool,
+) -> None:
+    async def publish(args: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(0)
+        return {"published": args["order_id"]}
+
+    catalog = integration.build_workflow_handler_catalog(
+        [WorkflowTool("publish", "Publish", publish)]
+    )
+    app = _Blueprints()
+    engine.register_workflows(
+        app,
+        handler_catalog=catalog,
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(allowed_tools=frozenset({"publish"}))
+        },
+    )
+    activity = app.function("agents_workflow_run_tool")
+    task = {
+        "id": "work",
+        "workflow_id": "workflow-1",
+        "workflow_agent_slug": "coordinator",
+        "tool": "publish",
+        "args": {"order_id": "order-42"},
+    }
+    if policy_aware:
+        task.update(_native_task())
+
+    result = await activity(task)
+
+    if policy_aware:
+        assert result == {"id": "work", "ok": True, "result": {"published": "order-42"}}
+    else:
+        assert result == {"id": "work", "result": {"published": "order-42"}}
+
+
 def test_data_driven_plans_use_the_same_retry_driver() -> None:
     """A ``when``/``for_each`` plan runs on the dynamic scheduler; retry still applies."""
     execution = {"max_attempts": 3, "durable_retry_policy": dict(_DURABLE_POLICY)}

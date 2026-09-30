@@ -108,14 +108,18 @@ Required for medium+ features. **Location:** committed to the repo at
 `docs/frds/0001-agents-folder-indexing.md`) — treated like a lightweight ADR so
 the Decisions log is durable history. Start from
 [`docs/frds/_template.md`](docs/frds/_template.md); see
-[`docs/frds/README.md`](docs/frds/README.md) for numbering. Recommended sections:
+[`docs/frds/README.md`](docs/frds/README.md) for numbering. FRDs describe
+intended feature behavior and acceptance, never delivery discussion, PR/slice
+scope, sequencing, ownership, schedule, or rollout plans. Keep those in PR
+descriptions or a separate delivery plan. Recommended sections:
 
 1. **Summary** — one paragraph: what and why.
 2. **Motivation / problem** — the pain today (e.g. AgentApps with many agents).
 3. **Goals / Non-goals** — explicit scope boundaries.
 4. **Proposed design** — modules touched, mapped to the `docs/architecture.md`
    stages (discover → translate → register → execute).
-5. **Decisions log** — append-only table; record *who* decided:
+5. **Decisions log** — append-only feature-contract choices; record *who* decided,
+   not delivery decisions:
 
    | # | Decision | Options considered | Choice | Decided by | Date |
    | - | -------- | ------------------ | ------ | ---------- | ---- |
@@ -141,8 +145,12 @@ Grounded in `pyproject.toml` and current code:
 - **Pydantic v2** for all config models (`config/schema.py`). When a field +
   validator is shared across provider/sub-models, declare it once on the common
   base class rather than duplicating per subclass.
-- **MAF is the only runtime.** The legacy `runtime:` frontmatter field is ignored
-  (one-time warning). Do not reintroduce runtime branching.
+- **MAF remains the default production runtime.** The only migration exception is the
+  internal, app-level `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` local preview
+  ([sample and limits](samples/copilot-preview/README.md)). Keep harness dispatch
+  behind that once-per-app boundary; no per-agent selectors, mixed-harness roles,
+  or automatic fallback. The legacy `runtime:` frontmatter field stays ignored
+  (one-time warning).
 - **Logging** goes through the shared `azure_functions_agents._logger.logger`.
 - **Respect the pipeline boundaries** (architecture.md §2): discovery is
   read-only; registration is the only Azure-aware stage; the runner executes

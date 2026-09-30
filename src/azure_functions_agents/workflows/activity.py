@@ -30,8 +30,10 @@ from .context import (
     workflow_task_idempotency_key,
 )
 from .schema import (
+    MAX_ATTEMPT_TIMEOUT_MS,
     MAX_BACKOFF_MS,
     MAX_POLICY_ATTEMPTS,
+    MIN_ATTEMPT_TIMEOUT_MS,
     WorkflowRetryableError,
     WorkflowTerminalError,
 )
@@ -100,6 +102,12 @@ class EffectiveExecutionModel(BaseModel):
 
     max_attempts: int = Field(ge=1, le=MAX_POLICY_ATTEMPTS)
     durable_retry_policy: DurableRetryPolicyModel
+    continue_on_error: bool = False
+    timeout_ms: int | None = Field(
+        default=None,
+        ge=MIN_ATTEMPT_TIMEOUT_MS,
+        le=MAX_ATTEMPT_TIMEOUT_MS,
+    )
 
     @model_validator(mode="after")
     def validate_schedule(self) -> EffectiveExecutionModel:
@@ -300,7 +308,17 @@ async def invoke_policy_handler(
     attempt. Everything else returns a terminal outcome the orchestrator
     interprets deterministically during replay.
     """
-    context = _policy_activity_context(task)
+    validated = PolicyActivityInputModel.model_validate(task)
+    context = WorkflowTaskContext(
+        workflow_id=validated.workflow_id,
+        task_id=validated.task_id,
+        node_instance_id=validated.id,
+        max_attempts=validated.execution.max_attempts,
+        idempotency_key=workflow_task_idempotency_key(
+            validated.workflow_id,
+            validated.id,
+        ),
+    )
     token = _set_workflow_task_context(context)
     task_id = str(task["id"])
 
@@ -314,10 +332,39 @@ async def invoke_policy_handler(
     try:
         outcome: ActivityOutcome | None = None
         result: Any = None
+        timeout_scope: asyncio.Timeout | None = None
         try:
-            result = await invoke_handler(handler, args)
+            if validated.execution.timeout_ms is None:
+                result = await invoke_handler(handler, args)
+            else:
+                timeout_scope = asyncio.timeout(
+                    validated.execution.timeout_ms / 1_000
+                )
+                async with timeout_scope:
+                    result = await invoke_handler(handler, args)
         except asyncio.CancelledError:
             raise
+        except TimeoutError:
+            if timeout_scope is not None and timeout_scope.expired():
+                outcome = failure_outcome(
+                    task_id,
+                    error_code="workflow_task_timeout",
+                    error="Task attempt timed out.",
+                    kind="handler_transient",
+                )
+            else:
+                logger.exception(
+                    "workflow task execution failed: workflow_id=%s node_id=%s target=%s",
+                    context.workflow_id,
+                    context.node_instance_id,
+                    target,
+                )
+                outcome = failure_outcome(
+                    task_id,
+                    error_code="workflow_task_execution_unknown",
+                    error="Task execution failed.",
+                    kind="execution_unknown",
+                )
         except WorkflowRetryableError as exc:
             outcome = failure_outcome(
                 task_id,

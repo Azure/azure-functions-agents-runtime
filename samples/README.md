@@ -11,7 +11,7 @@ app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure
 | [daily-tech-news-email](daily-tech-news-email/) | Timer | | ✅ Office 365 Outlook | ✅ Office 365 Outlook | | ✅ | |
 | [daily-azure-report](daily-azure-report/) | Timer + HTTP | ✅ azure_rest | ✅ Office 365 Outlook | ✅ MS Learn + Office 365 Outlook | ✅ azure-resources | | ✅ |
 | [workflow-incident-triage](workflow-incident-triage/) | HTTP | | | | | | ✅ |
-| [workflow-retry-policy](workflow-retry-policy/) | HTTP | ✅ workflow-safe | | | | | ✅ |
+| [workflow-retry-policy](workflow-retry-policy/) | HTTP | ✅ workflow-safe, retry, timeout, continuation | | | | | ✅ |
 | [workflow-queue-p0-report](workflow-queue-p0-report/) | Queue | ✅ workflow-safe | | | | | |
 | [per-agent-workflows](per-agent-workflows/) | HTTP | ✅ workflow-safe | | | | | ✅ |
 | [workflow-subagents-preview](workflow-subagents-preview/) | Queue | ✅ workflow-safe | | | ✅ | | |
@@ -27,6 +27,11 @@ Development tooling samples:
 - [agent-evaluation](agent-evaluation/) — runnable receipt-agent Function App plus a native Vally
 	evaluation against its local or staging chat endpoint, with deterministic tool/output graders,
 	repeated trials, and JUnit output.
+
+For the separate **local-only, default-off Copilot harness experiment**, use
+[`copilot-preview`](copilot-preview/README.md). Its pinned setup and two-turn
+receipt verifier exercise a real Functions-host restart; it is not an `azd up`
+deployment sample and does not require Azurite.
 
 ## Run Locally (optional)
 

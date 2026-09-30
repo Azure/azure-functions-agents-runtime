@@ -1,5 +1,5 @@
 ---
-frd: 0009
+frd: 0010
 title: Vally-first agent evaluations
 status: Finalized            # Draft → In review → Finalized  (→ Implemented after merge)
 author: hallvictoria
@@ -10,7 +10,7 @@ pull_requests: []
 branch: hallvictoria/vally-evals
 ---
 
-# FRD 0009 — Vally-first agent evaluations
+# FRD 0010 — Vally-first agent evaluations
 
 ## 1. Summary
 
@@ -443,7 +443,7 @@ No config-scenario fixture is required because the runtime authoring schema does
 - [x] `samples/agent-evaluation/` — retain the receipt Function App; replace JSONL/pytest with
   `eval.yaml` and the local Vally plug-in workflow.
 - [x] `README.md`, `docs/index.md`, and `samples/README.md` — replace MAF wording and links.
-- [x] `docs/frds/README.md` — update FRD 0009 title/status.
+- [x] `docs/frds/README.md` — update FRD 0010 title/status.
 - [x] `docs/front-matter-spec.md` and `docs/triggers.md` — no changes expected.
 
 ## 9. Status and sign-off

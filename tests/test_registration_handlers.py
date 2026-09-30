@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from azure_functions_agents._harness import AppHarness, HarnessKind
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     AgentFrameworkCompactionConfig,
@@ -169,6 +170,46 @@ def test_http_handler_response_schema_invalid_output_returns_500(monkeypatch: An
     }
 
 
+def test_copilot_http_handler_keeps_host_owned_structured_output_validation(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    contents = iter(['{"message":"ok"}', '{"message":123}', "not-json"])
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            content=next(contents),
+            session_id=kwargs["session_id"],
+            tool_calls=[],
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    handler = make_http_agent_handler(
+        _resolved_agent(
+            response_schema={
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+            }
+        ),
+        AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path)),
+    )
+
+    valid = asyncio.run(handler(DummyRequest({"prompt": "valid"})))
+    mismatch = asyncio.run(handler(DummyRequest({"prompt": "mismatch"})))
+    invalid = asyncio.run(handler(DummyRequest({"prompt": "invalid"})))
+
+    assert valid.status_code == 200
+    assert json.loads(valid.body) == {"message": "ok"}
+    assert mismatch.status_code == 500
+    assert json.loads(mismatch.body)["error"] == "Agent response validation failed"
+    assert invalid.status_code == 500
+    assert json.loads(invalid.body)["error"] == "Agent returned invalid JSON"
+
+
 def test_http_handler_records_input_validation_failed_event(monkeypatch: Any) -> None:
     span = _install_recording_span(monkeypatch)
 
@@ -193,6 +234,89 @@ def test_http_handler_records_input_validation_failed_event(monkeypatch: Any) ->
             {"af.fault_domain": "app", "af.http.status_code": 400},
         )
     ]
+
+
+def test_http_validation_returns_only_resumable_copilot_session_ids(
+    monkeypatch: Any, tmp_path: Path,
+) -> None:
+    run_kwargs: dict[str, Any] = {}
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        run_kwargs.update(kwargs)
+        return SimpleNamespace(content="ok", session_id=kwargs["session_id"], tool_calls=[])
+
+    monkeypatch.setattr("azure_functions_agents.registration._handlers._run_agent", fake_run_agent)
+    resolved = _resolved_agent(
+        response_schema=None,
+        input_schema={
+            "type": "object",
+            "required": ["message"],
+            "properties": {"message": {"type": "string"}},
+        },
+    )
+    copilot = make_http_agent_handler(
+        resolved, AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path))
+    )
+    maf = make_http_agent_handler(
+        resolved, AgentCapabilities(_harness=AppHarness(HarnessKind.MAF, tmp_path))
+    )
+
+    invalid = asyncio.run(copilot(DummyRequest({"message": 123})))
+    assert invalid.status_code == 400
+    assert "x-ms-session-id" not in invalid.headers
+    assert run_kwargs == {}
+
+    maf_invalid = asyncio.run(maf(DummyRequest({"message": 123})))
+    assert maf_invalid.status_code == 400
+    assert "x-ms-session-id" in maf_invalid.headers
+
+    first = asyncio.run(copilot(DummyRequest({"message": "valid"})))
+    assert first.status_code == 200
+    session_id = first.headers["x-ms-session-id"]
+    assert run_kwargs["_session_is_new"] is True
+
+    existing_invalid = asyncio.run(
+        copilot(DummyRequest({"message": 123}, headers={"x-ms-session-id": session_id}))
+    )
+    assert existing_invalid.status_code == 400
+    assert existing_invalid.headers["x-ms-session-id"] == session_id
+
+    resumed = asyncio.run(
+        copilot(DummyRequest({"message": "valid again"}, headers={"x-ms-session-id": session_id}))
+    )
+    assert resumed.status_code == 200
+    assert resumed.headers["x-ms-session-id"] == session_id
+    assert run_kwargs["_session_is_new"] is False
+
+
+def test_http_failure_before_copilot_create_does_not_return_new_session_id(
+    monkeypatch: Any, tmp_path: Path,
+) -> None:
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("native startup failed")
+
+    monkeypatch.setattr("azure_functions_agents.registration._handlers._run_agent", fake_run_agent)
+    resolved = _resolved_agent(response_schema=None)
+    copilot = make_http_agent_handler(
+        resolved, AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path))
+    )
+    maf = make_http_agent_handler(
+        resolved, AgentCapabilities(_harness=AppHarness(HarnessKind.MAF, tmp_path))
+    )
+
+    failed = asyncio.run(copilot(DummyRequest({"message": "valid"})))
+    assert failed.status_code == 500
+    assert "x-ms-session-id" not in failed.headers
+
+    supplied = asyncio.run(
+        copilot(DummyRequest({"message": "valid"}, headers={"x-ms-session-id": "existing"}))
+    )
+    assert supplied.status_code == 500
+    assert supplied.headers["x-ms-session-id"] == "existing"
+
+    maf_failed = asyncio.run(maf(DummyRequest({"message": "valid"})))
+    assert maf_failed.status_code == 500
+    assert "x-ms-session-id" in maf_failed.headers
 
 
 def test_http_handler_records_invalid_json_event(monkeypatch: Any) -> None:
@@ -1091,4 +1215,3 @@ def test_non_http_handler_forwards_agent_configuration(monkeypatch: Any) -> None
     asyncio.run(handler({}))
 
     assert captured.get("agent_configuration") is config
-

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import sys
 import textwrap
+import threading
 import types
 from pathlib import Path
 
 import pytest
 from agent_framework import FunctionTool
+from pydantic import ValidationError
 
 from azure_functions_agents._function_tool import tool, workflow_tool
 from azure_functions_agents.discovery.tools import (
@@ -247,6 +249,50 @@ def test_dual_decorator_with_schema_workflow_tool_then_tool_is_both(tmp_path: Pa
     assert workflow_tool.handler is not None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("workflow_first", [False, True])
+async def test_dual_schema_tool_runs_as_workflow(
+    tmp_path: Path, is_async: bool, workflow_first: bool
+) -> None:
+    from azure_functions_agents.workflows import activity, integration
+
+    decorators = ["@tool(schema=SharedArgs)", "@workflow_tool"]
+    if workflow_first:
+        decorators.reverse()
+    declaration = "async def" if is_async else "def"
+    _write_tool_file(
+        tmp_path,
+        "shared_tool",
+        f"""
+        import asyncio
+        import threading
+        from pydantic import BaseModel
+        from azure_functions_agents import tool, workflow_tool
+
+        class SharedArgs(BaseModel):
+            value: str
+
+        {decorators[0]}
+        {decorators[1]}
+        {declaration} shared(args: SharedArgs) -> dict[str, object]:
+            {"await asyncio.sleep(0)" if is_async else "pass"}
+            return {{"value": args.value, "thread": threading.get_ident()}}
+        """,
+    )
+
+    discovered = discover_project_tools(tmp_path)
+    catalog = integration.build_workflow_handler_catalog(discovered.workflow_tools)
+    handler = catalog["shared"].handler
+    result = await activity.invoke_handler(handler, {"value": "ok"})
+
+    assert result["value"] == "ok"
+    assert (result["thread"] == threading.get_ident()) is is_async
+    with pytest.raises(ValidationError):
+        await activity.invoke_handler(handler, {})
+    assert (await discovered.user_tools[0].func(value="direct"))["value"] == "direct"
+
+
 def test_workflow_tool_public_false_flows_through_discovery(tmp_path: Path) -> None:
     _write_tool_file(
         tmp_path,
@@ -304,9 +350,60 @@ def test_workflow_tool_retry_flows_through_discovery(tmp_path: Path) -> None:
     assert workflow_tool.retry.backoff.max == "PT4S"
 
 
+def test_workflow_tool_timeout_flows_through_discovery(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "timed_workflow_tool",
+        """
+        from azure_functions_agents import workflow_tool
+
+        @workflow_tool(timeout="PT20S")
+        def reserve(args: dict[str, object]) -> dict[str, object]:
+            return {"args": args}
+        """,
+    )
+
+    [workflow_tool] = discover_project_tools(tmp_path).workflow_tools
+
+    assert workflow_tool.timeout == "PT20S"
+
+
 def test_workflow_tool_rejects_invalid_retry_type() -> None:
     with pytest.raises(TypeError, match="WorkflowRetryPolicy"):
         workflow_tool(retry="three attempts")  # type: ignore[arg-type]
+
+
+def test_workflow_tool_rejects_continue_on_error() -> None:
+    with pytest.raises(TypeError, match=r"unknown workflow_tool argument.*continue_on_error"):
+        workflow_tool(continue_on_error=True)  # type: ignore[call-overload]
+
+
+@pytest.mark.parametrize("timeout", ["PT0.5S", "PT11M", "not a duration"])
+def test_workflow_tool_rejects_invalid_timeout(timeout: str) -> None:
+    with pytest.raises(TypeError, match="workflow_tool timeout is invalid"):
+        workflow_tool(timeout=timeout)
+
+
+def test_async_workflow_tool_flows_into_handler_catalog(tmp_path: Path) -> None:
+    from azure_functions_agents.workflows import integration
+
+    _write_tool_file(
+        tmp_path,
+        "async_workflow_tool",
+        """
+        from azure_functions_agents import workflow_tool
+
+        @workflow_tool(description="Fetch a record.")
+        async def fetch_record(args: dict[str, object]) -> dict[str, object]:
+            return {"args": args}
+        """,
+    )
+
+    [discovered] = discover_project_tools(tmp_path).workflow_tools
+    catalog = integration.build_workflow_handler_catalog([discovered])
+
+    assert list(catalog) == ["fetch_record"]
+    assert catalog["fetch_record"].handler is discovered.handler
 
 
 def test_multiple_workflow_tools_can_be_declared_in_one_file(tmp_path: Path) -> None:

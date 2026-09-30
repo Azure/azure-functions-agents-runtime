@@ -443,6 +443,8 @@ __azurite_*
 __blobstorage__/
 **/local.settings.json
 .tmp-validation/
+.preview-state/
+.preview-evidence*.json
 
 samples/harness-chat/*
 # MkDocs build output

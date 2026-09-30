@@ -1,0 +1,4 @@
+timeout: 60
+system_tools:
+  web_request:
+    allowed_hosts: [example.com]
