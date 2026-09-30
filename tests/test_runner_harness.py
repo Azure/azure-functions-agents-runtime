@@ -19,7 +19,7 @@ from agent_framework import (
 )
 
 from azure_functions_agents import runner
-from azure_functions_agents._agent_identity import RESOURCE_ID_ENV, agent_id
+from azure_functions_agents._agent_identity import agent_id
 from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
@@ -152,7 +152,8 @@ def test_build_role_agent_uses_stable_agent_id(monkeypatch: Any) -> None:
 
     import agent_framework
 
-    monkeypatch.setenv(RESOURCE_ID_ENV, "/subscriptions/sub/resourceGroups/rg/sites/app")
+    monkeypatch.setenv("WEBSITE_OWNER_NAME", "sub+rg-eastuswebspace")
+    monkeypatch.setenv("WEBSITE_DEPLOYMENT_ID", "deployment-123")
     monkeypatch.setattr(
         agent_framework,
         "create_harness_agent",

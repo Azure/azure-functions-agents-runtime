@@ -120,11 +120,22 @@ Plus `af.lifecycle_stage=agent_run`, and `af.fault_domain` if the run fails.
 
 #### Stable agent ID
 
-MAF `gen_ai.*` spans set `gen_ai.agent.id` to a deterministic UUIDv5 derived from the
-Function App resource identity plus the agent slug. The resource identity resolves in this
-order: non-blank `AZURE_FUNCTIONS_AGENTS_RESOURCE_ID`; full Azure Functions website
-environment (`WEBSITE_OWNER_NAME`, `WEBSITE_RESOURCE_GROUP`, `WEBSITE_SITE_NAME`);
-site-name-only fallback (`/providers/Microsoft.Web/sites/{site}`); then `local`.
+MAF `gen_ai.*` spans set `gen_ai.agent.id` to a deterministic UUIDv5 derived from a
+best-effort app correlation key plus the agent slug. The key is not a guaranteed unique
+Azure resource ID, and no app setting is required. It resolves in this order:
+
+1. `WEBSITE_OWNER_NAME` + `WEBSITE_DEPLOYMENT_ID`, when both are non-blank:
+   `{owner}/{deployment_id}`
+2. `WEBSITE_SITE_NAME`, when non-blank: `site/{site}`
+3. `local`
+
+Linux SKU behavior:
+
+| Linux SKU | Pair available? | Caveat |
+| --- | --- | --- |
+| Consumption | Set during specialization. | A later resolved reference can replace either value. |
+| Flex Consumption | Set, but owner may be empty. | Empty owner falls back to site name; resolved references are overlaid after platform values. |
+| Premium / Dedicated | Set. | Customer app settings can override either value, so correlation is customer-controlled. |
 
 The same value is emitted in the `agent_runtime_indexed` startup summary as `agent_id` so
 operators can copy it when registering agents with external services such as A2A,
