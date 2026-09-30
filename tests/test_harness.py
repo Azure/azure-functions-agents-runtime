@@ -110,7 +110,9 @@ def test_missing_sdk_is_explicit_without_forcing_a_second_version_check(preview,
     ("name", "value", "diagnostic"),
     [
         ("AZURE_FUNCTIONS_AGENTS_PROVIDER", "azure_openai", "supports.*PROVIDER"),
-        ("WEBSITE_INSTANCE_ID", "cloud-instance", "WEBSITE_SITE_NAME"),
+        ("WEBSITE_INSTANCE_ID", "cloud-instance", "Azure hosting is not qualified"),
+        ("FUNCTIONS_WORKER_PROCESS_COUNT", "2", "FUNCTIONS_WORKER_PROCESS_COUNT=1"),
+        ("FUNCTIONS_WORKER_PROCESS_COUNT", " ", "FUNCTIONS_WORKER_PROCESS_COUNT=1"),
         ("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "high", "REASONING_EFFORT"),
     ],
 )
@@ -118,6 +120,11 @@ def test_unsupported_app_settings(preview, monkeypatch, name, value, diagnostic)
     monkeypatch.setenv(name, value)
     with pytest.raises((UnsupportedCapabilityError, ValueError), match=diagnostic):
         _harness.get_harness()
+
+
+def test_single_worker_hosting_is_accepted(preview, monkeypatch):
+    monkeypatch.setenv("FUNCTIONS_WORKER_PROCESS_COUNT", " 1 ")
+    assert _harness.get_harness().name is HarnessKind.COPILOT
 
 
 def _sample():

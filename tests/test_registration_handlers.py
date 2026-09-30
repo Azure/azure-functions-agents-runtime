@@ -319,6 +319,38 @@ def test_http_failure_before_copilot_create_does_not_return_new_session_id(
     assert "x-ms-session-id" in maf_failed.headers
 
 
+def test_http_handler_maps_native_session_errors_to_their_status(
+    monkeypatch: Any, tmp_path: Path,
+) -> None:
+    from azure_functions_agents._native_session_identity import (
+        IncompatibleSessionError,
+        PersistenceUnavailableError,
+    )
+
+    failure: Exception = IncompatibleSessionError("session is not safely resumable")
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        raise failure
+
+    monkeypatch.setattr("azure_functions_agents.registration._handlers._run_agent", fake_run_agent)
+    copilot = make_http_agent_handler(
+        _resolved_agent(response_schema=None),
+        AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path)),
+    )
+
+    conflict = asyncio.run(
+        copilot(DummyRequest({"message": "valid"}, headers={"x-ms-session-id": "existing"}))
+    )
+    assert conflict.status_code == 409
+    assert conflict.headers["x-ms-session-id"] == "existing"
+    assert json.loads(conflict.body)["error"] == "session is not safely resumable"
+
+    failure = PersistenceUnavailableError("native persistence is unavailable")
+    unavailable = asyncio.run(copilot(DummyRequest({"message": "valid"})))
+    assert unavailable.status_code == 503
+    assert "x-ms-session-id" not in unavailable.headers
+
+
 def test_http_handler_records_invalid_json_event(monkeypatch: Any) -> None:
     span = _install_recording_span(monkeypatch)
 

@@ -533,8 +533,19 @@ async def test_sdk_resume_failure_is_safe_and_never_creates_a_session(preview, m
         await _copilot.shutdown()
 
 
+async def _persisted_state(preview):
+    owner = await NativeSession.open(
+        preview, "main", "example", _copilot._native_id("main", "example"),
+        asyncio.get_running_loop().time() + 5,
+    )
+    try:
+        return owner.envelope.state, owner.envelope.handoff_may_have_started
+    finally:
+        await owner.close()
+
+
 @pytest.mark.asyncio
-async def test_sdk_resume_failure_without_detach_is_uncertain(preview, monkeypatch):
+async def test_completed_resume_retries_after_a_temporary_rpc_failure(preview, monkeypatch):
     import copilot
 
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
@@ -546,37 +557,111 @@ async def test_sdk_resume_failure_without_detach_is_uncertain(preview, monkeypat
     try:
         with pytest.raises(CopilotPreviewError, match="could not resume"):
             await _copilot.run(preview, _request(new_session=False))
-        with pytest.raises(IncompatibleSessionError, match="not safely resumable"):
-            await _copilot.run(preview, _request(new_session=False))
-        assert client.resume_session.await_count == 1
+        assert await _persisted_state(preview) == (SessionState.READY, False)
+
+        result = await _copilot.run(preview, _request(new_session=False))
+        assert result.content == "synthetic reply"
+        assert client.resume_session.await_count == 2
         client.create_session.assert_not_awaited()
     finally:
         await _copilot.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_create_rpc_without_a_detachable_handle_stays_uncertain(preview, monkeypatch):
+async def test_create_rpc_failure_rolls_back_when_the_native_probe_is_clean(preview, monkeypatch):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    session = client.create_session.return_value
+    client.create_session.side_effect = [RuntimeError("unknown RPC outcome"), session]
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(CopilotPreviewError):
+            await _copilot.run(preview, _request())
+        assert await _persisted_state(preview) == (SessionState.EMPTY, False)
+
+        result = await _copilot.run(preview, _request())
+        assert result.content == "synthetic reply"
+        assert client.create_session.await_count == 2
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_create_rpc_stays_uncertain_when_the_native_probe_is_indeterminate(
+    preview, monkeypatch
+):
     import copilot
 
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
     client = _fake_client()
     client.create_session.side_effect = RuntimeError("unknown RPC outcome")
+    client.get_session_metadata.side_effect = [None, RuntimeError("probe unavailable")]
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
         with pytest.raises(CopilotPreviewError):
             await _copilot.run(preview, _request())
-        owner = await NativeSession.open(
-            preview, "main", "example", _copilot._native_id("main", "example"),
-            asyncio.get_running_loop().time() + 5,
-        )
-        try:
-            assert owner.envelope.state is SessionState.UNCERTAIN
-            assert owner.envelope.handoff_may_have_started is False
-        finally:
-            await owner.close()
+        assert await _persisted_state(preview) == (SessionState.UNCERTAIN, False)
+
         with pytest.raises(IncompatibleSessionError, match="not safely resumable"):
             await _copilot.run(preview, _request())
         client.create_session.assert_awaited_once()
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_create_rpc_stays_uncertain_when_the_probe_finds_a_native_session(
+    preview, monkeypatch
+):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    client.create_session.side_effect = RuntimeError("unknown RPC outcome")
+    client.get_session_metadata.side_effect = [None, SimpleNamespace(session_id="orphan")]
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(CopilotPreviewError):
+            await _copilot.run(preview, _request())
+        assert await _persisted_state(preview) == (SessionState.UNCERTAIN, False)
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_detach_failure_does_not_mask_the_original_failure(preview, monkeypatch):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    session = client.create_session.return_value
+    session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(tools=None)
+    session.__aexit__.side_effect = RuntimeError("detach failed")
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(CopilotPreviewError, match="model-visible tool catalog"):
+            await _copilot.run(preview, _request())
+        assert await _persisted_state(preview) == (SessionState.UNCERTAIN, False)
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_detach_failure_alone_still_fails_the_turn(preview, monkeypatch):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    client.create_session.return_value.__aexit__.side_effect = RuntimeError("detach failed")
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(CopilotPreviewError, match="could not be detached"):
+            await _copilot.run(preview, _request())
+        state, handoff = await _persisted_state(preview)
+        assert state is SessionState.UNCERTAIN
+        assert handoff is True
     finally:
         await _copilot.shutdown()
 

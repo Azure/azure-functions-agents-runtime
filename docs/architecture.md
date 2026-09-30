@@ -374,8 +374,10 @@ error headers for retry, and MAF header behavior is unchanged. No MAF transcript
 is imported or mutated. Cancellation is session-scoped; application shutdown
 stops the SDK client.
 
-This slice removed the foundation's startup rejection of multi-worker and
-deployed instances. Issue #1335 qualified real Entra-authenticated Blob
+The foundation's startup rejection of multi-worker
+(`FUNCTIONS_WORKER_PROCESS_COUNT` other than `1`) and deployed
+(`WEBSITE_INSTANCE_ID`) instances is retained, so the preview cannot start where
+native session persistence is unqualified. Issue #1335 qualified real Entra-authenticated Blob
 lease/fencing and cross-client restore, replacement-process tool-result
 continuation, and compacted semantic-summary cold restore. It did not qualify a
 deployed Functions host or multi-worker hosting; evidence is labeled per

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 
 from ._copilot_session_fs import (
     HOST_PATH_CONVENTIONS,
+    SESSION_STATE_ROOT,
     NativeSession,
     NativeSessionFs,
     SessionState,
@@ -112,7 +113,7 @@ class _NativeRuntime:
                 telemetry=None,
                 session_fs={
                     "initial_working_directory": str(self.workspace),
-                    "session_state_path": "/session-state",
+                    "session_state_path": SESSION_STATE_ROOT,
                     "conventions": HOST_PATH_CONVENTIONS,
                 },
             )
@@ -336,6 +337,22 @@ async def _verify_completed_turn(session: CopilotSession) -> None:
         )
 
 
+async def _rpc_left_no_session(
+    client: CopilotClient | None, native_id: str, *, resuming: bool
+) -> bool:
+    """Prove a failed create/resume RPC left nothing that could still act on the tree."""
+    if client is None:
+        return False
+    if resuming:
+        # The native session predates this turn; every write it could make flows
+        # through the fenced working tree this owner is about to discard.
+        return True
+    try:
+        return await client.get_session_metadata(native_id) is None
+    except Exception:
+        return False
+
+
 async def _abort(session: CopilotSession, deadline: float) -> None:
     try:
         await asyncio.wait_for(
@@ -351,8 +368,12 @@ async def _session_context(
 ) -> AsyncIterator[CopilotSession]:
     """Bound SDK session detachment without stopping the shared client."""
     await session.__aenter__()
+    turn_failed = False
     try:
         yield session
+    except BaseException:
+        turn_failed = True
+        raise
     finally:
         try:
             await asyncio.wait_for(
@@ -362,9 +383,10 @@ async def _session_context(
             on_detach()
         except Exception:
             logger.error("Copilot session detach failed.")
-            raise CopilotPreviewError(
-                "Copilot native session could not be detached; its state may be unfinished."
-            ) from None
+            if not turn_failed:
+                raise CopilotPreviewError(
+                    "Copilot native session could not be detached; its state may be unfinished."
+                ) from None
 
 
 async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
@@ -395,6 +417,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     send_created = False
     rpc_attempted = False
     detached = False
+    client: CopilotClient | None = None
     session: CopilotSession | None = None
 
     def on_event(event: SessionEvent) -> None:
@@ -567,7 +590,15 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     if session is not None and send_created and not detached:
                         with contextlib.suppress(Exception):
                             await _abort(session, request.deadline)
-                    if not send_created and (not rpc_attempted or detached):
+                    recoverable = (
+                        not send_created and not storage.envelope.handoff_may_have_started
+                    )
+                    if recoverable and rpc_attempted and not detached:
+                        recoverable = session is None and await _rpc_left_no_session(
+                            client, native_id,
+                            resuming=storage.envelope.completed is not None,
+                        )
+                    if recoverable:
                         with contextlib.suppress(Exception):
                             await storage.rollback()
                     elif storage.failure is None:

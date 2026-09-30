@@ -79,6 +79,23 @@ and writes through a `.state-*` temporary file that is atomically replaced.
 MAF history (`agent-sessions/<slug>/<session>.jsonl`) is untouched by this
 namespace, and neither format is read or rewritten by the other.
 
+The native runtime only addresses two virtual roots through the SessionFs
+callbacks: `/workspace` (the recorded host working directory, including its
+declared host-path aliases) and `/session-state`. Any other host-qualified or
+absolute path is rejected before it can touch storage, as is any path that
+traverses out of a root.
+
+### Single-object size limit
+
+The whole session — envelope metadata plus every file the native runtime wrote —
+is serialized into one object capped at 4 MiB (`MAX_ENVELOPE_BYTES`). During a
+turn the in-flight `working` tree is stored alongside the last `completed` tree,
+so a session is bounded in practice by roughly half that: about 2 MiB of session
+files. Crossing the cap fails the turn with `Native session exceeds the
+single-object storage limit.` (503) rather than truncating state, and an
+oversize object read back is rejected as corrupt. Keep native workspace output
+small; this preview has no chunking or external-blob spill.
+
 ## Inspecting a session
 
 Path keys are digests, so resolve the exact name with the (internal, preview-only)
@@ -147,6 +164,11 @@ credentials) and map to HTTP status codes on the built-in chat route:
 | Non-resumable state (`active`, `uncertain`, `deleted`, uncertain handoff) | 409 | `Native session is not safely resumable; use a new ID.` |
 | Storage unavailable, lease lost, deadline exceeded mid-turn | 503 | `Native session storage is unavailable.` |
 | Envelope corruption or version mismatch | 500 | Content-free validation diagnostic. |
+
+Only surfaces with HTTP status semantics carry these codes: the built-in chat
+route and HTTP-triggered agent functions. A streaming response has already sent
+its headers, and MCP tool results and non-HTTP triggers have no status line, so
+those surfaces propagate the original refusal instead of rewriting a status.
 
 A storage failure aborts the turn; it never becomes a model-visible tool result
 or a success-shaped empty response, and it never silently resets a conversation.
@@ -256,10 +278,13 @@ should reach a model:
 
 ## Known limits
 
-- Single worker per app is the only configuration exercised; the previous
-  `FUNCTIONS_WORKER_PROCESS_COUNT=1` startup check was removed with this slice,
-  so nothing now stops you from starting a multi-worker or deployed app with the
-  flag on. That is unqualified, not supported.
+- Single worker per app is the only qualified configuration, and startup
+  enforces it: an app with the flag on fails to start when
+  `FUNCTIONS_WORKER_PROCESS_COUNT` is set to anything other than `1`, or when
+  `WEBSITE_INSTANCE_ID` shows a deployed Functions instance. Both rejections are
+  `UnsupportedCapabilityError`s raised before any native process, download or
+  provider call. They stay until deployed-host and multi-worker qualification
+  lands (issues #1357 and #1337).
 - Streaming, history projection, MCP, skills, delegation, Workflow Sub Agents,
   workflow-enabled agents, non-HTTP triggers and the debug chat UI remain
   rejected before inference on the Copilot path.

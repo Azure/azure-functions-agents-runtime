@@ -87,12 +87,12 @@ async def test_directory_rename_is_atomic_and_complete(harness):
     owner = await open_session(harness)
     provider = fs.NativeSessionFs(owner)
     try:
-        await provider.write_file("/old/deep/a", "value")
-        await provider.rename("/old", "/new")
-        assert await provider.read_file("/new/deep/a") == "value"
-        assert not await provider.exists("/old")
-        assert "/old/deep/a" not in owner.envelope.working.files
-        assert "/new/deep/a" in owner.envelope.working.files
+        await provider.write_file("/workspace/old/deep/a", "value")
+        await provider.rename("/workspace/old", "/workspace/new")
+        assert await provider.read_file("/workspace/new/deep/a") == "value"
+        assert not await provider.exists("/workspace/old")
+        assert "/workspace/old/deep/a" not in owner.envelope.working.files
+        assert "/workspace/new/deep/a" in owner.envelope.working.files
     finally:
         await owner.close()
 
@@ -108,7 +108,7 @@ async def test_invalid_path_latches_even_when_sdk_exists_adapter_swallows_error(
         with pytest.raises(PersistenceUnavailableError):
             await owner.check()
         with pytest.raises(PersistenceUnavailableError):
-            await provider.write_file("/ok", "blocked")
+            await provider.write_file("/workspace/ok", "blocked")
     finally:
         await owner.close()
 
@@ -117,7 +117,7 @@ async def test_invalid_path_latches_even_when_sdk_exists_adapter_swallows_error(
 async def test_local_snapshot_rollback_preserves_prior_completed_bytes(harness):
     first = await open_session(harness)
     provider = fs.NativeSessionFs(first)
-    await provider.write_file("/events.jsonl", "before")
+    await provider.write_file("/workspace/events.jsonl", "before")
     await first.transition(state=fs.SessionState.ACTIVE)
     await first.complete()
     await first.close()
@@ -126,15 +126,15 @@ async def test_local_snapshot_rollback_preserves_prior_completed_bytes(harness):
     try:
         await resumed.prepare(new_session=False)
         provider = fs.NativeSessionFs(resumed)
-        await provider.append_file("/events.jsonl", "uncommitted")
-        assert resumed.envelope.completed.files["/events.jsonl"].content == "before"
+        await provider.append_file("/workspace/events.jsonl", "uncommitted")
+        assert resumed.envelope.completed.files["/workspace/events.jsonl"].content == "before"
         await resumed.rollback()
     finally:
         await resumed.close()
     restored = await open_session(harness, new=False)
     try:
         assert restored.envelope.state is fs.SessionState.READY
-        assert restored.envelope.completed.files["/events.jsonl"].content == "before"
+        assert restored.envelope.completed.files["/workspace/events.jsonl"].content == "before"
     finally:
         await restored.close()
 
@@ -142,21 +142,21 @@ async def test_local_snapshot_rollback_preserves_prior_completed_bytes(harness):
 @pytest.mark.asyncio
 async def test_preparing_without_handoff_recovers_only_prior_completed_tree(harness):
     first = await open_session(harness)
-    await fs.NativeSessionFs(first).write_file("/events.jsonl", "completed")
+    await fs.NativeSessionFs(first).write_file("/workspace/events.jsonl", "completed")
     await first.transition(state=fs.SessionState.ACTIVE)
     await first.complete()
     await first.close()
 
     interrupted = await open_session(harness, new=False)
     await interrupted.prepare(new_session=False)
-    await fs.NativeSessionFs(interrupted).write_file("/events.jsonl", "uncommitted")
+    await fs.NativeSessionFs(interrupted).write_file("/workspace/events.jsonl", "uncommitted")
     await interrupted.close()
 
     recovered = await open_session(harness, new=False)
     try:
         await recovered.recover_preparing()
         assert recovered.envelope.state is fs.SessionState.READY
-        assert recovered.envelope.completed.files["/events.jsonl"].content == "completed"
+        assert recovered.envelope.completed.files["/workspace/events.jsonl"].content == "completed"
         assert recovered.envelope.working is None
     finally:
         await recovered.close()
@@ -180,10 +180,10 @@ async def test_rename_to_same_path_preserves_file_and_directory(harness):
     owner = await open_session(harness)
     provider = fs.NativeSessionFs(owner)
     try:
-        await provider.write_file("/directory/file", "content")
-        await provider.rename("/directory/file", "/directory/file")
-        await provider.rename("/directory", "/directory")
-        assert await provider.read_file("/directory/file") == "content"
+        await provider.write_file("/workspace/directory/file", "content")
+        await provider.rename("/workspace/directory/file", "/workspace/directory/file")
+        await provider.rename("/workspace/directory", "/workspace/directory")
+        assert await provider.read_file("/workspace/directory/file") == "content"
     finally:
         await owner.close()
 
@@ -215,31 +215,31 @@ async def test_native_startup_missing_path_probe_is_enoent_without_latching(harn
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("operation", "code"), [
-    (lambda p: p.rm("/missing", recursive=False, force=False), SessionFSErrorCode.ENOENT),
-    (lambda p: p.rename("/missing", "/other"), SessionFSErrorCode.ENOENT),
-    (lambda p: p.rename("/file", "/missing/target"), SessionFSErrorCode.ENOENT),
-    (lambda p: p.mkdir("/missing/child", False), SessionFSErrorCode.ENOENT),
-    (lambda p: p.mkdir("/file", False), SessionFSErrorCode.UNKNOWN),
-    (lambda p: p.write_file("/directory", "x"), SessionFSErrorCode.UNKNOWN),
-    (lambda p: p.write_file("/file/child", "x"), SessionFSErrorCode.UNKNOWN),
-    (lambda p: p.append_file("/directory", "x"), SessionFSErrorCode.UNKNOWN),
-    (lambda p: p.rm("/directory", recursive=False, force=False), SessionFSErrorCode.UNKNOWN),
-    (lambda p: p.rename("/file", "/directory"), SessionFSErrorCode.UNKNOWN),
-    (lambda p: p.readdir("/file"), SessionFSErrorCode.UNKNOWN),
+    (lambda p: p.rm("/workspace/missing", recursive=False, force=False), SessionFSErrorCode.ENOENT),
+    (lambda p: p.rename("/workspace/missing", "/workspace/other"), SessionFSErrorCode.ENOENT),
+    (lambda p: p.rename("/workspace/file", "/workspace/missing/target"), SessionFSErrorCode.ENOENT),
+    (lambda p: p.mkdir("/workspace/missing/child", False), SessionFSErrorCode.ENOENT),
+    (lambda p: p.mkdir("/workspace/file", False), SessionFSErrorCode.UNKNOWN),
+    (lambda p: p.write_file("/workspace/directory", "x"), SessionFSErrorCode.UNKNOWN),
+    (lambda p: p.write_file("/workspace/file/child", "x"), SessionFSErrorCode.UNKNOWN),
+    (lambda p: p.append_file("/workspace/directory", "x"), SessionFSErrorCode.UNKNOWN),
+    (lambda p: p.rm("/workspace/directory", recursive=False, force=False), SessionFSErrorCode.UNKNOWN),
+    (lambda p: p.rename("/workspace/file", "/workspace/directory"), SessionFSErrorCode.UNKNOWN),
+    (lambda p: p.readdir("/workspace/file"), SessionFSErrorCode.UNKNOWN),
 ])
 async def test_filesystem_results_are_not_persisted_or_latched(harness, operation, code):
     owner = await open_session(harness)
     provider = fs.NativeSessionFs(owner)
     try:
-        await provider.write_file("/file", "content")
-        await provider.write_file("/directory/nested", "content")
+        await provider.write_file("/workspace/file", "content")
+        await provider.write_file("/workspace/directory/nested", "content")
         revision = owner.envelope.revision
         with pytest.raises(OSError) as raised:
             await operation(provider)
         assert fs_error_code(raised.value) is code
         assert owner.envelope.revision == revision
         await owner.check()
-        await provider.write_file("/after", "still writable")
+        await provider.write_file("/workspace/after", "still writable")
     finally:
         await owner.close()
 
@@ -255,13 +255,13 @@ async def test_latched_owner_rejects_filesystem_probes_with_latched_failure(harn
     monkeypatch.setattr(owner.store, "save", broken)
     try:
         with pytest.raises(FileNotFoundError):
-            await provider.write_file("/events.jsonl", "not acknowledged")
+            await provider.write_file("/workspace/events.jsonl", "not acknowledged")
         with pytest.raises(PersistenceUnavailableError):
             await owner.check()
         with pytest.raises(PersistenceUnavailableError):
-            await provider.read_file("/missing")
+            await provider.read_file("/workspace/missing")
         with pytest.raises(PersistenceUnavailableError):
-            await provider.stat("/missing")
+            await provider.stat("/workspace/missing")
     finally:
         await owner.close()
 
@@ -283,7 +283,7 @@ async def test_atomic_write_failure_latches_and_does_not_ack(harness, monkeypatc
     monkeypatch.setattr(owner.store, "save", broken)
     try:
         with pytest.raises(OSError):
-            await provider.write_file("/events.jsonl", "not acknowledged")
+            await provider.write_file("/workspace/events.jsonl", "not acknowledged")
         assert owner.envelope.revision == revision
         with pytest.raises(PersistenceUnavailableError):
             await owner.check()
@@ -531,6 +531,45 @@ async def test_blob_open_closes_owned_service_and_credential(harness, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_blob_container_is_ensured_once_per_route(harness, monkeypatch):
+    from azure.storage.blob import aio
+
+    from azure_functions_agents import _credential
+
+    fs.reset_container_cache_for_testing()
+    create_container = AsyncMock(return_value=None)
+    credential = SimpleNamespace(close=AsyncMock())
+    service = SimpleNamespace(
+        close=AsyncMock(),
+        get_container_client=lambda _name: SimpleNamespace(create_container=create_container),
+        get_blob_client=lambda **_kwargs: FakeBlob(),
+    )
+    monkeypatch.setattr(
+        _credential, "build_async_credential_with_client_id", lambda _client_id: credential
+    )
+    monkeypatch.setattr(aio, "BlobServiceClient", lambda **_kwargs: service)
+    selected = replace(
+        harness,
+        session_storage=replace(
+            harness.session_storage,
+            mode=StorageMode.BLOB,
+            connection_string=None,
+            blob_uri="https://example.blob.core.windows.net",
+        ),
+    )
+
+    for _ in range(2):
+        owner = await open_session(selected)
+        await owner.close()
+    create_container.assert_awaited_once()
+
+    fs.reset_container_cache_for_testing()
+    owner = await open_session(selected)
+    await owner.close()
+    assert create_container.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_blob_open_failure_closes_owned_service_and_credential(harness, monkeypatch):
     from azure.storage.blob import aio
 
@@ -560,8 +599,10 @@ async def test_blob_open_failure_closes_owned_service_and_credential(harness, mo
 
     with pytest.raises(PersistenceUnavailableError):
         await open_session(selected)
+    with pytest.raises(PersistenceUnavailableError):
+        await open_session(selected)
 
-    assert closed == ["service", "credential"]
+    assert closed == ["service", "credential", "service", "credential"]
 
 
 @pytest.mark.asyncio
@@ -627,8 +668,8 @@ async def test_blob_lease_etag_single_put_stale_owner_and_renew(harness, monkeyp
     owner = await open_session(selected)
     try:
         provider = fs.NativeSessionFs(owner)
-        await provider.append_file("/events.jsonl", "first")
-        await provider.append_file("/events.jsonl", " second")
+        await provider.append_file("/workspace/events.jsonl", "first")
+        await provider.append_file("/workspace/events.jsonl", " second")
         assert blob.current.renewed == 0
         await asyncio.sleep(.03)
         assert blob.current.renewed > 0
@@ -636,7 +677,7 @@ async def test_blob_lease_etag_single_put_stale_owner_and_renew(harness, monkeyp
         assert all(record.get("overwrite") is True for record in blob.writes[1:])
         blob.current.active = False
         with pytest.raises(LeaseLostError):
-            await provider.write_file("/events.jsonl", "stale")
+            await provider.write_file("/workspace/events.jsonl", "stale")
         with pytest.raises(LeaseLostError):
             await owner.complete()
         assert blob.current.released == 0
@@ -690,7 +731,7 @@ async def test_blob_renewal_loss_during_put_never_acknowledges_mutation(harness,
     monkeypatch.setattr(blob, "upload_blob", lost_renewal)
     try:
         with pytest.raises(LeaseLostError):
-            await fs.NativeSessionFs(owner).write_file("/file", "value")
+            await fs.NativeSessionFs(owner).write_file("/workspace/file", "value")
         assert owner.envelope.revision == original
     finally:
         await owner.close()
@@ -812,9 +853,34 @@ def test_normalize_callback_path_keeps_non_alias_host_paths_closed(path):
 def test_normalize_callback_path_ignores_aliases_under_posix_conventions():
     """POSIX hosts compare exactly: no case folding and no separator translation."""
     assert fs.normalize_callback_path("/srv/ws/a.txt", "posix", ("/srv/ws",)) == "/workspace/a.txt"
-    assert fs.normalize_callback_path("/SRV/ws/a.txt", "posix", ("/srv/ws",)) == "/SRV/ws/a.txt"
+    with pytest.raises(ValueError):
+        fs.normalize_callback_path("/SRV/ws/a.txt", "posix", ("/srv/ws",))
     with pytest.raises(ValueError):
         fs.normalize_callback_path("\\srv\\ws\\a.txt", "posix", ("/srv/ws",))
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/srv/ws/a.txt", "/etc/passwd", "/home/agent/notes.md", "/workspaces/other", "/var"],
+)
+def test_normalize_callback_path_rejects_paths_outside_the_virtual_roots(path):
+    """Only the virtual roots and declared aliases are addressable."""
+    with pytest.raises(ValueError, match="outside the virtual session roots"):
+        fs.normalize_callback_path(path, "posix")
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/", "/"),
+        ("/workspace", "/workspace"),
+        ("/workspace/./notes.md", "/workspace/notes.md"),
+        ("/session-state", "/session-state"),
+        ("/session-state/files/a.txt", "/session-state/files/a.txt"),
+    ],
+)
+def test_normalize_callback_path_keeps_the_virtual_roots_addressable(path, expected):
+    assert fs.normalize_callback_path(path, "posix") == expected
 
 
 def test_host_path_conventions_matches_the_running_host():

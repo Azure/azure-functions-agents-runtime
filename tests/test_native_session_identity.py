@@ -19,6 +19,15 @@ from azure_functions_agents._native_session_identity import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolated_probe_cache():
+    from azure_functions_agents import _native_session_identity as identity
+
+    identity._PROBE_SERVICES.clear()
+    yield
+    identity._PROBE_SERVICES.clear()
+
+
 @pytest.fixture
 def configured(tmp_path, monkeypatch):
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_DIR", str(tmp_path / "sessions"))
@@ -128,20 +137,14 @@ async def test_indeterminate_metadata_probe_fails_closed(configured, monkeypatch
         await guard_opposite_history(route, "agent", "session", native=False)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("result", "expected"),
-    [(None, True), (ResourceNotFoundError("missing"), False), (RuntimeError("failed"), None)],
-)
-async def test_blob_metadata_probe_closes_owned_service_and_credential(
-    configured, monkeypatch, result, expected
-):
+def _probe_double(monkeypatch, result):
+    """Install a fake Blob service whose probe returns or raises ``result``."""
     from azure.storage.blob import aio
 
     from azure_functions_agents import _credential
-    from azure_functions_agents import _native_session_identity as identity
 
-    closed = []
+    closed: list[str] = []
+    built: list[str] = []
     properties = AsyncMock(side_effect=result if isinstance(result, BaseException) else None)
     credential = SimpleNamespace(close=AsyncMock(side_effect=lambda: closed.append("credential")))
     service = SimpleNamespace(
@@ -151,18 +154,60 @@ async def test_blob_metadata_probe_closes_owned_service_and_credential(
     monkeypatch.setattr(
         _credential, "build_async_credential_with_client_id", lambda _client_id: credential
     )
-    monkeypatch.setattr(aio, "BlobServiceClient", lambda **_kwargs: service)
-    route = replace(
+
+    def build(**_kwargs):
+        built.append("service")
+        return service
+
+    monkeypatch.setattr(aio, "BlobServiceClient", build)
+    return closed, built
+
+
+def _blob_route(configured):
+    return replace(
         resolve_route(configured),
         mode=StorageMode.BLOB,
         connection_string=None,
         blob_uri="https://example.blob.core.windows.net",
     )
 
-    if expected is None:
-        with pytest.raises(PersistenceUnavailableError):
-            await identity._blob_metadata_exists(route, "state")
-    else:
-        assert await identity._blob_metadata_exists(route, "state") is expected
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [(None, True), (ResourceNotFoundError("missing"), False)],
+)
+async def test_blob_metadata_probe_reuses_one_client_per_route(
+    configured, monkeypatch, result, expected
+):
+    from azure_functions_agents import _native_session_identity as identity
+
+    closed, built = _probe_double(monkeypatch, result)
+    route = _blob_route(configured)
+
+    assert await identity._blob_metadata_exists(route, "state") is expected
+    assert await identity._blob_metadata_exists(route, "other") is expected
+    assert built == ["service"]
+    assert closed == []
+
+    await identity.close_probe_clients()
     assert closed == ["service", "credential"]
+    assert await identity._blob_metadata_exists(route, "state") is expected
+    assert built == ["service", "service"]
+
+
+@pytest.mark.asyncio
+async def test_failed_blob_metadata_probe_drops_the_cached_client(configured, monkeypatch):
+    from azure_functions_agents import _native_session_identity as identity
+
+    closed, built = _probe_double(monkeypatch, RuntimeError("failed"))
+    route = _blob_route(configured)
+
+    with pytest.raises(PersistenceUnavailableError):
+        await identity._blob_metadata_exists(route, "state")
+    assert closed == ["service", "credential"]
+    assert identity._PROBE_SERVICES == {}
+
+    with pytest.raises(PersistenceUnavailableError):
+        await identity._blob_metadata_exists(route, "state")
+    assert built == ["service", "service"]

@@ -288,3 +288,7 @@ async def shutdown_client_manager() -> None:
             from ._copilot import shutdown
 
             cleanup.push_async_callback(shutdown)
+        if "azure_functions_agents._native_session_identity" in sys.modules:
+            from ._native_session_identity import close_probe_clients
+
+            cleanup.push_async_callback(close_probe_clients)

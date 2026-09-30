@@ -47,7 +47,7 @@ from ._native_session_identity import (
 )
 
 if TYPE_CHECKING:
-    from azure.storage.blob.aio import BlobClient, BlobLeaseClient
+    from azure.storage.blob.aio import BlobClient, BlobLeaseClient, BlobServiceClient
 
     from ._harness import AppHarness
 
@@ -85,6 +85,8 @@ type PathConventions = Literal["posix", "windows"]
 HOST_PATH_CONVENTIONS: PathConventions = "windows" if os.name == "nt" else "posix"
 
 WORKSPACE_ROOT = "/workspace"
+SESSION_STATE_ROOT = "/session-state"
+VIRTUAL_ROOTS = (WORKSPACE_ROOT, SESSION_STATE_ROOT)
 
 
 def _workspace_relative(path: str, alias: str, conventions: PathConventions) -> str | None:
@@ -108,7 +110,11 @@ def _workspace_relative(path: str, alias: str, conventions: PathConventions) -> 
 def normalize_callback_path(
     path: str, conventions: PathConventions, workspace_aliases: Sequence[str] = ()
 ) -> str:
-    """Canonicalize one SDK path, mapping declared host workspace roots to the virtual root."""
+    """Canonicalize one SDK path against the virtual session roots.
+
+    Declared host workspace roots map onto ``/workspace``; any other host-qualified
+    path is rejected instead of being adopted into the virtual tree.
+    """
     if not isinstance(path, str) or "\x00" in path:
         raise ValueError("Invalid native filesystem path.")
     for alias in workspace_aliases:
@@ -119,7 +125,12 @@ def normalize_callback_path(
         if path.startswith("\\\\") or re.match(r"[A-Za-z]:", path):
             raise ValueError("Invalid native filesystem path.")
         path = path.replace("\\", "/")
-    return normalize_path(path)
+    normalized = normalize_path(path)
+    if normalized != "/" and not any(
+        normalized == root or normalized.startswith(f"{root}/") for root in VIRTUAL_ROOTS
+    ):
+        raise ValueError("Native filesystem path is outside the virtual session roots.")
+    return normalized
 
 
 class _Document(BaseModel):
@@ -487,14 +498,36 @@ class _BlobStore:
 type _Store = _LocalStore | _BlobStore
 
 
+# Container creation is a once-per-process route concern; a create that failed for
+# any other reason (including missing permission) is never remembered as ensured.
+_ENSURED_CONTAINERS: set[tuple[str, str]] = set()
+_ENSURED_CONTAINERS_LOCK = asyncio.Lock()
+
+
+def reset_container_cache_for_testing() -> None:
+    """Drop the remembered container ensures. Test-only helper."""
+    _ENSURED_CONTAINERS.clear()
+
+
+async def _ensure_container(route: StorageRoute, service: BlobServiceClient) -> None:
+    key = (route.identity_key, route.container)
+    if key in _ENSURED_CONTAINERS:
+        return
+    async with _ENSURED_CONTAINERS_LOCK:
+        if key in _ENSURED_CONTAINERS:
+            return
+        container = service.get_container_client(route.container)
+        with contextlib.suppress(ResourceExistsError):
+            await container.create_container()
+        _ENSURED_CONTAINERS.add(key)
+
+
 async def _blob_client(
     route: StorageRoute, name: str
 ) -> tuple[BlobClient, _OwnedBlobService]:
     owned = await _open_owned_blob_service(route)
     try:
-        container = owned.service.get_container_client(route.container)
-        with contextlib.suppress(ResourceExistsError):
-            await container.create_container()
+        await _ensure_container(route, owned.service)
         return (
             owned.service.get_blob_client(container=route.container, blob=name),
             owned,

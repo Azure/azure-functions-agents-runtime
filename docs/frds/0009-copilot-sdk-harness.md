@@ -582,7 +582,7 @@ remaining implementation decisions or qualification obligations are complete.
 | 11 | Session startup failures | Prescribe marker sequencing / specify observable behavior | Require one active turn per agent/session, safe retry after a startup failure that did not begin a turn or damage state, and explicit errors for uncertain continuation; leave marker ordering and cleanup to implementation | Human | 2026-09-28 |
 | 12 | Feature specification sign-off | Keep In review / finalize the agreed feature contracts | Finalized after approving decision 11; section 4.8 remains an explicit record of unresolved implementation choices and required evidence, not a claim of parity or production readiness | Human (larohra) | 2026-09-28 |
 | 13 | Native session delivery and persistence | Shared MAF JSONL or fragmented native Blob tree / one isolated lease-fenced envelope | Propose sections 4.5/4.9's encoded identities, frozen context, single-object local/Blob SessionFs, serialized/latching callbacks, safe pre-handoff rollback, uncertain post-handoff state, metadata-only history guards, tombstone deletion and native compaction after #241. Dedicated architecture-agent re-review APPROVED these mechanics on 2026-09-29 after two REVISE reviews; qualification was still open at this decision and is completed by decision 15. Human-approved contracts/status are unchanged. | Agent proposal; architecture-agent approval | 2026-09-29 |
-| 14 | Recorded host workspace on resume | Fuzzy suffix matching of recorded paths / persist the creating worker's workspace and alias it | The runtime resolves the recorded initial working directory through SessionFs before loading events, so the envelope records `workspace_path` and the provider maps that alias plus the current worker's directory to the virtual `/workspace`; unaliased host-qualified paths still fail closed and `protocol_version` moves to 4 so pre-alias envelopes are rejected | Agent proposal | 2026-09-30 |
+| 14 | Recorded host workspace on resume | Fuzzy suffix matching of recorded paths / persist the creating worker's workspace and alias it | The runtime resolves the recorded initial working directory through SessionFs before loading events, so the envelope records `workspace_path` and the provider maps that alias plus the current worker's directory to the virtual `/workspace`; unaliased host-qualified paths still fail closed and `protocol_version` moves to 4 so pre-alias envelopes are rejected. Dedicated architecture-agent re-review on 2026-09-30 returned REVISE: host-qualified paths outside the declared aliases were normalized instead of rejected, a failed create/resume RPC could permanently strand a completed tree as `uncertain`, and the multi-worker/deployed startup rejections had been dropped. Those findings are now implemented; explicit human acknowledgement of this decision is still pending | Agent proposal; architecture-agent REVISE addressed, human acknowledgement pending | 2026-09-30 |
 | 15 | #1335 qualification boundary | Treat mocked/local evidence as sufficient / qualify real Blob continuation and compaction while retaining later gates | Accept the sanitized section 4.8 evidence as completing #1335: real Entra Blob protocol tests, replacement-process tool-result continuation and semantic compacted-summary reuse. Do not claim verbatim arbitrary-token retention, Functions hosting, dual-harness end-to-end qualification or production activation; retain those gates in #1357/#1337. | Human (supplied qualification evidence) | 2026-09-30 |
 
 ## 6. Feature-level acceptance and test plan
@@ -639,6 +639,14 @@ this document does not introduce an unimplemented schema or rewrite runtime docs
   received dedicated architecture-agent APPROVE on 2026-09-29 after two REVISE
   reviews (decision 13). This approves design, not implementation or production
   qualification; existing human-approved feature contracts remain unchanged.
+- **Recorded-workspace alias review (decision 14):** Dedicated architecture-agent
+  review on 2026-09-30 returned REVISE. The blocking findings — unbounded
+  host-qualified callback paths, permanently stranded `uncertain` sessions after
+  a transient create/resume RPC failure, and the removed multi-worker/deployed
+  startup rejections — have been implemented, with the SessionFs callback
+  surface now limited to the `/workspace` and `/session-state` virtual roots and
+  their declared aliases. **Explicit human acknowledgement of decision 14 is
+  still pending**; no human sign-off is recorded for it.
 - **#1335 qualification:** Complete for real Entra Blob lease/fencing and
   cross-client durability, replacement-process tool-result continuation, and
   compacted semantic-summary cold restore (§4.8 and §6).

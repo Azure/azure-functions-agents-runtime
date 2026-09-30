@@ -15,6 +15,7 @@ from azurefunctions.extensions.http.fastapi import Request, Response
 
 from .._harness import HarnessKind, bind_harness
 from .._logger import logger
+from .._native_session_identity import NativeSessionError
 from .._observability import (
     ATTR_FAULT_DOMAIN,
     FaultDomain,
@@ -536,6 +537,22 @@ def make_http_agent_handler(
                     status_code=200,
                     media_type="text/plain",
                     headers={_SESSION_ID_HEADER: session_id},
+                )
+            except NativeSessionError as exc:
+                # Only an HTTP surface carries status semantics for a session
+                # conflict or an unavailable store; other boundaries re-raise.
+                span.set_attribute("af.agent.outcome", "error")
+                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                logger.error("HTTP agent '%s' session refused: %s", resolved.name, exc)
+                return Response(
+                    content=json.dumps({"error": str(exc)}),
+                    status_code=exc.status_code,
+                    media_type="application/json",
+                    headers=(
+                        {_SESSION_ID_HEADER: session_id}
+                        if echo_failed_session_id or turn_completed
+                        else None
+                    ),
                 )
             except Exception as exc:
                 span.set_attribute("af.agent.outcome", "error")

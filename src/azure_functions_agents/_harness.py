@@ -114,6 +114,16 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
             from ._native_session_identity import resolve_route
 
             check_sdk_dependency()
+            if os.environ.get(WORKER_COUNT_ENV, "1").strip() != "1":
+                raise UnsupportedCapabilityError(
+                    f"Copilot local preview requires {WORKER_COUNT_ENV}=1. "
+                    "Multi-worker hosting is not qualified for native session persistence."
+                )
+            if os.environ.get("WEBSITE_INSTANCE_ID"):
+                raise UnsupportedCapabilityError(
+                    "Copilot preview supports local execution only; "
+                    "Azure hosting is not qualified."
+                )
             raw_provider = os.environ.get(PROVIDER_ENV, "").strip().lower()
             try:
                 provider = ProviderKind(raw_provider)

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
 import hashlib
 import os
 from dataclasses import dataclass, field, replace
@@ -74,6 +76,41 @@ async def _open_owned_blob_service(route: StorageRoute) -> _OwnedBlobService:
                     [error, close_error],
                 ) from None
         raise
+
+
+# Metadata probes run on every MAF turn, so the probe client is cached per route.
+# The key is the route's non-secret identity digest; no credential material is stored
+# in the key and the route itself keeps its secrets out of reprs.
+_PROBE_SERVICES: dict[str, _OwnedBlobService] = {}
+_PROBE_SERVICES_LOCK = asyncio.Lock()
+
+
+async def _probe_blob_service(route: StorageRoute) -> _OwnedBlobService:
+    cached = _PROBE_SERVICES.get(route.identity_key)
+    if cached is not None:
+        return cached
+    async with _PROBE_SERVICES_LOCK:
+        cached = _PROBE_SERVICES.get(route.identity_key)
+        if cached is None:
+            cached = await _open_owned_blob_service(route)
+            _PROBE_SERVICES[route.identity_key] = cached
+        return cached
+
+
+async def _drop_probe_blob_service(identity_key: str, owned: _OwnedBlobService) -> None:
+    if _PROBE_SERVICES.get(identity_key) is owned:
+        del _PROBE_SERVICES[identity_key]
+    with contextlib.suppress(Exception):
+        await owned.close()
+
+
+async def close_probe_clients() -> None:
+    """Close and drop every cached metadata probe client."""
+    cached = list(_PROBE_SERVICES.items())
+    _PROBE_SERVICES.clear()
+    for _, owned in cached:
+        with contextlib.suppress(Exception):
+            await owned.close()
 
 
 class NativeSessionError(RuntimeError):
@@ -184,17 +221,18 @@ def state_name(route: StorageRoute, agent_slug: str, session_id: str) -> str:
 
 async def _blob_metadata_exists(route: StorageRoute, name: str) -> bool:
     try:
-        owned = await _open_owned_blob_service(route)
-        try:
-            await owned.service.get_blob_client(
-                container=route.container, blob=name
-            ).get_blob_properties()
-            return True
-        finally:
-            await owned.close()
+        owned = await _probe_blob_service(route)
+    except Exception:
+        raise PersistenceUnavailableError("Session metadata could not be checked.") from None
+    try:
+        await owned.service.get_blob_client(
+            container=route.container, blob=name
+        ).get_blob_properties()
+        return True
     except ResourceNotFoundError:
         return False
     except Exception:
+        await _drop_probe_blob_service(route.identity_key, owned)
         raise PersistenceUnavailableError("Session metadata could not be checked.") from None
 
 
