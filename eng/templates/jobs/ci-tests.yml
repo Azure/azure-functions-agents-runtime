@@ -50,7 +50,9 @@ jobs:
         inputs:
           workingFile: integrations/vally-executor-azure-functions/.npmrc
         displayName: 'Authenticate executor npm feed'
-      - bash: npm ci
+      # Vally CLI's server commands depend on native better-sqlite3, but this
+      # eval-only package neither imports nor runs those commands.
+      - bash: npm ci --ignore-scripts --no-audit
         workingDirectory: integrations/vally-executor-azure-functions
         displayName: 'Install locked dependencies'
       - bash: npm audit --audit-level=moderate
