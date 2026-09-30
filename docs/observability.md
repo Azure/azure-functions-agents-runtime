@@ -120,21 +120,32 @@ Plus `af.lifecycle_stage=agent_run`, and `af.fault_domain` if the run fails.
 
 #### Stable agent ID
 
-MAF `gen_ai.*` spans set `gen_ai.agent.id` to a deterministic UUIDv5 derived from a
-best-effort app correlation key plus the agent slug. The key is not a guaranteed unique
-Azure resource ID, and no app setting is required. It resolves in this order:
+MAF `gen_ai.*` spans set `gen_ai.agent.id` to a deterministic, human-readable
+`<correlation-key>/<agent-slug>` string. The correlation key is best effort, is
+not a guaranteed unique Azure resource ID, and needs no app setting. It is
+lower-cased and resolves from non-blank values in this order:
 
-1. `WEBSITE_OWNER_NAME` + `WEBSITE_DEPLOYMENT_ID`, when both are non-blank:
-   `{owner}/{deployment_id}`
-2. `WEBSITE_SITE_NAME`, when non-blank: `site/{site}`
-3. `local`
+1. `WEBSITE_OWNER_NAME`.
+2. `WEBSITE_DEPLOYMENT_ID`, or `WEBSITE_SITE_NAME` when the deployment id is
+   missing. Site name stands in for a missing deployment id so an owner-only key
+   (shared across apps in the same webspace) still becomes app-specific when the
+   site name is available.
+3. `local` when none of those values is available.
+
+For example, with
+`WEBSITE_OWNER_NAME=0f2c8a1e-1234-4d5e-9abc-0123456789ab+contoso-rg-EastUSwebspace-Linux`,
+`WEBSITE_DEPLOYMENT_ID=contoso-agents`, and agent file
+`agents/billing.agent.md`, the id is
+`0f2c8a1e-1234-4d5e-9abc-0123456789ab+contoso-rg-eastuswebspace-linux/contoso-agents/billing`.
+Locally, the same agent is `local/billing`. The id can contain the subscription
+id from `WEBSITE_OWNER_NAME`, so that subscription id is visible in telemetry.
 
 Linux SKU behavior:
 
 | Linux SKU | Pair available? | Caveat |
 | --- | --- | --- |
 | Consumption | Set during specialization. | A later resolved reference can replace either value. |
-| Flex Consumption | Set, but owner may be empty. | Empty owner falls back to site name; resolved references are overlaid after platform values. |
+| Flex Consumption | Set, but owner may be empty. | Empty owner means the key uses deployment id or site name only; resolved references are overlaid after platform values. |
 | Premium / Dedicated | Set. | Customer app settings can override either value, so correlation is customer-controlled. |
 
 The same value is emitted in the `agent_runtime_indexed` startup summary as `agent_id` so

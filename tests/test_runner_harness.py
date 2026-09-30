@@ -19,7 +19,6 @@ from agent_framework import (
 )
 
 from azure_functions_agents import runner
-from azure_functions_agents._agent_identity import agent_id
 from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
@@ -172,7 +171,9 @@ def test_build_role_agent_uses_stable_agent_id(monkeypatch: Any) -> None:
             agent_configuration=AgentConfiguration(),
         )
 
-    assert [options["id"] for options in captured] == [agent_id("billing")] * 2
+    assert [options["id"] for options in captured] == [
+        "sub+rg-eastuswebspace/deployment-123/billing"
+    ] * 2
     assert captured[0]["name"] == "billing"
 
 
