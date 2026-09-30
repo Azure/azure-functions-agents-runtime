@@ -154,13 +154,16 @@ class OpenAIProvider(CopilotProvider):
     def sdk_config(self, model: str, _tokens: ProviderTokenSource) -> ProviderConfig:
         from copilot.session import ProviderConfig
 
+        async def token(_args: ProviderTokenArgs) -> str:
+            return self.api_key
+
         return ProviderConfig(
             type=_PROVIDER_WIRE_OPENAI,
             wire_api=_WIRE_API_RESPONSES,
             base_url=_OPENAI_BASE_URL,
             model_id=model,
             wire_model=model,
-            bearer_token_provider=lambda _args: self.api_key,
+            bearer_token_provider=token,
         )
 
 

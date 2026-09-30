@@ -260,11 +260,12 @@ provider module's lazy config builders.
 
 `ClientManager` remains the MAF provider extension point, not the new harness
 boundary. Flag-off custom managers and subclasses retain their existing behavior.
-Copilot accepts only the exact runtime-created built-in manager: selection and
-catalog validation reject a replacement before `FunctionApp` mutation, and
-execution rechecks in case `set_client_manager()` replaced it later. Rejection is
-an explicit migration diagnostic with no custom MAF client construction or
-fallback.
+Copilot accepts only the exact runtime-created built-in manager: an explicitly
+installed `ClientManager`, including `MAFClientManager()`, is a MAF-only
+replacement. Selection and catalog validation reject it before `FunctionApp`
+mutation, and execution rechecks in case `set_client_manager()` replaced it
+later. Rejection is an explicit migration diagnostic with no custom MAF client
+construction or fallback.
 
 The Copilot SDK version pinned in `pyproject.toml` uses the stable singular
 `ProviderConfig` on both create and resume:
@@ -272,7 +273,7 @@ The Copilot SDK version pinned in `pyproject.toml` uses the stable singular
 | Target | SDK provider | Authentication and model mapping |
 | --- | --- | --- |
 | OpenAI | `type=openai`, `wire_api=responses`, `https://api.openai.com/v1` | The configured API key is frozen at startup and supplied by callback; the resolved model is the session model, `model_id`, and `wire_model`. |
-| Azure OpenAI | `type=azure`, `wire_api=responses`, host-only `AZURE_OPENAI_ENDPOINT` | Startup freezes endpoint, optional API version, and auth mode. A nonblank API key wins and is frozen; otherwise a refreshable callback uses `https://cognitiveservices.azure.com/.default`. Optional nonblank API version is passed under `azure`; omission uses versionless v1. The deployment/model is supplied in all three model positions. |
+| Azure OpenAI | `type=azure`, `wire_api=responses`, host-only `AZURE_OPENAI_ENDPOINT` | Host-only HTTPS endpoints intentionally include custom domains such as APIM. Startup freezes endpoint, optional API version, and auth mode. A nonblank API key wins and is frozen; otherwise a refreshable callback uses the public-cloud-only `https://cognitiveservices.azure.com/.default` scope; sovereign clouds are unsupported. Optional nonblank API version is passed under `azure`; omission uses versionless v1. The deployment/model is supplied in all three model positions. |
 | Foundry project | `type=openai`, `wire_api=responses`, normalized `<project-endpoint>/openai/v1` | A refreshable callback uses `https://ai.azure.com/.default`; model metadata is explicit and SDK Responses requests use `store=false`. |
 
 Endpoints and API-version tokens are validated before registration without

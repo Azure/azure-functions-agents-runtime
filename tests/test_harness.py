@@ -381,7 +381,7 @@ def test_custom_manager_is_rejected_before_function_app_construction(
     app_constructor = Mock(side_effect=AssertionError("FunctionApp must not be constructed"))
     monkeypatch.setattr(app_module.func, "FunctionApp", app_constructor)
 
-    with pytest.raises(UnsupportedCapabilityError, match=r"custom ClientManager.*MAF"):
+    with pytest.raises(UnsupportedCapabilityError, match=r"ClientManager.*MAF-only"):
         create_function_app(SAMPLE)
 
     app_constructor.assert_not_called()
@@ -393,7 +393,7 @@ def test_replaced_or_subclassed_builtin_manager_is_rejected(
 ):
     replace_client_manager(manager)
 
-    with pytest.raises(UnsupportedCapabilityError, match=r"custom ClientManager.*MAF"):
+    with pytest.raises(UnsupportedCapabilityError, match=r"MAFClientManager.*MAF-only"):
         _harness.get_harness(preview, new_app=True)
 
 

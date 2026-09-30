@@ -100,9 +100,10 @@ def check_sdk_dependency() -> None:
 def validate_copilot_client_manager() -> None:
     if not _is_active_client_manager_builtin():
         raise UnsupportedCapabilityError(
-            "Copilot preview does not support a custom ClientManager. "
-            f"Restart with {FLAG}=false to use the custom manager through MAF; "
-            "no client or fallback was constructed."
+            "Copilot preview accepts only the runtime-created MAFClientManager singleton. "
+            "An explicitly installed ClientManager, including MAFClientManager(), is a MAF-only "
+            f"replacement; restart with {FLAG}=false to use it through MAF. "
+            "No client or fallback was constructed."
         )
 
 

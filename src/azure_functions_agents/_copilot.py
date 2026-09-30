@@ -38,8 +38,10 @@ if TYPE_CHECKING:
     from copilot.session_events import PermissionRequest, SessionEvent
     from copilot.tools import Tool, ToolInvocation, ToolResult
 
+    from ._copilot_providers import ProviderTokenSource
     from ._function_tool import FunctionTool
     from .runner import AgentResult
+
 
 class _SessionOptions(TypedDict):
     model: str
@@ -169,6 +171,31 @@ class _NativeRuntime:
                 logger.error("Copilot native process-exit cleanup failed.")
 
 
+class _RequestTokenSource:
+    def __init__(self, owner: _NativeRuntime) -> None:
+        self._owner = owner
+        self._error: CopilotPreviewError | None = None
+
+    def bearer_token_provider(
+        self, scope: str, diagnostic: str
+    ) -> Callable[[ProviderTokenArgs], Awaitable[str]]:
+        callback = self._owner.bearer_token_provider(scope, diagnostic)
+
+        async def token(args: ProviderTokenArgs) -> str:
+            try:
+                return await callback(args)
+            except CopilotPreviewError as error:
+                self._error = error
+                raise
+
+        return token
+
+    def take_error(self) -> CopilotPreviewError | None:
+        error = self._error
+        self._error = None
+        return error
+
+
 _RUNTIMES: dict[Path, _NativeRuntime] = {}
 
 
@@ -243,11 +270,11 @@ def _tool(function: FunctionTool, calls: list[dict[str, Any]]) -> Tool:
     )
 
 
-def _provider(harness: AppHarness, owner: _NativeRuntime, model: str) -> ProviderConfig:
+def _provider(harness: AppHarness, tokens: ProviderTokenSource, model: str) -> ProviderConfig:
     if harness.provider is None:
         raise CopilotPreviewError("Copilot preview has no valid provider target.")
     try:
-        return harness.provider.sdk_config(model, owner)
+        return harness.provider.sdk_config(model, tokens)
     except CopilotPreviewError:
         raise
     except Exception:
@@ -258,7 +285,6 @@ def _provider(harness: AppHarness, owner: _NativeRuntime, model: str) -> Provide
             harness.provider.auth_label,
         )
         raise CopilotPreviewError(harness.provider.setup_diagnostic()) from None
-    raise CopilotPreviewError("Copilot preview has no valid provider target.")
 
 
 def _completed_turn(events: list[SessionEvent]) -> bool:
@@ -372,7 +398,8 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     output_tokens = (output_tokens or 0) + used_output
 
     try:
-        provider = _provider(harness, owner, request.model)
+        token_source = _RequestTokenSource(owner)
+        provider = _provider(harness, token_source, request.model)
         async with _session_lock_bounded_by(
             native_id, request.deadline, agent_slug=request.agent_slug
         ), asyncio.timeout_at(request.deadline):
@@ -442,10 +469,19 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 )
                 try:
                     invocation_started = True
-                    response = await session.send_and_wait(
-                        request.prompt,
-                        timeout=max(0.0, request.deadline - asyncio.get_running_loop().time()),
-                    )
+                    try:
+                        response = await session.send_and_wait(
+                            request.prompt,
+                            timeout=max(0.0, request.deadline - asyncio.get_running_loop().time()),
+                        )
+                    except BaseException:
+                        token_error = token_source.take_error()
+                        if token_error is not None:
+                            raise token_error from None
+                        raise
+                    token_error = token_source.take_error()
+                    if token_error is not None:
+                        raise token_error
                     match response.data if response is not None else None:
                         case AssistantMessageData(content=content) if content.strip():
                             await _verify_completed_turn(session)

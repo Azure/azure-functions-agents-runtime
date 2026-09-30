@@ -397,7 +397,8 @@ async def test_provider_options_use_sdk_declared_types(
         await _copilot.shutdown()
 
 
-def test_openai_provider_callback_uses_frozen_startup_key(preview, monkeypatch):
+@pytest.mark.asyncio
+async def test_openai_provider_callback_uses_frozen_startup_key(preview, monkeypatch):
     owner = _copilot._runtime(preview)
     monkeypatch.setenv("OPENAI_API_KEY", "sentinel-one")
     provider = _copilot._provider(preview, owner, "per-agent-model")
@@ -411,9 +412,9 @@ def test_openai_provider_callback_uses_frozen_startup_key(preview, monkeypatch):
         "bearer_token_provider": provider["bearer_token_provider"],
     }
     callback = provider["bearer_token_provider"]
-    assert callback(SimpleNamespace()) == "not-a-credential"
+    assert await callback(SimpleNamespace()) == "not-a-credential"
     monkeypatch.setenv("OPENAI_API_KEY", "sentinel-two")
-    assert callback(SimpleNamespace()) == "not-a-credential"
+    assert await callback(SimpleNamespace()) == "not-a-credential"
 
 
 def test_azure_api_key_provider_avoids_credential_construction(preview, monkeypatch):
@@ -513,6 +514,67 @@ async def test_entra_callback_failure_is_sanitized(preview, monkeypatch):
         assert "sentinel-private-credential-detail" not in str(error.value)
     finally:
         await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_entra_failure_diagnostic_is_request_scoped(preview, monkeypatch):
+    import copilot
+    from copilot.session_events import AssistantMessageData, SessionEvent, SessionEventType
+
+    selected = replace(
+        preview,
+        provider=AzureOpenAIProvider("https://fixture.openai.azure.com"),
+    )
+    credential = SimpleNamespace(
+        get_token=AsyncMock(side_effect=RuntimeError("sentinel-private-credential-detail")),
+        close=AsyncMock(),
+    )
+    token_failed = asyncio.Event()
+    release_failure = asyncio.Event()
+    client = _fake_client()
+
+    async def create_session(**options):
+        session = _fake_client().create_session.return_value
+        callback = options["provider"]["bearer_token_provider"]
+
+        async def send_and_wait(prompt, **_kwargs):
+            if prompt == "bad":
+                with pytest.raises(CopilotPreviewError):
+                    await callback(SimpleNamespace())
+                token_failed.set()
+                await release_failure.wait()
+                raise RuntimeError("SDK masked the token callback failure")
+            await token_failed.wait()
+            release_failure.set()
+            return SessionEvent(
+                data=AssistantMessageData(content="synthetic reply", message_id="fixture"),
+                id=uuid4(),
+                timestamp=datetime.now(UTC),
+                type=SessionEventType.ASSISTANT_MESSAGE,
+            )
+
+        session.send_and_wait.side_effect = send_and_wait
+        return session
+
+    client.create_session.side_effect = create_session
+    monkeypatch.setattr(_copilot, "build_async_credential", Mock(return_value=credential))
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    bad_request = replace(_request(), prompt="bad", session_id="bad")
+    good_request = replace(_request(), prompt="good", session_id="good")
+    try:
+        bad_result, good_result = await asyncio.gather(
+            _copilot.run(selected, bad_request),
+            _copilot.run(selected, good_request),
+            return_exceptions=True,
+        )
+    finally:
+        await _copilot.shutdown()
+
+    assert isinstance(bad_result, CopilotPreviewError)
+    assert "Azure OpenAI" in str(bad_result)
+    assert "Entra token" in str(bad_result)
+    assert "sentinel-private-credential-detail" not in str(bad_result)
+    assert good_result.content == "synthetic reply"
 
 
 def _registered_azure_chat(monkeypatch, tmp_path):
@@ -680,7 +742,7 @@ async def test_late_custom_manager_replacement_fails_before_native_execution(
     native = Mock(side_effect=AssertionError("Native runtime must not be acquired"))
     monkeypatch.setattr(_copilot, "_runtime", native)
 
-    with pytest.raises(UnsupportedCapabilityError, match=r"custom ClientManager.*MAF"):
+    with pytest.raises(UnsupportedCapabilityError, match=r"ClientManager.*MAF-only"):
         await _copilot.run(preview, _request())
 
     native.assert_not_called()

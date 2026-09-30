@@ -444,6 +444,29 @@ async def test_native_provider_auth_failure_is_sanitized_through_public_route(
 
 
 @pytest.mark.asyncio
+async def test_native_entra_token_failure_preserves_diagnostic(native, monkeypatch):
+    if native.provider == "openai" or native.auth == "api_key":
+        pytest.skip("Only Entra-backed providers invoke the bearer-token callback.")
+    native.credential.get_token.side_effect = RuntimeError("sentinel-private-token-callback")
+    app = create_function_app(native.root)
+    chat = next(
+        item.get_user_function()
+        for item in app.get_functions()
+        if item.get_function_name() == "agent_main_builtin_chat"
+    )
+    try:
+        response = await chat(
+            SimpleNamespace(headers={}, json=AsyncMock(return_value={"prompt": "hello"}))
+        )
+        body = response.body.decode()
+        assert response.status_code == 500
+        assert "Entra token" in body
+        assert "sentinel-private-token-callback" not in body
+    finally:
+        await shutdown_client_manager()
+
+
+@pytest.mark.asyncio
 async def test_native_startup_failure_preserves_completed_session(native, monkeypatch):
     app = create_function_app(native.root)
     chat = next(

@@ -53,7 +53,8 @@ Remove-Item Env:AZURE_OPENAI_ENDPOINT, Env:AZURE_OPENAI_API_KEY, `
 ### Azure OpenAI API key
 
 The endpoint must be host-only; do not include `/openai`, deployment paths,
-query strings, or credentials.
+query strings, or credentials. Host-only custom HTTPS domains, such as APIM,
+are intentionally supported.
 
 ```powershell
 $env:AZURE_FUNCTIONS_AGENTS_PROVIDER = "azure_openai"
@@ -70,7 +71,8 @@ Remove-Item Env:OPENAI_API_KEY, Env:FOUNDRY_PROJECT_ENDPOINT, Env:FOUNDRY_MODEL 
 
 Use an approved developer credential. `DefaultAzureCredential` supports the
 Azure CLI login below; `AZURE_CLIENT_ID` may select an approved identity where
-your credential policy requires it.
+your credential policy requires it. The Entra scope targets public Azure cloud
+only; sovereign clouds are unsupported.
 
 ```powershell
 az login --tenant "<tenant-id>"
