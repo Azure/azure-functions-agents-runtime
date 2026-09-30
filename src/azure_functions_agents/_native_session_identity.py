@@ -131,6 +131,12 @@ class CorruptSessionError(NativeSessionError):
     """A persisted native envelope failed validation."""
 
 
+class SessionCapacityError(NativeSessionError):
+    """The session exceeded its storage budget; retry requires a new ID."""
+
+    status_code = 413
+
+
 class PersistenceUnavailableError(NativeSessionError):
     status_code = 503
 

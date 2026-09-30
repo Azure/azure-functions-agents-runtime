@@ -325,6 +325,7 @@ def test_http_handler_maps_native_session_errors_to_their_status(
     from azure_functions_agents._native_session_identity import (
         IncompatibleSessionError,
         PersistenceUnavailableError,
+        SessionCapacityError,
     )
 
     failure: Exception = IncompatibleSessionError("session is not safely resumable")
@@ -349,6 +350,14 @@ def test_http_handler_maps_native_session_errors_to_their_status(
     unavailable = asyncio.run(copilot(DummyRequest({"message": "valid"})))
     assert unavailable.status_code == 503
     assert "x-ms-session-id" not in unavailable.headers
+
+    failure = SessionCapacityError("native session storage limit exceeded; use a new ID")
+    full = asyncio.run(
+        copilot(DummyRequest({"message": "valid"}, headers={"x-ms-session-id": "existing"}))
+    )
+    assert full.status_code == 413
+    assert full.headers["x-ms-session-id"] == "existing"
+    assert json.loads(full.body)["error"] == str(failure)
 
 
 def test_http_handler_records_invalid_json_event(monkeypatch: Any) -> None:

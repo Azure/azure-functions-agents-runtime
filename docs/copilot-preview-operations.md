@@ -81,9 +81,10 @@ namespace, and neither format is read or rewritten by the other.
 
 The native runtime only addresses two virtual roots through the SessionFs
 callbacks: `/workspace` (the recorded host working directory, including its
-declared host-path aliases) and `/session-state`. Any other host-qualified or
-absolute path is rejected before it can touch storage, as is any path that
-traverses out of a root.
+declared host-path aliases) and `/session-state`. Well-formed paths outside those
+roots are denied with `EACCES` before touching storage, without latching a
+session failure. Malformed paths, traversal, NUL and unaliased drive/UNC paths
+remain latched invariant violations.
 
 ### Single-object size limit
 
@@ -91,10 +92,13 @@ The whole session — envelope metadata plus every file the native runtime wrote
 is serialized into one object capped at 4 MiB (`MAX_ENVELOPE_BYTES`). During a
 turn the in-flight `working` tree is stored alongside the last `completed` tree,
 so a session is bounded in practice by roughly half that: about 2 MiB of session
-files. Crossing the cap fails the turn with `Native session exceeds the
-single-object storage limit.` (503) rather than truncating state, and an
-oversize object read back is rejected as corrupt. Keep native workspace output
-small; this preview has no chunking or external-blob spill.
+files. Crossing the cap raises `SessionCapacityError` with `Native session exceeds
+the single-object storage limit; use a new ID.` (413), before publishing the
+oversized state. This is terminal for that session, not a transient storage
+outage: do not retry the same ID; start a new conversation with a new ID.
+The prior persisted bytes remain unchanged, but there is no automatic pruning,
+truncation, chunking or external-blob spill to make that session fit. An oversize
+object read back is rejected as corrupt. Keep native workspace output small.
 
 ## Inspecting a session
 
@@ -162,6 +166,7 @@ credentials) and map to HTTP status codes on the built-in chat route:
 | Unknown ID used as a resume | 409 | `Native session has no completed turn to resume.` |
 | Opposite-harness history for the same ID | 409 | `This session has MAF history, not native state; use a new ID.` |
 | Non-resumable state (`active`, `uncertain`, `deleted`, uncertain handoff) | 409 | `Native session is not safely resumable; use a new ID.` |
+| Session envelope exceeds 4 MiB (terminal; new ID required) | 413 | `Native session exceeds the single-object storage limit; use a new ID.` |
 | Storage unavailable, lease lost, deadline exceeded mid-turn | 503 | `Native session storage is unavailable.` |
 | Envelope corruption or version mismatch | 500 | Content-free validation diagnostic. |
 
@@ -173,9 +178,13 @@ those surfaces propagate the original refusal instead of rewriting a status.
 A storage failure aborts the turn; it never becomes a model-visible tool result
 or a success-shaped empty response, and it never silently resets a conversation.
 Expected filesystem result errors such as `ENOENT`, `EEXIST`, `ENOTEMPTY`,
-`EISDIR` and `ENOTDIR` are normal SessionFs callback responses and do not latch
-a storage failure. Unexpected callback exceptions and persistence, lease/ETag
-or envelope-corruption failures still fail closed.
+`EISDIR`, `ENOTDIR` and `EACCES` for well-formed out-of-root paths are normal
+SessionFs callback responses and do not latch a storage failure. The pinned
+SDK exposes only `ENOENT` and `UNKNOWN` result codes: it carries the provider's
+`EACCES` permission-denied diagnostic as `UNKNOWN`, while its `exists` adapter
+returns `false`. Neither result grants access or mutates storage. Malformed
+paths and other invariant violations, unexpected callback exceptions, and
+persistence, lease/ETag or envelope-corruption failures still latch and fail closed.
 
 ## Versions, legacy IDs and rollback
 

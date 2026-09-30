@@ -365,8 +365,11 @@ and prior ETag, never staged blocks or side blobs. Increment `revision` and
 update in-memory state only after acknowledgment.
 Azure's strong consistency provides read-after-write; rename is one
 replacement, never a multi-blob copy. Cap the serialized envelope at a
-qualified single-put/memory budget and reject over-limit mutations before
-acknowledgment. Local mode uses the same envelope and serial lock, a stable
+4 MiB single-put/memory budget and reject over-limit mutations before
+acknowledgment. Overflow is terminal for that session (`SessionCapacityError`,
+HTTP 413); require a new session ID rather than retrying the same ID. Preserve
+the prior persisted bytes without truncation, pruning or weakening the cap.
+Local mode uses the same envelope and serial lock, a stable
 data-free sidecar for a deadline-bounded cross-process OS lock across the turn
 (never lock the replaceable state inode), and atomic replace plus file/directory
 `fsync` on each mutation. A crash exposes either the old or new full tree.
@@ -400,13 +403,17 @@ Qualify that detach prevents further background writes; otherwise require a
 supported SDK flush/quiescence signal before shipping.
 
 **Failure barrier.** Expected filesystem result errors such as `ENOENT`,
-`EEXIST`, `ENOTEMPTY`, `EISDIR` and `ENOTDIR` are ordinary callback responses:
+`EEXIST`, `ENOTEMPTY`, `EISDIR`, `ENOTDIR` and `EACCES` for well-formed paths
+outside `/workspace` and `/session-state` are ordinary callback responses:
 they report that the requested filesystem operation could not be applied and
 do not latch a storage failure. The provider latches and re-raises unexpected
-callback exceptions, including path-normalization, validation and in-memory
-invariant failures. Only a successfully normalized, authoritative `exists`
-lookup may return `true`/`false`; `exists` performs no remote probe. Although
-the SDK can convert an `exists` exception to `false`, the orchestration
+callback exceptions, including malformed paths, traversal, NUL, unaliased
+drive/UNC paths, validation and in-memory invariant failures. The pinned SDK
+maps the provider's `EACCES` to `UNKNOWN` with its errno diagnostic; its `exists`
+adapter returns `false` for denied paths. These results never grant access or
+mutate storage. An allowed `exists` lookup uses only the authoritative tree,
+with no remote probe. Although the SDK can also convert a malformed-path
+`exists` exception to `false`, the orchestration
 independently checks the latch and ownership before dispatch, races execution
 with subsequent latch/lease loss to abort promptly, and re-checks through
 detach, storage barrier and completion, independent of SDK results.

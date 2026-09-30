@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -98,17 +99,125 @@ async def test_directory_rename_is_atomic_and_complete(harness):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["../outside", "/../outside", "/a/../b", "\\windows", "/a/\x00"])
+@pytest.mark.parametrize("path", [
+    "../outside", "/../outside", "/a/../b", "\\windows", "/a/\x00",
+    "/etc/\x01", "C:/outside", "//server/share", None,
+])
 async def test_invalid_path_latches_even_when_sdk_exists_adapter_swallows_error(harness, path):
     owner = await open_session(harness)
     provider = fs.NativeSessionFs(owner)
     try:
+        baseline = await owner.store.load()
+        revision = owner.envelope.revision
         handler = create_session_fs_adapter(provider)
         assert not (await handler.exists(SimpleNamespace(path=path))).exists
         with pytest.raises(PersistenceUnavailableError):
             await owner.check()
         with pytest.raises(PersistenceUnavailableError):
             await provider.write_file("/workspace/ok", "blocked")
+        assert await owner.store.load() == baseline
+        assert owner.envelope.revision == revision
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("conventions", "path"), [
+    ("posix", "/etc/passwd"),
+    ("posix", "/workspaces/other"),
+    ("posix", "outside/./file"),
+    ("windows", "\\outside\\file"),
+    ("windows", "/etc/passwd"),
+])
+async def test_denied_paths_are_sdk_results_without_mutation_or_latching(harness, conventions, path):
+    owner = await open_session(harness)
+    provider = fs.NativeSessionFs(owner, conventions)
+    handler = create_session_fs_adapter(provider)
+    try:
+        await provider.write_file("/workspace/kept", "unchanged")
+        baseline = await owner.store.load()
+        envelope = fs.serialize(owner.envelope)
+        with pytest.raises(OSError) as denied:
+            await provider.read_file(path)
+        assert denied.value.errno == errno.EACCES
+        params = SimpleNamespace(path=path, content="denied", recursive=True, force=True)
+        results = [
+            (await handler.read_file(params)).error,
+            (await handler.stat(params)).error,
+            (await handler.readdir(params)).error,
+            (await handler.readdir_with_types(params)).error,
+            await handler.write_file(params),
+            await handler.append_file(params),
+            await handler.mkdir(params),
+            await handler.rm(params),
+            await handler.rename(SimpleNamespace(src="/workspace/kept", dest=path)),
+            await handler.rename(SimpleNamespace(src=path, dest="/workspace/kept")),
+        ]
+        for result in results:
+            assert result.code is SessionFSErrorCode.UNKNOWN
+            assert f"[Errno {errno.EACCES}]" in result.message
+        assert not (await handler.exists(params)).exists
+        assert await owner.store.load() == baseline
+        assert fs.serialize(owner.envelope) == envelope
+        assert owner.failure is None
+        assert not owner.failed.is_set()
+        await owner.check()
+        await provider.write_file("/workspace/after", "still writable")
+        await owner.transition(state=fs.SessionState.ACTIVE)
+        await owner.complete()
+    finally:
+        await owner.close()
+
+
+def test_envelope_cap_accepts_exact_limit_and_rejects_one_byte_over(harness):
+    assert fs.MAX_ENVELOPE_BYTES == 4 * 1024 * 1024
+    envelope = fs._new_envelope(harness.session_storage, "agent", "session", NATIVE_ID)
+    envelope.state = fs.SessionState.PREPARING
+    envelope.working = fs.empty_tree()
+    content = "x" * (fs.MAX_ENVELOPE_BYTES - 4096)
+    file = fs.FileContent(content=content, size_bytes=len(content), birthtime=0, mtime=0)
+    envelope.working.files["/workspace/full"] = file
+    file.content += "x" * (fs.MAX_ENVELOPE_BYTES - len(fs.serialize(envelope)))
+    file.size_bytes = len(file.content)
+    assert len(fs.serialize(envelope)) == fs.MAX_ENVELOPE_BYTES
+    file.content += "x"
+    file.size_bytes += 1
+    with pytest.raises(fs.SessionCapacityError, match="use a new ID") as raised:
+        fs.serialize(envelope)
+    assert raised.value.status_code == 413
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["callback", "prepare"])
+async def test_envelope_overflow_latches_without_publishing_partial_state(harness, monkeypatch, operation):
+    owner = await open_session(harness)
+    provider = fs.NativeSessionFs(owner)
+    try:
+        await provider.write_file("/workspace/kept", "saved")
+        if operation == "prepare":
+            await owner.transition(state=fs.SessionState.ACTIVE)
+            await owner.complete()
+        baseline = await owner.store.load()
+        envelope = fs.serialize(owner.envelope)
+        monkeypatch.setattr(fs, "MAX_ENVELOPE_BYTES", len(envelope))
+        if operation == "callback":
+            handler = create_session_fs_adapter(provider)
+            result = await handler.write_file(SimpleNamespace(
+                path="/workspace/overflow", content="x" * len(envelope),
+            ))
+            assert result.code is SessionFSErrorCode.UNKNOWN
+            assert "use a new ID" in result.message
+        else:
+            with pytest.raises(fs.SessionCapacityError, match="use a new ID"):
+                await owner.prepare(new_session=False)
+        assert isinstance(owner.failure, fs.SessionCapacityError)
+        assert owner.failed.is_set()
+        with pytest.raises(fs.SessionCapacityError):
+            await owner.check()
+        with pytest.raises(fs.SessionCapacityError):
+            await provider.write_file("/workspace/kept", "")
+        assert await owner.store.load() == baseline
+        assert fs.serialize(owner.envelope) == envelope
     finally:
         await owner.close()
 
@@ -536,7 +645,7 @@ async def test_blob_container_is_ensured_once_per_route(harness, monkeypatch):
 
     from azure_functions_agents import _credential
 
-    fs.reset_container_cache_for_testing()
+    fs.clear_container_cache()
     create_container = AsyncMock(return_value=None)
     credential = SimpleNamespace(close=AsyncMock())
     service = SimpleNamespace(
@@ -563,7 +672,9 @@ async def test_blob_container_is_ensured_once_per_route(harness, monkeypatch):
         await owner.close()
     create_container.assert_awaited_once()
 
-    fs.reset_container_cache_for_testing()
+    from azure_functions_agents.client_manager import shutdown_client_manager
+
+    await shutdown_client_manager()
     owner = await open_session(selected)
     await owner.close()
     assert create_container.await_count == 2
@@ -767,17 +878,21 @@ async def test_windows_conventions_reject_traversal_drive_and_unc_paths(harness)
     paths = (
         "\\session-state\\..\\..\\outside",
         "C:\\session-state",
+        "c:/session-state",
         "\\\\server\\share",
+        "//server/share",
         "\\session-state\\a\x00b",
     )
     for index, path in enumerate(paths):
         owner = await open_session(harness, session_id=f"invalid-{index}")
         provider = fs.NativeSessionFs(owner, "windows")
         try:
+            baseline = await owner.store.load()
             handler = create_session_fs_adapter(provider)
             assert not (await handler.exists(SimpleNamespace(path=path))).exists
             with pytest.raises(PersistenceUnavailableError):
                 await owner.check()
+            assert await owner.store.load() == baseline
         finally:
             await owner.close()
 
@@ -853,8 +968,9 @@ def test_normalize_callback_path_keeps_non_alias_host_paths_closed(path):
 def test_normalize_callback_path_ignores_aliases_under_posix_conventions():
     """POSIX hosts compare exactly: no case folding and no separator translation."""
     assert fs.normalize_callback_path("/srv/ws/a.txt", "posix", ("/srv/ws",)) == "/workspace/a.txt"
-    with pytest.raises(ValueError):
+    with pytest.raises(OSError) as denied:
         fs.normalize_callback_path("/SRV/ws/a.txt", "posix", ("/srv/ws",))
+    assert denied.value.errno == errno.EACCES
     with pytest.raises(ValueError):
         fs.normalize_callback_path("\\srv\\ws\\a.txt", "posix", ("/srv/ws",))
 
@@ -865,8 +981,9 @@ def test_normalize_callback_path_ignores_aliases_under_posix_conventions():
 )
 def test_normalize_callback_path_rejects_paths_outside_the_virtual_roots(path):
     """Only the virtual roots and declared aliases are addressable."""
-    with pytest.raises(ValueError, match="outside the virtual session roots"):
+    with pytest.raises(OSError) as denied:
         fs.normalize_callback_path(path, "posix")
+    assert denied.value.errno == errno.EACCES
 
 
 @pytest.mark.parametrize(

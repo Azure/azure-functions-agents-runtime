@@ -284,6 +284,10 @@ async def shutdown_client_manager() -> None:
     async with AsyncExitStack() as cleanup:
         if manager is not None:
             cleanup.push_async_callback(manager.close)
+        if "azure_functions_agents._copilot_session_fs" in sys.modules:
+            from ._copilot_session_fs import clear_container_cache
+
+            cleanup.callback(clear_container_cache)
         if "azure_functions_agents._copilot" in sys.modules:
             from ._copilot import shutdown
 

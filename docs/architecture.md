@@ -334,9 +334,10 @@ keeps a replacement worker able to resume a session created under a different
 host root. When the runtime echoes host-convention separators back through
 SessionFs callbacks, the provider translates only the declared platform
 separator at the boundary and then applies the unchanged canonicalization, so
-persisted keys stay canonical POSIX paths, unaliased drive-qualified and UNC
-paths are rejected, and traversal and invalid components still fail closed on
-every platform.
+persisted keys stay canonical POSIX paths. Well-formed paths outside the virtual
+roots are denied with `EACCES` without latching a session failure; unaliased
+drive-qualified/UNC paths, traversal, NUL and other malformed components remain
+latched invariant violations on every platform.
 
 The envelope carries `schema_version=1`, the pinned SDK/native/protocol triple,
 the validated logical identity, a monotonic owner epoch and revision, a handoff
@@ -352,12 +353,18 @@ Completion replaces the envelope only after SDK detach, so a non-streaming
 success means the continuation state is durably acknowledged. Native compaction
 runs with SDK defaults and its checkpoints and references live inside the same
 envelope, so a session is retained or removed as a whole unit.
+The serialized envelope is capped at 4 MiB, including both trees during a turn.
+Overflow is a terminal `SessionCapacityError` (HTTP 413), not a transient storage
+outage: a new session ID is required. No oversized write is published and no
+state is silently truncated or pruned.
 
 Expected filesystem result errors (`ENOENT`, `EEXIST`, `ENOTEMPTY`, `EISDIR`,
-`ENOTDIR` and equivalent operation outcomes) are normal SessionFs callback
-responses and do not latch a storage failure. Unexpected callback exceptions,
-envelope corruption, and persistence or lease/ETag failures still latch and
-fail closed.
+`ENOTDIR`, and `EACCES` for well-formed out-of-root paths) are normal SessionFs
+callback responses and do not latch a storage failure. The pinned SDK maps
+non-`ENOENT` results to `UNKNOWN` with the errno diagnostic, and denied `exists`
+probes to `false`; access remains denied without storage mutation. Malformed-path
+and other invariant exceptions, envelope corruption, and persistence or lease/ETag
+failures still latch and fail closed.
 
 A caller-supplied public session ID requests a strict resume, not a new
 conversation, and concurrent turns for one `(agent, session)` wait for ownership
@@ -372,7 +379,8 @@ object. An authored HTTP validation or startup error does not return a newly
 generated Copilot ID that has no completed native turn; supplied IDs remain in
 error headers for retry, and MAF header behavior is unchanged. No MAF transcript
 is imported or mutated. Cancellation is session-scoped; application shutdown
-stops the SDK client.
+stops the SDK client, closes cached metadata probe clients, and clears remembered
+container ensures so the next worker lifetime rechecks container creation.
 
 The foundation's startup rejection of multi-worker
 (`FUNCTIONS_WORKER_PROCESS_COUNT` other than `1`) and deployed

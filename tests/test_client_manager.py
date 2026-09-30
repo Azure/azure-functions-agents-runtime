@@ -262,24 +262,41 @@ async def test_foundry_stateless_request_does_not_include_encrypted_content() ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_fails", [False, True])
 async def test_shutdown_closes_maf_manager_even_if_copilot_cleanup_fails(
     monkeypatch: pytest.MonkeyPatch,
+    cleanup_fails: bool,
 ) -> None:
+    from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
     import azure_functions_agents._copilot as copilot
+    import azure_functions_agents._copilot_session_fs as fs
+    import azure_functions_agents._native_session_identity as identity
     import azure_functions_agents.client_manager as managers
 
+    ensured = {("route", "container")}
+    probe = SimpleNamespace(close=AsyncMock())
+    probes = {"route": probe}
+    monkeypatch.setattr(fs, "_ENSURED_CONTAINERS", ensured)
+    monkeypatch.setattr(identity, "_PROBE_SERVICES", probes)
     manager = MAFClientManager()
     close = AsyncMock()
     monkeypatch.setattr(manager, "close", close)
     monkeypatch.setattr(managers, "_INSTANCE", manager)
     monkeypatch.setattr(
-        copilot, "shutdown", AsyncMock(side_effect=RuntimeError("native cleanup failed"))
+        copilot, "shutdown",
+        AsyncMock(side_effect=RuntimeError("native cleanup failed") if cleanup_fails else None),
     )
 
-    with pytest.raises(RuntimeError, match="native cleanup failed"):
+    if cleanup_fails:
+        with pytest.raises(RuntimeError, match="native cleanup failed"):
+            await managers.shutdown_client_manager()
+    else:
         await managers.shutdown_client_manager()
 
     close.assert_awaited_once()
     assert managers._INSTANCE is None
+    probe.close.assert_awaited_once()
+    assert probes == {}
+    assert ensured == set()

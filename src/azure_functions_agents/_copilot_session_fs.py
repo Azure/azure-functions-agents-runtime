@@ -37,6 +37,7 @@ from ._native_session_identity import (
     LeaseLostError,
     NativeSessionError,
     PersistenceUnavailableError,
+    SessionCapacityError,
     SessionConflictError,
     StorageMode,
     StorageRoute,
@@ -121,15 +122,15 @@ def normalize_callback_path(
         remainder = _workspace_relative(path, alias, conventions)
         if remainder is not None:
             return normalize_path(f"{WORKSPACE_ROOT}/{remainder}")
+    if path.startswith(("\\\\", "//")) or re.match(r"[A-Za-z]:", path):
+        raise ValueError("Invalid native filesystem path.")
     if conventions == "windows":
-        if path.startswith("\\\\") or re.match(r"[A-Za-z]:", path):
-            raise ValueError("Invalid native filesystem path.")
         path = path.replace("\\", "/")
     normalized = normalize_path(path)
     if normalized != "/" and not any(
         normalized == root or normalized.startswith(f"{root}/") for root in VIRTUAL_ROOTS
     ):
-        raise ValueError("Native filesystem path is outside the virtual session roots.")
+        raise _PathResultError(errno.EACCES, normalized)
     return normalized
 
 
@@ -248,7 +249,9 @@ def serialize(envelope: StateEnvelope) -> bytes:
     checksum = hashlib.sha256(_canonical(fields)).hexdigest()
     payload = _canonical({**fields, "integrity_sha256": checksum})
     if len(payload) > MAX_ENVELOPE_BYTES:
-        raise PersistenceUnavailableError("Native session exceeds the single-object storage limit.")
+        raise SessionCapacityError(
+            "Native session exceeds the single-object storage limit; use a new ID."
+        )
     return payload
 
 
@@ -498,14 +501,14 @@ class _BlobStore:
 type _Store = _LocalStore | _BlobStore
 
 
-# Container creation is a once-per-process route concern; a create that failed for
+# Container creation is a once-per-worker-lifetime route concern; a create that failed for
 # any other reason (including missing permission) is never remembered as ensured.
 _ENSURED_CONTAINERS: set[tuple[str, str]] = set()
 _ENSURED_CONTAINERS_LOCK = asyncio.Lock()
 
 
-def reset_container_cache_for_testing() -> None:
-    """Drop the remembered container ensures. Test-only helper."""
+def clear_container_cache() -> None:
+    """Drop remembered container ensures at worker shutdown."""
     _ENSURED_CONTAINERS.clear()
 
 
@@ -608,8 +611,8 @@ class NativeSession:
     async def _save(self, candidate: StateEnvelope) -> None:
         await self.check()
         candidate.revision = self.envelope.revision + 1
-        data = serialize(candidate)
         try:
+            data = serialize(candidate)
             self.etag = await self.store.save(data, self.etag)
         except BaseException as exc:
             self.latch(exc)
