@@ -6,7 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from azure.core.exceptions import ResourceExistsError, ResourceModifiedError
+from azure.core.exceptions import HttpResponseError, ResourceExistsError, ResourceModifiedError
+from azure.storage.blob import StorageErrorCode
 from copilot.session_fs_provider import create_session_fs_adapter
 
 from azure_functions_agents import _copilot_session_fs as fs
@@ -20,6 +21,7 @@ from azure_functions_agents._native_session_identity import (
     StorageMode,
     resolve_route,
 )
+from tests._blob_sdk_errors import sdk_error
 
 NATIVE_ID = "native-fixture-id"
 
@@ -333,6 +335,79 @@ class AsyncRead:
 
     async def __call__(self):
         return self.data
+
+
+async def sdk_create_error(status, code):
+    error, request = await sdk_error(
+        status, code, lambda client: client.upload_blob(b"{}", overwrite=False)
+    )
+    assert request.headers["If-None-Match"] == "*"
+    return error
+
+
+@pytest.mark.asyncio
+async def test_sdk_reports_leased_blob_create_as_lease_id_missing_not_exists():
+    error = await sdk_create_error(412, "LeaseIdMissing")
+
+    assert type(error) is HttpResponseError
+    assert error.error_code == StorageErrorCode.LEASE_ID_MISSING
+
+
+class LeasedCreateBlob(FakeBlob):
+    """Real Blob behavior: an unleased create of a leased blob fails before If-None-Match."""
+
+    def __init__(self, lease_error, busy_error=None):
+        super().__init__()
+        self.lease_error, self.busy_error = lease_error, busy_error
+
+    async def upload_blob(self, data, **kwargs):
+        if not kwargs.get("overwrite") and self.current is not None and self.current.active:
+            raise self.lease_error
+        return await super().upload_blob(data, **kwargs)
+
+    async def acquire_lease(self, **kwargs):
+        if self.busy_error is not None and self.current is not None and self.current.active:
+            raise self.busy_error
+        return await super().acquire_lease(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_blob_second_client_on_leased_session_reports_busy(harness, monkeypatch):
+    busy, _ = await sdk_error(409, "LeaseAlreadyPresent", lambda client: client.acquire_lease())
+    blob = LeasedCreateBlob(await sdk_create_error(412, "LeaseIdMissing"), busy)
+
+    async def get_blob(_route, _name):
+        return blob, None
+
+    monkeypatch.setattr(fs, "_blob_client", get_blob)
+    selected = replace(harness, session_storage=replace(
+        harness.session_storage, mode=StorageMode.BLOB
+    ))
+    owner = await open_session(selected)
+    try:
+        with pytest.raises(SessionConflictError, match="busy"):
+            await fs.NativeSession.open(
+                selected, "agent", "session", NATIVE_ID,
+                asyncio.get_running_loop().time() + .05,
+            )
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_blob_create_non_contention_error_stays_unavailable(harness, monkeypatch):
+    blob = LeasedCreateBlob(await sdk_create_error(403, "AuthorizationPermissionMismatch"))
+    blob.current = FakeLease(blob)
+
+    async def get_blob(_route, _name):
+        return blob, None
+
+    monkeypatch.setattr(fs, "_blob_client", get_blob)
+    selected = replace(harness, session_storage=replace(
+        harness.session_storage, mode=StorageMode.BLOB
+    ))
+    with pytest.raises(PersistenceUnavailableError, match="unavailable"):
+        await open_session(selected)
 
 
 @pytest.mark.asyncio

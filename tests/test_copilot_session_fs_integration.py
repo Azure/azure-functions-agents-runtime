@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 import pytest_asyncio
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
+from azure.storage.blob import StorageErrorCode
+from azure.storage.blob.aio import BlobLeaseClient, BlobServiceClient
 
 from azure_functions_agents import _copilot_session_fs as fs
 from azure_functions_agents._harness import AppHarness, HarnessKind, ProviderKind
@@ -25,6 +26,7 @@ from azure_functions_agents._native_session_identity import (
     opaque_key,
     state_name,
 )
+from tests._blob_sdk_errors import ScriptedBlobTransport
 
 CONNECTION = "AZURE_FUNCTIONS_AGENTS_TEST_BLOB_CONNECTION_STRING"
 SERVICE_URI = "AZURE_FUNCTIONS_AGENTS_TEST_BLOB_SERVICE_URI"
@@ -64,6 +66,42 @@ def integration_route(environ: Mapping[str, str], local_dir: Path) -> StorageRou
     )
 
 
+def owned_blob(service, route: StorageRoute, name: str):
+    """Return a client for one exact blob under this test run's random app prefix."""
+    if not name.startswith(f"copilot-native/v1/{route.app_key}/"):
+        raise AssertionError("Refusing to touch a blob outside this test run's prefix.")
+    return service.get_blob_client(route.container, name)
+
+
+async def break_owned_lease(service, route: StorageRoute, name: str) -> None:
+    await BlobLeaseClient(owned_blob(service, route, name)).break_lease(lease_break_period=0)
+
+
+async def delete_owned_blobs(service, route: StorageRoute, names) -> None:
+    """Delete exactly ``names``; break only a still-held test lease, and surface other errors."""
+    blobs = [(name, owned_blob(service, route, name)) for name in sorted(names)]
+    errors: list[Exception] = []
+    for name, blob in blobs:
+        try:
+            try:
+                await blob.delete_blob(delete_snapshots="include")
+            except ResourceNotFoundError:
+                continue
+            except HttpResponseError as exc:
+                if exc.error_code != StorageErrorCode.LEASE_ID_MISSING:
+                    raise
+                # Failed owners intentionally keep their lease; break only this exact blob's.
+                await break_owned_lease(service, route, name)
+                await blob.delete_blob(delete_snapshots="include")
+        except ResourceNotFoundError:
+            continue
+        except Exception as exc:
+            exc.add_note(f"Leftover test blob: {name}")
+            errors.append(exc)
+    if errors:
+        raise ExceptionGroup("Test-owned Blob cleanup failed.", errors)
+
+
 @pytest_asyncio.fixture
 async def blob_case(tmp_path):
     try:
@@ -93,19 +131,7 @@ async def blob_case(tmp_path):
         yield harness, service, route
     finally:
         try:
-            for name in names:
-                assert name.startswith(f"copilot-native/v1/{route.app_key}/")
-                blob = service.get_blob_client(route.container, name)
-                try:
-                    await blob.delete_blob(delete_snapshots="include")
-                except HttpResponseError as exc:
-                    if isinstance(exc, ResourceNotFoundError):
-                        continue
-                    if exc.status_code not in {409, 412}:
-                        raise
-                    await blob.break_lease(lease_break_period=0)
-                    with contextlib.suppress(ResourceNotFoundError):
-                        await blob.delete_blob(delete_snapshots="include")
+            await delete_owned_blobs(service, route, names)
         finally:
             await owned.close()
 
@@ -147,8 +173,7 @@ async def test_real_blob_lease_break_blocks_stale_writer(blob_case):
     stale = await open_owner(harness, new=False)
     try:
         await stale.prepare(new_session=False)
-        name = state_name(route, "agent", "conversation")
-        await service.get_blob_client(route.container, name).break_lease(lease_break_period=0)
+        await break_owned_lease(service, route, state_name(route, "agent", "conversation"))
         with pytest.raises(LeaseLostError):
             await fs.NativeSessionFs(stale).write_file("/journal", "stale")
         with pytest.raises(LeaseLostError):
@@ -177,7 +202,7 @@ async def test_real_blob_changed_etag_rejects_interrupted_mutation(blob_case, op
         name = state_name(route, "agent", "conversation")
         # A distinct client advances the ETag under the same lease, without changing content.
         # The original owner must not acknowledge its subsequent stale conditional Put.
-        blob = service.get_blob_client(route.container, name)
+        blob = owned_blob(service, route, name)
         await blob.upload_blob(baseline, overwrite=True, lease=owner.store.lease.id)
         with pytest.raises(LeaseLostError):
             if operation == "write":
@@ -191,7 +216,7 @@ async def test_real_blob_changed_etag_rejects_interrupted_mutation(blob_case, op
         await owner.close()
 
     # Failed owners intentionally never release their lease; break this test-owned lease.
-    await service.get_blob_client(route.container, name).break_lease(lease_break_period=0)
+    await break_owned_lease(service, route, name)
     reopened = await open_owner(harness, new=False)
     try:
         assert reopened.envelope.owner_epoch > owner.envelope.owner_epoch
@@ -283,3 +308,74 @@ def test_integration_route_rejects_ambiguous_target(tmp_path):
             OPT_IN: "1", CONTAINER: "disposable", CONNECTION: "AccountKey=secret",
             SERVICE_URI: "https://acct.blob.core.windows.net",
         }, tmp_path)
+
+
+def offline_cleanup_case(tmp_path, *responses):
+    route = integration_route({
+        OPT_IN: "1", CONTAINER: "disposable", SERVICE_URI: "https://acct.blob.core.windows.net",
+    }, tmp_path)
+    transport = ScriptedBlobTransport(*responses)
+    service = BlobServiceClient(
+        "https://acct.blob.core.windows.net", transport=transport, retry_total=0
+    )
+    return route, transport, service
+
+
+def request_summary(route, request):
+    parts = urlsplit(request.url)
+    name = unquote(parts.path).removeprefix(f"/{route.container}/")
+    query = parse_qs(parts.query)
+    return request.method, name, query.get("comp", [None])[0], {
+        key: request.headers.get(key)
+        for key in ("x-ms-lease-action", "x-ms-lease-break-period", "x-ms-delete-snapshots")
+        if request.headers.get(key) is not None
+    }
+
+
+@pytest.mark.asyncio
+async def test_cleanup_breaks_held_test_lease_then_deletes_exact_blob(tmp_path):
+    route, transport, service = offline_cleanup_case(
+        tmp_path, (412, "LeaseIdMissing"), (202, None), (202, None),
+    )
+    name = state_name(route, "agent", "conversation")
+    async with service:
+        await delete_owned_blobs(service, route, {name})
+
+    assert [request_summary(route, request) for request in transport.requests] == [
+        ("DELETE", name, None, {"x-ms-delete-snapshots": "include"}),
+        ("PUT", name, "lease", {"x-ms-lease-action": "break", "x-ms-lease-break-period": "0"}),
+        ("DELETE", name, None, {"x-ms-delete-snapshots": "include"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_surfaces_non_lease_errors_without_breaking_and_continues(tmp_path):
+    route, transport, service = offline_cleanup_case(
+        tmp_path, (409, "SnapshotOperationRateExceeded"), (404, "BlobNotFound"),
+    )
+    names = sorted(state_name(route, "agent", session) for session in ("a", "b"))
+    async with service:
+        with pytest.raises(ExceptionGroup) as caught:
+            await delete_owned_blobs(service, route, set(names))
+
+    [error] = caught.value.exceptions
+    assert isinstance(error, HttpResponseError) and error.status_code == 409
+    assert f"Leftover test blob: {names[0]}" in error.__notes__
+    assert [request_summary(route, r)[:2] for r in transport.requests] == [
+        ("DELETE", names[0]), ("DELETE", names[1]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_refuses_any_blob_outside_the_run_prefix_before_requests(tmp_path):
+    route, transport, service = offline_cleanup_case(tmp_path)
+    own = state_name(route, "agent", "conversation")
+    async with service:
+        with pytest.raises(AssertionError, match="outside"):
+            await delete_owned_blobs(
+                service, route, {own, "copilot-native/v1/other-app/agent/state.json"}
+            )
+        with pytest.raises(AssertionError, match="outside"):
+            await break_owned_lease(service, route, "copilot-native/v1/other-app/x")
+
+    assert transport.requests == []

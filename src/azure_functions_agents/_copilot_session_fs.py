@@ -24,6 +24,7 @@ from azure.core.exceptions import (
     ResourceModifiedError,
     ResourceNotFoundError,
 )
+from azure.storage.blob import StorageErrorCode
 from copilot.generated.rpc import DebugCollectLogsEntryKind, SessionFSReaddirWithTypesEntry
 from copilot.session_fs_provider import SessionFsFileInfo, SessionFsProvider
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -349,6 +350,17 @@ class _BlobStore:
         self.failure: LeaseLostError | None = None
         self.failed = asyncio.Event()
 
+    async def create_if_absent(self, data: bytes) -> None:
+        try:
+            await self.blob.upload_blob(data, overwrite=False)
+        except ResourceExistsError:
+            return
+        except HttpResponseError as exc:
+            # A leased blob rejects this unleased create as LeaseIdMissing, not BlobAlreadyExists.
+            # azure-storage attaches error_code dynamically; azure-core does not declare it.
+            if getattr(exc, "error_code", None) != StorageErrorCode.LEASE_ID_MISSING:
+                raise
+
     async def acquire(self, deadline: float) -> None:
         while True:
             try:
@@ -473,11 +485,9 @@ class NativeSession:
                 store = _BlobStore(blob, owned_service)
             try:
                 if isinstance(store, _BlobStore):
-                    with contextlib.suppress(ResourceExistsError):
-                        await store.blob.upload_blob(
-                            serialize(_new_envelope(route, slug, session_id, native_id)),
-                            overwrite=False,
-                        )
+                    await store.create_if_absent(
+                        serialize(_new_envelope(route, slug, session_id, native_id))
+                    )
                     await store.acquire(deadline)
                 data, etag = await store.load()
                 envelope = (
