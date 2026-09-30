@@ -706,5 +706,3 @@ This design keeps global config declarative: shared config says what exists, whi
 - [`docs/triggers.md`](triggers.md) — supported trigger types and examples
 - [`docs/observability.md`](observability.md) — OpenTelemetry enablement, the `af.*` span/attribute reference, sensitive-data gating, and cost control
 - [`docs/frds/0007-multi-agent-delegation.md`](frds/0007-multi-agent-delegation.md) — the FRD behind Section 5, including the full Decisions log
-
-

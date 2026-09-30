@@ -249,4 +249,3 @@ should reach a model:
   rejected before inference on the Copilot path.
 - Interrupted turns are not recovered; a turn whose handoff cannot be proven
   safe fails closed and requires a new session ID.
-
