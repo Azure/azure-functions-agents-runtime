@@ -196,7 +196,10 @@ def _runtime(harness: AppHarness) -> _NativeRuntime:
            harness.provider, harness.endpoint)
     owner = _RUNTIMES.get(key)
     if owner is None:
-        namespace = uuid.uuid5(uuid.NAMESPACE_URL, repr(key)).hex
+        namespace = uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"af-copilot-worker:{key[1]}:{harness.provider}:{harness.endpoint}",
+        ).hex
         owner = _NativeRuntime(harness.storage_root, namespace)
         _RUNTIMES[key] = owner
     return owner
@@ -453,7 +456,9 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                         raise IncompatibleSessionError(
                             "An older native session exists without an envelope; use a new ID."
                         )
-                await storage.prepare(new_session=request.new_session)
+                await storage.prepare(
+                    new_session=request.new_session, workspace_path=str(owner.workspace)
+                )
                 await storage.check()
                 tools = [_tool(function, calls) for function in request.tools]
                 options = _SessionOptions(
@@ -472,7 +477,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     tool_search=ToolSearchConfig(enabled=False),
                     on_event=on_event,
                     create_session_fs_handler=lambda _session: NativeSessionFs(
-                        storage, HOST_PATH_CONVENTIONS
+                        storage, HOST_PATH_CONVENTIONS, str(owner.workspace)
                     ),
                 )
                 rpc_attempted = True

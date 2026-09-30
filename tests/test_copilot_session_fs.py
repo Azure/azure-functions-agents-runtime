@@ -712,7 +712,11 @@ async def test_windows_conventions_callbacks_persist_canonical_posix_paths(harne
             "\\session-state\\workspace.yaml.tmp", "\\session-state\\workspace.yaml"
         )
         assert sorted(owner.envelope.working.files) == ["/session-state/workspace.yaml"]
-        assert sorted(owner.envelope.working.directories) == ["/", "/session-state"]
+        assert sorted(owner.envelope.working.directories) == [
+            "/",
+            "/session-state",
+            "/workspace",
+        ]
     finally:
         await owner.close()
 
@@ -773,6 +777,44 @@ def test_normalize_callback_path_translates_only_windows_separators(path, expect
 def test_normalize_callback_path_rejects_host_qualified_and_escaping_paths(path):
     with pytest.raises(ValueError):
         fs.normalize_callback_path(path, "windows")
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("C:\\app\\ws", "/workspace"),
+        ("C:\\app\\ws\\", "/workspace"),
+        ("c:/APP/ws/notes.md", "/workspace/notes.md"),
+        ("C:\\app\\ws\\sub\\a.txt", "/workspace/sub/a.txt"),
+    ],
+)
+def test_normalize_callback_path_maps_declared_workspace_aliases(path, expected):
+    """The runtime resolves the recorded host cwd through SessionFs on resume."""
+    assert fs.normalize_callback_path(path, "windows", ("C:\\app\\ws",)) == expected
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "C:\\app\\ws2",
+        "C:\\app\\wsother\\a.txt",
+        "D:\\app\\ws",
+        "C:\\app\\ws\\..\\..\\escape",
+        "\\\\server\\share\\ws",
+    ],
+)
+def test_normalize_callback_path_keeps_non_alias_host_paths_closed(path):
+    """Sibling prefixes, other roots, and traversal out of the alias must still fail closed."""
+    with pytest.raises(ValueError):
+        fs.normalize_callback_path(path, "windows", ("C:\\app\\ws",))
+
+
+def test_normalize_callback_path_ignores_aliases_under_posix_conventions():
+    """POSIX hosts compare exactly: no case folding and no separator translation."""
+    assert fs.normalize_callback_path("/srv/ws/a.txt", "posix", ("/srv/ws",)) == "/workspace/a.txt"
+    assert fs.normalize_callback_path("/SRV/ws/a.txt", "posix", ("/srv/ws",)) == "/SRV/ws/a.txt"
+    with pytest.raises(ValueError):
+        fs.normalize_callback_path("\\srv\\ws\\a.txt", "posix", ("/srv/ws",))
 
 
 def test_host_path_conventions_matches_the_running_host():

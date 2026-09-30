@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 
 SDK_VERSION = "1.0.14"
 NATIVE_VERSION = "1.0.85"
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 MAX_ENVELOPE_BYTES = 4 * 1024 * 1024
 LEASE_SECONDS = 30
 
@@ -84,10 +84,38 @@ type PathConventions = Literal["posix", "windows"]
 
 HOST_PATH_CONVENTIONS: PathConventions = "windows" if os.name == "nt" else "posix"
 
+WORKSPACE_ROOT = "/workspace"
 
-def normalize_callback_path(path: str, conventions: PathConventions) -> str:
-    """Canonicalize one SDK path, translating only the separator the host declared."""
-    if conventions == "windows" and isinstance(path, str):
+
+def _workspace_relative(path: str, alias: str, conventions: PathConventions) -> str | None:
+    """Return the alias-relative remainder, or None when the path is not under the alias."""
+    if not alias:
+        return None
+    subject = path.replace("\\", "/") if conventions == "windows" else path
+    prefix = (alias.replace("\\", "/") if conventions == "windows" else alias).rstrip("/")
+    if not prefix:
+        return None
+    compared, against = (
+        (subject.casefold(), prefix.casefold()) if conventions == "windows" else (subject, prefix)
+    )
+    if compared == against:
+        return ""
+    if compared.startswith(against + "/"):
+        return subject[len(prefix) + 1 :]
+    return None
+
+
+def normalize_callback_path(
+    path: str, conventions: PathConventions, workspace_aliases: Sequence[str] = ()
+) -> str:
+    """Canonicalize one SDK path, mapping declared host workspace roots to the virtual root."""
+    if not isinstance(path, str) or "\x00" in path:
+        raise ValueError("Invalid native filesystem path.")
+    for alias in workspace_aliases:
+        remainder = _workspace_relative(path, alias, conventions)
+        if remainder is not None:
+            return normalize_path(f"{WORKSPACE_ROOT}/{remainder}")
+    if conventions == "windows":
         if path.startswith("\\\\") or re.match(r"[A-Za-z]:", path):
             raise ValueError("Invalid native filesystem path.")
         path = path.replace("\\", "/")
@@ -143,15 +171,22 @@ class WorkingTree(_Document):
 
 
 def empty_tree() -> WorkingTree:
+    """Start every tree with the virtual workspace root the native runtime resolves its cwd to."""
     now = time.time()
-    return WorkingTree(directories={"/": FileMetadata(birthtime=now, mtime=now)}, files={})
+    return WorkingTree(
+        directories={
+            "/": FileMetadata(birthtime=now, mtime=now),
+            WORKSPACE_ROOT: FileMetadata(birthtime=now, mtime=now),
+        },
+        files={},
+    )
 
 
 class StateEnvelope(_Document):
     schema_version: Literal[1] = 1
     sdk_version: Literal["1.0.14"] = "1.0.14"
     native_version: Literal["1.0.85"] = "1.0.85"
-    protocol_version: Literal[3] = 3
+    protocol_version: Literal[4] = 4
     app_key: str
     agent_slug: str
     session_id: str
@@ -159,6 +194,7 @@ class StateEnvelope(_Document):
     owner_epoch: int = Field(ge=0)
     revision: int = Field(ge=0)
     state: SessionState
+    workspace_path: str = ""
     handoff_may_have_started: bool = False
     working: WorkingTree | None = None
     completed: WorkingTree | None = None
@@ -554,7 +590,8 @@ class NativeSession:
             candidate = StateEnvelope.model_validate(candidate.model_dump())
             await self._save(candidate)
 
-    async def prepare(self, *, new_session: bool) -> None:
+    async def prepare(self, *, new_session: bool, workspace_path: str = "") -> None:
+        """Record the creating worker's workspace once; a resume keeps the persisted one."""
         state = self.envelope.state
         if state is SessionState.EMPTY:
             if not new_session:
@@ -565,8 +602,9 @@ class NativeSession:
         else:
             raise IncompatibleSessionError("Native session is not safely resumable; use a new ID.")
         baseline = self.envelope.completed.model_copy(deep=True) if self.envelope.completed else empty_tree()
+        recorded = self.envelope.workspace_path or workspace_path
         await self.transition(state=SessionState.PREPARING, working=baseline,
-                              handoff_may_have_started=False)
+                              workspace_path=recorded, handoff_may_have_started=False)
 
     async def rollback(self) -> None:
         await self.check()
@@ -617,10 +655,17 @@ class NativeSessionFs(SessionFsProvider):
     """SDK filesystem callbacks, scoped to the owned working tree."""
 
     def __init__(
-        self, owner: NativeSession, conventions: PathConventions = "posix"
+        self,
+        owner: NativeSession,
+        conventions: PathConventions = "posix",
+        workspace_path: str = "",
     ) -> None:
         self.owner = owner
         self.conventions = conventions
+        aliases = [owner.envelope.workspace_path, workspace_path]
+        self.workspace_aliases = tuple(
+            dict.fromkeys(alias for alias in aliases if alias)
+        )
 
     def _fail(self, error: BaseException) -> None:
         if not isinstance(error, _PathResultError):
@@ -628,7 +673,7 @@ class NativeSessionFs(SessionFsProvider):
 
     def _path(self, path: str) -> str:
         try:
-            return normalize_callback_path(path, self.conventions)
+            return normalize_callback_path(path, self.conventions, self.workspace_aliases)
         except BaseException as exc:
             self._fail(exc)
             raise

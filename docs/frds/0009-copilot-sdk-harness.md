@@ -333,11 +333,12 @@ not extend the existing human sign-off.
 
 **Storage schema and file operations.** A session has exactly one mutable
 Blob/local-file envelope, `state.json`, containing `schema_version=1`,
-`sdk_version="1.0.14"`, `native_version="1.0.85"`, `protocol_version=3`,
+`sdk_version="1.0.14"`, `native_version="1.0.85"`, `protocol_version=4`,
 `app_key`, validated logical `agent_slug` and `session_id`, `native_session_id`,
 monotonic `owner_epoch` and `revision`, `state`
 (`empty|preparing|active|ready|uncertain|deleted`),
-`handoff_may_have_started` (Boolean), nullable `working` and `completed`
+`handoff_may_have_started` (Boolean), the creating worker's `workspace_path`,
+nullable `working` and `completed`
 logical SessionFs trees, and `integrity_sha256` over the canonical envelope
 excluding that field. Each tree contains canonical-path-keyed `directories`
 with `birthtime`/`mtime` and `files` with full UTF-8 `content`, `size_bytes`,
@@ -552,6 +553,7 @@ remaining implementation decisions or qualification obligations are complete.
 | 10 | Workflows across app restarts/deployments | Custom harness pinning/lifecycle rules / existing Durable behavior | Follow Durable replay, retry, worker lifetime, and configured deployment routing; each executing app instance supplies its own selection, with no new persisted harness pin or mismatch rejection | Human | 2026-09-28 |
 | 11 | Session startup failures | Prescribe marker sequencing / specify observable behavior | Require one active turn per agent/session, safe retry after a startup failure that did not begin a turn or damage state, and explicit errors for uncertain continuation; leave marker ordering and cleanup to implementation | Human | 2026-09-28 |
 | 12 | Feature specification sign-off | Keep In review / finalize the agreed feature contracts | Finalized after approving decision 11; section 4.8 remains an explicit record of unresolved implementation choices and required evidence, not a claim of parity or production readiness | Human (larohra) | 2026-09-28 |
+| 14 | Recorded host workspace on resume | Fuzzy suffix matching of recorded paths / persist the creating worker's workspace and alias it | The runtime resolves the recorded initial working directory through SessionFs before loading events, so the envelope records `workspace_path` and the provider maps that alias plus the current worker's directory to the virtual `/workspace`; unaliased host-qualified paths still fail closed and `protocol_version` moves to 4 so pre-alias envelopes are rejected | Agent proposal | 2026-09-30 |
 | 13 | Native session delivery and persistence | Shared MAF JSONL or fragmented native Blob tree / one isolated lease-fenced envelope | Propose sections 4.5/4.9's encoded identities, frozen context, single-object local/Blob SessionFs, serialized/latching callbacks, safe pre-handoff rollback, uncertain post-handoff state, metadata-only history guards, tombstone deletion and native compaction after #241. Dedicated architecture-agent re-review APPROVED these mechanics on 2026-09-29 after two REVISE reviews; qualification remains open. Human-approved contracts/status are unchanged. | Agent proposal; architecture-agent approval | 2026-09-29 |
 
 ## 6. Feature-level acceptance and test plan
