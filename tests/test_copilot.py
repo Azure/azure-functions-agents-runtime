@@ -98,6 +98,57 @@ async def _seed_completed(preview):
         await owner.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("had_completed", [False, True])
+async def test_preparing_before_dispatch_recovers_same_id(preview, monkeypatch, had_completed):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    if had_completed:
+        await _seed_completed(preview)
+    owner = await NativeSession.open(
+        preview, "main", "example", _copilot._native_id("main", "example"),
+        asyncio.get_running_loop().time() + 5,
+    )
+    await owner.prepare(new_session=not had_completed)
+    await owner.close()
+
+    client = _fake_client()
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        result = await _copilot.run(preview, _request(new_session=not had_completed))
+        assert result.content == "synthetic reply"
+        if had_completed:
+            client.resume_session.assert_awaited_once()
+            client.create_session.assert_not_awaited()
+        else:
+            client.create_session.assert_awaited_once()
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_preparing_with_existing_uncompleted_sdk_id_fails_closed(preview, monkeypatch):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    owner = await NativeSession.open(
+        preview, "main", "example", _copilot._native_id("main", "example"),
+        asyncio.get_running_loop().time() + 5,
+    )
+    await owner.prepare(new_session=True)
+    await owner.close()
+    client = _fake_client()
+    client.get_session_metadata.return_value = SimpleNamespace(session_id="existing")
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(IncompatibleSessionError):
+            await _copilot.run(preview, _request())
+        client.create_session.assert_not_awaited()
+    finally:
+        await _copilot.shutdown()
+
+
 async def _invoke_native_tool(function, arguments):
     from copilot.tools import ToolInvocation
 
@@ -418,6 +469,33 @@ async def test_sdk_resume_failure_without_detach_is_uncertain(preview, monkeypat
             await _copilot.run(preview, _request(new_session=False))
         assert client.resume_session.await_count == 1
         client.create_session.assert_not_awaited()
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_create_rpc_without_a_detachable_handle_stays_uncertain(preview, monkeypatch):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    client.create_session.side_effect = RuntimeError("unknown RPC outcome")
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(CopilotPreviewError):
+            await _copilot.run(preview, _request())
+        owner = await NativeSession.open(
+            preview, "main", "example", _copilot._native_id("main", "example"),
+            asyncio.get_running_loop().time() + 5,
+        )
+        try:
+            assert owner.envelope.state is SessionState.UNCERTAIN
+            assert owner.envelope.handoff_may_have_started is False
+        finally:
+            await owner.close()
+        with pytest.raises(IncompatibleSessionError, match="not safely resumable"):
+            await _copilot.run(preview, _request())
+        client.create_session.assert_awaited_once()
     finally:
         await _copilot.shutdown()
 

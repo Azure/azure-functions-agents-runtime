@@ -29,7 +29,6 @@ from copilot.session_fs_provider import SessionFsFileInfo, SessionFsProvider
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from ._native_session_identity import (
-    NAMESPACE,
     CorruptSessionError,
     IncompatibleSessionError,
     LeaseLostError,
@@ -239,28 +238,45 @@ class _LocalStore:
         self._fd: int | None = None
 
     def _safe_paths(self) -> None:
-        base = self.path.parents[len(Path(NAMESPACE).parts) + 2]
-        if any(part.is_symlink() for part in (self.path, self.path.with_suffix(".lock"),
-                                               self.path.parent, *self.path.parents)
-               if part == base or base in part.parents):
+        if any(
+            part.is_symlink() or (sys.platform == "win32" and part.is_junction())
+            for part in (self.path, self.path.with_suffix(".lock"), *self.path.parents)
+        ):
             raise PersistenceUnavailableError("Native local storage cannot traverse symlinks.")
 
     async def acquire(self, deadline: float) -> None:
-        if sys.platform != "linux":
-            raise PersistenceUnavailableError("Native local locking supports Linux only.")
-        import fcntl
+        if sys.platform not in {"linux", "win32"}:
+            raise PersistenceUnavailableError("Native local locking supports Linux and Windows only.")
 
         try:
             self._safe_paths()
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._safe_paths()
-            fd = os.open(self.path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            fd = os.open(
+                self.path.with_suffix(".lock"),
+                os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600,
+            )
+            self._safe_paths()
+            if sys.platform == "win32" and os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
             while True:
                 try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    if sys.platform == "win32":
+                        import msvcrt
+
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     self._fd = fd
                     return
-                except BlockingIOError as exc:
+                except OSError as exc:
+                    if sys.platform == "win32" and exc.errno not in {13, 36}:
+                        raise
+                    if sys.platform != "win32" and not isinstance(exc, BlockingIOError):
+                        raise
                     if asyncio.get_running_loop().time() >= deadline:
                         raise SessionConflictError("Native session is busy; retry after its active turn.") from exc
                     await asyncio.sleep(min(.05, max(0, deadline - asyncio.get_running_loop().time())))
@@ -288,11 +304,12 @@ class _LocalStore:
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temp, self.path)
-            dir_fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+            if sys.platform != "win32":
+                dir_fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
             return None
         finally:
             if temp is not None and os.path.exists(temp):
@@ -304,11 +321,19 @@ class _LocalStore:
 
     async def release(self) -> None:
         if self._fd is not None:
-            import fcntl
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
 
-            fcntl.flock(self._fd, fcntl.LOCK_UN)
-            os.close(self._fd)
-            self._fd = None
+                    os.lseek(self._fd, 0, os.SEEK_SET)
+                    msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self._fd)
+                self._fd = None
 
 
 class _BlobStore:
@@ -360,6 +385,7 @@ class _BlobStore:
                 data, overwrite=True, lease=self.lease, etag=etag,
                 match_condition=MatchConditions.IfNotModified,
             )
+            await self.check()
             return str(response["etag"])
         except (ResourceModifiedError, ResourceNotFoundError, HttpResponseError):
             self.failure = LeaseLostError("Native session lease or state changed while owned.")
@@ -505,6 +531,13 @@ class NativeSession:
         completed = self.envelope.completed
         await self.transition(state=SessionState.READY if completed else SessionState.EMPTY,
                               working=None, handoff_may_have_started=False)
+
+    async def recover_preparing(self) -> None:
+        """Discard an unhanded-off tree under the newly acquired owner fence."""
+        if (self.envelope.state is not SessionState.PREPARING
+                or self.envelope.handoff_may_have_started):
+            raise IncompatibleSessionError("Native session is not safely resumable; use a new ID.")
+        await self.rollback()
 
     async def complete(self) -> None:
         async with self.lock:
@@ -764,10 +797,11 @@ class NativeSessionFs(SessionFsProvider):
             source, target = self._path(src), self._path(dest)
             if source == "/" or target == "/" or target.startswith(source + "/"):
                 raise ValueError("Invalid native rename.")
-
             def move(tree: WorkingTree) -> None:
                 if source not in tree.files and source not in tree.directories:
                     raise FileNotFoundError(source)
+                if source == target:
+                    return
                 parent = target.rpartition("/")[0] or "/"
                 if parent not in tree.directories:
                     raise FileNotFoundError(parent)

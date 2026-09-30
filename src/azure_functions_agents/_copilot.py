@@ -419,6 +419,24 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
             )
             try:
                 client = await owner.client()
+                if storage.envelope.state is SessionState.PREPARING:
+                    if storage.envelope.handoff_may_have_started:
+                        raise IncompatibleSessionError(
+                            "Native session handoff is uncertain; use a new ID."
+                        )
+                    if storage.envelope.completed is None:
+                        try:
+                            legacy = await client.get_session_metadata(native_id)
+                        except Exception:
+                            raise PersistenceUnavailableError(
+                                "Native session metadata could not be checked before recovery."
+                            ) from None
+                        if legacy is not None:
+                            raise IncompatibleSessionError(
+                                "Native session creation may have started; recovery cannot prove "
+                                "the old session is detached."
+                            )
+                    await storage.recover_preparing()
                 if storage.envelope.state is SessionState.EMPTY:
                     try:
                         legacy = await client.get_session_metadata(native_id)

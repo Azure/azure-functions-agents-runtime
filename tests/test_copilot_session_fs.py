@@ -136,6 +136,55 @@ async def test_local_snapshot_rollback_preserves_prior_completed_bytes(harness):
 
 
 @pytest.mark.asyncio
+async def test_preparing_without_handoff_recovers_only_prior_completed_tree(harness):
+    first = await open_session(harness)
+    await fs.NativeSessionFs(first).write_file("/events.jsonl", "completed")
+    await first.transition(state=fs.SessionState.ACTIVE)
+    await first.complete()
+    await first.close()
+
+    interrupted = await open_session(harness, new=False)
+    await interrupted.prepare(new_session=False)
+    await fs.NativeSessionFs(interrupted).write_file("/events.jsonl", "uncommitted")
+    await interrupted.close()
+
+    recovered = await open_session(harness, new=False)
+    try:
+        await recovered.recover_preparing()
+        assert recovered.envelope.state is fs.SessionState.READY
+        assert recovered.envelope.completed.files["/events.jsonl"].content == "completed"
+        assert recovered.envelope.working is None
+    finally:
+        await recovered.close()
+
+
+@pytest.mark.asyncio
+async def test_preparing_recovery_rejects_handoff_and_active_state(harness):
+    owner = await open_session(harness)
+    await owner.transition(state=fs.SessionState.ACTIVE, handoff_may_have_started=True)
+    await owner.close()
+    reopened = await open_session(harness, new=False)
+    try:
+        with pytest.raises(IncompatibleSessionError):
+            await reopened.recover_preparing()
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_rename_to_same_path_preserves_file_and_directory(harness):
+    owner = await open_session(harness)
+    provider = fs.NativeSessionFs(owner)
+    try:
+        await provider.write_file("/directory/file", "content")
+        await provider.rename("/directory/file", "/directory/file")
+        await provider.rename("/directory", "/directory")
+        assert await provider.read_file("/directory/file") == "content"
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_atomic_write_failure_latches_and_does_not_ack(harness, monkeypatch):
     owner = await open_session(harness)
     revision = owner.envelope.revision
@@ -168,6 +217,19 @@ async def test_local_lock_conflict_and_independent_session(harness):
         await other.close()
     finally:
         await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_local_storage_rejects_symlinked_storage_parent(harness):
+    root = harness.session_storage.local_dir.parent
+    target = root.parent / "redirected"
+    target.mkdir()
+    try:
+        root.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("Creating directory symlinks requires elevated privileges on this host.")
+    with pytest.raises(PersistenceUnavailableError, match="symlinks"):
+        await open_session(harness)
 
 
 def test_envelope_strict_integrity_version_identity_and_tombstone(harness):
@@ -325,3 +387,32 @@ async def test_blob_renewal_loss_latches_without_stale_release(harness, monkeypa
     finally:
         await owner.close()
     assert blob.current.released == 0
+
+
+@pytest.mark.asyncio
+async def test_blob_renewal_loss_during_put_never_acknowledges_mutation(harness, monkeypatch):
+    blob = FakeBlob()
+
+    async def get_blob(_route, _name):
+        return blob
+
+    monkeypatch.setattr(fs, "_blob_client", get_blob)
+    selected = replace(harness, session_storage=replace(
+        harness.session_storage, mode=StorageMode.BLOB
+    ))
+    owner = await open_session(selected)
+    original = owner.envelope.revision
+
+    async def lost_renewal(data, **kwargs):
+        result = await FakeBlob.upload_blob(blob, data, **kwargs)
+        owner.store.failure = LeaseLostError("renewal failed")
+        owner.store.failed.set()
+        return result
+
+    monkeypatch.setattr(blob, "upload_blob", lost_renewal)
+    try:
+        with pytest.raises(LeaseLostError):
+            await fs.NativeSessionFs(owner).write_file("/file", "value")
+        assert owner.envelope.revision == original
+    finally:
+        await owner.close()
