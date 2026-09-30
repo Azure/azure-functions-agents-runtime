@@ -46,6 +46,10 @@ jobs:
         inputs:
           versionSpec: '22.x'
         displayName: 'Use Node.js 22'
+      - task: npmAuthenticate@0
+        inputs:
+          workingFile: integrations/vally-executor-azure-functions/.npmrc
+        displayName: 'Authenticate executor npm feed'
       - bash: npm ci
         workingDirectory: integrations/vally-executor-azure-functions
         displayName: 'Install locked dependencies'
