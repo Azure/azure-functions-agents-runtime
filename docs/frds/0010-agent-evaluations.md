@@ -1,10 +1,10 @@
 ---
 frd: 0010
 title: Vally-first agent evaluations
-status: Finalized            # Draft → In review → Finalized  (→ Implemented after merge)
+status: In review            # Draft → In review → Finalized  (→ Implemented after merge)
 author: hallvictoria
 created: 2026-09-15
-updated: 2026-09-18
+updated: 2026-09-30
 issues: []
 pull_requests: []
 branch: hallvictoria/vally-evals
