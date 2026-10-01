@@ -16,7 +16,8 @@ from azure.storage.blob import StorageErrorCode
 from azure.storage.blob.aio import BlobLeaseClient, BlobServiceClient
 
 from azure_functions_agents import _copilot_session_fs as fs
-from azure_functions_agents._harness import AppHarness, HarnessKind, ProviderKind
+from azure_functions_agents._copilot_providers import OpenAIProvider
+from azure_functions_agents._harness import AppHarness, HarnessKind
 from azure_functions_agents._native_session_identity import (
     LeaseLostError,
     SessionConflictError,
@@ -125,7 +126,7 @@ async def blob_case(tmp_path):
             names.add(state_name(route, "agent", session_id))
             return AppHarness(
                 HarnessKind.COPILOT, tmp_path, tmp_path / "preview", "model",
-                ProviderKind.OPENAI, session_storage=route,
+                OpenAIProvider("not-a-credential"), session_storage=route,
             )
 
         yield harness, service, route

@@ -30,7 +30,8 @@ import sys
 from abc import ABC, abstractmethod
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from typing import Any
+from enum import StrEnum
+from typing import Any, cast
 
 from ._credential import build_async_credential
 from ._logger import logger
@@ -47,6 +48,12 @@ class InferenceTarget:
 
     provider: str | None = None
     model: str | None = None
+
+
+class ProviderKind(StrEnum):
+    OPENAI = "openai"
+    AZURE_OPENAI = "azure_openai"
+    FOUNDRY = "foundry"
 
 
 class ClientManager(ABC):
@@ -140,8 +147,9 @@ class MAFClientManager(ClientManager):
     def _build_maf_chat_client_with_target(
         self, model: str | None
     ) -> tuple[Any, InferenceTarget]:
-        provider = self._provider()
-        resolved = self._resolve_model(model, provider)
+        target = _resolve_inference_target_for_manager(type(self), model)
+        provider = cast(str, target.provider)
+        resolved = cast(str, target.model)
         logger.info("MAF provider=%s model=%s", provider, resolved)
         if provider == "openai":
             client = self._build_openai(resolved)
@@ -154,10 +162,7 @@ class MAFClientManager(ClientManager):
                 f"Unknown AZURE_FUNCTIONS_AGENTS_PROVIDER '{provider}'. "
                 "Use one of: openai, azure_openai, foundry."
             )
-        return client, InferenceTarget(
-            provider=provider,
-            model=resolved,
-        )
+        return client, target
 
     # ------------------------------------------------------------------
     # Internals
@@ -251,6 +256,22 @@ class MAFClientManager(ClientManager):
 # ---------------------------------------------------------------------------
 
 _INSTANCE: ClientManager | None = None
+_BUILTIN_INSTANCE: MAFClientManager | None = None
+
+
+def _resolve_inference_target_for_manager(
+    manager_type: type[MAFClientManager], requested: str | None
+) -> InferenceTarget:
+    provider = manager_type._provider()
+    return InferenceTarget(
+        provider=provider,
+        model=manager_type._resolve_model(requested, provider),
+    )
+
+
+def _resolve_builtin_inference_target(requested: str | None) -> InferenceTarget:
+    """Resolve the built-in provider/model without constructing a MAF client."""
+    return _resolve_inference_target_for_manager(MAFClientManager, requested)
 
 
 def get_client_manager() -> ClientManager:
@@ -260,11 +281,19 @@ def get_client_manager() -> ClientManager:
     switch on an env var (e.g. ``AZURE_FUNCTIONS_AGENTS_PROVIDER``) to pick
     between alternative implementations.
     """
-    global _INSTANCE
+    global _BUILTIN_INSTANCE, _INSTANCE
     if _INSTANCE is None:
-        _INSTANCE = MAFClientManager()
+        built_in = MAFClientManager()
+        _BUILTIN_INSTANCE = built_in
+        _INSTANCE = built_in
         logger.info("ClientManager initialized: %s", _INSTANCE.name)
     return _INSTANCE
+
+
+def _is_active_client_manager_builtin() -> bool:
+    """Return whether the active manager is the runtime-created built-in instance."""
+    manager = get_client_manager()
+    return manager is _BUILTIN_INSTANCE and type(manager) is MAFClientManager
 
 
 def set_client_manager(manager: ClientManager) -> None:

@@ -78,8 +78,9 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/system_tools/sandbox.py` | Builds the ACA Dynamic Sessions-backed `execute_python` tool for a resolved agent/session, using a fresh GUID when no explicit session id is provided. | `create_sandbox_tools()` |
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
 | `azure_functions_agents/runner.py` | Executes prompts through the default Microsoft Agent Framework path, managing sessions, tools, and streaming; the bounded Copilot fork composes the direct non-streaming host-tool catalog before any MAF construction. Builds per-request `delegate_<slug>` tools and fresh stateless workflow leaf agents on the MAF path; attempts one internal token-usage record through the shared runtime logger for each actual invocation attempt. | `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
-| `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
-| `azure_functions_agents/_harness.py` | Private once-per-app-root harness selection, explicit preview capability validation, and conservative MAF `FunctionTool` qualification, including combined-catalog collision checks and rejection of unsupported configured output caps. Captured in capabilities/registration closures; standalone runner calls use the same selection. No SDK import/process side effects when off. | `AppHarness`, `HarnessRequest`, `get_harness()`, `prepare_tools()`, `validate_agent()` |
+| `azure_functions_agents/client_manager.py` | Defines the pluggable MAF inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. Its pure internal built-in resolver preserves MAF provider/model precedence without constructing a chat client; an identity check protects Copilot from custom-manager fallback. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
+| `azure_functions_agents/_harness.py` | Private once-per-app-root harness selection, explicit preview capability validation, and conservative MAF `FunctionTool` qualification, including combined-catalog collision checks and rejection of unsupported configured output caps and custom client managers before app mutation. Captures one frozen Copilot provider from `_copilot_providers.py` and native storage route in capabilities/registration closures; standalone runner calls use the same selection. No SDK import/process side effects when off. | `AppHarness`, `HarnessRequest`, `get_harness()`, `prepare_tools()`, `validate_agent()` |
+| `azure_functions_agents/_copilot_providers.py` | Defines the Copilot provider interface, registry, sanitized provider-setting validation, and frozen OpenAI / Azure OpenAI / Foundry SDK provider mappings. Reads only the provider environment at harness selection; imports the Copilot SDK lazily when building per-request config. | `CopilotProvider`, `OpenAIProvider`, `AzureOpenAIProvider`, `FoundryProvider`, `_PROVIDERS` |
 | `azure_functions_agents/_copilot.py` | Lazy, pinned Copilot SDK stdio adapter. Uses SDK-owned runtime acquisition and native session create/resume/disconnect, drives the host-owned session envelope (prepare, handoff marking, rollback/uncertain, completion) and enables native compaction; supplies provider credential callbacks, adapts only the host-qualified custom tools, checks their exact model-visible catalog, translates results/usage and stops the SDK client on shutdown. No ambient SDK tools, host completion marker, OS file lock, broad child-environment filter, cache-layout inspection or outbound HTTP rewrite. | `run()`, `shutdown()` |
 | `azure_functions_agents/_native_session_identity.py` | Resolves and freezes the Copilot native storage route (`local` or `blob`, account/credential, container, app identity), derives the opaque `copilot-native/v1/...` path keys, defines the content-free persistence error types and their HTTP status codes, and runs the bidirectional metadata-only MAF/native history guards. | `resolve_route()`, `state_name()`, `guard_opposite_history()` |
 | `azure_functions_agents/_copilot_session_fs.py` | Implements the single-envelope native session store behind the SDK SessionFs seam: the versioned `state.json` schema and integrity digest, the `empty`/`preparing`/`active`/`ready`/`uncertain`/`deleted` lifecycle, Blob lease + ETag conditional single-put or local OS-lock + atomic replace, serialized callbacks with a failure latch, safe pre-handoff rollback, completion and tombstoning. | `NativeSession`, `NativeSessionFs`, `StateEnvelope` |
@@ -251,25 +252,52 @@ does not replace that default. Restart to switch an existing app/default.
 Legacy `runtime:` front matter remains ignored.
 
 The runner forks **before** MAF client, history, tool-loop or role construction.
-`ClientManager` remains the MAF provider extension point; it is not the new
-harness boundary. Copilot uses existing `InferenceTarget`, tool schemas and
-`AgentResult`, with SDK types kept inside `_copilot.py`. Capability validation
-runs before app mutation and again at standalone execution. The opt-in cannot
-silently fall back to MAF for roles or unsupported combinations.
+The built-in manager's pure target resolver selects provider/model without
+constructing or inspecting a MAF chat client. It preserves the existing explicit
+provider override, autodetection order (`AZURE_OPENAI_ENDPOINT` → Foundry
+endpoint → OpenAI key), model precedence, blank handling, and per-agent composed
+model handoff. `_copilot_providers.py` freezes the selected Copilot provider
+settings at harness selection; SDK types remain inside `_copilot.py` and the
+provider module's lazy config builders.
 
-The supported execution subset is the primary, direct, non-streaming HTTP role,
-Foundry project Responses with refreshable Entra auth (or explicit OpenAI BYOK
-completions), and completed-turn native-session continuity on local or Blob
-storage. Its tool catalog is composed in the same order as the MAF direct path:
-filtered explicit user tools, the per-request ACA `execute_python` tool when
-configured, then the configured
-`web_request` tool (default-on unless the app or agent opts out). These are the
-existing host `FunctionTool` objects, so sync/async invocation, Pydantic
+`ClientManager` remains the MAF provider extension point, not the new harness
+boundary. Flag-off custom managers and subclasses retain their existing behavior.
+Copilot accepts only the exact runtime-created built-in manager: an explicitly
+installed `ClientManager`, including `MAFClientManager()`, is a MAF-only
+replacement. Selection and catalog validation reject it before `FunctionApp`
+mutation, and execution rechecks in case `set_client_manager()` replaced it
+later. Rejection is an explicit migration diagnostic with no custom MAF client
+construction or fallback.
+
+The Copilot SDK version pinned in `pyproject.toml` uses the stable singular
+`ProviderConfig` on both create and resume:
+
+| Target | SDK provider | Authentication and model mapping |
+| --- | --- | --- |
+| OpenAI | `type=openai`, `wire_api=responses`, `https://api.openai.com/v1` | The configured API key is frozen at startup and supplied by callback; the resolved model is the session model, `model_id`, and `wire_model`. |
+| Azure OpenAI | `type=azure`, `wire_api=responses`, host-only `AZURE_OPENAI_ENDPOINT` | Host-only HTTPS endpoints intentionally include custom domains such as APIM. Startup freezes endpoint, optional API version, and auth mode. A nonblank API key wins and is frozen; otherwise a refreshable callback uses the public-cloud-only `https://cognitiveservices.azure.com/.default` scope; sovereign clouds are unsupported. Optional nonblank API version is passed under `azure`; omission uses versionless v1. The deployment/model is supplied in all three model positions. |
+| Foundry project | `type=openai`, `wire_api=responses`, normalized `<project-endpoint>/openai/v1` | A refreshable callback uses `https://ai.azure.com/.default`; model metadata is explicit and SDK Responses requests use `store=false`. |
+
+Endpoints and API-version tokens are validated before registration without
+echoing their values. Secret values and API-key-vs-Entra mode are frozen once
+at startup; Entra token callbacks may overlap and acquire a fresh token for each
+request because tokens expire. The credential owner is shared for that local
+worker and closed at shutdown. Credentials are not persisted, placed in session
+metadata or launch arguments, or logged. Authentication failures are sanitized
+and identify the provider/configuration action. Unsupported providers/settings
+fail without fallback.
+
+The supported execution subset is the primary, direct, non-streaming HTTP role
+and completed-turn native-session continuity on local or Blob storage. Its tool catalog is composed in the same
+order as the MAF direct path: filtered explicit user tools, the per-request ACA
+`execute_python` tool when configured, then the configured `web_request` tool
+(default-on unless the app or agent opts out). These are the existing host
+`FunctionTool` objects, so sync/async invocation, Pydantic
 validation-before-effect, web policy, and ACA public-session scoping remain
 host-owned. Tool exceptions become recoverable model-visible failures;
 cancellation propagates.
 
-The Copilot slice's automated ACA evidence stops at the adapter boundary: unit
+Automated ACA evidence for the Copilot path stops at the adapter boundary: unit
 tests prove catalog order and that the per-request `execute_python` closure is
 bound to the caller-visible HTTP session ID. Existing sandbox tests fake ACA
 transport, and the agentic E2E suite does not make a Copilot-to-ACA call. Real
@@ -283,22 +311,21 @@ client. The custom-only allowlist is then checked against the native
 model-visible catalog before every prompt. Empty mode, disabled config discovery
 and tool search, and the explicit `available_tools` list prevent ambient
 shell/file/web/todo/task/human-input tools; any catalog difference aborts before
-the prompt. Unrelated native permission requests are denied. Provider
-credentials come from host-owned callbacks rather than static session
-configuration. The SDK, not a host HTTP request handler, sends provider
-requests: the host does not rewrite them to force `store:false` or an output
-cap. In SDK 1.0.14/native 1.0.85, output-limit metadata does not emit a provider
-API generation cap; configured `max_output_tokens` is therefore rejected for
-this opt-in, not silently dropped. Default MAF objects, policies, output controls
-and execution remain unchanged when the flag is off.
+the prompt. Unrelated native permission requests are denied. The SDK, not a host
+HTTP request handler, sends provider requests: the host does not rewrite them to
+force `store:false` or an output cap. In the pinned SDK/native runtime,
+output-limit metadata does not emit a provider API generation cap; configured
+`max_output_tokens` is therefore rejected for this opt-in, not silently dropped.
+Default MAF objects, policies, output controls and execution remain unchanged
+when the flag is off.
 
-The SDK 1.0.14 wheel contains Python code but no native assets. The SDK obtains
-native 1.0.85 lazily on first client construction if it is not already cached,
-so the first Copilot-enabled request can incur download and extraction time.
-Later clients with access to the same cache reuse it. The app adds no separate
-CLI setup or download settings; default-off MAF never constructs the SDK
-client. A requirements-only Functions build installs the Python dependency but
-does not prepackage native assets. Install-time delivery through a Python
+The pinned SDK wheel contains Python code but no native assets. The SDK obtains
+native assets lazily on first client construction if they are not already
+cached, so the first Copilot-enabled request can incur download and extraction
+time. Later clients with access to the same cache reuse it. The app adds no
+separate CLI setup or download settings; default-off MAF never constructs the
+SDK client. A requirements-only Functions build installs the Python dependency
+but does not prepackage native assets. Install-time delivery through a Python
 runtime dependency is tracked upstream in
 [github/copilot-sdk#2789](https://github.com/github/copilot-sdk/issues/2789).
 External stdio remains the transport: experimental embedded FFI still needs
@@ -692,6 +719,10 @@ This split keeps parsing, policy, Azure binding registration, and runtime execut
 ### Custom inference client
 
 To plug in a different chat backend, implement the `ClientManager` interface and register it once with `set_client_manager(...)`; after that, `runner.run_agent()` and `runner.run_agent_stream()` use your implementation for every call. See `src/azure_functions_agents/client_manager.py` and the README section [Plugging in a custom client manager](https://github.com/Azure/azure-functions-agents-runtime/blob/main/README.md#plugging-in-a-custom-client-manager).
+
+This remains a MAF-only extension contract. The local Copilot migration preview
+rejects a custom, replaced, or subclassed manager before registration and
+rechecks before execution; disable the flag to continue using that manager.
 
 This extension point is deliberately below the registration layer: no trigger or endpoint code needs to change when you swap providers. The `ResolvedAgent.model` value is still the hand-off contract, but your manager decides how to interpret it. Delegated specialists resolve their model through the same `ClientManager`, so a custom implementation applies uniformly to coordinators and specialists alike.
 

@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
-import os
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
+from ._copilot_providers import AzureOpenAIProvider, FoundryProvider
 from ._copilot_session_fs import (
     HOST_PATH_CONVENTIONS,
     SESSION_STATE_ROOT,
@@ -25,8 +25,8 @@ from ._harness import (
     CopilotPreviewError,
     HarnessKind,
     HarnessRequest,
-    ProviderKind,
     UnsupportedCapabilityError,
+    validate_copilot_client_manager,
 )
 from ._logger import logger
 from ._native_session_identity import (
@@ -36,7 +36,7 @@ from ._native_session_identity import (
     SessionConflictError,
     guard_opposite_history,
 )
-from .client_manager import InferenceTarget
+from .client_manager import InferenceTarget, ProviderKind
 
 if TYPE_CHECKING:
     from azure.core.credentials_async import AsyncTokenCredential
@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from copilot.session_events import PermissionRequest, SessionEvent
     from copilot.tools import Tool, ToolInvocation, ToolResult
 
+    from ._copilot_providers import ProviderTokenSource
     from ._function_tool import FunctionTool
     from .runner import AgentResult
 
@@ -165,17 +166,25 @@ class _NativeRuntime:
         if failed:
             raise CopilotPreviewError("Copilot preview shutdown did not complete cleanly.")
 
-    async def foundry_token(self, _args: ProviderTokenArgs) -> str:
+    def credential(self) -> AsyncTokenCredential:
         if self._credential is None:
             self._credential = build_async_credential()
+        return self._credential
+
+    async def _entra_token(self, scope: str, diagnostic: str) -> str:
         try:
-            token = await self._credential.get_token("https://ai.azure.com/.default")
+            token = await self.credential().get_token(scope)
         except Exception:
-            raise CopilotPreviewError(
-                "Copilot Foundry preview could not acquire an Entra token. "
-                "Check the existing Azure sign-in and project access."
-            ) from None
+            raise CopilotPreviewError(diagnostic) from None
         return token.token
+
+    def bearer_token_provider(self, scope: str, diagnostic: str) -> Callable[[ProviderTokenArgs], Awaitable[str]]:
+        self.credential()
+
+        async def token(_args: ProviderTokenArgs) -> str:
+            return await self._entra_token(scope, diagnostic)
+
+        return token
 
     def _exit(self) -> None:
         """Best-effort SDK fallback when the host does not await shutdown."""
@@ -186,6 +195,31 @@ class _NativeRuntime:
                 logger.error("Copilot native process-exit cleanup failed.")
 
 
+class _RequestTokenSource:
+    def __init__(self, owner: _NativeRuntime) -> None:
+        self._owner = owner
+        self._error: CopilotPreviewError | None = None
+
+    def bearer_token_provider(
+        self, scope: str, diagnostic: str
+    ) -> Callable[[ProviderTokenArgs], Awaitable[str]]:
+        callback = self._owner.bearer_token_provider(scope, diagnostic)
+
+        async def token(args: ProviderTokenArgs) -> str:
+            try:
+                return await callback(args)
+            except CopilotPreviewError as error:
+                self._error = error
+                raise
+
+        return token
+
+    def take_error(self) -> CopilotPreviewError | None:
+        error = self._error
+        self._error = None
+        return error
+
+
 _RUNTIMES: dict[tuple[Path, str, ProviderKind | None, str | None], _NativeRuntime] = {}
 
 
@@ -193,13 +227,19 @@ def _runtime(harness: AppHarness) -> _NativeRuntime:
     if harness.name != HarnessKind.COPILOT or harness.storage_root is None:
         raise CopilotPreviewError("Copilot was not selected for this app.")
     route = harness.session_storage
+    provider_kind = harness.provider.kind if harness.provider is not None else None
+    endpoint = (
+        harness.provider.endpoint
+        if isinstance(harness.provider, AzureOpenAIProvider | FoundryProvider)
+        else None
+    )
     key = (harness.storage_root, route.identity_key if route else "unconfigured",
-           harness.provider, harness.endpoint)
+           provider_kind, endpoint)
     owner = _RUNTIMES.get(key)
     if owner is None:
         namespace = uuid.uuid5(
             uuid.NAMESPACE_URL,
-            f"af-copilot-worker:{key[1]}:{harness.provider}:{harness.endpoint}",
+            f"af-copilot-worker:{key[1]}:{provider_kind}:{endpoint}",
         ).hex
         owner = _NativeRuntime(harness.storage_root, namespace)
         _RUNTIMES[key] = owner
@@ -218,13 +258,6 @@ async def shutdown() -> None:
             _RUNTIMES.pop(key, None)
     if failed:
         raise CopilotPreviewError("Copilot preview shutdown failed for one or more workers.")
-
-
-def _token(_args: ProviderTokenArgs) -> str:
-    token = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not token:
-        raise CopilotPreviewError("Copilot OpenAI preview requires OPENAI_API_KEY in the host environment.")
-    return token
 
 
 def _deny_permission(
@@ -274,24 +307,21 @@ def _tool(function: FunctionTool, calls: list[dict[str, Any]]) -> Tool:
     )
 
 
-def _provider(harness: AppHarness, owner: _NativeRuntime) -> ProviderConfig:
-    from copilot.session import ProviderConfig
-
-    if harness.provider == ProviderKind.OPENAI:
-        return ProviderConfig(
-            type="openai",
-            wire_api="completions",
-            base_url="https://api.openai.com/v1",
-            bearer_token_provider=_token,
+def _provider(harness: AppHarness, tokens: ProviderTokenSource, model: str) -> ProviderConfig:
+    if harness.provider is None:
+        raise CopilotPreviewError("Copilot preview has no valid provider target.")
+    try:
+        return harness.provider.sdk_config(model, tokens)
+    except CopilotPreviewError:
+        raise
+    except Exception:
+        logger.error(
+            "Copilot provider setup failed: provider=%s authentication=%s; "
+            "underlying details were not logged.",
+            harness.provider.kind,
+            harness.provider.auth_label,
         )
-    if harness.provider == ProviderKind.FOUNDRY and harness.endpoint is not None:
-        return ProviderConfig(
-            type="openai",
-            wire_api="responses",
-            base_url=f"{harness.endpoint}/openai/v1",
-            bearer_token_provider=owner.foundry_token,
-        )
-    raise CopilotPreviewError("Copilot preview has no valid provider target.")
+        raise CopilotPreviewError(harness.provider.setup_diagnostic()) from None
 
 
 def _completed_turn(events: list[SessionEvent]) -> bool:
@@ -390,6 +420,7 @@ async def _session_context(
 
 
 async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
+    validate_copilot_client_manager()
     if request.max_output_tokens is not None:
         raise UnsupportedCapabilityError(
             "Copilot preview cannot enforce max_output_tokens with the pinned SDK/runtime. "
@@ -401,7 +432,6 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     from .runner import AgentResult, _AgentUsageRecorder, _session_lock_bounded_by
 
     owner = _runtime(harness)
-    provider = _provider(harness, owner)
     native_id = _native_id(request.agent_slug, request.session_id)
     calls: list[dict[str, Any]] = []
     messages: list[str] = []
@@ -410,7 +440,10 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     recorder = _AgentUsageRecorder(
         agent_name=request.agent_slug,
         execution_role="primary",
-        inference_target=InferenceTarget(harness.provider, request.model),
+        inference_target=InferenceTarget(
+            harness.provider.kind if harness.provider is not None else None,
+            request.model,
+        ),
     )
     invocation_started = False
     storage: NativeSession | None = None
@@ -434,6 +467,8 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     output_tokens = (output_tokens or 0) + used_output
 
     try:
+        token_source = _RequestTokenSource(owner)
+        provider = _provider(harness, token_source, request.model)
         async with _session_lock_bounded_by(
             native_id, request.deadline, agent_slug=request.agent_slug
         ), asyncio.timeout_at(request.deadline):
@@ -538,7 +573,11 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                         )
                     await storage.check()
                     logger.info("Copilot tool catalog verified: custom_tool_count=%d", len(expected_names))
-                    logger.info("Copilot request target: provider=%s model=%s", harness.provider, request.model)
+                    logger.info(
+                        "Copilot request target: provider=%s model=%s",
+                        harness.provider.kind if harness.provider is not None else None,
+                        request.model,
+                    )
                     await storage.transition(state=SessionState.ACTIVE)
                     await storage.transition(handoff_may_have_started=True)
                     await storage.check()
@@ -560,7 +599,16 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                         await storage.check()
                         if not send_task.done():
                             raise PersistenceUnavailableError("Native persistence failed during the turn.")
-                        response = await send_task
+                        try:
+                            response = await send_task
+                        except BaseException:
+                            token_error = token_source.take_error()
+                            if token_error is not None:
+                                raise token_error from None
+                            raise
+                        token_error = token_source.take_error()
+                        if token_error is not None:
+                            raise token_error
                         await storage.check()
                     finally:
                         fail_task.cancel()
@@ -575,7 +623,10 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                         case AssistantMessageData(content=content) if content.strip():
                             await _verify_completed_turn(session)
                         case _:
-                            raise CopilotPreviewError("Copilot returned no final model reply.")
+                            raise CopilotPreviewError(
+                                "Copilot returned no final model reply. Check provider "
+                                "authentication and model/deployment access."
+                            )
                 async with storage.lock:
                     await storage.check()
                 await storage.complete()

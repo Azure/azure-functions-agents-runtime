@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import threading
 from collections.abc import Callable
@@ -12,22 +11,27 @@ from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlsplit
 
 from ._function_tool import FunctionTool, tool
 from ._logger import logger
+from .client_manager import ProviderKind as ProviderKind
+from .client_manager import (
+    _is_active_client_manager_builtin,
+    _resolve_builtin_inference_target,
+)
+from .config.env import EnvVar, raw_env_value
 from .config.paths import get_app_root, resolve_config_dir
 from .config.schema import HTTP_TRIGGER_TYPE, AgentConfiguration, ResolvedAgent
 
 if TYPE_CHECKING:
+    from ._copilot_providers import CopilotProvider
     from ._native_session_identity import StorageRoute
     from .registration.capabilities import AgentCapabilities
 
-FLAG = "AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT"
+FLAG = EnvVar.ENABLE_COPILOT
 SDK_DISTRIBUTION = "github-copilot-sdk"
-PROVIDER_ENV = "AZURE_FUNCTIONS_AGENTS_PROVIDER"
-FOUNDRY_ENDPOINT_ENV = "FOUNDRY_PROJECT_ENDPOINT"
-WORKER_COUNT_ENV = "FUNCTIONS_WORKER_PROCESS_COUNT"
+PROVIDER_ENV = EnvVar.PROVIDER
+WORKER_COUNT_ENV = EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT
 
 type ExecutionRole = Literal["primary", "delegate", "workflow_subagent"]
 
@@ -35,11 +39,6 @@ type ExecutionRole = Literal["primary", "delegate", "workflow_subagent"]
 class HarnessKind(StrEnum):
     MAF = "maf"
     COPILOT = "copilot"
-
-
-class ProviderKind(StrEnum):
-    OPENAI = "openai"
-    FOUNDRY = "foundry"
 
 
 class CopilotPreviewError(RuntimeError):
@@ -56,8 +55,7 @@ class AppHarness:
     app_root: Path
     storage_root: Path | None = None
     default_model: str | None = None
-    provider: ProviderKind | None = None
-    endpoint: str | None = field(default=None, repr=False)
+    provider: CopilotProvider | None = None
     session_storage: StorageRoute | None = field(default=None, repr=False)
 
 
@@ -101,6 +99,16 @@ def check_sdk_dependency() -> None:
         ) from None
 
 
+def validate_copilot_client_manager() -> None:
+    if not _is_active_client_manager_builtin():
+        raise UnsupportedCapabilityError(
+            "Copilot preview accepts only the runtime-created MAFClientManager singleton. "
+            "An explicitly installed ClientManager, including MAFClientManager(), is a MAF-only "
+            f"replacement; restart with {FLAG}=false to use it through MAF. "
+            "No client or fallback was constructed."
+        )
+
+
 def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHarness:
     """Capture each app independently; standalone calls retain a first-use root default."""
     root = (app_root or get_app_root()).resolve()
@@ -108,74 +116,48 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
         existing = _HARNESSES.get(root)
         if existing is not None and not new_app:
             return existing
-        if not _flag_enabled(os.environ.get(FLAG)):
+        if not _flag_enabled(raw_env_value(EnvVar.ENABLE_COPILOT)):
             selected = AppHarness(HarnessKind.MAF, root)
         else:
             from ._native_session_identity import resolve_route
 
+            validate_copilot_client_manager()
             check_sdk_dependency()
-            if os.environ.get(WORKER_COUNT_ENV, "1").strip() != "1":
-                raise UnsupportedCapabilityError(
-                    f"Copilot local preview requires {WORKER_COUNT_ENV}=1. "
-                    "Multi-worker hosting is not qualified for native session persistence."
-                )
-            if os.environ.get("WEBSITE_INSTANCE_ID"):
-                raise UnsupportedCapabilityError(
-                    "Copilot preview supports local execution only; "
-                    "Azure hosting is not qualified."
-                )
-            raw_provider = os.environ.get(PROVIDER_ENV, "").strip().lower()
             try:
-                provider = ProviderKind(raw_provider)
-            except ValueError:
+                target = _resolve_builtin_inference_target(None)
+                if target.provider is None:
+                    raise ValueError
+                provider = ProviderKind(target.provider)
+            except (RuntimeError, ValueError):
                 raise UnsupportedCapabilityError(
-                    f"Copilot preview supports {PROVIDER_ENV}=foundry "
-                    "(project Responses + Entra) or openai (BYOK Chat Completions), "
-                    "with external native stdio only."
+                    f"Copilot preview supports {PROVIDER_ENV}=openai, azure_openai, or foundry "
+                    "with the existing explicit-or-autodetected provider settings."
                 ) from None
-            endpoint = None
-            default_model = os.environ.get("AZURE_FUNCTIONS_AGENTS_MODEL") or None
-            if provider is ProviderKind.FOUNDRY:
-                endpoint = os.environ.get(FOUNDRY_ENDPOINT_ENV, "").strip().rstrip("/")
-                try:
-                    url = urlsplit(endpoint)
-                    port = url.port
-                except ValueError:
-                    raise UnsupportedCapabilityError(
-                        "Copilot Foundry preview requires a valid HTTPS project endpoint."
-                    ) from None
-                if (
-                    url.scheme != "https"
-                    or not (url.hostname or "").endswith(".services.ai.azure.com")
-                    or url.username is not None
-                    or url.password is not None
-                    or url.query
-                    or url.fragment
-                    or port not in {None, 443}
-                    or not re.fullmatch(r"/api/projects/[A-Za-z0-9_-]+", url.path)
-                ):
-                    raise UnsupportedCapabilityError(
-                        f"Copilot Foundry preview requires {FOUNDRY_ENDPOINT_ENV} in the form "
-                        "https://<resource>.services.ai.azure.com/api/projects/<project>."
-                    )
-                default_model = os.environ.get("FOUNDRY_MODEL") or default_model
-            route = resolve_route(root)
-            for name in (
-                "AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT",
-                "AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY",
-            ):
-                if os.environ.get(name):
+            from ._copilot_providers import _PROVIDERS
+
+            copilot_provider = _PROVIDERS[provider].from_environment()
+            worker_count = raw_env_value(EnvVar.FUNCTIONS_WORKER_PROCESS_COUNT)
+            if (worker_count if worker_count is not None else "1").strip() != "1":
+                raise UnsupportedCapabilityError(
+                    f"Copilot local preview requires {WORKER_COUNT_ENV}=1."
+                )
+            if raw_env_value(EnvVar.WEBSITE_INSTANCE_ID):
+                raise UnsupportedCapabilityError(
+                    "Copilot preview supports local execution only; Azure hosting is not qualified."
+                )
+            for name in (EnvVar.REASONING_EFFORT, EnvVar.REASONING_SUMMARY):
+                if raw_env_value(name):
                     raise UnsupportedCapabilityError(f"Copilot preview does not support {name}.")
+            route = resolve_route(root)
             app_key = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:32]
             storage_root = Path(resolve_config_dir()).resolve() / "copilot-preview" / app_key
             selected = AppHarness(
                 HarnessKind.COPILOT,
                 root,
                 storage_root,
-                default_model,
-                provider,
-                endpoint,
-                route,
+                target.model,
+                copilot_provider,
+                session_storage=route,
             )
         if not new_app:
             _HARNESSES[root] = selected
@@ -243,6 +225,7 @@ def validate_agent(
 
     if harness.name is HarnessKind.MAF:
         return
+    validate_copilot_client_manager()
     validate_configuration(resolved.agent_configuration)
     reject_unsupported(
         non_http_trigger=resolved.trigger is not None and resolved.trigger.type != HTTP_TRIGGER_TYPE,

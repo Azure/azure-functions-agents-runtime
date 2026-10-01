@@ -19,6 +19,8 @@ from azure.core.credentials import AccessToken
 from azure_functions_agents import _copilot, _harness, runner, shutdown_client_manager
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.config import paths
+from azure_functions_agents.config.schema import WebRequestConfig
+from azure_functions_agents.system_tools.web_request import create_web_request_tools
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("AZURE_FUNCTIONS_AGENTS_TEST_NATIVE_COPILOT") != "1",
@@ -28,6 +30,7 @@ pytestmark = pytest.mark.skipif(
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
 CACHE = Path(__file__).resolve().parents[1] / ".tmp-validation" / "runtime-1.0.85"
 SENTINEL = "not-a-credential-native-persistence-sentinel"
+AUTH_FAILURE_SENTINEL = "sentinel-private-native-provider-403"
 
 
 def _tag(user: str) -> str:
@@ -80,7 +83,14 @@ def _responses_fixture(body, item, request):
     )
 
 
-@pytest.fixture(params=["openai", "foundry"])
+@pytest.fixture(
+    params=[
+        "openai",
+        "azure_openai_entra_versionless",
+        "azure_openai_api_key_versioned",
+        "foundry",
+    ]
+)
 def native(monkeypatch, tmp_path, request):
     import copilot
     from copilot._cli_version import get_runtime_platform
@@ -108,16 +118,42 @@ def native(monkeypatch, tmp_path, request):
     stalled = asyncio.Event()
     cancelled = asyncio.Event()
     provider_types = get_type_hints(ProviderConfig)
+    provider_case = request.param
+    provider_name = (
+        "azure_openai" if provider_case.startswith("azure_openai_") else provider_case
+    )
+    azure_api_key = provider_case == "azure_openai_api_key_versioned"
+    azure_api_version = "2024-10-21" if azure_api_key else None
 
     def check_options(options):
         provider = options["provider"]
         assert provider["type"] in get_args(provider_types["type"])
-        assert provider["type"] == "openai"
+        assert provider["type"] == ("azure" if provider_name == "azure_openai" else "openai")
         assert provider["wire_api"] in get_args(provider_types["wire_api"])
-        assert provider["wire_api"] == (
-            "responses" if request.param == "foundry" else "completions"
-        )
+        assert provider["wire_api"] == "responses"
+        assert provider["model_id"] == "gpt-4.1-mini"
+        assert provider["wire_model"] == "gpt-4.1-mini"
+        assert options["model"] == "gpt-4.1-mini"
         assert options["available_tools"] == ["custom:make_receipt", "custom:web_request"]
+        if provider_name == "openai":
+            assert provider["base_url"] == "https://api.openai.com/v1"
+        elif provider_name == "foundry":
+            assert (
+                provider["base_url"]
+                == "https://fixture.services.ai.azure.com/api/projects/test/openai/v1"
+            )
+        else:
+            assert provider["base_url"] == "https://fixture.openai.azure.com"
+            if azure_api_version is None:
+                assert "azure" not in provider
+            else:
+                assert provider["azure"] == {"api_version": azure_api_version}
+            if azure_api_key:
+                assert provider["api_key"] == SENTINEL
+                assert "bearer_token_provider" not in provider
+            else:
+                assert "api_key" not in provider
+                assert callable(provider["bearer_token_provider"])
 
     class ObservedClient(sdk_client):
         async def get_session_metadata(self, session_id):
@@ -145,13 +181,47 @@ def native(monkeypatch, tmp_path, request):
 
     class SyntheticProvider(CopilotRequestHandler):
         async def send_request(self, request, context):
-            assert request.url.host in {"api.openai.com", "fixture.services.ai.azure.com"}, "Unexpected destination"
-            assert request.headers.get("authorization") == f"Bearer {SENTINEL}"
+            expected_route = {
+                "openai": ("api.openai.com", "/v1/responses", {}),
+                "azure_openai_entra_versionless": (
+                    "fixture.openai.azure.com",
+                    "/openai/v1/responses",
+                    {},
+                ),
+                "azure_openai_api_key_versioned": (
+                    "fixture.openai.azure.com",
+                    "/openai/responses",
+                    {"api-version": "2024-10-21"},
+                ),
+                "foundry": (
+                    "fixture.services.ai.azure.com",
+                    "/api/projects/test/openai/v1/responses",
+                    {},
+                ),
+            }[provider_case]
+            assert request.url.host == expected_route[0]
+            assert request.url.path == expected_route[1]
+            assert dict(request.url.params) == expected_route[2]
+            headers = dict(request.headers)
+            bearer = "Bearer " + SENTINEL
+            expected_auth = {
+                "openai": ("authorization", bearer),
+                "azure_openai_entra_versionless": ("authorization", bearer),
+                "azure_openai_api_key_versioned": ("api-key", SENTINEL),
+                "foundry": ("authorization", bearer),
+            }[provider_case]
+            raw_header_names = {name.decode("ascii") for name, _value in request.headers.raw}
+            assert expected_auth[0] in raw_header_names
+            assert headers[expected_auth[0]] == expected_auth[1]
+            if provider_case == "azure_openai_api_key_versioned":
+                assert "authorization" not in headers
+                assert "authorization" not in raw_header_names
             body = json.loads(await request.aread())
             captured.append(body)
             responses = request.url.path.endswith("/responses")
             if responses:
                 assert body.get("store") is False, "SDK Responses must disable provider retention"
+            assert body["model"] == "gpt-4.1-mini"
             tools = [item["name"] if responses else item["function"]["name"] for item in body.get("tools", [])]
             assert tools == ["make_receipt", "web_request"], f"Unexpected model-visible tools: {tools}"
             declaration = body["tools"][0] if responses else body["tools"][0]["function"]
@@ -161,6 +231,12 @@ def native(monkeypatch, tmp_path, request):
             messages = body["input"] if responses else body["messages"]
             users = [item for item in messages if item.get("role") == "user"]
             user = str(users[-1]["content"])
+            if "PROVIDER_AUTH_FAILURE" in user:
+                return httpx.Response(
+                    403,
+                    json={"error": {"message": AUTH_FAILURE_SENTINEL}},
+                    request=request,
+                )
             if "STALL_NATIVE_TEST" in user:
                 stalled.set()
                 await asyncio.wait_for(context.cancel_event.wait(), timeout=20)
@@ -238,10 +314,20 @@ def native(monkeypatch, tmp_path, request):
     monkeypatch.setattr(_copilot, "_RUNTIMES", {})
     monkeypatch.setattr(paths, "_app_root", app_root)
     monkeypatch.setenv(_harness.FLAG, "true")
-    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", request.param)
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", provider_name)
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_MODEL", "gpt-4.1-mini")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("OPENAI_API_KEY", SENTINEL)
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://fixture.openai.azure.com")
+    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1-mini")
+    if azure_api_key:
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", SENTINEL)
+    else:
+        monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    if azure_api_version is None:
+        monkeypatch.delenv("AZURE_OPENAI_API_VERSION", raising=False)
+    else:
+        monkeypatch.setenv("AZURE_OPENAI_API_VERSION", azure_api_version)
     monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://fixture.services.ai.azure.com/api/projects/test")
     monkeypatch.setenv("FOUNDRY_MODEL", "gpt-4.1-mini")
     credential = SimpleNamespace(
@@ -257,7 +343,8 @@ def native(monkeypatch, tmp_path, request):
         root=app_root, state=tmp_path / "state", captured=captured,
         clients=clients, created=created, metadata_lookups=metadata_lookups,
         resumed=resumed, histories=histories,
-        stalled=stalled, cancelled=cancelled, provider=request.param, credential=credential,
+        stalled=stalled, cancelled=cancelled, provider=provider_name,
+        auth="api_key" if azure_api_key else "entra", credential=credential,
     )
 
 
@@ -312,10 +399,69 @@ async def test_real_native_markdown_tool_and_cold_runtime_resume(native):
         assert "native-one" not in str(prior[-1])
         assert any(item.get("role") == "tool" or item.get("type") == "function_call_output" for item in prior)
         assert any(isinstance(event.data, AssistantTurnEndData) for event in native.histories[1])
-        if native.provider == "foundry":
+        if native.provider in {"azure_openai", "foundry"} and native.auth == "entra":
             native.credential.get_token.assert_awaited()
         else:
             native.credential.get_token.assert_not_awaited()
+        for path in native.state.rglob("*"):
+            if path.is_file():
+                assert SENTINEL.encode() not in path.read_bytes(), (
+                    f"Credential sentinel was persisted in {path.relative_to(native.state)}"
+                )
+    finally:
+        await shutdown_client_manager()
+
+
+@pytest.mark.asyncio
+async def test_native_provider_auth_failure_is_sanitized_through_public_route(
+    native, monkeypatch, caplog
+):
+    maf = AsyncMock(side_effect=AssertionError("MAF fallback must not run"))
+    monkeypatch.setattr(runner, "_build_agent_session", maf)
+    app = create_function_app(native.root)
+    chat = next(
+        item.get_user_function()
+        for item in app.get_functions()
+        if item.get_function_name() == "agent_main_builtin_chat"
+    )
+    try:
+        response = await chat(
+            SimpleNamespace(
+                headers={},
+                json=AsyncMock(return_value={"prompt": "PROVIDER_AUTH_FAILURE"}),
+            )
+        )
+        body = response.body.decode()
+        assert response.status_code == 500
+        assert "provider" in body.lower() or "auth" in body.lower()
+        assert AUTH_FAILURE_SENTINEL not in body
+        assert SENTINEL not in body
+        assert AUTH_FAILURE_SENTINEL not in caplog.text
+        assert SENTINEL not in caplog.text
+        maf.assert_not_awaited()
+    finally:
+        await shutdown_client_manager()
+
+
+@pytest.mark.asyncio
+async def test_native_entra_token_failure_preserves_diagnostic(native, monkeypatch):
+    if native.provider == "openai" or native.auth == "api_key":
+        pytest.skip("Only Entra-backed providers invoke the bearer-token callback.")
+    native.credential.get_token.side_effect = RuntimeError("sentinel-private-token-callback")
+    app = create_function_app(native.root)
+    chat = next(
+        item.get_user_function()
+        for item in app.get_functions()
+        if item.get_function_name() == "agent_main_builtin_chat"
+    )
+    try:
+        response = await chat(
+            SimpleNamespace(headers={}, json=AsyncMock(return_value={"prompt": "hello"}))
+        )
+        body = response.body.decode()
+        assert response.status_code == 500
+        assert "Entra token" in body
+        assert "sentinel-private-token-callback" not in body
     finally:
         await shutdown_client_manager()
 
@@ -445,7 +591,10 @@ async def test_authored_preview_http_trigger_creates_and_resumes(native):
 @pytest.mark.asyncio
 async def test_real_native_request_cancellation_does_not_kill_peer(native):
     create_function_app(native.root)
-    tools = runner.discover_user_tools(native.root).tools
+    tools = [
+        *runner.discover_user_tools(native.root).tools,
+        *create_web_request_tools(WebRequestConfig(allowed_hosts=["example.com"])),
+    ]
     slow = asyncio.create_task(runner.run_agent(
         "STALL_NATIVE_TEST", tools=tools, mcp_tools=[], timeout=45,
     ))

@@ -42,6 +42,9 @@ parity is unchanged. Configured output-token caps are not supported in this
 Copilot preview; MAF retains its output-limit controls. See
 [`docs/copilot-preview-operations.md`](docs/copilot-preview-operations.md) for
 storage settings, inspection, error codes, retention and cleanup.
+The sample documents OpenAI key, Azure OpenAI key/Entra and Foundry Entra setup.
+Custom `ClientManager`
+implementations remain MAF-only and are rejected explicitly when Copilot is on.
 
 ## Installation
 

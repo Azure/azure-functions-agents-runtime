@@ -19,7 +19,8 @@ from pathlib import Path
 async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> None:
     from azure_functions_agents import _copilot
     from azure_functions_agents import _copilot_session_fs as fs
-    from azure_functions_agents._harness import AppHarness, HarnessKind, ProviderKind
+    from azure_functions_agents._copilot_providers import OpenAIProvider
+    from azure_functions_agents._harness import AppHarness, HarnessKind
     from azure_functions_agents._native_session_identity import resolve_route
 
     paths: list[str] = []
@@ -35,7 +36,7 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
     app_root = session_dir / "app"
     app_root.mkdir(parents=True, exist_ok=True)
     harness = AppHarness(
-        HarnessKind.COPILOT, app_root, storage_root, "offline-model", ProviderKind.OPENAI,
+        HarnessKind.COPILOT, app_root, storage_root, "offline-model", OpenAIProvider("offline"),
         session_storage=resolve_route(app_root),
     )
     owner = _copilot._runtime(harness)

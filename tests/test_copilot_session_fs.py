@@ -13,7 +13,8 @@ from copilot.generated.rpc import SessionFSErrorCode
 from copilot.session_fs_provider import create_session_fs_adapter
 
 from azure_functions_agents import _copilot_session_fs as fs
-from azure_functions_agents._harness import AppHarness, HarnessKind, ProviderKind
+from azure_functions_agents._copilot_providers import OpenAIProvider
+from azure_functions_agents._harness import AppHarness, HarnessKind
 from azure_functions_agents._native_session_identity import (
     CorruptSessionError,
     IncompatibleSessionError,
@@ -36,7 +37,7 @@ def harness(tmp_path, monkeypatch):
     monkeypatch.delenv("WEBSITE_INSTANCE_ID", raising=False)
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_COPILOT_SESSION_STORAGE", raising=False)
     return AppHarness(
-        HarnessKind.COPILOT, tmp_path, tmp_path / "preview", "model", ProviderKind.OPENAI,
+        HarnessKind.COPILOT, tmp_path, tmp_path / "preview", "model", OpenAIProvider("not-a-credential"),
         session_storage=resolve_route(tmp_path),
     )
 

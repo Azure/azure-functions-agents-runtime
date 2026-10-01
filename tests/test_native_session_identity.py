@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from azure.core.exceptions import ResourceNotFoundError
 
-from azure_functions_agents import _harness
+from azure_functions_agents import _copilot, _harness
 from azure_functions_agents._native_session_identity import (
     IncompatibleSessionError,
     PersistenceUnavailableError,
@@ -76,7 +76,9 @@ def test_context_freezes_storage_and_separates_client_identity(configured, monke
     monkeypatch.setenv(_harness.FLAG, "true")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_MODEL", "model")
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
     monkeypatch.setattr(_harness, "_HARNESSES", {})
+    monkeypatch.setattr(_copilot, "_RUNTIMES", {})
     old = _harness.get_harness(configured, new_app=True)
     monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_COPILOT_SESSION_STORAGE", "BLOB")
@@ -84,6 +86,7 @@ def test_context_freezes_storage_and_separates_client_identity(configured, monke
     assert old.session_storage.mode is StorageMode.LOCAL
     assert new.session_storage.mode is StorageMode.BLOB
     assert old.session_storage.identity_key != new.session_storage.identity_key
+    assert _copilot._runtime(old) is not _copilot._runtime(new)
     assert "UseDevelopmentStorage" not in repr(new)
 
 
