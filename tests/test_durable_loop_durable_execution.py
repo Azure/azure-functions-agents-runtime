@@ -2716,11 +2716,58 @@ async def test_registered_orchestrator_releases_session_after_activity_failure(
     task.is_completed = True
     task = generator.send(task.result)
     task.is_completed = True
-    abort_task = generator.send(task.result)
+    cancellation_check_task = generator.send(task.result)
+    abort_task = generator.send(cancellation_check_task.result)
 
     assert context.entity_calls[-1][0] == "abort"
     with pytest.raises(KeyError):
         generator.send(abort_task.result)
+
+
+@pytest.mark.asyncio
+async def test_registered_orchestrator_preserves_cancel_after_activity_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(DURABLE_LOOP_ENABLED_ENV, "true")
+    _write_agent(tmp_path)
+    app = app_module.create_function_app(tmp_path)
+    assert isinstance(app, df.DFApp)
+    registry = DurableToolRegistry()
+    content = InMemoryDurableContentStore()
+    run_input = await _run_input(
+        content,
+        registry.catalog(policy_hash=_HASH, package_hash="f" * 64),
+    )
+    context = _OrchestrationContext(
+        run_input.model_dump(mode="json"),
+        activity_results={},
+        cancellation_sequence=[False, True],
+    )
+    orchestrator = _registered(app, DURABLE_LOOP_ORCHESTRATOR_NAME)
+    generator = orchestrator(context)
+
+    task = next(generator)
+    task.is_completed = True
+    task = generator.send(task.result)
+    task.is_completed = True
+    task = generator.send(task.result)
+    task.is_completed = True
+    cancellation_check_task = generator.send(task.result)
+    abort_task = generator.send(cancellation_check_task.result)
+
+    with pytest.raises(StopIteration) as terminal:
+        generator.send(abort_task.result)
+
+    assert terminal.value.value == {"status": DurableLoopRunStatus.CANCELLED.value}
+    assert [operation for operation, _ in context.entity_calls][-2:] == [
+        "is_cancelled",
+        "abort",
+    ]
+    assert (
+        context.entity_calls[-1][1]["status"]  # type: ignore[index]
+        == DurableLoopRunStatus.CANCELLED.value
+    )
 
 
 @pytest.mark.asyncio

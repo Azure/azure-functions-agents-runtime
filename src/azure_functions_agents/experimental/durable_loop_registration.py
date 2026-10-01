@@ -687,6 +687,23 @@ def _run_registered_durable_loop(
             skills_enabled=skills_enabled,
         )
     except Exception:
+        cancelled = yield context.call_entity(
+            entity,
+            "is_cancelled",
+            {"run_id": payload.identity.run_id},
+        )
+        if cancelled.get("cancelled") is True:
+            yield from _cleanup_execution_plane(context, payload)
+            yield context.call_entity(
+                entity,
+                "abort",
+                {
+                    "context_ref": payload.run_document_ref.model_dump(mode="json"),
+                    "run_id": payload.identity.run_id,
+                    "status": DurableLoopRunStatus.CANCELLED.value,
+                },
+            )
+            return {"status": DurableLoopRunStatus.CANCELLED.value}
         yield from _cleanup_execution_plane(context, payload)
         yield context.call_entity(
             entity,
