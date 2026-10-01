@@ -15,6 +15,8 @@ branch: <user>/<slug>
 > Copy this file to `docs/frds/<NNNN>-<slug>.md` (next zero-padded number) and
 > fill every section. Delete these guidance blockquotes as you go. See
 > `docs/frds/README.md` for the process and `AGENTS.md` §1 for the lifecycle.
+> Describe the intended feature behavior, not PR sequencing, delivery scope,
+> ownership, schedule, or rollout plans. Track those in PRs or a separate plan.
 
 ## 1. Summary
 
@@ -58,8 +60,8 @@ branch: <user>/<slug>
 
 ## 5. Decisions log
 
-> Append-only. Record every non-trivial choice and **who** made it. This is the
-> durable record that makes the FRD worth committing.
+> Append-only. Record consequential feature-contract choices and **who** made
+> them, not implementation or delivery-planning decisions.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | - | -------- | ------------------ | ------ | ---------- | ---- |

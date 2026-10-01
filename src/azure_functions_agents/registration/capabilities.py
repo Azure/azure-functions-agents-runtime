@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .._function_tool import WorkflowTool
 from .._logger import logger
@@ -13,11 +13,14 @@ from .._slug import delegate_tool_name
 from ..config import ResolvedAgent
 from ..discovery.mcp import MCPTool
 
+if TYPE_CHECKING:
+    from .._harness import AppHarness
+
 # Hardcoded (not imported from system_tools.sandbox) to avoid pulling in
 # that module's heavy optional deps (aiohttp, azure.identity) — matches the
 # lazy-import convention used by `_build_web_request_tools` below. The
 # sandbox tool's name is fixed as "execute_python" by its `@tool` decorator.
-_SANDBOX_TOOL_NAME = "execute_python"
+SANDBOX_TOOL_NAME = "execute_python"
 
 
 @dataclass
@@ -29,6 +32,7 @@ class AgentCapabilities:
     filtered_mcp_tools: list[MCPTool] | None = None
     enabled_skill_paths: list[Path] = field(default_factory=list)
     web_request_tools: list[Any] | None = None
+    _harness: AppHarness | None = field(default=None, repr=False, compare=False)
 
 
 def with_runtime_skill_paths(
@@ -147,7 +151,7 @@ def existing_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities
     names.update(_tool_name(tool) for tool in capabilities.filtered_workflow_tools or [])
     names.update(_tool_name(tool) for tool in capabilities.web_request_tools or [])
     if resolved.sandbox_config is not None and not resolved.tools_disabled:
-        names.add(_SANDBOX_TOOL_NAME)
+        names.add(SANDBOX_TOOL_NAME)
     names.discard("")
     return names
 

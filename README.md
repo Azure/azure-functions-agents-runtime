@@ -15,7 +15,24 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
-- **Harness-only execution controls** — set portable output limits and optional Microsoft Agent Framework token-budget conversation compaction
+- **MAF execution controls** — set output limits and optional Microsoft Agent Framework token-budget conversation compaction
+
+### Experimental Copilot harness
+
+MAF remains the default. A separate, local-only
+[Copilot foundation sample](samples/copilot-preview/README.md) supports an explicit
+`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=true` opt-in for non-streaming HTTP,
+filtered explicit Python tools, the configured `web_request` tool, session-bound
+ACA `execute_python` adapter wiring, host-validated structured results on
+authored HTTP-trigger routes, and completed-turn native-session continuity. ACA
+catalog/session scoping is unit-qualified; real Copilot-to-ACA execution remains
+a separately gated acceptance item. It documents the pinned SDK/runtime,
+Foundry Entra setup, supported tool policy, unsupported capabilities, real
+request/tool/follow-up verification and the flag-off restart path. Ambient SDK
+shell/file/web/todo/task/human-input tools are disabled. This is not production
+activation or provider/session persistence/MCP/skills/role/streaming parity;
+existing MAF history is untouched. Configured output-token caps are not
+supported in this Copilot preview; MAF retains its output-limit controls.
 
 ## Installation
 
@@ -159,9 +176,10 @@ If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint
 
 ### Agent configuration
 
-All agents execute through Microsoft Agent Framework's harness-agent mechanism. Optional global
+By default, agents execute through Microsoft Agent Framework's harness-agent mechanism. Optional global
 defaults and recursive per-agent overrides configure model output and conversation compaction
-limits.
+limits. The local Copilot opt-in rejects configured output limits rather than silently
+dropping them.
 
 ```yaml
 # agents.config.yaml

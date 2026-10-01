@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from .._logger import logger
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
+from ..config.schema import HTTP_TRIGGER_TYPE
 from . import _naming
 from ._auth import resolve_endpoint_auth_level
 from ._handlers import (
@@ -212,7 +213,7 @@ def register_agent(
             registered_names.copy(),
         )
 
-    if trigger_type == "http_trigger":
+    if trigger_type == HTTP_TRIGGER_TYPE:
         _register_http_agent(
             app,
             resolved,
