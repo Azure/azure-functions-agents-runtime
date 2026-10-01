@@ -598,3 +598,55 @@ def test_discover_inline_mix_in_url(
 
     assert isinstance(tool, MCPStreamableHTTPTool)
     assert tool.url == "https://example.com:8080/api"
+
+
+def test_build_http_client_sets_long_read_timeout() -> None:
+    def header_provider(_ctx: object) -> dict[str, str]:
+        return {"x-functions-key": "secret"}
+
+    client = mcp_discovery._build_http_client(header_provider)
+
+    assert client is not None
+    assert client.timeout.read == mcp_discovery._MCP_HTTP_READ_TIMEOUT_SECONDS
+    assert client.timeout.connect == mcp_discovery._MCP_HTTP_CONNECT_TIMEOUT_SECONDS
+
+
+def test_build_http_client_returns_none_without_header_provider() -> None:
+    assert mcp_discovery._build_http_client(None) is None
+
+
+def test_build_http_client_honors_custom_timeout() -> None:
+    def header_provider(_ctx: object) -> dict[str, str]:
+        return {"x-functions-key": "secret"}
+
+    client = mcp_discovery._build_http_client(header_provider, 600.0)
+
+    assert client.timeout.read == 600.0
+
+
+def test_discover_mcp_servers_reads_per_server_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        mcp_discovery, "MCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool
+    )
+    _write_mcp_config(
+        tmp_path,
+        {
+            "type": "http",
+            "url": "https://example.com/mcp",
+            "headers": {"x-functions-key": "secret"},
+            "timeout": 600,
+        },
+    )
+
+    tool = discover_mcp_servers(tmp_path).servers["demo"]
+
+    assert tool.http_client.timeout.read == 600.0
+
+
+@pytest.mark.parametrize("value", ["not-a-number", 0, -1])
+def test_resolve_timeout_seconds_falls_back_on_invalid_value(value: object) -> None:
+    resolved = mcp_discovery._resolve_timeout_seconds({"timeout": value}, "demo")
+
+    assert resolved == mcp_discovery._MCP_HTTP_READ_TIMEOUT_SECONDS
