@@ -1369,7 +1369,6 @@ async def run_agent_stream(
         if harness.name is HarnessKind.COPILOT:
             validated_id = _validate_session_id(session_id)
             resolved_id = validated_id or uuid.uuid4().hex
-            yield f"data: {json.dumps({'type': 'session', 'session_id': resolved_id})}\n\n"
             events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
             emitted_text = False
 

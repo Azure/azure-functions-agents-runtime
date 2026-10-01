@@ -519,6 +519,8 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                         "Copilot model-visible tool catalog differs from the configured custom tools. "
                         "No prompt was sent."
                     )
+                if request.event_sink is not None:
+                    request.event_sink({"type": "session", "session_id": request.session_id})
                 logger.info("Copilot tool catalog verified: custom_tool_count=%d", len(expected_names))
                 logger.info(
                     "Copilot request target: provider=%s model=%s",

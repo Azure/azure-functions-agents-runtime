@@ -397,6 +397,9 @@ async def test_stream_translates_sdk_deltas_host_tools_and_completes_before_done
             "hello", _harness=preview, tools=[function], mcp_tools=[],
         ):
             event = json.loads(line.removeprefix("data: "))
+            if event["type"] == "session":
+                client.create_session.assert_awaited_once()
+                session.rpc.tools.get_current_metadata.assert_awaited_once()
             if event["type"] == "done":
                 session.get_events.assert_awaited()
             events.append(event)
@@ -427,6 +430,50 @@ async def test_stream_incomplete_turn_ends_with_error_never_done(preview, monkey
         ]
         assert [event["type"] for event in events] == ["session", "error"]
         client.create_session.return_value.abort.assert_awaited_once()
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stream_unsupported_output_cap_does_not_advertise_unusable_session(
+    preview, monkeypatch,
+):
+    import copilot
+
+    client_factory = Mock(side_effect=AssertionError("Native runtime must not start"))
+    monkeypatch.setattr(copilot, "CopilotClient", client_factory)
+    events = [
+        json.loads(line.removeprefix("data: "))
+        async for line in runner.run_agent_stream(
+            "hello", _harness=preview, tools=[], mcp_tools=[],
+            agent_configuration=runner.AgentConfiguration(max_output_tokens=32),
+        )
+    ]
+    assert [event["type"] for event in events] == ["error"]
+    assert "max_output_tokens" in events[0]["content"]
+    client_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stream_native_creation_failure_does_not_advertise_unusable_session(
+    preview, monkeypatch,
+):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    client.create_session.side_effect = RuntimeError("private native failure")
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        events = [
+            json.loads(line.removeprefix("data: "))
+            async for line in runner.run_agent_stream(
+                "hello", _harness=preview, tools=[], mcp_tools=[],
+            )
+        ]
+        assert [event["type"] for event in events] == ["error"]
+        assert "private native failure" not in events[0]["content"]
+        client.create_session.assert_awaited_once()
     finally:
         await _copilot.shutdown()
 

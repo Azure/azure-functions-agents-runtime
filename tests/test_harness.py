@@ -747,6 +747,7 @@ def test_stream_uses_copilot_but_leaf_remains_isolated(preview, monkeypatch):
 
     monkeypatch.setattr(runner, "_build_agent_session", AsyncMock(side_effect=AssertionError))
     async def invoke(_harness, request):
+        request.event_sink({"type": "session", "session_id": request.session_id})
         request.event_sink({"type": "delta", "content": "reply"})
         return runner.AgentResult(request.session_id, "reply")
     monkeypatch.setattr(_copilot, "run", invoke)
@@ -777,6 +778,8 @@ def test_registered_app_captures_selection_and_newness(preview, monkeypatch):
 
     async def invoke(harness, request):
         requests.append((harness, request))
+        if request.event_sink is not None:
+            request.event_sink({"type": "session", "session_id": request.session_id})
         return runner.AgentResult(request.session_id, "reply")
 
     monkeypatch.setattr(_harness, "validate_agent", validate_once)

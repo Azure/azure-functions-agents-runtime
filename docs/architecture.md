@@ -366,7 +366,10 @@ agent gets the packaged data-driven workflow grammar in its own prompt because
 the preview does not support scoped skill loading; it is not exposed to other
 agents as a global skill. The public SSE route emits `session`, SDK
 `delta`/`intermediate`, host-authorized `tool_start`/`tool_end`, and terminal
-`done`/`error`. A `done` requires the same verified completed native turn as
+`done`/`error`. The SDK adapter emits `session` only after native create/resume
+and the configured tool-catalog check succeed; validation or creation failures
+emit only `error`, without advertising an unusable new ID. A `done` requires
+the same verified completed native turn as
 non-streaming success; a disconnected consumer cancels and aborts its turn
 without closing the shared client. SDK specialist events never enter that queue.
 The pinned native runtime has been exercised with a synthetic, intercepted
