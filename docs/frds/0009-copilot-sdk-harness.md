@@ -265,6 +265,15 @@ The descriptor set has three shapes:
 - **Skill descriptor.** Skill name, description, path, resources, and scripts as
   discovered from the skill folder. It contains no provider state.
 
+The ordinary runtime `@tool` authoring seam stays stable. Authors keep using
+runtime `@tool` syntax, schema validation, sync or async callables, and current
+invocation semantics. Tool discovery records neutral runtime tool metadata. The
+MAF adapter maps that metadata to MAF `FunctionTool`; the Copilot adapter maps it
+to Copilot tools. Authors do not rewrite tools with SDK-specific decorators.
+Raw MAF `FunctionTool` subclasses and MAF-only `@tool` keyword arguments remain
+isolated in the MAF compatibility layer. Unmapped extensions fail explicitly on
+Copilot instead of being silently flattened.
+
 `HarnessRequest` carries only these descriptors and other scalar execution
 settings. It does not carry `agent_framework` or Copilot SDK types. Registration
 remains the authority for per-agent filtering. The runner receives the filtered
@@ -302,30 +311,40 @@ This interface maps to the pipeline as follows:
 | register | `registration/capabilities.py`, `registration/catalog.py`, `_harness.py` | Filter neutral inventories into immutable role capabilities and build `HarnessRequest` with descriptors only. |
 | execute | MAF adapter, Copilot adapter, `runner.py`, `_copilot.py` | Map descriptors to the selected SDK at the execution boundary and preserve the same runtime contract. |
 
-Phase-out acceptance is structural. Removing MAF means deleting the MAF adapter
-and its dependency. Discovery, registration, `HarnessRequest`, runner contracts,
-and Copilot execution do not change. Add an import-boundary test that fails if
-`agent_framework` appears outside the MAF adapter and the named MAF-compat public
-surfaces, or if Copilot imports appear outside the Copilot adapter.
+Phase-out acceptance is structural for the neutral core. Removing MAF from that
+core means deleting the MAF adapter and its dependency. Discovery, registration,
+`HarnessRequest`, runner contracts, and Copilot execution do not change. Retiring
+public legacy MAF-specific extension surfaces still needs an explicit migration.
+The design does not promise that customer MAF subclasses work after the MAF
+adapter is removed. Add an import-boundary test that fails if `agent_framework`
+appears outside the MAF adapter and the named MAF-compat public surfaces, or if
+Copilot imports appear outside the Copilot adapter.
 
 #### 4.3.2 Issue #1336 MCP and skills compatibility
 
-This amendment proposes direct-run Model Context Protocol (MCP) and scoped-skill
-compatibility. MCP calls external tool servers. Scoped skills are project skill
+This amendment proposes Model Context Protocol (MCP) and scoped-skill
+compatibility. MCP calls external tool servers. Server URLs may be remote
+HTTP/streamable-HTTP URLs; the local-only preview limit applies to Azure
+Functions app hosting, not to MCP URL locality. Scoped skills are project skill
 folders exposed only when configuration allows them. The pinned versions are
 `github-copilot-sdk` 1.0.14, native runtime 1.0.85, and protocol 3. MAF remains
-the default. Copilot remains an app-level, default-off, local-only preview with
-no automatic fallback. Human approval so far covers only same-session MCP
-credential replacement and MAF-parity empty-scope behavior. The rest still needs
-architecture review.
+the default. Copilot remains an app-level, default-off preview with no automatic
+fallback. Human approval covers the filter semantics, static-header
+create/resume boundary, empty-scope behavior, neutral descriptors, and ordinary
+runtime `@tool` mapping. The amendment still needs architecture review.
 
 **Discovery and registration.** MCP discovery returns the immutable,
 harness-neutral MCP server descriptors defined above. It keeps the authored
 server name and URL, HTTP transport, repr-hidden static headers, an
 all/none/finite-set tool filter, and optional Entra scope and client ID.
 Discovery stays read-only. Registration stays authoritative for per-agent
-filtering. `HarnessRequest` receives only descriptors already filtered for that
-role. For valid Entra auth, keep MAF header precedence: static headers first,
+filtering. Filtering means the existing authored filters: per-agent `mcp: false`
+disables MCP, `mcp.exclude` removes named servers, and per-server `tools` in
+`mcp.json` exposes all tools, no tools, or a named allowlist. Source servers may
+contain additional tools. A named allowlist does not require the host to prove
+that every named tool is remotely present before a turn. `HarnessRequest`
+receives only the selected server descriptors and their authored tool filters.
+For valid Entra auth, keep MAF header precedence: static headers first,
 generated `Authorization` second. Do not reject authored `Authorization`. Never
 log tokens or headers.
 
@@ -335,21 +354,23 @@ host-owned proxy/session framework. Configure the full filtered MCP set only at
 native session create or resume. Post-create start and reload are unsupported.
 
 Fresh static headers supplied on resume replace old ones. Native history is
-preserved for the same native session ID. This supports credential replacement
-between completed turns only. It does not support mid-turn refresh. For
+preserved for the same native session ID. This accepts the static-header
+restriction: headers and Entra tokens are supplied at create/resume between
+completed turns only. The design does not support mid-turn refresh. For
 Entra-authenticated MCP, acquire a fresh token before the next create/resume and
 materialize it as the static `Authorization` header. The stable native ID,
 per-turn create/resume/detach flow, and per-session lock define that boundary.
-Do not add another lifecycle manager, second detach, or resume controller.
+Do not add another lifecycle manager, second detach, proxy, private API,
+dynamic-header broker, or resume controller.
 
 An MCP auth failure during a turn is terminal for that turn. Do not replace
 headers in place. Do not automatically retry a tool call that may have had an
-external effect. Token acquisition, resume, and readiness failures fail closed.
-Never continue with stale tokens, drop servers/tools, start empty replacement
-sessions, or fall back to SDK OAuth. This is not full MAF auth parity: MAF can
-refresh tokens before each outbound request; Copilot refreshes static session
-configuration only between turns. Real Entra, provider-model, cloud-hosting,
-auth-failure, and expiry qualification remain required.
+external effect. Token acquisition, resume, connection, and initialization
+failures fail closed. Never continue with stale tokens, drop servers/tools, start
+empty replacement sessions, or fall back to SDK OAuth. This is not full MAF auth
+parity: MAF can refresh tokens before each outbound request; Copilot refreshes
+static session configuration only between turns. Static-header behavior is an
+accepted MCP design limit, not an MCP-specific qualification blocker.
 
 For a server without `auth`, pass authored static headers unchanged, including
 `Authorization`. For empty or whitespace-only `auth.scope`, log the existing MAF
@@ -359,30 +380,28 @@ unresolved `client_id` uses the default credential; resolved client ID uses the
 client-ID credential. No interactive OAuth, inferred scope, upscope,
 stale-token fallback, or other credential source is allowed.
 
-**Catalog and permissions.** Before model work on every create/resume, wait for
-each configured server through public SDK surfaces. Verify effective
-model-visible catalog and provenance through the supported pinned-version API.
-Qualification must establish that format. Do not guess `mcp:` `available_tools`
-syntax or hard-code a flattened name.
+**Catalog and permissions.** Do not add a host-side readiness, healthcheck,
+full-catalog, or provenance attestation step before prompting. The MAF route
+relies on normal MCP connection, initialization, tool loading, and surfaced
+errors. Copilot follows the same product contract through public SDK
+create/resume and connection behavior. Ordinary SDK failures remain explicit.
+Do not silently drop servers or tools, continue with stale credentials, or fall
+back to MAF.
 
 Validate MCP names only against documented provider model-name rules. Check
-model-visible collisions before prompting. Do not invent a skill-like
-64-character MCP limit. A finite `tools` list allows only explicit
-`(server, raw-tool)` pairs. Every configured pair must be present and
-model-visible; no other pair may be model-visible. Extra source-discovered tools
-are allowed only before filtering. `none` or empty exposes no MCP tools. Missing
-pairs, unexpected exposure, failed/needs-auth servers, provenance mismatch, or
-name collision fails before prompting. If public readiness/catalog APIs cannot
-prove this, direct Copilot MCP support stays unqualified.
+model-visible collisions that the host can determine before prompting. Do not
+invent a skill-like 64-character MCP limit. A finite `tools` list authorizes
+only explicit `(server, raw-tool)` pairs. `none` or empty exposes no MCP tools.
+Extra source-discovered tools are allowed before filtering.
 
 Configured MCP tools run without interactive approval, matching MAF. Construct
 MAF `MCPStreamableHTTPTool` with `approval_mode="never_require"`. Copilot has no
 per-server MCP approval field, so register a custom session permission callback.
-Approve only exact server/raw-tool names from the filtered, catalog-verified
-inventory. Reject ambient, unattributed, mismatched, and policy-flagged requests.
-Never defer in the headless worker. Never use approve-all. The pinned SDK
-documents managed approval for Shell/Read/Edit/Domain, not MCP. This design does
-not enable or assume managed MCP policy.
+The callback derives authority from selected servers and the authored all, none,
+or named tool filter. Reject unconfigured, unattributed, mismatched, and
+policy-flagged requests. Never defer in the headless worker. Never use
+approve-all. The pinned SDK documents managed approval for Shell/Read/Edit/
+Domain, not MCP. This design does not enable or assume managed MCP policy.
 
 **Skills adaptation.** Do not use SDK-native skills, `builtin:skill`, native
 file/read/shell tools, or `disabled_skills`. For each role and run, start from
@@ -408,29 +427,11 @@ not add a host script runner, new execution limits, or approval gates. Skills
 remain trusted deployment-owned code, not an OS sandbox. Untrusted or
 adversarially mutable skill trees are unsupported.
 
-**Role boundary and compatibility matrix.** This amendment removes MCP/skills
-rejection only for otherwise-supported direct Copilot runs. `discovery/mcp.py`
-produces the neutral MCP descriptor. `registration/capabilities.py` remains the
-filtering authority. `_harness.py` admits only supported direct roles and carries
-neutral descriptors only. The adapters own SDK mapping. `_copilot.py` owns
-create/resume, readiness/catalog verification, permissions, and disconnect.
-
-Chat delegates, Workflow Sub Agents, and Dynamic Workflows are not yet supported
-in the Copilot preview. This is a temporary preview gap, not an intended design
-difference from MAF. The goal is MAF-consistent behavior after those roles are
-ported under separate parent-issue milestones. Until then, fail explicitly. Do
-not silently degrade, bypass role policy, or claim workflow execution. Mirror
-these boundaries in `tests/test_discovery_mcp.py`,
-`tests/test_registration_capabilities.py`, `tests/test_harness.py`, and
-`tests/test_copilot.py`.
-
-| Capability/role | Flag off (MAF) | Proposed Copilot preview behavior |
-| --- | --- | --- |
-| Direct remote HTTP MCP | Existing filtered behavior | Proposed create/resume, verified behavior above |
-| Direct project skills | Existing discovery and script behavior | Proposed canonical-inventory, three-tool adaptation, preserving existing discovery and script behavior |
-| Chat delegate or Workflow Sub Agent MCP/skills | Existing role policy | Not yet supported in preview (fails explicitly) |
-| Dynamic Workflow execution/management | Existing Durable behavior | Not yet supported in preview (fails explicitly) |
-| SDK-native skills or native file/read/shell tools | Not introduced | Disabled/not used |
+**Role boundary.** This amendment defines neutral MCP and skill descriptors and
+their adapter mapping. It does not add new role restrictions or new workflow,
+delegate, or Workflow Sub Agent support claims. Callers reuse the same descriptor
+contract where their existing role contract allows the capability. The parent
+feature's role contracts remain the authority until separate work changes them.
 
 The disabled SDK built-ins list reflects SDK 1.0.14. The runtime may expose more
 later, but all built-ins are excluded by the custom-tool allowlist
@@ -441,9 +442,9 @@ network (`web_fetch`), skills (`skill`), agents (`task`, `read_agent`,
 `task_complete`, `exit_plan_mode`, `send_inbox`, `context_board`), tool search,
 and infinite sessions.
 
-Add structural tests that direct capability copies cannot mutate catalog leaves,
-leaves receive only project skill roots, and future direct workflow-capability
-copies cannot leak `data-driven-workflows` into leaf roles.
+Add structural tests that capability copies cannot mutate catalog leaves and
+ordinary project skill roots do not receive workflow-only guidance unless the
+existing role contract already adds it.
 
 ### 4.4 Native runtime lifetime
 
@@ -600,28 +601,35 @@ rejected rather than silently dropped.
 
 #### 4.8.2 Issue #1336 MCP/skills amendment status
 
-Section 4.3.2 proposes direct-run MCP and scoped-skills compatibility, but it is
+Section 4.3.2 proposes MCP and scoped-skills compatibility, but it is
 unimplemented and unqualified; until then, MCP and scoped skills remain
-unsupported preview capabilities as stated above. Human approval covers only the
+unsupported preview capabilities as stated above. Human approval covers the
 pinned 1.0.14/1.0.85/protocol-3 public create/resume lifecycle that replaces
 static MCP auth headers between completed turns on the same native session
-ID/history, MAF-parity handling of an empty auth scope, and the harness-neutral
-capability interface. Supported catalog/permission enforcement, role boundary,
-flag-off safety, real Entra/model/cloud behavior, and the rest of the mapping
-still require fresh architecture review and qualification.
+ID/history, MAF-parity handling of an empty auth scope, the harness-neutral
+capability interface, existing authored MCP filter semantics, ordinary SDK
+connection behavior without an extra host catalog audit, remote MCP URLs with
+static headers, minimal flag-off validation, and ordinary runtime `@tool`
+automatic SDK mapping. Permission callback implementation details, skill adapter
+details, and full amendment architecture review remain open.
 
 ## 5. Decisions log
 
 Dates below record the original scope approvals and proposals. The provider-contract
 entries were approved by larohra on 2026-09-29. The issue #1336 MCP/skills
-proposal entries record proposed mappings, later human direction on preserving
-skill behavior and autonomous MCP approvals, same-session resume with fresh
-static MCP auth headers between completed turns, MAF-parity behavior for an
-empty auth scope, and the harness-neutral capability interface. The shared
-script runner, MAF-provider dependency in the Copilot skills path, stricter
-discovery correction, post-create staging sequence, dynamic-header broker, and
-SDK-object descriptor proposals are superseded by those later choices. Unrelated
-parts of the MCP/skills proposal remain pending fresh architecture review.
+proposal entries record proposed mappings and later human direction. Approved
+directions now include preserving skill behavior and autonomous MCP approvals,
+same-session resume with fresh static MCP auth headers between completed turns,
+MAF-parity behavior for an empty auth scope, the harness-neutral capability
+interface, existing authored MCP filter semantics, no extra readiness/catalog
+audit, remote MCP URLs with the accepted static-header boundary, no new
+amendment role restrictions, minimal flag-off validation, and ordinary runtime
+`@tool` mapping to each harness. The shared script runner, MAF-provider
+dependency in the Copilot skills path, stricter discovery correction,
+post-create staging sequence, dynamic-header broker, SDK-object descriptor,
+full catalog attestation, direct-only role restriction, and exhaustive flag-off
+regression proposals are superseded by those later choices. Unrelated parts of
+the MCP/skills proposal remain pending fresh architecture review.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
@@ -650,6 +658,11 @@ parts of the MCP/skills proposal remain pending fresh architecture review.
 | 23 | Authenticated MCP continuity between turns | Mid-turn dynamic refresh or new session / detach and resume the same native session with fresh static headers | Proceed with public non-destructive disconnect/resume of the same native session ID and history after a completed turn; obtain fresh Entra headers as needed before the next create/resume. No mid-turn replacement, automatic side-effect retry, stale-token/drop-tools fallback, or claim of full MAF parity. | Human (larohra) | 2026-09-30 |
 | 24 | Empty MCP auth scope | Reject or use a Copilot-only policy / preserve MAF behavior | Preserve MAF behavior: warn and use authored static headers (or no headers) when `auth.scope` is empty; valid-scope token acquisition failures remain explicit errors. Preserve unresolved/missing client-ID fallback to the default credential and existing generated-Authorization precedence. | Human (larohra) | 2026-09-30 |
 | 25 | Harness-neutral capability interface | Share MAF types across harnesses / neutral descriptors with one adapter per SDK | Use immutable SDK-free tool, MCP server, and skill descriptors through discovery, registration, and `HarnessRequest`; map them only inside one adapter per harness so MAF can be removed by deleting the MAF adapter and dependency. | Human (larohra) | 2026-10-01 |
+| 26 | MCP filter and readiness parity | Extra host-side catalog/readiness attestation / match MAF filtering and connection behavior | Preserve existing authored filters: per-agent disable/exclude and per-server all, none, or named tool allowlist. Do not require a separate host preflight proving every configured tool is present; rely on normal SDK connection, initialization, tool loading, and explicit surfaced errors. | Human (larohra) | 2026-10-01 |
+| 27 | Remote MCP static-header boundary | Disallow remote MCP or add dynamic-header machinery / allow remote URLs with static create-resume headers | Remote HTTP/streamable-HTTP MCP URLs are allowed by the intended design. Accept static headers and Entra tokens supplied at create/resume between completed turns, with no mid-turn refresh, automatic retry of side-effecting calls, proxy, private API, or dynamic-header broker. | Human (larohra) | 2026-10-01 |
+| 28 | Amendment role scope | Specify direct-only support and workflow/delegate rejection / leave roles to separate work | Do not add new role restrictions or new workflow/delegate support claims in this amendment. Neutral descriptors are reusable by callers under their existing role contracts. | Human (larohra) | 2026-10-01 |
+| 29 | Flag-off validation | Exhaustive new regression suite / ordinary or minimal check | Preserve flag-off MAF behavior. Existing coverage or a minimal focused check is acceptable; this is not an open design decision. | Human (larohra) | 2026-10-01 |
+| 30 | Runtime `@tool` SDK mapping | Author SDK-specific decorators / map runtime tools through adapters | Keep ordinary runtime `@tool` authoring, schema validation, and sync/async invocation stable. Discovery emits neutral tool metadata; the MAF adapter constructs MAF `FunctionTool`, and the Copilot adapter constructs Copilot tools. MAF-specific subclasses and keyword arguments stay in the MAF compatibility layer and fail explicitly on Copilot when unmapped. | Human (larohra) | 2026-10-01 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -660,17 +673,17 @@ where mocks cannot establish process, transport, authentication, or durability.
 
 | Area | Acceptance evidence |
 | --- | --- |
-| Selection/isolation | Exercise unset, `false`, `0`, `true`, `1`, mixed-case/padded text, empty/whitespace-only/invalid values, multiple app contexts, and standalone entry points. Off starts no Copilot process/download/auth/telemetry; on is uniform across all roles and never falls back. |
+| Selection/isolation | Exercise representative selector values, app contexts, and standalone entry points. Off starts no Copilot process/download/auth/telemetry; on is uniform across all roles and never falls back. Existing coverage or a minimal focused flag-off check is acceptable for this amendment. |
 | Context propagation/lifetime | Construct two apps with different flag snapshots, including the same root; delayed handlers, delegates, and Activity calls retain their own context after environment changes. Cover explicit/default standalone contexts. On worker replacement, completed Activity results replay normally and newly executed/redelivered Activities use the serving app's context, without adding harness state to Durable history or changing its scheduling/version-routing rules. |
 | Unsupported features | Effective inherited/default-on capabilities and unmapped configuration/extensions fail before provider inference or tool effects. Isolated previews of supported capabilities execute real SDK turns. |
 | Authoring/API | Existing precedence/null scenarios, tool `None`/empty semantics, routes/auth, response envelopes, structured-output validation/errors, history projection/degradation/errors/bounds, and SSE ordering/cancellation remain compatible. No native or specialist events leak. |
 | Models/extensions | Verify supported providers/Entra refresh, model metadata, disabled provider conversation storage, deadlines, output limits, and explicit custom-manager/tool compatibility, including a manager replaced after composition. MAF hooks remain intact off. |
-| Tools | Cover sync/async, Pydantic, both decorator orders, workflow-only tools, approval options, and denied ambient capabilities. Assert callable/effect counts and no unexpected interactive approval gate. |
+| Tools | Cover ordinary runtime `@tool` mapping to neutral metadata, sync/async, Pydantic, both decorator orders, workflow-only tools, approval options, and denied ambient capabilities. Assert MAF maps neutral tools to `FunctionTool`, Copilot maps them to Copilot tools, callable/effect counts remain stable, and no unexpected interactive approval gate appears. Unmapped MAF-only extensions fail explicitly on Copilot. |
 | Import boundary / neutral interface | Structurally assert `HarnessRequest` and discovery/registration outputs contain only immutable SDK-free descriptors. Assert `agent_framework` imports are limited to the MAF adapter and named MAF-compat public surfaces, and Copilot imports are limited to the Copilot adapter. Delete-or-stub the MAF adapter in a smoke test to prove discovery, registration, runner contracts, and Copilot descriptor mapping do not change. |
-| MCP compatibility | At the pinned SDK/native/protocol versions, keep a regression for the confirmed post-create staging/reload failures. Exercise MCP configuration at create and same-ID resume through the existing lock/per-turn detach lifecycle; prove that a completed first turn survives resume, fresh static headers replace old headers before the next turn, no old-header request occurs after readiness, and prior user/tool/assistant history reaches the resumed model context. Verify empty/whitespace scope logs the existing warning and uses static headers without token acquisition; valid-scope token acquisition failures are explicit; and missing/unresolved client IDs use the default credential. Verify generated `Authorization` keeps existing MAF precedence over static headers. Exercise all/none/finite filters using the provider-supported configuration/catalog format: a finite list admits every configured `(server, raw-tool)` pair but accepts an additional source-discovered server tool; `none` exposes no MCP tool. Verify only the configured pairs are model-visible, provider-supported MCP name validation and collision checks occur before prompting, configured server readiness/provenance is checked, and unsupported catalog APIs leave support unqualified. Cover missing configured pairs, failed/needs-auth configured servers, callback invocation and explicit no-prompt execution of configured calls, and rejection of ambient/unattributed/mismatched/policy-flagged requests. Assert no model prompt occurs before effective-catalog verification and no OAuth/upscope/stale-token/drop-tools fallback. |
+| MCP compatibility | At the pinned SDK/native/protocol versions, keep a regression for the confirmed post-create staging/reload failures. Exercise MCP configuration at create and same-ID resume through the existing lock/per-turn detach lifecycle; prove that a completed first turn survives resume, fresh static headers replace old headers before the next turn, and prior user/tool/assistant history reaches the resumed model context. Verify remote HTTP/streamable-HTTP URLs are allowed by the intended design. Verify empty/whitespace scope logs the existing warning and uses static headers without token acquisition; valid-scope token acquisition failures are explicit; and missing/unresolved client IDs use the default credential. Verify generated `Authorization` keeps existing MAF precedence over static headers. Exercise existing filters: per-agent disable/exclude, per-server all, none, and named tool allowlists. Verify the permission callback approves only selected servers and authored tool filters, rejects unconfigured/unattributed/mismatched/policy-flagged requests, never uses approve-all, and never prompts. Do not require an extra host readiness/full-catalog/provenance audit before prompting. Assert no OAuth/upscope/stale-token/drop-tools fallback. Ordinary SDK connection and initialization errors surface explicitly. |
 | Skills compatibility | Exercise canonical `(name, path)` inventory construction, including valid nested skills and excluded descendants. Build skill descriptors and neutral `load_skill`, `read_skill_resource`, and `run_skill_script` behavior from that inventory. Recompose progressive-disclosure instructions on create/resume while preserving native history. Cover malformed-frontmatter logging-and-skip, existing name validation, and role isolation. Verify Copilot does not use MAF skill provider objects, adds no approval gate or host-owned script execution limits, and that MAF behavior remains unchanged. |
-| Compatibility/role isolation | Verify flag-off MCP/tool behavior and unchanged MAF skill discovery/script behavior without Copilot startup. Structurally prove per-run provider state, direct-copy/catalog-leaf non-mutation, project-skill retention, no `data-driven-workflows` leakage, and unchanged rejection of Copilot delegation, workflows, and Workflow Sub Agents. |
-| Delegation/workflows | Prove fresh same-specialist concurrent sessions, catalog/role isolation, no child SSE, parent cancellation and specialist-local errors, Workflow Sub Agent grants/results, existing management/Activity retry/timeout/authorization, and at-least-once semantics. |
+| Compatibility/role isolation | Verify flag-off MCP/tool behavior and unchanged MAF skill discovery/script behavior without Copilot startup. A minimal focused flag-off check is acceptable for this amendment. Structurally prove per-run provider state, capability-copy/catalog-leaf non-mutation, project-skill retention, and no unintended `data-driven-workflows` leakage. |
+| Delegation/workflows | Preserve the parent feature's role contracts. This amendment adds no new role restriction, support claim, or delivery requirement for delegates, Workflow Sub Agents, or Dynamic Workflows. |
 | Role storage/trigger execution | Run a non-HTTP trigger with its generated identity, serialization, logging/error behavior, and direct capabilities. Persistent direct state is isolated; delegates/Workflow Sub Agents leave no persistent native tree and dispose ephemeral state. |
 | System tools | Exercise `web_request` defaults/exclusion/SSRF/budgets/errors and real ACA `execute_python` scoping/results without substituting local execution. |
 | Completed-turn restore | On Blob and local storage, complete a real tool-using turn, replace Python and native processes, and continue by the same agent/session identity without restating prior values. Inspect outbound provider context/state reuse, not just a plausible answer. |
@@ -695,13 +708,14 @@ preview use and the history break. Update the current MAF-only statements in
 requires regenerating the configuration reference and synchronizing examples;
 this document does not introduce an unimplemented schema or rewrite runtime docs.
 
-Documentation for issue #1336 compatibility must update `README.md`, `docs/architecture.md`,
-`docs/front-matter-spec.md`, the preview compatibility matrix, and the local
-Copilot preview sample. Document the pinned native versions, create/resume MCP
-configuration and between-turn credential replacement, authenticated local MCP
-and filters, safe failures, the qualified provider model-visible MCP naming
-format, canonical skill load/resource/script behavior, trusted-code/non-sandbox
-boundary, preserved MAF skill behavior, role rejection/isolation, and flag-off
+Documentation for issue #1336 compatibility must update `README.md`,
+`docs/architecture.md`, `docs/front-matter-spec.md`, the preview compatibility
+matrix, and the local Copilot preview sample. Document the pinned native
+versions, create/resume MCP configuration and between-turn credential
+replacement, remote HTTP/streamable-HTTP MCP URLs, static-header limits,
+authored filters, safe failures, no extra host catalog/readiness audit, canonical
+skill load/resource/script behavior, trusted-code/non-sandbox boundary,
+preserved MAF skill behavior, ordinary runtime `@tool` mapping, and flag-off
 behavior. The sample must be copy/paste complete for setup, request, expected
 failure, and cleanup.
 
@@ -713,7 +727,10 @@ failure, and cleanup.
   amendment is partially approved only for preserving current MAF skill behavior,
   autonomous MCP approvals, same-session resume with fresh static MCP auth headers
   between completed turns, empty-scope MAF parity, and the harness-neutral
-  capability interface. Its
+  capability interface. Later human direction also approves existing authored
+  MCP filters, no extra host readiness/catalog audit, remote MCP URLs with the
+  accepted static-header boundary, no new amendment role restrictions, minimal
+  flag-off validation, and ordinary runtime `@tool` automatic SDK mapping. Its
   product implementation must not begin until the revised amendment receives a
   fresh architecture review and the remaining choices are explicitly approved.
   The parent migration is not complete or production-qualified.
@@ -731,13 +748,15 @@ failure, and cleanup.
   execution and autonomous MCP approvals. Human approval also covers same-session
   resume with fresh static MCP auth headers between completed turns, with no
   mid-turn refresh or full-MAF parity claim, and MAF handling of an empty auth
-  scope, plus the harness-neutral capability interface. These approvals do not
-  cover the supported catalog/readiness mapping, role expansion, or other
-  unreviewed choices.
+  scope, plus the harness-neutral capability interface, authored MCP filters, no
+  extra host catalog/readiness audit, remote MCP static-header behavior, no new
+  amendment role restrictions, minimal flag-off validation, and ordinary runtime
+  `@tool` mapping. These approvals do not cover implementation details, skill
+  adapter details, or other unreviewed choices.
 - **Remaining approval needs:** Fresh architecture review and human decisions
-  are required for the supported model-visible MCP catalog/readiness and
-  permission mapping and direct-role boundary. Status must not return to
-  `Finalized` before those choices are resolved and recorded.
+  are required for full amendment sign-off and implementation details that are
+  not already settled above. Status must not return to `Finalized` before those
+  choices are resolved and recorded.
 - **Remaining qualification:** Section 4.8 records preview support limits and
   section 4.8.2 the amendment's remaining evidence requirements. Section 6
   defines acceptance, not results already achieved.
