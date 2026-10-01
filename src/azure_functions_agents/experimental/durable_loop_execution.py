@@ -24,6 +24,7 @@ from .durable_loop_config import (
 from .durable_loop_mcp import DurableRemoteMcpLane
 from .durable_loop_protocol import (
     DurableFaultProfile,
+    FrozenToolCatalogV1,
     SandboxExecutionProfile,
     ToolProvenance,
     ToolRequestV1,
@@ -37,6 +38,7 @@ from .durable_loop_tools import (
     DurableRetainedSandboxInspectionPort,
     DurableToolCatalogSnapshot,
     DurableToolCleanupPort,
+    DurableToolDispatchError,
     DurableToolDispatchPort,
 )
 from .durable_skill_providers import (
@@ -53,6 +55,50 @@ class DurableLoopExecutionBinding:
 
     enabled_mcp_names: tuple[str, ...]
     local_tools_enabled: bool
+
+
+class DurableModelOnlyExecutionPlane(
+    DurableToolDispatchPort,
+    DurableToolCleanupPort,
+):
+    """Empty, fail-closed execution plane for direct foreground model calls."""
+
+    async def freeze_catalog(
+        self,
+        *,
+        policy_hash: str,
+        sandbox_profile: SandboxExecutionProfile,
+        include_human_input: bool = True,
+    ) -> DurableToolCatalogSnapshot:
+        """Freeze an empty catalog without contacting MCP or ACA."""
+        del sandbox_profile, include_human_input
+        package_hash = canonical_hash({"durable_model_only_tools": []})
+        return DurableToolCatalogSnapshot(
+            catalog=FrozenToolCatalogV1.create(
+                tools=(),
+                policy_hash=policy_hash,
+                package_hash=package_hash,
+            ),
+            package_hash=package_hash,
+        )
+
+    async def dispatch(self, request: ToolRequestV1) -> ToolResultV1:
+        """Reject every dispatch because no tools were admitted."""
+        del request
+        raise DurableToolDispatchError(
+            "the direct durable model-only execution plane cannot dispatch tools"
+        )
+
+    async def cleanup(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        sandbox_profile: SandboxExecutionProfile,
+        fault_profile: DurableFaultProfile,
+    ) -> None:
+        """Complete cleanup without external resources."""
+        del run_id, session_id, sandbox_profile, fault_profile
 
 
 class DurableExecutionPlaneRouter(
@@ -200,12 +246,28 @@ def build_durable_execution_plane(
     content: object,
     receipts: DurableKeyedDocumentStore,
     binding: DurableLoopExecutionBinding,
-) -> DurableExecutionPlaneRouter:
+) -> DurableExecutionPlaneRouter | DurableModelOnlyExecutionPlane:
     """Construct real private execution planes from existing settings."""
     if not isinstance(client_manager, HybridApimClientManager):
-        raise DurableLoopConfigurationError(
-            "durable execution planes require the APIM client manager"
-        )
+        from ..client_manager import MAFClientManager
+
+        if not isinstance(client_manager, MAFClientManager):
+            raise DurableLoopConfigurationError(
+                "direct durable model execution requires an ordinary MAFClientManager"
+            )
+        if settings.background_model_enabled:
+            raise DurableLoopConfigurationError(
+                "durable background model execution requires HybridApimClientManager"
+            )
+        if binding.enabled_mcp_names:
+            raise DurableLoopConfigurationError(
+                "durable remote MCP tools require HybridApimClientManager"
+            )
+        if binding.local_tools_enabled:
+            raise DurableLoopConfigurationError(
+                "durable local tools require HybridApimClientManager and ACA sandbox settings"
+            )
+        return DurableModelOnlyExecutionPlane()
     mcp_base_url = os.environ.get(DURABLE_LOOP_APIM_MCP_BASE_URL_ENV, "").strip()
     if not mcp_base_url:
         raise DurableLoopConfigurationError(

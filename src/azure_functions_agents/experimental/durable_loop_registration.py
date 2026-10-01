@@ -14,7 +14,7 @@ import azure.functions as func
 
 from .._logger import logger
 from .._observability import use_function_trace_context
-from ..client_manager import get_client_manager
+from ..client_manager import MAFClientManager, get_client_manager
 from ..strict_json import canonical_json_bytes
 from . import durable_loop_protocol as _protocol
 from .durable_chat_execution_observer import (
@@ -32,6 +32,7 @@ from .durable_loop_activities import (
     BackgroundModelProvider,
     BlobDurableContentStore,
     DeterministicContextCompactor,
+    DirectMafOneStepModelProvider,
     DurableChatStreamingModelProvider,
     DurableContentStore,
     DurableLoopProviderTerminalError,
@@ -51,7 +52,7 @@ from .durable_loop_activities import (
     resolve_frozen_skill_content_hash,
     search_frozen_skill_catalog,
 )
-from .durable_loop_config import DurableLoopSettings
+from .durable_loop_config import DurableLoopConfigurationError, DurableLoopSettings
 from .durable_loop_execution import DurableLoopExecutionBinding
 from .durable_loop_observability import (
     DurableLoopPhase,
@@ -233,10 +234,8 @@ def _with_function_trace_context(
 def _default_activity_runtime() -> DurableLoopActivityRuntime:
     global _default_runtime_instance
     if _default_runtime_instance is None:
-        from .durable_loop_apim import ApimMafResponsesProvider
         from .durable_loop_execution import (
             build_durable_execution_plane,
-            durable_model_control_base_url,
         )
         from .durable_loop_receipts import (
             BlobDurableKeyedDocumentStore,
@@ -251,8 +250,6 @@ def _default_activity_runtime() -> DurableLoopActivityRuntime:
         content = BlobDurableContentStore.from_environment()
         receipts = BlobDurableKeyedDocumentStore.from_environment()
         manager = get_client_manager()
-        if not isinstance(manager, HybridApimClientManager):
-            raise RuntimeError("durable-loop APIM client manager is unavailable")
         tools = build_durable_execution_plane(
             client_manager=manager,
             settings=settings,
@@ -260,20 +257,34 @@ def _default_activity_runtime() -> DurableLoopActivityRuntime:
             receipts=receipts,
             binding=_execution_binding,
         )
-        model = ApimMafResponsesProvider(
-            manager,
-            content=content,
-            receipts=receipts,
-            settings=settings,
-            control_base_url=durable_model_control_base_url(),
-        )
+        model: OneStepModelProvider
+        background_model: BackgroundModelProvider | None
+        if isinstance(manager, HybridApimClientManager):
+            from .durable_loop_apim import ApimMafResponsesProvider
+            from .durable_loop_execution import durable_model_control_base_url
+
+            model = ApimMafResponsesProvider(
+                manager,
+                content=content,
+                receipts=receipts,
+                settings=settings,
+                control_base_url=durable_model_control_base_url(),
+            )
+            background_model = model if settings.background_model_enabled else None
+        elif isinstance(manager, MAFClientManager):
+            model = DirectMafOneStepModelProvider(manager)
+            background_model = None
+        else:
+            raise DurableLoopConfigurationError(
+                "durable model execution requires a supported client manager"
+            )
         faults = DurableOneShotFaults(
             receipts,
             enabled=settings.fault_injection_enabled,
         )
         _default_runtime_instance = DurableLoopActivityRuntime(
             model=model,
-            background_model=model if settings.background_model_enabled else None,
+            background_model=background_model,
             tools=tools,
             compactor=DeterministicContextCompactor(),
             content=content,

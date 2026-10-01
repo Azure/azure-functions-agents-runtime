@@ -29,6 +29,11 @@ from .durable_loop_config import (
     DURABLE_LOOP_CONTENT_CLIENT_ID_ENV,
     DURABLE_LOOP_CONTENT_CONTAINER_ENV,
 )
+from .durable_loop_observability import (
+    DurableLoopOutcome,
+    DurableLoopPhase,
+    DurableLoopTimer,
+)
 from .durable_loop_protocol import (
     BackgroundPollResultV1,
     BackgroundStartDisposition,
@@ -1375,6 +1380,48 @@ class MafOneStepModelProvider:
             usage=normalized_usage,
             finish_reason=finish_reason,
         )
+
+
+class DirectMafOneStepModelProvider:
+    """Foreground durable adapter for an ordinary in-process MAF client."""
+
+    def __init__(self, client_manager: ClientManager) -> None:
+        self._foreground = MafOneStepModelProvider(client_manager)
+
+    async def run_one_step(
+        self,
+        request: OneStepModelRequest,
+    ) -> ModelDecisionEnvelopeV1:
+        """Perform exactly one foreground MAF inference."""
+        timer = DurableLoopTimer(DurableLoopPhase.MODEL_STEP, provenance="model")
+        try:
+            decision = await self._foreground.run_one_step(request)
+        except BaseException:
+            timer.finish(DurableLoopOutcome.FAILED)
+            raise
+        timer.finish(DurableLoopOutcome.COMPLETED)
+        return decision
+
+    async def run_one_step_with_observer(
+        self,
+        request: OneStepModelRequest,
+        *,
+        observer: DurableChatExecutionObserver,
+        producers: Sequence[DurableChatModelProducerV1],
+    ) -> ModelDecisionEnvelopeV1:
+        """Perform one foreground streaming inference with durable observations."""
+        timer = DurableLoopTimer(DurableLoopPhase.MODEL_STEP, provenance="model")
+        try:
+            decision = await self._foreground.run_one_step_with_observer(
+                request,
+                observer=observer,
+                producers=producers,
+            )
+        except BaseException:
+            timer.finish(DurableLoopOutcome.FAILED)
+            raise
+        timer.finish(DurableLoopOutcome.COMPLETED)
+        return decision
 
 
 class FakeBackgroundModelProvider:
