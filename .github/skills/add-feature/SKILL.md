@@ -46,6 +46,9 @@ bug fixes.
    [`references/split-rules.md`](references/split-rules.md). Discuss the PR
    sequence and dependencies in PR descriptions or a separate delivery plan,
    never in the FRD.
+6. Keep the FRD focused on intended behavior, contracts, and durable decisions.
+   Do not encode delivery mechanics such as PR numbers, commit SHAs, temporary
+   slice/phasing labels, or package versions already owned by `pyproject.toml`.
 
 ## Phase 2 — Architecture review (planning mode)  *(gate: human sign-off → `status: Finalized`)*
 
