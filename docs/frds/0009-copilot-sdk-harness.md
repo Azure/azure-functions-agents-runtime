@@ -427,12 +427,6 @@ not add a host script runner, new execution limits, or approval gates. Skills
 remain trusted deployment-owned code, not an OS sandbox. Untrusted or
 adversarially mutable skill trees are unsupported.
 
-**Role boundary.** This amendment defines neutral MCP and skill descriptors and
-their adapter mapping. It does not add new role restrictions or new workflow,
-delegate, or Workflow Sub Agent support claims. Callers reuse the same descriptor
-contract where their existing role contract allows the capability. The parent
-feature's role contracts remain the authority until separate work changes them.
-
 The disabled SDK built-ins list reflects SDK 1.0.14. The runtime may expose more
 later, but all built-ins are excluded by the custom-tool allowlist
 (`available_tools` contains only `custom:<name>` entries). Disabled built-ins:
@@ -673,7 +667,7 @@ where mocks cannot establish process, transport, authentication, or durability.
 
 | Area | Acceptance evidence |
 | --- | --- |
-| Selection/isolation | Exercise representative selector values, app contexts, and standalone entry points. Off starts no Copilot process/download/auth/telemetry; on is uniform across all roles and never falls back. Existing coverage or a minimal focused flag-off check is acceptable for this amendment. |
+| Selection/isolation | Exercise unset, `false`, `0`, `true`, `1`, mixed-case/padded text, empty/whitespace-only/invalid values, multiple app contexts, and standalone entry points. Off starts no Copilot process/download/auth/telemetry; on is uniform across all roles and never falls back. Existing coverage or a minimal focused flag-off check is sufficient for this amendment; no new exhaustive suite is required. |
 | Context propagation/lifetime | Construct two apps with different flag snapshots, including the same root; delayed handlers, delegates, and Activity calls retain their own context after environment changes. Cover explicit/default standalone contexts. On worker replacement, completed Activity results replay normally and newly executed/redelivered Activities use the serving app's context, without adding harness state to Durable history or changing its scheduling/version-routing rules. |
 | Unsupported features | Effective inherited/default-on capabilities and unmapped configuration/extensions fail before provider inference or tool effects. Isolated previews of supported capabilities execute real SDK turns. |
 | Authoring/API | Existing precedence/null scenarios, tool `None`/empty semantics, routes/auth, response envelopes, structured-output validation/errors, history projection/degradation/errors/bounds, and SSE ordering/cancellation remain compatible. No native or specialist events leak. |
@@ -683,7 +677,7 @@ where mocks cannot establish process, transport, authentication, or durability.
 | MCP compatibility | At the pinned SDK/native/protocol versions, keep a regression for the confirmed post-create staging/reload failures. Exercise MCP configuration at create and same-ID resume through the existing lock/per-turn detach lifecycle; prove that a completed first turn survives resume, fresh static headers replace old headers before the next turn, and prior user/tool/assistant history reaches the resumed model context. Verify remote HTTP/streamable-HTTP URLs are allowed by the intended design. Verify empty/whitespace scope logs the existing warning and uses static headers without token acquisition; valid-scope token acquisition failures are explicit; and missing/unresolved client IDs use the default credential. Verify generated `Authorization` keeps existing MAF precedence over static headers. Exercise existing filters: per-agent disable/exclude, per-server all, none, and named tool allowlists. Verify the permission callback approves only selected servers and authored tool filters, rejects unconfigured/unattributed/mismatched/policy-flagged requests, never uses approve-all, and never prompts. Do not require an extra host readiness/full-catalog/provenance audit before prompting. Assert no OAuth/upscope/stale-token/drop-tools fallback. Ordinary SDK connection and initialization errors surface explicitly. |
 | Skills compatibility | Exercise canonical `(name, path)` inventory construction, including valid nested skills and excluded descendants. Build skill descriptors and neutral `load_skill`, `read_skill_resource`, and `run_skill_script` behavior from that inventory. Recompose progressive-disclosure instructions on create/resume while preserving native history. Cover malformed-frontmatter logging-and-skip, existing name validation, and role isolation. Verify Copilot does not use MAF skill provider objects, adds no approval gate or host-owned script execution limits, and that MAF behavior remains unchanged. |
 | Compatibility/role isolation | Verify flag-off MCP/tool behavior and unchanged MAF skill discovery/script behavior without Copilot startup. A minimal focused flag-off check is acceptable for this amendment. Structurally prove per-run provider state, capability-copy/catalog-leaf non-mutation, project-skill retention, and no unintended `data-driven-workflows` leakage. |
-| Delegation/workflows | Preserve the parent feature's role contracts. This amendment adds no new role restriction, support claim, or delivery requirement for delegates, Workflow Sub Agents, or Dynamic Workflows. |
+| Delegation/workflows | Prove fresh same-specialist concurrent sessions, catalog/role isolation, no child SSE, parent cancellation and specialist-local errors, Workflow Sub Agent grants/results, existing management/Activity retry/timeout/authorization, and at-least-once semantics. |
 | Role storage/trigger execution | Run a non-HTTP trigger with its generated identity, serialization, logging/error behavior, and direct capabilities. Persistent direct state is isolated; delegates/Workflow Sub Agents leave no persistent native tree and dispose ephemeral state. |
 | System tools | Exercise `web_request` defaults/exclusion/SSRF/budgets/errors and real ACA `execute_python` scoping/results without substituting local execution. |
 | Completed-turn restore | On Blob and local storage, complete a real tool-using turn, replace Python and native processes, and continue by the same agent/session identity without restating prior values. Inspect outbound provider context/state reuse, not just a plausible answer. |
@@ -732,7 +726,7 @@ failure, and cleanup.
   accepted static-header boundary, no new amendment role restrictions, minimal
   flag-off validation, and ordinary runtime `@tool` automatic SDK mapping. Its
   product implementation must not begin until the revised amendment receives a
-  fresh architecture review and the remaining choices are explicitly approved.
+  fresh architecture review and full amendment sign-off.
   The parent migration is not complete or production-qualified.
 - **Architecture review:** The dedicated review completed on 2026-09-28 remains
   historical for the original app-bound selection, Durable lifecycle, and safe
@@ -751,12 +745,11 @@ failure, and cleanup.
   scope, plus the harness-neutral capability interface, authored MCP filters, no
   extra host catalog/readiness audit, remote MCP static-header behavior, no new
   amendment role restrictions, minimal flag-off validation, and ordinary runtime
-  `@tool` mapping. These approvals do not cover implementation details, skill
-  adapter details, or other unreviewed choices.
-- **Remaining approval needs:** Fresh architecture review and human decisions
-  are required for full amendment sign-off and implementation details that are
-  not already settled above. Status must not return to `Finalized` before those
-  choices are resolved and recorded.
+  `@tool` mapping. Implementation mechanics must stay within these contracts.
+- **Remaining approval needs:** Fresh architecture review and full amendment
+  sign-off. The approved filtering, static-header, tool-authoring, and interface
+  directions do not need to be re-decided. Status must not return to `Finalized`
+  before review and full sign-off are recorded.
 - **Remaining qualification:** Section 4.8 records preview support limits and
   section 4.8.2 the amendment's remaining evidence requirements. Section 6
   defines acceptance, not results already achieved.
