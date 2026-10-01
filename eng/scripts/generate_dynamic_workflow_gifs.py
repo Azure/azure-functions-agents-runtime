@@ -218,7 +218,7 @@ def _agent_loop_frame(frame: int) -> Image.Image:
     stage = min(3, int(round_progress * 4))
     stage_progress = (round_progress * 4) % 1
 
-    _text(draw, (54, 44), "THE STANDARD AGENT LOOP", font=FONT_TITLE)
+    _text(draw, (54, 44), "THE LLM REASONING LOOP", font=FONT_TITLE)
     _text(
         draw,
         (55, 91),
@@ -422,7 +422,7 @@ def _dynamic_workflow_frame(frame: int) -> Image.Image:
     _text(
         draw,
         (55, 91),
-        "The model authors the DAG. Durable Functions executes it outside the agent loop.",
+        "The model authors the DAG. Durable Functions executes it outside the LLM reasoning loop.",
         font=FONT_SUBTITLE,
         fill=MUTED,
     )
@@ -456,7 +456,7 @@ def _dynamic_workflow_frame(frame: int) -> Image.Image:
         draw,
         agent_box,
         [
-            ("AGENT + LLM", FONT_HEADING, TEXT),
+            ("LLM + REASONING", FONT_HEADING, TEXT),
             ("author one DAG", FONT_BODY, BLUE),
             ("start_workflow(plan)", FONT_SMALL, MUTED),
         ],
@@ -594,7 +594,7 @@ def _dynamic_workflow_frame(frame: int) -> Image.Image:
     )
 
     _metric(draw, (45, 445, 215, 520), "LLM planning", "1 turn", BLUE)
-    _metric(draw, (265, 445, 465, 520), "Agent polling", "none", GREEN)
+    _metric(draw, (265, 445, 465, 520), "LLM polling", "none", GREEN)
     _token_meter(
         draw,
         (1005, 445, 1165, 477),
