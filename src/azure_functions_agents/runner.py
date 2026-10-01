@@ -576,11 +576,37 @@ async def run_leaf_agent_task(
     *,
     timeout: float,
     execution_role: Literal["delegate", "workflow_subagent"],
+    _harness: AppHarness | None = None,
 ) -> str:
     """Run one fresh stateless specialist and return its response text."""
-    harness = capabilities._harness or get_harness()
+    harness = _harness or capabilities._harness or get_harness()
     if harness.name is HarnessKind.COPILOT:
-        reject_unsupported(**{execution_role: True})
+        validate_configuration(resolved.agent_configuration)
+        reject_unsupported(
+            mcp=bool(capabilities.filtered_mcp_tools),
+            skills=bool(capabilities.enabled_skill_paths),
+        )
+        from ._copilot import run
+
+        result = await run(
+            harness,
+            HarnessRequest(
+                prompt=task,
+                instructions=resolved.instructions,
+                agent_slug=resolved.slug,
+                session_id=uuid.uuid4().hex,
+                new_session=True,
+                model=resolved.model or harness.default_model or "",
+                tools=prepare_tools([
+                    *list(capabilities.filtered_user_tools or []),
+                    *list(capabilities.web_request_tools or []),
+                ]),
+                max_output_tokens=resolved.agent_configuration.max_output_tokens,
+                deadline=asyncio.get_running_loop().time() + timeout,
+                execution_role=execution_role,
+            ),
+        )
+        return result.content
     specialist_agent, inference_target = _build_delegated_agent(resolved, capabilities)
     usage_recorder = _AgentUsageRecorder(
         agent_name=resolved.slug,
@@ -702,6 +728,7 @@ def _build_delegate_tool(
     *,
     coordinator_deadline: float,
     tracker: _DelegateErrorTracker,
+    harness: AppHarness | None = None,
 ) -> FunctionTool:
     """Build one ``delegate_<slug>`` ``FunctionTool`` for the reference ``ref``.
 
@@ -753,6 +780,7 @@ def _build_delegate_tool(
                 task_text,
                 timeout=effective_timeout,
                 execution_role="delegate",
+                _harness=harness,
             )
         except asyncio.CancelledError:
             # Parent/request cancellation — never a recoverable delegate
@@ -784,6 +812,7 @@ async def build_subagent_tools(
     catalog: AgentCatalog | None,
     *,
     coordinator_deadline: float,
+    harness: AppHarness | None = None,
 ) -> tuple[list[FunctionTool], _DelegateErrorTracker]:
     """Build one ``delegate_<slug>`` tool per ``subagents`` reference.
 
@@ -817,6 +846,7 @@ async def build_subagent_tools(
                 entry,
                 coordinator_deadline=coordinator_deadline,
                 tracker=tracker,
+                harness=harness,
             )
         )
     return tools, tracker
@@ -993,6 +1023,7 @@ async def run_agent(
     workflow_policy: WorkflowPlanPolicy | None = None,
     _harness: AppHarness | None = None,
     _session_is_new: bool = False,
+    _copilot_event_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> AgentResult:
     """Execute a single prompt against the configured agent backend.
 
@@ -1067,6 +1098,22 @@ async def run_agent(
     if harness.name is HarnessKind.COPILOT:
         configuration = agent_configuration or AgentConfiguration()
         validate_configuration(configuration)
+        if workflow_enabled:
+            from .workflows.integration import data_driven_workflows_skill_path
+
+            workflow_skill = data_driven_workflows_skill_path()
+            unsupported_skills = [
+                path for path in skill_paths or []
+                if path != workflow_skill
+            ]
+            if workflow_skill in (skill_paths or []):
+                system_addendum = (
+                    (system_addendum or "")
+                    + "\n\n"
+                    + (workflow_skill / "SKILL.md").read_text(encoding="utf-8")
+                )
+        else:
+            unsupported_skills = skill_paths or []
         resolved_mcp = (
             list(discover_mcp_servers(harness.app_root).servers.values())
             if mcp_tools is None
@@ -1074,43 +1121,72 @@ async def run_agent(
         )
         reject_unsupported(
             mcp=bool(resolved_mcp),
-            skills=bool(skill_paths),
-            subagents=bool(subagents),
-            workflows=workflow_enabled or workflow_policy is not None,
+            skills=bool(unsupported_skills),
         )
+        if workflow_enabled and workflow_policy is None:
+            raise UnsupportedCapabilityError(
+                "Copilot workflow management requires a bound per-agent workflow policy."
+            )
+        if workflow_policy is not None and not workflow_enabled:
+            raise UnsupportedCapabilityError(
+                "Copilot workflow policy cannot be supplied without enabling workflows."
+            )
         resolved_model = model or harness.default_model
         if not resolved_model:
             raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
+        validated_id = _validate_session_id(session_id)
+        resolved_id = validated_id or uuid.uuid4().hex
         user_tools = (
             list(discover_user_tools(harness.app_root).tools) if tools is None else list(tools)
         )
+        delegate_tools: list[FunctionTool] = []
+        delegate_tracker: _DelegateErrorTracker | None = None
+        if subagents:
+            delegate_tools, delegate_tracker = await build_subagent_tools(
+                subagents, catalog, coordinator_deadline=coordinator_deadline, harness=harness
+            )
+        workflow_tools: list[FunctionTool] = []
+        if workflow_enabled:
+            from .workflows.tools import build_workflow_tools
+
+            workflow_tools = build_workflow_tools(
+                session_id=resolved_id,
+                workflow_agent_slug=workflow_agent_slug or agent_name or "main",
+                agent_name=agent_name or "main",
+                durable_client=workflow_durable_client,
+                policy=workflow_policy,
+            )
         resolved_tools = prepare_tools(
             [
                 *user_tools,
                 *list(sandbox_tools or []),
                 *list(web_request_tools or []),
+                *workflow_tools,
+                *delegate_tools,
             ]
         )
-        validated_id = _validate_session_id(session_id)
         effective_instructions = instructions.strip() if instructions and instructions.strip() else None
         if system_addendum:
             effective_instructions = (effective_instructions or "") + system_addendum
         from ._copilot import run
 
-        return await run(
+        result = await run(
             harness,
             HarnessRequest(
                 prompt=prompt,
                 instructions=effective_instructions,
                 agent_slug=history_agent_slug,
-                session_id=validated_id or uuid.uuid4().hex,
+                session_id=resolved_id,
                 new_session=validated_id is None or _session_is_new,
                 model=resolved_model,
                 tools=resolved_tools,
                 max_output_tokens=configuration.max_output_tokens,
                 deadline=coordinator_deadline,
+                event_sink=_copilot_event_sink,
             ),
         )
+        result.delegate_error_count = delegate_tracker.count if delegate_tracker else 0
+        return result
 
     agent, session, resolved_id, delegate_error_tracker, inference_target = (
         await _build_agent_session(
@@ -1247,6 +1323,7 @@ async def run_agent_stream(
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
     _harness: AppHarness | None = None,
+    _session_is_new: bool = False,
 ) -> AsyncIterator[str]:
     """SSE-formatted async generator yielding ``data: {...}\\n\\n`` lines.
 
@@ -1290,7 +1367,82 @@ async def run_agent_stream(
     try:
         harness = _harness or get_harness()
         if harness.name is HarnessKind.COPILOT:
-            reject_unsupported(streaming=True)
+            validated_id = _validate_session_id(session_id)
+            resolved_id = validated_id or uuid.uuid4().hex
+            yield f"data: {json.dumps({'type': 'session', 'session_id': resolved_id})}\n\n"
+            events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+            emitted_text = False
+
+            def emit(event: dict[str, Any]) -> None:
+                events.put_nowait(event)
+
+            async def execute() -> AgentResult:
+                try:
+                    return await run_agent(
+                        prompt,
+                        instructions=instructions,
+                        timeout=timeout,
+                        tools=tools,
+                        mcp_tools=mcp_tools,
+                        skill_paths=skill_paths,
+                        model=model,
+                        session_id=resolved_id,
+                        sandbox_tools=sandbox_tools,
+                        system_addendum=system_addendum,
+                        workflow_enabled=workflow_enabled,
+                        workflow_durable_client=workflow_durable_client,
+                        workflow_agent_slug=workflow_agent_slug,
+                        agent_name=agent_name,
+                        web_request_tools=web_request_tools,
+                        agent_configuration=agent_configuration,
+                        subagents=subagents,
+                        catalog=catalog,
+                        workflow_policy=workflow_policy,
+                        _harness=harness,
+                        _session_is_new=_session_is_new or validated_id is None,
+                        _copilot_event_sink=emit,
+                    )
+                finally:
+                    events.put_nowait(None)
+
+            with start_span(
+                f"agent.run {agent_name or 'agent'}",
+                lifecycle_stage=LifecycleStage.AGENT_RUN,
+                attributes={
+                    "af.agent.name": agent_name,
+                    "af.agent.display_name": display_name,
+                    "af.agent.trigger_type": "stream",
+                    "af.agent.session_id": resolved_id,
+                    "af.agent.model": model,
+                },
+            ) as span:
+                execution = asyncio.create_task(execute())
+                try:
+                    while (event := await events.get()) is not None:
+                        if event["type"] == "delta":
+                            emitted_text = True
+                        yield f"data: {json.dumps(event, default=str)}\n\n"
+                    result = await execution
+                    from .registration._handlers import _set_run_result_attributes
+
+                    _set_run_result_attributes(span, result)
+                    if not emitted_text and result.content:
+                        yield f"data: {json.dumps({'type': 'delta', 'content': result.content})}\n\n"
+                    span.set_attribute("af.agent.outcome", "success")
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                except asyncio.CancelledError:
+                    span.set_attribute("af.agent.outcome", "cancelled")
+                    raise
+                except Exception as exc:
+                    span.set_attribute("af.agent.outcome", "error")
+                    span.record_exception(exc, fault_domain=FaultDomain.RUNTIME)
+                    yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+                finally:
+                    if not execution.done():
+                        execution.cancel()
+                    with contextlib.suppress(Exception, asyncio.CancelledError):
+                        await execution
+            return
     except (ValueError, RuntimeError) as exc:
         logger.error("Agent harness selection failed: %s", exc)
         yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"

@@ -77,11 +77,11 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/registration/_auth.py` | Enforces inbound endpoint auth: maps the configured `auth.mode` to a Functions `AuthLevel` (API key / anonymous) and enforces Entra ID identity by trusting the platform-validated Easy Auth `x-ms-client-principal` header (never validating tokens in-app), with optional tenant/audience/client-id allowlists. Because `entra` routes are anonymous, the header is trusted only with non-spoofable evidence Easy Auth is enforced (`WEBSITE_AUTH_ENABLED` / `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH`); fails closed (401) otherwise. | `resolve_endpoint_auth_level()`, `authorize_entra_request()` |
 | `azure_functions_agents/system_tools/sandbox.py` | Builds the ACA Dynamic Sessions-backed `execute_python` tool for a resolved agent/session, using a fresh GUID when no explicit session id is provided. | `create_sandbox_tools()` |
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
-| `azure_functions_agents/runner.py` | Executes prompts through the default Microsoft Agent Framework path, managing sessions, tools, and streaming; the bounded Copilot fork composes the direct non-streaming host-tool catalog before any MAF construction. Builds per-request `delegate_<slug>` tools and fresh stateless workflow leaf agents on the MAF path; attempts one internal token-usage record through the shared runtime logger for each actual invocation attempt. | `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
+| `azure_functions_agents/runner.py` | Executes prompts through the default Microsoft Agent Framework path, managing sessions, tools, and streaming; the bounded Copilot fork composes direct management/delegation tools and fresh stateless workflow leaves before any MAF construction. It translates SDK callbacks to public SSE using a per-request queue and cancels native turns on disconnect. The same immutable app harness is passed to all roles. Attempts one internal token-usage record through the shared runtime logger for each actual invocation attempt. | `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable MAF inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. Its pure internal built-in resolver preserves MAF provider/model precedence without constructing a chat client; an identity check protects Copilot from custom-manager fallback. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
 | `azure_functions_agents/_harness.py` | Private once-per-app-root harness selection, explicit preview capability validation, and conservative MAF `FunctionTool` qualification, including combined-catalog collision checks and rejection of unsupported configured output caps and custom client managers before app mutation. Captures one frozen Copilot provider from `_copilot_providers.py`; standalone runner calls use the same selection. No SDK import/process side effects when off. | `AppHarness`, `HarnessRequest`, `get_harness()`, `prepare_tools()`, `validate_agent()` |
 | `azure_functions_agents/_copilot_providers.py` | Defines the Copilot provider interface, registry, sanitized provider-setting validation, and frozen OpenAI / Azure OpenAI / Foundry SDK provider mappings. Reads only the provider environment at harness selection; imports the Copilot SDK lazily when building per-request config. | `CopilotProvider`, `OpenAIProvider`, `AzureOpenAIProvider`, `FoundryProvider`, `_PROVIDERS` |
-| `azure_functions_agents/_copilot.py` | Lazy, pinned local Copilot SDK stdio adapter. Uses SDK-owned runtime acquisition, native session create/resume/disconnect and local state; supplies provider token callbacks, adapts only the host-qualified custom tools, checks their exact model-visible catalog, translates results/usage and stops the SDK client on shutdown. No ambient SDK tools, host completion marker, OS file lock, broad child-environment filter, cache-layout inspection or outbound HTTP rewrite. | `run()`, `shutdown()` |
+| `azure_functions_agents/_copilot.py` | Lazy, pinned local Copilot SDK stdio adapter. Uses SDK-owned runtime acquisition, native session create/resume/disconnect and local state; deletes fresh leaf session state after each specialist call. Supplies provider token callbacks, adapts only the host-qualified custom tools, checks their exact model-visible catalog, optionally forwards SDK text/reasoning deltas and host-tool start/end events, translates results/usage by execution role and stops the SDK client on shutdown. No ambient SDK tools, host completion marker, OS file lock, broad child-environment filter, cache-layout inspection or outbound HTTP rewrite. | `run()`, `shutdown()` |
 | `azure_functions_agents/workflows/integration.py` | Builds the complete immutable handler catalog, immutable slug-keyed workflow-agent policy catalog (including allowed tools' decorator-owned retry and timeout declarations), per-agent management tools/addenda, validates declared trigger support for workflow-enabled agents, and performs the one app-wide Durable registration. It also resolves the packaged `data-driven-workflows` skill used for progressive authoring guidance. | `build_workflow_handler_catalog()`, `build_workflow_agent_policy_catalog()`, `build_workflow_agent_integration()`, `data_driven_workflows_skill_path()`, `validate_workflow_agent_trigger()`, `register_workflow_runtime()` |
 | `azure_functions_agents/workflows/engine.py` | Registers one Durable blueprint per app and executes the native two-argument Durable Task orchestrator, workflow-tool Activity, and Workflow Sub Agent Activity. Orchestration and Activity schedules attach `durabletask.displayName` tags for readable DTS dashboard timelines without changing registered function names. Capability-bearing Activities reauthorize against the current workflow-agent policy before complete-catalog dispatch. Data-driven execution uses typed persisted-task/state contracts and deterministic phase helpers for `when` evaluation, bounded `for_each` materialization, runnable selection, ordered aggregation, result application, cancellation restoration, structured (`schema_version: 2`) status, and controlled-failure normalization. It selects retry and continuation behavior from persisted orchestration input. Static and dynamic schedulers share the continuation decision that commits bounded permitted failures. Waves without enabled continuation keep the earlier wait, failure, and cancellation order. Durable `yield` boundaries remain in the top-level orchestrator generator. | `register_workflows()` |
 | `azure_functions_agents/workflows/context.py` | Tracks invocation context by `(workflow_agent_slug, session_id)`, derives non-revealing 128-bit agent/session prefixes for Durable instance IDs, and exposes the per-delivery task context whose idempotency key is stable across retry attempts. | `session_instance_prefix()`, `new_workflow_instance_id()`, `workflow_matches_agent_session()`, `current_workflow_task_context()` |
@@ -350,11 +350,29 @@ chat is a distinct surface: `registration/endpoints.py` validates its own
 `prompt` envelope and returns the chat result envelope, but does not apply an
 agent's authored `input_schema`, `response_example`, or `response_schema`.
 
-Debug UI, streaming/history projection, non-HTTP triggers, MCP, skills,
-delegation, Workflow Sub Agents, workflows-enabled agents and their management
-tools, and MAF-specific compaction settings remain unsupported and are rejected
-before inference. Stream/history routes return 501 rather than success-shaped
-empty output. SDK-owned local completed-turn state is the only
+Debug UI, history projection, non-HTTP triggers, MCP, authored skills,
+and MAF-specific compaction settings remain unsupported and are rejected
+before inference. Chat-time delegation and workflow management tools are available
+to locally opted-in agents; Workflow Sub Agent Activities use the serving app's
+bound harness and reauthorize against its current per-agent workflow policy.
+Every specialist call uses its own model, instructions, filtered static tools and
+`web_request`, a distinct SDK session, and SDK deletion after the turn (including
+failed turns). Fresh leaf-native UUIDs never resume, so they bypass the
+long-lived primary-session lock registry instead of accumulating one lock per
+task. Specialists get no parent conversation, nested delegation, sandbox,
+workflow tools, persistence, or public child events. Parent cancellation propagates;
+recoverable delegate failures remain sanitized and counted. A workflow-enabled
+agent gets the packaged data-driven workflow grammar in its own prompt because
+the preview does not support scoped skill loading; it is not exposed to other
+agents as a global skill. The public SSE route emits `session`, SDK
+`delta`/`intermediate`, host-authorized `tool_start`/`tool_end`, and terminal
+`done`/`error`. A `done` requires the same verified completed native turn as
+non-streaming success; a disconnected consumer cancels and aborts its turn
+without closing the shared client. SDK specialist events never enter that queue.
+The pinned native runtime has been exercised with a synthetic, intercepted
+provider for host-tool ordering, resume, completion, and disconnect isolation.
+This does not establish live model-provider or hosted streaming parity.
+The history route still returns 501. SDK-owned local completed-turn state is the only
 supported continuity; Azure Blob/distributed persistence, native
 compaction, and interrupted-turn recovery remain unsupported. No host summarizer is introduced. The runnable subset,
 setup, verification and rollback are in the
@@ -373,6 +391,8 @@ MAF exposes the packaged `data-driven-workflows` skill's narrow selection
 description normally and loads its detailed grammar only on demand. The shared
 workflow addendum does not mention the skill: keeping the selection pointer in
 skill metadata avoids prompting fixed-DAG turns to load it speculatively.
+The local Copilot preview instead injects that packaged grammar only for a
+workflow-enabled direct agent (no native skill or script tool is enabled).
 `start_workflow` validates the submitted plan against that policy and **persists** the
 owner's allowed tool/Sub Agent sets into the Durable client input, so the orchestrator
 re-validates every materialized `for_each` instance's static target against the identical

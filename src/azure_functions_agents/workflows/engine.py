@@ -39,6 +39,7 @@ from durabletask.task import (
     when_any,
 )
 
+from azure_functions_agents._harness import AppHarness
 from azure_functions_agents._logger import logger
 from azure_functions_agents.registration.catalog import AgentCatalog
 from azure_functions_agents.runner import run_leaf_agent_task
@@ -1380,6 +1381,7 @@ def register_workflows(
     catalog: AgentCatalog | None = None,
     handler_catalog: registry.WorkflowHandlerCatalog | None = None,
     workflow_agent_policies: Mapping[str, WorkflowPlanPolicy] | None = None,
+    harness: AppHarness | None = None,
 ) -> None:
     """Register the workflow orchestrator + activities on ``app``.
 
@@ -1388,6 +1390,7 @@ def register_workflows(
     at worker index time.
     """
     bp = df.Blueprint()
+    leaf_binding = {"_harness": harness} if harness is not None else {}
 
     def require_workflow_agent_policy(
         task: _ActivityInput,
@@ -1561,6 +1564,7 @@ def register_workflows(
                         task["task"],
                         timeout=entry.resolved.timeout,
                         execution_role="workflow_subagent",
+                        **leaf_binding,
                     )
                 except TimeoutError:
                     logger.exception(
@@ -1593,6 +1597,7 @@ def register_workflows(
                 task["task"],
                 timeout=entry.resolved.timeout,
                 execution_role="workflow_subagent",
+                **leaf_binding,
             )
         except asyncio.CancelledError:
             raise

@@ -26,6 +26,7 @@ from typing import Any
 import azure.functions as func
 
 from azure_functions_agents._function_tool import WorkflowTool
+from azure_functions_agents._harness import AppHarness
 from azure_functions_agents._logger import logger
 from azure_functions_agents.config.schema import (
     TRIGGER_TYPES,
@@ -531,6 +532,7 @@ def register_workflow_runtime(
     handler_catalog: registry.WorkflowHandlerCatalog,
     catalog: AgentCatalog,
     workflow_agent_policies: WorkflowAgentPolicyCatalog,
+    harness: AppHarness | None = None,
 ) -> None:
     """Register the app-wide Durable engine exactly once."""
     register_workflows(
@@ -538,6 +540,7 @@ def register_workflow_runtime(
         catalog=catalog,
         handler_catalog=handler_catalog,
         workflow_agent_policies=workflow_agent_policies,
+        harness=harness,
     )
 
 

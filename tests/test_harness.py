@@ -436,7 +436,7 @@ def test_enabled_unsupported_capabilities_fail(preview, field):
         _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
 
 
-def test_direct_preview_keeps_other_roles_and_surfaces_rejected(preview):
+def test_direct_preview_rejects_unsupported_surfaces_but_accepts_roles(preview):
     resolved, capabilities = _sample()
     cases = [
         (
@@ -467,19 +467,16 @@ def test_direct_preview_keeps_other_roles_and_surfaces_rejected(preview):
                 }
             ),
         ),
-        (
-            "subagents",
-            resolved.model_copy(update={"subagents": [SubagentRef(agent="specialist")]}),
-        ),
-        (
-            "workflows",
-            resolved.model_copy(update={"workflows": WorkflowConfig(enabled=True)}),
-        ),
     ]
 
     for diagnostic, candidate in cases:
         with pytest.raises(UnsupportedCapabilityError, match=diagnostic):
             _harness.validate_agent(_harness.get_harness(), candidate, capabilities)
+    for candidate in (
+        resolved.model_copy(update={"subagents": [SubagentRef(agent="specialist")]}),
+        resolved.model_copy(update={"workflows": WorkflowConfig(enabled=True)}),
+    ):
+        _harness.validate_agent(_harness.get_harness(), candidate, capabilities)
 
 
 def test_direct_preview_accepts_explicit_host_system_tools(preview):
@@ -702,9 +699,11 @@ def test_combined_tool_collision_fails_before_native_startup(preview, monkeypatc
     invoke.assert_not_called()
 
 
-def test_workflow_management_tools_qualify_for_adapter_but_workflows_stay_rejected(
-    preview,
+def test_workflow_management_tools_qualify_and_bind_to_preview(
+    preview, monkeypatch,
 ):
+    from azure_functions_agents import _copilot
+    from azure_functions_agents.workflows.schema import WorkflowPlanPolicy
     from azure_functions_agents.workflows.tools import build_workflow_tools
 
     durable_client = AsyncMock()
@@ -722,30 +721,47 @@ def test_workflow_management_tools_qualify_for_adapter_but_workflows_stay_reject
         "cancel_workflow",
         "terminate_workflow",
     ]
-    with pytest.raises(UnsupportedCapabilityError, match="workflows"):
-        asyncio.run(
-            runner.run_agent(
-                "hello",
-                tools=[],
-                mcp_tools=[],
-                workflow_enabled=True,
-                workflow_durable_client=durable_client,
-            )
+    invoke = AsyncMock(return_value=runner.AgentResult(session_id="public-session", content="ok"))
+    monkeypatch.setattr(_copilot, "run", invoke)
+    asyncio.run(
+        runner.run_agent(
+            "hello",
+            tools=[],
+            mcp_tools=[],
+            workflow_enabled=True,
+            workflow_durable_client=durable_client,
+            workflow_policy=WorkflowPlanPolicy(allowed_tools=frozenset()),
         )
+    )
+    assert [function.name for function in invoke.call_args.args[1].tools] == [
+        "start_workflow",
+        "get_workflow_status",
+        "list_workflows",
+        "cancel_workflow",
+        "terminate_workflow",
+    ]
 
 
-def test_stream_and_leaf_roles_never_fall_back(preview, monkeypatch):
+def test_stream_uses_copilot_but_leaf_remains_isolated(preview, monkeypatch):
+    from azure_functions_agents import _copilot
+
     monkeypatch.setattr(runner, "_build_agent_session", AsyncMock(side_effect=AssertionError))
+    async def invoke(_harness, request):
+        request.event_sink({"type": "delta", "content": "reply"})
+        return runner.AgentResult(request.session_id, "reply")
+    monkeypatch.setattr(_copilot, "run", invoke)
 
     async def collect():
         return [json.loads(event.removeprefix("data: ")) async for event in runner.run_agent_stream("hi")]
 
-    assert [event["type"] for event in asyncio.run(collect())] == ["error"]
+    assert [event["type"] for event in asyncio.run(collect())] == ["session", "delta", "done"]
     resolved, capabilities = _sample()
-    with pytest.raises(UnsupportedCapabilityError, match="workflow_subagent"):
-        asyncio.run(runner.run_leaf_agent_task(
-            resolved, capabilities, "hi", timeout=1, execution_role="workflow_subagent"
-        ))
+    invoke = AsyncMock(return_value=runner.AgentResult(session_id="leaf", content="analysis"))
+    monkeypatch.setattr(_copilot, "run", invoke)
+    assert asyncio.run(runner.run_leaf_agent_task(
+        resolved, capabilities, "hi", timeout=1, execution_role="workflow_subagent"
+    )) == "analysis"
+    assert invoke.call_args.args[1].execution_role == "workflow_subagent"
 
 
 def test_registered_app_captures_selection_and_newness(preview, monkeypatch):
@@ -789,12 +805,30 @@ def test_registered_app_captures_selection_and_newness(preview, monkeypatch):
         assert requests[0][0] is requests[1][0]
         assert requests[0][0].app_root == SAMPLE.resolve()
         assert requests[0][0].name == "copilot"
-        for name in ("agent_main_builtin_chatstream", "agent_main_builtin_history"):
-            response = await functions[name](SimpleNamespace(
-                headers={}, json=AsyncMock(return_value={"prompt": "must not run"})
-            ))
-            assert response.status_code == 501
-        assert len(requests) == 2
+        stream = await functions["agent_main_builtin_chatstream"](SimpleNamespace(
+            headers={}, json=AsyncMock(return_value={"prompt": "stream"})
+        ))
+        assert stream.status_code == 200
+        events = [json.loads(chunk.removeprefix("data: ")) async for chunk in stream.body_iterator]
+        assert [event["type"] for event in events] == ["session", "delta", "done"]
+        assert requests[2][1].new_session is True
+        assert requests[2][0] is requests[0][0]
+        resumed_stream = await functions["agent_main_builtin_chatstream"](SimpleNamespace(
+            headers={"x-ms-session-id": events[0]["session_id"]},
+            json=AsyncMock(return_value={"prompt": "resume stream"}),
+        ))
+        resumed_events = [
+            json.loads(chunk.removeprefix("data: "))
+            async for chunk in resumed_stream.body_iterator
+        ]
+        assert resumed_events[0]["session_id"] == events[0]["session_id"]
+        assert requests[3][1].new_session is False
+        assert requests[3][0] is requests[0][0]
+        response = await functions["agent_main_builtin_history"](SimpleNamespace(
+            headers={}, json=AsyncMock(return_value={"prompt": "must not run"})
+        ))
+        assert response.status_code == 501
+        assert len(requests) == 4
         assert validations == ["main"]
 
     asyncio.run(call())

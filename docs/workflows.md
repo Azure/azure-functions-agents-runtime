@@ -1,5 +1,13 @@
 # Dynamic workflows (experimental v1)
 
+The app-level Copilot opt-in supports the same five management tools,
+per-agent policy authorization, and Workflow Sub Agent Activities in the
+single-worker local preview. Each leaf gets a fresh native session that is
+deleted after use. MCP and authored skills remain unsupported; the packaged
+data-driven workflow grammar is included only in workflow-enabled direct
+agents' prompts rather than loaded as a native skill. This does not qualify
+Azure hosting or multi-worker native persistence.
+
 > [!NOTE]
 > **Status: public experimental v1.** The API is intentionally small and
 > may change based on early feedback, but the behavior described here is

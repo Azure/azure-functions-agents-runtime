@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 from contextlib import suppress
 from dataclasses import replace
@@ -37,6 +38,16 @@ from azure_functions_agents.client_manager import (
     set_client_manager,
 )
 from azure_functions_agents.config import paths
+from azure_functions_agents.config.schema import (
+    BuiltinEndpointsConfig,
+    ResolvedAgent,
+    ToolsFilter,
+    WorkflowConfig,
+)
+from azure_functions_agents.registration.capabilities import AgentCapabilities
+from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
+from azure_functions_agents.workflows.integration import data_driven_workflows_skill_path
+from azure_functions_agents.workflows.schema import WorkflowPlanPolicy
 
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
 
@@ -96,10 +107,359 @@ def _fake_client():
     ]
     return SimpleNamespace(
         start=AsyncMock(), stop=AsyncMock(), force_stop=AsyncMock(),
+        delete_session=AsyncMock(),
         get_session_metadata=AsyncMock(return_value=None),
         create_session=AsyncMock(return_value=session),
         resume_session=AsyncMock(return_value=session),
     )
+
+
+def _specialist(slug="analyst", *, model="specialist-model", timeout=4.0):
+    return ResolvedAgent(
+        name=slug, slug=slug, description="Analyze requests.", trigger=None,
+        instructions="Use only your own instructions.", is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(), model=model, timeout=timeout,
+        enabled_mcp_names=[], enabled_skills_names=[], tool_filter=ToolsFilter(),
+        sandbox_config=None, input_schema=None, response_schema=None,
+        response_example=None, metadata={}, source_file=f"{slug}.agent.md",
+    )
+
+
+@pytest.mark.asyncio
+async def test_leaf_calls_are_isolated_and_deleted(preview, monkeypatch):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    resolved = _specialist()
+    capabilities = AgentCapabilities(
+        filtered_user_tools=[tool(name="static_tool")(lambda: "static")],
+        web_request_tools=[],
+        _harness=preview,
+    )
+    from copilot.generated.rpc import CurrentToolMetadata
+
+    sessions = [_fake_client().create_session.return_value for _ in range(2)]
+    overlapping = asyncio.Event()
+    active = 0
+
+    async def simultaneous(*args, **kwargs):
+        nonlocal active
+        active += 1
+        if active == 2:
+            overlapping.set()
+        await asyncio.wait_for(overlapping.wait(), timeout=2)
+        return sessions[0].send_and_wait.return_value
+
+    for session in sessions:
+        session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(
+            tools=[CurrentToolMetadata(description="", name="static_tool")]
+        )
+        session.send_and_wait.side_effect = simultaneous
+    client.create_session.side_effect = sessions
+    try:
+        answers = await asyncio.gather(*[
+            runner.run_leaf_agent_task(
+                resolved, capabilities, f"task-{index}", timeout=3,
+                execution_role="delegate", _harness=preview,
+            ) for index in range(2)
+        ])
+        assert answers == ["synthetic reply", "synthetic reply"]
+        sessions = [call.kwargs["session_id"] for call in client.create_session.call_args_list]
+        assert len(set(sessions)) == 2
+        assert {call.args[0] for call in client.delete_session.call_args_list} == set(sessions)
+        assert client.resume_session.await_count == 0
+        for call in client.create_session.call_args_list:
+            assert call.kwargs["model"] == "specialist-model"
+            assert call.kwargs["system_message"]["content"] == resolved.instructions
+            assert call.kwargs["available_tools"] == ["custom:static_tool"]
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_ephemeral_leaf_invocations_do_not_accumulate_session_locks(preview, monkeypatch):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    initial_locks = set(runner._SESSION_LOCKS)
+    try:
+        for index in range(64):
+            result = await runner.run_leaf_agent_task(
+                _specialist(), AgentCapabilities(_harness=preview), f"task-{index}",
+                timeout=3, execution_role="workflow_subagent", _harness=preview,
+            )
+            assert result == "synthetic reply"
+        created = [call.kwargs["session_id"] for call in client.create_session.call_args_list]
+        assert len(set(created)) == 64
+        assert client.delete_session.await_count == 64
+        assert set(runner._SESSION_LOCKS) == initial_locks
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_leaf_failure_still_deletes_native_state(preview, monkeypatch):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    client.create_session.return_value.send_and_wait.side_effect = RuntimeError("private detail")
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(CopilotPreviewError) as error:
+            await runner.run_leaf_agent_task(
+                _specialist(), AgentCapabilities(_harness=preview), "task",
+                timeout=3, execution_role="workflow_subagent", _harness=preview,
+            )
+        assert "private detail" not in str(error.value)
+        client.delete_session.assert_awaited_once()
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_leaf_timeout_keeps_activity_retry_classification(preview, monkeypatch):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+
+    async def stall(*args, **kwargs):
+        await asyncio.sleep(10)
+
+    session = client.create_session.return_value
+    session.send_and_wait.side_effect = stall
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(TimeoutError, match="specialist timed out"):
+            await runner.run_leaf_agent_task(
+                _specialist(), AgentCapabilities(_harness=preview), "task",
+                timeout=0.03, execution_role="workflow_subagent", _harness=preview,
+            )
+        session.abort.assert_awaited_once()
+        client.delete_session.assert_awaited_once()
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_parent_cancellation_aborts_and_deletes_leaf(preview, monkeypatch):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    started = asyncio.Event()
+
+    async def stall(*args, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    session = client.create_session.return_value
+    session.send_and_wait.side_effect = stall
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        task = asyncio.create_task(runner.run_leaf_agent_task(
+            _specialist(), AgentCapabilities(_harness=preview), "task",
+            timeout=5, execution_role="delegate", _harness=preview,
+        ))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        session.abort.assert_awaited_once()
+        client.delete_session.assert_awaited_once()
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_delegate_tool_uses_bound_preview_and_counts_recoverable_errors(preview, monkeypatch):
+    from azure_functions_agents.config.schema import SubagentRef
+
+    resolved = _specialist()
+    capabilities = AgentCapabilities(_harness=preview)
+    catalog = build_catalog({resolved.slug: CatalogEntry(resolved, capabilities)})
+    seen = []
+
+    async def fake_leaf(*args, **kwargs):
+        seen.append(kwargs["_harness"])
+        raise RuntimeError("private detail")
+
+    monkeypatch.setattr(runner, "run_leaf_agent_task", fake_leaf)
+    [function], tracker = await runner.build_subagent_tools(
+        [SubagentRef(agent=resolved.slug)], catalog,
+        coordinator_deadline=asyncio.get_running_loop().time() + 5,
+        harness=preview,
+    )
+    result, _ = await _invoke_native_tool(function, {"task": "check"})
+    assert function.name == "delegate_analyst"
+    assert "private detail" not in result.text_result_for_llm
+    assert tracker.count == 1
+    assert seen == [preview]
+
+
+@pytest.mark.asyncio
+async def test_workflow_management_tools_use_bound_context_and_policy(preview, monkeypatch):
+    from azure_functions_agents.runner import AgentResult
+
+    requests = []
+
+    async def fake_run(harness, request):
+        requests.append((harness, request))
+        return AgentResult(session_id=request.session_id, content="ready")
+
+    monkeypatch.setattr(_copilot, "run", fake_run)
+    policy = WorkflowPlanPolicy(
+        allowed_tools=frozenset({"inspect"}),
+        allowed_subagents=frozenset({"analyst"}),
+    )
+    result = await runner.run_agent(
+        "Create a workflow", _harness=preview, agent_name="coordinator",
+        session_id="session-1", tools=[], mcp_tools=[],
+        skill_paths=[data_driven_workflows_skill_path()],
+        workflow_enabled=True, workflow_policy=policy,
+        workflow_agent_slug="coordinator", workflow_durable_client=Mock(),
+    )
+    assert result.content == "ready"
+    assert requests[0][0] is preview
+    assert {function.name for function in requests[0][1].tools} == {
+        "start_workflow", "get_workflow_status", "list_workflows",
+        "cancel_workflow", "terminate_workflow",
+    }
+    assert "Collection fan-out" in requests[0][1].instructions
+    await runner.run_agent(
+        "Create another workflow", _harness=preview, agent_name="coordinator",
+        tools=[], mcp_tools=[], workflow_enabled=True, workflow_policy=policy,
+        workflow_agent_slug="coordinator", workflow_durable_client=Mock(),
+    )
+    assert requests[1][1].session_id
+    assert requests[1][1].session_id != requests[0][1].session_id
+    with pytest.raises(UnsupportedCapabilityError, match="skills"):
+        await runner.run_agent(
+            "hello", _harness=preview, tools=[], mcp_tools=[],
+            skill_paths=[preview.app_root / "authored-skill"],
+            workflow_enabled=True, workflow_policy=policy,
+        )
+    with pytest.raises(UnsupportedCapabilityError, match="per-agent workflow policy"):
+        await runner.run_agent(
+            "hello", _harness=preview, tools=[], mcp_tools=[],
+            workflow_enabled=True, workflow_durable_client=Mock(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_stream_translates_sdk_deltas_host_tools_and_completes_before_done(preview, monkeypatch):
+    import copilot
+    from copilot.session_events import (
+        AssistantMessageDeltaData,
+        AssistantReasoningDeltaData,
+        SessionEvent,
+        SessionEventType,
+    )
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    session = client.create_session.return_value
+    function = tool(name="inspect")(lambda: "inspection")
+    session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(
+        tools=[SimpleNamespace(name="inspect")]
+    )
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    from copilot.tools import ToolInvocation
+
+    async def send(*args, **kwargs):
+        callback = client.create_session.call_args.kwargs["on_event"]
+        for data, kind in (
+            (AssistantMessageDeltaData(delta_content="secret", message_id="child",
+                                       parent_tool_call_id="child-call"),
+             SessionEventType.ASSISTANT_MESSAGE_DELTA),
+            (AssistantReasoningDeltaData(delta_content="thinking", reasoning_id="r"),
+             SessionEventType.ASSISTANT_REASONING_DELTA),
+            (AssistantMessageDeltaData(delta_content="answer", message_id="public"),
+             SessionEventType.ASSISTANT_MESSAGE_DELTA),
+        ):
+            callback(SessionEvent(data=data, id=uuid4(), timestamp=datetime.now(UTC), type=kind))
+        [native_tool] = client.create_session.call_args.kwargs["tools"]
+        assert native_tool.handler is not None
+        await native_tool.handler(ToolInvocation(
+            session_id="native", tool_call_id="call-1", tool_name="inspect", arguments={}
+        ))
+        return session.send_and_wait.return_value
+
+    session.send_and_wait.side_effect = send
+    events = []
+    try:
+        async for line in runner.run_agent_stream(
+            "hello", _harness=preview, tools=[function], mcp_tools=[],
+        ):
+            event = json.loads(line.removeprefix("data: "))
+            if event["type"] == "done":
+                session.get_events.assert_awaited()
+            events.append(event)
+    finally:
+        await _copilot.shutdown()
+    assert [event["type"] for event in events] == [
+        "session", "intermediate", "delta", "tool_start", "tool_end", "done",
+    ]
+    assert events[2]["content"] == "answer"
+    assert events[3]["tool_call_id"] == events[4]["tool_call_id"] == "call-1"
+    assert client.create_session.call_args.kwargs["streaming"] is True
+
+
+@pytest.mark.asyncio
+async def test_stream_incomplete_turn_ends_with_error_never_done(preview, monkeypatch):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    client.create_session.return_value.get_events.return_value = []
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        events = [
+            json.loads(line.removeprefix("data: "))
+            async for line in runner.run_agent_stream(
+                "hello", _harness=preview, tools=[], mcp_tools=[],
+            )
+        ]
+        assert [event["type"] for event in events] == ["session", "error"]
+        client.create_session.return_value.abort.assert_awaited_once()
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stream_close_cancels_native_turn_without_stopping_client(preview, monkeypatch):
+    import copilot
+
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    client = _fake_client()
+    started = asyncio.Event()
+
+    async def stall(*args, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    session = client.create_session.return_value
+    session.send_and_wait.side_effect = stall
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    stream = runner.run_agent_stream("hello", _harness=preview, tools=[], mcp_tools=[])
+    try:
+        first = json.loads((await anext(stream)).removeprefix("data: "))
+        assert first["type"] == "session"
+        pending = asyncio.create_task(anext(stream))
+        await started.wait()
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        await stream.aclose()
+        session.abort.assert_awaited_once()
+        client.stop.assert_not_awaited()
+    finally:
+        await _copilot.shutdown()
 
 
 async def _invoke_native_tool(function, arguments):
@@ -834,6 +1194,56 @@ def test_portable_output_limit_is_rejected_during_registration(tmp_path, monkeyp
     with pytest.raises(UnsupportedCapabilityError, match="max_output_tokens"):
         create_function_app(root)
     factory.assert_not_called()
+
+
+def test_preview_composes_delegation_and_workflows_before_native_start(tmp_path, monkeypatch):
+    import copilot
+
+    root = tmp_path / "app"
+    shutil.copytree(SAMPLE, root)
+    agent = root / "main.agent.md"
+    agent.write_text(
+        agent.read_text(encoding="utf-8").replace(
+            "workflows:\n  enabled: false",
+            "subagents:\n  - agent: analyst\nworkflows:\n  enabled: true\n"
+            "  subagents:\n    - agent: analyst",
+        ),
+        encoding="utf-8",
+    )
+    (root / "analyst.agent.md").write_text(
+        "---\nname: Analyst\ndescription: Analyze requests.\n"
+        "mcp: false\nskills: false\nsystem_tools:\n"
+        "  web_request: false\n  dynamic_sessions_code_interpreter: false\n"
+        "---\nAnalyze the task.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_harness, "_HARNESSES", {})
+    monkeypatch.setattr(paths, "_app_root", root)
+    monkeypatch.setenv(_harness.FLAG, "true")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_MODEL", "gpt-4.1-mini")
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("WEBSITE_INSTANCE_ID", raising=False)
+    monkeypatch.delenv("FUNCTIONS_WORKER_PROCESS_COUNT", raising=False)
+    native = Mock(side_effect=AssertionError("Native startup must be lazy"))
+    monkeypatch.setattr(copilot, "CopilotClient", native)
+
+    from azure.durable_functions import DFApp
+
+    app = create_function_app(root)
+    assert isinstance(app, DFApp)
+    native.assert_not_called()
+
+
+def test_workflow_management_collision_is_rejected_before_native_start(preview):
+    resolved = _specialist()
+    resolved.workflows = WorkflowConfig(enabled=True)
+    capabilities = AgentCapabilities(
+        filtered_user_tools=[tool(name="start_workflow")(lambda: "shadowed")]
+    )
+    with pytest.raises(UnsupportedCapabilityError, match="must not collide"):
+        _harness.validate_agent(preview, resolved, capabilities)
 
 
 def test_sdk_events_require_a_completed_uninterrupted_turn():
