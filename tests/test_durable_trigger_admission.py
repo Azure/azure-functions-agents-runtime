@@ -352,6 +352,12 @@ def test_runtime_registers_outbox_activity_and_monitored_sweeper() -> None:
         "durableClient",
         "timerTrigger",
     ]
+    attempt = next(
+        function
+        for function in app.get_functions()
+        if function.get_function_name() == DURABLE_TRIGGER_ATTEMPT_ACTIVITY_NAME
+    )
+    assert attempt.get_user_function().__annotations__["payload"] == "dict"
 
 
 def test_runtime_registration_injects_production_shared_admission_callback() -> None:

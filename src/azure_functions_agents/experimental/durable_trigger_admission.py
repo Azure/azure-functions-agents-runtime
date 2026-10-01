@@ -1127,7 +1127,7 @@ def register_durable_trigger_admission_runtime(
         activity=DURABLE_TRIGGER_ATTEMPT_ACTIVITY_NAME,
     )
     async def durable_trigger_admission_attempt_v1(
-        payload: dict[str, object],
+        payload: dict,  # type: ignore[type-arg]
         client: df.DurableOrchestrationClient,
     ) -> dict[str, object]:
         record = DurableTriggerAdmissionRecordV1.model_validate(
