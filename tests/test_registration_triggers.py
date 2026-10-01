@@ -17,6 +17,13 @@ from azure_functions_agents.config.schema import (
     ToolsFilter,
     TriggerSpec,
 )
+from azure_functions_agents.experimental.durable_loop_receipts import (
+    InMemoryDurableKeyedDocumentStore,
+)
+from azure_functions_agents.experimental.durable_trigger_admission import (
+    DurableTriggerAdmissionRuntime,
+    DurableTriggerPendingLedger,
+)
 from azure_functions_agents.registration._naming import (
     _function_name_from_source,
     _safe_function_name,
@@ -130,6 +137,13 @@ def _resolved_agent(*, trigger: TriggerSpec, is_main: bool = False) -> ResolvedA
         response_example=None,
         metadata={},
         source_file=__file__,
+    )
+
+
+def _durable_trigger_runtime() -> DurableTriggerAdmissionRuntime:
+    return DurableTriggerAdmissionRuntime(
+        DurableTriggerPendingLedger(InMemoryDurableKeyedDocumentStore()),
+        admission_deadline_seconds=300,
     )
 
 
@@ -872,3 +886,190 @@ def test_register_workflow_timer_adds_durable_client_without_changing_trigger(
         )
     ]
     assert app.function_names == ["test_registration_triggers"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {
+            "schedule": "0 * * * * *",
+            "durable_owner": {"kind": "app"},
+        },
+        {
+            "schedule": "0 * * * * *",
+            "use_monitor": True,
+            "run_on_startup": True,
+            "durable_owner": {"kind": "app"},
+        },
+    ],
+)
+def test_register_durable_timer_requires_monitor_and_rejects_startup(
+    args: dict[str, Any],
+) -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(type="timer_trigger", args=args)
+    )
+
+    with pytest.raises(ValueError, match=r"use_monitor|run_on_startup"):
+        register_agent(
+            FakeFunctionApp(),
+            resolved,
+            AgentCapabilities(),
+            durable_trigger_admission=_durable_trigger_runtime(),
+        )
+
+
+def test_register_durable_connector_requires_authored_event_path() -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(
+            type="connector_trigger",
+            args={
+                "connection": "office365",
+                "durable_owner": {"kind": "app"},
+            },
+        )
+    )
+
+    with pytest.raises(ValueError, match="event_id_path"):
+        register_agent(
+            FakeFunctionApp(),
+            resolved,
+            AgentCapabilities(),
+            durable_trigger_admission=_durable_trigger_runtime(),
+        )
+
+
+def test_register_durable_connector_strips_runtime_only_binding_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(
+            type="connector_trigger",
+            args={
+                "connection": "office365",
+                "durable_owner": {"kind": "app"},
+                "event_id_path": "$.event.id",
+                "session_id_path": "$.thread.id",
+                "allow_human_input": False,
+            },
+        )
+    )
+    app = FakeFunctionApp()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers.make_agent_handler",
+        lambda *args, **kwargs: pytest.fail("ordinary handler must not be built"),
+    )
+
+    register_agent(
+        app,
+        resolved,
+        AgentCapabilities(),
+        durable_trigger_admission=_durable_trigger_runtime(),
+    )
+
+    assert app.trigger_calls == [
+        (
+            "connector_trigger",
+            {"connection": "office365", "arg_name": "trigger_data"},
+        )
+    ]
+    assert len(app.durable_client_inputs) == 1
+
+
+def test_register_durable_http_requires_public_auth_match() -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(
+            type="http_trigger",
+            args={
+                "route": "reports",
+                "http_auth": "anonymous",
+            },
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"must equal builtin_endpoints\.http_auth",
+    ):
+        register_agent(
+            FakeFunctionApp(),
+            resolved,
+            AgentCapabilities(),
+            durable_trigger_admission=_durable_trigger_runtime(),
+        )
+
+
+def test_register_durable_http_requires_declared_auth() -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(
+            type="http_trigger",
+            args={"route": "reports"},
+        )
+    )
+
+    with pytest.raises(ValueError, match="requires declared"):
+        register_agent(
+            FakeFunctionApp(),
+            resolved,
+            AgentCapabilities(),
+            durable_trigger_admission=_durable_trigger_runtime(),
+        )
+
+
+def test_register_durable_http_never_builds_inline_agent_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(
+            type="http_trigger",
+            args={
+                "route": "reports",
+                "methods": ["POST"],
+                "http_auth": "function",
+            },
+        )
+    )
+    app = FakeFunctionApp()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers.make_http_agent_handler",
+        lambda *args, **kwargs: pytest.fail("ordinary handler must not be built"),
+    )
+
+    register_agent(
+        app,
+        resolved,
+        AgentCapabilities(),
+        durable_trigger_admission=_durable_trigger_runtime(),
+    )
+
+    assert len(app.durable_client_inputs) == 1
+    assert app.trigger_calls == [
+        (
+            "route",
+            {
+                "route": "reports",
+                "methods": ["POST"],
+                "auth_level": func.AuthLevel.FUNCTION,
+            },
+        )
+    ]
+
+
+def test_register_durable_mode_rejects_unsupported_trigger_without_inline_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(type="queue_trigger", args={"queue_name": "reports"})
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers.make_agent_handler",
+        lambda *args, **kwargs: pytest.fail("ordinary handler must not be built"),
+    )
+
+    with pytest.raises(ValueError, match="supports only"):
+        register_agent(
+            FakeFunctionApp(),
+            resolved,
+            AgentCapabilities(),
+            durable_trigger_admission=_durable_trigger_runtime(),
+        )

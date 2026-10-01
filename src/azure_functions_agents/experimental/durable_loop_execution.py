@@ -39,6 +39,10 @@ from .durable_loop_tools import (
     DurableToolCleanupPort,
     DurableToolDispatchPort,
 )
+from .durable_skill_providers import (
+    DurableSkillProvider,
+    PackagedFilesystemDurableSkillProvider,
+)
 from .hybrid_apim import HybridApimClientManager
 from .hybrid_config import HybridSandboxSettings
 
@@ -73,6 +77,7 @@ class DurableExecutionPlaneRouter(
         *,
         policy_hash: str,
         sandbox_profile: SandboxExecutionProfile,
+        include_human_input: bool = True,
     ) -> DurableToolCatalogSnapshot:
         """Discover both planes and bind every tool to explicit policy."""
         del sandbox_profile
@@ -93,6 +98,7 @@ class DurableExecutionPlaneRouter(
             policy,
             package_hash=package_hash,
             base_policy_hash=policy_hash,
+            include_human_input=include_human_input,
         )
         snapshot = DurableToolCatalogSnapshot(
             catalog=catalog,
@@ -123,6 +129,14 @@ class DurableExecutionPlaneRouter(
                 package_hash=package_hash,
                 base_policy_hash="0" * 64,
             ).model_copy(update={"policy_hash": request.policy_hash})
+            if catalog.catalog_hash != request.catalog_hash:
+                catalog = freeze_durable_tool_catalog(
+                    (*remote, *local),
+                    policy,
+                    package_hash=package_hash,
+                    base_policy_hash="0" * 64,
+                    include_human_input=False,
+                ).model_copy(update={"policy_hash": request.policy_hash})
             snapshot = DurableToolCatalogSnapshot(
                 catalog=catalog,
                 package_hash=package_hash,
@@ -227,6 +241,17 @@ def build_durable_execution_plane(
             receipts=receipts,
             local_tools_enabled=binding.local_tools_enabled,
         ),
+    )
+
+
+def build_durable_skill_provider(
+    settings: DurableLoopSettings,
+) -> DurableSkillProvider:
+    """Construct the configured core durable skill provider."""
+    if settings.skill_provider == "filesystem":
+        return PackagedFilesystemDurableSkillProvider(get_app_root())
+    raise DurableLoopConfigurationError(
+        "the configured durable skill provider is not installed"
     )
 
 

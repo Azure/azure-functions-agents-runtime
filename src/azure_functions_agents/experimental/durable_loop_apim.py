@@ -38,6 +38,7 @@ from .durable_loop_observability import (
 )
 from .durable_loop_protocol import (
     DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+    DURABLE_LOOP_ORCHESTRATOR_V4_NAME,
     BackgroundPollResultV1,
     BackgroundStartDisposition,
     BackgroundStartResultV1,
@@ -1236,7 +1237,10 @@ def _cross_activity_429(
     headers = client_kwargs.get("extra_headers")
     return (
         request.identity.orchestration_version
-        == DURABLE_LOOP_ORCHESTRATOR_V3_NAME
+        in {
+            DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+            DURABLE_LOOP_ORCHESTRATOR_V4_NAME,
+        }
         and request.fault_profile is DurableFaultProfile.MODEL_APIM_429_ONCE
         and isinstance(error, ApimResponsesError)
         and error.status_code == 429

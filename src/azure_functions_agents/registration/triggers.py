@@ -23,6 +23,9 @@ from .capabilities import AgentCapabilities
 from .catalog import AgentCatalog
 
 if TYPE_CHECKING:
+    from ..experimental.durable_trigger_admission import (
+        DurableTriggerAdmissionRuntime,
+    )
     from ..workflows.workflow_schema import WorkflowPlanPolicy
 
 __all__ = [
@@ -41,11 +44,40 @@ def _register_builtin_agent(
     trigger_type: str,
     catalog: AgentCatalog | None = None,
     *,
+    durable_trigger_admission: DurableTriggerAdmissionRuntime | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     trigger_params = dict(trigger_params)
+    if durable_trigger_admission is not None:
+        from ..experimental.durable_trigger_admission import (
+            durable_binding_decorator_args,
+            make_durable_binding_handler,
+            validate_durable_trigger_registration,
+        )
+
+        registration = validate_durable_trigger_registration(
+            resolved,
+            trigger_type,
+            trigger_params,
+            function_name=function_name,
+        )
+        trigger_params = durable_binding_decorator_args(trigger_params)
+        handler = make_durable_binding_handler(
+            durable_trigger_admission,
+            registration,
+        )
+    else:
+        handler = make_agent_handler(
+            resolved,
+            trigger_type,
+            capabilities,
+            catalog,
+            workflows_enabled=workflows_enabled,
+            workflow_system_addendum=workflow_system_addendum,
+            workflow_policy=workflow_policy,
+        )
     decorator_fn = getattr(app, trigger_type, None)
     if decorator_fn is None and trigger_type == "connector_trigger":
         decorator_fn = getattr(app, "generic_trigger", None)
@@ -62,18 +94,9 @@ def _register_builtin_agent(
     if trigger_type == "timer_trigger" and "schedule" in trigger_params:
         trigger_params["schedule"] = normalize_timer_schedule(str(trigger_params["schedule"]))
 
-    handler = make_agent_handler(
-        resolved,
-        trigger_type,
-        capabilities,
-        catalog,
-        workflows_enabled=workflows_enabled,
-        workflow_system_addendum=workflow_system_addendum,
-        workflow_policy=workflow_policy,
-    )
     trigger_params["arg_name"] = "trigger_data"
 
-    if workflows_enabled:
+    if durable_trigger_admission is not None or workflows_enabled:
         handler = app.durable_client_input(client_name="client")(handler)
     decorated = decorator_fn(**trigger_params)(handler)
     decorated = app.function_name(name=function_name)(decorated)
@@ -119,6 +142,7 @@ def _register_http_agent(
     trigger_params: dict[str, Any],
     catalog: AgentCatalog | None = None,
     *,
+    durable_trigger_admission: DurableTriggerAdmissionRuntime | None = None,
     session_runtime: SessionRuntimeBinding | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
@@ -134,7 +158,26 @@ def _register_http_agent(
 
     methods = trigger_params.get("methods", ["POST"])
     auth = _resolve_http_trigger_auth(resolved, trigger_params)
-    if session_runtime is None:
+    if durable_trigger_admission is not None:
+        from ..experimental.durable_trigger_admission import (
+            make_durable_http_handler,
+            validate_durable_trigger_registration,
+        )
+
+        registration = validate_durable_trigger_registration(
+            resolved,
+            "http_trigger",
+            trigger_params,
+            function_name=function_name,
+        )
+        handler = make_durable_http_handler(
+            durable_trigger_admission,
+            registration,
+            auth,
+            resolved=resolved,
+            input_schema=resolved.input_schema,
+        )
+    elif session_runtime is None:
         handler = make_http_agent_handler(
             resolved,
             capabilities,
@@ -156,7 +199,7 @@ def _register_http_agent(
             workflow_policy=workflow_policy,
         )
 
-    if workflows_enabled:
+    if durable_trigger_admission is not None or workflows_enabled:
         handler = app.durable_client_input(client_name="client")(handler)
     decorated = app.route(
         route=route,
@@ -174,6 +217,7 @@ def register_agent(
     function_name: str | None = None,
     catalog: AgentCatalog | None = None,
     *,
+    durable_trigger_admission: DurableTriggerAdmissionRuntime | None = None,
     session_runtime: SessionRuntimeBinding | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
@@ -189,6 +233,10 @@ def register_agent(
 
     trigger_type = resolved.trigger.type.strip()
     trigger_params = dict(resolved.trigger.args or {})
+    if durable_trigger_admission is not None and workflows_enabled:
+        raise ValueError(
+            "durable-loop trigger admission is incompatible with Dynamic Workflows"
+        )
     if function_name is None and registered_names is None:
         function_name = _function_name_from_source(resolved.source_file, resolved.name)
     elif function_name is None:
@@ -207,6 +255,7 @@ def register_agent(
             function_name,
             trigger_params,
             catalog,
+            durable_trigger_admission=durable_trigger_admission,
             session_runtime=session_runtime,
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
@@ -231,6 +280,7 @@ def register_agent(
         trigger_params,
         trigger_type,
         catalog,
+        durable_trigger_admission=durable_trigger_admission,
         workflows_enabled=workflows_enabled,
         workflow_system_addendum=workflow_system_addendum,
         workflow_policy=workflow_policy,

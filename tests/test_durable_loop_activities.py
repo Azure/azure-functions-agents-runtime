@@ -9,11 +9,21 @@ from azure_functions_agents.experimental.durable_loop_activities import (
     DeterministicContextCompactor,
     DurableLoopContentError,
     DurableLoopContextOverflowError,
+    DurableSkillOperationError,
     FakeBackgroundModelProvider,
     InMemoryDurableContentStore,
     OneStepModelRequest,
     ScriptedModelStep,
+    compose_durable_skill_instructions,
     get_protocol_model,
+    load_frozen_skill,
+    put_protocol_model,
+    resolve_frozen_skill_content_hash,
+    search_frozen_skill_catalog,
+)
+from azure_functions_agents.experimental.durable_loop_catalog import (
+    FrozenDurableSkillCatalogV1,
+    MaterializedDurableSkillV1,
 )
 from azure_functions_agents.experimental.durable_loop_config import (
     DURABLE_LOOP_CONTENT_BLOB_URI_ENV,
@@ -21,9 +31,15 @@ from azure_functions_agents.experimental.durable_loop_config import (
 )
 from azure_functions_agents.experimental.durable_loop_protocol import (
     BackgroundStartDisposition,
+    ContentRefV1,
     DurableLoopBudgetV1,
     DurableLoopProtocolDocumentError,
     DurableRunIdentityV1,
+    DurableSkillCatalogSnapshotV1,
+    DurableSkillContentFileV1,
+    DurableSkillContentV1,
+    DurableSkillMetadataPageV1,
+    DurableSkillMetadataV1,
     ErrorDisposition,
     MAFMessageBundleV1,
     ModelOperationStatus,
@@ -98,6 +114,220 @@ def _request() -> OneStepModelRequest:
         catalog=catalog,
         model_settings={"temperature": 0},
     )
+
+
+async def _frozen_skill_catalog(
+    store: InMemoryDurableContentStore,
+) -> tuple[
+    ContentRefV1,
+    FrozenDurableSkillCatalogV1,
+    tuple[DurableSkillContentV1, ...],
+]:
+    metadata: list[DurableSkillMetadataV1] = []
+    materialized: list[MaterializedDurableSkillV1] = []
+    contents: list[DurableSkillContentV1] = []
+    for skill_id in ("alpha", "beta"):
+        content = DurableSkillContentV1.create(
+            skill_id=skill_id,
+            version="1",
+            files=(
+                DurableSkillContentFileV1(
+                    relative_path="SKILL.md",
+                    content=f"Use {skill_id}.",
+                ),
+            ),
+        )
+        content_ref = await put_protocol_model(
+            store,
+            kind="skill-content",
+            model=content,
+            retention_class="skill",
+        )
+        metadata.append(
+            DurableSkillMetadataV1(
+                skill_id=skill_id,
+                display_name=skill_id.title(),
+                selection_description=f"Guidance for {skill_id}",
+                version="1",
+                content_hash=content.content_hash,
+                tags=("test",),
+            )
+        )
+        materialized.append(
+            MaterializedDurableSkillV1(
+                skill_id=skill_id,
+                version="1",
+                content_hash=content.content_hash,
+                content_ref=content_ref,
+            )
+        )
+        contents.append(content)
+    snapshot = DurableSkillCatalogSnapshotV1.create(
+        provider_id="packaged",
+        catalog_revision="revision-1",
+        metadata=tuple(metadata),
+        snapshot_token="token",
+        retain_until=datetime(2026, 10, 1, tzinfo=UTC),
+    )
+    frozen = FrozenDurableSkillCatalogV1(
+        snapshot=snapshot,
+        materialized=tuple(materialized),
+    )
+    catalog_ref = await put_protocol_model(
+        store,
+        kind="skill-catalog",
+        model=frozen,
+        retention_class="skill",
+    )
+    return catalog_ref, frozen, tuple(contents)
+
+
+@pytest.mark.asyncio
+async def test_frozen_skill_search_is_metadata_only_and_cursor_bound() -> None:
+    store = InMemoryDurableContentStore()
+    catalog_ref, frozen, _ = await _frozen_skill_catalog(store)
+
+    result = await search_frozen_skill_catalog(
+        store,
+        catalog_ref=catalog_ref,
+        operation_key=_HASH,
+        query="alpha",
+        cursor=None,
+        maximum_result_bytes=4096,
+    )
+    page = await get_protocol_model(
+        store,
+        result.page_ref,
+        DurableSkillMetadataPageV1,
+    )
+
+    assert [item.skill_id for item in page.metadata] == ["alpha"]
+    assert page.catalog_hash == frozen.snapshot.catalog_hash
+    assert "content_ref" not in page.model_dump_json()
+    with pytest.raises(DurableSkillOperationError, match="invalid_skill_cursor"):
+        await search_frozen_skill_catalog(
+            store,
+            catalog_ref=catalog_ref,
+            operation_key="b" * 64,
+            query="alpha",
+            cursor="invalid",
+            maximum_result_bytes=4096,
+        )
+    with pytest.raises(
+        DurableSkillOperationError,
+        match="skill_catalog_unavailable",
+    ) as unavailable:
+        await search_frozen_skill_catalog(
+            store,
+            catalog_ref=catalog_ref.model_copy(update={"sha256": "f" * 64}),
+            operation_key="c" * 64,
+            query=None,
+            cursor=None,
+            maximum_result_bytes=4096,
+        )
+    assert unavailable.value.terminal is True
+
+
+@pytest.mark.asyncio
+async def test_frozen_skill_load_is_ref_only_and_duplicate_is_idempotent() -> None:
+    store = InMemoryDurableContentStore()
+    catalog_ref, frozen, contents = await _frozen_skill_catalog(store)
+
+    result, receipt = await load_frozen_skill(
+        store,
+        catalog_ref=catalog_ref,
+        run_id="run-1",
+        operation_key=_HASH,
+        stable_step_id="skill-step-1",
+        skill_id="alpha",
+        version="1",
+        loaded_receipts=(),
+        completed_skill_loads=0,
+        maximum_skill_loads=1,
+        loaded_skill_bytes=0,
+        maximum_loaded_skill_bytes=4096,
+        base_context_bytes=0,
+        context_max_bytes=8192,
+        loaded_at=datetime(2026, 9, 4, tzinfo=UTC),
+    )
+    duplicate, duplicate_receipt = await load_frozen_skill(
+        store,
+        catalog_ref=catalog_ref,
+        run_id="run-1",
+        operation_key="b" * 64,
+        stable_step_id="skill-step-2",
+        skill_id="alpha",
+        version="1",
+        loaded_receipts=(receipt,),
+        completed_skill_loads=1,
+        maximum_skill_loads=1,
+        loaded_skill_bytes=result.content_ref.byte_length,
+        maximum_loaded_skill_bytes=4096,
+        base_context_bytes=0,
+        context_max_bytes=8192,
+        loaded_at=datetime(2026, 9, 4, tzinfo=UTC),
+    )
+
+    assert result.content_hash == contents[0].content_hash
+    assert "files" not in result.model_dump_json()
+    assert duplicate.already_loaded is True
+    assert duplicate_receipt.already_loaded is True
+    assert await resolve_frozen_skill_content_hash(
+        store,
+        catalog_ref=catalog_ref,
+        skill_id="beta",
+        version="1",
+    ) == frozen.snapshot.metadata[1].content_hash
+    composed = compose_durable_skill_instructions(
+        "Root.",
+        frozen.snapshot.metadata,
+        (contents[0],),
+    )
+    assert composed.index("Root.") < composed.index("metadata only") < composed.index(
+        "Loaded durable instruction skill alpha@1"
+    )
+    with pytest.raises(
+        DurableSkillOperationError,
+        match="skill_load_budget_exceeded",
+    ):
+        await load_frozen_skill(
+            store,
+            catalog_ref=catalog_ref,
+            run_id="run-1",
+            operation_key="c" * 64,
+            stable_step_id="skill-step-3",
+            skill_id="beta",
+            version="1",
+            loaded_receipts=(receipt,),
+            completed_skill_loads=1,
+            maximum_skill_loads=1,
+            loaded_skill_bytes=result.content_ref.byte_length,
+            maximum_loaded_skill_bytes=4096,
+            base_context_bytes=0,
+            context_max_bytes=8192,
+            loaded_at=datetime(2026, 9, 4, tzinfo=UTC),
+        )
+    with pytest.raises(
+        DurableSkillOperationError,
+        match="skill_context_budget_exceeded",
+    ):
+        await load_frozen_skill(
+            store,
+            catalog_ref=catalog_ref,
+            run_id="run-1",
+            operation_key="d" * 64,
+            stable_step_id="skill-step-4",
+            skill_id="beta",
+            version="1",
+            loaded_receipts=(receipt,),
+            completed_skill_loads=1,
+            maximum_skill_loads=2,
+            loaded_skill_bytes=result.content_ref.byte_length,
+            maximum_loaded_skill_bytes=4096,
+            base_context_bytes=8190,
+            context_max_bytes=8192,
+            loaded_at=datetime(2026, 9, 4, tzinfo=UTC),
+        )
 
 
 @pytest.mark.asyncio

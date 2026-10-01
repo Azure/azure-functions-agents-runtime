@@ -43,6 +43,7 @@ The full lifecycle that produces an FRD lives in [`../../AGENTS.md`](../../AGENT
 | [0010](0010-durable-agent-loop-spike.md) | Durable agent loop spike | In review |
 | [0011](0011-focused-durable-chat-demo.md) | Focused durable Chat UI demo | Finalized |
 | [0012](0012-durable-loop-chat-ui.md) | Durable Agent Loop chat UI | Implemented; locally validated |
+| [0013](0013-durable-skills-and-public-run-contracts.md) | Durable skills and public run contracts | Finalized |
 
 > `_template.md` is the template, not an FRD — the leading underscore keeps it
 > sorted first and excludes it from numbering.

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import json
 import math
@@ -12,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from importlib.metadata import version
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel
@@ -33,7 +35,12 @@ from .durable_loop_protocol import (
     BackgroundStartResultV1,
     ContentRefV1,
     DurableFaultProfile,
+    DurableLoopPlanDocumentV2,
     DurableRunIdentityV1,
+    DurableSkillContentV1,
+    DurableSkillLoadReceiptV1,
+    DurableSkillMetadataPageV1,
+    DurableSkillMetadataV1,
     ErrorDisposition,
     ErrorEnvelopeV1,
     FrozenToolCatalogV1,
@@ -43,6 +50,8 @@ from .durable_loop_protocol import (
     ModelOperationStatus,
     ModelOperationV1,
     ModelToolCallV1,
+    SkillLoadActivityResultV1,
+    SkillSearchActivityResultV1,
     ToolResultV1,
     UsageV1,
     WorkingContextV1,
@@ -80,6 +89,15 @@ class DurableLoopContextOverflowError(RuntimeError):
     """Deterministic compaction could not fit the working context."""
 
 
+class DurableSkillOperationError(RuntimeError):
+    """A runtime-owned skill operation failed with a stable public code."""
+
+    def __init__(self, code: str, *, terminal: bool) -> None:
+        super().__init__(code)
+        self.code = code
+        self.terminal = terminal
+
+
 class ResumeContextDisposition(StrEnum):
     """How a long-parked model context can resume."""
 
@@ -105,6 +123,9 @@ class DurableContentStore(Protocol):
     async def get_bytes(self, reference: ContentRefV1) -> bytes:
         """Read and integrity-check one immutable object."""
 
+    async def delete_bytes(self, reference: ContentRefV1) -> bool:
+        """Delete only the exact integrity-bound object."""
+
 
 class InMemoryDurableContentStore:
     """Local-test content store with immutable hash-addressed objects."""
@@ -129,14 +150,8 @@ class InMemoryDurableContentStore:
     ) -> ContentRefV1:
         if len(payload) > self._maximum_bytes:
             raise DurableLoopContentError("content exceeds the configured byte limit")
-        digest = canonical_hash(
-            {
-                "kind": kind,
-                "payload_sha256": _sha256_bytes(payload),
-                "retention_class": retention_class,
-            }
-        )
-        object_id = f"content/{kind}/{digest}"
+        digest = _sha256_bytes(payload)
+        object_id = canonical_content_object_id(kind, digest)
         async with self._lock:
             existing = self._objects.get(object_id)
             if existing is not None and existing != payload:
@@ -160,6 +175,20 @@ class InMemoryDurableContentStore:
         if len(payload) != reference.byte_length or _sha256_bytes(payload) != reference.sha256:
             raise DurableLoopContentError("content reference integrity check failed")
         return bytes(payload)
+
+    async def delete_bytes(self, reference: ContentRefV1) -> bool:
+        """Delete only the exact integrity-bound object."""
+        async with self._lock:
+            payload = self._objects.get(reference.object_id)
+            if payload is None:
+                return False
+            if (
+                len(payload) != reference.byte_length
+                or _sha256_bytes(payload) != reference.sha256
+            ):
+                raise DurableLoopContentError("content reference integrity check failed")
+            self._objects.pop(reference.object_id)
+            return True
 
     async def put_json(
         self,
@@ -244,7 +273,7 @@ class BlobDurableContentStore:
             raise DurableLoopContentError("content exceeds the configured byte limit")
         await self._ensure_container()
         digest = _sha256_bytes(payload)
-        object_id = f"objects/{kind}/{digest}"
+        object_id = canonical_content_object_id(kind, digest)
         client = self._service_client.get_blob_client(
             container=self._container_name,
             blob=object_id,
@@ -273,13 +302,41 @@ class BlobDurableContentStore:
             container=self._container_name,
             blob=reference.object_id,
         )
-        downloader = await client.download_blob()
+        from azure.core.exceptions import ResourceNotFoundError
+
+        try:
+            downloader = await client.download_blob()
+        except ResourceNotFoundError as exc:
+            raise DurableLoopContentError("content reference was not found") from exc
         payload = await downloader.readall()
         if not isinstance(payload, bytes):
             payload = bytes(payload)
         if len(payload) != reference.byte_length or _sha256_bytes(payload) != reference.sha256:
             raise DurableLoopContentError("content reference integrity check failed")
         return payload
+
+    async def delete_bytes(self, reference: ContentRefV1) -> bool:
+        """Delete only the exact integrity-bound Blob."""
+        from azure.core.exceptions import ResourceNotFoundError
+
+        client = self._service_client.get_blob_client(
+            container=self._container_name,
+            blob=reference.object_id,
+        )
+        try:
+            downloader = await client.download_blob()
+        except ResourceNotFoundError:
+            return False
+        payload = await downloader.readall()
+        if not isinstance(payload, bytes):
+            payload = bytes(payload)
+        if len(payload) != reference.byte_length or _sha256_bytes(payload) != reference.sha256:
+            raise DurableLoopContentError("content reference integrity check failed")
+        try:
+            await client.delete_blob()
+        except ResourceNotFoundError:
+            return False
+        return True
 
     async def _ensure_container(self) -> None:
         if self._ensured:
@@ -304,6 +361,11 @@ class DurableContentBlobBinding:
     service_url: str
     container_name: str
     client_id: str | None
+
+
+def canonical_content_object_id(kind: str, digest: str) -> str:
+    """Return the canonical exact Blob name for immutable content."""
+    return f"objects/{kind}/{digest}"
 
 
 def resolve_durable_content_blob_binding(
@@ -377,6 +439,418 @@ async def get_protocol_model[ModelT: BaseModel](
         model,
         maximum_bytes=reference.byte_length,
     )
+
+
+def compose_durable_skill_instructions(
+    root_instructions: str,
+    initial_metadata: Sequence[DurableSkillMetadataV1],
+    loaded_skills: Sequence[DurableSkillContentV1],
+) -> str:
+    """Compose root, catalog metadata, and loaded skills in stable load order."""
+    sections = [root_instructions]
+    if initial_metadata:
+        metadata_json = canonical_json_bytes(
+            [item.model_dump(mode="json") for item in initial_metadata]
+        ).decode("utf-8")
+        sections.append(
+            "Available durable instruction skills (metadata only):\n"
+            f"{metadata_json}"
+        )
+    for skill in loaded_skills:
+        files = "\n\n".join(
+            f"--- {item.relative_path} ---\n{item.content}" for item in skill.files
+        )
+        sections.append(
+            "Loaded durable instruction skill "
+            f"{skill.skill_id}@{skill.version} ({skill.content_hash}):\n{files}"
+        )
+    return "\n\n".join(section for section in sections if section)
+
+
+async def resolve_durable_skill_instructions(
+    store: DurableContentStore,
+    plan: DurableLoopPlanDocumentV2,
+    receipts: Sequence[DurableSkillLoadReceiptV1],
+) -> str:
+    """Resolve loaded refs immediately before a V2 model request."""
+    loaded: list[DurableSkillContentV1] = []
+    for receipt in receipts:
+        try:
+            content = await get_protocol_model(
+                store,
+                receipt.content_ref,
+                DurableSkillContentV1,
+            )
+        except (DurableLoopContentError, UnicodeDecodeError, ValueError) as exc:
+            raise DurableSkillOperationError(
+                "skill_content_unavailable",
+                terminal=True,
+            ) from exc
+        if (
+            content.skill_id != receipt.skill_id
+            or content.version != receipt.version
+            or content.content_hash != receipt.content_hash
+            or content.executable
+        ):
+            raise DurableSkillOperationError(
+                "skill_integrity_error",
+                terminal=True,
+            )
+        loaded.append(content)
+    return compose_durable_skill_instructions(
+        plan.instructions,
+        plan.initial_skill_metadata,
+        loaded,
+    )
+
+
+async def search_frozen_skill_catalog(
+    store: DurableContentStore,
+    *,
+    catalog_ref: ContentRefV1,
+    operation_key: str,
+    query: str | None,
+    cursor: str | None,
+    maximum_result_bytes: int,
+) -> SkillSearchActivityResultV1:
+    """Search an admitted materialized catalog with a catalog-bound cursor."""
+    catalog = await _frozen_skill_catalog(store, catalog_ref)
+    normalized_query = (query or "").strip().casefold()
+    offset = _decode_skill_cursor(
+        cursor,
+        catalog_hash=catalog.snapshot.catalog_hash,
+        query=normalized_query,
+    )
+    matches = tuple(
+        item
+        for item in catalog.snapshot.metadata
+        if _skill_metadata_matches(item, normalized_query)
+    )
+    if offset > len(matches):
+        raise DurableSkillOperationError("invalid_skill_cursor", terminal=False)
+    selected: list[DurableSkillMetadataV1] = []
+    next_offset = offset
+    while next_offset < len(matches) and len(selected) < 256:
+        candidate = (*selected, matches[next_offset])
+        has_more = next_offset + 1 < len(matches)
+        candidate_cursor = (
+            _encode_skill_cursor(
+                catalog_hash=catalog.snapshot.catalog_hash,
+                query=normalized_query,
+                offset=next_offset + 1,
+            )
+            if has_more
+            else None
+        )
+        page = DurableSkillMetadataPageV1(
+            catalog_hash=catalog.snapshot.catalog_hash,
+            query_hash=canonical_hash({"query": normalized_query}),
+            page_size=256,
+            metadata=candidate,
+            next_cursor=candidate_cursor,
+        )
+        if len(canonical_json_bytes(page)) > maximum_result_bytes:
+            break
+        selected.append(matches[next_offset])
+        next_offset += 1
+    if not selected and offset < len(matches):
+        raise DurableSkillOperationError(
+            "skill_search_result_budget_exceeded",
+            terminal=True,
+        )
+    next_cursor = (
+        _encode_skill_cursor(
+            catalog_hash=catalog.snapshot.catalog_hash,
+            query=normalized_query,
+            offset=next_offset,
+        )
+        if next_offset < len(matches)
+        else None
+    )
+    page = DurableSkillMetadataPageV1(
+        catalog_hash=catalog.snapshot.catalog_hash,
+        query_hash=canonical_hash({"query": normalized_query}),
+        page_size=256,
+        metadata=tuple(selected),
+        next_cursor=next_cursor,
+    )
+    page_ref = await put_protocol_model(
+        store,
+        kind="skill-search-page",
+        model=page,
+        retention_class="run",
+    )
+    return SkillSearchActivityResultV1(
+        operation_key=operation_key,
+        catalog_hash=catalog.snapshot.catalog_hash,
+        page_ref=page_ref,
+        result_bytes=len(canonical_json_bytes(page)),
+        written_bytes=page_ref.byte_length,
+    )
+
+
+async def load_frozen_skill(
+    store: DurableContentStore,
+    *,
+    catalog_ref: ContentRefV1,
+    run_id: str,
+    operation_key: str,
+    stable_step_id: str,
+    skill_id: str,
+    version: str,
+    loaded_receipts: Sequence[DurableSkillLoadReceiptV1],
+    completed_skill_loads: int,
+    maximum_skill_loads: int,
+    loaded_skill_bytes: int,
+    maximum_loaded_skill_bytes: int,
+    base_context_bytes: int,
+    context_max_bytes: int,
+    loaded_at: datetime,
+) -> tuple[SkillLoadActivityResultV1, DurableSkillLoadReceiptV1]:
+    """Load one materialized exact-version skill and persist a content-free receipt."""
+    catalog = await _frozen_skill_catalog(store, catalog_ref)
+    metadata = next(
+        (item for item in catalog.snapshot.metadata if item.skill_id == skill_id),
+        None,
+    )
+    if metadata is None:
+        raise DurableSkillOperationError("unknown_skill", terminal=False)
+    if metadata.version != version:
+        raise DurableSkillOperationError("skill_version_mismatch", terminal=False)
+    previous = next(
+        (
+            item
+            for item in loaded_receipts
+            if item.skill_id == skill_id and item.version == version
+        ),
+        None,
+    )
+    materialized = catalog.by_id()[skill_id]
+    if previous is not None:
+        receipt = previous.model_copy(
+            update={
+                "already_loaded": True,
+                "operation_key": operation_key,
+                "stable_step_id": stable_step_id,
+                "loaded_at": loaded_at,
+            }
+        )
+        receipt_ref = await put_protocol_model(
+            store,
+            kind="skill-load-receipt",
+            model=receipt,
+            retention_class="receipt",
+        )
+        return (
+            SkillLoadActivityResultV1(
+                operation_key=operation_key,
+                catalog_hash=catalog.snapshot.catalog_hash,
+                skill_id=skill_id,
+                version=version,
+                content_hash=metadata.content_hash,
+                content_ref=previous.content_ref,
+                receipt_ref=receipt_ref,
+                already_loaded=True,
+                written_bytes=receipt_ref.byte_length,
+            ),
+            receipt,
+        )
+    if completed_skill_loads >= maximum_skill_loads:
+        raise DurableSkillOperationError(
+            "skill_load_budget_exceeded",
+            terminal=True,
+        )
+    proposed_loaded_bytes = loaded_skill_bytes + materialized.content_ref.byte_length
+    if proposed_loaded_bytes > maximum_loaded_skill_bytes:
+        raise DurableSkillOperationError(
+            "skill_load_budget_exceeded",
+            terminal=True,
+        )
+    try:
+        skill = await get_protocol_model(
+            store,
+            materialized.content_ref,
+            DurableSkillContentV1,
+        )
+    except (DurableLoopContentError, UnicodeDecodeError, ValueError) as exc:
+        raise DurableSkillOperationError(
+            "skill_content_unavailable",
+            terminal=True,
+        ) from exc
+    if (
+        skill.skill_id != metadata.skill_id
+        or skill.version != metadata.version
+        or skill.content_hash != metadata.content_hash
+        or skill.executable
+    ):
+        raise DurableSkillOperationError("skill_integrity_error", terminal=True)
+    skill_instructions = compose_durable_skill_instructions("", (), (skill,))
+    if base_context_bytes + 2 + len(skill_instructions.encode("utf-8")) > context_max_bytes:
+        raise DurableSkillOperationError(
+            "skill_context_budget_exceeded",
+            terminal=True,
+        )
+    receipt = DurableSkillLoadReceiptV1(
+        run_id=run_id,
+        operation_key=operation_key,
+        stable_step_id=stable_step_id,
+        skill_id=skill_id,
+        provider_id=catalog.snapshot.provider_id,
+        version=version,
+        catalog_revision=catalog.snapshot.catalog_revision,
+        catalog_hash=catalog.snapshot.catalog_hash,
+        content_hash=metadata.content_hash,
+        content_ref=materialized.content_ref,
+        loaded_at=loaded_at,
+    )
+    receipt_ref = await put_protocol_model(
+        store,
+        kind="skill-load-receipt",
+        model=receipt,
+        retention_class="receipt",
+    )
+    return (
+        SkillLoadActivityResultV1(
+            operation_key=operation_key,
+            catalog_hash=catalog.snapshot.catalog_hash,
+            skill_id=skill_id,
+            version=version,
+            content_hash=metadata.content_hash,
+            content_ref=materialized.content_ref,
+            receipt_ref=receipt_ref,
+            written_bytes=receipt_ref.byte_length,
+        ),
+        receipt,
+    )
+
+
+async def resolve_frozen_skill_content_hash(
+    store: DurableContentStore,
+    *,
+    catalog_ref: ContentRefV1,
+    skill_id: str,
+    version: str,
+) -> str | None:
+    """Resolve an exact admitted hash without exposing materialized skill content."""
+    catalog = await _frozen_skill_catalog(store, catalog_ref)
+    metadata = next(
+        (item for item in catalog.snapshot.metadata if item.skill_id == skill_id),
+        None,
+    )
+    if metadata is None or metadata.version != version:
+        return None
+    return cast(str, metadata.content_hash)
+
+
+async def _frozen_skill_catalog(
+    store: DurableContentStore,
+    reference: ContentRefV1,
+) -> Any:
+    from .durable_loop_catalog import FrozenDurableSkillCatalogV1
+
+    try:
+        return await get_protocol_model(
+            store,
+            reference,
+            FrozenDurableSkillCatalogV1,
+        )
+    except (DurableLoopContentError, UnicodeDecodeError, ValueError) as exc:
+        raise DurableSkillOperationError(
+            "skill_catalog_unavailable",
+            terminal=True,
+        ) from exc
+
+
+def _skill_metadata_matches(
+    metadata: DurableSkillMetadataV1,
+    query: str,
+) -> bool:
+    if not query:
+        return True
+    haystack = "\n".join(
+        (
+            metadata.skill_id,
+            metadata.display_name,
+            metadata.selection_description,
+            *metadata.tags,
+        )
+    ).casefold()
+    return all(token in haystack for token in query.split())
+
+
+def _encode_skill_cursor(*, catalog_hash: str, query: str, offset: int) -> str:
+    payload = {
+        "catalog_hash": catalog_hash,
+        "offset": offset,
+        "query": query,
+        "version": "dsc1",
+    }
+    signature = canonical_hash(payload)
+    return base64.urlsafe_b64encode(
+        canonical_json_bytes({**payload, "signature": signature})
+    ).decode("ascii").rstrip("=")
+
+
+def _decode_skill_cursor(
+    cursor: str | None,
+    *,
+    catalog_hash: str,
+    query: str,
+) -> int:
+    if cursor is None:
+        return 0
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        decoded = json.loads(raw)
+    except (
+        UnicodeEncodeError,
+        UnicodeDecodeError,
+        binascii.Error,
+        json.JSONDecodeError,
+    ) as exc:
+        raise DurableSkillOperationError(
+            "invalid_skill_cursor",
+            terminal=False,
+        ) from exc
+    try:
+        return _validated_skill_cursor_offset(
+            decoded,
+            catalog_hash=catalog_hash,
+            query=query,
+        )
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise DurableSkillOperationError(
+            "invalid_skill_cursor",
+            terminal=False,
+        ) from exc
+
+
+def _validated_skill_cursor_offset(
+    value: object,
+    *,
+    catalog_hash: str,
+    query: str,
+) -> int:
+    if not isinstance(value, dict):
+        raise ValueError("cursor payload must be an object")
+    decoded = dict(value)
+    signature = decoded.pop("signature")
+    offset = decoded.get("offset")
+    if (
+        decoded.get("version") != "dsc1"
+        or decoded.get("catalog_hash") != catalog_hash
+        or decoded.get("query") != query
+        or not isinstance(offset, int)
+        or offset <= 0
+        or signature != canonical_hash(decoded)
+    ):
+        raise ValueError("cursor binding is invalid")
+    return offset
 
 
 @dataclass(frozen=True, slots=True)

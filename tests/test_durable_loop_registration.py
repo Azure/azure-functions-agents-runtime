@@ -39,11 +39,15 @@ from azure_functions_agents.experimental.durable_loop_registration import (
     DURABLE_LOOP_ORCHESTRATOR_NAME,
     DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
     DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+    DURABLE_LOOP_ORCHESTRATOR_V4_NAME,
     DURABLE_LOOP_SANDBOX_TOOL_ACTIVITY_NAME,
     DURABLE_LOOP_SESSION_ENTITY_NAME,
+    DURABLE_LOOP_SKILL_LOAD_ACTIVITY_NAME,
+    DURABLE_LOOP_SKILL_SEARCH_ACTIVITY_NAME,
     DURABLE_LOOP_TOOL_ACTIVITY_NAME,
     _call_model_activity,
     _deliver_event_with_durable_client,
+    _runtime_control_batch_requires_repair,
     apply_session_entity_operation,
 )
 from azure_functions_agents.experimental.hybrid_config import (
@@ -84,6 +88,38 @@ def _registered_handler(app: df.DFApp, name: str):
     raise AssertionError(f"function {name!r} was not registered")
 
 
+@pytest.mark.parametrize(
+    "tool_names",
+    [
+        ("search_skills", "customer_read"),
+        ("load_skill", "request_human_input"),
+        ("request_human_input", "customer_write"),
+    ],
+)
+def test_v4_mixed_runtime_batches_require_repair_before_dispatch(
+    tool_names: tuple[str, ...],
+) -> None:
+    assert _runtime_control_batch_requires_repair(
+        tool_names,
+        skills_enabled=True,
+    )
+    assert not _runtime_control_batch_requires_repair(
+        tool_names,
+        skills_enabled=False,
+    )
+
+
+def test_v4_single_runtime_or_customer_batch_does_not_require_repair() -> None:
+    assert not _runtime_control_batch_requires_repair(
+        ("load_skill",),
+        skills_enabled=True,
+    )
+    assert not _runtime_control_batch_requires_repair(
+        ("customer_read", "customer_write"),
+        skills_enabled=True,
+    )
+
+
 def test_private_gate_registers_one_versioned_durable_blueprint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -105,6 +141,9 @@ def test_private_gate_registers_one_versioned_durable_blueprint(
         "orchestrationTrigger"
     ]
     assert functions[DURABLE_LOOP_ORCHESTRATOR_V3_NAME] == [
+        "orchestrationTrigger"
+    ]
+    assert functions[DURABLE_LOOP_ORCHESTRATOR_V4_NAME] == [
         "orchestrationTrigger"
     ]
     assert functions[DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME] == [
@@ -139,12 +178,15 @@ def test_private_gate_registers_one_versioned_durable_blueprint(
         "activityTrigger"
     ]
     assert functions[DURABLE_LOOP_COMPACTION_ACTIVITY_NAME] == ["activityTrigger"]
+    assert functions[DURABLE_LOOP_SKILL_SEARCH_ACTIVITY_NAME] == ["activityTrigger"]
+    assert functions[DURABLE_LOOP_SKILL_LOAD_ACTIVITY_NAME] == ["activityTrigger"]
     for name in (
         DURABLE_LOOP_SESSION_ENTITY_NAME,
         DURABLE_LOOP_ADMISSION_ORCHESTRATOR_NAME,
         DURABLE_LOOP_ORCHESTRATOR_NAME,
         DURABLE_LOOP_ORCHESTRATOR_V2_NAME,
         DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+        DURABLE_LOOP_ORCHESTRATOR_V4_NAME,
         DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME,
         DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME,
         DURABLE_LOOP_CANCEL_DELIVERY_ORCHESTRATOR_NAME,
@@ -162,6 +204,8 @@ def test_private_gate_registers_one_versioned_durable_blueprint(
         DURABLE_LOOP_HUMAN_RESULT_ACTIVITY_NAME,
         DURABLE_LOOP_HUMAN_DELIVERY_ACTIVITY_NAME,
         DURABLE_LOOP_COMPACTION_ACTIVITY_NAME,
+        DURABLE_LOOP_SKILL_SEARCH_ACTIVITY_NAME,
+        DURABLE_LOOP_SKILL_LOAD_ACTIVITY_NAME,
     ):
         assert list(functions).count(name) == 1
 

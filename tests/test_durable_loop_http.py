@@ -13,7 +13,13 @@ import pytest
 from azurefunctions.extensions.http.fastapi import Response
 
 from azure_functions_agents import app as app_module
-from azure_functions_agents.config import EndpointAuthConfig
+from azure_functions_agents.config import (
+    BuiltinEndpointsConfig,
+    EndpointAuthConfig,
+    ResolvedAgent,
+    ToolsFilter,
+    TriggerSpec,
+)
 from azure_functions_agents.experimental.durable_loop_activities import (
     DeterministicContextCompactor,
     InMemoryDurableContentStore,
@@ -26,22 +32,33 @@ from azure_functions_agents.experimental.durable_loop_config import (
     DURABLE_LOOP_ENABLED_ENV,
     DURABLE_LOOP_FAULT_INJECTION_ENABLED_ENV,
     DURABLE_LOOP_RETAINED_SANDBOX_ENABLED_ENV,
+    DurableLoopSettings,
+)
+from azure_functions_agents.experimental.durable_loop_execution import (
+    build_durable_skill_provider,
 )
 from azure_functions_agents.experimental.durable_loop_http import (
     _authorized_owner,
     _json_response,
     _owner_hash,
     _persist_run_input,
+    _persist_trigger_run_input,
     _RunMetadata,
     _status_projection,
+    _trigger_run_metadata,
 )
 from azure_functions_agents.experimental.durable_loop_protocol import (
     DurableFaultProfile,
     DurableOrchestrationInputV1,
+    DurableOrchestrationInputV2,
     DurableRunDocumentV1,
+    DurableRunDocumentV2,
     HumanInputRequestV1,
     SandboxExecutionProfile,
     canonical_hash,
+)
+from azure_functions_agents.experimental.durable_loop_receipts import (
+    InMemoryDurableKeyedDocumentStore,
 )
 from azure_functions_agents.experimental.durable_loop_registration import (
     DURABLE_LOOP_ADMISSION_ORCHESTRATOR_NAME,
@@ -61,6 +78,11 @@ from azure_functions_agents.experimental.durable_loop_registration import (
 from azure_functions_agents.experimental.durable_loop_tools import (
     DurableRetainedSandboxInspection,
     DurableToolRegistry,
+)
+from azure_functions_agents.experimental.durable_trigger_admission import (
+    DurableTriggerAdmissionRuntime,
+    DurableTriggerPendingLedger,
+    DurableTriggerRegistration,
 )
 from azure_functions_agents.registration._auth import AuthError, resolve_owner_principal
 from azure_functions_agents.session_state import FunctionAppPrincipal
@@ -116,6 +138,49 @@ def test_status_projection_exposes_sanitized_ambiguous_outcome() -> None:
         "run_id": "run-1",
         "status": "Failed",
     }
+
+
+def test_entity_terminal_timestamp_is_stable_across_replay() -> None:
+    state, admitted = apply_session_entity_operation(
+        None,
+        "admit",
+        {
+            "request_hash": "a" * 64,
+            "request_id_hash": "b" * 64,
+            "run_id": "run-terminal",
+        },
+    )
+    assert admitted["disposition"] == "admitted"
+    state, aborted = apply_session_entity_operation(
+        state,
+        "abort",
+        {
+            "error": "failed",
+            "run_id": "run-terminal",
+            "status": "Failed",
+        },
+    )
+    assert aborted["disposition"] == "aborted"
+    first_timestamp = "2026-09-30T12:00:00+00:00"
+    state, first = apply_session_entity_operation(
+        state,
+        "terminalize",
+        {
+            "run_id": "run-terminal",
+            "terminal_at": first_timestamp,
+        },
+    )
+    _, replayed = apply_session_entity_operation(
+        state,
+        "terminalize",
+        {
+            "run_id": "run-terminal",
+            "terminal_at": "2026-09-30T12:05:00+00:00",
+        },
+    )
+    assert first["disposition"] == "terminal"
+    assert first["terminal_at"] == first_timestamp
+    assert replayed["terminal_at"] == first_timestamp
 
 
 def test_durable_json_responses_never_cache_sensitive_data_or_errors() -> None:
@@ -655,6 +720,103 @@ async def test_next_turn_carries_committed_workspace_reference(
 
 
 @pytest.mark.asyncio
+async def test_trigger_run_builds_frozen_v2_input_from_staged_identity(
+    durable_app: df.DFApp,
+) -> None:
+    del durable_app
+    activity_runtime = get_durable_loop_activity_runtime()
+    settings = DurableLoopSettings()
+    resolved = ResolvedAgent(
+        name="Daily Report",
+        slug="daily-report",
+        description="desc",
+        trigger=TriggerSpec(
+            type="timer_trigger",
+            args={
+                "schedule": "0 */5 * * * *",
+                "use_monitor": True,
+                "allow_human_input": False,
+            },
+        ),
+        instructions="run",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(),
+        model=None,
+        timeout=1,
+        enabled_mcp_names=[],
+        enabled_skills_names=[],
+        tool_filter=ToolsFilter(),
+        sandbox_config=None,
+        input_schema=None,
+        response_schema=None,
+        response_example=None,
+        metadata={},
+        source_file=__file__,
+    )
+    trigger_runtime = DurableTriggerAdmissionRuntime(
+        DurableTriggerPendingLedger(InMemoryDurableKeyedDocumentStore()),
+        admission_deadline_seconds=settings.trigger_admission_deadline_seconds,
+        content=activity_runtime.content,
+        app_identity=lambda: "app:test",
+        now=lambda: datetime(2026, 9, 29, 20, 0, tzinfo=UTC),
+    )
+    staged = await trigger_runtime.stage(
+        registration=DurableTriggerRegistration(
+            trigger_type="timer_trigger",
+            registration_id="1" * 64,
+            agent_slug=resolved.slug,
+            owner={"kind": "app"},
+            event_id_path=None,
+            session_id_path=None,
+            connection_hash=None,
+            allow_human_input=False,
+            response_schema_hash=None,
+            auth_mode="function",
+            ownership_class="function_app",
+        ),
+        owner_hash="3" * 64,
+        initiator_hash="4" * 64,
+        stable_event_id="2026-09-29T20:00:00Z",
+        session_id="session-1",
+        payload={"scheduled": "2026-09-29T20:00:00Z"},
+        prompt="run the report",
+    )
+    assert staged.record is not None
+    metadata = await _trigger_run_metadata(
+        record=staged.record,
+        resolved=resolved,
+        settings=settings,
+        provider=build_durable_skill_provider(settings),
+    )
+    durable_input = await _persist_trigger_run_input(
+        metadata,
+        record=staged.record,
+        committed_context_ref=None,
+        committed_generation=0,
+    )
+    document = await get_protocol_model(
+        activity_runtime.content,
+        durable_input.run_document_ref,
+        DurableRunDocumentV2,
+    )
+
+    assert isinstance(durable_input, DurableOrchestrationInputV2)
+    assert durable_input.identity.run_id == staged.record.run_id
+    assert durable_input.identity.request_hash == staged.record.request_hash
+    assert (
+        durable_input.identity.request_id_hash
+        == staged.record.stable_event_id_hash
+    )
+    assert (
+        durable_input.identity.access_namespace_hash
+        == staged.record.access_namespace_hash
+    )
+    assert durable_input.identity.orchestration_version.endswith("_v4")
+    assert document.plan.allow_human_input is False
+    assert document.plan.skill_catalog_hash == durable_input.skill_catalog_hash
+
+
+@pytest.mark.asyncio
 async def test_private_start_profiles_are_strict_and_gate_controlled(
     durable_app: df.DFApp,
     tmp_path: Path,
@@ -793,7 +955,10 @@ async def test_background_chat_rejects_explicit_streaming_before_admission(
 
     assert rejected.status_code == 400
     assert json.loads(rejected.body) == {
-        "error": "chat streaming is not supported for background model mode"
+        "code": "request_failed",
+        "error": "chat streaming is not supported for background model mode",
+        "schema_version": "1",
+        "status": 400,
     }
     assert client.starts == []
 
@@ -823,7 +988,12 @@ async def test_start_route_rejects_conflicting_request_body(
     )
 
     assert conflict.status_code == 409
-    assert json.loads(conflict.body) == {"error": "idempotency_conflict"}
+    assert json.loads(conflict.body) == {
+        "code": "idempotency_conflict",
+        "error": "idempotency_conflict",
+        "schema_version": "1",
+        "status": 409,
+    }
 
 
 @pytest.mark.asyncio
@@ -1105,7 +1275,12 @@ async def test_human_input_route_uses_durable_outbox_and_server_event_name(
         client,
     )
     assert conflict.status_code == 409
-    assert json.loads(conflict.body) == {"error": "human_input_conflict"}
+    assert json.loads(conflict.body) == {
+        "code": "human_input_conflict",
+        "error": "human_input_conflict",
+        "schema_version": "1",
+        "status": 409,
+    }
     assert runtime.content.object_count == stored_objects
 
 

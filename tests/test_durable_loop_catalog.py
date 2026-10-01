@@ -1,19 +1,32 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from azure_functions_agents.experimental.durable_loop_activities import (
+    InMemoryDurableContentStore,
+    get_protocol_model,
+)
 from azure_functions_agents.experimental.durable_loop_catalog import (
     DurableLoopToolPolicyError,
+    DurableSkillCatalogAdmissionError,
+    FrozenDurableSkillCatalogV1,
+    admit_durable_skill_catalog,
     freeze_durable_tool_catalog,
+    inject_skill_runtime_tools,
     load_durable_tool_policy,
 )
 from azure_functions_agents.experimental.durable_loop_protocol import (
+    FrozenToolCatalogV1,
     FrozenToolDescriptorV1,
     ToolBehavior,
     ToolProvenance,
+)
+from azure_functions_agents.experimental.durable_skill_providers import (
+    PackagedFilesystemDurableSkillProvider,
 )
 
 
@@ -171,3 +184,90 @@ def test_policy_rejects_parallel_local_tool(tmp_path: Path) -> None:
 
     with pytest.raises(DurableLoopToolPolicyError, match="invalid"):
         load_durable_tool_policy(tmp_path, required=True)
+
+
+def test_catalog_can_omit_human_input_for_unattended_runs(tmp_path: Path) -> None:
+    catalog = freeze_durable_tool_catalog(
+        (),
+        None,
+        package_hash="a" * 64,
+        base_policy_hash="b" * 64,
+        include_human_input=False,
+    )
+
+    assert "request_human_input" not in catalog.by_name()
+
+
+def test_skill_runtime_rejects_customer_reserved_name() -> None:
+    catalog = FrozenToolCatalogV1.create(
+        tools=(_descriptor("load_skill", ToolProvenance.LOCAL),),
+        policy_hash="a" * 64,
+        package_hash="b" * 64,
+    )
+
+    with pytest.raises(DurableSkillCatalogAdmissionError, match="reserved"):
+        inject_skill_runtime_tools(
+            catalog,
+            skill_count=1,
+            initial_metadata_count=1,
+        )
+
+
+def test_skill_runtime_injects_search_only_when_initial_metadata_is_incomplete() -> None:
+    catalog = FrozenToolCatalogV1.create(
+        tools=(),
+        policy_hash="a" * 64,
+        package_hash="b" * 64,
+    )
+
+    complete = inject_skill_runtime_tools(
+        catalog,
+        skill_count=1,
+        initial_metadata_count=1,
+    )
+    incomplete = inject_skill_runtime_tools(
+        catalog,
+        skill_count=2,
+        initial_metadata_count=1,
+    )
+
+    assert set(complete.by_name()) == {"load_skill"}
+    assert set(incomplete.by_name()) == {"load_skill", "search_skills"}
+
+
+@pytest.mark.asyncio
+async def test_admission_materializes_enabled_packaged_skills_and_injects_runtime_tools(
+    tmp_path: Path,
+) -> None:
+    skill_root = tmp_path / "skills" / "alpha"
+    skill_root.mkdir(parents=True)
+    (skill_root / "SKILL.md").write_text(
+        "---\nname: alpha\ndescription: Alpha guidance\n---\nUse alpha.",
+        encoding="utf-8",
+    )
+    provider = PackagedFilesystemDurableSkillProvider(tmp_path)
+    store = InMemoryDurableContentStore()
+    customer_catalog = FrozenToolCatalogV1.create(
+        tools=(),
+        policy_hash="a" * 64,
+        package_hash="b" * 64,
+    )
+
+    admission = await admit_durable_skill_catalog(
+        provider=provider,
+        content=store,
+        agent_slug="main",
+        enabled_skill_ids=("alpha",),
+        retain_until=datetime.now(UTC) + timedelta(days=31),
+        tool_catalog=customer_catalog,
+    )
+
+    frozen = await get_protocol_model(
+        store,
+        admission.catalog_ref,
+        FrozenDurableSkillCatalogV1,
+    )
+    assert admission.catalog_hash == frozen.snapshot.catalog_hash
+    assert [item.skill_id for item in frozen.snapshot.metadata] == ["alpha"]
+    assert frozen.materialized[0].content_ref.byte_length > 0
+    assert set(admission.tool_catalog.by_name()) == {"load_skill"}

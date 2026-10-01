@@ -34,6 +34,7 @@ from azure_functions_agents.experimental.durable_loop_config import DurableLoopS
 from azure_functions_agents.experimental.durable_loop_protocol import (
     DURABLE_LOOP_ORCHESTRATOR_V1_NAME,
     DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+    DURABLE_LOOP_ORCHESTRATOR_V4_NAME,
     BackgroundStartDisposition,
     DurableFaultProfile,
     DurableLoopBudgetV1,
@@ -701,10 +702,25 @@ async def test_streaming_timeout_marks_active_attempt_failed_without_retry() -> 
 
 
 @pytest.mark.asyncio
-async def test_v3_apim_429_escapes_then_next_activity_attempt_succeeds() -> None:
+@pytest.mark.parametrize(
+    "orchestration_version",
+    [
+        pytest.param(
+            DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+            id="v3-in-flight-unchanged",
+        ),
+        pytest.param(
+            DURABLE_LOOP_ORCHESTRATOR_V4_NAME,
+            id="v4-recognized",
+        ),
+    ],
+)
+async def test_versioned_apim_429_escapes_then_next_activity_attempt_succeeds(
+    orchestration_version: str,
+) -> None:
     request = _request(
         fault_profile=DurableFaultProfile.MODEL_APIM_429_ONCE,
-        orchestration_version=DURABLE_LOOP_ORCHESTRATOR_V3_NAME,
+        orchestration_version=orchestration_version,
     )
     receipts = InMemoryDurableKeyedDocumentStore()
 

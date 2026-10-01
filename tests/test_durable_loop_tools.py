@@ -15,7 +15,11 @@ from azure_functions_agents.experimental.durable_loop_protocol import (
     tool_request_hash,
 )
 from azure_functions_agents.experimental.durable_loop_tools import (
+    LOAD_SKILL_TOOL_NAME,
+    SEARCH_SKILLS_TOOL_NAME,
     DurableToolRegistry,
+    load_skill_tool_descriptor,
+    search_skills_tool_descriptor,
 )
 
 _HASH = "a" * 64
@@ -100,6 +104,29 @@ def _request_at(
             ),
         }
     )
+
+
+def test_skill_runtime_descriptors_are_runtime_owned_and_non_dispatchable() -> None:
+    search = search_skills_tool_descriptor()
+    load = load_skill_tool_descriptor()
+
+    assert search.name == SEARCH_SKILLS_TOOL_NAME
+    assert load.name == LOAD_SKILL_TOOL_NAME
+    assert search.provenance is ToolProvenance.RUNTIME
+    assert load.provenance is ToolProvenance.RUNTIME
+    assert search.parameters["additionalProperties"] is False
+    assert load.parameters["required"] == ["skill_id", "version"]
+
+
+@pytest.mark.parametrize("name", [SEARCH_SKILLS_TOOL_NAME, LOAD_SKILL_TOOL_NAME])
+def test_customer_registry_rejects_skill_runtime_name_collisions(name: str) -> None:
+    registry = DurableToolRegistry()
+
+    with pytest.raises(ValueError, match="reserved by the runtime"):
+        registry.register(
+            _descriptor(name, behavior=ToolBehavior.READ_ONLY),
+            lambda _: None,
+        )
 
 
 def test_tool_request_accepts_configured_max_payload_limits() -> None:

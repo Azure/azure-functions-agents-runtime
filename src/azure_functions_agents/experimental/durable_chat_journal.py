@@ -67,10 +67,12 @@ from .durable_chat_protocol import (
     parse_durable_chat_document,
 )
 from .durable_loop_protocol import ContentRefV1, DurableLoopRunStatus, canonical_hash
+from .durable_run_observations import DurableRunObservationJournal
 
 if TYPE_CHECKING:
     from .durable_loop_activities import DurableContentStore
     from .durable_loop_receipts import DurableKeyedDocumentStore, KeyedDocument
+    from .durable_retention import DurableRetentionManager
 
 _READ_DEADLINE_SECONDS = 10.0
 _RETAINED_EVENT_LIMIT = MAX_DURABLE_CHAT_REPLAY_EVENTS
@@ -264,15 +266,25 @@ class _ProjectionState:
     health: DurableChatObservationHealthV1
 
 
-class DurableChatJournal(DurableChatRunInitializationPort, DurableChatJournalPort):
-    """Publish immutable batches and a CAS manifest without execution coupling."""
+class DurableChatJournal(
+    DurableRunObservationJournal,
+    DurableChatRunInitializationPort,
+    DurableChatJournalPort,
+):
+    """V1 chat adapter over the shared generic durable observation storage."""
 
     def __init__(
         self,
         *,
         content: DurableContentStore,
         documents: DurableKeyedDocumentStore,
+        retention: DurableRetentionManager | None = None,
     ) -> None:
+        super().__init__(
+            content=content,
+            documents=documents,
+            retention=retention,
+        )
         self._content = content
         self._documents = documents
 
@@ -1266,10 +1278,14 @@ def _default_durable_chat_journal() -> DurableChatJournal:
     if _default_journal_instance is None:
         from .durable_loop_activities import BlobDurableContentStore
         from .durable_loop_receipts import BlobDurableKeyedDocumentStore
+        from .durable_retention import DurableRetentionManager
 
+        content = BlobDurableContentStore.from_environment()
+        documents = BlobDurableKeyedDocumentStore.from_environment()
         _default_journal_instance = DurableChatJournal(
-            content=BlobDurableContentStore.from_environment(),
-            documents=BlobDurableKeyedDocumentStore.from_environment(),
+            content=content,
+            documents=documents,
+            retention=DurableRetentionManager(documents, content),
         )
     return _default_journal_instance
 

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -34,6 +35,7 @@ from .durable_loop_activities import (
     DurableChatStreamingModelProvider,
     DurableContentStore,
     DurableLoopProviderTerminalError,
+    DurableSkillOperationError,
     HumanEventDeliveryPort,
     OneStepModelProvider,
     OneStepModelRequest,
@@ -43,7 +45,11 @@ from .durable_loop_activities import (
     append_model_and_tool_messages,
     append_tool_result_messages,
     get_protocol_model,
+    load_frozen_skill,
     put_protocol_model,
+    resolve_durable_skill_instructions,
+    resolve_frozen_skill_content_hash,
+    search_frozen_skill_catalog,
 )
 from .durable_loop_config import DurableLoopSettings
 from .durable_loop_execution import DurableLoopExecutionBinding
@@ -53,14 +59,22 @@ from .durable_loop_observability import (
 )
 from .durable_loop_protocol import (
     CheckpointStateV1,
+    CheckpointStateV2,
     ContentRefV1,
     DurableChatModelMode,
     DurableChatRunOptionsV1,
     DurableFaultProfile,
     DurableLoopPlanDocumentV1,
+    DurableLoopPlanDocumentV2,
     DurableLoopRunStatus,
     DurableOrchestrationInputV1,
+    DurableOrchestrationInputV2,
+    DurablePublicErrorV1,
+    DurablePublicLinksV1,
+    DurablePublicStatusV1,
     DurableRunDocumentV1,
+    DurableRunDocumentV2,
+    DurableRunIdentityV2,
     ErrorDisposition,
     ErrorEnvelopeV1,
     HumanEventDeliveryResultV1,
@@ -73,6 +87,7 @@ from .durable_loop_protocol import (
     ModelOperationV1,
     ModelStepActivityResultV1,
     SandboxExecutionProfile,
+    SkillLoadActivityResultV1,
     ToolBehavior,
     ToolDispatchRefV1,
     ToolProvenance,
@@ -85,17 +100,29 @@ from .durable_loop_protocol import (
     canonical_hash,
     deterministic_human_event_name,
     deterministic_model_step_key,
+    deterministic_skill_operation_key,
 )
 from .durable_loop_tools import (
+    LOAD_SKILL_TOOL_NAME,
     REQUEST_HUMAN_INPUT_TOOL_NAME,
+    SEARCH_SKILLS_TOOL_NAME,
     DurableToolCleanupPort,
     DurableToolDispatchPort,
 )
+from .durable_retention import (
+    is_retention_indexed_identity,
+    retained_identifier_hash,
+)
+
+if TYPE_CHECKING:
+    from .durable_loop_receipts import DurableKeyedDocumentStore
+    from .durable_retention import DurableRetentionManager
 
 DURABLE_LOOP_ADMISSION_ORCHESTRATOR_NAME = "durable_agent_admission_v1"
 DURABLE_LOOP_ORCHESTRATOR_NAME = _protocol.DURABLE_LOOP_ORCHESTRATOR_V1_NAME
 DURABLE_LOOP_ORCHESTRATOR_V2_NAME = _protocol.DURABLE_LOOP_ORCHESTRATOR_V2_NAME
 DURABLE_LOOP_ORCHESTRATOR_V3_NAME = _protocol.DURABLE_LOOP_ORCHESTRATOR_V3_NAME
+DURABLE_LOOP_ORCHESTRATOR_V4_NAME = _protocol.DURABLE_LOOP_ORCHESTRATOR_V4_NAME
 DURABLE_LOOP_HUMAN_OUTBOX_ORCHESTRATOR_NAME = "durable_agent_human_input_outbox_v1"
 DURABLE_LOOP_HUMAN_DELIVERY_ORCHESTRATOR_NAME = (
     "durable_agent_human_delivery_outbox_v1"
@@ -118,6 +145,9 @@ DURABLE_LOOP_MODEL_POLL_ACTIVITY_NAME = "durable_agent_model_poll_v1"
 DURABLE_LOOP_MODEL_CANCEL_ACTIVITY_NAME = "durable_agent_model_cancel_v1"
 DURABLE_LOOP_CLEANUP_ACTIVITY_NAME = "durable_agent_cleanup_v1"
 DURABLE_LOOP_FAULT_ACTIVITY_NAME = "durable_agent_fault_v1"
+DURABLE_LOOP_SKILL_SEARCH_ACTIVITY_NAME = "durable_agent_skill_search_v1"
+DURABLE_LOOP_SKILL_LOAD_ACTIVITY_NAME = "durable_agent_skill_load_v1"
+DURABLE_LOOP_RETENTION_TERMINAL_ACTIVITY_NAME = "durable_agent_retention_terminal_v1"
 DURABLE_LOOP_CANCEL_EVENT_NAME = "durable_agent_cancel_v1"
 
 _MAX_ENTITY_IDEMPOTENCY_RECEIPTS = 128
@@ -171,6 +201,8 @@ class DurableLoopActivityRuntime:
     tools: DurableToolDispatchPort
     compactor: DeterministicContextCompactor
     content: DurableContentStore
+    documents: DurableKeyedDocumentStore | None = None
+    retention: DurableRetentionManager | None = None
     background_model: BackgroundModelProvider | None = None
     faults: Any | None = None
     human_events: HumanEventDeliveryPort = field(
@@ -210,6 +242,7 @@ def _default_activity_runtime() -> DurableLoopActivityRuntime:
             BlobDurableKeyedDocumentStore,
             DurableOneShotFaults,
         )
+        from .durable_retention import DurableRetentionManager
         from .hybrid_apim import HybridApimClientManager
 
         settings = DurableLoopSettings.from_environment()
@@ -244,6 +277,8 @@ def _default_activity_runtime() -> DurableLoopActivityRuntime:
             tools=tools,
             compactor=DeterministicContextCompactor(),
             content=content,
+            documents=receipts,
+            retention=DurableRetentionManager(receipts, content),
             faults=faults,
             human_events=_UnavailableHumanEventDelivery(),
         )
@@ -406,6 +441,8 @@ def apply_session_entity_operation(  # noqa: PLR0912, PLR0915
         return _entity_complete(current, data)
     if operation == "abort":
         return _entity_abort(current, data)
+    if operation == "terminalize":
+        return _entity_terminalize(current, data)
     if operation == "mark_running":
         run_id = _required_string(data, "run_id")
         if current.get("active_run_id") != run_id:
@@ -593,6 +630,22 @@ def register_durable_loop_blueprint(app: func.FunctionApp) -> None:
             )
         )
 
+    @blueprint.orchestration_trigger(  # type: ignore[untyped-decorator]
+        context_name="context",
+        orchestration=DURABLE_LOOP_ORCHESTRATOR_V4_NAME,
+    )
+    def durable_agent_turn_orchestrator_v4(
+        context: df.DurableOrchestrationContext,
+    ) -> Any:
+        return (
+            yield from _run_registered_durable_loop(
+                context,
+                tool_activity_name_for_call=_provenance_tool_activity_name,
+                retry_first_model_activity=True,
+                skills_enabled=True,
+            )
+        )
+
     app.register_blueprint(blueprint)
 
 
@@ -601,23 +654,26 @@ def _run_registered_durable_loop(
     *,
     tool_activity_name_for_call: Callable[[ToolDispatchRefV1], str],
     retry_first_model_activity: bool = False,
+    skills_enabled: bool = False,
 ) -> Any:
-    payload = DurableOrchestrationInputV1.model_validate_json(
-        canonical_json_bytes(context.get_input())
-    )
+    payload_data = canonical_json_bytes(context.get_input())
+    payload: DurableOrchestrationInputV1 | DurableOrchestrationInputV2
+    if skills_enabled:
+        payload = DurableOrchestrationInputV2.model_validate_json(payload_data)
+    else:
+        payload = DurableOrchestrationInputV1.model_validate_json(payload_data)
     entity = df.EntityId(
         DURABLE_LOOP_SESSION_ENTITY_NAME,
         payload.session_entity_key,
     )
     try:
-        return (
-            yield from _run_durable_loop(
-                context,
-                entity,
-                payload,
-                tool_activity_name_for_call=tool_activity_name_for_call,
-                retry_first_model_activity=retry_first_model_activity,
-            )
+        result = yield from _run_durable_loop(
+            context,
+            entity,
+            payload,
+            tool_activity_name_for_call=tool_activity_name_for_call,
+            retry_first_model_activity=retry_first_model_activity,
+            skills_enabled=skills_enabled,
         )
     except Exception:
         yield from _cleanup_execution_plane(context, payload)
@@ -631,7 +687,61 @@ def _run_registered_durable_loop(
                 "status": DurableLoopRunStatus.FAILED.value,
             },
         )
+        if skills_enabled and isinstance(payload.identity, DurableRunIdentityV2):
+            terminal_receipt = yield context.call_entity(
+                entity,
+                "terminalize",
+                {
+                    "run_id": payload.identity.run_id,
+                    "terminal_at": context.current_utc_datetime.isoformat(),
+                },
+            )
+            if terminal_receipt.get("disposition") == "terminal":
+                yield context.call_activity(
+                    DURABLE_LOOP_RETENTION_TERMINAL_ACTIVITY_NAME,
+                    {
+                        "context_ref": terminal_receipt.get(
+                            "terminal_context_ref"
+                        ),
+                        "identity": payload.identity.model_dump(mode="json"),
+                        "result": {
+                            "error": "orchestration_failed",
+                            "status": DurableLoopRunStatus.FAILED.value,
+                        },
+                        "terminal_at": terminal_receipt.get("terminal_at"),
+                    },
+                )
         raise
+    if (
+        skills_enabled
+        and isinstance(payload.identity, DurableRunIdentityV2)
+        and result.get("status")
+        in {
+            DurableLoopRunStatus.CANCELLED.value,
+            DurableLoopRunStatus.COMPLETED.value,
+            DurableLoopRunStatus.FAILED.value,
+        }
+    ):
+        terminal_receipt = yield context.call_entity(
+            entity,
+            "terminalize",
+            {
+                "run_id": payload.identity.run_id,
+                "terminal_at": context.current_utc_datetime.isoformat(),
+            },
+        )
+        if terminal_receipt.get("disposition") != "terminal":
+            raise RuntimeError("entity terminal receipt was unavailable")
+        yield context.call_activity(
+            DURABLE_LOOP_RETENTION_TERMINAL_ACTIVITY_NAME,
+            {
+                "context_ref": terminal_receipt.get("terminal_context_ref"),
+                "identity": payload.identity.model_dump(mode="json"),
+                "result": result,
+                "terminal_at": terminal_receipt.get("terminal_at"),
+            },
+        )
+    return result
 
 
 def _generic_tool_activity_name(_call: ToolDispatchRefV1) -> str:
@@ -839,17 +949,48 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
     ) -> dict[str, object]:
         runtime = get_durable_loop_activity_runtime()
         reference = ContentRefV1.model_validate(payload["run_document_ref"])
-        document = await get_protocol_model(
-            runtime.content,
-            reference,
-            DurableRunDocumentV1,
-        )
+        document = await _load_run_document(runtime.content, reference)
         plan = _plan_from_document(document.plan)
         checkpoint = document.checkpoint
+        try:
+            if isinstance(document, DurableRunDocumentV2):
+                instructions = await resolve_durable_skill_instructions(
+                    runtime.content,
+                    document.plan,
+                    document.checkpoint.loaded_skill_receipts,
+                )
+            else:
+                instructions = plan.instructions
+        except DurableSkillOperationError as exc:
+            error = ErrorEnvelopeV1(
+                code=exc.code,
+                classification="skill",
+                retryable=False,
+                phase="model_step",
+                step_index=checkpoint.next_model_step,
+            )
+            return await _persist_model_error(runtime, document, error)
+        if (
+            isinstance(document, DurableRunDocumentV2)
+            and len(instructions.encode("utf-8"))
+            + len(canonical_json_bytes(checkpoint.working_context.bundle.messages))
+            > checkpoint.identity.budget.context_max_bytes
+        ):
+            return await _persist_model_error(
+                runtime,
+                document,
+                ErrorEnvelopeV1(
+                    code="skill_context_budget_exceeded",
+                    classification="budget",
+                    retryable=False,
+                    phase="model_step",
+                    step_index=checkpoint.next_model_step,
+                ),
+            )
         request = OneStepModelRequest(
             identity=checkpoint.identity,
             step_index=checkpoint.next_model_step,
-            instructions=plan.instructions,
+            instructions=instructions,
             working_context=checkpoint.working_context,
             catalog=plan.catalog,
             model_settings=plan.model_settings,
@@ -887,7 +1028,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
             and document.plan.ui.model_mode is DurableChatModelMode.FOREGROUND
         ) or (
             checkpoint.identity.orchestration_version
-            == DURABLE_LOOP_ORCHESTRATOR_V3_NAME
+            in {DURABLE_LOOP_ORCHESTRATOR_V3_NAME, DURABLE_LOOP_ORCHESTRATOR_V4_NAME}
             and plan.fault_profile is DurableFaultProfile.MODEL_APIM_429_ONCE
         ):
             background_model = None
@@ -1032,10 +1173,9 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         runtime = get_durable_loop_activity_runtime()
         if runtime.background_model is None:
             raise RuntimeError("background model provider is unavailable")
-        document = await get_protocol_model(
+        document = await _load_run_document(
             runtime.content,
             ContentRefV1.model_validate(payload["run_document_ref"]),
-            DurableRunDocumentV1,
         )
         operation = await get_protocol_model(
             runtime.content,
@@ -1240,6 +1380,240 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
 
     @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
         input_name="payload",
+        activity=DURABLE_LOOP_SKILL_SEARCH_ACTIVITY_NAME,
+    )
+    async def durable_agent_skill_search_v1(
+        payload: dict,  # type: ignore[type-arg]
+    ) -> dict[str, object]:
+        runtime = get_durable_loop_activity_runtime()
+        document_ref = ContentRefV1.model_validate(payload["run_document_ref"])
+        document = await _load_run_document(runtime.content, document_ref)
+        if not isinstance(document, DurableRunDocumentV2):
+            raise ValueError("skill search requires a V2 run document")
+        request_ref = ContentRefV1.model_validate(payload["request_ref"])
+        request = await get_protocol_model(
+            runtime.content,
+            request_ref,
+            ToolRequestV1,
+        )
+        if request.tool_name != SEARCH_SKILLS_TOOL_NAME:
+            raise ValueError("skill search request uses the wrong runtime tool")
+        try:
+            query, cursor = _skill_search_arguments(request.arguments)
+        except DurableSkillOperationError as exc:
+            return await _persist_runtime_skill_failure(
+                runtime.content,
+                request,
+                exc.code,
+            )
+        operation_key = deterministic_skill_operation_key(
+            run_id=request.run_id,
+            step_index=request.step_index,
+            call_ordinal=request.call_ordinal,
+            plan_version="2",
+            catalog_hash=document.checkpoint.skill_catalog_hash,
+            operation_kind="search_skills",
+            arguments=dict(request.arguments),
+        )
+        if (
+            document.checkpoint.completed_skill_searches
+            >= document.checkpoint.identity.budget.max_skill_searches
+        ):
+            return {"terminal_error": "skill_search_budget_exceeded"}
+        try:
+            activity_result = await search_frozen_skill_catalog(
+                runtime.content,
+                catalog_ref=document.checkpoint.skill_catalog_ref,
+                operation_key=operation_key,
+                query=query,
+                cursor=cursor,
+                maximum_result_bytes=(
+                    document.checkpoint.identity.budget.max_skill_search_result_bytes
+                ),
+            )
+            page = await get_protocol_model(
+                runtime.content,
+                activity_result.page_ref,
+                _protocol.DurableSkillMetadataPageV1,
+            )
+            result = _runtime_skill_tool_result(
+                request,
+                value={
+                    "catalog_hash": page.catalog_hash,
+                    "metadata": [
+                        item.model_dump(mode="json") for item in page.metadata
+                    ],
+                    "next_cursor": page.next_cursor,
+                },
+            )
+        except DurableSkillOperationError as exc:
+            if exc.terminal:
+                return {"terminal_error": exc.code}
+            activity_result = None
+            result = _runtime_skill_tool_result(request, error_code=exc.code)
+        result_ref = await put_protocol_model(
+            runtime.content,
+            kind="tool-result",
+            model=result,
+        )
+        return {
+            "activity_result": (
+                activity_result.model_dump(mode="json")
+                if activity_result is not None
+                else None
+            ),
+            "result_ref": ToolResultRefV1(
+                result_ref=result_ref,
+                call_ordinal=request.call_ordinal,
+                call_key=request.call_key,
+                request_hash=request.request_hash,
+                tool_name=request.tool_name,
+                status=result.status,
+                written_bytes=result_ref.byte_length,
+            ).model_dump(mode="json"),
+            "written_bytes": (
+                result_ref.byte_length
+                + (
+                    activity_result.written_bytes
+                    if activity_result is not None
+                    else 0
+                )
+            ),
+        }
+
+    @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
+        input_name="payload",
+        activity=DURABLE_LOOP_SKILL_LOAD_ACTIVITY_NAME,
+    )
+    async def durable_agent_skill_load_v1(
+        payload: dict,  # type: ignore[type-arg]
+    ) -> dict[str, object]:
+        runtime = get_durable_loop_activity_runtime()
+        document_ref = ContentRefV1.model_validate(payload["run_document_ref"])
+        document = await _load_run_document(runtime.content, document_ref)
+        if not isinstance(document, DurableRunDocumentV2):
+            raise ValueError("skill load requires a V2 run document")
+        request_ref = ContentRefV1.model_validate(payload["request_ref"])
+        request = await get_protocol_model(
+            runtime.content,
+            request_ref,
+            ToolRequestV1,
+        )
+        if request.tool_name != LOAD_SKILL_TOOL_NAME:
+            raise ValueError("skill load request uses the wrong runtime tool")
+        try:
+            skill_id, version = _skill_load_arguments(request.arguments)
+            expected_content_hash = await resolve_frozen_skill_content_hash(
+                runtime.content,
+                catalog_ref=document.checkpoint.skill_catalog_ref,
+                skill_id=skill_id,
+                version=version,
+            )
+        except DurableSkillOperationError as exc:
+            if exc.terminal:
+                return {"terminal_error": exc.code}
+            return await _persist_runtime_skill_failure(
+                runtime.content,
+                request,
+                exc.code,
+            )
+        operation_key = deterministic_skill_operation_key(
+            run_id=request.run_id,
+            step_index=request.step_index,
+            call_ordinal=request.call_ordinal,
+            plan_version="2",
+            catalog_hash=document.checkpoint.skill_catalog_hash,
+            operation_kind="load_skill",
+            arguments=dict(request.arguments),
+            expected_version=version,
+            expected_content_hash=expected_content_hash,
+        )
+        try:
+            current_instructions = await resolve_durable_skill_instructions(
+                runtime.content,
+                document.plan,
+                document.checkpoint.loaded_skill_receipts,
+            )
+            base_context_bytes = len(current_instructions.encode("utf-8")) + len(
+                canonical_json_bytes(
+                    document.checkpoint.working_context.bundle.messages
+                )
+            )
+            activity_result, _ = await load_frozen_skill(
+                runtime.content,
+                catalog_ref=document.checkpoint.skill_catalog_ref,
+                run_id=request.run_id,
+                operation_key=operation_key,
+                stable_step_id=(
+                    f"skill-{request.step_index}-{request.call_ordinal}-"
+                    f"{operation_key[:16]}"
+                ),
+                skill_id=skill_id,
+                version=version,
+                loaded_receipts=document.checkpoint.loaded_skill_receipts,
+                completed_skill_loads=document.checkpoint.completed_skill_loads,
+                maximum_skill_loads=(
+                    document.checkpoint.identity.budget.max_skill_loads
+                ),
+                loaded_skill_bytes=document.checkpoint.loaded_skill_bytes,
+                maximum_loaded_skill_bytes=(
+                    document.checkpoint.identity.budget.max_loaded_skill_bytes
+                ),
+                base_context_bytes=base_context_bytes,
+                context_max_bytes=document.checkpoint.identity.budget.context_max_bytes,
+                loaded_at=_datetime_value(payload["loaded_at"], "loaded_at"),
+            )
+            result = _runtime_skill_tool_result(
+                request,
+                value={
+                    "already_loaded": activity_result.already_loaded,
+                    "content_hash": activity_result.content_hash,
+                    "skill_id": activity_result.skill_id,
+                    "version": activity_result.version,
+                },
+            )
+        except DurableSkillOperationError as exc:
+            if exc.terminal:
+                return {"terminal_error": exc.code}
+            activity_result = None
+            result = _runtime_skill_tool_result(request, error_code=exc.code)
+        result_ref = await put_protocol_model(
+            runtime.content,
+            kind="tool-result",
+            model=result,
+        )
+        return {
+            "activity_result": (
+                activity_result.model_dump(mode="json")
+                if activity_result is not None
+                else None
+            ),
+            "receipt_ref": (
+                activity_result.receipt_ref.model_dump(mode="json")
+                if activity_result is not None
+                else None
+            ),
+            "result_ref": ToolResultRefV1(
+                result_ref=result_ref,
+                call_ordinal=request.call_ordinal,
+                call_key=request.call_key,
+                request_hash=request.request_hash,
+                tool_name=request.tool_name,
+                status=result.status,
+                written_bytes=result_ref.byte_length,
+            ).model_dump(mode="json"),
+            "written_bytes": (
+                result_ref.byte_length
+                + (
+                    activity_result.written_bytes
+                    if activity_result is not None
+                    else 0
+                )
+            ),
+        }
+
+    @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
+        input_name="payload",
         activity=DURABLE_LOOP_APPEND_ACTIVITY_NAME,
     )
     async def durable_agent_append_results_v1(
@@ -1247,14 +1621,17 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
     ) -> dict[str, object]:
         runtime = get_durable_loop_activity_runtime()
         document_ref = ContentRefV1.model_validate(payload["run_document_ref"])
-        document = await get_protocol_model(
-            runtime.content,
-            document_ref,
-            DurableRunDocumentV1,
-        )
+        document = await _load_run_document(runtime.content, document_ref)
         decision = document.pending_decision
         if decision is None:
             raise ValueError("run document has no pending model decision")
+        skill_operation = payload.get("skill_operation")
+        runtime_protocol_error = payload.get("runtime_protocol_error") is True
+        if skill_operation is not None and (
+            not isinstance(document, DurableRunDocumentV2)
+            or skill_operation not in {SEARCH_SKILLS_TOOL_NAME, LOAD_SKILL_TOOL_NAME}
+        ):
+            raise ValueError("runtime skill result requires a V2 run document")
         if payload.get("protocol_error") is True:
             request_refs = [
                 ContentRefV1.model_validate(item)
@@ -1268,7 +1645,16 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                 )
                 for item in request_refs
             ]
-            results = [_protocol_error_result(item) for item in requests]
+            protocol_error_code = payload.get(
+                "protocol_error_code",
+                "invalid_clarification_batch",
+            )
+            if not isinstance(protocol_error_code, str):
+                raise ValueError("protocol error code must be a string")
+            results = [
+                _protocol_error_result(item, code=protocol_error_code)
+                for item in requests
+            ]
         else:
             result_refs = [
                 ToolResultRefV1.model_validate_json(canonical_json_bytes(item))
@@ -1309,8 +1695,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         working = working.model_copy(
             update={"source_audit_hash": audit.bundle_hash}
         )
-        checkpoint = document.checkpoint.model_copy(
-            update={
+        checkpoint_updates: dict[str, object] = {
                 "audit_bundle": audit,
                 "audit_head_hash": audit.bundle_hash,
                 "checkpoints_in_generation": (
@@ -1319,8 +1704,11 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                 "completed_model_steps": (
                     document.checkpoint.completed_model_steps + 1
                 ),
-                "completed_tool_calls": (
-                    document.checkpoint.completed_tool_calls + len(results)
+                "completed_tool_calls": document.checkpoint.completed_tool_calls
+                + (
+                    0
+                    if skill_operation is not None or runtime_protocol_error
+                    else len(results)
                 ),
                 "next_model_step": document.checkpoint.next_model_step + 1,
                 "status": DurableLoopRunStatus.RUNNING,
@@ -1337,8 +1725,36 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
                     ),
                     document.checkpoint.workspace_ref,
                 ),
-            }
-        )
+        }
+        if isinstance(document, DurableRunDocumentV2):
+            if skill_operation == SEARCH_SKILLS_TOOL_NAME:
+                checkpoint_updates["completed_skill_searches"] = (
+                    document.checkpoint.completed_skill_searches + 1
+                )
+            elif skill_operation == LOAD_SKILL_TOOL_NAME:
+                raw_activity_result = payload.get("activity_result")
+                if isinstance(raw_activity_result, Mapping):
+                    load_result = SkillLoadActivityResultV1.model_validate_json(
+                        canonical_json_bytes(raw_activity_result)
+                    )
+                    if not load_result.already_loaded:
+                        receipt = await get_protocol_model(
+                            runtime.content,
+                            load_result.receipt_ref,
+                            _protocol.DurableSkillLoadReceiptV1,
+                        )
+                        checkpoint_updates["completed_skill_loads"] = (
+                            document.checkpoint.completed_skill_loads + 1
+                        )
+                        checkpoint_updates["loaded_skill_receipts"] = (
+                            *document.checkpoint.loaded_skill_receipts,
+                            receipt,
+                        )
+                        checkpoint_updates["loaded_skill_bytes"] = (
+                            document.checkpoint.loaded_skill_bytes
+                            + load_result.content_ref.byte_length
+                        )
+        checkpoint = document.checkpoint.model_copy(update=checkpoint_updates)
         updated = document.model_copy(
             update={"checkpoint": checkpoint, "pending_decision": None}
         )
@@ -1365,11 +1781,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         runtime = get_durable_loop_activity_runtime()
         document_ref = ContentRefV1.model_validate(payload["run_document_ref"])
         request_ref = ContentRefV1.model_validate(payload["request_ref"])
-        document = await get_protocol_model(
-            runtime.content,
-            document_ref,
-            DurableRunDocumentV1,
-        )
+        document = await _load_run_document(runtime.content, document_ref)
         request = await get_protocol_model(
             runtime.content,
             request_ref,
@@ -1390,12 +1802,28 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         response_schema = arguments.get("response_schema")
         if response_schema is not None and not isinstance(response_schema, dict):
             raise ValueError("response_schema must be an object")
-        question_ref = await runtime.content.put_bytes(
-            kind="human-question",
-            payload=question.encode("utf-8"),
-            media_type="text/plain; charset=utf-8",
-            retention_class="run",
-        )
+        issued_at = _datetime_value(payload["issued_at"], "issued_at")
+        expires_at = _datetime_value(payload["expires_at"], "expires_at")
+        if (
+            runtime.retention is not None
+            and is_retention_indexed_identity(document.checkpoint.identity)
+        ):
+            question_ref = await runtime.retention.tracked_put(
+                run_id=document.checkpoint.identity.run_id,
+                kind="human-question",
+                payload=question.encode("utf-8"),
+                media_type="text/plain; charset=utf-8",
+                retention_class="human",
+                expires_at=expires_at,
+                now=issued_at,
+            )
+        else:
+            question_ref = await runtime.content.put_bytes(
+                kind="human-question",
+                payload=question.encode("utf-8"),
+                media_type="text/plain; charset=utf-8",
+                retention_class="run",
+            )
         generation = document.checkpoint.continue_as_new_generation + 1
         request_id = (
             f"human-{document.checkpoint.next_model_step}-"
@@ -1422,15 +1850,29 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
             response_schema=response_schema,
             actor_policy_hash=document.checkpoint.identity.owner_hash,
             event_name=event_name,
-            issued_at=_datetime_value(payload["issued_at"], "issued_at"),
-            expires_at=_datetime_value(payload["expires_at"], "expires_at"),
+            issued_at=issued_at,
+            expires_at=expires_at,
             record_version=1,
         )
-        human_ref = await put_protocol_model(
-            runtime.content,
-            kind="human-request",
-            model=human,
-        )
+        if (
+            runtime.retention is not None
+            and is_retention_indexed_identity(document.checkpoint.identity)
+        ):
+            human_ref = await runtime.retention.tracked_put(
+                run_id=document.checkpoint.identity.run_id,
+                kind="human-request",
+                payload=canonical_json_bytes(human),
+                media_type="application/json",
+                retention_class="human",
+                expires_at=expires_at,
+                now=issued_at,
+            )
+        else:
+            human_ref = await put_protocol_model(
+                runtime.content,
+                kind="human-request",
+                model=human,
+            )
         return HumanWaitActivityResultV1(
             request_ref=human_ref,
             request_id=request_id,
@@ -1454,11 +1896,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
         runtime = get_durable_loop_activity_runtime()
         document_ref = ContentRefV1.model_validate(payload["run_document_ref"])
         request_ref = ContentRefV1.model_validate(payload["request_ref"])
-        document = await get_protocol_model(
-            runtime.content,
-            document_ref,
-            DurableRunDocumentV1,
-        )
+        document = await _load_run_document(runtime.content, document_ref)
         human = await get_protocol_model(
             runtime.content,
             request_ref,
@@ -1576,6 +2014,144 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
 
     @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
         input_name="payload",
+        activity=DURABLE_LOOP_RETENTION_TERMINAL_ACTIVITY_NAME,
+    )
+    async def durable_agent_retention_terminal_v1(
+        payload: dict,  # type: ignore[type-arg]
+    ) -> dict[str, object]:
+        runtime = get_durable_loop_activity_runtime()
+        if runtime.retention is None:
+            raise RuntimeError("durable retention runtime is unavailable")
+        identity = DurableRunIdentityV2.model_validate(payload["identity"])
+        if not is_retention_indexed_identity(identity):
+            raise RuntimeError("terminal retention requires an indexed V4 identity")
+        result = _mapping(payload.get("result"), "result")
+        terminal_at = datetime.fromisoformat(
+            _required_string(payload, "terminal_at")
+        ).astimezone(UTC)
+        status = DurableLoopRunStatus(_required_string(result, "status"))
+        result_expiry = terminal_at + timedelta(
+            seconds=identity.retention_policy.event_result_seconds
+        )
+        raw_response_ref = result.get("response_ref")
+        response_ref = (
+            ContentRefV1.model_validate(raw_response_ref)
+            if isinstance(raw_response_ref, Mapping)
+            else None
+        )
+        raw_context_ref = payload.get("context_ref")
+        context_ref = (
+            ContentRefV1.model_validate(raw_context_ref)
+            if isinstance(raw_context_ref, Mapping)
+            else None
+        )
+        for reference, retention_class, expires_at in (
+            (
+                context_ref,
+                "receipt",
+                terminal_at
+                + timedelta(seconds=identity.retention_policy.receipt_seconds),
+            ),
+            (response_ref, "result", result_expiry),
+        ):
+            if reference is None:
+                continue
+            object_parts = reference.object_id.split("/")
+            if len(object_parts) != 3 or object_parts[0] != "objects":
+                raise RuntimeError("terminal artifact is not a canonical object")
+            content = await runtime.content.get_bytes(reference)
+            await runtime.retention.tracked_put(
+                run_id=identity.run_id,
+                kind=object_parts[1],
+                payload=content,
+                media_type=reference.media_type,
+                retention_class=retention_class,
+                expires_at=expires_at,
+                now=terminal_at,
+            )
+        public_error = None
+        error_code = result.get("error")
+        if status is DurableLoopRunStatus.FAILED and isinstance(error_code, str):
+            public_error = DurablePublicErrorV1(
+                code=error_code,
+                error=error_code,
+                status=500,
+                possibly_committed=result.get("possibly_committed") is True,
+            )
+        route = f"/experimental/durable-agent-runs/{identity.run_id}"
+        projection = DurablePublicStatusV1(
+            run_id=identity.run_id,
+            session_id=identity.session_id,
+            status=status,
+            phase=str(result.get("phase", status.value.casefold())),
+            created_at=identity.created_at,
+            updated_at=terminal_at,
+            completed_model_steps=_nonnegative_int(
+                result.get("model_steps", 0),
+                "model_steps",
+            ),
+            completed_tool_calls=_nonnegative_int(
+                result.get("tool_calls", 0),
+                "tool_calls",
+            ),
+            completed_skill_searches=_nonnegative_int(
+                result.get("skill_searches", 0),
+                "skill_searches",
+            ),
+            completed_skill_loads=_nonnegative_int(
+                result.get("skill_loads", 0),
+                "skill_loads",
+            ),
+            human_waits=_nonnegative_int(
+                result.get("human_waits", 0),
+                "human_waits",
+            ),
+            result_available=response_ref is not None,
+            links=DurablePublicLinksV1(
+                status=route,
+                events=f"{route}/events",
+                result=f"{route}/result",
+                cancel=f"{route}/cancel",
+            ),
+            error=public_error,
+        )
+        await runtime.retention.terminalize_run(
+            run_id=identity.run_id,
+            status=status,
+            terminal_at=terminal_at,
+            projection=projection,
+        )
+        session_id_hash = retained_identifier_hash("session", identity.session_id)
+        run_id_hash = retained_identifier_hash("run", identity.run_id)
+        if (
+            status is DurableLoopRunStatus.COMPLETED
+            and context_ref is not None
+            and result.get("committed_generation") is not None
+        ):
+            await runtime.retention.put_session_context(
+                session_id_hash=session_id_hash,
+                owner_hash=identity.owner_hash,
+                access_namespace_hash=identity.access_namespace_hash,
+                active_run_id_hash=run_id_hash,
+                committed_generation=_nonnegative_int(
+                    result["committed_generation"],
+                    "committed_generation",
+                ),
+                payload=await runtime.content.get_bytes(context_ref),
+                media_type=context_ref.media_type,
+                committed_at=terminal_at,
+                retention_seconds=identity.retention_policy.session_seconds,
+                tombstone_seconds=identity.retention_policy.tombstone_seconds,
+            )
+        else:
+            await runtime.retention.release_session_admission(
+                session_id_hash=session_id_hash,
+                run_id_hash=run_id_hash,
+            )
+        return {"status": status.value}
+
+    @blueprint.activity_trigger(  # type: ignore[untyped-decorator]
+        input_name="payload",
         activity=DURABLE_LOOP_COMPACTION_ACTIVITY_NAME,
     )
     async def durable_agent_compact_context_v1(
@@ -1583,11 +2159,7 @@ def _register_activities(blueprint: df.Blueprint) -> None:  # noqa: PLR0915
     ) -> dict[str, object]:
         runtime = get_durable_loop_activity_runtime()
         reference = ContentRefV1.model_validate(payload["run_document_ref"])
-        document = await get_protocol_model(
-            runtime.content,
-            reference,
-            DurableRunDocumentV1,
-        )
+        document = await _load_run_document(runtime.content, reference)
         settings = _plan_from_document(document.plan).settings
         try:
             async with asyncio.timeout(settings.activity_timeout_seconds):
@@ -1777,7 +2349,7 @@ def _register_short_orchestrators(blueprint: df.Blueprint) -> None:
 
 def _call_model_activity(
     context: df.DurableOrchestrationContext,
-    current: DurableOrchestrationInputV1,
+    current: DurableOrchestrationInputV1 | DurableOrchestrationInputV2,
     *,
     retry_once: bool,
 ) -> Any:
@@ -1817,12 +2389,13 @@ def _call_model_activity(
 def _run_durable_loop(  # noqa: PLR0912, PLR0915
     context: df.DurableOrchestrationContext,
     entity: df.EntityId,
-    payload: DurableOrchestrationInputV1,
+    payload: DurableOrchestrationInputV1 | DurableOrchestrationInputV2,
     *,
     tool_activity_name_for_call: Callable[[ToolDispatchRefV1], str] = (
         _generic_tool_activity_name
     ),
     retry_first_model_activity: bool = False,
+    skills_enabled: bool = False,
 ) -> Any:
     admission = yield context.call_entity(
         entity,
@@ -2191,6 +2764,186 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
                 "tool_calls": current.completed_tool_calls,
             }
 
+        if skills_enabled:
+            if not isinstance(current, DurableOrchestrationInputV2):
+                raise RuntimeError("V4 orchestration requires V2 state")
+            if _runtime_control_batch_requires_repair(
+                tuple(item.tool_name for item in model_result.tool_calls),
+                skills_enabled=skills_enabled,
+            ):
+                if current.repair_steps_used >= 1:
+                    yield from _cleanup_execution_plane(context, current)
+                    yield context.call_entity(
+                        entity,
+                        "abort",
+                        {
+                            "context_ref": current.run_document_ref.model_dump(
+                                mode="json"
+                            ),
+                            "error": "invalid_runtime_operation_batch",
+                            "run_id": current.identity.run_id,
+                            "status": DurableLoopRunStatus.FAILED.value,
+                        },
+                    )
+                    return {
+                        "error": "invalid_runtime_operation_batch",
+                        "status": DurableLoopRunStatus.FAILED.value,
+                    }
+                repaired = yield context.call_activity(
+                    DURABLE_LOOP_APPEND_ACTIVITY_NAME,
+                    {
+                        "protocol_error": True,
+                        "protocol_error_code": "invalid_runtime_operation_batch",
+                        "request_refs": [
+                            item.request_ref.model_dump(mode="json")
+                            for item in model_result.tool_calls
+                        ],
+                        "run_document_ref": current.run_document_ref.model_dump(
+                            mode="json"
+                        ),
+                        "runtime_protocol_error": True,
+                    },
+                )
+                current = _advance_cursor(
+                    current,
+                    ContentRefV1.model_validate(repaired["run_document_ref"]),
+                    model_steps=1,
+                    tool_calls=0,
+                    working_context_bytes=_nonnegative_int(
+                        repaired.get("working_context_bytes"),
+                        "working_context_bytes",
+                    ),
+                ).model_copy(
+                    update={"repair_steps_used": current.repair_steps_used + 1}
+                )
+                continue
+            if (
+                len(model_result.tool_calls) == 1
+                and model_result.tool_calls[0].tool_name
+                in {SEARCH_SKILLS_TOOL_NAME, LOAD_SKILL_TOOL_NAME}
+            ):
+                runtime_call = model_result.tool_calls[0]
+                if (
+                    runtime_call.tool_name == SEARCH_SKILLS_TOOL_NAME
+                    and current.completed_skill_searches
+                    >= current.identity.budget.max_skill_searches
+                ):
+                    skill_terminal_error: str | None = (
+                        "skill_search_budget_exceeded"
+                    )
+                    skill_data: Mapping[str, object] = {}
+                else:
+                    activity_name = (
+                        DURABLE_LOOP_SKILL_SEARCH_ACTIVITY_NAME
+                        if runtime_call.tool_name == SEARCH_SKILLS_TOOL_NAME
+                        else DURABLE_LOOP_SKILL_LOAD_ACTIVITY_NAME
+                    )
+                    raw_skill_data = yield context.call_activity(
+                        activity_name,
+                        {
+                            "loaded_at": context.current_utc_datetime.isoformat(),
+                            "request_ref": runtime_call.request_ref.model_dump(
+                                mode="json"
+                            ),
+                            "run_document_ref": current.run_document_ref.model_dump(
+                                mode="json"
+                            ),
+                        },
+                    )
+                    skill_data = _mapping(raw_skill_data, "skill operation result")
+                    terminal_value = skill_data.get("terminal_error")
+                    skill_terminal_error = (
+                        terminal_value if isinstance(terminal_value, str) else None
+                    )
+                if skill_terminal_error is not None:
+                    yield from _cleanup_execution_plane(context, current)
+                    yield context.call_entity(
+                        entity,
+                        "abort",
+                        {
+                            "context_ref": current.run_document_ref.model_dump(
+                                mode="json"
+                            ),
+                            "error": skill_terminal_error,
+                            "run_id": current.identity.run_id,
+                            "status": DurableLoopRunStatus.FAILED.value,
+                        },
+                    )
+                    return {
+                        "error": skill_terminal_error,
+                        "status": DurableLoopRunStatus.FAILED.value,
+                    }
+                raw_result_ref = skill_data.get("result_ref")
+                if not isinstance(raw_result_ref, Mapping):
+                    raise RuntimeError("skill operation omitted its tool result")
+                append_payload: dict[str, object] = {
+                    "activity_result": skill_data.get("activity_result"),
+                    "result_refs": [dict(raw_result_ref)],
+                    "run_document_ref": current.run_document_ref.model_dump(
+                        mode="json"
+                    ),
+                    "skill_operation": runtime_call.tool_name,
+                }
+                appended = yield context.call_activity(
+                    DURABLE_LOOP_APPEND_ACTIVITY_NAME,
+                    append_payload,
+                )
+                updated = _advance_cursor(
+                    current,
+                    ContentRefV1.model_validate(appended["run_document_ref"]),
+                    model_steps=1,
+                    tool_calls=0,
+                    external_content_bytes=(
+                        _nonnegative_int(
+                            skill_data.get("written_bytes", 0),
+                            "written_bytes",
+                        )
+                        + _nonnegative_int(
+                            appended.get("written_bytes", 0),
+                            "written_bytes",
+                        )
+                    ),
+                    working_context_bytes=_nonnegative_int(
+                        appended.get("working_context_bytes"),
+                        "working_context_bytes",
+                    ),
+                )
+                if runtime_call.tool_name == SEARCH_SKILLS_TOOL_NAME:
+                    current = updated.model_copy(
+                        update={
+                            "completed_skill_searches": (
+                                current.completed_skill_searches + 1
+                            )
+                        }
+                    )
+                else:
+                    raw_activity = skill_data.get("activity_result")
+                    if isinstance(raw_activity, Mapping):
+                        load_result = SkillLoadActivityResultV1.model_validate_json(
+                            canonical_json_bytes(raw_activity)
+                        )
+                        if not load_result.already_loaded:
+                            current = updated.model_copy(
+                                update={
+                                    "completed_skill_loads": (
+                                        current.completed_skill_loads + 1
+                                    ),
+                                    "loaded_skill_bytes": (
+                                        current.loaded_skill_bytes
+                                        + load_result.content_ref.byte_length
+                                    ),
+                                    "loaded_skill_receipt_refs": (
+                                        *current.loaded_skill_receipt_refs,
+                                        load_result.receipt_ref,
+                                    ),
+                                }
+                            )
+                        else:
+                            current = updated
+                    else:
+                        current = updated
+                continue
+
         clarification = [
             item
             for item in model_result.tool_calls
@@ -2372,7 +3125,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
                     "get_human",
                     {"request_id": human.request_id},
                 )
-            append_payload: dict[str, object] = {
+            human_append_payload: dict[str, object] = {
                 "parked_seconds": max(
                     0,
                     int(
@@ -2391,10 +3144,10 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
                 ),
             }
             if isinstance(response.get("response_ref"), Mapping):
-                append_payload["response_ref"] = response["response_ref"]
+                human_append_payload["response_ref"] = response["response_ref"]
             appended = yield context.call_activity(
                 DURABLE_LOOP_HUMAN_RESULT_ACTIVITY_NAME,
-                append_payload,
+                human_append_payload,
             )
             current = _advance_cursor(
                 current,
@@ -2407,7 +3160,7 @@ def _run_durable_loop(  # noqa: PLR0912, PLR0915
                     "written_bytes",
                 ),
                 parked_seconds=_nonnegative_int(
-                    append_payload["parked_seconds"],
+                    human_append_payload["parked_seconds"],
                     "parked_seconds",
                 ),
                 working_context_bytes=_nonnegative_int(
@@ -2556,7 +3309,7 @@ def _call_session_entity(
 
 def _cleanup_execution_plane(
     context: df.DurableOrchestrationContext,
-    current: DurableOrchestrationInputV1,
+    current: DurableOrchestrationInputV1 | DurableOrchestrationInputV2,
 ) -> Any:
     """Schedule idempotent terminal cleanup before releasing session ownership."""
     if current.sandbox_profile is SandboxExecutionProfile.PER_CALL:
@@ -2628,7 +3381,7 @@ def _schedule_tool_refs(
     return tuple(sorted(results, key=lambda item: item.call_ordinal)), ()
 
 
-def _entity_admit(
+def _entity_admit(  # noqa: PLR0912
     current: dict[str, object],
     data: Mapping[str, object],
 ) -> tuple[dict[str, object], dict[str, object]]:
@@ -2686,6 +3439,26 @@ def _entity_admit(
         _evict_terminal_idempotency_receipts(idempotency, now)
     if len(idempotency) >= _MAX_ENTITY_IDEMPOTENCY_RECEIPTS:
         return current, {"disposition": "idempotency_capacity_exceeded"}
+    retained_generation = data.get("retained_generation")
+    retained_context_ref = data.get("retained_context_ref")
+    if retained_generation is not None or retained_context_ref is not None:
+        generation = _nonnegative_int(
+            retained_generation,
+            "retained_generation",
+        )
+        current_generation = _nonnegative_int(
+            current.get("committed_generation"),
+            "committed_generation",
+        )
+        current_context_ref = current.get("committed_context_ref")
+        if current_generation == 0 and current_context_ref is None:
+            current["committed_generation"] = generation
+            current["committed_context_ref"] = retained_context_ref
+        elif (
+            current_generation != generation
+            or current_context_ref != retained_context_ref
+        ):
+            return current, {"disposition": "retained_session_conflict"}
     receipt: dict[str, object] = {
         "expires_at": data.get("expires_at"),
         "lifecycle": "admitted",
@@ -2882,6 +3655,32 @@ def _entity_abort(
     }
 
 
+def _entity_terminalize(
+    current: dict[str, object],
+    data: Mapping[str, object],
+) -> tuple[dict[str, object], dict[str, object]]:
+    run_id = _required_string(data, "run_id")
+    terminal_at = _required_string(data, "terminal_at")
+    idempotency = _mapping(current.get("idempotency"), "idempotency")
+    for key, value in tuple(idempotency.items()):
+        if not isinstance(value, Mapping) or value.get("run_id") != run_id:
+            continue
+        if value.get("lifecycle") not in {"aborted", "completed"}:
+            return current, {"disposition": "not_terminal"}
+        observed = value.get("terminal_at")
+        if observed is not None and observed != terminal_at:
+            return current, {**value, "disposition": "terminal"}
+        receipt = {
+            **value,
+            "disposition": "terminal",
+            "terminal_at": terminal_at,
+        }
+        idempotency[key] = receipt
+        current["idempotency"] = idempotency
+        return current, receipt
+    return current, {"disposition": "not_found"}
+
+
 def _entity_reserve_human(
     current: dict[str, object],
     data: Mapping[str, object],
@@ -3057,7 +3856,7 @@ def _entity_close_human(
 
 
 def _advance_cursor(
-    current: DurableOrchestrationInputV1,
+    current: DurableOrchestrationInputV1 | DurableOrchestrationInputV2,
     reference: ContentRefV1,
     *,
     model_steps: int,
@@ -3066,7 +3865,7 @@ def _advance_cursor(
     human_waits: int = 0,
     parked_seconds: int = 0,
     external_content_bytes: int = 0,
-) -> DurableOrchestrationInputV1:
+) -> DurableOrchestrationInputV1 | DurableOrchestrationInputV2:
     return current.model_copy(
         update={
             "checkpoints_in_generation": current.checkpoints_in_generation + 1,
@@ -3085,7 +3884,7 @@ def _advance_cursor(
 
 
 def _orchestration_budget_error(
-    current: DurableOrchestrationInputV1,
+    current: DurableOrchestrationInputV1 | DurableOrchestrationInputV2,
     context: df.DurableOrchestrationContext,
 ) -> str | None:
     if current.completed_model_steps >= current.identity.budget.max_model_steps:
@@ -3115,7 +3914,32 @@ def _orchestration_budget_error(
     return None
 
 
-def _plan_from_document(document: DurableLoopPlanDocumentV1) -> DurableLoopPlan:
+async def _load_run_document(
+    content: DurableContentStore,
+    reference: ContentRefV1,
+) -> DurableRunDocumentV1 | DurableRunDocumentV2:
+    payload = await content.get_bytes(reference)
+    decoded = json.loads(payload)
+    if not isinstance(decoded, Mapping):
+        raise ValueError("run document must be an object")
+    model = (
+        DurableRunDocumentV2
+        if decoded.get("schema_version") == "2"
+        else DurableRunDocumentV1
+    )
+    return cast(
+        DurableRunDocumentV1 | DurableRunDocumentV2,
+        _protocol.parse_durable_loop_document(
+            payload,
+            model,
+            maximum_bytes=reference.byte_length,
+        ),
+    )
+
+
+def _plan_from_document(
+    document: DurableLoopPlanDocumentV1 | DurableLoopPlanDocumentV2,
+) -> DurableLoopPlan:
     return DurableLoopPlan(
         instructions=document.instructions,
         catalog=document.catalog,
@@ -3132,7 +3956,7 @@ def _plan_from_document(document: DurableLoopPlanDocumentV1) -> DurableLoopPlan:
 
 async def _persist_model_error(
     runtime: DurableLoopActivityRuntime,
-    document: DurableRunDocumentV1,
+    document: DurableRunDocumentV1 | DurableRunDocumentV2,
     error: ErrorEnvelopeV1,
     *,
     extra_written_bytes: int = 0,
@@ -3162,7 +3986,7 @@ async def _persist_model_error(
 
 async def _persist_model_decision(
     runtime: DurableLoopActivityRuntime,
-    document: DurableRunDocumentV1,
+    document: DurableRunDocumentV1 | DurableRunDocumentV2,
     decision: ModelDecisionEnvelopeV1,
     *,
     extra_written_bytes: int = 0,
@@ -3280,7 +4104,7 @@ async def _persist_model_decision(
 
 
 def _validate_decision(
-    checkpoint: CheckpointStateV1,
+    checkpoint: CheckpointStateV1 | CheckpointStateV2,
     decision: ModelDecisionEnvelopeV1,
 ) -> None:
     if (
@@ -3297,9 +4121,9 @@ def _validate_decision(
 
 
 def _checkpoint_with_usage(
-    checkpoint: CheckpointStateV1,
+    checkpoint: CheckpointStateV1 | CheckpointStateV2,
     usage: Any,
-) -> CheckpointStateV1:
+) -> CheckpointStateV1 | CheckpointStateV2:
     return checkpoint.model_copy(
         update={
             "cost_microunits": (
@@ -3315,7 +4139,7 @@ def _checkpoint_with_usage(
 
 
 def _append_pending_assistant(
-    document: DurableRunDocumentV1,
+    document: DurableRunDocumentV1 | DurableRunDocumentV2,
 ) -> WorkingContextV1:
     decision = document.pending_decision
     if decision is None:
@@ -3379,7 +4203,11 @@ def _timed_out_human_result(request: HumanInputRequestV1) -> ToolResultV1:
     )
 
 
-def _protocol_error_result(request: ToolRequestV1) -> ToolResultV1:
+def _protocol_error_result(
+    request: ToolRequestV1,
+    *,
+    code: str = "invalid_clarification_batch",
+) -> ToolResultV1:
     return ToolResultV1(
         run_id=request.run_id,
         step_index=request.step_index,
@@ -3391,7 +4219,7 @@ def _protocol_error_result(request: ToolRequestV1) -> ToolResultV1:
         status=ToolResultStatus.FAILED,
         elapsed_ms=0.0,
         error=ErrorEnvelopeV1(
-            code="invalid_clarification_batch",
+            code=code,
             classification="protocol",
             retryable=False,
             phase="model_step",
@@ -3453,6 +4281,114 @@ def _tool_result_size(result: ToolResultV1) -> int:
     if result.result_ref is not None:
         return result.result_ref.byte_length
     return len(canonical_json_bytes(result.value))
+
+
+def _runtime_skill_tool_result(
+    request: ToolRequestV1,
+    *,
+    value: object | None = None,
+    error_code: str | None = None,
+) -> ToolResultV1:
+    if (value is None) == (error_code is None):
+        raise ValueError("runtime skill result requires exactly one outcome")
+    return ToolResultV1(
+        run_id=request.run_id,
+        step_index=request.step_index,
+        call_ordinal=request.call_ordinal,
+        provider_call_id=request.provider_call_id,
+        call_key=request.call_key,
+        request_hash=request.request_hash,
+        tool_name=request.tool_name,
+        status=(
+            ToolResultStatus.SUCCEEDED
+            if error_code is None
+            else ToolResultStatus.FAILED
+        ),
+        value=value,
+        elapsed_ms=0.0,
+        error=(
+            None
+            if error_code is None
+            else ErrorEnvelopeV1(
+                code=error_code,
+                classification="skill",
+                retryable=False,
+                phase="skill_operation",
+                step_index=request.step_index,
+                call_key=request.call_key,
+            )
+        ),
+    )
+
+
+def _runtime_control_batch_requires_repair(
+    tool_names: Sequence[str],
+    *,
+    skills_enabled: bool,
+) -> bool:
+    if not skills_enabled:
+        return False
+    runtime_names = {
+        REQUEST_HUMAN_INPUT_TOOL_NAME,
+        SEARCH_SKILLS_TOOL_NAME,
+        LOAD_SKILL_TOOL_NAME,
+    }
+    return len(tool_names) != 1 and any(name in runtime_names for name in tool_names)
+
+
+async def _persist_runtime_skill_failure(
+    content: DurableContentStore,
+    request: ToolRequestV1,
+    error_code: str,
+) -> dict[str, object]:
+    result = _runtime_skill_tool_result(request, error_code=error_code)
+    result_ref = await put_protocol_model(
+        content,
+        kind="tool-result",
+        model=result,
+    )
+    return {
+        "activity_result": None,
+        "result_ref": ToolResultRefV1(
+            result_ref=result_ref,
+            call_ordinal=request.call_ordinal,
+            call_key=request.call_key,
+            request_hash=request.request_hash,
+            tool_name=request.tool_name,
+            status=result.status,
+            written_bytes=result_ref.byte_length,
+        ).model_dump(mode="json"),
+        "written_bytes": result_ref.byte_length,
+    }
+
+
+def _skill_search_arguments(
+    arguments: Mapping[str, object],
+) -> tuple[str | None, str | None]:
+    if set(arguments).difference({"query", "cursor"}):
+        raise DurableSkillOperationError("invalid_skill_arguments", terminal=False)
+    query = arguments.get("query")
+    cursor = arguments.get("cursor")
+    if query is not None and (not isinstance(query, str) or len(query) > 512):
+        raise DurableSkillOperationError("invalid_skill_arguments", terminal=False)
+    if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 2048):
+        raise DurableSkillOperationError("invalid_skill_arguments", terminal=False)
+    return query, cursor
+
+
+def _skill_load_arguments(arguments: Mapping[str, object]) -> tuple[str, str]:
+    if set(arguments) != {"skill_id", "version"}:
+        raise DurableSkillOperationError("invalid_skill_arguments", terminal=False)
+    skill_id = arguments.get("skill_id")
+    version = arguments.get("version")
+    if (
+        not isinstance(skill_id, str)
+        or not 1 <= len(skill_id) <= 128
+        or not isinstance(version, str)
+        or not 1 <= len(version) <= 128
+    ):
+        raise DurableSkillOperationError("invalid_skill_arguments", terminal=False)
+    return skill_id, version
 
 
 async def _deliver_event_with_durable_client(

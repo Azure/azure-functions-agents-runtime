@@ -26,6 +26,15 @@ from .durable_loop_protocol import (
 )
 
 REQUEST_HUMAN_INPUT_TOOL_NAME = "request_human_input"
+SEARCH_SKILLS_TOOL_NAME = "search_skills"
+LOAD_SKILL_TOOL_NAME = "load_skill"
+RUNTIME_CONTROL_TOOL_NAMES = frozenset(
+    {
+        REQUEST_HUMAN_INPUT_TOOL_NAME,
+        SEARCH_SKILLS_TOOL_NAME,
+        LOAD_SKILL_TOOL_NAME,
+    }
+)
 
 type ToolHandler = Callable[
     [Mapping[str, object], str],
@@ -70,6 +79,7 @@ class DurableToolCatalogPort(Protocol):
         *,
         policy_hash: str,
         sandbox_profile: SandboxExecutionProfile,
+        include_human_input: bool = True,
     ) -> DurableToolCatalogSnapshot:
         """Freeze the exact remote/local inventory for one run."""
 
@@ -132,8 +142,8 @@ class DurableToolRegistry:
         handler: ToolHandler,
     ) -> None:
         """Register one handler after reserved-name and collision checks."""
-        if descriptor.name == REQUEST_HUMAN_INPUT_TOOL_NAME:
-            raise ValueError("request_human_input is reserved by the runtime")
+        if descriptor.name in RUNTIME_CONTROL_TOOL_NAMES:
+            raise ValueError(f"{descriptor.name} is reserved by the runtime")
         if descriptor.provenance is ToolProvenance.RUNTIME:
             raise ValueError("customer tools cannot claim runtime provenance")
         if descriptor.name in self._tools:
@@ -174,6 +184,7 @@ class RegistryToolDispatcher:
         *,
         policy_hash: str,
         sandbox_profile: SandboxExecutionProfile,
+        include_human_input: bool = True,
     ) -> DurableToolCatalogSnapshot:
         """Freeze deterministic test tools without external discovery."""
         del sandbox_profile
@@ -187,7 +198,7 @@ class RegistryToolDispatcher:
         catalog = FrozenToolCatalogV1.create(
             tools=(
                 *(entry.descriptor for entry in self._tools.values()),
-                human_input_tool_descriptor(),
+                *((human_input_tool_descriptor(),) if include_human_input else ()),
             ),
             policy_hash=policy_hash,
             package_hash=package_hash,
@@ -386,6 +397,52 @@ def human_input_tool_descriptor() -> FrozenToolDescriptorV1:
                 "response_schema": {"type": ["object", "null"]},
             },
             "required": ["question", "choices", "allow_free_text"],
+            "type": "object",
+        },
+        provenance=ToolProvenance.RUNTIME,
+        behavior=ToolBehavior.READ_ONLY,
+        parallel_safe=False,
+    )
+
+
+def search_skills_tool_descriptor() -> FrozenToolDescriptorV1:
+    """Return the runtime-owned deterministic skill-search schema."""
+    return FrozenToolDescriptorV1(
+        name=SEARCH_SKILLS_TOOL_NAME,
+        description=(
+            "Search the frozen instruction-skill catalog. Use the returned cursor "
+            "unchanged to request another page. This must be the only tool call."
+        ),
+        parameters={
+            "additionalProperties": False,
+            "properties": {
+                "cursor": {"maxLength": 2048, "type": ["string", "null"]},
+                "query": {"maxLength": 512, "type": ["string", "null"]},
+            },
+            "required": [],
+            "type": "object",
+        },
+        provenance=ToolProvenance.RUNTIME,
+        behavior=ToolBehavior.READ_ONLY,
+        parallel_safe=False,
+    )
+
+
+def load_skill_tool_descriptor() -> FrozenToolDescriptorV1:
+    """Return the runtime-owned exact-version skill-load schema."""
+    return FrozenToolDescriptorV1(
+        name=LOAD_SKILL_TOOL_NAME,
+        description=(
+            "Load one exact instruction-only skill from the frozen catalog for "
+            "subsequent model steps. This must be the only tool call."
+        ),
+        parameters={
+            "additionalProperties": False,
+            "properties": {
+                "skill_id": {"maxLength": 128, "minLength": 1, "type": "string"},
+                "version": {"maxLength": 128, "minLength": 1, "type": "string"},
+            },
+            "required": ["skill_id", "version"],
             "type": "object",
         },
         provenance=ToolProvenance.RUNTIME,

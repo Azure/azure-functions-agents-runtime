@@ -56,10 +56,16 @@ from .durable_loop_http import (
 )
 from .durable_loop_protocol import DurableLoopRunStatus, SandboxExecutionProfile
 from .durable_loop_registration import _normalize_durable_client_binding_annotation
+from .durable_run_observations import (
+    DurableRunObservationError,
+    DurableRunObservationJournal,
+    reconcile_durable_run_terminal,
+    replay_durable_chat_adapter,
+)
 
 _SHELL_ROUTE = "experimental/durable-chat"
 _CONFIG_ROUTE = f"{_SHELL_ROUTE}/config"
-_EVENTS_ROUTE = f"{_ROUTE_BASE}/{{run_id}}/events"
+_EVENTS_ROUTE = f"{_SHELL_ROUTE}/{{run_id}}/events"
 _DIAGNOSTICS_ROUTE = f"{_ROUTE_BASE}/{{run_id}}/diagnostics"
 _EVENT_LEASE_SECONDS = 210.0
 _EVENT_HEARTBEAT_SECONDS = 15.0
@@ -136,7 +142,7 @@ def register_durable_chat_http_routes(  # noqa: PLR0915
         )
         return _chat_model_response(bootstrap)
 
-    async def get_events(
+    async def get_events(  # noqa: PLR0912
         req: Request,
         client: df.DurableOrchestrationClient,
     ) -> Response:
@@ -146,6 +152,85 @@ def register_durable_chat_http_routes(  # noqa: PLR0915
         status, durable_input = authorized
         run_id = status.instance_id
         journal = get_durable_chat_journal()
+        generic_journal = (
+            journal if isinstance(journal, DurableRunObservationJournal) else None
+        )
+        generic_initialization = None
+        if generic_journal is not None:
+            try:
+                generic_initialization = (
+                    await generic_journal.load_observation_initialization(run_id=run_id)
+                )
+            except DurableRunObservationError:
+                return _chat_json_response(
+                    {"error": "chat_observations_unavailable"},
+                    status_code=503,
+                )
+        if generic_initialization is not None:
+            identity = getattr(durable_input, "identity", None)
+            if (
+                getattr(identity, "run_id", None) != generic_initialization.run_id
+                or getattr(identity, "session_id", None)
+                != generic_initialization.session_id
+                or getattr(identity, "owner_hash", None)
+                != generic_initialization.owner_hash
+            ):
+                logger.warning("durable-chat V2 initialization did not match authorized run")
+                return _chat_json_response(
+                    {"error": "chat_initialization_unavailable"},
+                    status_code=503,
+                )
+            if datetime.now(UTC) >= generic_initialization.events_expires_at.astimezone(
+                UTC
+            ):
+                return _chat_json_response(
+                    {"error": "chat_observations_expired"},
+                    status_code=410,
+                )
+            try:
+                after_sequence = _after_sequence(req)
+                await _reconcile_generic_terminal_status(
+                    journal=generic_journal,
+                    run_id=run_id,
+                    status=status,
+                )
+                initial_page = await replay_durable_chat_adapter(
+                    run_id=run_id,
+                    after_sequence=after_sequence,
+                    journal=generic_journal,
+                )
+            except ValueError:
+                return _chat_json_response(
+                    {"error": "invalid_event_cursor"},
+                    status_code=400,
+                )
+            except DurableRunObservationError:
+                return _chat_json_response(
+                    {"error": "chat_observations_unavailable"},
+                    status_code=503,
+                )
+            if initial_page.disposition is DurableChatReplayDisposition.CURSOR_AHEAD:
+                return _chat_json_response(
+                    {
+                        "error": "event_cursor_ahead",
+                        "through_sequence": initial_page.through_sequence,
+                    },
+                    status_code=409,
+                )
+            return StreamingResponse(
+                _stream_generic_chat_events(
+                    client=client,
+                    journal=generic_journal,
+                    initial_page=initial_page,
+                    run_id=run_id,
+                ),
+                media_type="text/event-stream",
+                headers={
+                    **_DATA_HEADERS,
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
         initialization = await _load_initialization(journal, run_id)
         if isinstance(initialization, Response):
             return initialization
@@ -487,6 +572,95 @@ def _query_value(req: Request, name: str) -> str | None:
         return None
     value = values.get(name)
     return value if isinstance(value, str) else None
+
+
+async def _reconcile_generic_terminal_status(
+    *,
+    journal: Any,
+    run_id: str,
+    status: Any,
+) -> None:
+    projection = _status_projection(status)
+    raw_status = projection.get("status")
+    if not isinstance(raw_status, str):
+        return
+    try:
+        run_status = DurableLoopRunStatus(raw_status)
+    except ValueError:
+        return
+    if run_status not in {
+        DurableLoopRunStatus.COMPLETED,
+        DurableLoopRunStatus.FAILED,
+        DurableLoopRunStatus.CANCELLED,
+    }:
+        return
+    output = status.output if isinstance(status.output, Mapping) else {}
+    result_available = (
+        run_status is DurableLoopRunStatus.COMPLETED
+        and output.get("status") == DurableLoopRunStatus.COMPLETED.value
+    )
+    if run_status is DurableLoopRunStatus.COMPLETED and not result_available:
+        return
+    await reconcile_durable_run_terminal(
+        run_id=run_id,
+        status=run_status,
+        result_available=result_available,
+        error_code=(
+            _safe_error_code(projection.get("error"))
+            if run_status is not DurableLoopRunStatus.COMPLETED
+            else None
+        ),
+        possibly_committed=projection.get("possibly_committed") is True,
+        journal=journal,
+    )
+
+
+async def _stream_generic_chat_events(
+    *,
+    client: Any,
+    journal: Any,
+    initial_page: DurableChatReplayPageV1,
+    run_id: str,
+) -> AsyncIterator[str]:
+    page = initial_page
+    cursor = page.requested_after_sequence
+    deadline = time.monotonic() + _EVENT_LEASE_SECONDS
+    next_heartbeat = time.monotonic() + _EVENT_HEARTBEAT_SECONDS
+    while True:
+        emitted = False
+        for frame in _render_replay_page(page):
+            emitted = True
+            if isinstance(frame, DurableChatEventFrameV1):
+                cursor = frame.sequence
+            else:
+                cursor = frame.projection.through_sequence
+            yield _render_frame(frame)
+        if _is_terminal_status_page(page):
+            return
+        now = time.monotonic()
+        if now >= deadline:
+            yield ": lease-ended\n\n"
+            return
+        if not emitted and now >= next_heartbeat:
+            next_heartbeat = now + _EVENT_HEARTBEAT_SECONDS
+            yield ": heartbeat\n\n"
+        await asyncio.sleep(min(_EVENT_POLL_SECONDS, max(0.001, deadline - now)))
+        try:
+            status = await client.get_status(run_id, show_input=False)
+            if status is not None:
+                await _reconcile_generic_terminal_status(
+                    journal=journal,
+                    run_id=run_id,
+                    status=status,
+                )
+            page = await replay_durable_chat_adapter(
+                run_id=run_id,
+                after_sequence=cursor,
+                journal=journal,
+            )
+        except (DurableRunObservationError, ValueError):
+            yield ": observation-unavailable\n\n"
+            return
 
 
 async def _stream_events(

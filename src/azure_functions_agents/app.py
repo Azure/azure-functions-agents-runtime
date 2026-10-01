@@ -9,9 +9,9 @@ import math
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -72,6 +72,9 @@ from .transport.transport_models import (
 from .workflows import build_workflow_integration
 
 if TYPE_CHECKING:
+    from .experimental.durable_trigger_admission import (
+        DurableTriggerAdmissionRuntime,
+    )
     from .registration.capabilities import AgentCapabilities
     from .registration.catalog import AgentCatalog
     from .workflows.workflow_schema import WorkflowPlanPolicy
@@ -663,8 +666,11 @@ def _create_registration_app(
     from .experimental.durable_loop_config import DurableLoopSettings
 
     durable_loop_settings = DurableLoopSettings.from_environment()
-    app: func.FunctionApp = (
-        df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
+    app = (
+        cast(
+            func.FunctionApp,
+            df.DFApp(http_auth_level=func.AuthLevel.FUNCTION),
+        )
         if workflows_requested or durable_loop_settings is not None
         else func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
     )
@@ -674,7 +680,48 @@ def _create_registration_app(
         )
 
         register_durable_loop_blueprint(app)
+        _register_private_durable_retention_cleanup(app)
     return app, durable_loop_settings
+
+
+def _register_private_durable_retention_cleanup(app: func.FunctionApp) -> None:
+    """Register bounded exact-bucket retention cleanup and history purge."""
+    from .experimental.durable_loop_registration import (
+        get_durable_loop_activity_runtime,
+    )
+
+    async def cleanup_durable_retention(
+        timer: func.TimerRequest,
+        client: df.DurableOrchestrationClient,
+    ) -> None:
+        del timer
+        runtime = get_durable_loop_activity_runtime()
+        if runtime.retention is None:
+            raise RuntimeError("durable retention runtime is unavailable")
+        now = datetime.now(UTC)
+        for bucket in await runtime.retention.due_cleanup_buckets(now=now):
+            for run_id in await runtime.retention.purgeable_run_ids(
+                bucket,
+                now=now,
+            ):
+                await client.purge_instance_history(run_id)
+            await runtime.retention.cleanup_bucket(bucket, now=now)
+            await runtime.retention.advance_cleanup_cursor(bucket, now=now)
+
+    cleanup_durable_retention.__name__ = (
+        "azure_functions_agents_durable_retention_cleanup"
+    )
+    decorated = app.durable_client_input(client_name="client")(
+        cleanup_durable_retention
+    )
+    decorated = app.timer_trigger(
+        schedule="0 15 * * * *",
+        arg_name="timer",
+        use_monitor=True,
+    )(decorated)
+    app.function_name(
+        name="azure_functions_agents_durable_retention_cleanup"
+    )(decorated)
 
 
 def _register_private_durable_loop_routes(
@@ -750,6 +797,39 @@ def _register_private_durable_loop_reaper(
     )(reap_durable_loop_tool_sandboxes)
 
 
+def _register_private_durable_runtime(
+    app: func.FunctionApp,
+    durable_settings: object | None,
+    resolved_agents: tuple[ResolvedAgent, ...],
+    *,
+    app_root: Path,
+) -> DurableTriggerAdmissionRuntime | None:
+    _register_private_durable_loop_routes(
+        app,
+        resolved_agents,
+        durable_settings,
+        app_root=app_root,
+    )
+    if durable_settings is None:
+        return None
+    from .experimental.durable_loop_config import DurableLoopSettings
+    from .experimental.durable_trigger_admission import (
+        register_durable_trigger_admission_runtime,
+    )
+
+    if not isinstance(durable_settings, DurableLoopSettings):
+        raise TypeError("durable trigger admission settings have an invalid type")
+    return register_durable_trigger_admission_runtime(
+        app,
+        admission_deadline_seconds=(
+            durable_settings.trigger_admission_deadline_seconds
+        ),
+        receipt_retention_seconds=durable_settings.receipt_retention_seconds,
+        settings=durable_settings,
+        resolved_agents={resolved.slug: resolved for resolved in resolved_agents},
+    )
+
+
 def _enabled_builtin_endpoint_names(builtin_endpoints: Any) -> list[str]:
     names: list[str] = []
     if builtin_endpoints.debug_chat_ui:
@@ -785,6 +865,7 @@ def _register_resolved_agent(
     resolved: ResolvedAgent,
     *,
     catalog: AgentCatalog,
+    durable_trigger_admission: DurableTriggerAdmissionRuntime | None,
     session_runtime: SessionRuntimeBinding | None,
     terminal_bindings: Mapping[str, AgentBinding],
     skill_name_by_path: dict[str, str],
@@ -818,6 +899,7 @@ def _register_resolved_agent(
             capabilities,
             function_name=resolved.slug,
             catalog=catalog,
+            durable_trigger_admission=durable_trigger_admission,
             session_runtime=session_runtime,
             workflows_enabled=workflow_setup.enabled,
             workflow_system_addendum=workflow_setup.trigger_system_addendum,
@@ -905,10 +987,10 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     catalog = aca_composition.catalog
     terminal_bindings = aca_composition.bindings
     session_runtime = aca_composition.session_runtime
-    _register_private_durable_loop_routes(
+    durable_trigger_admission = _register_private_durable_runtime(
         app,
-        resolved_agents,
         durable_loop_settings,
+        resolved_agents,
         app_root=resolved_root,
     )
 
@@ -919,6 +1001,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 app,
                 resolved,
                 catalog=catalog,
+                durable_trigger_admission=durable_trigger_admission,
                 session_runtime=session_runtime,
                 terminal_bindings=terminal_bindings,
                 skill_name_by_path=skill_name_by_path,

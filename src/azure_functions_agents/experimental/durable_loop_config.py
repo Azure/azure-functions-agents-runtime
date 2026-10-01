@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
+from uuid import UUID
 
 from ..config.schema import GlobalConfig, ResolvedAgent
 
@@ -115,6 +118,36 @@ DURABLE_LOOP_RETAINED_SANDBOX_AUTO_DELETE_SECONDS_ENV = (
 DURABLE_LOOP_SANDBOX_REAPER_AGE_SECONDS_ENV = (
     "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_SANDBOX_REAPER_AGE_SECONDS"
 )
+DURABLE_LOOP_SKILL_PROVIDER_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_SKILL_PROVIDER"
+)
+DURABLE_LOOP_SKILL_BLOB_URI_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_SKILL_BLOB_URI"
+)
+DURABLE_LOOP_SKILL_BLOB_CLIENT_ID_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_SKILL_BLOB_CLIENT_ID"
+)
+DURABLE_LOOP_EVENT_RESULT_RETENTION_SECONDS_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_EVENT_RESULT_RETENTION_SECONDS"
+)
+DURABLE_LOOP_RECEIPT_RETENTION_SECONDS_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_RECEIPT_RETENTION_SECONDS"
+)
+DURABLE_LOOP_SKILL_GRACE_SECONDS_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_SKILL_GRACE_SECONDS"
+)
+DURABLE_LOOP_HUMAN_CONTENT_RETENTION_SECONDS_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_HUMAN_CONTENT_RETENTION_SECONDS"
+)
+DURABLE_LOOP_SESSION_RETENTION_SECONDS_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_SESSION_RETENTION_SECONDS"
+)
+DURABLE_LOOP_TOMBSTONE_RETENTION_SECONDS_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_TOMBSTONE_RETENTION_SECONDS"
+)
+DURABLE_LOOP_TRIGGER_ADMISSION_DEADLINE_SECONDS_ENV = (
+    "AZURE_FUNCTIONS_AGENTS_EXPERIMENTAL_DURABLE_AGENT_LOOP_TRIGGER_ADMISSION_DEADLINE_SECONDS"
+)
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
@@ -140,6 +173,15 @@ _DEFAULT_CONTINUE_AS_NEW_CHECKPOINTS = 20
 _DEFAULT_MAX_APP_OWNED_SANDBOXES = 10
 _DEFAULT_RETAINED_SANDBOX_AUTO_DELETE_SECONDS = 24 * 60 * 60
 _DEFAULT_SANDBOX_REAPER_AGE_SECONDS = 10 * 60
+_DEFAULT_EVENT_RESULT_RETENTION_SECONDS = 30 * 24 * 60 * 60
+_DEFAULT_RECEIPT_RETENTION_SECONDS = 90 * 24 * 60 * 60
+_DEFAULT_SKILL_GRACE_SECONDS = 30 * 24 * 60 * 60
+_DEFAULT_HUMAN_CONTENT_RETENTION_SECONDS = 30 * 24 * 60 * 60
+_DEFAULT_SESSION_RETENTION_SECONDS = 30 * 24 * 60 * 60
+_DEFAULT_TOMBSTONE_RETENTION_SECONDS = 90 * 24 * 60 * 60
+_DEFAULT_TRIGGER_ADMISSION_DEADLINE_SECONDS = 7 * 24 * 60 * 60
+_MAX_RETENTION_SECONDS = 730 * 24 * 60 * 60
+_SKILL_PROVIDER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
 class DurableLoopConfigurationError(RuntimeError):
@@ -180,6 +222,16 @@ class DurableLoopSettings:
     )
     sandbox_reaper_age_seconds: int = _DEFAULT_SANDBOX_REAPER_AGE_SECONDS
     mixed_batch_repair_steps: int = 1
+    skill_provider: str = "filesystem"
+    skill_blob_uri: str | None = None
+    skill_blob_client_id: str | None = None
+    event_result_retention_seconds: int = _DEFAULT_EVENT_RESULT_RETENTION_SECONDS
+    receipt_retention_seconds: int = _DEFAULT_RECEIPT_RETENTION_SECONDS
+    skill_grace_seconds: int = _DEFAULT_SKILL_GRACE_SECONDS
+    human_content_retention_seconds: int = _DEFAULT_HUMAN_CONTENT_RETENTION_SECONDS
+    session_retention_seconds: int = _DEFAULT_SESSION_RETENTION_SECONDS
+    tombstone_retention_seconds: int = _DEFAULT_TOMBSTONE_RETENTION_SECONDS
+    trigger_admission_deadline_seconds: int = _DEFAULT_TRIGGER_ADMISSION_DEADLINE_SECONDS
 
     @classmethod
     def from_environment(
@@ -374,6 +426,64 @@ class DurableLoopSettings:
                 minimum=60,
                 maximum=24 * 60 * 60,
             ),
+            skill_provider=_skill_provider(source),
+            skill_blob_uri=_optional_nullable_text(
+                source,
+                DURABLE_LOOP_SKILL_BLOB_URI_ENV,
+            ),
+            skill_blob_client_id=_optional_nullable_text(
+                source,
+                DURABLE_LOOP_SKILL_BLOB_CLIENT_ID_ENV,
+            ),
+            event_result_retention_seconds=_bounded_integer(
+                source,
+                DURABLE_LOOP_EVENT_RESULT_RETENTION_SECONDS_ENV,
+                _DEFAULT_EVENT_RESULT_RETENTION_SECONDS,
+                minimum=60 * 60,
+                maximum=365 * 24 * 60 * 60,
+            ),
+            receipt_retention_seconds=_bounded_integer(
+                source,
+                DURABLE_LOOP_RECEIPT_RETENTION_SECONDS_ENV,
+                _DEFAULT_RECEIPT_RETENTION_SECONDS,
+                minimum=60 * 60,
+                maximum=_MAX_RETENTION_SECONDS,
+            ),
+            skill_grace_seconds=_bounded_integer(
+                source,
+                DURABLE_LOOP_SKILL_GRACE_SECONDS_ENV,
+                _DEFAULT_SKILL_GRACE_SECONDS,
+                minimum=24 * 60 * 60,
+                maximum=365 * 24 * 60 * 60,
+            ),
+            human_content_retention_seconds=_bounded_integer(
+                source,
+                DURABLE_LOOP_HUMAN_CONTENT_RETENTION_SECONDS_ENV,
+                _DEFAULT_HUMAN_CONTENT_RETENTION_SECONDS,
+                minimum=0,
+                maximum=365 * 24 * 60 * 60,
+            ),
+            session_retention_seconds=_bounded_integer(
+                source,
+                DURABLE_LOOP_SESSION_RETENTION_SECONDS_ENV,
+                _DEFAULT_SESSION_RETENTION_SECONDS,
+                minimum=24 * 60 * 60,
+                maximum=365 * 24 * 60 * 60,
+            ),
+            tombstone_retention_seconds=_bounded_integer(
+                source,
+                DURABLE_LOOP_TOMBSTONE_RETENTION_SECONDS_ENV,
+                _DEFAULT_TOMBSTONE_RETENTION_SECONDS,
+                minimum=60 * 60,
+                maximum=_MAX_RETENTION_SECONDS,
+            ),
+            trigger_admission_deadline_seconds=_bounded_integer(
+                source,
+                DURABLE_LOOP_TRIGGER_ADMISSION_DEADLINE_SECONDS_ENV,
+                _DEFAULT_TRIGGER_ADMISSION_DEADLINE_SECONDS,
+                minimum=5 * 60,
+                maximum=30 * 24 * 60 * 60,
+            ),
         )
         settings.validate()
         return settings
@@ -414,6 +524,22 @@ class DurableLoopSettings:
                 f"{DURABLE_LOOP_INPUT_COST_RATE_ENV} and "
                 f"{DURABLE_LOOP_OUTPUT_COST_RATE_ENV}."
             )
+        if self.receipt_retention_seconds < self.event_result_retention_seconds:
+            raise DurableLoopConfigurationError(
+                f"{DURABLE_LOOP_RECEIPT_RETENTION_SECONDS_ENV} must not be less than "
+                f"{DURABLE_LOOP_EVENT_RESULT_RETENTION_SECONDS_ENV}."
+            )
+        if self.human_content_retention_seconds > self.event_result_retention_seconds:
+            raise DurableLoopConfigurationError(
+                f"{DURABLE_LOOP_HUMAN_CONTENT_RETENTION_SECONDS_ENV} must not exceed "
+                f"{DURABLE_LOOP_EVENT_RESULT_RETENTION_SECONDS_ENV}."
+            )
+        if self.tombstone_retention_seconds < self.receipt_retention_seconds:
+            raise DurableLoopConfigurationError(
+                f"{DURABLE_LOOP_TOMBSTONE_RETENTION_SECONDS_ENV} must not be less than "
+                f"{DURABLE_LOOP_RECEIPT_RETENTION_SECONDS_ENV}."
+            )
+        _validate_skill_provider_configuration(self)
 
 
 def durable_loop_enabled(environment: Mapping[str, str] | None = None) -> bool:
@@ -468,6 +594,63 @@ def _optional_text(environment: Mapping[str, str], name: str) -> str:
     if not isinstance(value, str):
         raise DurableLoopConfigurationError(f"{name} must be a string.")
     return value.strip()
+
+
+def _optional_nullable_text(
+    environment: Mapping[str, str],
+    name: str,
+) -> str | None:
+    value = _optional_text(environment, name)
+    return value or None
+
+
+def _skill_provider(environment: Mapping[str, str]) -> str:
+    provider = _optional_text(environment, DURABLE_LOOP_SKILL_PROVIDER_ENV)
+    provider = provider or "filesystem"
+    if _SKILL_PROVIDER_PATTERN.fullmatch(provider) is None:
+        raise DurableLoopConfigurationError(
+            f"{DURABLE_LOOP_SKILL_PROVIDER_ENV} must be a valid provider ID."
+        )
+    return provider
+
+
+def _validate_skill_provider_configuration(settings: DurableLoopSettings) -> None:
+    uri = settings.skill_blob_uri
+    client_id = settings.skill_blob_client_id
+    if settings.skill_provider != "blob":
+        if uri is not None or client_id is not None:
+            raise DurableLoopConfigurationError(
+                f"{DURABLE_LOOP_SKILL_BLOB_URI_ENV} and "
+                f"{DURABLE_LOOP_SKILL_BLOB_CLIENT_ID_ENV} require the blob provider."
+            )
+        return
+    if uri is None:
+        raise DurableLoopConfigurationError(
+            f"{DURABLE_LOOP_SKILL_BLOB_URI_ENV} is required for the blob provider."
+        )
+    parsed = urlsplit(uri)
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path.endswith("/")
+        or len(path_parts) > 1
+    ):
+        raise DurableLoopConfigurationError(
+            f"{DURABLE_LOOP_SKILL_BLOB_URI_ENV} must be a credential-free HTTPS "
+            "service or container origin."
+        )
+    if client_id is not None:
+        try:
+            UUID(client_id)
+        except ValueError as exc:
+            raise DurableLoopConfigurationError(
+                f"{DURABLE_LOOP_SKILL_BLOB_CLIENT_ID_ENV} must be a UUID."
+            ) from exc
 
 
 def _optional_bool(environment: Mapping[str, str], name: str) -> bool:
