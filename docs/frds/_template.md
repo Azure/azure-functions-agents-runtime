@@ -20,7 +20,7 @@ branch: <user>/<slug>
 
 ## 1. Summary
 
-> One paragraph: what is changing and why, in plain language.
+> One paragraph: what is changing and why, in plain language. Use short sentences, define terms on first use, and state conclusions as facts instead of narrating investigation history.
 
 ## 2. Motivation / problem
 
@@ -65,6 +65,7 @@ branch: <user>/<slug>
 
 > Append-only. Record consequential feature-contract choices and **who** made
 > them, not implementation or delivery-planning decisions.
+<!-- Never cite Decisions-log numbers in FRD prose or cross-references; describe the decision because numbers can shift. -->
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | - | -------- | ------------------ | ------ | ---------- | ---- |
