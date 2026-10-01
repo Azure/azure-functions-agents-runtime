@@ -27,13 +27,3 @@ python eng/scripts/generate_config_reference.py --check
 **Integration:**
 - **Pre-commit hook:** Configured in `.pre-commit-config.yaml`
 - **CI pipeline:** Runs in `eng/templates/jobs/ci-tests.yml`
-
-### `generate_dynamic_workflow_gifs.py`
-
-Generates the animated standard-agent-loop and Dynamic Workflow architecture
-diagrams embedded in `docs/workflows.md`.
-
-```bash
-python -m pip install Pillow
-python eng/scripts/generate_dynamic_workflow_gifs.py
-```
