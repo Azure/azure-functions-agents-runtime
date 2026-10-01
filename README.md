@@ -28,12 +28,14 @@ ACA `execute_python` adapter wiring, host-validated structured results on
 authored HTTP-trigger routes, and completed-turn native-session continuity. ACA
 catalog/session scoping is unit-qualified; real Copilot-to-ACA execution remains
 a separately gated acceptance item. It documents the pinned SDK/runtime,
-Foundry Entra setup, supported tool policy, unsupported capabilities, real
-request/tool/follow-up verification and the flag-off restart path. Ambient SDK
-shell/file/web/todo/task/human-input tools are disabled. This is not production
-activation or provider/session persistence/MCP/skills/role/streaming parity;
-existing MAF history is untouched. Configured output-token caps are not
-supported in this Copilot preview; MAF retains its output-limit controls.
+OpenAI key, Azure OpenAI key/Entra and Foundry Entra setup, supported tool
+policy, unsupported capabilities, real request/tool/follow-up verification and
+the flag-off restart path. Ambient SDK shell/file/web/todo/task/human-input
+tools are disabled. This is not production activation or session
+persistence/MCP/skills/role/streaming parity; existing MAF history is
+untouched. Configured output-token caps are not supported in this Copilot
+preview; MAF retains its output-limit controls. Custom `ClientManager`
+implementations remain MAF-only and are rejected explicitly when Copilot is on.
 
 ## Installation
 
