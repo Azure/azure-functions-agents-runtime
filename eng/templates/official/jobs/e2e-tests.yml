@@ -9,6 +9,8 @@ parameters:
 jobs:
   - job: "E2ETests"
     displayName: 'Run Azure Functions Agent Runtime E2E Tests'
+    # Secret variables are unavailable to pull requests from forks.
+    condition: and(succeeded(), ne(variables['System.PullRequest.IsFork'], 'True'))
 
     pool:
       name: ${{ parameters.PoolName }}

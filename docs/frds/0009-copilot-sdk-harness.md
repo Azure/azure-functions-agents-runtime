@@ -254,7 +254,7 @@ This amendment proposes direct-run MCP/skills compatibility. It keeps
 `github-copilot-sdk` 1.0.14, native runtime 1.0.85, and protocol 3 pinned for the
 proposed behavior. MAF remains the default; Copilot remains an app-level,
 default-off, local-only preview with no automatic fallback. Human approval in
-decisions 19-20 is limited to the same-session MCP credential lifecycle and
+decisions 23-24 is limited to the same-session MCP credential lifecycle and
 MAF-parity malformed-scope behavior described below; it does not approve the
 amendment's other unreviewed choices.
 
@@ -540,57 +540,66 @@ success-shaped response or an automatic MAF fallback. Cancellation stays
 cancellation. Already-dispatched tool effects may remain after an unsuccessful
 turn; the feature does not claim transactional or exactly-once execution.
 
-### 4.8 Evidence limits and remaining implementation decisions
+### 4.8 Preview support limits
 
-The supplied 2026-09-25 assessment used SDK revision
-`4001c1da7d832c51bad1d38619c1a082af390efb`, runtime `1.0.84-5`, protocol 3.
-It reported real local-file and Azure Blob native restores with single-writer
-rename recovery, and host-named custom delegation with overlapping same-specialist
-calls and no specialist-stream leakage. These establish feasibility, not the
-contracts above. Native `custom_agents`/`task` delegation did not match the host
-contract. A Functions-shaped Windows transport comparison favored external stdio;
-it was not an Azure Functions deployment qualification.
+The Copilot preview is local-only and requires a single Functions worker. Azure
+Functions hosting, multi-worker execution, Blob-backed native session storage,
+MAF history import, public streaming/structured-response parity, MCP, scoped
+skills, delegation, workflows, system tools, and interrupted-turn recovery are
+unsupported in this preview. Unsupported capabilities fail explicitly without
+fallback. Configured output caps are rejected because the pinned SDK/native
+runtime does not expose a provider generation cap for this path.
 
-The Blob evidence did not establish distributed ownership or concurrent-reader
-safe rename. A storage-error path allowed inference before acknowledgment.
-Compacted cold restore, Functions hosting, public streaming/structured-response
-parity, and content-safe telemetry remain unqualified. MCP and scoped skills now
-have the proposed issue #1336 mapping in section 4.3.1, but it remains
-unimplemented and unqualified. Decisions 19-20 approve only its between-turn
-same-session MCP authentication lifecycle and malformed-scope parity; the rest
-remains pending fresh architecture review and human sign-off. The assessment's
-mid-turn recovery experiments do not add those capabilities to this feature's
-scope.
+Native session storage remains SDK-owned. The host verifies completed turns
+before resume and returns explicit errors for missing, corrupt, interrupted, or
+incompatible native history; it does not reset conversations silently or claim
+transactional/exactly-once execution.
 
-The 2026-09-28 sign-off approves the original feature-level contracts, not the
-whole compatibility amendment, its version pin, or its mapping. The 2026-09-30
-approvals in decisions 19-20 cover only same-session resume with fresh static
-MCP headers between completed turns and MAF-parity handling of an empty auth
-scope. The following implementation decisions and qualification obligations
-remain open. Unsupported capabilities must continue to follow the explicit
-preview-rejection rules.
+#### 4.8.1 Architecture-approved provider contract
 
-| Implementation item | Resolution or evidence required for supported behavior |
-| --- | --- |
-| SDK/runtime and hosting contract | Select version/protocol/assets, core-versus-optional packaging and dependency coexistence with MAF, provider/Entra mappings, and provider `store=false` enforcement. Define worker lifecycle and target Functions hosting constraints, including Linux/Flex not qualified by the Windows evidence. Do not promote the evidence SHA to a production pin by assumption. |
-| Native storage protocol | Specify ownership/fencing, rename/read consistency, completion metadata, SDK storage-error barriers, and acknowledgment/quiescence. Define local-versus-deployed storage selection, complete-session retention safety, corruption/version detection, and interrupted-session behavior against concrete SDK operations. |
-| Native continuation and presentation | Establish a supported native history projection, compaction/reference preservation and cold-restore evidence, and metadata-only incompatible-history detection/rollback behavior. Rendering history must not become a second execution-state authority. |
-| Configuration compatibility | Decide the enforceable portable output limit and treatment/replacement of MAF-specific compaction configuration, preserving recursive inheritance/null behavior without claiming equivalent algorithms. |
-| Extension compatibility | Define the supported custom `ClientManager` contract and MAF `FunctionTool` conversion boundary, including authored decorator kwargs, approval semantics, unsupported hooks/options, and construction-time validation. Preserve MAF extensions with the flag off. |
-| Issue #1336 MCP/skills compatibility | **Partially approved:** use the pinned 1.0.14/1.0.85/protocol-3 public create/resume lifecycle and the same native session ID/history to replace static MCP auth headers between completed turns; preserve MAF warning/static-header behavior for an empty auth scope. The neutral descriptor, canonical skill-inventory adaptation, supported catalog/permission enforcement, role boundary, flag-off safety, real Entra/model/cloud behavior, and the rest of the mapping still require fresh architecture review and qualification. |
+The provider contract preserves MAF behavior and provider/model precedence,
+including explicit/autodetected provider selection and authored/per-agent model
+merge and `null` semantics. Storage, history, hosting, and tool behavior remain
+bounded by the feature-level contracts above until separately qualified.
+
+Decision: OpenAI, Azure OpenAI (API key or Entra), and Foundry project (Entra)
+map to the Copilot SDK's singular `ProviderConfig` using the Responses API, with
+settings and auth mode frozen at harness selection and no fallback. Copilot
+accepts only the built-in `ClientManager`. The provider mappings, credential
+handling, and `ClientManager` rules are documented once in
+[architecture.md § Bounded Copilot migration preview](../architecture.md#bounded-copilot-migration-preview).
+Azure OpenAI intentionally accepts host-only HTTPS custom domains (for example,
+APIM); its Entra scope targets public Azure cloud only, so sovereign clouds are
+unsupported.
+
+The preview remains local-only and single-worker. Configured output caps are
+rejected rather than silently dropped.
+
+#### 4.8.2 Issue #1336 MCP/skills amendment status
+
+Section 4.3.1 proposes direct-run MCP and scoped-skills compatibility, but it is
+unimplemented and unqualified; until then, MCP and scoped skills remain
+unsupported preview capabilities as stated above. Decisions 23-24 approve only
+the pinned 1.0.14/1.0.85/protocol-3 public create/resume lifecycle that replaces
+static MCP auth headers between completed turns on the same native session
+ID/history, and MAF-parity handling of an empty auth scope. The neutral
+descriptor, canonical skill-inventory adaptation, supported catalog/permission
+enforcement, role boundary, flag-off safety, real Entra/model/cloud behavior,
+and the rest of the mapping still require fresh architecture review and
+qualification.
 
 ## 5. Decisions log
 
-Dates below record the original scope approvals and proposals. Decision 12
-records human sign-off on the feature specification, without claiming that its
-remaining implementation decisions or qualification obligations are complete.
-Decisions 13-16 append the 2026-09-29 agent proposal. Decisions 17-18 record
-human direction on preserving skill behavior and autonomous MCP approvals.
-Decision 17 supersedes decision 15's proposed shared script runner and strict
-discovery correction. Decision 19 supersedes decision 13's post-create staging
-sequence and approves only the between-turn session/auth lifecycle. Decision 20
-records the later MAF-parity choice for an empty auth scope. Unrelated parts of
-decisions 13-16 remain pending fresh architecture review.
+Dates below record the original scope approvals and proposals. Decisions 13-16
+record the provider contracts added for the Copilot preview, approved by
+larohra on 2026-09-29. Decisions 17-20 append the 2026-09-29 issue #1336
+MCP/skills agent proposal. Decisions 21-22 record human direction on preserving
+skill behavior and autonomous MCP approvals. Decision 21 supersedes decision
+19's proposed shared script runner and strict discovery correction. Decision 23
+supersedes decision 17's post-create staging sequence and approves only the
+between-turn session/auth lifecycle. Decision 24 records the later MAF-parity
+choice for an empty auth scope. Unrelated parts of decisions 17-20 remain
+pending fresh architecture review.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
@@ -606,14 +615,18 @@ decisions 13-16 remain pending fresh architecture review.
 | 10 | Workflows across app restarts/deployments | Custom harness pinning/lifecycle rules / existing Durable behavior | Follow Durable replay, retry, worker lifetime, and configured deployment routing; each executing app instance supplies its own selection, with no new persisted harness pin or mismatch rejection | Human | 2026-09-28 |
 | 11 | Session startup failures | Prescribe marker sequencing / specify observable behavior | Require one active turn per agent/session, safe retry after a startup failure that did not begin a turn or damage state, and explicit errors for uncertain continuation; leave marker ordering and cleanup to implementation | Human | 2026-09-28 |
 | 12 | Feature specification sign-off | Keep In review / finalize the agreed feature contracts | Finalized after approving decision 11; section 4.8 remains an explicit record of unresolved implementation choices and required evidence, not a claim of parity or production readiness | Human (larohra) | 2026-09-28 |
-| 13 | Issue #1336 version/API seam | Upgrade or loosen versions / retain the version pin and public experimental staging | Retain `github-copilot-sdk` 1.0.14, native 1.0.85, and protocol 3; the proposed post-create refresh/start sequence is superseded by decision 19 | Agent proposal; lifecycle superseded by decision 19 | 2026-09-29 |
-| 14 | MCP authority and safety | SDK discovery/ambient permissions / host-filtered descriptors and verified catalog | Keep registration authoritative, pass only filtered neutral descriptors, verify server/tool provenance before prompt, and deny ambient, unattributed, mismatched, or policy-flagged requests. The proposed dynamic-header broker is superseded by decision 19; the remaining mapping awaits review. | Agent proposal; partially superseded, otherwise pending human sign-off | 2026-09-29 |
-| 15 | Skills and script execution | SDK-native skills or exposed tools without execution / exact public-MAF adaptation and shared runner | Historical proposal to adapt exact per-role roots into the custom-tool seam. Its shared runner and stricter discovery correction are superseded by decision 17; the remaining adaptation details await fresh review. | Agent proposal; partially superseded by decision 17 | 2026-09-29 |
-| 16 | Compatibility role boundary | Enable workflow/delegate roles opportunistically / direct supported runs only | Remove MCP/skills rejection only for direct Copilot runs; retain delegation, Dynamic Workflow, and Workflow Sub Agent rejection without bypasses, with structural non-leakage tests | Agent proposal/pending human sign-off | 2026-09-29 |
-| 17 | MAF skill behavior during Copilot compatibility work | Change shared discovery/execution behavior / preserve existing MAF behavior | Preserve current malformed-frontmatter logging-and-skip behavior in both harnesses; keep existing name validation; reuse MAF skill tools including `run_skill_script` without adding a host runner, new limits, or approval gates | Human | 2026-09-29 |
-| 18 | MCP tool approvals | Interactive approval / explicit autonomous policy | Configured MCP tools require no interactive user approval; set MAF `approval_mode="never_require"` and use a Copilot callback to approve only catalog-verified configured MCP calls, rejecting other requests. Validate behavior on the pinned SDK/native pair; its v1.0.14 source documents managed approval for Shell/Read/Edit/Domain, not MCP. | Human | 2026-09-29 |
-| 19 | Authenticated MCP continuity between turns | Mid-turn dynamic refresh or new session / detach and resume the same native session with fresh static headers | Proceed with public non-destructive disconnect/resume of the same native session ID and history after a completed turn; obtain fresh Entra headers as needed before the next create/resume. No mid-turn replacement, automatic side-effect retry, stale-token/drop-tools fallback, or claim of full MAF parity. | Human (larohra) | 2026-09-30 |
-| 20 | Empty MCP auth scope | Reject or use a Copilot-only policy / preserve MAF behavior | Preserve MAF behavior: warn and use authored static headers (or no headers) when `auth.scope` is empty; valid-scope token acquisition failures remain explicit errors. Preserve unresolved/missing client-ID fallback to the default credential and existing generated-Authorization precedence. | Human (larohra) | 2026-09-30 |
+| 13 | MAF compatibility and Copilot provider boundary | Adjust MAF or precedence / preserve MAF exactly and isolate Copilot SDK types | Keep MAF behavior and provider/model precedence byte-for-byte behaviorally unchanged, including provider selection and authored/per-agent merge/`null` semantics. Use one stable singular pure typed target and lazily construct SDK `ProviderConfig` in `_copilot_providers.py`; do not optionally import the SDK in shared/default-off code | Human (larohra) | 2026-09-29 |
+| 14 | Copilot provider mappings | Generic/fallback mapping / explicit matrix | Map OpenAI, Azure OpenAI, and Foundry exactly as section 4.8.1 specifies with Responses for all supported providers; reject unsupported providers/settings without fallback | Human (larohra) | 2026-09-29 |
+| 15 | Credential lifecycle | Persist credentials / re-supply and refresh | Freeze provider settings at harness selection, re-supply credentials on resume from that provider object, permit overlapping Entra callbacks that acquire per request through Azure Identity, and exclude credentials from persistence, session metadata, launch arguments, and logs while acknowledging native request memory | Human (larohra) | 2026-09-29 |
+| 16 | Custom `ClientManager` migration | Adapt custom managers / built-in only on Copilot | Leave MAF unchanged; on Copilot accept only the exact runtime-created built-in manager, treating an explicitly installed `MAFClientManager()` or any other replacement as MAF-only. Reject replacement before app mutation and recheck before execution. `build_chat_client`-only managers remain MAF-only; this is not a future extension hook | Human (larohra) | 2026-09-29 |
+| 17 | Issue #1336 version/API seam | Upgrade or loosen versions / retain the version pin and public experimental staging | Retain `github-copilot-sdk` 1.0.14, native 1.0.85, and protocol 3; the proposed post-create refresh/start sequence is superseded by decision 23 | Agent proposal; lifecycle superseded by decision 23 | 2026-09-29 |
+| 18 | MCP authority and safety | SDK discovery/ambient permissions / host-filtered descriptors and verified catalog | Keep registration authoritative, pass only filtered neutral descriptors, verify server/tool provenance before prompt, and deny ambient, unattributed, mismatched, or policy-flagged requests. The proposed dynamic-header broker is superseded by decision 23; the remaining mapping awaits review. | Agent proposal; partially superseded, otherwise pending human sign-off | 2026-09-29 |
+| 19 | Skills and script execution | SDK-native skills or exposed tools without execution / exact public-MAF adaptation and shared runner | Historical proposal to adapt exact per-role roots into the custom-tool seam. Its shared runner and stricter discovery correction are superseded by decision 21; the remaining adaptation details await fresh review. | Agent proposal; partially superseded by decision 21 | 2026-09-29 |
+| 20 | Compatibility role boundary | Enable workflow/delegate roles opportunistically / direct supported runs only | Remove MCP/skills rejection only for direct Copilot runs; retain delegation, Dynamic Workflow, and Workflow Sub Agent rejection without bypasses, with structural non-leakage tests | Agent proposal/pending human sign-off | 2026-09-29 |
+| 21 | MAF skill behavior during Copilot compatibility work | Change shared discovery/execution behavior / preserve existing MAF behavior | Preserve current malformed-frontmatter logging-and-skip behavior in both harnesses; keep existing name validation; reuse MAF skill tools including `run_skill_script` without adding a host runner, new limits, or approval gates | Human | 2026-09-29 |
+| 22 | MCP tool approvals | Interactive approval / explicit autonomous policy | Configured MCP tools require no interactive user approval; set MAF `approval_mode="never_require"` and use a Copilot callback to approve only catalog-verified configured MCP calls, rejecting other requests. Validate behavior on the pinned SDK/native pair; its v1.0.14 source documents managed approval for Shell/Read/Edit/Domain, not MCP. | Human | 2026-09-29 |
+| 23 | Authenticated MCP continuity between turns | Mid-turn dynamic refresh or new session / detach and resume the same native session with fresh static headers | Proceed with public non-destructive disconnect/resume of the same native session ID and history after a completed turn; obtain fresh Entra headers as needed before the next create/resume. No mid-turn replacement, automatic side-effect retry, stale-token/drop-tools fallback, or claim of full MAF parity. | Human (larohra) | 2026-09-30 |
+| 24 | Empty MCP auth scope | Reject or use a Copilot-only policy / preserve MAF behavior | Preserve MAF behavior: warn and use authored static headers (or no headers) when `auth.scope` is empty; valid-scope token acquisition failures remain explicit errors. Preserve unresolved/missing client-ID fallback to the default credential and existing generated-Authorization precedence. | Human (larohra) | 2026-09-30 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -669,27 +682,28 @@ failure, and cleanup.
 
 ## 8. Status & sign-off
 
-- **Status:** In review; the approved original feature specification describes
-  intended behavior, not delivery order or production qualification. The
-  2026-09-29 issue #1336 MCP/skills amendment is partially approved only as
-  recorded in decisions 17-20. Product implementation must not begin until the
-  revised amendment receives a fresh architecture review and the remaining
-  choices are explicitly approved. The parent migration is not complete or
-  production-qualified.
+- **Status:** In review; the approved original feature specification and the
+  provider contracts in decisions 13-16 describe intended behavior, not delivery
+  order or production qualification. The 2026-09-29 issue #1336 MCP/skills
+  amendment is partially approved only as recorded in decisions 21-24. Its
+  product implementation must not begin until the revised amendment receives a
+  fresh architecture review and the remaining choices are explicitly approved.
+  The parent migration is not complete or production-qualified.
 - **Architecture review:** The dedicated review completed on 2026-09-28 remains
   historical for the original app-bound selection, Durable lifecycle, and safe
-  startup failure behavior (decisions 8-11). The amendment in decisions 13-16
-  requires a fresh review after the decisions 19-20 lifecycle/parity
+  startup failure behavior (decisions 8-11). The amendment in decisions 17-20
+  requires a fresh review after the decisions 23-24 lifecycle/parity
   corrections.
-- **Historical human sign-off:** Laveesh Rohra (`larohra`), 2026-09-28,
-  explicitly approved the behavior-focused session contract and requested
-  sign-off on the FRD (decision 12). That sign-off does not approve this
-  2026-09-29 mapping or version pin.
-- **Amendment sign-off:** Decisions 17-18 record human direction on MAF skill
-  discovery/script execution and autonomous MCP approvals. Decision 19 records
+- **Human sign-off:** Laveesh Rohra (`larohra`), 2026-09-28, explicitly approved
+  the behavior-focused session contract and requested sign-off on the FRD
+  (decision 12). On 2026-09-29, larohra also signed off decisions 13-16 (the
+  Copilot provider contracts). Neither sign-off approves the issue #1336
+  amendment's mapping.
+- **Amendment sign-off:** Decisions 21-22 record human direction on MAF skill
+  discovery/script execution and autonomous MCP approvals. Decision 23 records
   human approval to proceed with same-session resume and fresh static MCP auth
   headers between completed turns, with no mid-turn refresh or full-MAF parity
-  claim. Decision 20 records human approval to preserve MAF handling of an
+  claim. Decision 24 records human approval to preserve MAF handling of an
   empty auth scope. These approvals do not cover the neutral descriptor, the
   supported catalog/readiness mapping, canonical skill adaptation, role
   expansion, or other unreviewed choices.
@@ -698,6 +712,6 @@ failure, and cleanup.
   MCP catalog/readiness and permission mapping, canonical skill adaptation,
   and direct-role boundary. Status must not return to `Finalized` before those
   decisions are resolved and recorded.
-- **Remaining qualification:** Separately from those approvals, section 4.8
-  retains the SDK/runtime, real Entra/model/cloud, storage, and other evidence
-  requirements. Section 6 defines acceptance, not results already achieved.
+- **Remaining qualification:** Section 4.8 records preview support limits and
+  section 4.8.2 the amendment's remaining evidence requirements. Section 6
+  defines acceptance, not results already achieved.
