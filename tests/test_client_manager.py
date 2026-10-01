@@ -12,6 +12,7 @@ from azure_functions_agents.client_manager import (
     ClientManager,
     InferenceTarget,
     MAFClientManager,
+    _resolve_builtin_inference_target,
 )
 
 
@@ -156,6 +157,69 @@ def test_maf_target_uses_one_provider_and_model_resolution_pass(
     assert target.model == "resolved-model"
     provider.assert_called_once_with()
     resolve.assert_called_once_with("requested-model", "foundry")
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [
+        (
+            {
+                "AZURE_FUNCTIONS_AGENTS_PROVIDER": "openai",
+                "AZURE_OPENAI_ENDPOINT": "https://ignored.openai.azure.com",
+            },
+            InferenceTarget("openai", "requested-model"),
+        ),
+        (
+            {"AZURE_OPENAI_ENDPOINT": "https://account.openai.azure.com"},
+            InferenceTarget("azure_openai", "requested-model"),
+        ),
+        (
+            {"FOUNDRY_PROJECT_ENDPOINT": "https://project.example"},
+            InferenceTarget("foundry", "requested-model"),
+        ),
+        (
+            {"OPENAI_API_KEY": "sentinel-not-a-secret"},
+            InferenceTarget("openai", "requested-model"),
+        ),
+    ],
+)
+def test_pure_builtin_target_resolution_preserves_selection_order(
+    monkeypatch: pytest.MonkeyPatch,
+    environment: dict[str, str],
+    expected: InferenceTarget,
+) -> None:
+    for name in (
+        "AZURE_FUNCTIONS_AGENTS_PROVIDER",
+        "AZURE_OPENAI_ENDPOINT",
+        "FOUNDRY_PROJECT_ENDPOINT",
+        "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    with patch.object(
+        MAFClientManager,
+        "_build_openai",
+        side_effect=AssertionError("Pure resolution must not construct a MAF client"),
+    ):
+        assert _resolve_builtin_inference_target("requested-model") == expected
+
+
+def test_maf_build_uses_the_same_pure_target_without_changing_constructor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "azure_openai")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://account.openai.azure.com")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "sentinel-not-a-secret")
+    client = object()
+
+    with patch.object(MAFClientManager, "_build_azure_openai", return_value=client) as build:
+        built, target = MAFClientManager().build_chat_client_with_target("requested-model")
+
+    assert built is client
+    assert target == _resolve_builtin_inference_target("requested-model")
+    build.assert_called_once_with("requested-model")
 
 
 def test_custom_manager_target_fallback_builds_client_once() -> None:

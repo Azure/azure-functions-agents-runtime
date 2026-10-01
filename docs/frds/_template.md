@@ -40,6 +40,9 @@ branch: <user>/<slug>
 > Map the change onto the runtime pipeline (`docs/architecture.md` §2):
 > **discover → translate → register → execute**. Name the modules touched and
 > the new/changed public surface (authoring format, config keys, endpoints).
+> Define intended behavior and contracts, not delivery mechanics: omit PR
+> numbers, commit SHAs, temporary slice/phasing labels, and package versions
+> already owned by `pyproject.toml`.
 
 | Pipeline stage | Module(s) | Change |
 | --- | --- | --- |
