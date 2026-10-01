@@ -24,6 +24,7 @@ from azure_functions_agents.experimental.durable_loop_receipts import (
 )
 from azure_functions_agents.experimental.durable_retention import (
     DurableAdmissionReceiptState,
+    DurableRetentionConflictError,
     DurableRetentionExpiredError,
     DurableRetentionLegacyExcludedError,
     DurableRetentionManager,
