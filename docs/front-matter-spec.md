@@ -195,7 +195,7 @@ unless another agent references it through `subagents` or
 #### `agent_configuration`
 - **Type:** `object | null`
 - **Typical location:** Global defaults in `agents.config.yaml`; optional recursive overrides in agent front matter
-- **Default:** Empty configuration; Microsoft Agent Framework is the runtime invariant
+- **Default:** Empty configuration; Microsoft Agent Framework is the default harness
 - **Description:** Configures a portable model output limit and framework-specific execution
   settings. All agents execute through the harness-agent mechanism, whether or not this object is
   present.
@@ -225,14 +225,31 @@ only their own resolved global-plus-agent configuration, never a coordinator's o
 be smaller than the context limit. Environment substitution runs before schema parsing and effective
 validation.
 
-Harness execution applies whenever an agent runs directly, as a chat-time delegated specialist, or
-as a Workflow Sub Agent. Direct runs retain authoritative full Blob/File history while compaction
+With the default MAF harness, execution applies whenever an agent runs directly,
+as a chat-time delegated specialist, or as a Workflow Sub Agent. Direct runs
+retain authoritative full Blob/File history while compaction
 bounds only the message context sent to the model. Specialist runs remain fresh, single-task leaf
 executions with no nested delegation or persistent history. Harness instructions are empty, and the
 runtime disables todo, plan/execute mode, file memory, web search, and automatic tool approval;
 these controls are intentionally not author-configurable. For configured skills, the runtime allows
 `load_skill`, `read_skill_resource`, and `run_skill_script` without approval so autonomous turns can
 continue.
+
+On the experimental Copilot opt-in (`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`), a non-null effective
+`max_context_window_tokens` is rejected before inference rather than mapped to a different threshold;
+omitting it or clearing it with `null` selects Copilot's native compaction defaults. Configured
+`max_output_tokens` is rejected on that path. Both fields behave as described above on the default
+MAF path.
+
+Session storage is not an `agent_configuration` or front-matter setting.
+The selected harness uses the existing `AzureWebJobsStorage` connection string
+or `AzureWebJobsStorage__blobServiceUri` to select Blob; local files are used
+only when neither is configured. Configured Blob failures do not fall back to
+disk. MAF keeps its history provider, while Copilot supplies thin `SessionFs`
+callbacks for opaque SDK-owned files. The SDK owns continuation, recovery,
+compaction and format compatibility; the host does not interpret those files.
+Only the selected harness's persistence adapter is initialized, used and closed.
+See [`copilot-preview-operations.md`](copilot-preview-operations.md).
 
 `max_context_window_tokens` is the budget used by compaction and may be lower than the model's
 physical context window. The default strategy begins truncating older non-system message groups at

@@ -20,8 +20,9 @@ the agent-execution harness, while retaining this runtime's markdown authoring,
 Azure Functions surfaces, capability policy, and workflow behavior. Copilot
 becomes the sole harness in the end state, not another public plugin. A temporary
 app-level preview flag leaves MAF as the default and enables isolated Copilot
-previews with explicit capability checks. Direct conversations continue between
-completed turns using Copilot-native session state, not converted MAF messages.
+previews with explicit capability checks. For Copilot-owned sessions, the host
+provides only a thin filesystem adapter and storage selection boundary; the SDK
+owns continuation, compaction, recovery, file contents, and format compatibility.
 
 ## 2. Motivation / problem
 
@@ -30,15 +31,15 @@ delegation policy, and Dynamic Workflows; MAF currently supplies the agent loop,
 tool wrappers, model-client integration, and message/context management.
 Replacing only `ClientManager` cannot replace that harness: `runner.py`,
 discovery, history providers, and observability also contain MAF-specific seams.
-The desired replacement uses Copilot's native loop and compaction without
-recreating either in the host or changing how an application defines agents.
+The desired replacement uses Copilot's native loop and native session persistence
+without recreating session protocols in the host or changing how an application
+defines agents.
 
-This specification describes intended behavior, not established SDK parity.
-Its repository baseline is `main` at
-`781ee63d49cee03b167016903faf2c4371b2c04d` (0.1.0b16). The
-[architecture](../architecture.md) and
-[authoring specification](../front-matter-spec.md) describe that implementation;
-the evidence limits in section 4.8 distinguish feasibility from qualification.
+This specification describes intended behavior for the bounded Copilot preview.
+The current [architecture](../architecture.md) and
+[authoring specification](../front-matter-spec.md) document today's runtime;
+this FRD defines the future Copilot-path contracts that preserve those product
+surfaces while narrowing the host's persistence responsibility.
 
 ## 3. Goals / Non-goals
 
@@ -50,8 +51,9 @@ the evidence limits in section 4.8 distinguish feasibility from qualification.
   contracts, local tools, MCP, scoped skills, structured responses, and safe telemetry.
 - Preserve direct agents, chat-time delegation, Workflow Sub Agents, Dynamic
   Workflow management/Activities, `web_request`, and ACA Dynamic Sessions `execute_python`.
-- Support Blob-backed native session continuation in Azure and file-backed local
-  development, isolated by `(agent_slug, session_id)`, including native compaction state.
+- Support Copilot-owned session files through a thin SessionFs adapter backed by
+  Blob when configured or local files otherwise, isolated by shared readable
+  app/agent/session identity and opaque SDK-relative paths.
 - Reject unsupported configured behavior explicitly; never silently remove a
   capability, weaken its policy, or fall back to MAF after selecting Copilot.
 
@@ -59,10 +61,10 @@ the evidence limits in section 4.8 distinguish feasibility from qualification.
 
 - A permanent multi-harness extension framework, per-agent selection, or revival
   of legacy `runtime:` frontmatter as a harness selector.
-- MAF Message JSONL import, transcript injection into fresh native sessions, or
-  a host-owned summarizer/parallel compacted-context format.
-- Durable mid-turn checkpoints, recovery controllers, custom durable `ask_human`,
-  empty `send_messages` continuation, exactly-once effects, or general Brain/Hands dispatch.
+- A host-owned session format, summarizer, continuation protocol, recovery
+  controller, or format-compatibility layer.
+- Durable mid-turn checkpoints, custom durable `ask_human`, empty `send_messages`
+  continuation, exactly-once effects, or general Brain/Hands dispatch.
 - Replacing the existing Durable Functions workflow engine. Its current features
   are required parity, not part of the excluded durable-agent-loop work.
 
@@ -71,9 +73,10 @@ the evidence limits in section 4.8 distinguish feasibility from qualification.
 Use a thin internal Copilot adapter at the execution boundary. Reuse
 `ResolvedAgent`, `AgentCapabilities`, `AgentCatalog`, `AgentResult`, and existing
 workflow types; do not expose a harness registry or a new public plugin protocol.
-Some current capability payloads are MAF objects, so preserving these boundaries
-requires changing their internal representation/adaptation, not pretending a
-`FunctionTool` or MAF MCP wrapper is already SDK-neutral.
+Some current capability payloads are MAF objects. Section 4.3.1 defines their
+planned SDK-neutral representation and per-harness adaptation. The persistence
+interface in section 4.5 is narrower: it routes storage without changing shared
+tool definitions or discovery contracts.
 
 | Pipeline stage | Existing modules | Required responsibility |
 | --- | --- | --- |
@@ -81,7 +84,7 @@ requires changing their internal representation/adaptation, not pretending a
 | translate | `config/schema.py`, `config/merge.py`, `config/validation.py` | Preserve typed composition, inheritance/null semantics, and effective capability validation. Interpret no new harness selector in agent files. |
 | compose/register | `app.py`, `registration/capabilities.py`, `registration/catalog.py`, `registration/_handlers.py`, `registration/endpoints.py`, `registration/triggers.py` | Resolve the app's preview choice before harness-specific bootstrap; validate the complete catalog before FunctionApp mutation; pass resolved values to lazy handlers. Keep Azure registration and inbound authorization here. |
 | execute | `runner.py`, `client_manager.py`, internal Copilot adapter | Create/resume sessions, bind approved tools, enforce deadlines, and translate events/results. `ClientManager` remains provider access, not the agent loop, tool dispatcher, or session manager. |
-| persist | `_history_identity.py`, `_session_id.py`, separate native SessionFs adapter; existing `_blob_history.py`/`_file_history.py` on the MAF path | Reuse identity validation, keep native and MAF storage disjoint, and enforce the completed-turn contract below. |
+| persist | `_agent_identity.py`, `_history_identity.py`, `_session_id.py`, separate native SessionFs adapter; existing `_blob_history.py`/`_file_history.py` on the MAF path | Route persistence only through the selected harness. Preserve validation and path-containment rules, reuse the shared readable agent ID for native paths, and treat Copilot session bytes as opaque SDK-owned files. |
 | cross-cutting | `workflows/*`, `system_tools/*`, `_observability.py` | Preserve workflow authorization/Activities, system-tool policies, correlation, and content controls independently of SDK object types. |
 
 ### 4.1 App-level preview selection
@@ -146,10 +149,7 @@ Do not persist the execution context or a new harness selector in orchestration
 history, read the flag during orchestrator replay, or add a custom workflow
 pinning, cancellation, migration, or restart controller. Preserve existing
 Activity contracts and at-least-once semantics. Breaking deployment changes
-still need the application's normal Durable compatibility/versioning practices;
-native-versus-MAF conversation-history incompatibility remains explicit under
-section 4.6. See Durable's [reliability model](https://learn.microsoft.com/en-us/azure/durable-task/common/durable-task-orchestrations#reliability)
-and [deployment/versioning guidance](https://learn.microsoft.com/en-us/azure/durable-task/durable-functions/durable-functions-versioning).
+still need the application's normal Durable compatibility/versioning practices.
 
 An isolated preview may use only capabilities actually supported by its build.
 Validate effective configuration, including inherited and default-on features,
@@ -194,12 +194,10 @@ The read-only history endpoint retains `{messages: [{role, text}], truncated}`,
 its 200-message bound, and its projection of nonempty user/assistant text only,
 excluding internal/tool entries. Keep empty success for an absent session ID or
 unconfigured Blob storage, and invalid-ID errors. Local native persistence does
-not by itself expand today's Blob-only transcript endpoint. With history
-storage configured, other-harness-only state is an explicit incompatibility
-error; corruption must not become an empty-success transcript. The Copilot path
-needs a supported read-only native projection, not MAF deserialization or a
-replay input to the model. That projection, especially after compaction, remains
-an open design question.
+not by itself expand today's Blob-only transcript endpoint. The Copilot path
+needs a supported read-only native projection, not MAF deserialization or host
+interpretation of SDK-owned files. That projection, especially after compaction,
+remains an open design question.
 
 ### 4.3 Models, tools, and execution roles
 
@@ -475,83 +473,71 @@ existing role contract already adds it.
 ### 4.4 Native runtime lifetime
 
 The proposed default is the external native Rust runtime over stdio, with one
-lazily initialized, process-long SDK client per Functions worker, reused across
-invocations with isolated sessions. Concurrent initialization must not launch
-duplicate runtimes. Request cancellation must not close the shared client or
-poison unrelated sessions; worker shutdown must release its client/process.
-Initialization, ownership waits, execution, and final persistence acknowledgments
-are bounded by the request deadline.
+lazily initialized, process-long SDK client per frozen app/storage context in a
+Functions worker, reused across invocations with isolated sessions. Concurrent
+initialization must not launch duplicate runtimes for the same context.
+Request cancellation must not close the shared client or poison unrelated
+sessions; worker shutdown must release its client/process.
+Initialization, process-local session-lock waits, execution, and storage
+operations are bounded by the request deadline.
 
 No embedded FFI dependency is proposed. A compatible Python SDK/native-runtime/
 protocol combination, deployment asset acquisition, and supported Functions
-hosting behavior need explicit qualification; the assessment version is not a
-production pin or permission to download a runtime at invocation time.
+hosting behavior need explicit qualification. Do not download a runtime at
+invocation time.
 
-### 4.5 Native session continuation and persistence
+### 4.5 Native session persistence boundary
 
-Continuation means a later user turn resumes the same native conversation
-**after a completed turn**, including after replacement of both Python worker
-and native runtime. It does not mean resuming an interrupted tool/model operation.
-Use the SDK's SessionFs seam with Blob Storage in Azure and a local-development
-filesystem implementation. Reuse configured Functions storage/identity settings
-where applicable; do not fall back to ephemeral disk on an Azure storage error
-or missing Azure storage configuration. The concrete local-versus-deployed
-selection rule must be defined, not inferred from a failed Blob connection.
+The Copilot path implements SessionFs, the SDK's filesystem callback interface.
+The host provides correct filesystem operations, path containment, file metadata,
+and SDK-shaped errors. The SDK owns continuation semantics, compaction, recovery,
+file contents, file formats, and format compatibility across versions. The host
+does not add its own session format, state machine, recovery logic, or native
+format-version checks.
 
-Persistent native state applies to direct runs, including the fresh IDs used by
-non-HTTP triggers, whose current MAF path also writes history. This preserves
-that behavior but costs a native file tree, not one JSONL transcript, per trigger
-invocation. Retention remains customer-controlled; no automatic retention limit
-or new retention API is introduced. Retain/delete a session as a complete unit,
-never prune live compaction references. Delegates and Workflow Sub Agents instead
-use fresh ephemeral native storage, disposed at call end; they do not populate
-the persistent namespace or require its completed-turn storage barrier.
+**Backend selection and configuration.** There is no new storage app setting.
+Reuse the existing `AzureWebJobsStorage` connection string or
+`AzureWebJobsStorage__blobServiceUri`, together with the current storage-specific
+identity and container behavior. Select Blob whenever either Blob configuration
+path is configured; select local files only when neither is configured.
+Configured Blob errors surface as errors; there is no auth/network failure
+fallback to local storage and no deployed-versus-local environment heuristic.
+Shared app/configuration/registration logic routes persistence through the
+selected harness. The Copilot path constructs, uses, and closes only its
+SessionFs adapter; the MAF path constructs, uses, and closes only its existing
+history provider. Do not import, initialize, probe, or clean up the opposite
+harness's persistence implementation.
 
-Use a separate, versioned native namespace keyed by `(agent_slug, session_id)`.
-Validate both identity components and contain every native relative path within
-that namespace. Persist **all** SDK-owned files: journals, metadata, workspace
-files, compaction checkpoints/references, and any referenced content. Do not
-whitelist only `events.jsonl`, edit journal records, or serialize native state as
-MAF `Message` JSONL.
+**Identity and path construction.** Store ordinary local files or individual
+blobs at `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`.
+Reuse `_agent_identity.agent_id(slug)` unchanged: its readable result already
+includes the app correlation key and canonical agent slug. The correlation key
+joins the trimmed, available `WEBSITE_OWNER_NAME` and `WEBSITE_DEPLOYMENT_ID`
+(or `WEBSITE_SITE_NAME` fallback) with `/`, lowercases them, and uses `local`
+when no platform metadata is available. Do not add another app-identity segment
+or a separate hash/version scheme. Preserve existing session-ID validation and
+path containment. Store every SDK-requested file without a filename whitelist
+or interpretation of its contents.
 
-Only one turn may execute at a time for a given agent/session. Concurrent requests
-must wait within their deadline or fail clearly. A failed startup that neither
-began a turn nor damaged session state must leave the previous conversation
-usable. If an interrupted turn cannot be continued safely, return an explicit
-error rather than silently resetting the conversation or replaying work.
+**Isolation and concurrency.** Match the current MAF boundary: only one active
+turn per `(agent, session)` within a Python process, using process-local
+serialization with bounded waiting. Independent sessions remain concurrent.
+There is no distributed exclusion, lease/fencing protocol, cross-process OS
+lock, or worker-to-worker recovery ownership contract in this feature. Cross-worker
+overlap is unsupported and owned by the caller/platform. Blob-backed rename may
+require copy/delete and therefore cannot be described as crash-atomic; the
+adapter's responsibility is to implement the SDK's required file operations and
+surface SDK-shaped errors, not to promote those operations into a host-owned
+session-consistency protocol. Adapter operation failures use the SDK filesystem
+error contract rather than substituting empty or absent data.
 
-The storage guarantees below support that behavior; they are not claims about
-the demonstrated Blob adapter. Marker states, write ordering, and cleanup
-mechanics are implementation details, not prescribed by this specification.
+**SDK integration contract.** Preserve all SDK-requested files and operations
+opaquely: read, write, append, exists, stat, directory listing (including entry
+types), mkdir, remove, and rename must conform to the SDK's SessionFs contract.
+The host does not interpret compaction artifacts or replace SDK session
+behavior. Native compaction uses the SDK defaults.
 
-| Concern | Required contract |
-| --- | --- |
-| Ownership | Enforce single-active-turn isolation across workers, not only within one process. Ownership protection must prevent stale owners from mutating session state; independent sessions remain concurrent. |
-| Lost ownership | Fence stale writes, deny new dispatch, and cancel the affected turn; never let an old owner publish completion after a replacement owner proceeds. Cancellation cannot undo an already-started external effect. |
-| Filesystem operations | Qualify every operation used by the selected native runtime, including append, replacement, rename, delete, listing, and missing-file behavior. Reads see acknowledged writes. Rename emulation must be crash-recoverable and protected from concurrent readers/writers; Blob is not assumed to provide POSIX rename. |
-| Acknowledgment | A successful persistent SessionFs mutation acknowledges durable storage, not a queued upload. A successful persistent turn requires acknowledged native state and all references, including background compaction writes. The exact SDK quiescence/flush signal and storage barrier must be established. |
-| Completion | Non-streaming success or SSE `done` means the turn finished and the native state required for continuation is durably acknowledged. Earlier stream deltas are provisional. This is a completed-turn guarantee, not per-model/tool checkpoints or a recovery controller. |
-| Failure/interruption | Storage/ownership failures abort rather than become an ordinary model-visible tool result that permits continued inference. Uncertain turn progress, corruption, missing referenced state, or an unsupported format must fail explicitly on restore, not reset, partially restore, or automatically replay tools. A known-safe startup failure must not invalidate the last completed conversation. |
-| Restore | A clean worker reopens the complete acknowledged native state and accepts the next user prompt without host transcript injection. No automatic continuation of pending work, no empty `send_messages`, and no exactly-once guarantee. |
-
-Native compaction alone owns triggering, summarization, and context
-transformation. Native compaction references and their targets are part of the
-same durability obligation as conversation history. Acceptance requires a real
-compact -> complete -> replace both processes -> restore -> follow-up sequence
-showing reuse of the saved summary without a replacement compaction LLM call.
-Separate passing compaction and uncompacted-restore tests do not prove this.
-
-### 4.6 Compatibility and history break
-
-Existing MAF files and blobs remain untouched. There is no automatic conversion,
-import, dual-write, or merge between formats. A continuation request whose
-identity has only incompatible harness history must fail explicitly instead of
-silently starting an empty conversation; a fresh session ID starts a new native
-conversation. Switching back to MAF can continue existing MAF history only,
-never the turns recorded under Copilot. Copilot-only conversations require a new
-MAF session ID. An older binary unaware of the native namespace cannot enforce
-that guard, so rollback to it requires fresh IDs rather than an assumption of
-history continuity. Cross-namespace detection must not parse or modify MAF JSONL.
+### 4.6 Configuration and extension compatibility
 
 The portable `agent_configuration.max_output_tokens` contract must be enforced
 through a verified SDK/provider mapping or rejected as unsupported. The exact
@@ -567,7 +553,9 @@ must either have an explicitly supported mapping or fail before inference/tool
 effects. Neither a silent default provider nor an incomplete callable adapter is
 acceptable. Check the active manager at agent/session construction too:
 `set_client_manager()` can replace it after app composition. These extensions
-continue to behave as before when the flag is off.
+continue to behave as before when the flag is off. Provider/model precedence,
+auth behavior, and the built-in-manager-only Copilot preview contract remain as
+approved in section 4.8.1.
 
 ### 4.7 Errors and observability
 
@@ -592,27 +580,27 @@ instructions, tool arguments/results, credentials, and native session files must
 not escape through a second default-on export path. The flag-off path must not
 bootstrap Copilot telemetry.
 
-Unsupported capability, incompatible history, corruption, ownership loss, and
-persistence failures must be diagnosable without sensitive payloads. Map them
-through existing HTTP/MCP error envelopes and terminal SSE `error`, not a new
-success-shaped response or an automatic MAF fallback. Cancellation stays
-cancellation. Already-dispatched tool effects may remain after an unsuccessful
-turn; the feature does not claim transactional or exactly-once execution.
+Unsupported capability, invalid configuration, adapter-path validation, backend
+configuration, and filesystem/provider failures must be diagnosable without
+sensitive payloads. Map them through existing HTTP/MCP error envelopes and
+terminal SSE `error`, not a new success-shaped response or an automatic MAF
+fallback. Cancellation stays cancellation. Already-dispatched tool effects may
+remain after an unsuccessful turn; the feature does not claim transactional or
+exactly-once execution.
 
-### 4.8 Preview support limits
+### 4.8 Preview limits and approved provider contract
 
-The Copilot preview is local-only and requires a single Functions worker. Azure
-Functions hosting, multi-worker execution, Blob-backed native session storage,
-MAF history import, public streaming/structured-response parity, MCP, scoped
-skills, delegation, workflows, system tools, and interrupted-turn recovery are
-unsupported in this preview. Unsupported capabilities fail explicitly without
-fallback. Configured output caps are rejected because the pinned SDK/native
-runtime does not expose a provider generation cap for this path.
+The Copilot preview remains local-only and requires a single Functions worker.
+Azure Functions hosting, public streaming/structured-response parity, MCP,
+scoped skills, delegation, workflows, full system-tool parity, and cross-worker
+session overlap are unsupported in this preview unless separately qualified.
+Unsupported capabilities fail explicitly without fallback. Configured output caps
+are rejected because this path does not yet expose a verified provider generation
+cap mapping.
 
-Native session storage remains SDK-owned. The host verifies completed turns
-before resume and returns explicit errors for missing, corrupt, interrupted, or
-incompatible native history; it does not reset conversations silently or claim
-transactional/exactly-once execution.
+This FRD records intended product behavior and architecture boundaries. It does
+not claim implementation completion, real-service qualification, or production
+activation for the persistence redesign in section 4.5.
 
 #### 4.8.1 Architecture-approved provider contract
 
@@ -648,6 +636,13 @@ PowerShell target under the same scoped helper policy. The neutral descriptor
 contract, nested skill ownership, unchanged role contracts, and minimal flag-off
 validation supersede the older conflicting proposals. Section 4.3 defines the
 current requirements.
+
+The SDK-owned persistence boundary supersedes earlier completed-turn durability,
+lease-fenced envelopes, workspace aliases, host rollback/recovery, and native
+format-version guard proposals. Earlier qualification evidence belongs to those
+superseded designs, not to the redesigned thin adapter. Section 4.5 defines the
+current persistence contract; its interface separation does not replace the
+planned capability adaptation in section 4.3.1.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
@@ -688,6 +683,14 @@ current requirements.
 | 35 | MCP parity-only scope | Add host MCP policy / preserve current MAF behavior | Keep existing MAF MCP behavior and the accepted between-turn header limit. Add no host MCP policy. Raise any further gap for joint review before changing scope. | Human (larohra) | 2026-10-02 |
 | 36 | MCP-only SDK helper branch | Global approve-all / SDK helper restricted to MCP requests | Use the SDK standard `PermissionHandler.approve_all` approve-once helper only for `request.kind == "mcp"` in the shared callback. All other request kinds retain scoped skill checks and default deny; no global approve-all. | Human (larohra) | 2026-10-02 |
 | 37 | Full MCP/skills amendment sign-off | Keep In review / finalize with comment cleanups | Finalize the full amendment with the internal MCP-only SDK approve-once branch and Linux helper wording clarified. Scoped skills, SDK managed-approval limits, and skill-resource-only `view` are unchanged. | Human (larohra) | 2026-10-02 |
+| 38 | Native session delivery and persistence | Shared MAF JSONL or fragmented native Blob tree / one isolated lease-fenced envelope | Propose sections 4.5/4.9's encoded identities, frozen context, single-object local/Blob SessionFs, serialized/latching callbacks, safe pre-handoff rollback, uncertain post-handoff state, metadata-only history guards, tombstone deletion and native compaction after #241. Dedicated architecture-agent re-review APPROVED these mechanics on 2026-09-29 after two REVISE reviews; qualification was still open at this decision and is completed by the later #1335 qualification decision. Human-approved contracts/status are unchanged. | Agent proposal; architecture-agent approval | 2026-09-29 |
+| 39 | Recorded host workspace on resume | Fuzzy suffix matching of recorded paths / protocol v4 native envelopes with virtual workspace aliases | Use protocol v4 native envelopes; persist and alias the creating and current worker host workspace paths to virtual `/workspace` for cross-worker restore. Reject protocol v3 preview envelopes, requiring fresh session IDs, and leave MAF unaffected. Dedicated architecture re-review approved this design conditional on explicit human acknowledgement; that acknowledgement is recorded by this decision. | Human (larohra); architecture re-review approved conditional on acknowledgement | 2026-09-30 |
+| 40 | #1335 qualification boundary | Treat mocked/local evidence as sufficient / qualify real Blob continuation and compaction while retaining later gates | Accept the sanitized section 4.8 evidence as completing #1335: real Entra Blob protocol tests, replacement-process tool-result continuation and semantic compacted-summary reuse. Do not claim verbatim arbitrary-token retention, Functions hosting, dual-harness end-to-end qualification or production activation; retain those gates in #1357/#1337. | Human (supplied qualification evidence) | 2026-09-30 |
+| 41 | Copilot session persistence ownership | Host recovery/state protocol / thin SessionFs adapter | The host provides only filesystem operations, containment, metadata, and SDK-shaped errors. The SDK owns continuation, compaction, recovery, file contents, formats, and format compatibility. No host envelope, completed-turn guarantee, rollback logic, native-state checks, handoff markers, tombstones, or recovery/controller protocol. | Human (larohra) | 2026-10-02 |
+| 42 | Persistence backend selection | New Copilot-specific setting or environment heuristic / reuse existing storage configuration | Reuse `AzureWebJobsStorage` connection string or `AzureWebJobsStorage__blobServiceUri` with existing storage-specific identity/container behavior. Select Blob when configured, local only when neither is configured, and never fall back from configured Blob failures to local storage. | Human (larohra) | 2026-10-02 |
+| 43 | Native identity and path scheme | New opaque hash scheme / shared readable identity | Use `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`, with `agent_id` supplied by the shared helper and already containing the app correlation key and canonical slug. Retain session-ID validation and path containment without a separate hash scheme or host format version. | Human (larohra) | 2026-10-02 |
+| 44 | Session concurrency boundary | Distributed leases/fencing/OS locks / process-local serialization | Match the current MAF boundary: serialize only same-session turns within a Python process, with bounded waiting and no distributed exclusion. Cross-worker overlap is unsupported and caller-owned. | Human (larohra) | 2026-10-02 |
+| 45 | Interface separation scope | Broad execution-interface rewrite / persistence-only boundary | Keep the interface split narrowly about persistence. Shared app/configuration/registration routes through the selected harness; MAF owns its existing history provider, Copilot owns SessionFs. Construct/use/close only the selected persistence adapter, without opposite-harness imports, storage initialization, history probes, or cleanup, and without expanding scope into unrelated tool/model/discovery refactors. | Human (larohra) | 2026-10-02 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -699,7 +702,7 @@ where mocks cannot establish process, transport, authentication, or durability.
 | Area | Acceptance evidence |
 | --- | --- |
 | Selection/isolation | Exercise unset, `false`, `0`, `true`, `1`, mixed-case/padded text, empty/whitespace-only/invalid values, multiple app contexts, and standalone entry points. Off starts no Copilot process/download/auth/telemetry; on is uniform across all roles and never falls back. Existing coverage or a minimal focused flag-off check is sufficient for this amendment; no new exhaustive suite is required. |
-| Context propagation/lifetime | Construct two apps with different flag snapshots, including the same root; delayed handlers, delegates, and Activity calls retain their own context after environment changes. Cover explicit/default standalone contexts. On worker replacement, completed Activity results replay normally and newly executed/redelivered Activities use the serving app's context, without adding harness state to Durable history or changing its scheduling/version-routing rules. |
+| Context propagation/lifetime | Construct two same-root app contexts with different flag snapshots and frozen storage settings; assert neither changes on environment mutation nor shares a native client. Delayed handlers, delegates, and Activity calls retain their own context. Cover explicit/default standalone contexts. On worker replacement, completed Activity results replay normally and newly executed/redelivered Activities use the serving app's context, without adding harness state to Durable history or changing its scheduling/version-routing rules. |
 | Unsupported features | Effective inherited/default-on capabilities and unmapped configuration/extensions fail before provider inference or tool effects. Isolated previews of supported capabilities execute real SDK turns. |
 | Authoring/API | Existing precedence/null scenarios, tool `None`/empty semantics, routes/auth, response envelopes, structured-output validation/errors, history projection/degradation/errors/bounds, and SSE ordering/cancellation remain compatible. No native or specialist events leak. |
 | Models/extensions | Verify supported providers/Entra refresh, model metadata, disabled provider conversation storage, deadlines, output limits, and explicit custom-manager/tool compatibility, including a manager replaced after composition. MAF hooks remain intact off. |
@@ -711,12 +714,13 @@ where mocks cannot establish process, transport, authentication, or durability.
 | Native tool accounting | Through public SDK `tool.execution_start` and `tool.execution_complete` events, verify allowed and permission-denied native `skill`, `view`, and `bash` calls appear exactly once per `toolCallId` in `AgentResult.tool_calls`, tool/error counts, and existing telemetry. Verify custom calls already captured by wrappers are not duplicated and `skill.invoked` metadata is not a second generic call. Preserve public `tool_start`/`tool_end`/`error` meanings, sanitized results, and sensitive-data/redaction policy without raw native envelopes or new public logging interfaces. Existing deadline/cancellation behavior and already-dispatched-effect limits remain unchanged. |
 | Compatibility/role isolation | Verify flag-off MCP/tool behavior and unchanged MAF skill discovery/script behavior without Copilot startup. A minimal focused flag-off check is acceptable for this amendment. Structurally prove per-run provider state, capability-copy/catalog-leaf non-mutation, project-skill retention, and no unintended `data-driven-workflows` leakage. |
 | Delegation/workflows | Prove fresh same-specialist concurrent sessions, catalog/role isolation, no child SSE, parent cancellation and specialist-local errors, Workflow Sub Agent grants/results, existing management/Activity retry/timeout/authorization, and at-least-once semantics. |
-| Role storage/trigger execution | Run a non-HTTP trigger with its generated identity, serialization, logging/error behavior, and direct capabilities. Persistent direct state is isolated; delegates/Workflow Sub Agents leave no persistent native tree and dispose ephemeral state. |
-| System tools | Exercise `web_request` defaults/exclusion/SSRF/budgets/errors and real ACA `execute_python` scoping/results without substituting local execution. |
-| Completed-turn restore | On Blob and local storage, complete a real tool-using turn, replace Python and native processes, and continue by the same agent/session identity without restating prior values. Inspect outbound provider context/state reuse, not just a plausible answer. |
-| Compacted restore | Force native compaction, acknowledge complete state, replace both processes, restore in a clean worker, and prove saved-summary/reference reuse without another compaction LLM call. |
-| Storage failures/concurrency | Fault-inject append/replace/rename/read/ack errors, partial references, corrupt/unsupported state, crashes before completion, lease loss, stale writers, and two-worker same-session contention. For known pre-turn create/resume, validation, or startup-deadline failures that leave native state valid, verify no inference/tool effects and a successful retry on the same session ID. Uncertain submission or unsafe state must still fail explicitly. No silent reset, continued inference after a storage barrier failure, or false success/`done`; independent sessions still progress. |
-| History break | MAF bytes remain unchanged. Incompatible IDs fail explicitly; native and MAF namespaces never cross-read as execution state. Verify documented rollback behavior and native history rendering without importing MAF messages. |
+| Role storage/trigger execution | Run a non-HTTP trigger with its generated identity, serialization, logging/error behavior, and direct capabilities. Persistent direct state uses the selected harness's storage path only; delegates and Workflow Sub Agents leave no persistent Copilot session tree and dispose ephemeral state. |
+| SessionFs file contract | Exercise exact byte preservation and SDK-visible behavior for read, write, append, exists, stat, directory listing with entry types, mkdir, remove, rename, and documented file errors on both local and Blob adapters. Preserve all SDK-requested files opaquely rather than host-specific file whitelists or content interpretation. |
+| Identity/path isolation | Verify native paths reuse the shared agent ID, including its app correlation key exactly once, followed by validated session ID and SDK-relative path. Cover partial/local identity fallbacks and containment enforcement without introducing separate identity hashes. |
+| Backend configuration/errors | Verify Blob selection from existing storage configuration, local selection only when no Blob configuration is present, reuse of existing identity/container behavior, and explicit surfacing of Blob auth/network/configuration failures without fallback to local storage. |
+| Persistence boundary isolation | Verify that only the selected harness's persistence implementation is imported, initialized, exercised, and closed. The Copilot path must not probe or clean up MAF history storage, and the MAF path must not initialize Copilot SessionFs. |
+| Same-process concurrency | Verify bounded waiting and serialization for concurrent turns targeting the same `(agent, session)` within one Python process, while independent sessions remain concurrent. Do not require distributed exclusion, cross-worker ownership, or OS-level locking for this feature. |
+| SDK integration boundary | Exercise real SDK callbacks against the adapter and verify that the host does not interpret native session contents, claim recovery semantics, or impose its own compaction/summary protocol. |
 | Hosting/telemetry | Demonstrate supported Functions deployment assets, lazy single-client startup, concurrent isolation, bounded cancellation/shutdown, and no orphan native process. Verify usage/correlation/error accounting and sensitive-data-off behavior in host and native telemetry. |
 
 ## 7. Docs impact
@@ -730,7 +734,7 @@ map entries for the MAF adapter, Copilot adapter, and neutral capability modules
 settings; `docs/observability.md` for native telemetry; `docs/workflows.md` and
 `docs/triggers.md` where execution/error behavior changes; and `README.md`,
 `docs/index.md`, `docs/getting-started.md`, and relevant samples for supported
-preview use and the history break. Update the current MAF-only statements in
+preview use and the SDK-owned persistence boundary. Update the current MAF-only statements in
 `AGENTS.md` when the implementation changes that invariant. Any schema change
 requires regenerating the configuration reference and synchronizing examples;
 this document does not introduce an unimplemented schema or rewrite runtime docs.
@@ -758,6 +762,14 @@ The sample must be copy/paste complete for setup, request, expected failure, and
 - **Original sign-offs:** Laveesh Rohra (`larohra`) approved the behavior-focused
   session contract on 2026-09-28 and the Copilot provider contracts on 2026-09-29.
   The amendment sign-off below is separate.
+- **Persistence review and sign-off:** The persistence-only interface and
+  SDK-owned session boundary were architecture-reviewed. Laveesh Rohra
+  (`larohra`) approved the revised persistence design on 2026-10-02. It supersedes
+  earlier storage/recovery mechanics while retaining their historical decisions.
+  App-bound selection, Durable lifecycle, and provider/model contracts remain
+  in force. This storage split leaves MAF with its existing history provider and
+  Copilot with SessionFs; it does not implement the planned capability interface
+  in section 4.3.1.
 - **Architecture review:** The 2026-09-28 review remains historical for the
   original app-bound selection, Durable lifecycle, and safe startup behavior.
   The 2026-10-02 amendment review found nested-skill ownership and native tool

@@ -47,33 +47,39 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import json
-import os
 from collections.abc import Mapping, Sequence
-from typing import Any, ClassVar
+from contextlib import AsyncExitStack
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from agent_framework import HistoryProvider, Message
 from azure.core.exceptions import (
+    AzureError,
     ResourceExistsError,
     ResourceNotFoundError,
 )
 
+from ._harness import _register_shutdown, _unregister_shutdown
 from ._history_identity import validate_agent_slug
 from ._logger import logger
+from ._session_storage import (
+    DEFAULT_CONTAINER_NAME,
+    SessionStorageError,
+    blob_storage_from_environment,
+    storage_client_id,
+)
+
+if TYPE_CHECKING:
+    from azure.core.credentials_async import AsyncTokenCredential
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_CONTAINER_NAME = "azure-functions-agents"
 DEFAULT_BLOB_PREFIX = "agent-sessions/"
 DEFAULT_SOURCE_ID = "blob_history"
-
-_CONN_STRING_ENV = "AzureWebJobsStorage"
-_BLOB_SERVICE_URI_ENV = "AzureWebJobsStorage__blobServiceUri"
-_CLIENT_ID_ENV = "AzureWebJobsStorage__clientId"
-_CONTAINER_ENV = "AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER"
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +91,7 @@ _CONTAINER_ENV = "AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER"
 # secrets never live inside dict keys that could leak into reprs / logs.
 _SERVICE_CLIENTS: dict[str, Any] = {}
 _SERVICE_CLIENTS_LOCK = asyncio.Lock()
+_OWNED_CREDENTIALS: dict[int, AsyncTokenCredential] = {}
 
 # Container existence check is process-wide: we only need to create it once
 # per (cache_key, container_name).
@@ -253,6 +260,7 @@ class BlobHistoryProvider(HistoryProvider):
                 credential=self._credential,
             )
             _SERVICE_CLIENTS[self._cache_key] = client
+            _register_shutdown(shutdown)
             return client
 
     async def _ensure_container(self, service_client: Any) -> None:
@@ -323,11 +331,40 @@ def _build_service_client(
 
         # Precedence: storage-specific identity (AzureWebJobsStorage__clientId) wins,
         # then app-wide AZURE_CLIENT_ID, then bare DefaultAzureCredential().
-        client_id = (
-            os.environ.get(_CLIENT_ID_ENV) or os.environ.get("AZURE_CLIENT_ID") or ""
-        ).strip()
-        credential = build_async_credential_with_client_id(client_id)
+        owned_credential = build_async_credential_with_client_id(storage_client_id())
+        _OWNED_CREDENTIALS[id(owned_credential)] = owned_credential
+        _register_shutdown(shutdown)
+        credential = owned_credential
     return BlobServiceClient(account_url=blob_service_url, credential=credential)
+
+
+async def _close_service(cache_key: str) -> None:
+    try:
+        await asyncio.wait_for(_SERVICE_CLIENTS[cache_key].close(), timeout=5)
+    except (AzureError, OSError):
+        logger.error("MAF history storage client cleanup failed.")
+        raise SessionStorageError(errno.EIO, "MAF history storage cleanup failed.") from None
+    _SERVICE_CLIENTS.pop(cache_key, None)
+
+
+async def _close_credential(credential: AsyncTokenCredential) -> None:
+    try:
+        await asyncio.wait_for(credential.close(), timeout=5)
+    except (AzureError, OSError):
+        logger.error("MAF history storage credential cleanup failed.")
+        raise SessionStorageError(errno.EIO, "MAF history storage cleanup failed.") from None
+    _OWNED_CREDENTIALS.pop(id(credential), None)
+
+
+async def shutdown() -> None:
+    """Close only this provider's cached clients and owned credentials."""
+    async with AsyncExitStack() as cleanup:
+        cleanup.callback(_ENSURED_CONTAINERS.clear)
+        for credential in tuple(_OWNED_CREDENTIALS.values()):
+            cleanup.push_async_callback(_close_credential, credential)
+        for cache_key in tuple(_SERVICE_CLIENTS):
+            cleanup.push_async_callback(_close_service, cache_key)
+    _unregister_shutdown(shutdown)
 
 
 # ---------------------------------------------------------------------------
@@ -348,37 +385,34 @@ def build_blob_provider_from_environment(
     (``AzureWebJobsStorage__blobServiceUri``) that Azure Functions deploys
     use with managed identity.
     """
-    conn = (os.environ.get(_CONN_STRING_ENV) or "").strip()
-    uri = (os.environ.get(_BLOB_SERVICE_URI_ENV) or "").strip()
-    if not conn and not uri:
+    settings = blob_storage_from_environment(container_name=container_name)
+    if settings is None:
         return None
-    container = container_name or (os.environ.get(_CONTAINER_ENV) or "").strip() or None
-    kwargs: dict[str, Any] = {}
-    if container:
-        kwargs["container_name"] = container
-    if conn:
+    if settings.connection_string:
         logger.info(
             "BlobHistoryProvider: using AzureWebJobsStorage connection string (container=%s).",
-            container or DEFAULT_CONTAINER_NAME,
+            settings.container_name,
         )
         return BlobHistoryProvider(
             agent_slug=agent_slug,
-            connection_string=conn,
-            **kwargs,
+            connection_string=settings.connection_string,
+            container_name=settings.container_name,
         )
     logger.info(
         "BlobHistoryProvider: using AzureWebJobsStorage__blobServiceUri=%s (container=%s).",
-        uri,
-        container or DEFAULT_CONTAINER_NAME,
+        settings.blob_service_url,
+        settings.container_name,
     )
     return BlobHistoryProvider(
         agent_slug=agent_slug,
-        blob_service_url=uri,
-        **kwargs,
+        blob_service_url=settings.blob_service_url,
+        container_name=settings.container_name,
     )
 
 
 def reset_caches_for_testing() -> None:
     """Drop the module-level caches. Test-only helper."""
     _SERVICE_CLIENTS.clear()
+    _OWNED_CREDENTIALS.clear()
     _ENSURED_CONTAINERS.clear()
+    _unregister_shutdown(shutdown)

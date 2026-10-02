@@ -41,6 +41,7 @@ from azure_functions_agents.config.loader import load_agent_specs, load_global_c
 from azure_functions_agents.config.merge import compose
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
+    AgentFrameworkCompactionConfig,
     AgentFrameworkConfiguration,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
@@ -81,7 +82,35 @@ def preview(monkeypatch, tmp_path):
     monkeypatch.delenv("FUNCTIONS_WORKER_PROCESS_COUNT", raising=False)
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
+    monkeypatch.delenv("AzureWebJobsStorage", raising=False)
+    monkeypatch.delenv("AzureWebJobsStorage__blobServiceUri", raising=False)
     return tmp_path
+
+
+def test_app_context_freezes_storage_without_initializing_either_provider(preview, monkeypatch):
+    from azure_functions_agents._native_session_identity import StorageMode
+
+    monkeypatch.setenv("AzureWebJobsStorage", "fixture-connection")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER", "first-container")
+    first = _harness.get_harness(preview, new_app=True)
+    monkeypatch.delenv("AzureWebJobsStorage")
+    monkeypatch.setenv("AzureWebJobsStorage__blobServiceUri", "https://fixture.invalid")
+    monkeypatch.setenv("AzureWebJobsStorage__clientId", "storage-identity")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER", "second-container")
+    second = _harness.get_harness(preview, new_app=True)
+    monkeypatch.delenv("AzureWebJobsStorage__blobServiceUri")
+    monkeypatch.setenv(_harness.FLAG, "false")
+
+    assert first is not second
+    assert first.session_storage.mode is StorageMode.BLOB
+    assert first.session_storage.blob.connection_string == "fixture-connection"
+    assert first.session_storage.blob.container_name == "first-container"
+    assert second.session_storage.blob.blob_service_url == "https://fixture.invalid"
+    assert second.session_storage.blob.client_id == "storage-identity"
+    assert second.session_storage.blob.container_name == "second-container"
+    assert _harness.get_harness(preview, new_app=True).session_storage is None
+    assert not first.storage_root.exists()
+    assert not second.storage_root.exists()
 
 
 @pytest.mark.parametrize("value", [None, "false", "FALSE", "fAlSe", "0", " false "])
@@ -137,15 +166,21 @@ def test_missing_sdk_is_explicit_without_forcing_a_second_version_check(preview,
 @pytest.mark.parametrize(
     ("name", "value", "diagnostic"),
     [
-        ("FUNCTIONS_WORKER_PROCESS_COUNT", "2", "one|=1"),
-        ("WEBSITE_INSTANCE_ID", "cloud-instance", "local execution"),
+        ("WEBSITE_INSTANCE_ID", "cloud-instance", "Azure hosting is not qualified"),
+        ("FUNCTIONS_WORKER_PROCESS_COUNT", "2", "FUNCTIONS_WORKER_PROCESS_COUNT=1"),
+        ("FUNCTIONS_WORKER_PROCESS_COUNT", " ", "FUNCTIONS_WORKER_PROCESS_COUNT=1"),
         ("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "high", "REASONING_EFFORT"),
     ],
 )
 def test_unsupported_app_settings(preview, monkeypatch, name, value, diagnostic):
     monkeypatch.setenv(name, value)
-    with pytest.raises(UnsupportedCapabilityError, match=diagnostic):
+    with pytest.raises((UnsupportedCapabilityError, ValueError), match=diagnostic):
         _harness.get_harness()
+
+
+def test_single_worker_hosting_is_accepted(preview, monkeypatch):
+    monkeypatch.setenv("FUNCTIONS_WORKER_PROCESS_COUNT", " 1 ")
+    assert _harness.get_harness().name is HarnessKind.COPILOT
 
 
 @pytest.mark.parametrize(
@@ -579,8 +614,12 @@ def test_maf_keeps_tool_objects_that_copilot_cannot_adapt(tmp_path):
 def test_maf_only_configuration_is_not_silently_discarded(preview):
     with pytest.raises(UnsupportedCapabilityError, match="agent_framework"):
         _harness.validate_configuration(
-            AgentConfiguration(agent_framework=AgentFrameworkConfiguration())
+            AgentConfiguration(agent_framework=AgentFrameworkConfiguration(
+                compaction=AgentFrameworkCompactionConfig(max_context_window_tokens=100)
+            ))
         )
+    _harness.validate_configuration(AgentConfiguration(agent_framework=AgentFrameworkConfiguration()))
+    _harness.validate_configuration(AgentConfiguration(agent_framework=None))
 
 
 def test_unsupported_output_limit_fails_before_native_execution(preview):

@@ -66,8 +66,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ._blob_history import build_blob_provider_from_environment
-from ._file_history import ScopedFileHistoryProvider
 from ._function_tool import FunctionTool, tool
 from ._harness import (
     AppHarness,
@@ -347,6 +345,9 @@ def _build_history_provider(agent_slug: str) -> Any:
     Falls back to :class:`ScopedFileHistoryProvider` for pure local
     development.
     """
+    from ._blob_history import build_blob_provider_from_environment
+    from ._file_history import ScopedFileHistoryProvider
+
     blob_provider = build_blob_provider_from_environment(agent_slug=agent_slug)
     if blob_provider is not None:
         return blob_provider
@@ -842,6 +843,7 @@ async def _build_agent_session(
     catalog: AgentCatalog | None = None,
     coordinator_deadline: float | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
+    app_root: Path | None = None,
 ) -> tuple[Any, Any, str, _DelegateErrorTracker | None, InferenceTarget]:
     """Construct an agent/session using MAF's ``create_harness_agent``.
 
@@ -1132,6 +1134,7 @@ async def run_agent(
             catalog=catalog,
             coordinator_deadline=coordinator_deadline,
             workflow_policy=workflow_policy,
+            app_root=harness.app_root,
         )
     )
 
@@ -1327,6 +1330,7 @@ async def run_agent_stream(
                 catalog=catalog,
                 coordinator_deadline=deadline,
                 workflow_policy=workflow_policy,
+                app_root=harness.app_root,
             )
         )
     except Exception as exc:

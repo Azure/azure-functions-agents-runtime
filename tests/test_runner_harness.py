@@ -339,8 +339,7 @@ def test_build_history_provider_scopes_local_storage_by_agent(
     captured_blob_slugs: list[str] = []
     monkeypatch.setattr(runner, "resolve_config_dir", lambda: tmp_path)
     monkeypatch.setattr(
-        runner,
-        "build_blob_provider_from_environment",
+        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
         lambda *, agent_slug: captured_blob_slugs.append(agent_slug) or None,
     )
 

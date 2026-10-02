@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import get_type_hints
+
+import pytest
 
 from azure_functions_agents._function_tool import WorkflowTool, WorkflowToolMetadata, tool
 
@@ -62,3 +68,78 @@ def test_workflow_retry_annotations_resolve_at_runtime() -> None:
     assert get_type_hints(WorkflowToolMetadata)["retry"] == WorkflowRetryPolicy | None
     assert get_type_hints(WorkflowTool)["retry"] == WorkflowRetryPolicy | None
     assert get_type_hints(workflow_tool)["retry"] == WorkflowRetryPolicy | None
+
+
+@pytest.mark.parametrize("selected", ["maf", "copilot"])
+def test_selected_persistence_runs_and_shuts_down_without_opposite_imports(tmp_path, selected):
+    root = tmp_path / "app with spaces"
+    root.mkdir()
+    script = """
+import asyncio
+import json
+import os
+import sys
+from pathlib import Path
+
+selected, root = sys.argv[1], Path(sys.argv[2])
+opposite = (
+    ["azure_functions_agents._copilot", "azure_functions_agents._copilot_session_fs",
+     "azure_functions_agents._native_session_identity", "copilot"]
+    if selected == "maf"
+    else ["azure_functions_agents._blob_history", "azure_functions_agents._file_history"]
+)
+for name in opposite:
+    sys.modules[name] = None
+os.environ["AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT"] = "true" if selected == "copilot" else "false"
+os.environ["AZURE_FUNCTIONS_AGENTS_SESSION_DIR"] = str(root / "sessions")
+os.environ["AZURE_FUNCTIONS_AGENTS_PROVIDER"] = "openai"
+os.environ["AZURE_FUNCTIONS_AGENTS_MODEL"] = "offline"
+os.environ["OPENAI_API_KEY"] = "offline-fixture"
+os.environ["COPILOT_SKIP_CLI_DOWNLOAD"] = "1"
+for name in (
+    "AzureWebJobsStorage", "AzureWebJobsStorage__blobServiceUri", "WEBSITE_INSTANCE_ID",
+    "WEBSITE_OWNER_NAME", "WEBSITE_DEPLOYMENT_ID", "WEBSITE_SITE_NAME",
+    "FUNCTIONS_WORKER_PROCESS_COUNT", "AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT",
+    "AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY",
+):
+    os.environ.pop(name, None)
+
+import azure_functions_agents as runtime
+from azure_functions_agents import _harness, runner
+
+async def run():
+    harness = _harness.get_harness(root, new_app=True)
+    if selected == "copilot":
+        import copilot
+        from tests.test_copilot import _fake_client
+        client = _fake_client()
+        copilot.CopilotClient = lambda **kwargs: client
+        result = await runner.run_agent("offline", tools=[], mcp_tools=[], _harness=harness)
+        assert result.content == "synthetic reply"
+        await runtime.shutdown_client_manager()
+        client.stop.assert_awaited_once()
+    else:
+        from agent_framework import Message
+        provider = runner._build_history_provider("agent")
+        await provider.save_messages("session", [Message("user", ["ordinary MAF history"])])
+        assert [message.text for message in await provider.get_messages("session")] == [
+            "ordinary MAF history"
+        ]
+        await runtime.shutdown_client_manager()
+    assert all(sys.modules.get(name) is None for name in opposite)
+    print(json.dumps({"selected": harness.name.value, "opposite_loaded": False}))
+
+asyncio.run(run())
+"""
+    repository = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", script, selected, str(root)],
+        cwd=repository,
+        env={**os.environ, "PYTHONPATH": str(repository / "src")},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"selected": selected, "opposite_loaded": False}

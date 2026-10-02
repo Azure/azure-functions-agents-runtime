@@ -28,8 +28,9 @@ flowchart LR
     J["client_manager.py<br/>ClientManager"] -.->|"chat client"| K["runner.py<br/>run_agent<br/>run_agent_stream<br/>build_subagent_tools"]
     H -.->|"handler closures + AgentCatalog"| K
     K -.->|"default: prompt + tools + session"| L["Microsoft Agent Framework"]
+    L -.->|"MAF-owned history"| T["_blob_history.py / _file_history.py<br/>JSONL transcripts"]
     K -.->|"explicit app-level local preview"| P["_copilot.py<br/>Copilot SDK + native stdio"]
-    P -.->|"SDK-owned persistence"| S["local native session files"]
+    P -.->|"SDK SessionFs callbacks"| S["_copilot_session_fs.py<br/>opaque SDK files<br/>local files or one Blob per file"]
 ```
 
 Read left to right: files on disk become typed config, typed config becomes a
@@ -49,7 +50,7 @@ A few boundaries are worth calling out explicitly:
   workflow-policy catalog. Only pass 2 creates/mutates the app, registers the
   workflow runtime once, and registers agent surfaces (FRDs 0004 and 0007).
 - **Registration is Azure-specific.** This is the first stage that knows about `azure.functions.FunctionApp`, decorators, routes, and trigger bindings.
-- **Execution is deferred.** The runner is not part of startup registration; it is called later by handler closures when an HTTP route or trigger actually fires. The explicit local Copilot opt-in forks before MAF construction; its SDK owns native process startup and local session files.
+- **Execution is deferred.** The runner is not part of startup registration; it is called later by handler closures when an HTTP route or trigger actually fires. The explicit Copilot opt-in forks before MAF construction. Each harness owns its persistence adapter; Copilot's SDK owns session behavior and uses the host's thin filesystem callbacks.
 
 ## 3. Module map
 
@@ -62,7 +63,10 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/config/loader.py` | Loads YAML front matter and `agents.config.yaml` into typed models. | `load_agent_specs()`, `load_global_config()` |
 | `azure_functions_agents/config/merge.py` | Applies defaults, overrides, and per-agent filters to produce runtime config, including each agent's identity `slug` (via `_slug.py`) and its normalized `subagents` list. | `compose()` |
 | `azure_functions_agents/_slug.py` | Derives an agent's identity slug from its `.agent.md` filename (and the `delegate_<slug>` tool-name convention) in one shared place, so naming, config composition, and delegation can never compute a slug differently. | `_function_name_from_source()`, `delegate_tool_name()` |
-| `azure_functions_agents/_history_identity.py`, `_blob_history.py`, `_file_history.py` | Validate the canonical slug before using it as a path segment and persist conversation history by `(agent_slug, session_id)`. | `validate_agent_slug()`, `BlobHistoryProvider`, `ScopedFileHistoryProvider` |
+| `azure_functions_agents/_agent_identity.py` | Supplies the shared readable app correlation key plus canonical slug used for agent identity, including persistence paths. | `agent_id()`, `resolve_app_correlation_key()` |
+| `azure_functions_agents/_history_identity.py`, `_blob_history.py`, `_file_history.py` | Validate the canonical slug and persist MAF conversation history by agent/session identity. Imported and used only on the MAF path; acquired Blob clients and owned storage credentials register their own shutdown callback. | `validate_agent_slug()`, `BlobHistoryProvider`, `ScopedFileHistoryProvider`, `_blob_history.shutdown()` |
+| `azure_functions_agents/_session_storage.py` | Harness-neutral Blob configuration, storage-specific identity/container precedence, sanitized backend errors, and owned service/credential construction. Does not import either persistence implementation. | `BlobStorageSettings`, `SessionStorageError`, `blob_storage_from_environment()`, `open_blob_service()` |
+| `azure_functions_agents/_native_session_identity.py` | SDK-independent, frozen Copilot storage routing and readable session prefixes, with shared agent identity and session/path validation. Resolved only when Copilot is selected. | `StorageRoute`, `StorageMode`, `resolve_route()`, `session_prefix()` |
 | `azure_functions_agents/config/validation.py` | Post-merge sanity checks for resolved agents, including rejecting unknown/duplicate/self references in both independent Sub Agent grants against the app-wide slug index. | `validate_resolved_agent()`, `validate_subagent_references()`, `validate_workflow_subagent_references()` |
 | `azure_functions_agents/discovery/skills.py` | Walks `skills/<name>/SKILL.md` files, validates frontmatter, and caches the name→directory map for MAF's `SkillsProvider`. | `discover_skills()`, `clear_skills_cache()` |
 | `azure_functions_agents/discovery/tools.py` | Imports `tools/*.py`, finds normal `FunctionTool`/plain-function tools, discovers `@workflow_tool` Activity targets, and caches both inventories. | `discover_project_tools()`, `discover_user_tools()` |
@@ -79,9 +83,11 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
 | `azure_functions_agents/runner.py` | Executes prompts through the default Microsoft Agent Framework path, managing sessions, tools, and streaming; the bounded Copilot fork composes the direct non-streaming host-tool catalog before any MAF construction. Builds per-request `delegate_<slug>` tools and fresh stateless workflow leaf agents on the MAF path; attempts one internal token-usage record through the shared runtime logger for each actual invocation attempt. | `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable MAF inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. Its pure internal built-in resolver preserves MAF provider/model precedence without constructing a chat client; an identity check protects Copilot from custom-manager fallback. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
-| `azure_functions_agents/_harness.py` | Private once-per-app-root harness selection, explicit preview capability validation, and conservative MAF `FunctionTool` qualification, including combined-catalog collision checks and rejection of unsupported configured output caps and custom client managers before app mutation. Captures one frozen Copilot provider from `_copilot_providers.py`; standalone runner calls use the same selection. No SDK import/process side effects when off. | `AppHarness`, `HarnessRequest`, `get_harness()`, `prepare_tools()`, `validate_agent()` |
+| `azure_functions_agents/_harness.py` | Private once-per-app-instance selection, with a separate first-use standalone default per root, explicit preview capability validation, and conservative MAF `FunctionTool` qualification. Captures the frozen Copilot provider and storage configuration in registration closures; distinct app contexts do not share native clients. Internal shutdown callbacks are registered only by acquired resource owners. No opposite-persistence initialization/probes or SDK import/process side effects when off. | `AppHarness`, `HarnessRequest`, `get_harness()`, `prepare_tools()`, `validate_agent()` |
 | `azure_functions_agents/_copilot_providers.py` | Defines the Copilot provider interface, registry, sanitized provider-setting validation, and frozen OpenAI / Azure OpenAI / Foundry SDK provider mappings. Reads only the provider environment at harness selection; imports the Copilot SDK lazily when building per-request config. | `CopilotProvider`, `OpenAIProvider`, `AzureOpenAIProvider`, `FoundryProvider`, `_PROVIDERS` |
-| `azure_functions_agents/_copilot.py` | Lazy, pinned local Copilot SDK stdio adapter. Uses SDK-owned runtime acquisition, native session create/resume/disconnect and local state; supplies provider token callbacks, adapts only the host-qualified custom tools, checks their exact model-visible catalog, translates results/usage and stops the SDK client on shutdown. No ambient SDK tools, host completion marker, OS file lock, broad child-environment filter, cache-layout inspection or outbound HTTP rewrite. | `run()`, `shutdown()` |
+| `azure_functions_agents/_copilot.py` | Lazy, pinned Copilot SDK stdio adapter. Uses SDK-owned runtime acquisition and native session create/resume/disconnect with its own SessionFs adapter. Supplies provider credential callbacks, adapts only the host-qualified custom tools, checks their exact model-visible catalog, translates results/usage and stops the SDK client and its persistence adapter on shutdown. The SDK owns session behavior and native compaction. No ambient SDK tools, broad child-environment filter, cache-layout inspection or outbound HTTP rewrite. | `run()`, `shutdown()` |
+| `azure_functions_agents/_copilot_session_fs.py` | Thin filesystem adapter for opaque SDK files: ordinary local files or one Blob per SDK file, with path containment, file/directory metadata and SDK-shaped operation errors. Uses shared readable agent identity; SDK-specific persistence types stay behind this boundary. Constructed, used and closed only on the Copilot path. | `NativeSessionFs`, `open_session_fs()` |
+| `azure_functions_agents/__init__.py` | Public API exports and shutdown of acquired, harness-owned resources plus the active client manager, without importing unselected persistence implementations. | `shutdown_client_manager()` |
 | `azure_functions_agents/workflows/integration.py` | Builds the complete immutable handler catalog, immutable slug-keyed workflow-agent policy catalog (including allowed tools' decorator-owned retry and timeout declarations), per-agent management tools/addenda, validates declared trigger support for workflow-enabled agents, and performs the one app-wide Durable registration. It also resolves the packaged `data-driven-workflows` skill used for progressive authoring guidance. | `build_workflow_handler_catalog()`, `build_workflow_agent_policy_catalog()`, `build_workflow_agent_integration()`, `data_driven_workflows_skill_path()`, `validate_workflow_agent_trigger()`, `register_workflow_runtime()` |
 | `azure_functions_agents/workflows/engine.py` | Registers one Durable blueprint per app and executes the native two-argument Durable Task orchestrator, workflow-tool Activity, and Workflow Sub Agent Activity. Orchestration and Activity schedules attach `durabletask.displayName` tags for readable DTS dashboard timelines without changing registered function names. Capability-bearing Activities reauthorize against the current workflow-agent policy before complete-catalog dispatch. Data-driven execution uses typed persisted-task/state contracts and deterministic phase helpers for `when` evaluation, bounded `for_each` materialization, runnable selection, ordered aggregation, result application, cancellation restoration, structured (`schema_version: 2`) status, and controlled-failure normalization. It selects retry and continuation behavior from persisted orchestration input. Static and dynamic schedulers share the continuation decision that commits bounded permitted failures. Waves without enabled continuation keep the earlier wait, failure, and cancellation order. Durable `yield` boundaries remain in the top-level orchestrator generator. | `register_workflows()` |
 | `azure_functions_agents/workflows/context.py` | Tracks invocation context by `(workflow_agent_slug, session_id)`, derives non-revealing 128-bit agent/session prefixes for Durable instance IDs, and exposes the per-delivery task context whose idempotency key is stable across retry attempts. | `session_instance_prefix()`, `new_workflow_instance_id()`, `workflow_matches_agent_session()`, `current_workflow_task_context()` |
@@ -231,8 +237,7 @@ the supplied ID, and the Blob/File provider reloads the history stored under the
 Blob/File
 history, rather than a provider-side conversation ID retained on an earlier object, therefore remains
 authoritative. Cross-worker turn ordering is not coordinated, so callers must still avoid concurrent
-turns for the same agent/session pair. Earlier unscoped
-`agent-sessions/{session_id}.jsonl` records are not loaded or mutated. With effective context and
+turns for the same agent/session pair. With effective context and
 output limits configured, MAF compacts the externally
 loaded conversation history immediately before each model call. Agent instructions remain part of
 every call; compaction controls accumulated message-history growth.
@@ -241,7 +246,7 @@ every call; compaction controls accumulated message-history growth.
 
 `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` is the only harness selector. Unset,
 `false` or `0` selects the unchanged MAF path; `true` or `1` selects the
-local preview. Boolean text is case-insensitive and trimmed; a present empty
+preview. Boolean text is case-insensitive and trimmed; a present empty
 value or any other value is an error. Each app construction captures a fresh
 immutable binding, carried as an internal `AgentCapabilities` handle into
 closures. Existing closures retain their selection. Standalone calls capture
@@ -255,8 +260,9 @@ constructing or inspecting a MAF chat client. It preserves the existing explicit
 provider override, autodetection order (`AZURE_OPENAI_ENDPOINT` → Foundry
 endpoint → OpenAI key), model precedence, blank handling, and per-agent composed
 model handoff. `_copilot_providers.py` freezes the selected Copilot provider
-settings at harness selection; SDK types remain inside `_copilot.py` and the
-provider module's lazy config builders.
+settings at harness selection; SDK types remain inside Copilot adapters and the
+provider module's lazy config builders. Shared storage configuration does not
+import either harness's persistence implementation.
 
 `ClientManager` remains the MAF provider extension point, not the new harness
 boundary. Flag-off custom managers and subclasses retain their existing behavior.
@@ -286,7 +292,7 @@ and identify the provider/configuration action. Unsupported providers/settings
 fail without fallback.
 
 The supported execution subset is the primary, direct, non-streaming HTTP role
-and local native-session continuity. Its tool catalog is composed in the same
+with SDK-owned sessions backed by local files or Blob storage. Its tool catalog is composed in the same
 order as the MAF direct path: filtered explicit user tools, the per-request ACA
 `execute_python` tool when configured, then the configured `web_request` tool
 (default-on unless the app or agent opts out). These are the existing host
@@ -330,17 +336,77 @@ External stdio remains the transport: experimental embedded FFI still needs
 native assets, and prior Linux/Windows spikes found stdio competitive or faster
 while embedded retained native resources.
 
-The SDK owns local native session files under an app-scoped local directory.
-A caller-supplied public session ID requests a strict resume, not a new
-conversation. An authored HTTP validation or startup error does not return a
-newly generated Copilot ID that has no completed native turn; supplied IDs
-remain in error headers for retry, and MAF header behavior is unchanged. The
-host does not hash completed files, keep a pending/ready overlay or take an OS
-file lock.
-No MAF transcript is imported or mutated. The preview remains one local worker
-and does not qualify multi-worker or Azure hosting; interrupted-turn recovery
-is not guaranteed. Cancellation is session-scoped; application shutdown stops
-the SDK client.
+#### Native session persistence
+
+Copilot's SDK owns sessions, continuation, recovery, compaction, file contents,
+file formats and format compatibility. The host implements only the SDK's
+`SessionFs` filesystem contract: read, write, append, exists, stat, directory
+listing with entry types, mkdir, remove and rename. Every SDK-requested file is
+stored opaquely as an ordinary local file or an individual Blob, without a
+filename whitelist, content parsing or a host-owned session protocol.
+
+Storage selection reuses the existing `AzureWebJobsStorage` connection string
+or `AzureWebJobsStorage__blobServiceUri`. A connection string takes precedence;
+the service-URI path retains storage-specific identity selection
+(`AzureWebJobsStorage__clientId` before `AZURE_CLIENT_ID`). Blob is selected
+whenever either storage setting is configured, including on a local host.
+Local files are selected only when neither is configured. Configured Blob
+auth, network and configuration failures surface as errors, never a disk
+fallback. Container and local-root overrides remain
+`AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER` and
+`AZURE_FUNCTIONS_AGENTS_SESSION_DIR`; no new storage selector is introduced.
+
+The native namespace is:
+
+```text
+copilot-native/{agent_id}/{session_id}/{sdk_relative_path}
+```
+
+`agent_id` comes from `_agent_identity.agent_id(slug)` and already includes
+the shared app correlation key and canonical slug. The correlation key
+slash-joins the trimmed, available `WEBSITE_OWNER_NAME` and
+`WEBSITE_DEPLOYMENT_ID` values, using `WEBSITE_SITE_NAME` in place of a missing
+deployment ID. It is lowercased and becomes `local` when platform metadata is
+absent. There is no additional app segment or host format version. Session IDs
+retain their existing validation, and normalized SDK paths must stay within
+the adapter's configured filesystem roots.
+
+The pinned SDK can pass real host working-directory paths to filesystem
+callbacks. Those paths must be handled according to its declared path
+contract, not by interpreting saved session contents or matching arbitrary
+path suffixes. The adapter accepts the exact current workspace; unknown recorded
+host paths remain denied, so changing that workspace is not a qualified restore
+scenario. File and directory metadata and operation errors must match the
+SDK's exported types. The SDK can narrow some error codes or mask some `exists`
+errors; that is not permission to return empty files or hide backend failures.
+Blob rename may require copy/delete and is **not crash-atomic**. Filesystem
+operations do not constitute a host-owned whole-session transaction.
+
+Turns for one `(agent, session)` are serialized only within a Python process,
+with bounded waiting; independent sessions remain concurrent. Cross-worker
+overlap is unsupported and caller-owned, matching the MAF boundary.
+Distributed coordination is tracked separately in
+[planning issue #1361](https://github.com/Azure/azure-functions-bucees-planning/issues/1361).
+
+Shared configuration and registration route persistence to the selected
+harness without importing, initializing, probing or cleaning up the opposite
+persistence implementation. MAF owns its existing history provider; Copilot
+constructs, uses and closes its SessionFs adapter, keeping SDK-specific
+persistence types behind that boundary. Cancellation remains session-scoped.
+The already-open provider is returned by the SDK's per-session callback factory
+before create/resume; the SDK builds its own RPC adapter. The public session
+request chooses create or resume without host history probes, and the SDK
+session is disconnected before its filesystem closes. Request deadlines bound
+lock waits, startup, execution and filesystem callbacks; abort, disconnect and
+adapter-close cleanup each have a bounded five-second grace. Standalone callers
+await `shutdown_client_manager()` before closing their event loop.
+
+The preview remains local-only and single-worker: startup rejects
+`FUNCTIONS_WORKER_PROCESS_COUNT` other than `1` and deployed
+`WEBSITE_INSTANCE_ID` instances. Earlier real-service continuation and
+compaction results do not qualify this filesystem adapter. See
+[Copilot preview: session storage operations](copilot-preview-operations.md)
+for configuration, inspection, errors and targeted cleanup.
 
 Authored HTTP-trigger input validation, response-format prompting, JSON
 extraction, `response_schema` validation, `AgentResult`, response bodies and
@@ -352,12 +418,15 @@ agent's authored `input_schema`, `response_example`, or `response_schema`.
 
 Debug UI, streaming/history projection, non-HTTP triggers, MCP, skills,
 delegation, Workflow Sub Agents, workflows-enabled agents and their management
-tools, and MAF-specific compaction settings remain unsupported and are rejected
-before inference. Stream/history routes return 501 rather than success-shaped
-empty output. SDK-owned local completed-turn state is the only
-supported continuity; Azure Blob/distributed persistence, native
-compaction, and interrupted-turn recovery remain unsupported. No host summarizer is introduced. The runnable subset,
-setup, verification and rollback are in the
+tools remain unsupported and are rejected before inference. Stream/history
+routes return 501 rather than success-shaped empty output. A non-null effective
+`agent_configuration.agent_framework.compaction.max_context_window_tokens` is
+still rejected; clearing it with `null`, or omitting it, now selects native
+compaction defaults instead of failing. The SDK owns compaction and its
+artifacts; the host adds no summarizer or continuation guarantee.
+Deployed-host and dual-harness end-to-end qualification remain in #1357, and
+final rollout/production activation remains in #1337. The runnable subset, setup,
+verification and rollback are in the
 [sample](https://github.com/Azure/azure-functions-agents-runtime/tree/main/samples/copilot-preview).
 
 Delegated and Workflow Sub Agent roles use the specialist's own resolved configuration, never the
