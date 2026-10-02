@@ -60,19 +60,17 @@ def followup(client: httpx.Client, path: Path) -> None:
 def negative(client: httpx.Client) -> None:
     response = client.post(
         "/agents/main/chat",
-        headers={"x-ms-session-id": "unknown-" + uuid.uuid4().hex},
+        headers={"x-ms-session-id": "../outside"},
         json={"prompt": "This must fail before any model call."},
     )
-    assert response.status_code == 409, "Unknown preview session did not return HTTP 409"
+    assert response.status_code == 400, "Invalid session identity did not return HTTP 400"
     error = response.json()["error"].lower()
-    assert "native session has no completed turn to resume" in error, (
-        "Missing unknown native session diagnostic"
-    )
+    assert "invalid session_id" in error, "Missing invalid session identity diagnostic"
     stream = client.post("/agents/main/chatstream", json={"prompt": "Do not call a model."})
     assert stream.status_code == 501, "Unsupported streaming did not fail explicitly"
     history = client.get("/agents/main/history")
     assert history.status_code == 501, "Preview returned a success-shaped MAF transcript"
-    print("PASS negative: unknown session, streaming and history fail without model calls")
+    print("PASS negative: invalid session, streaming and history fail without model calls")
 
 
 def main() -> None:
@@ -92,18 +90,12 @@ def main() -> None:
             parser.error("--restart-host requires the explicit Copilot preview flag.")
         app = Path(__file__).resolve().parent / "src"
         required = ["AZURE_FUNCTIONS_AGENTS_PROVIDER"]
-        storage = os.environ.get("AZURE_FUNCTIONS_AGENTS_COPILOT_SESSION_STORAGE", "local").strip().lower()
-        if storage == "blob":
+        connection = os.environ.get("AzureWebJobsStorage", "").strip()
+        service_uri = os.environ.get("AzureWebJobsStorage__blobServiceUri", "").strip()
+        if connection or service_uri:
             required.append("AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER")
             if os.environ.get("AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB") != "1":
                 parser.error("Blob restart requires AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB=1.")
-            connection = os.environ.get("AzureWebJobsStorage", "").strip()
-            service_uri = os.environ.get("AzureWebJobsStorage__blobServiceUri", "").strip()
-            if bool(connection) == bool(service_uri):
-                parser.error(
-                    "Blob restart requires exactly one of AzureWebJobsStorage or "
-                    "AzureWebJobsStorage__blobServiceUri."
-                )
             settings = app / "local.settings.json"
             if not settings.exists():
                 parser.error(
@@ -128,12 +120,15 @@ def main() -> None:
                         "Remove AzureWebJobsStorage and any mismatched AzureWebJobsStorage__blobServiceUri "
                         "entry from local.settings.json so the worker uses the explicit Entra ID service URI."
                     )
-        elif storage == "local":
-            required.append("AZURE_FUNCTIONS_AGENTS_SESSION_DIR")
         else:
-            parser.error("Session storage must be local or blob.")
-        if os.environ.get("AZURE_FUNCTIONS_AGENTS_PROVIDER") == "foundry":
+            required.append("AZURE_FUNCTIONS_AGENTS_SESSION_DIR")
+        provider = os.environ.get("AZURE_FUNCTIONS_AGENTS_PROVIDER", "").strip().lower()
+        if provider == "foundry":
             required.extend(["FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"])
+        elif provider == "azure_openai":
+            required.append("AZURE_OPENAI_ENDPOINT")
+            if not os.environ.get("AZURE_FUNCTIONS_AGENTS_MODEL", "").strip():
+                required.append("AZURE_OPENAI_DEPLOYMENT")
         else:
             required.extend(["AZURE_FUNCTIONS_AGENTS_MODEL", "OPENAI_API_KEY"])
         missing = [name for name in required if not os.environ.get(name)]
@@ -150,7 +145,7 @@ def main() -> None:
             with httpx.Client(base_url=host.base_url, timeout=75, trust_env=False) as client:
                 followup(client, args.evidence)
                 negative(client)
-        print("PASS local Functions host restart between completed turns")
+        print("PASS local Functions host restart and SDK follow-up")
         return
     url = urlsplit(args.base_url)
     if url.scheme != "http" or url.hostname not in {"localhost", "127.0.0.1", "::1"}:

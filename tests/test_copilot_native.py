@@ -335,7 +335,8 @@ def native(monkeypatch, tmp_path, request):
     )
     monkeypatch.setattr(_copilot, "build_async_credential", lambda: credential)
     monkeypatch.setenv("GITHUB_TOKEN", "ambient-auth-must-not-be-forwarded")
-    monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
+    monkeypatch.delenv("AzureWebJobsStorage", raising=False)
+    monkeypatch.delenv("AzureWebJobsStorage__blobServiceUri", raising=False)
     for key in ("WEBSITE_INSTANCE_ID", "FUNCTIONS_WORKER_PROCESS_COUNT",
                 "AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY"):
         monkeypatch.delenv(key, raising=False)
@@ -370,7 +371,7 @@ async def test_real_native_markdown_tool_and_cold_runtime_resume(native):
         assert receipt in result["response"]
         assert len(native.clients) == 1
         assert len(native.created) == 1
-        assert native.metadata_lookups == native.created
+        assert native.metadata_lookups == []
         assert any(isinstance(event.data, AssistantTurnEndData) for event in native.histories[0])
         assert any(
             isinstance(event.data, AssistantMessageData) and receipt in event.data.content
@@ -392,7 +393,7 @@ async def test_real_native_markdown_tool_and_cold_runtime_resume(native):
         assert second["tool_calls"] == []
         assert len(native.clients) == 2
         assert native.resumed == native.created
-        assert native.metadata_lookups == native.created
+        assert native.metadata_lookups == []
         assert len(native.captured) == 3
         prior = native.captured[-1].get("messages") or native.captured[-1]["input"]
         assert prior[-1]["role"] == "user"
@@ -500,7 +501,9 @@ async def test_native_startup_failure_preserves_completed_session(native, monkey
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("damage", ["missing", "empty", "malformed"])
-async def test_missing_or_corrupt_sdk_journal_never_starts_over(native, damage):
+async def test_sdk_remains_the_only_resume_authority_after_journal_damage(native, damage, monkeypatch):
+    from copilot.session import CopilotSession
+
     app = create_function_app(native.root)
     chat = next(
         item.get_user_function() for item in app.get_functions()
@@ -520,6 +523,10 @@ async def test_missing_or_corrupt_sdk_journal_never_starts_over(native, damage):
             journal.unlink()
         else:
             journal.write_text("" if damage == "empty" else "malformed\n", encoding="utf-8")
+        send_probe = AsyncMock(side_effect=_harness.CopilotPreviewError(
+            "SDK resume probe completed; no prompt was sent."
+        ))
+        monkeypatch.setattr(CopilotSession, "send_and_wait", send_probe)
         failed = await chat(SimpleNamespace(
             headers={"x-ms-session-id": public_id},
             json=AsyncMock(return_value={"prompt": "Recall the receipt."}),
@@ -530,6 +537,9 @@ async def test_missing_or_corrupt_sdk_journal_never_starts_over(native, damage):
         assert "session" in error.lower() or "conversation" in error.lower()
         assert len(native.captured) == 2
         assert len(native.created) == 1
+        assert len(native.resumed) == 1
+        assert native.metadata_lookups == []
+        assert send_probe.await_count in {0, 1}
     finally:
         await shutdown_client_manager()
 

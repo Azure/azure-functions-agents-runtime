@@ -1,4 +1,4 @@
-"""Cross-process native cold-restore coverage against the pinned runtime (no model calls)."""
+"""Real SDK/native filesystem boundaries without inference or downloads."""
 
 from __future__ import annotations
 
@@ -10,30 +10,25 @@ from pathlib import Path
 
 import pytest
 
-from azure_functions_agents._copilot_session_fs import WORKSPACE_ROOT
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TIMEOUT_SECONDS = 300
 
 
 def runtime_is_cached() -> bool:
     """Report whether the pinned runtime bundle is already present; never download it."""
-    from copilot._cli_download import ensure_runtime_wrapper
+    from copilot._cli_version import get_runtime_platform
 
-    previous = os.environ.get("COPILOT_SKIP_CLI_DOWNLOAD")
-    os.environ["COPILOT_SKIP_CLI_DOWNLOAD"] = "1"
-    try:
-        return bool(ensure_runtime_wrapper())
-    except Exception:
-        return False
-    finally:
-        if previous is None:
-            os.environ.pop("COPILOT_SKIP_CLI_DOWNLOAD", None)
-        else:
-            os.environ["COPILOT_SKIP_CLI_DOWNLOAD"] = previous
+    bundle = REPO_ROOT / ".tmp-validation" / "runtime-1.0.85" / "prebuilds" / get_runtime_platform()
+    wrapper = "copilot-runtime.exe" if os.name == "nt" else "copilot-runtime"
+    return all((bundle / name).is_file() for name in (
+        wrapper, "runtime.node", ".hostless-runtime-assets-v2"
+    ))
 
 
-def run_worker(phase: int, session_dir: Path, storage_root: Path, out: Path, cwd: Path) -> dict:
+def run_worker(
+    phase: int, session_dir: Path, storage_root: Path, out: Path, cwd: Path,
+    *, expected_exit: int = 0,
+) -> dict:
     environment = {
         **os.environ,
         "PYTHONPATH": os.pathsep.join([str(REPO_ROOT), str(REPO_ROOT / "src")]),
@@ -50,12 +45,18 @@ def run_worker(phase: int, session_dir: Path, storage_root: Path, out: Path, cwd
         check=False,
     )
     assert out.is_file(), f"worker {phase} produced no report: {completed.stderr[-2000:]}"
-    return json.loads(out.read_text(encoding="utf-8"))
+    result = json.loads(out.read_text(encoding="utf-8"))
+    assert completed.returncode == expected_exit, result
+    return result
 
 
-@pytest.mark.skipif(not runtime_is_cached(), reason="pinned native runtime is not cached")
-def test_second_process_resumes_the_hydrated_session_from_a_different_host_root(tmp_path):
-    """A replacement worker with its own host root and cwd must resume the persisted tree."""
+pytestmark = pytest.mark.skipif(
+    os.environ.get("AZURE_FUNCTIONS_AGENTS_TEST_NATIVE_COPILOT") != "1" or not runtime_is_cached(),
+    reason="Explicit offline native test only; pinned assets must already be cached.",
+)
+
+
+def test_replacement_process_uses_the_same_known_workspace_with_opaque_files(tmp_path):
     session_dir = tmp_path / "sessions"
     first_cwd = tmp_path / "first-cwd"
     second_cwd = tmp_path / "second-cwd"
@@ -64,15 +65,28 @@ def test_second_process_resumes_the_hydrated_session_from_a_different_host_root(
 
     created = run_worker(1, session_dir, tmp_path / "root-a", tmp_path / "a.json", first_cwd)
     assert created["outcome"] == "ok", created.get("error")
-    assert "/session-state/events.jsonl" in created["files"]
-    assert WORKSPACE_ROOT not in created["paths"], "creation never resolves the host workspace"
+    assert "session-state/opaque.sdk" in created["files"]
+    assert created["denied_paths"] == []
 
-    resumed = run_worker(2, session_dir, tmp_path / "root-b", tmp_path / "b.json", second_cwd)
+    resumed = run_worker(2, session_dir, tmp_path / "root-a", tmp_path / "b.json", second_cwd)
     assert resumed["outcome"] == "ok", resumed.get("error")
     assert resumed["pid"] != created["pid"]
     assert resumed["cwd"] != created["cwd"]
+    assert resumed["workspace"] == created["workspace"]
+    assert resumed["denied_paths"] == []
+    assert "session-state/opaque.sdk" in resumed["files"]
+    assert any(path.startswith("/session-state") for path in resumed["paths"])
+
+
+def test_recorded_unknown_workspace_is_denied_without_suffix_adoption(tmp_path):
+    session_dir = tmp_path / "sessions"
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    created = run_worker(1, session_dir, tmp_path / "root-a", tmp_path / "a.json", cwd)
+    assert created["outcome"] == "ok", created.get("error")
+    resumed = run_worker(
+        2, session_dir, tmp_path / "root-b", tmp_path / "b.json", cwd, expected_exit=1
+    )
+    assert resumed["outcome"] == "error"
     assert resumed["workspace"] != created["workspace"]
-    # The runtime resolves the recorded host cwd through SessionFs before loading events.
-    assert WORKSPACE_ROOT in resumed["paths"]
-    assert "/session-state/events.jsonl" in resumed["paths"]
-    assert "/session-state/events.jsonl" in resumed["files"]
+    assert created["workspace"] in resumed["denied_paths"]

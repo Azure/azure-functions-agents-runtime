@@ -1,22 +1,15 @@
-"""Out-of-process native create/resume worker for the cold-restore regression test.
-
-Run as ``python -m tests._native_restore_worker <phase> <session_dir> <storage_root> <out.json>``.
-It mirrors the adapter wiring in :mod:`azure_functions_agents._copilot` but points the
-provider at a closed loopback port, so a turn is attempted and its events are flushed to
-the SessionFs without any model call.
-"""
+"""Offline SDK create/resume worker using ordinary local SessionFs files."""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import sys
 from pathlib import Path
 
 
-async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> None:
+async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> int:
     from azure_functions_agents import _copilot
     from azure_functions_agents import _copilot_session_fs as fs
     from azure_functions_agents._copilot_providers import OpenAIProvider
@@ -24,12 +17,16 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
     from azure_functions_agents._native_session_identity import resolve_route
 
     paths: list[str] = []
+    denied_paths: list[str] = []
     original = fs.NativeSessionFs._path
 
     def record(self: fs.NativeSessionFs, path: str) -> str:
-        resolved = original(self, path)
-        paths.append(resolved)
-        return resolved
+        paths.append(path)
+        try:
+            return original(self, path)
+        except OSError:
+            denied_paths.append(path)
+            raise
 
     fs.NativeSessionFs._path = record
 
@@ -48,44 +45,52 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
         "workspace": str(owner.workspace),
     }
     storage = None
+    session = None
     try:
-        client = await owner.client()
-        storage = await fs.NativeSession.open(
-            harness, "agent", "restore", native_id, asyncio.get_running_loop().time() + 300
+        storage = await fs.open_session_fs(
+            harness.session_storage, "agent", "restore",
+            workspace_path=str(owner.workspace),
+            deadline=asyncio.get_running_loop().time() + 120,
         )
-        await storage.prepare(new_session=(phase == 1), workspace_path=str(owner.workspace))
-        session = await _open_session(client, native_id, phase, storage, owner)
-        async with session:
-            # A closed loopback provider still drives a real turn whose events are persisted.
-            with contextlib.suppress(BaseException):
-                await asyncio.wait_for(session.send_and_wait("ping"), timeout=90)
-        await storage.transition(state=fs.SessionState.ACTIVE)
-        await storage.transition(handoff_may_have_started=True)
-        await storage.complete()
+        client = await owner.client()
+        session = await _open_session(client, native_id, phase, storage)
+        result["event_count"] = len(await session.get_events())
+        if phase == 1:
+            await storage.write_file("/session-state/opaque.sdk", "\x00opaque\r\nfixture")
+        else:
+            assert await storage.read_file("/session-state/opaque.sdk") == "\x00opaque\r\nfixture"
         result["outcome"] = "ok"
-        result["files"] = sorted(storage.envelope.completed.files)
-    except BaseException as error:
+    except Exception as error:
         result["outcome"] = "error"
         result["error"] = f"{type(error).__name__}: {error}"
     finally:
-        if storage is not None:
-            await storage.close()
-        await _copilot.shutdown()
+        try:
+            if session is not None:
+                await session.disconnect()
+        finally:
+            try:
+                if storage is not None:
+                    await storage.close()
+            finally:
+                await _copilot.shutdown()
+    root = session_dir / "copilot-native" / "local" / "agent" / "restore"
+    result["files"] = sorted(
+        path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()
+    )
     result["paths"] = paths
+    result["denied_paths"] = denied_paths
     out.write_text(json.dumps(result), encoding="utf-8")
+    return 0 if result["outcome"] == "ok" else 1
 
 
-async def _open_session(client, native_id, phase, storage, owner):
+async def _open_session(client, native_id, phase, storage):
     from copilot.session import (
-        InfiniteSessionConfig,
         ProviderConfig,
         SystemMessageReplaceConfig,
         ToolSearchConfig,
     )
 
     from azure_functions_agents import _copilot
-    from azure_functions_agents import _copilot_session_fs as fs
-
     options = {
         "model": "offline-model",
         "tools": [],
@@ -99,32 +104,37 @@ async def _open_session(client, native_id, phase, storage, owner):
         "enable_config_discovery": False,
         "enable_session_telemetry": False,
         "request_extensions": False,
-        "infinite_sessions": InfiniteSessionConfig(enabled=True),
         "tool_search": ToolSearchConfig(enabled=False),
         "on_event": lambda _event: None,
-        "create_session_fs_handler": lambda _session: fs.NativeSessionFs(
-            storage, fs.HOST_PATH_CONVENTIONS, str(owner.workspace)
-        ),
+        "create_session_fs_handler": lambda _session: storage,
     }
     if phase == 1:
         return await client.create_session(
             session_id=native_id, on_permission_request=_copilot._deny_permission, **options
         )
     return await client.resume_session(
-        native_id, on_permission_request=_copilot._deny_permission,
-        continue_pending_work=False, **options,
+        native_id, on_permission_request=_copilot._deny_permission, **options,
     )
 
 
 def main() -> None:
     phase, session_dir, storage_root, out = sys.argv[1:5]
     os.environ["COPILOT_SKIP_CLI_DOWNLOAD"] = "1"
+    os.environ["COPILOT_CLI_EXTRACT_DIR"] = str(
+        Path(__file__).resolve().parents[1] / ".tmp-validation" / "runtime-1.0.85"
+    )
+    for name in ("COPILOT_CLI_PATH", "COPILOT_SDK_DEFAULT_CONNECTION"):
+        os.environ.pop(name, None)
     os.environ["OPENAI_API_KEY"] = "offline"
     os.environ["AZURE_FUNCTIONS_AGENTS_SESSION_DIR"] = session_dir
-    os.environ["AZURE_FUNCTIONS_AGENTS_COPILOT_SESSION_STORAGE"] = "local"
-    for name in ("AzureWebJobsStorage", "AzureWebJobsStorage__blobServiceUri", "WEBSITE_INSTANCE_ID"):
+    for name in (
+        "AzureWebJobsStorage", "AzureWebJobsStorage__blobServiceUri", "WEBSITE_INSTANCE_ID",
+        "WEBSITE_OWNER_NAME", "WEBSITE_DEPLOYMENT_ID", "WEBSITE_SITE_NAME",
+    ):
         os.environ.pop(name, None)
-    asyncio.run(_run(int(phase), Path(session_dir), Path(storage_root), Path(out)))
+    raise SystemExit(asyncio.run(
+        _run(int(phase), Path(session_dir), Path(storage_root), Path(out))
+    ))
 
 
 if __name__ == "__main__":

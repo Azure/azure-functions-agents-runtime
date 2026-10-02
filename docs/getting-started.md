@@ -2,7 +2,7 @@
 
 ## Model provider configuration
 
-The runtime uses Microsoft Agent Framework, which supports Microsoft Foundry, Azure OpenAI, and OpenAI as inference back-ends. The public preview quickstart and samples use **Microsoft Foundry** as the primary path, pinned with `AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`.
+The runtime uses Microsoft Agent Framework by default, which supports Microsoft Foundry, Azure OpenAI, and OpenAI as inference back-ends. The public preview quickstart and samples use **Microsoft Foundry** as the primary path, pinned with `AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`.
 
 | Provider | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Required env vars | Notes |
 | --- | --- | --- | --- |
@@ -105,6 +105,11 @@ docker run -d --name azurite -p 10000:10000 -p 10001:10001 -p 10002:10002 \
   azurite --skipApiVersionCheck --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
 ```
 
+The existing `AzureWebJobsStorage` setting selects Blob-backed session storage,
+even on a local host. `AzureWebJobsStorage__blobServiceUri` is the Entra-based
+alternative. Local session files are used only when neither is configured;
+configured Blob failures surface rather than falling back to local disk.
+
 ### 8. Run locally
 
 ```bash
@@ -119,4 +124,5 @@ Your agent is now running at `http://localhost:7071/agents/main/` with a built-i
 - [Front matter reference](front-matter-reference.md) — auto-generated, plain field-by-field reference (handy for quick lookups)
 - [Triggers](triggers.md) — supported trigger types and payload shapes
 - [Architecture](architecture.md) — how the runtime discovers, translates, and registers agents
+- [Copilot preview operations](copilot-preview-operations.md) — separate default-off, local-only preview; this quickstart uses MAF and its existing history provider
 - The repository [README](https://github.com/Azure/azure-functions-agents-runtime#readme) also covers custom Python tools, built-in endpoint routes, and multi-agent delegation in more depth

@@ -15,7 +15,6 @@ from azurefunctions.extensions.http.fastapi import Request, Response
 
 from .._harness import HarnessKind, bind_harness
 from .._logger import logger
-from .._native_session_identity import NativeSessionError
 from .._observability import (
     ATTR_FAULT_DOMAIN,
     FaultDomain,
@@ -23,6 +22,7 @@ from .._observability import (
     capture_sensitive_data,
     start_span,
 )
+from .._session_storage import SessionStorageError
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
 from ._auth import authorize_entra_request
@@ -538,12 +538,10 @@ def make_http_agent_handler(
                     media_type="text/plain",
                     headers={_SESSION_ID_HEADER: session_id},
                 )
-            except NativeSessionError as exc:
-                # Only an HTTP surface carries status semantics for a session
-                # conflict or an unavailable store; other boundaries re-raise.
+            except SessionStorageError as exc:
                 span.set_attribute("af.agent.outcome", "error")
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
-                logger.error("HTTP agent '%s' session refused: %s", resolved.name, exc)
+                logger.error("HTTP agent '%s' storage failed: %s", resolved.name, exc)
                 return Response(
                     content=json.dumps({"error": str(exc)}),
                     status_code=exc.status_code,

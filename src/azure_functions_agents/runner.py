@@ -66,8 +66,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ._blob_history import build_blob_provider_from_environment
-from ._file_history import ScopedFileHistoryProvider
 from ._function_tool import FunctionTool, tool
 from ._harness import (
     AppHarness,
@@ -347,6 +345,9 @@ def _build_history_provider(agent_slug: str) -> Any:
     Falls back to :class:`ScopedFileHistoryProvider` for pure local
     development.
     """
+    from ._blob_history import build_blob_provider_from_environment
+    from ._file_history import ScopedFileHistoryProvider
+
     blob_provider = build_blob_provider_from_environment(agent_slug=agent_slug)
     if blob_provider is not None:
         return blob_provider
@@ -866,12 +867,6 @@ async def _build_agent_session(
         session = AgentSession(session_id=resolved_id)
 
     history_agent_slug = _resolve_history_agent_slug(agent_name, workflow_agent_slug)
-    from ._native_session_identity import guard_opposite_history, resolve_route
-
-    await guard_opposite_history(
-        resolve_route(app_root or get_app_root(), for_guard=True),
-        history_agent_slug, resolved_id, native=False,
-    )
     history_provider = _build_history_provider(history_agent_slug)
 
     delegate_tools: list[FunctionTool] | None = None

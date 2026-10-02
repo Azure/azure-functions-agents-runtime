@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, version
@@ -20,7 +20,7 @@ from .client_manager import (
     _resolve_builtin_inference_target,
 )
 from .config.env import EnvVar, raw_env_value
-from .config.paths import get_app_root, resolve_config_dir
+from .config.paths import get_app_root
 from .config.schema import HTTP_TRIGGER_TYPE, AgentConfiguration, ResolvedAgent
 
 if TYPE_CHECKING:
@@ -49,7 +49,7 @@ class UnsupportedCapabilityError(ValueError):
     """The preview cannot preserve a requested capability's semantics."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class AppHarness:
     name: HarnessKind
     app_root: Path
@@ -76,6 +76,22 @@ class HarnessRequest:
 
 _HARNESSES: dict[Path, AppHarness] = {}
 _SELECTION_LOCK = threading.Lock()
+_SHUTDOWN_CALLBACKS: set[Callable[[], Awaitable[None]]] = set()
+
+
+def _register_shutdown(callback: Callable[[], Awaitable[None]]) -> None:
+    _SHUTDOWN_CALLBACKS.add(callback)
+
+
+def _unregister_shutdown(callback: Callable[[], Awaitable[None]]) -> None:
+    _SHUTDOWN_CALLBACKS.discard(callback)
+
+
+async def _shutdown_harnesses() -> None:
+    """Close only resource owners acquired by selected app paths."""
+    async with AsyncExitStack() as cleanup:
+        for callback in tuple(_SHUTDOWN_CALLBACKS):
+            cleanup.push_async_callback(callback)
 
 
 def _flag_enabled(value: str | None) -> bool:
@@ -149,8 +165,7 @@ def get_harness(app_root: Path | None = None, *, new_app: bool = False) -> AppHa
                 if raw_env_value(name):
                     raise UnsupportedCapabilityError(f"Copilot preview does not support {name}.")
             route = resolve_route(root)
-            app_key = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:32]
-            storage_root = Path(resolve_config_dir()).resolve() / "copilot-preview" / app_key
+            storage_root = route.local_dir / "copilot-preview"
             selected = AppHarness(
                 HarnessKind.COPILOT,
                 root,

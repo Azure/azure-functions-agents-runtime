@@ -4,20 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import contextlib
-import uuid
+import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
-from ._copilot_providers import AzureOpenAIProvider, FoundryProvider
 from ._copilot_session_fs import (
     HOST_PATH_CONVENTIONS,
     SESSION_STATE_ROOT,
-    NativeSession,
     NativeSessionFs,
-    SessionState,
+    open_session_fs,
 )
 from ._credential import build_async_credential
 from ._harness import (
@@ -26,17 +23,13 @@ from ._harness import (
     HarnessKind,
     HarnessRequest,
     UnsupportedCapabilityError,
+    _register_shutdown,
+    _unregister_shutdown,
     validate_copilot_client_manager,
 )
 from ._logger import logger
-from ._native_session_identity import (
-    IncompatibleSessionError,
-    NativeSessionError,
-    PersistenceUnavailableError,
-    SessionConflictError,
-    guard_opposite_history,
-)
-from .client_manager import InferenceTarget, ProviderKind
+from ._native_session_identity import NativeSessionError
+from .client_manager import InferenceTarget
 
 if TYPE_CHECKING:
     from azure.core.credentials_async import AsyncTokenCredential
@@ -45,7 +38,6 @@ if TYPE_CHECKING:
     from copilot.session import (
         CopilotSession,
         CreateSessionFsHandler,
-        InfiniteSessionConfig,
         PermissionInvocation,
         ProviderConfig,
         ProviderTokenArgs,
@@ -70,26 +62,30 @@ class _SessionOptions(TypedDict):
     enable_config_discovery: bool
     enable_session_telemetry: bool
     request_extensions: bool
-    infinite_sessions: InfiniteSessionConfig
     tool_search: ToolSearchConfig
     on_event: Callable[[SessionEvent], None]
     create_session_fs_handler: CreateSessionFsHandler
 
 
 def _native_id(agent_slug: str, session_id: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"af-copilot:{agent_slug}:{session_id}"))
+    return f"{agent_slug}.{session_id}"
 
 
 class _NativeRuntime:
     """One SDK-managed stdio client per app worker."""
 
-    def __init__(self, root: Path, namespace: str) -> None:
-        self.native_root = root / "native" / namespace
+    def __init__(self, root: Path) -> None:
+        self.native_root = root / "native"
         self.workspace = self.native_root / "workspace"
         self._client: CopilotClient | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._start_lock = asyncio.Lock()
         self._credential: AsyncTokenCredential | None = None
+        self._filesystems: set[NativeSessionFs] = set()
+
+    async def release_filesystem(self, provider: NativeSessionFs) -> None:
+        await asyncio.wait_for(provider.close(), timeout=5)
+        self._filesystems.discard(provider)
 
     async def client(self) -> CopilotClient:
         loop = asyncio.get_running_loop()
@@ -156,6 +152,12 @@ class _NativeRuntime:
                 self._client = None
                 self._loop = None
                 atexit.unregister(self._exit)
+            for provider in tuple(self._filesystems):
+                try:
+                    await self.release_filesystem(provider)
+                except OSError:
+                    logger.error("Copilot session filesystem cleanup failed.")
+                    failed = True
             if self._credential is not None:
                 try:
                     await self._credential.close()
@@ -220,29 +222,17 @@ class _RequestTokenSource:
         return error
 
 
-_RUNTIMES: dict[tuple[Path, str, ProviderKind | None, str | None], _NativeRuntime] = {}
+_RUNTIMES: dict[AppHarness, _NativeRuntime] = {}
 
 
 def _runtime(harness: AppHarness) -> _NativeRuntime:
     if harness.name != HarnessKind.COPILOT or harness.storage_root is None:
         raise CopilotPreviewError("Copilot was not selected for this app.")
-    route = harness.session_storage
-    provider_kind = harness.provider.kind if harness.provider is not None else None
-    endpoint = (
-        harness.provider.endpoint
-        if isinstance(harness.provider, AzureOpenAIProvider | FoundryProvider)
-        else None
-    )
-    key = (harness.storage_root, route.identity_key if route else "unconfigured",
-           provider_kind, endpoint)
-    owner = _RUNTIMES.get(key)
+    owner = _RUNTIMES.get(harness)
     if owner is None:
-        namespace = uuid.uuid5(
-            uuid.NAMESPACE_URL,
-            f"af-copilot-worker:{key[1]}:{provider_kind}:{endpoint}",
-        ).hex
-        owner = _NativeRuntime(harness.storage_root, namespace)
-        _RUNTIMES[key] = owner
+        owner = _NativeRuntime(harness.storage_root)
+        _RUNTIMES[harness] = owner
+        _register_shutdown(shutdown)
     return owner
 
 
@@ -251,11 +241,13 @@ async def shutdown() -> None:
     for key, owner in list(_RUNTIMES.items()):
         try:
             await owner.close()
-        except Exception:
+        except (CopilotPreviewError, OSError, RuntimeError):
             logger.error("Copilot runtime owner cleanup failed.")
             failed = True
-        if owner._client is None and owner._credential is None:
+        if owner._client is None and owner._credential is None and not owner._filesystems:
             _RUNTIMES.pop(key, None)
+    if not _RUNTIMES:
+        _unregister_shutdown(shutdown)
     if failed:
         raise CopilotPreviewError("Copilot preview shutdown failed for one or more workers.")
 
@@ -324,98 +316,29 @@ def _provider(harness: AppHarness, tokens: ProviderTokenSource, model: str) -> P
         raise CopilotPreviewError(harness.provider.setup_diagnostic()) from None
 
 
-def _completed_turn(events: list[SessionEvent]) -> bool:
-    from copilot.session_events import SessionEventType, SessionIdleData
-
-    has_user_message = False
-    completed = False
-    interrupted = False
-    for event in events:
-        if event.type == SessionEventType.USER_MESSAGE:
-            has_user_message = True
-            completed = False
-            interrupted = False
-        elif event.type == SessionEventType.ASSISTANT_TURN_START and has_user_message:
-            completed = False
-        elif event.type in {
-            SessionEventType.ABORT,
-            SessionEventType.AGENT_INTERRUPTED,
-            SessionEventType.SESSION_ERROR,
-        }:
-            interrupted = True
-        elif event.type == SessionEventType.SESSION_IDLE:
-            match event.data:
-                case SessionIdleData(aborted=True):
-                    interrupted = True
-        elif event.type == SessionEventType.ASSISTANT_TURN_END and has_user_message:
-            completed = not interrupted
-    return has_user_message and completed and not interrupted
-
-
-async def _verify_completed_turn(session: CopilotSession) -> None:
+async def _abort(session: CopilotSession) -> None:
     try:
-        events = await session.get_events()
-    except Exception:
-        raise CopilotPreviewError(
-            "Copilot native session history is missing, corrupt, or unavailable; "
-            "no conversation was reset."
-        ) from None
-    if not _completed_turn(events):
-        raise CopilotPreviewError(
-            "Copilot native session has no verifiable completed turn. "
-            "Interrupted or empty history cannot be continued; start a new conversation."
-        )
-
-
-async def _rpc_left_no_session(
-    client: CopilotClient | None, native_id: str, *, resuming: bool
-) -> bool:
-    """Prove a failed create/resume RPC left nothing that could still act on the tree."""
-    if client is None:
-        return False
-    if resuming:
-        # The native session predates this turn; every write it could make flows
-        # through the fenced working tree this owner is about to discard.
-        return True
-    try:
-        return await client.get_session_metadata(native_id) is None
-    except Exception:
-        return False
-
-
-async def _abort(session: CopilotSession, deadline: float) -> None:
-    try:
-        await asyncio.wait_for(
-            session.abort(), timeout=max(0.0, min(5.0, deadline - asyncio.get_running_loop().time()))
-        )
+        await asyncio.wait_for(session.abort(), timeout=5)
     except Exception:
         logger.error("Copilot session abort failed.")
 
 
 @asynccontextmanager
 async def _session_context(
-    session: CopilotSession, on_detach: Callable[[], None], deadline: float
+    session: CopilotSession,
 ) -> AsyncIterator[CopilotSession]:
     """Bound SDK session detachment without stopping the shared client."""
-    await session.__aenter__()
-    turn_failed = False
     try:
         yield session
-    except BaseException:
-        turn_failed = True
-        raise
     finally:
+        turn_failed = sys.exception() is not None
         try:
-            await asyncio.wait_for(
-                session.__aexit__(None, None, None),
-                timeout=max(0.0, min(5.0, deadline - asyncio.get_running_loop().time())),
-            )
-            on_detach()
+            await asyncio.wait_for(session.disconnect(), timeout=5)
         except Exception:
             logger.error("Copilot session detach failed.")
             if not turn_failed:
                 raise CopilotPreviewError(
-                    "Copilot native session could not be detached; its state may be unfinished."
+                    "Copilot native session could not be disconnected."
                 ) from None
 
 
@@ -426,7 +349,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
             "Copilot preview cannot enforce max_output_tokens with the pinned SDK/runtime. "
             "Remove the cap or use the MAF harness."
         )
-    from copilot.session import InfiniteSessionConfig, SystemMessageReplaceConfig, ToolSearchConfig
+    from copilot.session import SystemMessageReplaceConfig, ToolSearchConfig
     from copilot.session_events import AssistantMessageData, AssistantUsageData
 
     from .runner import AgentResult, _AgentUsageRecorder, _session_lock_bounded_by
@@ -446,12 +369,6 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
         ),
     )
     invocation_started = False
-    storage: NativeSession | None = None
-    send_created = False
-    rpc_attempted = False
-    detached = False
-    client: CopilotClient | None = None
-    session: CopilotSession | None = None
 
     def on_event(event: SessionEvent) -> None:
         nonlocal input_tokens, output_tokens
@@ -466,213 +383,107 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 if used_output is not None:
                     output_tokens = (output_tokens or 0) + used_output
 
+    token_source = _RequestTokenSource(owner)
     try:
-        token_source = _RequestTokenSource(owner)
         provider = _provider(harness, token_source, request.model)
         async with _session_lock_bounded_by(
-            native_id, request.deadline, agent_slug=request.agent_slug
-        ), asyncio.timeout_at(request.deadline):
+            request.session_id, request.deadline, agent_slug=request.agent_slug
+        ), asyncio.timeout_at(request.deadline), AsyncExitStack() as cleanup:
             if harness.session_storage is None:
-                raise PersistenceUnavailableError("Native session storage is not configured.")
-            await guard_opposite_history(
-                harness.session_storage, request.agent_slug, request.session_id, native=True
+                raise CopilotPreviewError("Native session storage is not configured.")
+            storage = await open_session_fs(
+                harness.session_storage,
+                request.agent_slug,
+                request.session_id,
+                workspace_path=str(owner.workspace),
+                deadline=request.deadline,
             )
-            storage = await NativeSession.open(
-                harness, request.agent_slug, request.session_id, native_id, request.deadline
+            owner._filesystems.add(storage)
+            cleanup.push_async_callback(owner.release_filesystem, storage)
+            client = await owner.client()
+            options = _SessionOptions(
+                model=request.model,
+                tools=[_tool(function, calls) for function in request.tools],
+                available_tools=[f"custom:{function.name}" for function in request.tools],
+                system_message=SystemMessageReplaceConfig(
+                    mode="replace", content=request.instructions or ""
+                ),
+                provider=provider,
+                streaming=False,
+                enable_config_discovery=False,
+                enable_session_telemetry=False,
+                request_extensions=False,
+                tool_search=ToolSearchConfig(enabled=False),
+                on_event=on_event,
+                create_session_fs_handler=lambda _session: storage,
             )
-            try:
-                client = await owner.client()
-                if storage.envelope.state in {
-                    SessionState.PREPARING,
-                    SessionState.ACTIVE,
-                }:
-                    if storage.envelope.handoff_may_have_started:
-                        raise IncompatibleSessionError(
-                            "Native session handoff is uncertain; use a new ID."
-                        )
-                    if storage.envelope.completed is None:
-                        try:
-                            legacy = await client.get_session_metadata(native_id)
-                        except Exception:
-                            raise PersistenceUnavailableError(
-                                "Native session metadata could not be checked before recovery."
-                            ) from None
-                        if legacy is not None:
-                            raise IncompatibleSessionError(
-                                "Native session creation may have started; recovery cannot prove "
-                                "the old session is detached."
-                            )
-                    await storage.recover_preparing()
-                if storage.envelope.state is SessionState.EMPTY:
-                    try:
-                        legacy = await client.get_session_metadata(native_id)
-                    except Exception:
-                        raise PersistenceUnavailableError(
-                            "Native legacy session metadata could not be checked."
-                        ) from None
-                    if legacy is not None:
-                        raise IncompatibleSessionError(
-                            "An older native session exists without an envelope; use a new ID."
-                        )
-                await storage.prepare(
-                    new_session=request.new_session, workspace_path=str(owner.workspace)
+            if request.new_session:
+                session = await client.create_session(
+                    session_id=native_id, on_permission_request=_deny_permission, **options
                 )
-                await storage.check()
-                tools = [_tool(function, calls) for function in request.tools]
-                options = _SessionOptions(
-                    model=request.model,
-                    tools=tools,
-                    available_tools=[f"custom:{function.name}" for function in request.tools],
-                    system_message=SystemMessageReplaceConfig(
-                        mode="replace", content=request.instructions or ""
-                    ),
-                    provider=provider,
-                    streaming=False,
-                    enable_config_discovery=False,
-                    enable_session_telemetry=False,
-                    request_extensions=False,
-                    infinite_sessions=InfiniteSessionConfig(enabled=True),
-                    tool_search=ToolSearchConfig(enabled=False),
-                    on_event=on_event,
-                    create_session_fs_handler=lambda _session: NativeSessionFs(
-                        storage, HOST_PATH_CONVENTIONS, str(owner.workspace)
-                    ),
+            else:
+                session = await client.resume_session(
+                    native_id, on_permission_request=_deny_permission, **options
                 )
-                rpc_attempted = True
-                if storage.envelope.completed is None:
-                    session = await client.create_session(
-                        session_id=native_id, on_permission_request=_deny_permission, **options
+            async with _session_context(session):
+                metadata = await session.rpc.tools.get_current_metadata()
+                if metadata.tools is None:
+                    raise CopilotPreviewError("Copilot did not report its model-visible tool catalog.")
+                actual_names = sorted(item.name for item in metadata.tools)
+                expected_names = sorted(function.name for function in request.tools)
+                if actual_names != expected_names:
+                    raise CopilotPreviewError(
+                        "Copilot model-visible tool catalog differs from the configured custom tools. "
+                        "No prompt was sent."
                     )
-                else:
-                    try:
-                        session = await client.resume_session(
-                            native_id, on_permission_request=_deny_permission,
-                            continue_pending_work=False, **options,
-                        )
-                    except Exception:
+                logger.info("Copilot tool catalog verified: custom_tool_count=%d", len(expected_names))
+                logger.info(
+                    "Copilot request target: provider=%s model=%s",
+                    harness.provider.kind if harness.provider is not None else None,
+                    request.model,
+                )
+                invocation_started = True
+                replied = False
+                try:
+                    response = await session.send_and_wait(
+                        request.prompt,
+                        timeout=max(0.0, request.deadline - asyncio.get_running_loop().time()),
+                    )
+                    replied = True
+                finally:
+                    if not replied:
+                        await _abort(session)
+                token_error = token_source.take_error()
+                if token_error is not None:
+                    raise token_error
+                match response.data if response is not None else None:
+                    case AssistantMessageData(content=content) if content.strip():
+                        pass
+                    case _:
                         raise CopilotPreviewError(
-                            "Copilot could not resume this session. Native state may be missing, "
-                            "corrupt, or unavailable; no replacement session was created."
-                        ) from None
-                def mark_detached() -> None:
-                    nonlocal detached
-                    detached = True
-
-                async with _session_context(session, mark_detached, request.deadline):
-                    if storage.envelope.completed is not None:
-                        await _verify_completed_turn(session)
-                    metadata = await session.rpc.tools.get_current_metadata()
-                    if metadata.tools is None:
-                        raise CopilotPreviewError("Copilot did not report its model-visible tool catalog.")
-                    actual_names = sorted(item.name for item in metadata.tools)
-                    expected_names = sorted(function.name for function in request.tools)
-                    if actual_names != expected_names:
-                        raise CopilotPreviewError(
-                            "Copilot model-visible tool catalog differs from the configured custom tools. "
-                            "No prompt was sent."
+                            "Copilot returned no final model reply. Check provider "
+                            "authentication and model/deployment access."
                         )
-                    await storage.check()
-                    logger.info("Copilot tool catalog verified: custom_tool_count=%d", len(expected_names))
-                    logger.info(
-                        "Copilot request target: provider=%s model=%s",
-                        harness.provider.kind if harness.provider is not None else None,
-                        request.model,
-                    )
-                    await storage.transition(state=SessionState.ACTIVE)
-                    await storage.transition(handoff_may_have_started=True)
-                    await storage.check()
-                    invocation_started = True
-                    send_task = asyncio.create_task(session.send_and_wait(
-                        request.prompt, timeout=max(0.0, request.deadline - asyncio.get_running_loop().time())
-                    ))
-                    send_created = True
-                    fail_task = asyncio.create_task(storage.failed.wait())
-                    lease_task = (
-                        asyncio.create_task(storage.store.failed.wait())
-                        if hasattr(storage.store, "failed") else None
-                    )
-                    try:
-                        watchers = {send_task, fail_task}
-                        if lease_task is not None:
-                            watchers.add(lease_task)
-                        await asyncio.wait(watchers, return_when=asyncio.FIRST_COMPLETED)
-                        await storage.check()
-                        if not send_task.done():
-                            raise PersistenceUnavailableError("Native persistence failed during the turn.")
-                        try:
-                            response = await send_task
-                        except BaseException:
-                            token_error = token_source.take_error()
-                            if token_error is not None:
-                                raise token_error from None
-                            raise
-                        token_error = token_source.take_error()
-                        if token_error is not None:
-                            raise token_error
-                        await storage.check()
-                    finally:
-                        fail_task.cancel()
-                        if lease_task is not None:
-                            lease_task.cancel()
-                        if not send_task.done():
-                            await _abort(session, request.deadline)
-                            send_task.cancel()
-                        await asyncio.gather(send_task, fail_task, *([lease_task] if lease_task else []),
-                                             return_exceptions=True)
-                    match response.data if response is not None else None:
-                        case AssistantMessageData(content=content) if content.strip():
-                            await _verify_completed_turn(session)
-                        case _:
-                            raise CopilotPreviewError(
-                                "Copilot returned no final model reply. Check provider "
-                                "authentication and model/deployment access."
-                            )
-                async with storage.lock:
-                    await storage.check()
-                await storage.complete()
-                return AgentResult(
-                    session_id=request.session_id,
-                    content=content,
-                    content_intermediate=messages[:-1],
-                    tool_calls=calls,
-                )
-            except BaseException:
-                if storage.envelope.state in {SessionState.PREPARING, SessionState.ACTIVE}:
-                    if session is not None and send_created and not detached:
-                        with contextlib.suppress(Exception):
-                            await _abort(session, request.deadline)
-                    recoverable = (
-                        not send_created and not storage.envelope.handoff_may_have_started
-                    )
-                    if recoverable and rpc_attempted and not detached:
-                        recoverable = session is None and await _rpc_left_no_session(
-                            client, native_id,
-                            resuming=storage.envelope.completed is not None,
-                        )
-                    if recoverable:
-                        with contextlib.suppress(Exception):
-                            await storage.rollback()
-                    elif storage.failure is None:
-                        with contextlib.suppress(Exception):
-                            await storage.uncertain()
-                raise
-            finally:
-                await storage.close()
+            return AgentResult(
+                session_id=request.session_id,
+                content=content,
+                content_intermediate=messages[:-1],
+                tool_calls=calls,
+            )
     except asyncio.CancelledError:
         raise
     except TimeoutError:
-        if storage is None:
-            raise SessionConflictError("Native session is busy or startup exceeded its deadline.") from None
-        raise PersistenceUnavailableError(
-            "Copilot native turn exceeded its deadline; completion was not acknowledged."
-        ) from None
+        raise CopilotPreviewError("Copilot request exceeded its deadline.") from None
     except (CopilotPreviewError, NativeSessionError):
         raise
     except Exception:
+        token_error = token_source.take_error()
+        if token_error is not None:
+            raise token_error from None
         logger.error("Copilot preview execution failed; native details were not logged.")
         raise CopilotPreviewError(
             "Copilot preview failed. Check the SDK runtime, provider authentication, and "
-            "local storage. This conversation was not silently restarted."
+            "session storage. No fallback was attempted."
         ) from None
     finally:
         if invocation_started:
