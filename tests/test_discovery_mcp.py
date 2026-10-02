@@ -598,3 +598,53 @@ def test_discover_inline_mix_in_url(
 
     assert isinstance(tool, MCPStreamableHTTPTool)
     assert tool.url == "https://example.com:8080/api"
+
+
+def test_discover_mcp_servers_skips_unresolved_header_value(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write_mcp_json(
+        tmp_path,
+        {
+            "servers": {
+                "example": {
+                    "type": "http",
+                    "url": "https://api.example.com/mcp",
+                    "headers": {"Authorization": "Bearer $MY_TOKEN_TYPO"},
+                }
+            }
+        },
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = discover_mcp_servers(tmp_path)
+
+    assert result.servers == {}
+    assert len(result.failed_loads) == 1
+    assert result.failed_loads[0][0] == "example"
+    assert "could not resolve header 'Authorization' value 'Bearer $MY_TOKEN_TYPO'" in result.failed_loads[0][1]
+
+
+def test_discover_mcp_servers_skips_unresolved_header_name(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write_mcp_json(
+        tmp_path,
+        {
+            "servers": {
+                "example": {
+                    "type": "http",
+                    "url": "https://api.example.com/mcp",
+                    "headers": {"$MY_HEADER_KEY": "some-value"},
+                }
+            }
+        },
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = discover_mcp_servers(tmp_path)
+
+    assert result.servers == {}
+    assert len(result.failed_loads) == 1
+    assert result.failed_loads[0][0] == "example"
+    assert "could not resolve header name '$MY_HEADER_KEY'" in result.failed_loads[0][1]
