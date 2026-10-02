@@ -9,30 +9,25 @@ because an owner-only key is shared across apps in the same webspace.
 
 from __future__ import annotations
 
-import os
+from .config.env import runtime_env_value
 
 _WEBSITE_DEPLOYMENT_ID_ENV = "WEBSITE_DEPLOYMENT_ID"
 _WEBSITE_OWNER_NAME_ENV = "WEBSITE_OWNER_NAME"
 _WEBSITE_SITE_NAME_ENV = "WEBSITE_SITE_NAME"
 
 
-def _env_value(name: str) -> str | None:
-    value = os.environ.get(name, "").strip()
-    return value or None
-
-
 def resolve_app_correlation_key() -> str:
     """Resolve a lower-case, best-effort app key from platform env."""
-    owner_name = _env_value(_WEBSITE_OWNER_NAME_ENV)
-    deployment_id = _env_value(_WEBSITE_DEPLOYMENT_ID_ENV)
-    site_name = _env_value(_WEBSITE_SITE_NAME_ENV)
+    owner_name = runtime_env_value(_WEBSITE_OWNER_NAME_ENV)
+    deployment_id = runtime_env_value(_WEBSITE_DEPLOYMENT_ID_ENV)
+    site_name = runtime_env_value(_WEBSITE_SITE_NAME_ENV)
     parts = [owner_name]
-    if deployment_id is not None:
+    if deployment_id:
         parts.append(deployment_id)
-    elif site_name is not None:
+    elif site_name:
         parts.append(site_name)
 
-    return "/".join(part for part in parts if part is not None).lower() or "local"
+    return "/".join(part for part in parts if part).lower() or "local"
 
 
 def agent_id(agent_slug: str, *, correlation_key: str | None = None) -> str:
