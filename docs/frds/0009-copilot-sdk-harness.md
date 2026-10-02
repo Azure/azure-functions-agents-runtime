@@ -427,16 +427,45 @@ gates in this amendment. Skills remain trusted deployment-owned code, not an OS
 sandbox. Untrusted or adversarially mutable skill trees are unsupported.
 
 Native instruction loading is established. Resource access and script execution
-through native skills still need real SDK-session evidence. Do not preselect a
-host resource reader workaround or broad native shell/file permission policy
-before that evidence exists.
+through native skills use targeted native helpers. The host owns the permission
+policy for those helpers. Use `on_permission_request` on create and resume with
+default deny. Return approve-once only for valid approved resource reads or
+validated approved skill-script invocations. Reject general PowerShell commands,
+including commands from an approved skill directory or after a skill is loaded.
+Never use approve-all, session-wide cached grants, or a callback bypass.
+
+Native `view` may read only resources under canonical approved skill trees.
+Native `powershell` is the tested Windows helper for approved skill scripts. It
+remains visible, and an approved script command may be permitted from an
+unrelated turn because the SDK does not attest skill origin. Do not approve other
+platform shells or generic tools without separate evidence and policy. Validate
+against stable permission-request data, such as request kind and full command
+text plus canonical approved targets. Do not trust model or caller intent,
+homemade loaded-skill state, `possiblePaths` alone, tool-call correlation IDs,
+or accepted skill frontmatter/event metadata as authorization. Approve only
+narrowly supported validated invocation forms. Deny unknown or ambiguous forms,
+and do not treat exact-command matching as a general PowerShell argument parser.
+
+Once approved, a skill script runs with host privileges. This policy restricts
+which native helper actions may start; it does not sandbox the script's internal
+effects. Supported command forms and arguments need implementation coverage under
+this contract. They are not a new authoring surface or another user policy
+question.
+
+The native skill schema takes a skill name and does not enumerate approved names.
+Give the model the approved skill names and descriptions automatically. Prefer a
+supported SDK prompt or catalog presentation. If replace-mode integration needs
+it, a tiny adapter projection of already validated names and descriptions is an
+acceptable fallback. That fallback is not a loader or prompt engine.
 
 The disabled SDK built-ins list reflects SDK 1.0.14. The runtime may expose more
 later. Native `builtin:skill` is the targeted allowlist exception for approved
-skill directories. Other built-ins remain excluded by the custom-tool allowlist
-unless separately approved. Disabled built-ins: shell/files (`bash`,
-`powershell`, `view`, `create`, `edit`, `grep`, `glob`), network (`web_fetch`),
-agents (`task`, `read_agent`, `write_agent`, `list_agents`),
+skill directories. Native `view` and Windows `powershell` are targeted helper
+exceptions only for approved skill resource reads and approved skill-script
+invocations. Other built-ins remain excluded by the custom-tool allowlist unless
+separately approved. Disabled built-ins: shell/files (`bash`, generic
+`powershell`, generic `view`, `create`, `edit`, `grep`, `glob`), network
+(`web_fetch`), agents (`task`, `read_agent`, `write_agent`, `list_agents`),
 interaction/planning (`ask_user`,
 `task_complete`, `exit_plan_mode`, `send_inbox`, `context_board`), tool search,
 and infinite sessions.
@@ -611,31 +640,33 @@ connection behavior without an extra host catalog audit, remote MCP URLs with
 static headers, minimal flag-off validation, and ordinary runtime `@tool`
 automatic SDK mapping. It also covers thin SDK-owned skill integration: shared
 runtime discovery and filtering feed approved skill paths and metadata to the
-selected harness, and the harness SDK owns skill behavior. Permission callback
-mechanics remain implementation work under the approved policy. Real SDK-session
-evidence for native resource/script capability is pending and must not become a
-new broad preview gate. Full amendment architecture review remains open.
+selected harness, and the harness SDK owns skill behavior. Native skill resource
+reads and Windows PowerShell script runs are allowed only through approve-once
+permission decisions for approved skill actions; all other native helper actions
+default to reject. Permission callback mechanics remain implementation work under
+the approved policy. Full amendment architecture review remains open.
 
 ## 5. Decisions log
 
 Dates below record the original scope approvals and proposals. The provider-contract
 entries were approved by larohra on 2026-09-29. The issue #1336 MCP/skills
 proposal entries record proposed mappings and later human direction. Approved
-directions now include preserving skill behavior and autonomous MCP approvals,
-same-session resume with fresh static MCP auth headers between completed turns,
-MAF-parity behavior for an empty auth scope, the harness-neutral capability
-interface, existing authored MCP filter semantics, no extra readiness/catalog
+directions now include preserving skill discovery/filtering behavior and
+autonomous MCP approvals, same-session resume with fresh static MCP auth headers
+between completed turns, MAF-parity behavior for an empty auth scope, the
+harness-neutral capability interface, existing authored MCP filter semantics, no
+extra readiness/catalog
 audit, remote MCP URLs with the accepted static-header boundary, no new
 amendment role restrictions, minimal flag-off validation, and ordinary runtime
 `@tool` mapping to each harness. The latest approved direction uses a thin
 harness-owned skill interface instead of a runtime-owned skill engine. The shared
 script runner, MAF-provider dependency in the Copilot skills path, common
-three-tool skill abstraction, runtime prompt/resource/script engine, stricter
-discovery correction, post-create staging sequence, dynamic-header broker,
-SDK-object descriptor, full catalog attestation, direct-only role restriction,
-and exhaustive flag-off regression proposals are superseded by those later
-choices. Unrelated parts of the MCP/skills proposal remain pending fresh
-architecture review.
+three-tool skill abstraction, runtime prompt/resource/script engine, broad native
+file/shell permission, stricter discovery correction, post-create staging
+sequence, dynamic-header broker, SDK-object descriptor, full catalog attestation,
+direct-only role restriction, and exhaustive flag-off regression proposals are
+superseded by those later choices. Unrelated parts of the MCP/skills proposal
+remain pending fresh architecture review.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
@@ -670,6 +701,7 @@ architecture review.
 | 29 | Flag-off validation | Exhaustive new regression suite / ordinary or minimal check | Preserve flag-off MAF behavior. Existing coverage or a minimal focused check is acceptable; this is not an open design decision. | Human (larohra) | 2026-10-01 |
 | 30 | Runtime `@tool` SDK mapping | Author SDK-specific decorators / map runtime tools through adapters | Keep ordinary runtime `@tool` authoring, schema validation, and sync/async invocation stable. Discovery emits neutral tool metadata; the MAF adapter constructs MAF `FunctionTool`, and the Copilot adapter constructs Copilot tools. MAF-specific subclasses and keyword arguments stay in the MAF compatibility layer and fail explicitly on Copilot when unmapped. | Human (larohra) | 2026-10-01 |
 | 31 | Thin SDK-owned skills integration | Runtime-owned skill engine / harness interface with SDK-owned skill behavior | Keep shared discovery, validation, exclusions, and approved skill paths/metadata. Let each harness adapter map those paths into its SDK: MAF through public `SkillsProvider.from_paths`, Copilot through supported public skill directory/enable/exclusion configuration and native `builtin:skill`. Do not create a runtime-owned loader, prompt engine, three-tool abstraction, or script executor for parity. | Human (larohra) | 2026-10-02 |
+| 32 | Native skill helper permissions | Hide helper tools or broadly trust them / visible helpers with approve-once scoped actions | Keep native skill helpers visible when needed, but approve only valid resource reads under approved skill trees and validated approved skill-script invocations. Reject general PowerShell and other generic helper use. There is no skill-origin attestation or sandbox guarantee once a script is approved. | Human (larohra) | 2026-10-02 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -688,7 +720,7 @@ where mocks cannot establish process, transport, authentication, or durability.
 | Tools | Cover ordinary runtime `@tool` mapping to neutral metadata, sync/async, Pydantic, both decorator orders, workflow-only tools, approval options, and denied ambient capabilities. Assert MAF maps neutral tools to `FunctionTool`, Copilot maps them to Copilot tools, callable/effect counts remain stable, and no unexpected interactive approval gate appears. Unmapped MAF-only extensions fail explicitly on Copilot. |
 | Import boundary / neutral interface | Structurally assert `HarnessRequest` and discovery/registration outputs contain only immutable SDK-free descriptors. Assert `agent_framework` imports are limited to the MAF adapter and named MAF-compat public surfaces, and Copilot imports are limited to the Copilot adapter. Delete-or-stub the MAF adapter in a smoke test to prove discovery, registration, runner contracts, and Copilot descriptor mapping do not change. |
 | MCP compatibility | At the pinned SDK/native/protocol versions, keep a regression for the confirmed post-create staging/reload failures. Exercise MCP configuration at create and same-ID resume through the existing lock/per-turn detach lifecycle; prove that a completed first turn survives resume, fresh static headers replace old headers before the next turn, and prior user/tool/assistant history reaches the resumed model context. Verify remote HTTP/streamable-HTTP URLs are allowed by the intended design. Verify empty/whitespace scope logs the existing warning and uses static headers without token acquisition; valid-scope token acquisition failures are explicit; and missing/unresolved client IDs use the default credential. Verify generated `Authorization` keeps existing MAF precedence over static headers. Exercise existing filters: per-agent disable/exclude, per-server all, none, and named tool allowlists. Verify the permission callback approves only selected servers and authored tool filters, rejects unconfigured/unattributed/mismatched/policy-flagged requests, never uses approve-all, and never prompts. Do not require an extra host readiness/full-catalog/provenance audit before prompting. Assert no OAuth/upscope/stale-token/drop-tools fallback. Ordinary SDK connection and initialization errors surface explicitly. |
-| Skills compatibility | Exercise canonical `(name, path)` inventory construction, including valid nested skills and excluded descendants. Build skill descriptors with approved paths and metadata only. Verify adapters preserve allowed visibility and do not expose broad unfiltered roots. Verify MAF maps approved paths through public `SkillsProvider.from_paths`; Copilot maps approved paths through supported public skill directory/enable/exclusion configuration and native `builtin:skill`. Cover malformed-frontmatter logging-and-skip, existing name validation, and role isolation. Verify no runtime-owned skill loader, prompt engine, three-tool abstraction, host script runner, or new approval gate is introduced. Native resource/script behavior depends on real SDK-session evidence and selected SDK capabilities. |
+| Skills compatibility | Exercise canonical `(name, path)` inventory construction, including valid nested skills and excluded descendants. Build skill descriptors with approved paths and metadata only. Verify adapters preserve allowed visibility and do not expose broad unfiltered roots. Verify MAF maps approved paths through public `SkillsProvider.from_paths`; Copilot maps approved paths through supported public skill directory/enable/exclusion configuration and native `builtin:skill`. Cover malformed-frontmatter logging-and-skip, existing name validation, and role isolation. Verify no runtime-owned skill loader, prompt engine, three-tool abstraction, host script runner, or new approval gate is introduced. Verify create and resume both install the same default-deny permission policy: native `view` is approved only for resources under approved skill trees, Windows `powershell` is approved only for validated approved skill-script invocations, generic commands are rejected before and after skill loading, approve-all is not used, and broad native tools remain denied. Verify approved names/descriptions reach the model without requiring duplicate author prompts. |
 | Compatibility/role isolation | Verify flag-off MCP/tool behavior and unchanged MAF skill discovery/script behavior without Copilot startup. A minimal focused flag-off check is acceptable for this amendment. Structurally prove per-run provider state, capability-copy/catalog-leaf non-mutation, project-skill retention, and no unintended `data-driven-workflows` leakage. |
 | Delegation/workflows | Prove fresh same-specialist concurrent sessions, catalog/role isolation, no child SSE, parent cancellation and specialist-local errors, Workflow Sub Agent grants/results, existing management/Activity retry/timeout/authorization, and at-least-once semantics. |
 | Role storage/trigger execution | Run a non-HTTP trigger with its generated identity, serialization, logging/error behavior, and direct capabilities. Persistent direct state is isolated; delegates/Workflow Sub Agents leave no persistent native tree and dispose ephemeral state. |
@@ -722,23 +754,26 @@ versions, create/resume MCP configuration and between-turn credential
 replacement, remote HTTP/streamable-HTTP MCP URLs, static-header limits,
 authored filters, safe failures, no extra host catalog/readiness audit, thin
 SDK-owned skill integration, trusted-code/non-sandbox boundary, preserved MAF
-skill discovery/filtering behavior, ordinary runtime `@tool` mapping, and
-flag-off behavior. The sample must be copy/paste complete for setup, request,
-expected failure, and cleanup.
+skill discovery/filtering behavior, approve-once native skill helper policy,
+ordinary runtime `@tool` mapping, and flag-off behavior. The sample must be
+copy/paste complete for setup, request, expected failure, and cleanup.
 
 ## 8. Status & sign-off
 
 - **Status:** In review; the approved original feature specification and the
   provider contract entries describe intended behavior, not delivery
   order or production qualification. The 2026-09-29 issue #1336 MCP/skills
-  amendment is partially approved only for preserving current MAF skill behavior,
-  autonomous MCP approvals, same-session resume with fresh static MCP auth headers
-  between completed turns, empty-scope MAF parity, and the harness-neutral
-  capability interface. Later human direction also approves existing authored
+  amendment is partially approved only for preserving current MAF skill
+  discovery/filtering behavior, autonomous MCP approvals, same-session resume
+  with fresh static MCP auth headers between completed turns, empty-scope MAF
+  parity, and the harness-neutral capability interface. Later human direction
+  also approves existing authored
   MCP filters, no extra host readiness/catalog audit, remote MCP URLs with the
   accepted static-header boundary, no new amendment role restrictions, minimal
   flag-off validation, ordinary runtime `@tool` automatic SDK mapping, and thin
-  SDK-owned skill integration. Its
+  SDK-owned skill integration. It also approves visible native skill helpers
+  with approve-once scoped resource/script actions and no sandbox or skill-origin
+  guarantee. Its
   product implementation must not begin until the revised amendment receives a
   fresh architecture review and full amendment sign-off.
   The parent migration is not complete or production-qualified.
@@ -761,11 +796,14 @@ expected failure, and cleanup.
   extra host catalog/readiness audit, remote MCP static-header behavior, no new
   amendment role restrictions, minimal flag-off validation, and ordinary runtime
   `@tool` mapping. Human approval also covers thin SDK-owned skill integration.
+  It covers visible native skill helpers with approve-once scoped
+  resource/script actions, with no skill-origin attestation or sandbox
+  guarantee.
   Implementation mechanics must stay within these contracts.
 - **Remaining approval needs:** Fresh architecture review and full amendment
-  sign-off. The approved filtering, static-header, tool-authoring, skill, and
-  interface directions do not need to be re-decided. Status must not return to
-  `Finalized` before review and full sign-off are recorded.
+  sign-off. The approved filtering, static-header, tool-authoring, skill-helper,
+  skill, and interface directions do not need to be re-decided. Status must not
+  return to `Finalized` before review and full sign-off are recorded.
 - **Remaining qualification:** Section 4.8 records preview support limits and
   section 4.8.2 the amendment's remaining evidence requirements. Section 6
   defines acceptance, not results already achieved.
