@@ -376,7 +376,7 @@ parameter is optional; omission is not autoapproval. Permission requests still
 need a consumer decision.
 
 Use the callback already needed for skill helpers on create and resume. For
-ordinary configured MCP requests (`kind == "mcp"`), the proposed minimal mapping
+ordinary configured MCP requests (`kind == "mcp"`), the minimal mapping
 delegates to `PermissionHandler.approve_all`, the SDK's approve-once helper.
 Native `mcpServers.tools` enforces the authored filter. All other request kinds
 retain the agreed skill-helper handling and default deny. Do not install a
@@ -687,6 +687,7 @@ current requirements.
 | 33 | Explicit frontmatter skill exclusions and nested ownership | Name-only exclusion / owning-skill subtree enforcement | Apply existing `skills: false` and `skills.exclude` selections to individual approved paths, explicit `disabled_skills` names, and canonical most-specific target ownership. An enabled parent cannot authorize an excluded nested child; an independently enabled child keeps its own grant under an excluded parent. Preserve the flag-off MAF baseline, which does not guarantee nested subtree exclusions. | Human (larohra) | 2026-10-02 |
 | 34 | Linux native skill helper target | Windows PowerShell / Linux Bash | Use `builtin:skill`, `builtin:view`, and `builtin:bash` for enabled skills on the intended Linux Python worker, with PowerShell disabled. This supersedes the earlier Windows PowerShell helper target, not the default-deny approve-once policy for approved resource reads and validated approved-script invocations. Linux execution remains untested; scripts have host privileges, not a sandbox. | Human (larohra) | 2026-10-02 |
 | 35 | MCP parity-only scope | Add host MCP policy / preserve current MAF behavior | Keep existing MAF MCP behavior and the accepted between-turn header limit. Add no host MCP policy. Raise any further gap for joint review before changing scope. | Human (larohra) | 2026-10-02 |
+| 36 | MCP-only SDK helper branch | Global approve-all / SDK helper restricted to MCP requests | Use the SDK standard `PermissionHandler.approve_all` approve-once helper only for `request.kind == "mcp"` in the shared callback. All other request kinds retain scoped skill checks and default deny; no global approve-all. | Human (larohra) | 2026-10-02 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -767,8 +768,8 @@ The sample must be copy/paste complete for setup, request, expected failure, and
   in sections 4.3.1-4.3.2. Nested exclusions, scoped helper permissions, the Linux
   Bash target, existing role contracts, and minimal flag-off validation are
   unchanged. The latest human direction limits MCP to MAF parity and asks that
-  further gaps come back for review. This is not full amendment sign-off or
-  approval of the proposed SDK helper mapping.
+  further gaps come back for review. The MCP-only SDK helper branch is now
+  approved; full amendment sign-off remains pending.
 - **Open question: managed approvals.** The SDK's standard helper raises when
   managed settings are enabled and returns no approval when a request requires
   managed approval. These source-level limits are not a demonstrated failure in
