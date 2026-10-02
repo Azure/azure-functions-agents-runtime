@@ -104,7 +104,7 @@ spans and the sandbox/`web_request` tool spans together.
 
 | Attribute | Meaning |
 | --- | --- |
-| `af.agent.name` | Agent name. |
+| `af.agent.name` | Canonical agent slug, not the app-qualified MAF name or frontmatter display name. |
 | `af.agent.trigger_type` | `timer`, `connectorTrigger`, `http`, … |
 | `af.agent.model` | Model/deployment used. |
 | `af.agent.session_id` | Conversation/session id. |
@@ -117,6 +117,59 @@ spans and the sandbox/`web_request` tool spans together.
 | `af.agent.response` | The final response text. **Content — only when `ENABLE_SENSITIVE_DATA=true`.** |
 
 Plus `af.lifecycle_stage=agent_run`, and `af.fault_domain` if the run fails.
+
+#### Stable agent ID
+
+MAF `gen_ai.*` spans set `gen_ai.agent.id` to a deterministic, human-readable
+`<correlation-key>/<agent-slug>` string. The correlation key is best effort, is
+not a guaranteed unique Azure resource ID, and needs no app setting. It is
+lower-cased and resolves from non-blank values in this order:
+
+1. `WEBSITE_OWNER_NAME`.
+2. `WEBSITE_DEPLOYMENT_ID`, or `WEBSITE_SITE_NAME` when the deployment id is
+   missing. Site name stands in for a missing deployment id so an owner-only key
+   (shared across apps in the same webspace) still becomes app-specific when the
+   site name is available.
+3. `local` when none of those values is available.
+
+For example, with
+`WEBSITE_OWNER_NAME=0f2c8a1e-1234-4d5e-9abc-0123456789ab+contoso-rg-EastUSwebspace-Linux`,
+`WEBSITE_DEPLOYMENT_ID=contoso-agents`, and agent file
+`agents/billing.agent.md`, the id is
+`0f2c8a1e-1234-4d5e-9abc-0123456789ab+contoso-rg-eastuswebspace-linux/contoso-agents/billing`.
+Locally, the same agent is `local/billing`. The id can contain the subscription
+id from `WEBSITE_OWNER_NAME`, so that subscription id is visible in telemetry.
+
+Linux SKU behavior:
+
+| Linux SKU | Pair available? | Caveat |
+| --- | --- | --- |
+| Consumption | Set during specialization. | A later resolved reference can replace either value. |
+| Flex Consumption | Set, but owner may be empty. | Empty owner means the key uses deployment id or site name only; resolved references are overlaid after platform values. |
+| Premium / Dedicated | Set. | Customer app settings can override either value, so correlation is customer-controlled. |
+
+The same value is emitted in the `agent_runtime_indexed` startup summary as `agent_id` so
+operators can copy it when registering agents with external services such as A2A,
+Agent 365, or Foundry.
+
+#### Readable agent name
+
+MAF `gen_ai.agent.name` is separate from the full stable `gen_ai.agent.id`.
+For primary agents, streaming, chat delegates, and workflow leaf specialists,
+the name is `<Function App name>/<canonical agent slug>` when the trimmed
+`WEBSITE_SITE_NAME` is non-blank. Site-name casing is preserved; owner,
+deployment id, and the frontmatter display `name:` do not choose this label.
+For example, `WEBSITE_SITE_NAME=Contoso-Agents` gives the billing agent the name
+`Contoso-Agents/billing`, while its full correlation-key/slug ID remains unchanged.
+MAF can also use this readable name as response `author_name` metadata; it is
+not a new canonical runtime identity.
+
+An unset, empty, or whitespace-only site name preserves the existing MAF name:
+the caller's canonical slug, or `None` when the caller omitted the name. With a
+site name, an omitted or empty caller name uses the same `main` suffix as the ID.
+Qualification does not change files, routes, `delegate_<slug>` tool names,
+catalog lookup, history/session scope, locks, workflow authorization, or the
+Copilot preview namespace. Runtime `af.agent.name` stays the canonical slug.
 
 #### Span events (runtime lifecycle milestones)
 

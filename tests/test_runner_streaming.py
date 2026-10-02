@@ -271,8 +271,9 @@ def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("site_name", [None, "Contoso-Agents"])
 async def test_run_agent_stream_continues_after_loading_skill(
-    monkeypatch: Any, tmp_path: Path
+    monkeypatch: Any, tmp_path: Path, site_name: str | None
 ) -> None:
     """A read-only skill load executes and returns control to the model."""
 
@@ -311,6 +312,21 @@ async def test_run_agent_stream_continues_after_loading_skill(
 
             return ResponseStream(updates(), finalizer=ChatResponse.from_updates)
 
+    if site_name is None:
+        monkeypatch.delenv("WEBSITE_SITE_NAME", raising=False)
+    else:
+        monkeypatch.setenv("WEBSITE_SITE_NAME", site_name)
+    spans = _install_start_span_capture(monkeypatch)
+    constructed_agents: list[Any] = []
+    original_build_role_agent = runner._build_role_agent
+
+    def build_role_agent(*args: Any, **kwargs: Any) -> Any:
+        agent = original_build_role_agent(*args, **kwargs)
+        constructed_agents.append(agent)
+        return agent
+
+    monkeypatch.setattr(runner, "_build_role_agent", build_role_agent)
+    history_calls: list[str] = []
     skill_dir = tmp_path / "test-skill"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text(
@@ -323,7 +339,11 @@ async def test_run_agent_stream_continues_after_loading_skill(
         "build_chat_client_with_target",
         lambda _model: (chat_client, InferenceTarget()),
     )
-    monkeypatch.setattr(runner, "_build_history_provider", lambda agent_slug: None)
+    monkeypatch.setattr(
+        runner,
+        "_build_history_provider",
+        lambda agent_slug: history_calls.append(agent_slug) or None,
+    )
 
     events = _events_from_sse(
         [
@@ -333,6 +353,7 @@ async def test_run_agent_stream_continues_after_loading_skill(
                 mcp_tools=[],
                 skill_paths=[skill_dir],
                 session_id="skill-session",
+                agent_name="billing",
             )
         ]
     )
@@ -348,6 +369,11 @@ async def test_run_agent_stream_continues_after_loading_skill(
     assert events[2]["tool_call_id"] == "load-skill-1"
     assert events[3]["content"] == "Skill loaded."
     assert chat_client.call_count == 2
+    [agent] = constructed_agents
+    assert agent.name == (f"{site_name}/billing" if site_name else "billing")
+    assert history_calls == ["billing"]
+    [span] = spans
+    assert span.attributes["af.agent.name"] == "billing"
 
 
 def test_run_agent_stream_bounds_stalled_generator_by_coordinator_deadline(

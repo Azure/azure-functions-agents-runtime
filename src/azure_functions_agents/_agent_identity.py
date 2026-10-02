@@ -1,4 +1,11 @@
-"""Shared readable agent identity and best-effort app correlation key."""
+"""Stable agent identity helpers using a best-effort app correlation key.
+
+The key is not a guaranteed unique Azure resource ID. Platform-provided values
+vary by Linux SKU: Flex Consumption/Legion can omit the owner name, while
+Premium/Dedicated resolved references or app settings can override values.
+When deployment id is missing, site name is included with owner when available
+because an owner-only key is shared across apps in the same webspace.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +22,7 @@ def resolve_app_correlation_key() -> str:
         parts.append(deployment_id)
     elif site_name:
         parts.append(site_name)
+
     return "/".join(part for part in parts if part).lower() or "local"
 
 
