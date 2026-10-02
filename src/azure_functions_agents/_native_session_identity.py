@@ -43,7 +43,7 @@ def resolve_route(app_root: Path) -> StorageRoute:
     """Freeze existing storage configuration and the shared app correlation key."""
     del app_root
     return StorageRoute(
-        local_dir=Path(resolve_config_dir()).absolute(),
+        local_dir=Path(resolve_config_dir()).resolve(),
         correlation_key=resolve_app_correlation_key(),
         blob=blob_storage_from_environment(),
     )

@@ -368,7 +368,13 @@ class _BlobFileBackend:
 
     async def _touch_parent(self, path: str) -> None:
         parent = path.rpartition("/")[0]
-        await self._blob(self._directory_name(parent)).set_blob_metadata(DIRECTORY_METADATA)
+        marker = self._blob(self._directory_name(parent))
+        try:
+            await marker.set_blob_metadata(DIRECTORY_METADATA)
+        except ResourceNotFoundError as error:
+            if not _has_storage_code(error, StorageErrorCode.BLOB_NOT_FOUND):
+                raise
+            await marker.upload_blob(b"", overwrite=False, metadata=DIRECTORY_METADATA)
 
     async def write_file(self, path: str, content: bytes, mode: int | None) -> None:
         del mode
@@ -455,7 +461,13 @@ class _BlobFileBackend:
     async def _copy_delete(self, src: str, dest: str) -> None:
         source, target = self._blob(src), self._blob(dest)
         if self.owned.credential is None:
-            await target.upload_blob_from_url(source.url, overwrite=True)
+            # Account-key request authorization does not authorize a private copy-source URL.
+            downloader = await source.download_blob()
+            content = BytesIO()
+            await downloader.readinto(content)
+            await target.upload_blob(
+                content.getvalue(), overwrite=True, metadata=downloader.properties.metadata
+            )
         else:
             token = await self.owned.credential.get_token(STORAGE_TOKEN_SCOPE)
             await target.upload_blob_from_url(

@@ -57,7 +57,7 @@ network or configuration failures surface as errors, never a local fallback.
 | `AzureWebJobsStorage__blobServiceUri` | Existing identity-based Blob service URI, used with `DefaultAzureCredential` when no connection string is configured. |
 | `AzureWebJobsStorage__clientId` / `AZURE_CLIENT_ID` | Optional managed-identity client ID for storage; the storage-specific `clientId` takes precedence. |
 | `AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER` | Blob container name; defaults to `azure-functions-agents` (the same container the MAF history provider uses, in a disjoint prefix). |
-| `AZURE_FUNCTIONS_AGENTS_SESSION_DIR` | Existing local storage root override; defaults to `~/.azure-functions-agents`. Applies only when no Blob setting is configured. |
+| `AZURE_FUNCTIONS_AGENTS_SESSION_DIR` | Existing local root override; defaults to `~/.azure-functions-agents`. Determines the local SDK workspace even with Blob persistence, and the native file storage root when no Blob setting is configured. Keep it stable when resuming SDK sessions. |
 
 Storage configuration is captured per app. Restart the host after changing
 captured settings, and check both process variables and `local.settings.json`

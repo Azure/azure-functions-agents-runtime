@@ -43,6 +43,57 @@ CONTAINER = "AZURE_FUNCTIONS_AGENTS_TEST_BLOB_CONTAINER"
 OPT_IN = "AZURE_FUNCTIONS_AGENTS_TEST_DISPOSABLE_BLOB"
 
 
+class BufferedBlobStream:
+    def __init__(self, response):
+        self.response = response
+        self.content_length = int(response.headers["Content-Length"])
+
+    def __aiter__(self):
+        return self.response.iter_bytes()
+
+
+class PrivateRenameTransport(ScriptedBlobTransport):
+    """Serve one private source blob and reject unauthenticated source-URL copies."""
+
+    def __init__(self, content, metadata, upload_fails):
+        super().__init__()
+        self.content, self.metadata, self.upload_fails = content, metadata, upload_fails
+
+    async def send(self, request, **kwargs):
+        if request.method == "GET":
+            if not self.content and "x-ms-range" in request.headers:
+                status, code = 416, "InvalidRange"
+            else:
+                status, code = (206 if self.content else 200), None
+        elif request.method == "PUT":
+            if "x-ms-copy-source" in request.headers:
+                status, code = 403, "CannotVerifyCopySource"
+            else:
+                status, code = (503, "ServerBusy") if self.upload_fails else (201, None)
+        else:
+            assert request.method == "DELETE"
+            status, code = 202, None
+        self.responses.append((status, code))
+        response = await super().send(request, **kwargs)
+        if request.method == "GET" and code is None:
+            response.headers.update({
+                "Content-Length": str(len(self.content)),
+                "Content-Type": "application/octet-stream",
+                "Last-Modified": "Fri, 02 Oct 2026 21:00:00 GMT",
+                "x-ms-creation-time": "Fri, 02 Oct 2026 21:00:00 GMT",
+                "x-ms-blob-type": "BlockBlob",
+                "ETag": '"fixture-etag"',
+            })
+            if self.content:
+                response.headers["Content-Range"] = f"bytes 0-{len(self.content) - 1}/{len(self.content)}"
+            response.headers.update({f"x-ms-meta-{key}": value for key, value in self.metadata.items()})
+            response._content = self.content
+            response._stream_download_generator = (
+                lambda _pipeline, current, **_kwargs: BufferedBlobStream(current)
+            )
+        return response
+
+
 @pytest.mark.asyncio
 async def test_real_sdk_handler_reports_missing_file(tmp_path, monkeypatch):
     for name in ("AzureWebJobsStorage", "AzureWebJobsStorage__blobServiceUri"):
@@ -262,13 +313,12 @@ async def test_real_blob_sdk_error_pipeline_distinguishes_file_absence(status, c
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("identity", [False, True])
-async def test_real_blob_sdk_rename_primitive_copies_then_deletes_without_leases(identity):
+async def test_real_blob_sdk_identity_rename_copies_then_deletes_without_leases():
     transport = ScriptedBlobTransport((201, None), (202, None))
     service = BlobServiceClient("https://fixture.invalid", transport=transport, retry_total=0)
     credential = SimpleNamespace(
         get_token=AsyncMock(return_value=AccessToken("fixture-token", 0)), close=AsyncMock()
-    ) if identity else None
+    )
     backend = fs._BlobFileBackend(OwnedBlobService(service, credential), "container", "owned-prefix")
     provider = fs.NativeSessionFs(backend)
     try:
@@ -279,13 +329,66 @@ async def test_real_blob_sdk_rename_primitive_copies_then_deletes_without_leases
         assert copy.headers["x-ms-copy-source"] == "https://fixture.invalid/container/owned-prefix/source"
         assert parse_qs(urlsplit(copy.url).query).get("comp") is None
         assert "x-ms-lease-id" not in copy.headers and "x-ms-lease-id" not in delete.headers
-        if identity:
-            assert copy.headers["x-ms-copy-source-authorization"] == "Bearer fixture-token"
-            credential.get_token.assert_awaited_once_with(fs.STORAGE_TOKEN_SCOPE)
+        assert copy.headers["x-ms-copy-source-authorization"] == "Bearer fixture-token"
+        credential.get_token.assert_awaited_once_with(fs.STORAGE_TOKEN_SCOPE)
     finally:
         await provider.close()
-    if identity:
-        credential.close.assert_awaited_once()
+    credential.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("upload_fails", [False, True])
+@pytest.mark.parametrize(
+    ("content", "metadata", "suffix"),
+    [
+        ("\x00opaque\r\n雪".encode(), {"fixture": "file"}, "file"),
+        (b"", fs.DIRECTORY_METADATA | {"fixture": "directory"}, "directory/"),
+    ],
+)
+async def test_real_account_key_blob_sdk_rename_preserves_bytes_metadata_and_source_on_failure(
+    content, metadata, suffix, upload_fails
+):
+    transport = PrivateRenameTransport(content, metadata, upload_fails)
+    service = BlobServiceClient.from_connection_string(
+        "DefaultEndpointsProtocol=https;AccountName=fixture;"
+        "AccountKey=Zml4dHVyZS1rZXk=;EndpointSuffix=core.windows.net",
+        transport=transport, retry_total=0,
+    )
+    backend = fs._BlobFileBackend(OwnedBlobService(service), "container", "owned-prefix")
+    provider = fs.NativeSessionFs(backend)
+    source, target = f"owned-prefix/source/{suffix}", f"owned-prefix/target/{suffix}"
+    try:
+        if upload_fails:
+            with pytest.raises(NativeSessionError) as caught:
+                await provider._call(lambda: backend._copy_delete(source, target))
+            assert caught.value.errno == errno.EIO
+        else:
+            await provider._call(lambda: backend._copy_delete(source, target))
+        downloads = 1 if content else 2
+        assert [request.method for request in transport.requests] == (
+            ["GET"] * downloads + ["PUT"] + ([] if upload_fails else ["DELETE"])
+        )
+        for request in transport.requests:
+            assert request.headers["Authorization"].startswith("SharedKey fixture:")
+            assert "x-ms-copy-source" not in request.headers
+            assert "x-ms-lease-id" not in request.headers
+            assert "sig" not in parse_qs(urlsplit(request.url).query)
+        upload = transport.requests[downloads]
+        assert unquote(urlsplit(upload.url).path) == "/container/" + target
+        assert upload.body == content
+        assert {
+            key.removeprefix("x-ms-meta-"): value
+            for key, value in upload.headers.items()
+            if key.startswith("x-ms-meta-")
+        } == metadata
+        assert all(
+            unquote(urlsplit(request.url).path) == "/container/" + source
+            for request in transport.requests[:downloads]
+        )
+        if not upload_fails:
+            assert unquote(urlsplit(transport.requests[-1].url).path) == "/container/" + source
+    finally:
+        await provider.close()
 
 
 def integration_route(environ: Mapping[str, str], local_dir: Path) -> StorageRoute | None:

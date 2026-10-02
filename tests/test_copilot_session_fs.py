@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import pytest
 import pytest_asyncio
@@ -100,13 +100,13 @@ class MemoryBlob:
 
     async def download_blob(self):
         self.fail("read")
-        await self.get_blob_properties()
+        properties = await self.get_blob_properties()
         content = self.service.store.files[self.name].content
 
         async def readinto(stream):
             return stream.write(content)
 
-        return SimpleNamespace(readinto=readinto)
+        return SimpleNamespace(readinto=readinto, properties=properties)
 
     async def delete_blob(self):
         self.fail("delete")
@@ -115,6 +115,8 @@ class MemoryBlob:
 
     async def upload_blob_from_url(self, url, *, overwrite, source_authorization=None):
         self.fail("copy")
+        if source_authorization is None and "sig" not in parse_qs(urlsplit(url).query):
+            raise storage_error(403, StorageErrorCode.CANNOT_VERIFY_COPY_SOURCE)
         source = unquote(urlsplit(url).path).removeprefix("/container/")
         source_file = self.service.store.files[source]
         self.service.store.copies.append((source, self.name, source_authorization))
@@ -206,6 +208,8 @@ def memory_blobs(monkeypatch):
 
     async def open_owned(_settings):
         service = MemoryService(store)
+        if _settings.connection_string:
+            return OwnedBlobService(service)
         credential = SimpleNamespace(
             close=AsyncMock(),
             get_token=AsyncMock(return_value=AccessToken("fixture-token", 0)),
@@ -592,6 +596,29 @@ async def test_local_storage_denies_symlinked_parents_without_touching_the_targe
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", ["", "sessions"])
+async def test_local_storage_accepts_trusted_linked_configured_roots(
+    local_route, tmp_path, monkeypatch, suffix
+):
+    physical = tmp_path / "physical"
+    physical.mkdir()
+    link = tmp_path / "configured-link"
+    directory_link(link, physical)
+    configured = link / suffix if suffix else link
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_DIR", str(configured))
+    route = resolve_route(tmp_path)
+    provider = await open_session_fs(route, "agent", "session", conventions="posix")
+    try:
+        assert route.local_dir == configured.resolve()
+        await provider.write_file("/workspace/opaque.sdk", "\x00opaque\r\n雪")
+        root = physical / suffix / session_prefix(route, "agent", "session")
+        assert (root / "workspace" / "opaque.sdk").read_bytes() == "\x00opaque\r\n雪".encode()
+        assert await provider.read_file("/workspace/opaque.sdk") == "\x00opaque\r\n雪"
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_blob_failures_are_not_absence_or_a_fallback(local_route, memory_blobs):
     route = replace(
         local_route,
@@ -657,6 +684,192 @@ async def test_blob_copy_delete_failure_surfaces_without_a_host_rollback(local_r
         assert memory_blobs.files[prefix + "source"].content == b"opaque"
         assert memory_blobs.files[prefix + "target"].content == b"opaque"
         assert not any("uncertain" in name or "tombstone" in name for name in memory_blobs.files)
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_connection_string_rename_preserves_file_bytes_and_directory_metadata(
+    local_route, memory_blobs
+):
+    route = replace(
+        local_route,
+        blob=BlobStorageSettings(container_name="container", connection_string="fixture-connection"),
+    )
+    provider = await open_session_fs(route, "agent", "session", conventions="posix")
+    prefix = session_prefix(route, "agent", "session") + "/workspace/"
+    content = "\x00opaque\r\n雪"
+    try:
+        await provider.write_file("/workspace/source/opaque.sdk", content)
+        await provider.mkdir("/workspace/source/empty", recursive=False)
+        metadata = {
+            "": fs.DIRECTORY_METADATA | {"fixture": "directory"},
+            "empty/": fs.DIRECTORY_METADATA | {"fixture": "empty-directory"},
+            "opaque.sdk": {"fixture": "file"},
+        }
+        for suffix, values in metadata.items():
+            name = prefix + "source/" + suffix
+            memory_blobs.files[name].properties.metadata = values
+        await provider.rename("/workspace/source", "/workspace/target")
+        assert await provider.read_file("/workspace/target/opaque.sdk") == content
+        assert (await provider.stat("/workspace/target/empty")).is_directory
+        assert not await provider.exists("/workspace/source")
+        for suffix, values in metadata.items():
+            target = memory_blobs.files[prefix + "target/" + suffix]
+            assert target.properties.metadata == values
+            assert target.content == (content.encode() if suffix == "opaque.sdk" else b"")
+        await provider.rename("/workspace/target/opaque.sdk", "/workspace/ordinary.sdk")
+        assert memory_blobs.files[prefix + "ordinary.sdk"].content == content.encode()
+        assert memory_blobs.files[prefix + "ordinary.sdk"].properties.metadata == {"fixture": "file"}
+        assert not memory_blobs.copies
+        assert not memory_blobs.credentials
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["read", "write"])
+async def test_connection_string_rename_failure_keeps_source_and_existing_target(
+    local_route, memory_blobs, operation
+):
+    route = replace(
+        local_route,
+        blob=BlobStorageSettings(container_name="container", connection_string="fixture-connection"),
+    )
+    provider = await open_session_fs(route, "agent", "session", conventions="posix")
+    prefix = session_prefix(route, "agent", "session") + "/workspace/"
+    try:
+        await provider.write_file("/workspace/source", "source bytes")
+        await provider.write_file("/workspace/target", "target bytes")
+        failed_name = prefix + ("source" if operation == "read" else "target")
+        memory_blobs.failures[(operation, failed_name)] = ServiceRequestError("fixture-secret")
+        with pytest.raises(NativeSessionError) as caught:
+            await provider.rename("/workspace/source", "/workspace/target")
+        assert caught.value.errno == errno.EIO
+        assert memory_blobs.files[prefix + "source"].content == b"source bytes"
+        assert memory_blobs.files[prefix + "target"].content == b"target bytes"
+        assert not memory_blobs.copies
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupted", ["rm", "rename"])
+@pytest.mark.parametrize("follow_up", ["write", "rm", "mkdir", "rename"])
+async def test_interrupted_directory_operation_keeps_implicit_parent_usable(
+    local_route, memory_blobs, interrupted, follow_up
+):
+    route = replace(
+        local_route,
+        blob=BlobStorageSettings(container_name="container", blob_service_url="https://fixture.invalid"),
+    )
+    provider = await open_session_fs(route, "agent", "session", conventions="posix")
+    prefix = session_prefix(route, "agent", "session") + "/workspace/"
+    try:
+        await provider.write_file("/workspace/source/child", "child bytes")
+        await provider.write_file("/workspace/source/sibling", "sibling bytes")
+        failure = (
+            ("delete", prefix + "source/child")
+            if interrupted == "rm"
+            else ("copy", prefix + "target/child")
+        )
+        memory_blobs.failures[failure] = ServiceRequestError("fixture-secret")
+        with pytest.raises(NativeSessionError) as caught:
+            if interrupted == "rm":
+                await provider.rm("/workspace/source", recursive=True, force=False)
+            else:
+                await provider.rename("/workspace/source", "/workspace/target")
+        assert caught.value.errno == errno.EIO
+        assert prefix + "source/" not in memory_blobs.files
+        memory_blobs.failures.clear()
+        assert (await provider.stat("/workspace/source")).is_directory
+        assert await provider.read_file("/workspace/source/child") == "child bytes"
+        if follow_up == "write":
+            await provider.write_file("/workspace/source/new", "new bytes")
+            assert await provider.read_file("/workspace/source/new") == "new bytes"
+        elif follow_up == "rm":
+            await provider.rm("/workspace/source/child", recursive=False, force=False)
+            assert not await provider.exists("/workspace/source/child")
+        elif follow_up == "mkdir":
+            await provider.mkdir("/workspace/source/new", recursive=False)
+            assert (await provider.stat("/workspace/source/new")).is_directory
+        else:
+            await provider.rename("/workspace/source/child", "/workspace/source/renamed")
+            assert await provider.read_file("/workspace/source/renamed") == "child bytes"
+            assert not await provider.exists("/workspace/source/child")
+        marker = memory_blobs.files[prefix + "source/"]
+        assert marker.content == b""
+        assert marker.properties.metadata == fs.DIRECTORY_METADATA
+        assert await provider.read_file("/workspace/source/sibling") == "sibling bytes"
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_unlink_last_child_of_implicit_directory_recreates_empty_marker(
+    local_route, memory_blobs
+):
+    route = replace(
+        local_route,
+        blob=BlobStorageSettings(container_name="container", blob_service_url="https://fixture.invalid"),
+    )
+    provider = await open_session_fs(route, "agent", "session", conventions="posix")
+    marker = session_prefix(route, "agent", "session") + "/workspace/parent/"
+    try:
+        await provider.write_file("/workspace/parent/child", "child bytes")
+        del memory_blobs.files[marker]
+        await provider.rm("/workspace/parent/child", recursive=False, force=False)
+        assert (await provider.stat("/workspace/parent")).is_directory
+        assert await provider.readdir("/workspace/parent") == []
+        assert memory_blobs.files[marker].properties.metadata == fs.DIRECTORY_METADATA
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_parent_marker_recreation_failure_is_not_hidden(local_route, memory_blobs):
+    route = replace(
+        local_route,
+        blob=BlobStorageSettings(container_name="container", blob_service_url="https://fixture.invalid"),
+    )
+    provider = await open_session_fs(route, "agent", "session", conventions="posix")
+    marker = session_prefix(route, "agent", "session") + "/workspace/parent/"
+    try:
+        await provider.write_file("/workspace/parent/kept", "kept bytes")
+        del memory_blobs.files[marker]
+        memory_blobs.failures[("write", marker)] = ServiceRequestError("fixture-secret")
+        with pytest.raises(NativeSessionError) as caught:
+            await provider.write_file("/workspace/parent/new", "new bytes")
+        assert caught.value.errno == errno.EIO
+        assert marker not in memory_blobs.files
+        assert await provider.read_file("/workspace/parent/kept") == "kept bytes"
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "code", "expected"),
+    [
+        (404, StorageErrorCode.CONTAINER_NOT_FOUND, errno.EIO),
+        (403, StorageErrorCode.AUTHENTICATION_FAILED, errno.EACCES),
+    ],
+)
+async def test_missing_parent_marker_handling_does_not_mask_other_storage_failures(
+    local_route, memory_blobs, status, code, expected
+):
+    route = replace(
+        local_route,
+        blob=BlobStorageSettings(container_name="container", blob_service_url="https://fixture.invalid"),
+    )
+    provider = await open_session_fs(route, "agent", "session", conventions="posix")
+    marker = session_prefix(route, "agent", "session") + "/workspace/"
+    try:
+        memory_blobs.failures[("metadata", marker)] = storage_error(status, code)
+        with pytest.raises(NativeSessionError) as caught:
+            await provider.write_file("/workspace/new", "new bytes")
+        assert caught.value.errno == expected
+        assert memory_blobs.files[marker].properties.metadata == fs.DIRECTORY_METADATA
     finally:
         await provider.close()
 
