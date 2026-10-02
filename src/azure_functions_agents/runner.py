@@ -95,7 +95,7 @@ from ._session_id import SESSION_ID_PATTERN
 from ._slug import delegate_tool_name
 from .client_manager import InferenceTarget, get_client_manager
 from .config import ResolvedAgent, SubagentRef
-from .config.env import runtime_env_value
+from .config.env import EnvVar, runtime_env_value
 from .config.paths import get_app_root, resolve_config_dir
 from .config.schema import AgentConfiguration
 from .discovery.mcp import MCPTool, discover_mcp_servers
@@ -502,13 +502,15 @@ def _build_role_agent(
         if skill_paths
         else None
     )
+    site_name = runtime_env_value(EnvVar.WEBSITE_SITE_NAME)
+    maf_agent_name = f"{site_name}/{agent_name or 'main'}" if site_name else agent_name
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=ExperimentalWarning)
         return create_harness_agent(
             chat_client,
             id=agent_id(agent_name or "main"),
-            name=agent_name,
+            name=maf_agent_name,
             harness_instructions="",
             agent_instructions=agent_instructions,
             tools=tools,

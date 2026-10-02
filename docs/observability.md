@@ -104,7 +104,7 @@ spans and the sandbox/`web_request` tool spans together.
 
 | Attribute | Meaning |
 | --- | --- |
-| `af.agent.name` | Agent name. |
+| `af.agent.name` | Canonical agent slug, not the app-qualified MAF name or frontmatter display name. |
 | `af.agent.trigger_type` | `timer`, `connectorTrigger`, `http`, … |
 | `af.agent.model` | Model/deployment used. |
 | `af.agent.session_id` | Conversation/session id. |
@@ -151,6 +151,25 @@ Linux SKU behavior:
 The same value is emitted in the `agent_runtime_indexed` startup summary as `agent_id` so
 operators can copy it when registering agents with external services such as A2A,
 Agent 365, or Foundry.
+
+#### Readable agent name
+
+MAF `gen_ai.agent.name` is separate from the full stable `gen_ai.agent.id`.
+For primary agents, streaming, chat delegates, and workflow leaf specialists,
+the name is `<Function App name>/<canonical agent slug>` when the trimmed
+`WEBSITE_SITE_NAME` is non-blank. Site-name casing is preserved; owner,
+deployment id, and the frontmatter display `name:` do not choose this label.
+For example, `WEBSITE_SITE_NAME=Contoso-Agents` gives the billing agent the name
+`Contoso-Agents/billing`, while its full correlation-key/slug ID remains unchanged.
+MAF can also use this readable name as response `author_name` metadata; it is
+not a new canonical runtime identity.
+
+An unset, empty, or whitespace-only site name preserves the existing MAF name:
+the caller's canonical slug, or `None` when the caller omitted the name. With a
+site name, an omitted or empty caller name uses the same `main` suffix as the ID.
+Qualification does not change files, routes, `delegate_<slug>` tool names,
+catalog lookup, history/session scope, locks, workflow authorization, or the
+Copilot preview namespace. Runtime `af.agent.name` stays the canonical slug.
 
 #### Span events (runtime lifecycle milestones)
 
