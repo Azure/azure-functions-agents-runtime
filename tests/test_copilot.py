@@ -222,11 +222,16 @@ async def test_leaf_failure_still_deletes_native_state(preview, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_leaf_timeout_keeps_activity_retry_classification(preview, monkeypatch):
+@pytest.mark.parametrize("delete_fails", [False, True])
+async def test_leaf_timeout_keeps_activity_retry_classification(
+    preview, monkeypatch, caplog, delete_fails,
+):
     import copilot
 
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
     client = _fake_client()
+    if delete_fails:
+        client.delete_session.side_effect = RuntimeError("private deletion detail")
 
     async def stall(*args, **kwargs):
         await asyncio.sleep(10)
@@ -242,16 +247,24 @@ async def test_leaf_timeout_keeps_activity_retry_classification(preview, monkeyp
             )
         session.abort.assert_awaited_once()
         client.delete_session.assert_awaited_once()
+        if delete_fails:
+            assert "Copilot leaf session deletion failed." in caplog.text
+            assert "private deletion detail" not in caplog.text
     finally:
         await _copilot.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_parent_cancellation_aborts_and_deletes_leaf(preview, monkeypatch):
+@pytest.mark.parametrize("delete_fails", [False, True])
+async def test_parent_cancellation_aborts_and_deletes_leaf(
+    preview, monkeypatch, caplog, delete_fails,
+):
     import copilot
 
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
     client = _fake_client()
+    if delete_fails:
+        client.delete_session.side_effect = RuntimeError("private deletion detail")
     started = asyncio.Event()
 
     async def stall(*args, **kwargs):
@@ -272,6 +285,32 @@ async def test_parent_cancellation_aborts_and_deletes_leaf(preview, monkeypatch)
             await task
         session.abort.assert_awaited_once()
         client.delete_session.assert_awaited_once()
+        if delete_fails:
+            assert "Copilot leaf session deletion failed." in caplog.text
+            assert "private deletion detail" not in caplog.text
+    finally:
+        await _copilot.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_successful_leaf_with_delete_failure_raises_sanitized_error(
+    preview, monkeypatch, caplog,
+):
+    import copilot
+
+    client = _fake_client()
+    client.delete_session.side_effect = RuntimeError("private deletion detail")
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(CopilotPreviewError, match="delete ephemeral specialist state") as error:
+            await runner.run_leaf_agent_task(
+                _specialist(), AgentCapabilities(_harness=preview), "task",
+                timeout=3, execution_role="workflow_subagent", _harness=preview,
+            )
+        client.delete_session.assert_awaited_once()
+        assert "Copilot leaf session deletion failed." in caplog.text
+        assert "private deletion detail" not in caplog.text
+        assert "private deletion detail" not in str(error.value)
     finally:
         await _copilot.shutdown()
 

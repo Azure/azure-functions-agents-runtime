@@ -377,19 +377,22 @@ async def _leaf_cleanup(
     owner: _NativeRuntime, native_id: str, *, enabled: bool
 ) -> AsyncIterator[None]:
     """Remove SDK-owned leaf history even when its turn fails."""
+    turn_succeeded = False
     try:
         yield
+        turn_succeeded = True
     finally:
         if enabled and owner._client is not None:
             try:
                 await asyncio.wait_for(owner._client.delete_session(native_id), timeout=5)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
+            except (Exception, asyncio.CancelledError) as error:
                 logger.error("Copilot leaf session deletion failed.")
-                raise CopilotPreviewError(
-                    "Copilot could not delete ephemeral specialist state."
-                ) from None
+                if turn_succeeded:
+                    if isinstance(error, asyncio.CancelledError):
+                        raise
+                    raise CopilotPreviewError(
+                        "Copilot could not delete ephemeral specialist state."
+                    ) from None
 
 
 async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:

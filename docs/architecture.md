@@ -355,9 +355,15 @@ and MAF-specific compaction settings remain unsupported and are rejected
 before inference. Chat-time delegation and workflow management tools are available
 to locally opted-in agents; Workflow Sub Agent Activities use the serving app's
 bound harness and reauthorize against its current per-agent workflow policy.
+The compatibility `build_workflow_integration` helper accepts that same bound
+harness; omitted bindings are selected once during registration, not Activity
+delivery.
 Every specialist call uses its own model, instructions, filtered static tools and
 `web_request`, a distinct SDK session, and SDK deletion after the turn (including
-failed turns). Fresh leaf-native UUIDs never resume, so they bypass the
+failed turns).
+Deletion failures are logged without SDK details and preserve a failed turn's
+cancellation or timeout; a successful turn instead reports sanitized cleanup
+failure. Fresh leaf-native UUIDs never resume, so they bypass the
 long-lived primary-session lock registry instead of accumulating one lock per
 task. Specialists get no parent conversation, nested delegation, sandbox,
 workflow tools, persistence, or public child events. Parent cancellation propagates;
