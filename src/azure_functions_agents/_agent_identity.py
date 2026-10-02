@@ -9,18 +9,14 @@ because an owner-only key is shared across apps in the same webspace.
 
 from __future__ import annotations
 
-from .config.env import runtime_env_value
-
-_WEBSITE_DEPLOYMENT_ID_ENV = "WEBSITE_DEPLOYMENT_ID"
-_WEBSITE_OWNER_NAME_ENV = "WEBSITE_OWNER_NAME"
-_WEBSITE_SITE_NAME_ENV = "WEBSITE_SITE_NAME"
+from .config.env import EnvVar, runtime_env_value
 
 
 def resolve_app_correlation_key() -> str:
     """Resolve a lower-case, best-effort app key from platform env."""
-    owner_name = runtime_env_value(_WEBSITE_OWNER_NAME_ENV)
-    deployment_id = runtime_env_value(_WEBSITE_DEPLOYMENT_ID_ENV)
-    site_name = runtime_env_value(_WEBSITE_SITE_NAME_ENV)
+    owner_name = runtime_env_value(EnvVar.WEBSITE_OWNER_NAME)
+    deployment_id = runtime_env_value(EnvVar.WEBSITE_DEPLOYMENT_ID)
+    site_name = runtime_env_value(EnvVar.WEBSITE_SITE_NAME)
     parts = [owner_name]
     if deployment_id:
         parts.append(deployment_id)
