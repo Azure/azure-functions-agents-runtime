@@ -41,6 +41,7 @@ class _CapturedMCPStreamableHTTPTool:
         url: str,
         *,
         allowed_tools: list[str] | None = None,
+        tool_name_prefix: str | None = None,
         load_tools: bool = True,
         load_prompts: bool = True,
         header_provider: object = None,
@@ -50,6 +51,7 @@ class _CapturedMCPStreamableHTTPTool:
         self.name = name
         self.url = url
         self.allowed_tools = allowed_tools
+        self.tool_name_prefix = tool_name_prefix
         self.load_tools = load_tools
         self.load_prompts = load_prompts
         self.header_provider = header_provider
@@ -409,6 +411,7 @@ def test_mcp_json_env_substitution(monkeypatch: pytest.MonkeyPatch) -> None:
     fixture = FIXTURES_ROOT / "11_mcp_json_substitution"
 
     monkeypatch.setenv("GITHUB_MCP_TOKEN", "ghp_live_token")
+    monkeypatch.setenv("GITHUB_TOOL_PREFIX", "github_")
     monkeypatch.setenv("TENANT_NAME", "contoso")
     monkeypatch.setenv("NODE_BIN", "/usr/local/bin/node")
     monkeypatch.setenv("WORKSPACE_ROOT", "/srv/workspace")
@@ -435,6 +438,7 @@ def test_mcp_json_env_substitution(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(github, _CapturedMCPStreamableHTTPTool)
     assert github.url == "https://api.githubcopilot.com/mcp/"
     assert github.allowed_tools == ["search_issues", "list_pull_requests"]
+    assert github.tool_name_prefix == "github_"
     header_provider = github.header_provider
     assert callable(header_provider)
     headers = header_provider(None)
