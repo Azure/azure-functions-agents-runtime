@@ -26,6 +26,7 @@ from typing import Any
 import azure.functions as func
 
 from azure_functions_agents._function_tool import WorkflowTool
+from azure_functions_agents._harness import AppHarness, get_harness
 from azure_functions_agents._logger import logger
 from azure_functions_agents.config.schema import (
     TRIGGER_TYPES,
@@ -529,8 +530,9 @@ def register_workflow_runtime(
     app: func.FunctionApp,
     *,
     handler_catalog: registry.WorkflowHandlerCatalog,
-    catalog: AgentCatalog,
+    catalog: AgentCatalog | None,
     workflow_agent_policies: WorkflowAgentPolicyCatalog,
+    harness: AppHarness | None = None,
 ) -> None:
     """Register the app-wide Durable engine exactly once."""
     register_workflows(
@@ -538,6 +540,7 @@ def register_workflow_runtime(
         catalog=catalog,
         handler_catalog=handler_catalog,
         workflow_agent_policies=workflow_agent_policies,
+        harness=harness or get_harness(),
     )
 
 
@@ -548,12 +551,14 @@ def build_workflow_integration(
     *,
     workflow_subagents: Sequence[WorkflowSubagentRef] = (),
     catalog: AgentCatalog | None = None,
+    harness: AppHarness | None = None,
 ) -> WorkflowIntegrationResult:
     """Compatibility helper that enables one agent's workflows on ``app``.
 
     Returns a :class:`WorkflowIntegrationResult` containing management tools
     plus chat and declared-trigger system addenda. The tools are empty and both
-    addenda are ``None`` when workflows are disabled.
+    addenda are ``None`` when workflows are disabled. Pass the serving app's
+    harness; otherwise selection is captured once at registration.
     """
     # Shape-check the workflows block first so typos surface at app
     # start regardless of whether workflows are enabled. A typo'd key
@@ -577,11 +582,12 @@ def build_workflow_integration(
         catalog,
         handler_catalog,
     )
-    register_workflows(
+    register_workflow_runtime(
         app,
         catalog=catalog,
         handler_catalog=handler_catalog,
         workflow_agent_policies=MappingProxyType({"main": policy}),
+        harness=harness,
     )
     registry.set_app_config(effective)
     logger.info(

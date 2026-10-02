@@ -59,7 +59,7 @@ class AppHarness:
 
 @dataclass(frozen=True)
 class HarnessRequest:
-    """Normalized inputs for the supported primary, non-streaming adapter."""
+    """Normalized inputs for one SDK invocation."""
 
     prompt: str
     instructions: str | None
@@ -70,6 +70,8 @@ class HarnessRequest:
     tools: list[FunctionTool]
     max_output_tokens: int | None
     deadline: float
+    execution_role: ExecutionRole = "primary"
+    event_sink: Callable[[dict[str, Any]], None] | None = None
 
 
 _HARNESSES: dict[Path, AppHarness] = {}
@@ -223,8 +225,6 @@ def validate_agent(
         mcp_endpoint=resolved.builtin_endpoints.mcp,
         mcp=bool(capabilities.filtered_mcp_tools),
         skills=bool(capabilities.enabled_skill_paths),
-        subagents=bool(resolved.subagents),
-        workflows=resolved.workflows is not None and resolved.workflows.enabled,
     )
     if not (resolved.model or harness.default_model):
         raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
@@ -234,6 +234,20 @@ def validate_agent(
             *list(capabilities.web_request_tools or []),
         ]
     )
+    if resolved.workflows is not None and resolved.workflows.enabled:
+        from .workflows.tools import build_workflow_tools
+
+        management_names = {function.name for function in build_workflow_tools()}
+        if management_names.intersection(function.name for function in prepared):
+            raise UnsupportedCapabilityError(
+                "Copilot preview workflow management tool names must not collide with authored tools."
+            )
+        if management_names.intersection(
+            f"delegate_{ref.agent}" for ref in resolved.subagents
+        ):
+            raise UnsupportedCapabilityError(
+                "Copilot preview workflow management tool names must not collide with delegates."
+            )
     if (
         resolved.sandbox_config is not None
         and not resolved.tools_disabled

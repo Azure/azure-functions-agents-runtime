@@ -228,6 +228,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             handler_catalog=workflow_handler_catalog,
             catalog=catalog,
             workflow_agent_policies=workflow_agent_policies,
+            harness=harness,
         )
 
     for resolved in resolved_agents:

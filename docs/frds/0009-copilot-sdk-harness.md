@@ -369,11 +369,19 @@ turn; the feature does not claim transactional or exactly-once execution.
 
 The Copilot preview is local-only and requires a single Functions worker. Azure
 Functions hosting, multi-worker execution, Blob-backed native session storage,
-MAF history import, public streaming/structured-response parity, MCP, scoped
-skills, delegation, workflows, system tools, and interrupted-turn recovery are
-unsupported in this preview. Unsupported capabilities fail explicitly without
-fallback. Configured output caps are rejected because the pinned SDK/native
-runtime does not expose a provider generation cap for this path.
+MAF history import, MCP, scoped skills, non-HTTP triggers, and interrupted-turn
+recovery remain unsupported.
+The local preview exposes the public SSE envelope via SDK callbacks, with
+host-owned structured-output validation and completed-turn verification before
+`done`. The pinned native runtime has been exercised with a synthetic,
+intercepted provider for tool event ordering, resume, completion, and disconnect
+isolation; live model-provider and hosted streaming parity are not qualified.
+Chat-time delegation, Workflow Sub Agent Activities, Dynamic Workflow management
+tools, and host-authorized system tools are supported within the local boundary;
+the packaged workflow grammar is direct-role guidance, not a native skill.
+Unsupported capabilities fail explicitly without fallback. Configured output
+caps are rejected because the pinned SDK/native runtime does not expose a
+provider generation cap for this path.
 
 Native session storage remains SDK-owned. The host verifies completed turns
 before resume and returns explicit errors for missing, corrupt, interrupted, or

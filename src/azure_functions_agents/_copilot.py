@@ -6,7 +6,7 @@ import asyncio
 import atexit
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -231,7 +231,11 @@ def _deny_permission(
     return PermissionDecisionDeniedByRules(rules=[])
 
 
-def _tool(function: FunctionTool, calls: list[dict[str, Any]]) -> Tool:
+def _tool(
+    function: FunctionTool,
+    calls: list[dict[str, Any]],
+    event_sink: Callable[[dict[str, Any]], None] | None = None,
+) -> Tool:
     from copilot.tools import Tool, ToolResult
 
     async def invoke(invocation: ToolInvocation) -> ToolResult:
@@ -242,6 +246,8 @@ def _tool(function: FunctionTool, calls: list[dict[str, Any]]) -> Tool:
             "arguments": invocation.arguments,
         }
         calls.append(record)
+        if event_sink is not None:
+            event_sink(dict(record))
         try:
             contents = await function.invoke(
                 arguments=invocation.arguments,
@@ -256,8 +262,18 @@ def _tool(function: FunctionTool, calls: list[dict[str, Any]]) -> Tool:
             logger.warning("Copilot custom tool failed: tool=%s", function.name)
             text = '{"error":"Custom tool failed or returned unsupported content."}'
             record["result"] = text
+            if event_sink is not None:
+                event_sink({
+                    "type": "tool_end", "tool_call_id": invocation.tool_call_id,
+                    "tool_name": function.name, "result": text,
+                })
             return ToolResult(text_result_for_llm=text, result_type="failure")
         record["result"] = text
+        if event_sink is not None:
+            event_sink({
+                "type": "tool_end", "tool_call_id": invocation.tool_call_id,
+                "tool_name": function.name, "result": text,
+            })
         return ToolResult(text_result_for_llm=text, result_type="success")
 
     return Tool(
@@ -356,6 +372,29 @@ async def _session_context(session: CopilotSession) -> AsyncIterator[CopilotSess
                 ) from None
 
 
+@asynccontextmanager
+async def _leaf_cleanup(
+    owner: _NativeRuntime, native_id: str, *, enabled: bool
+) -> AsyncIterator[None]:
+    """Remove SDK-owned leaf history even when its turn fails."""
+    turn_succeeded = False
+    try:
+        yield
+        turn_succeeded = True
+    finally:
+        if enabled and owner._client is not None:
+            try:
+                await asyncio.wait_for(owner._client.delete_session(native_id), timeout=5)
+            except (Exception, asyncio.CancelledError) as error:
+                logger.error("Copilot leaf session deletion failed.")
+                if turn_succeeded:
+                    if isinstance(error, asyncio.CancelledError):
+                        raise
+                    raise CopilotPreviewError(
+                        "Copilot could not delete ephemeral specialist state."
+                    ) from None
+
+
 async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     validate_copilot_client_manager()
     if request.max_output_tokens is not None:
@@ -364,19 +403,33 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
             "Remove the cap or use the MAF harness."
         )
     from copilot.session import InfiniteSessionConfig, SystemMessageReplaceConfig, ToolSearchConfig
-    from copilot.session_events import AssistantMessageData, AssistantUsageData
+    from copilot.session_events import (
+        AssistantMessageData,
+        AssistantMessageDeltaData,
+        AssistantReasoningDeltaData,
+        AssistantUsageData,
+    )
 
     from .runner import AgentResult, _AgentUsageRecorder, _session_lock_bounded_by
 
     owner = _runtime(harness)
-    native_id = _native_id(request.agent_slug, request.session_id)
+    leaf = request.execution_role != "primary"
+    if leaf and not request.new_session:
+        raise CopilotPreviewError("Copilot specialist sessions cannot be resumed.")
+    # Leaf sessions are never resumed: unique native IDs need no persistent per-session lock.
+    native_id = str(uuid.uuid4()) if leaf else _native_id(request.agent_slug, request.session_id)
+    session_lock = (
+        nullcontext()
+        if leaf
+        else _session_lock_bounded_by(native_id, request.deadline, agent_slug=request.agent_slug)
+    )
     calls: list[dict[str, Any]] = []
     messages: list[str] = []
     input_tokens: int | None = None
     output_tokens: int | None = None
     recorder = _AgentUsageRecorder(
         agent_name=request.agent_slug,
-        execution_role="primary",
+        execution_role=request.execution_role,
         inference_target=InferenceTarget(
             harness.provider.kind if harness.provider is not None else None,
             request.model,
@@ -388,8 +441,16 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
         nonlocal input_tokens, output_tokens
         if not invocation_started:
             return
+        if request.event_sink is not None:
+            match event.data:
+                case AssistantMessageDeltaData(delta_content=delta, parent_tool_call_id=None):
+                    if delta:
+                        request.event_sink({"type": "delta", "content": delta})
+                case AssistantReasoningDeltaData(delta_content=delta):
+                    if delta:
+                        request.event_sink({"type": "intermediate", "content": delta})
         match event.data:
-            case AssistantMessageData(content=content) if content:
+            case AssistantMessageData(content=content, parent_tool_call_id=None) if content:
                 messages.append(content)
             case AssistantUsageData(input_tokens=used_input, output_tokens=used_output):
                 if used_input is not None:
@@ -400,11 +461,11 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     try:
         token_source = _RequestTokenSource(owner)
         provider = _provider(harness, token_source, request.model)
-        async with _session_lock_bounded_by(
-            native_id, request.deadline, agent_slug=request.agent_slug
-        ), asyncio.timeout_at(request.deadline):
+        async with session_lock, asyncio.timeout_at(request.deadline), _leaf_cleanup(
+            owner, native_id, enabled=leaf
+        ):
             client = await owner.client()
-            tools = [_tool(function, calls) for function in request.tools]
+            tools = [_tool(function, calls, request.event_sink) for function in request.tools]
             options = _SessionOptions(
                 model=request.model,
                 tools=tools,
@@ -413,7 +474,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     mode="replace", content=request.instructions or ""
                 ),
                 provider=provider,
-                streaming=False,
+                streaming=request.event_sink is not None,
                 enable_config_discovery=False,
                 enable_session_telemetry=False,
                 request_extensions=False,
@@ -461,6 +522,8 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                         "Copilot model-visible tool catalog differs from the configured custom tools. "
                         "No prompt was sent."
                     )
+                if request.event_sink is not None:
+                    request.event_sink({"type": "session", "session_id": request.session_id})
                 logger.info("Copilot tool catalog verified: custom_tool_count=%d", len(expected_names))
                 logger.info(
                     "Copilot request target: provider=%s model=%s",
@@ -503,6 +566,8 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     except asyncio.CancelledError:
         raise
     except TimeoutError:
+        if leaf:
+            raise TimeoutError("Copilot specialist timed out.") from None
         raise CopilotPreviewError(
             "Copilot preview request timed out during a turn. This session may be unfinished."
             if invocation_started

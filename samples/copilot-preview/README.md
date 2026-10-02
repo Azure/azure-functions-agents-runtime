@@ -143,8 +143,13 @@ $web = Invoke-RestMethod http://127.0.0.1:7071/agents/main/chat -Method Post `
 $web.tool_calls | ConvertTo-Json -Depth 8
 ```
 
-This local preview does not support streaming, MCP, skills, delegation,
-workflows, Azure hosting, or MAF history import. Custom `ClientManager`
+This sample exercises direct turns; the local preview also supports authorized
+delegates and Dynamic Workflow management/Sub Agent Activities when configured
+in an app with local Durable storage. The chat SSE route has been exercised
+against the pinned native runtime with a synthetic provider, including tool
+ordering and disconnect behavior; live-provider and hosted streaming are not
+production-qualified. The preview
+does not support MCP, authored skills, Azure hosting, or MAF history import. Custom `ClientManager`
 instances are MAF-only and are rejected when Copilot is on. See
 [the architecture guide](../../docs/architecture.md#bounded-copilot-migration-preview)
 for the capability boundary.
