@@ -30,7 +30,7 @@ from azure_functions_agents.registration.endpoints import (
     _run_builtin_agent_stream,
     register_builtin_endpoints,
 )
-from azure_functions_agents.runner import _SESSION_ID_PATTERN
+from azure_functions_agents.runner import _SESSION_ID_PATTERN, AgentResult
 from azure_functions_agents.workflows.context import (
     new_workflow_instance_id,
     session_instance_prefix,
@@ -575,11 +575,19 @@ def test_handle_chat_reports_delegate_error_count_on_span(
     )
     spans = _install_start_span_capture(monkeypatch)
 
-    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
-        return SimpleNamespace(
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> AgentResult:
+        return AgentResult(
             session_id="session-123",
             content="ok, but the billing specialist failed",
-            tool_calls=[{"name": "delegate_billing", "result": "ok"}],
+            tool_calls=[
+                {
+                    "type": "tool_start",
+                    "tool_call_id": "delegate-1",
+                    "tool_name": "delegate_billing",
+                    "arguments": {},
+                    "result": "ok",
+                }
+            ],
             delegate_error_count=2,
         )
 
@@ -624,11 +632,10 @@ def test_handle_mcp_agent_chat_reports_delegate_error_count_on_span(
     )
     spans = _install_start_span_capture(monkeypatch)
 
-    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
-        return SimpleNamespace(
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> AgentResult:
+        return AgentResult(
             session_id="session-456",
             content="ok, but the shipping specialist failed",
-            tool_calls=[],
             delegate_error_count=1,
         )
 
@@ -679,13 +686,11 @@ def test_handle_mcp_agent_chat_refreshes_span_session_id_when_caller_omits_it(
     )
     spans = _install_start_span_capture(monkeypatch)
 
-    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> AgentResult:
         assert kwargs["session_id"] is None  # caller omitted it
-        return SimpleNamespace(
+        return AgentResult(
             session_id="runner-generated-session-id",
             content="ok",
-            tool_calls=[],
-            delegate_error_count=0,
         )
 
     monkeypatch.setattr(
@@ -903,9 +908,9 @@ def test_workflows_enabled_passes_client_to_run_builtin_agent(
     )
     run_calls: dict[str, Any] = {}
 
-    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> AgentResult:
         run_calls["kwargs"] = kwargs
-        return SimpleNamespace(session_id="session-123", content="ok", tool_calls=[])
+        return AgentResult(session_id="session-123", content="ok")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration.endpoints._run_builtin_agent",
@@ -1084,9 +1089,9 @@ def test_workflows_disabled_does_not_pass_client_to_run_builtin_agent(
     )
     run_calls: dict[str, Any] = {}
 
-    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> AgentResult:
         run_calls["kwargs"] = kwargs
-        return SimpleNamespace(session_id="session-123", content="ok", tool_calls=[])
+        return AgentResult(session_id="session-123", content="ok")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration.endpoints._run_builtin_agent",
@@ -1553,8 +1558,8 @@ def test_entra_chat_with_easy_auth_principal_proceeds(
     app = FakeFunctionApp()
     resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
 
-    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
-        return SimpleNamespace(session_id="s-1", content="ok", tool_calls=[])
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> AgentResult:
+        return AgentResult(session_id="s-1", content="ok")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration.endpoints._run_builtin_agent",

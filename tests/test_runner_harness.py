@@ -13,6 +13,7 @@ from agent_framework import (
     BaseChatClient,
     ChatMiddlewareLayer,
     ChatResponse,
+    Content,
     HistoryProvider,
     Message,
     SessionContext,
@@ -550,48 +551,31 @@ def test_run_agent_reports_model_and_tool_evidence_by_assistant_message(
     monkeypatch: Any,
 ) -> None:
     messages = [
-        SimpleNamespace(
-            role="assistant",
-            contents=[
-                SimpleNamespace(
-                    type="function_call",
-                    call_id="call-1",
-                    name="lookup",
-                    arguments={"id": 1},
+        Message(
+            "assistant",
+            [
+                Content(
+                    "function_call", call_id="call-1", name="lookup", arguments={"id": 1}
                 ),
-                SimpleNamespace(
-                    type="function_call",
-                    call_id="call-2",
-                    name="lookup",
-                    arguments={"id": 2},
+                Content(
+                    "function_call", call_id="call-2", name="lookup", arguments={"id": 2}
                 ),
             ],
         ),
-        SimpleNamespace(
-            role="tool",
-            contents=[
-                SimpleNamespace(type="function_result", call_id="call-1", result="ok"),
-                SimpleNamespace(
-                    type="function_result",
-                    call_id="call-2",
-                    result='{"error": "failed"}',
-                ),
+        Message(
+            "tool",
+            [
+                Content("function_result", call_id="call-1", result="ok"),
+                Content("function_result", call_id="call-2", result='{"error": "failed"}'),
             ],
         ),
-        SimpleNamespace(
-            role="assistant",
-            contents=[
-                SimpleNamespace(
-                    type="function_call",
-                    call_id="call-3",
-                    name="finish",
-                    arguments=None,
-                )
-            ],
+        Message(
+            "assistant",
+            [Content("function_call", call_id="call-3", name="finish", arguments=None)],
         ),
-        SimpleNamespace(
-            role="tool",
-            contents=[SimpleNamespace(type="function_result", call_id="call-3", result=None)],
+        Message(
+            "tool",
+            [Content("function_result", call_id="call-3", result=None)],
         ),
     ]
 
@@ -640,40 +624,26 @@ def test_run_agent_reports_model_and_tool_evidence_by_assistant_message(
     ]
 
 
-def test_run_agent_does_not_guess_batch_or_result_evidence(monkeypatch: Any) -> None:
+def test_run_agent_does_not_guess_batch_or_correlate_missing_ids(monkeypatch: Any) -> None:
     messages = [
-        SimpleNamespace(
-            role=SimpleNamespace(value="Assistant"),
-            contents=[
-                SimpleNamespace(
-                    type="function_call",
-                    call_id="call-1",
-                    name="valid",
-                    arguments={},
-                )
-            ],
+        Message(
+            "assistant",
+            [Content("function_call", call_id="call-1", name="valid", arguments={})],
         ),
-        SimpleNamespace(
-            role="unknown",
-            contents=[
-                SimpleNamespace(
-                    type="function_call",
-                    call_id="call-2",
-                    name="unbatched",
-                    arguments={},
-                )
-            ],
+        Message(
+            "unknown",
+            [Content("function_call", call_id="call-2", name="unbatched", arguments={})],
         ),
-        SimpleNamespace(
-            role="assistant",
-            contents=[SimpleNamespace(type="function_call", name="anonymous", arguments={})],
+        Message(
+            "assistant",
+            [Content("function_call", name="anonymous", arguments={})],
         ),
-        SimpleNamespace(
-            role="tool",
-            contents=[
-                SimpleNamespace(type="function_result", call_id="call-1"),
-                SimpleNamespace(type="function_result", call_id="missing", result="ignored"),
-                SimpleNamespace(type="function_result", result="must-not-attach"),
+        Message(
+            "tool",
+            [
+                Content("function_result", call_id="call-1"),
+                Content("function_result", call_id="missing", result="ignored"),
+                Content("function_result", result="must-not-attach"),
             ],
         ),
     ]
@@ -698,6 +668,8 @@ def test_run_agent_does_not_guess_batch_or_result_evidence(monkeypatch: Any) -> 
             "tool_name": "valid",
             "arguments": {},
             "turn_id": "response-0",
+            "result": None,
+            "success": True,
         },
         {
             "type": "tool_start",

@@ -47,6 +47,9 @@ npm run build
 Pop-Location
 ```
 
+The executor is currently private and path-loaded; it is not published to npm. Use the repository
+install and build steps above before running an evaluation.
+
 Configure a supported model provider as described in the repository's
 [model provider configuration](../../README.md#model-provider-configuration), then start Azurite.
 In the provider-configured terminal, start the app:
@@ -61,7 +64,7 @@ The empty route prefix in `host.json` exposes the endpoint at
 
 ```powershell
 $env:AGENT_EVAL_TARGET_URL = "http://localhost:7071/agents/receipt/chat"
-node integrations/vally-executor-azure-functions/node_modules/@microsoft/vally-cli/dist/index.js eval `
+npm exec --prefix integrations/vally-executor-azure-functions -- vally eval `
   --eval-spec samples/agent-evaluation/eval.yaml `
   --executor-plugin ../../integrations/vally-executor-azure-functions/dist/index.js `
   --require-pass `

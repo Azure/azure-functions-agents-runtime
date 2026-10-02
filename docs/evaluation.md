@@ -81,7 +81,7 @@ Start the Function App, set its complete chat URL, and invoke the pinned CLI:
 
 ```powershell
 $env:AGENT_EVAL_TARGET_URL = "http://localhost:7071/agents/receipt/chat"
-node integrations/vally-executor-azure-functions/node_modules/@microsoft/vally-cli/dist/index.js eval `
+npm exec --prefix integrations/vally-executor-azure-functions -- vally eval `
   --eval-spec samples/agent-evaluation/eval.yaml `
   --executor-plugin ../../integrations/vally-executor-azure-functions/dist/index.js `
   --require-pass `
