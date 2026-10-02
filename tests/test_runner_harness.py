@@ -13,6 +13,7 @@ from agent_framework import (
     BaseChatClient,
     ChatMiddlewareLayer,
     ChatResponse,
+    Content,
     HistoryProvider,
     Message,
     SessionContext,
@@ -25,6 +26,29 @@ from azure_functions_agents.config.schema import (
     AgentFrameworkCompactionConfig,
     AgentFrameworkConfiguration,
 )
+
+
+def test_agent_result_preserves_existing_positional_argument_order() -> None:
+    intermediate = ["thinking"]
+    tool_calls = [{"name": "lookup"}]
+    events = [{"type": "completed"}]
+
+    result = runner.AgentResult(
+        "session",
+        "answer",
+        intermediate,
+        tool_calls,
+        "reasoning",
+        events,
+        2,
+    )
+
+    assert result.content_intermediate is intermediate
+    assert result.tool_calls is tool_calls
+    assert result.reasoning == "reasoning"
+    assert result.events is events
+    assert result.delegate_error_count == 2
+    assert result.model == "unknown"
 
 # ---------------------------------------------------------------------------
 # Minimal fake Agent
@@ -521,6 +545,146 @@ def test_run_agent_uses_session_builder_with_default_configuration(monkeypatch: 
     assert len(session_calls) == 1
     assert session_calls[0]["agent_configuration"] is None
     assert result.session_id == "session"
+
+
+def test_run_agent_reports_model_and_tool_evidence_by_assistant_message(
+    monkeypatch: Any,
+) -> None:
+    messages = [
+        Message(
+            "assistant",
+            [
+                Content(
+                    "function_call", call_id="call-1", name="lookup", arguments={"id": 1}
+                ),
+                Content(
+                    "function_call", call_id="call-2", name="lookup", arguments={"id": 2}
+                ),
+            ],
+        ),
+        Message(
+            "tool",
+            [
+                Content("function_result", call_id="call-1", result="ok"),
+                Content("function_result", call_id="call-2", result='{"error": "failed"}'),
+            ],
+        ),
+        Message(
+            "assistant",
+            [Content("function_call", call_id="call-3", name="finish", arguments=None)],
+        ),
+        Message(
+            "tool",
+            [Content("function_result", call_id="call-3", result=None)],
+        ),
+    ]
+
+    class FakeAgent:
+        async def run(self, *args: Any, **kwargs: Any) -> Any:
+            return SimpleNamespace(text="done", messages=messages, usage_details=None)
+
+    async def fake_session_builder(
+        **kwargs: Any,
+    ) -> tuple[FakeAgent, object, str, None, InferenceTarget]:
+        return FakeAgent(), object(), "session", None, InferenceTarget(model="gpt-test")
+
+    monkeypatch.setattr(runner, "_build_agent_session", fake_session_builder)
+
+    result = asyncio.run(runner.run_agent("hello"))
+
+    assert result.model == "gpt-test"
+    assert result.tool_calls == [
+        {
+            "type": "tool_start",
+            "tool_call_id": "call-1",
+            "tool_name": "lookup",
+            "arguments": {"id": 1},
+            "turn_id": "response-0",
+            "result": "ok",
+            "success": True,
+        },
+        {
+            "type": "tool_start",
+            "tool_call_id": "call-2",
+            "tool_name": "lookup",
+            "arguments": {"id": 2},
+            "turn_id": "response-0",
+            "result": '{"error": "failed"}',
+            "success": False,
+        },
+        {
+            "type": "tool_start",
+            "tool_call_id": "call-3",
+            "tool_name": "finish",
+            "arguments": None,
+            "turn_id": "response-1",
+            "result": None,
+            "success": True,
+        },
+    ]
+
+
+def test_run_agent_does_not_guess_batch_or_correlate_missing_ids(monkeypatch: Any) -> None:
+    messages = [
+        Message(
+            "assistant",
+            [Content("function_call", call_id="call-1", name="valid", arguments={})],
+        ),
+        Message(
+            "unknown",
+            [Content("function_call", call_id="call-2", name="unbatched", arguments={})],
+        ),
+        Message(
+            "assistant",
+            [Content("function_call", name="anonymous", arguments={})],
+        ),
+        Message(
+            "tool",
+            [
+                Content("function_result", call_id="call-1"),
+                Content("function_result", call_id="missing", result="ignored"),
+                Content("function_result", result="must-not-attach"),
+            ],
+        ),
+    ]
+
+    class FakeAgent:
+        async def run(self, *args: Any, **kwargs: Any) -> Any:
+            return SimpleNamespace(text="done", messages=messages, usage_details=None)
+
+    async def fake_session_builder(
+        **kwargs: Any,
+    ) -> tuple[FakeAgent, object, str, None, InferenceTarget]:
+        return FakeAgent(), object(), "session", None, InferenceTarget()
+
+    monkeypatch.setattr(runner, "_build_agent_session", fake_session_builder)
+
+    result = asyncio.run(runner.run_agent("hello"))
+
+    assert result.tool_calls == [
+        {
+            "type": "tool_start",
+            "tool_call_id": "call-1",
+            "tool_name": "valid",
+            "arguments": {},
+            "turn_id": "response-0",
+            "result": None,
+            "success": True,
+        },
+        {
+            "type": "tool_start",
+            "tool_call_id": "call-2",
+            "tool_name": "unbatched",
+            "arguments": {},
+        },
+        {
+            "type": "tool_start",
+            "tool_call_id": None,
+            "tool_name": "anonymous",
+            "arguments": {},
+            "turn_id": "response-1",
+        },
+    ]
 
 
 def test_run_agent_stream_uses_session_builder_with_configuration(monkeypatch: Any) -> None:
