@@ -365,42 +365,46 @@ success-shaped response or an automatic MAF fallback. Cancellation stays
 cancellation. Already-dispatched tool effects may remain after an unsuccessful
 turn; the feature does not claim transactional or exactly-once execution.
 
-### 4.8 Evidence limits and remaining implementation decisions
+### 4.8 Preview support limits
 
-The supplied 2026-09-25 assessment used SDK revision
-`4001c1da7d832c51bad1d38619c1a082af390efb`, runtime `1.0.84-5`, protocol 3.
-It reported real local-file and Azure Blob native restores with single-writer
-rename recovery, and host-named custom delegation with overlapping same-specialist
-calls and no specialist-stream leakage. These establish feasibility, not the
-contracts above. Native `custom_agents`/`task` delegation did not match the host
-contract. A Functions-shaped Windows transport comparison favored external stdio;
-it was not an Azure Functions deployment qualification.
+The Copilot preview is local-only and requires a single Functions worker. Azure
+Functions hosting, multi-worker execution, Blob-backed native session storage,
+MAF history import, public streaming/structured-response parity, MCP, scoped
+skills, delegation, workflows, system tools, and interrupted-turn recovery are
+unsupported in this preview. Unsupported capabilities fail explicitly without
+fallback. Configured output caps are rejected because the pinned SDK/native
+runtime does not expose a provider generation cap for this path.
 
-The Blob evidence did not establish distributed ownership or concurrent-reader
-safe rename. A storage-error path allowed inference before acknowledgment.
-Compacted cold restore, Functions hosting, MCP, scoped skills, public streaming/
-structured-response parity, and content-safe telemetry remain unqualified.
-The assessment's mid-turn recovery experiments do not add those capabilities to
-this feature's scope.
+Native session storage remains SDK-owned. The host verifies completed turns
+before resume and returns explicit errors for missing, corrupt, interrupted, or
+incompatible native history; it does not reset conversations silently or claim
+transactional/exactly-once execution.
 
-Sign-off approves the feature-level contracts, not a production SDK pin or
-unverified compatibility mappings. The following implementation decisions and
-qualification obligations remain open. Unsupported capabilities must continue
-to follow the explicit preview-rejection rules.
+#### 4.8.1 Architecture-approved provider contract
 
-| Implementation item | Resolution or evidence required for supported behavior |
-| --- | --- |
-| SDK/runtime and hosting contract | Select version/protocol/assets, core-versus-optional packaging and dependency coexistence with MAF, provider/Entra mappings, and provider `store=false` enforcement. Define worker lifecycle and target Functions hosting constraints, including Linux/Flex not qualified by the Windows evidence. Do not promote the evidence SHA to a production pin by assumption. |
-| Native storage protocol | Specify ownership/fencing, rename/read consistency, completion metadata, SDK storage-error barriers, and acknowledgment/quiescence. Define local-versus-deployed storage selection, complete-session retention safety, corruption/version detection, and interrupted-session behavior against concrete SDK operations. |
-| Native continuation and presentation | Establish a supported native history projection, compaction/reference preservation and cold-restore evidence, and metadata-only incompatible-history detection/rollback behavior. Rendering history must not become a second execution-state authority. |
-| Configuration compatibility | Decide the enforceable portable output limit and treatment/replacement of MAF-specific compaction configuration, preserving recursive inheritance/null behavior without claiming equivalent algorithms. |
-| Extension compatibility | Define the supported custom `ClientManager` contract and MAF `FunctionTool` conversion boundary, including authored decorator kwargs, approval semantics, unsupported hooks/options, and construction-time validation. Preserve MAF extensions with the flag off. |
+The provider contract preserves MAF behavior and provider/model precedence,
+including explicit/autodetected provider selection and authored/per-agent model
+merge and `null` semantics. Storage, history, hosting, and tool behavior remain
+bounded by the feature-level contracts above until separately qualified.
+
+Decision: OpenAI, Azure OpenAI (API key or Entra), and Foundry project (Entra)
+map to the Copilot SDK's singular `ProviderConfig` using the Responses API, with
+settings and auth mode frozen at harness selection and no fallback. Copilot
+accepts only the built-in `ClientManager`. The provider mappings, credential
+handling, and `ClientManager` rules are documented once in
+[architecture.md § Bounded Copilot migration preview](../architecture.md#bounded-copilot-migration-preview).
+Azure OpenAI intentionally accepts host-only HTTPS custom domains (for example,
+APIM); its Entra scope targets public Azure cloud only, so sovereign clouds are
+unsupported.
+
+The preview remains local-only and single-worker. Configured output caps are
+rejected rather than silently dropped.
 
 ## 5. Decisions log
 
-Dates below record the original scope approvals and proposals. Decision 12
-records human sign-off on the feature specification, without claiming that its
-remaining implementation decisions or qualification obligations are complete.
+Dates below record the original scope approvals and proposals. Decisions 13-16
+record the provider contracts added for the Copilot preview, approved by
+larohra on 2026-09-29.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
@@ -416,6 +420,10 @@ remaining implementation decisions or qualification obligations are complete.
 | 10 | Workflows across app restarts/deployments | Custom harness pinning/lifecycle rules / existing Durable behavior | Follow Durable replay, retry, worker lifetime, and configured deployment routing; each executing app instance supplies its own selection, with no new persisted harness pin or mismatch rejection | Human | 2026-09-28 |
 | 11 | Session startup failures | Prescribe marker sequencing / specify observable behavior | Require one active turn per agent/session, safe retry after a startup failure that did not begin a turn or damage state, and explicit errors for uncertain continuation; leave marker ordering and cleanup to implementation | Human | 2026-09-28 |
 | 12 | Feature specification sign-off | Keep In review / finalize the agreed feature contracts | Finalized after approving decision 11; section 4.8 remains an explicit record of unresolved implementation choices and required evidence, not a claim of parity or production readiness | Human (larohra) | 2026-09-28 |
+| 13 | MAF compatibility and Copilot provider boundary | Adjust MAF or precedence / preserve MAF exactly and isolate Copilot SDK types | Keep MAF behavior and provider/model precedence byte-for-byte behaviorally unchanged, including provider selection and authored/per-agent merge/`null` semantics. Use one stable singular pure typed target and lazily construct SDK `ProviderConfig` in `_copilot_providers.py`; do not optionally import the SDK in shared/default-off code | Human (larohra) | 2026-09-29 |
+| 14 | Copilot provider mappings | Generic/fallback mapping / explicit matrix | Map OpenAI, Azure OpenAI, and Foundry exactly as section 4.8.1 specifies with Responses for all supported providers; reject unsupported providers/settings without fallback | Human (larohra) | 2026-09-29 |
+| 15 | Credential lifecycle | Persist credentials / re-supply and refresh | Freeze provider settings at harness selection, re-supply credentials on resume from that provider object, permit overlapping Entra callbacks that acquire per request through Azure Identity, and exclude credentials from persistence, session metadata, launch arguments, and logs while acknowledging native request memory | Human (larohra) | 2026-09-29 |
+| 16 | Custom `ClientManager` migration | Adapt custom managers / built-in only on Copilot | Leave MAF unchanged; on Copilot accept only the exact runtime-created built-in manager, treating an explicitly installed `MAFClientManager()` or any other replacement as MAF-only. Reject replacement before app mutation and recheck before execution. `build_chat_client`-only managers remain MAF-only; this is not a future extension hook | Human (larohra) | 2026-09-29 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -466,7 +474,8 @@ this document does not introduce an unimplemented schema or rewrite runtime docs
   startup failure behavior (decisions 8-11).
 - **Human sign-off:** Laveesh Rohra (`larohra`), 2026-09-28, explicitly approved
   the behavior-focused session contract and requested sign-off on the FRD
-  (decision 12).
+  (decision 12). On 2026-09-29, larohra also signed off decisions 13-16 (the Copilot
+  provider contracts).
 - **Remaining qualification:** Section 4.8 retains unresolved implementation
   choices and evidence requirements. Section 6 defines acceptance, not results
   already achieved.

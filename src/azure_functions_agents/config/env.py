@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from enum import StrEnum
 from typing import Any
 
 _VAR_NAME_FRAGMENT = r"[A-Za-z_][A-Za-z0-9_]*"
@@ -16,6 +17,20 @@ _INLINE_PERCENT_PATTERN = re.compile(rf"%({_VAR_NAME_FRAGMENT})%")
 _LITERAL_DOLLAR_SENTINEL = "\x00AF_LITERAL_DOLLAR:"
 _LITERAL_PERCENT_SENTINEL = "\x00AF_LITERAL_PERCENT:"
 _LITERAL_SENTINEL_SUFFIX = "\x00"
+
+
+class EnvVar(StrEnum):
+    ENABLE_COPILOT = "AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT"
+    PROVIDER = "AZURE_FUNCTIONS_AGENTS_PROVIDER"
+    OPENAI_API_KEY = "OPENAI_API_KEY"
+    AZURE_OPENAI_ENDPOINT = "AZURE_OPENAI_ENDPOINT"
+    AZURE_OPENAI_API_KEY = "AZURE_OPENAI_API_KEY"
+    AZURE_OPENAI_API_VERSION = "AZURE_OPENAI_API_VERSION"
+    FOUNDRY_PROJECT_ENDPOINT = "FOUNDRY_PROJECT_ENDPOINT"
+    FUNCTIONS_WORKER_PROCESS_COUNT = "FUNCTIONS_WORKER_PROCESS_COUNT"
+    WEBSITE_INSTANCE_ID = "WEBSITE_INSTANCE_ID"
+    REASONING_EFFORT = "AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT"
+    REASONING_SUMMARY = "AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY"
 
 
 def _escaped_dollar_replacer(match: re.Match[str]) -> str:
@@ -84,9 +99,14 @@ def resolve_env_vars_in_data(value: Any) -> Any:
     return value
 
 
-def runtime_env_value(name: str) -> str:
+def runtime_env_value(name: EnvVar | str) -> str:
     """Return a stripped runtime env var value, or an empty string if unset."""
     return (os.environ.get(name) or "").strip()
+
+
+def raw_env_value(name: EnvVar) -> str | None:
+    """Return an exact runtime env var value, preserving unset versus blank."""
+    return os.environ.get(name)
 
 
 def _to_bool(value: Any, default: bool = True) -> bool:
