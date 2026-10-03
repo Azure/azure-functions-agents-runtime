@@ -69,7 +69,14 @@ def test_empty_scope_warns_and_uses_only_static_headers(
 ) -> None:
     credential, default_builder, client_builder = credentials
     with caplog.at_level(logging.WARNING):
-        result = mcp_auth.materialize_mcp_headers(_server(headers=headers, scope=scope))
+        server = _server(headers=headers, scope=scope)
+        assert [record.getMessage() for record in caplog.records] == [
+            "MCP server auth requires a non-empty 'scope'"
+        ]
+        result = mcp_auth.materialize_mcp_headers(server)
+        assert mcp_auth.materialize_mcp_headers(server) == headers
+        provider = mcp_auth.build_mcp_header_provider(server)
+        assert (provider({}) if provider is not None else {}) == headers
 
     assert result == headers
     assert [record.getMessage() for record in caplog.records] == [

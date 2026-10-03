@@ -9,6 +9,7 @@ import json
 import sys
 import uuid
 import warnings
+import weakref
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -62,7 +63,6 @@ type _MAFAgentTool = FunctionTool | MCPStreamableHTTPTool
 
 @dataclass
 class _LegacyTool:
-    descriptor: ToolDescriptor | None = None
     options: dict[str, Any] | None = None
     tool: FunctionTool | None = None
 
@@ -130,8 +130,6 @@ def describe_maf_tool(candidate: object) -> ToolDescriptor:
     if candidate.func is not None and _is_maf_tool(candidate.func):
         unsupported.add("nested SDK tool")
     unsupported.update(set(vars(candidate)) - _MAF_TOOL_ATTRIBUTES)
-    key = f"raw:{id(candidate)}"
-    _LEGACY_TOOLS[key] = _LegacyTool(tool=candidate)
     func = candidate.func if candidate.func is not None else _unavailable
     if _is_maf_tool(func) or (
         inspect.ismethod(func)
@@ -147,18 +145,23 @@ def describe_maf_tool(candidate: object) -> ToolDescriptor:
             unsupported.add("SDK input model")
         else:
             model = candidate.input_model
-    return ToolDescriptor.create(
+    key = f"raw:{uuid.uuid4().hex}"
+    policy = ToolPolicy(
+        approval_mode=candidate.approval_mode,
+        maf_only_options=tuple(sorted(unsupported)),
+        maf_compatibility_key=key,
+    )
+    descriptor = ToolDescriptor.create(
         name=candidate.name,
         description=candidate.description,
         func=func,
         input_model=model,
         parameters=candidate.parameters(),
-        policy=ToolPolicy(
-            approval_mode=candidate.approval_mode,
-            maf_only_options=tuple(sorted(unsupported)),
-            maf_compatibility_key=key,
-        ),
+        policy=policy,
     )
+    _LEGACY_TOOLS[key] = _LegacyTool(tool=candidate)
+    weakref.finalize(policy, _LEGACY_TOOLS.pop, key, None)
+    return descriptor
 
 
 def with_maf_options(
@@ -178,7 +181,8 @@ def with_maf_options(
         maf_compatibility_key=key,
     )
     declaration = replace(descriptor, policy=policy)
-    _LEGACY_TOOLS[key] = _LegacyTool(descriptor=declaration, options=dict(options))
+    _LEGACY_TOOLS[key] = _LegacyTool(options=dict(options))
+    weakref.finalize(policy, _LEGACY_TOOLS.pop, key, None)
     return declaration
 
 
@@ -226,9 +230,11 @@ def build_maf_tools(descriptors: Sequence[ToolDescriptor]) -> list[FunctionTool]
             tools.append(_function_tool(descriptor))
             continue
         legacy = _LEGACY_TOOLS[key]
+        if legacy.options is not None and inspect.ismethod(descriptor.func):
+            tools.append(_function_tool(descriptor, **legacy.options))
+            continue
         if legacy.tool is None:
-            assert legacy.descriptor is not None
-            legacy.tool = _function_tool(legacy.descriptor, **(legacy.options or {}))
+            legacy.tool = _function_tool(descriptor, **(legacy.options or {}))
         tools.append(legacy.tool)
     return tools
 
@@ -599,7 +605,11 @@ async def run(
         session_id=session_id,
         tools=request.tools,
         mcp_tools=request.mcp_servers,
-        skill_paths=tuple(skill.path for skill in request.skills) or None,
+        skill_paths=(
+            request.skill_source_paths
+            if request.skill_source_paths is not None
+            else tuple(skill.path for skill in request.skills) or None
+        ),
         model=model,
         sandbox_tools=None,
         web_request_tools=None,
@@ -703,7 +713,11 @@ async def run_stream(
             session_id=session_id,
             tools=request.tools,
             mcp_tools=request.mcp_servers,
-            skill_paths=tuple(skill.path for skill in request.skills) or None,
+            skill_paths=(
+                request.skill_source_paths
+                if request.skill_source_paths is not None
+                else tuple(skill.path for skill in request.skills) or None
+            ),
             model=model,
             sandbox_tools=None,
             web_request_tools=None,

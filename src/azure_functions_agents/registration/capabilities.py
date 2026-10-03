@@ -84,13 +84,25 @@ def _merge_skill_descriptors(
     return tuple(catalog)
 
 
+def _select_skill_roots(
+    catalog: Sequence[SkillDescriptor], paths: Sequence[Path]
+) -> tuple[SkillDescriptor, ...]:
+    roots = tuple(path.resolve() for path in paths)
+    return tuple(
+        skill
+        for path in roots
+        for skill in catalog
+        if skill.path == path
+    )
+
+
 def with_runtime_skill_paths(
     capabilities: AgentCapabilities,
     skill_paths: list[Path] | tuple[Path, ...],
 ) -> AgentCapabilities:
     """Return direct-role capabilities augmented with runtime-owned skills."""
-    runtime_skills = describe_skill_paths(skill_paths)
     runtime_catalog = describe_skill_catalog(skill_paths)
+    runtime_skills = _select_skill_roots(runtime_catalog, skill_paths)
     project_skills = capabilities.skills or describe_skill_paths(capabilities.enabled_skill_paths)
     approved = _merge_skill_descriptors(project_skills, runtime_skills)
     return replace(

@@ -55,13 +55,16 @@ class MCPServerDescriptor:
         client_id: str | None = None,
     ) -> Self:
         """Copy mutable inputs into the immutable descriptor shape."""
+        scope = auth_scope.strip() if auth_scope is not None else None
+        if scope == "":
+            logger.warning("MCP server auth requires a non-empty 'scope'")
         return cls(
             name=name,
             url=url,
             transport=transport,
             headers=_freeze_headers(headers),
             tools=_freeze_tool_filter(tools),
-            auth_scope=auth_scope.strip() if auth_scope is not None else None,
+            auth_scope=scope,
             client_id=(client_id.strip() or None) if client_id is not None else None,
         )
 
@@ -117,8 +120,6 @@ def _build_mcp_descriptor(
         auth = server.get("auth")
         scope = str(auth.get("scope", "")) if isinstance(auth, dict) else None
         client_id = str(auth.get("client_id", "")) if isinstance(auth, dict) else None
-        if scope is not None and not scope.strip():
-            logger.warning("MCP server auth requires a non-empty 'scope'")
         return MCPServerDescriptor.create(
             name=name,
             url=url,

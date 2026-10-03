@@ -52,7 +52,11 @@ from .discovery.skills import (
     discover_skills,
 )
 from .discovery.tools import discover_user_tools
-from .registration.capabilities import AgentCapabilities, _merge_skill_descriptors
+from .registration.capabilities import (
+    AgentCapabilities,
+    _merge_skill_descriptors,
+    _select_skill_roots,
+)
 from .registration.catalog import AgentCatalog, CatalogEntry
 
 if TYPE_CHECKING:
@@ -430,15 +434,33 @@ def _request(
         if mcp_tools is None
         else tuple(mcp_tools)
     )
-    approved = (
-        tuple(skills) if skills is not None else describe_skill_paths(skill_paths or ())
-    )
+    skill_source_paths: tuple[Path, ...] | None = None
+    explicit_catalog: tuple[SkillDescriptor, ...] = ()
+    if harness.name is HarnessKind.MAF and skills is None:
+        approved: tuple[SkillDescriptor, ...] = ()
+        skill_source_paths = tuple(skill_paths) if skill_paths is not None else None
+    elif skill_catalog is None and harness.name is HarnessKind.COPILOT:
+        explicit_paths = (
+            tuple(skill.path for skill in skills)
+            if skills is not None
+            else tuple(skill_paths or ())
+        )
+        explicit_catalog = describe_skill_catalog(explicit_paths)
+        approved = (
+            tuple(skills)
+            if skills is not None
+            else _select_skill_roots(explicit_catalog, explicit_paths)
+        )
+    else:
+        approved = (
+            tuple(skills) if skills is not None else describe_skill_paths(skill_paths or ())
+        )
     if skill_catalog is not None:
         discovered = tuple(skill_catalog)
     elif harness.name is HarnessKind.COPILOT:
         discovered = _merge_skill_descriptors(
             discover_skills(harness.app_root).descriptors,
-            describe_skill_catalog(tuple(skill.path for skill in approved)),
+            explicit_catalog,
         )
     else:
         discovered = approved
@@ -460,6 +482,7 @@ def _request(
         mcp_servers=servers,
         skills=approved,
         skill_catalog=_merge_skill_descriptors(discovered, approved),
+        skill_source_paths=skill_source_paths,
         max_output_tokens=configuration.max_output_tokens,
         deadline=deadline,
     )
@@ -492,6 +515,7 @@ async def run_agent(
     _session_is_new: bool = False,
 ) -> AgentResult:
     """Execute a prompt; None inventories discover, explicit empty inventories disable."""
+    validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
     deadline = asyncio.get_running_loop().time() + timeout
     harness = _harness or get_harness()
@@ -574,6 +598,7 @@ async def run_agent_stream(
     _harness: AppHarness | None = None,
 ) -> AsyncIterator[str]:
     """Yield the existing SSE vocabulary under the selected app context."""
+    validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
     try:
         harness = _harness or get_harness()
         if harness.name is HarnessKind.COPILOT:

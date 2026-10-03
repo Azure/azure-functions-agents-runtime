@@ -77,6 +77,7 @@ class HarnessRequest:
     mcp_servers: tuple[MCPServerDescriptor, ...] = ()
     skills: tuple[SkillDescriptor, ...] = ()
     skill_catalog: tuple[SkillDescriptor, ...] = ()
+    skill_source_paths: tuple[Path, ...] | None = None
 
 
 _HARNESSES: dict[Path, AppHarness] = {}

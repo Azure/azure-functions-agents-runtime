@@ -15,13 +15,18 @@ from agent_framework import (
     BaseChatClient,
     ChatMiddlewareLayer,
     ChatResponse,
+    ChatResponseUpdate,
+    Content,
+    FunctionInvocationLayer,
     HistoryProvider,
     Message,
+    ResponseStream,
     SessionContext,
 )
 
 from azure_functions_agents import _maf_tools, runner
 from azure_functions_agents._function_tool import tool
+from azure_functions_agents._harness import AppHarness, HarnessKind
 from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
@@ -98,6 +103,107 @@ class _SharedHistoryProvider(HistoryProvider):
         **kwargs: Any,
     ) -> None:
         self.messages.extend(messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("selection", ["collection", "invalid-name", "empty", "unspecified"])
+async def test_public_maf_skill_source_paths_preserve_sdk_collection_semantics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: Any, stream: bool, selection: str
+) -> None:
+    import agent_framework
+
+    class SkillMetadataChatClient(FunctionInvocationLayer[Any], BaseChatClient[Any]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.messages: list[str] = []
+
+        def _inner_get_response(
+            self,
+            *,
+            messages: Sequence[Message],
+            stream: bool,
+            options: Mapping[str, Any],
+            **kwargs: Any,
+        ) -> Any:
+            self.messages.extend(message.text for message in messages)
+            self.messages.append(str(options.get("instructions") or ""))
+            if stream:
+                async def updates() -> Any:
+                    yield ChatResponseUpdate(
+                        contents=[Content.from_text("complete")], role="assistant"
+                    )
+
+                return ResponseStream(updates(), finalizer=ChatResponse.from_updates)
+
+            async def response() -> ChatResponse[Any]:
+                return ChatResponse(messages=[Message("assistant", ["complete"])])
+
+            return response()
+
+    collection = tmp_path / "collection"
+    extra = tmp_path / "extra-collection"
+    invalid = tmp_path / "invalid-skill"
+    for directory, name in (
+        (collection / "alpha", "alpha"),
+        (collection / "beta", "beta"),
+        (extra / "gamma", "gamma"),
+        (invalid, "Bad_Name"),
+    ):
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Description for {name}\n---\nInstructions.\n",
+            encoding="utf-8",
+        )
+    paths = (
+        [extra, collection] if selection == "collection"
+        else [invalid, collection] if selection == "invalid-name"
+        else [] if selection == "empty" else None
+    )
+    passed_paths: list[list[Path]] = []
+    original_from_paths = agent_framework.SkillsProvider.from_paths
+
+    def from_paths(received: Sequence[Path], **kwargs: Any) -> Any:
+        passed_paths.append(list(received))
+        return original_from_paths(received, **kwargs)
+
+    monkeypatch.setattr(agent_framework.SkillsProvider, "from_paths", from_paths)
+    chat_client = SkillMetadataChatClient()
+    monkeypatch.setattr(
+        _maf_tools.get_client_manager(),
+        "build_chat_client_with_target",
+        lambda _model: (chat_client, InferenceTarget()),
+    )
+    monkeypatch.setattr(runner, "_build_history_provider", lambda _slug: None)
+    harness = AppHarness(HarnessKind.MAF, tmp_path)
+    kwargs = dict(tools=[], mcp_tools=[], skill_paths=paths, _harness=harness)
+    if stream:
+        events = [
+            json.loads(chunk.removeprefix("data: ").strip())
+            async for chunk in runner.run_agent_stream("prompt", **kwargs)
+        ]
+        assert any(event["type"] == "done" for event in events)
+        assert not any(event["type"] == "error" for event in events)
+    else:
+        response = await runner.run_agent("prompt", **kwargs)
+        assert response.content == "complete"
+    advertised = "\n".join(chat_client.messages)
+    if selection in {"collection", "invalid-name"}:
+        assert passed_paths == [paths]
+        assert "alpha" in advertised and "beta" in advertised
+        if selection == "collection":
+            assert "gamma" in advertised
+        else:
+            assert "Bad_Name" not in advertised
+            assert any(
+                record.name == "agent_framework._skills"
+                and "invalid name" in record.getMessage()
+                and "Bad_Name" in record.getMessage()
+                for record in caplog.records
+            )
+    else:
+        assert passed_paths == []
+        assert "alpha" not in advertised and "beta" not in advertised
 
 
 def test_build_agent_session_forces_provider_managed_history(

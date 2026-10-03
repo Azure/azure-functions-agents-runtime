@@ -740,6 +740,18 @@ def test_explicit_skill_roots_outside_app_include_nested_ownership(preview, monk
     harness = _harness.get_harness(app_root, new_app=True)
     invoke = AsyncMock(return_value=runner.AgentResult("session", "reply"))
     monkeypatch.setattr(_copilot, "run", invoke)
+    original_catalog = runner.describe_skill_catalog
+    catalog_calls = []
+
+    def catalog(paths):
+        catalog_calls.append(tuple(paths))
+        return original_catalog(paths)
+
+    def duplicate_parse(paths):
+        raise AssertionError("Explicit approved roots must use the single catalog parse")
+
+    monkeypatch.setattr(runner, "describe_skill_catalog", catalog)
+    monkeypatch.setattr(runner, "describe_skill_paths", duplicate_parse)
 
     asyncio.run(runner.run_agent(
         "hello", tools=[], mcp_tools=[], skill_paths=[parent], _harness=harness,
@@ -750,6 +762,7 @@ def test_explicit_skill_roots_outside_app_include_nested_ownership(preview, monk
     assert {skill.name for skill in request.skill_catalog} == {
         "external-parent", "external-child",
     }
+    assert catalog_calls == [(parent,)]
 
 
 def test_maf_standalone_does_not_discover_unrequested_skills(tmp_path, monkeypatch):

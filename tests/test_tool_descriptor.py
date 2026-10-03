@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import FrozenInstanceError
+from enum import Enum
 from pathlib import Path
 from typing import Annotated
 
@@ -10,6 +11,52 @@ from pydantic import BaseModel, Field
 
 from azure_functions_agents._function_tool import tool
 from azure_functions_agents._tool_descriptor import ToolDescriptor
+
+
+class _Choice(Enum):
+    FIRST = "first"
+    SECOND = "second"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_descriptor_validates_json_enums_but_invokes_with_python_values(
+    asynchronous: bool,
+) -> None:
+    calls: list[_Choice] = []
+
+    def synchronous(choice: _Choice) -> dict[str, _Choice]:
+        calls.append(choice)
+        return {"choice": choice}
+
+    async def coroutine(choice: _Choice) -> dict[str, _Choice]:
+        calls.append(choice)
+        return {"choice": choice}
+
+    descriptor = tool(coroutine if asynchronous else synchronous, name="enum_choice")
+    with pytest.raises(TypeError, match="Invalid arguments"):
+        await descriptor.invoke(arguments={"choice": "invalid"})
+    assert calls == []
+    assert await descriptor.invoke(arguments={"choice": "first"}) == {"choice": _Choice.FIRST}
+    assert calls == [_Choice.FIRST]
+
+
+@pytest.mark.asyncio
+async def test_descriptor_preserves_nested_and_list_enum_values() -> None:
+    calls: list[tuple[list[_Choice], dict[str, list[_Choice]]]] = []
+
+    @tool
+    def nested(choices: list[_Choice], groups: dict[str, list[_Choice]]) -> object:
+        calls.append((choices, groups))
+        return choices, groups
+
+    arguments = {"choices": ["first"], "groups": {"nested": ["second"]}}
+    with pytest.raises(TypeError, match="Invalid arguments"):
+        await nested.invoke(arguments={**arguments, "groups": {"nested": ["invalid"]}})
+    assert calls == []
+    expected = ([_Choice.FIRST], {"nested": [_Choice.SECOND]})
+    assert await nested.invoke(arguments=arguments) == expected
+    assert calls == [expected]
 
 
 def test_descriptor_schema_is_an_independent_frozen_snapshot() -> None:

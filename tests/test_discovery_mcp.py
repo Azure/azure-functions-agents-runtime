@@ -514,10 +514,15 @@ def test_discover_mcp_servers_auth_without_scope_keeps_static_headers_and_warnin
     )
     with caplog.at_level(logging.WARNING):
         server = discover_mcp_servers(tmp_path).servers["demo"]
+        assert discover_mcp_servers(tmp_path).servers["demo"] is server
+        assert mcp_auth.materialize_mcp_headers(server) == {"X-Test": "yes"}
+        assert mcp_auth.materialize_mcp_headers(server) == {"X-Test": "yes"}
 
     assert server.auth_scope == ""
     assert server.headers == (("X-Test", "yes"),)
-    assert "MCP server auth requires a non-empty 'scope'" in caplog.text
+    assert [record.getMessage() for record in caplog.records] == [
+        "MCP server auth requires a non-empty 'scope'"
+    ]
 
 
 def test_discover_does_not_substitute_server_name_keys(

@@ -7,7 +7,6 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from ._credential import build_credential, build_credential_with_client_id
-from ._logger import logger
 from .config.env import has_unresolved_placeholders
 from .discovery.mcp import MCPServerDescriptor
 
@@ -38,7 +37,6 @@ def build_mcp_header_provider(server: MCPServerDescriptor) -> MCPHeaderProvider 
         return static_header_provider if static_headers else None
     scope = scope.strip()
     if not scope:
-        logger.warning("MCP server auth requires a non-empty 'scope'")
         return static_header_provider if static_headers else None
 
     client_id = server.client_id

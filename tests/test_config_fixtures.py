@@ -704,9 +704,9 @@ def test_no_subagent_regression_fixture() -> None:
         discovered_skills={},
     )
 
-    assert main_caps.filtered_user_tools == discovered.tools
-    assert nightly_report_caps.filtered_user_tools == discovered.tools
-    assert resource_summary_caps.filtered_user_tools == []
+    assert main_caps.filtered_user_tools == tuple(discovered.tools)
+    assert nightly_report_caps.filtered_user_tools == tuple(discovered.tools)
+    assert resource_summary_caps.filtered_user_tools == ()
 
 
 # ---------------------------------------------------------------------------

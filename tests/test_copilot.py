@@ -1437,12 +1437,16 @@ async def test_detach_failure_does_not_mask_the_original_failure(preview, monkey
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
     client = _fake_client()
     session = client.create_session.return_value
-    session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(tools=None)
+    original_failure = CopilotPreviewError("original failure")
+    session.send_and_wait.side_effect = original_failure
     session.disconnect.side_effect = RuntimeError("disconnect failed")
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
-        with pytest.raises(CopilotPreviewError, match="model-visible tool catalog"):
+        with pytest.raises(CopilotPreviewError, match="original failure") as caught:
             await _copilot.run(preview, _request())
+        assert caught.value is original_failure
+        session.send_and_wait.assert_awaited_once()
+        session.abort.assert_awaited_once()
         session.disconnect.assert_awaited_once()
         assert not _copilot._runtime(preview)._filesystems
     finally:
