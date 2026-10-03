@@ -22,6 +22,7 @@ from .._observability import (
     capture_sensitive_data,
     start_span,
 )
+from .._session_storage import SessionStorageError
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
 from ._auth import authorize_entra_request
@@ -536,6 +537,20 @@ def make_http_agent_handler(
                     status_code=200,
                     media_type="text/plain",
                     headers={_SESSION_ID_HEADER: session_id},
+                )
+            except SessionStorageError as exc:
+                span.set_attribute("af.agent.outcome", "error")
+                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                logger.error("HTTP agent '%s' storage failed: %s", resolved.name, exc)
+                return Response(
+                    content=json.dumps({"error": str(exc)}),
+                    status_code=exc.status_code,
+                    media_type="application/json",
+                    headers=(
+                        {_SESSION_ID_HEADER: session_id}
+                        if echo_failed_session_id or turn_completed
+                        else None
+                    ),
                 )
             except Exception as exc:
                 span.set_attribute("af.agent.outcome", "error")

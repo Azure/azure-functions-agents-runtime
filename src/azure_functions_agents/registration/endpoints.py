@@ -18,6 +18,7 @@ from .._history_identity import validate_agent_slug
 from .._logger import logger
 from .._observability import FaultDomain, LifecycleStage, start_span
 from .._session_id import SESSION_ID_PATTERN
+from .._session_storage import SessionStorageError
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
 from ._auth import authorize_entra_request, resolve_endpoint_auth_level
@@ -360,6 +361,10 @@ def _register_http_chat(
                     media_type="application/json",
                     headers={_SESSION_ID_HEADER: result.session_id},
                 )
+            except SessionStorageError as exc:
+                span.set_attribute("af.agent.outcome", "error")
+                span.set_error(str(exc), fault_domain=FaultDomain.UNKNOWN)
+                return _json_error(str(exc), status_code=exc.status_code)
             except ValueError as exc:
                 span.set_attribute("af.agent.outcome", "error")
                 span.set_error(str(exc), fault_domain=FaultDomain.APP)

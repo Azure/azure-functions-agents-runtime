@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any, ClassVar
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from azure.core.exceptions import (
@@ -91,6 +93,9 @@ class _FakeServiceClient:
     def __init__(self, account: _FakeAccount) -> None:
         self._account = account
 
+    async def close(self) -> None:
+        self._account.service_close_calls += 1
+
     def get_container_client(self, container: str) -> _FakeContainerClient:
         return _FakeContainerClient(self._account, container)
 
@@ -109,6 +114,7 @@ class _FakeAccount:
         self.container_create_calls: list[str] = []
         self.download_calls: list[tuple[str, str]] = []
         self.properties_calls: list[tuple[str, str]] = []
+        self.service_close_calls = 0
 
 
 # ---------------------------------------------------------------------------
@@ -602,3 +608,59 @@ def test_build_service_client_bare_credential_when_no_env(
         credential=None,
     )
     assert _credential_spies.instances == [{}]
+
+
+@pytest.mark.asyncio
+async def test_selected_maf_storage_closes_at_package_shutdown_without_changing_history(
+    monkeypatch, fake_account,
+):
+    import azure_functions_agents as runtime
+    from azure_functions_agents import _harness
+
+    monkeypatch.setattr(_harness, "_SHUTDOWN_CALLBACKS", set())
+    provider = BlobHistoryProvider(agent_slug="billing", connection_string="fixture")
+    await provider.save_messages("session", [_make_message("persisted")])
+    original = dict(fake_account.blobs)
+
+    await runtime.shutdown_client_manager()
+
+    assert fake_account.service_close_calls == 1
+    assert not _blob_history._SERVICE_CLIENTS
+    assert not _blob_history._ENSURED_CONTAINERS
+    assert fake_account.blobs == original
+    assert [message.text for message in await provider.get_messages("session")] == ["persisted"]
+    await runtime.shutdown_client_manager()
+    assert fake_account.service_close_calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("borrowed", [False, True])
+async def test_maf_shutdown_closes_only_owned_storage_credentials(monkeypatch, borrowed):
+    import azure.storage.blob.aio
+
+    import azure_functions_agents as runtime
+    from azure_functions_agents import _credential, _harness
+
+    monkeypatch.setattr(_harness, "_SHUTDOWN_CALLBACKS", set())
+    credential = SimpleNamespace(get_token=AsyncMock(), close=AsyncMock())
+    service = _FakeServiceClient(_FakeAccount())
+    service.close = AsyncMock()
+    monkeypatch.setattr(
+        azure.storage.blob.aio, "BlobServiceClient", Mock(return_value=service)
+    )
+    monkeypatch.setattr(
+        _credential, "build_async_credential_with_client_id", Mock(return_value=credential)
+    )
+    provider = BlobHistoryProvider(
+        agent_slug="billing", blob_service_url="https://fixture.invalid",
+        credential=credential if borrowed else None,
+    )
+    await provider.get_messages("session")
+
+    await runtime.shutdown_client_manager()
+
+    service.close.assert_awaited_once()
+    if borrowed:
+        credential.close.assert_not_awaited()
+    else:
+        credential.close.assert_awaited_once()

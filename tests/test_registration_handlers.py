@@ -319,6 +319,44 @@ def test_http_failure_before_copilot_create_does_not_return_new_session_id(
     assert "x-ms-session-id" in maf_failed.headers
 
 
+def test_http_handler_maps_sanitized_storage_errors_without_host_lifecycle_statuses(
+    monkeypatch: Any, tmp_path: Path,
+) -> None:
+    import errno
+
+    from azure_functions_agents._session_storage import SessionStorageError
+
+    failure: Exception = SessionStorageError(errno.EACCES, "Storage authentication failed.")
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        raise failure
+
+    monkeypatch.setattr("azure_functions_agents.registration._handlers._run_agent", fake_run_agent)
+    copilot = make_http_agent_handler(
+        _resolved_agent(response_schema=None),
+        AgentCapabilities(_harness=AppHarness(HarnessKind.COPILOT, tmp_path)),
+    )
+
+    unavailable = asyncio.run(
+        copilot(DummyRequest({"message": "valid"}, headers={"x-ms-session-id": "existing"}))
+    )
+    assert unavailable.status_code == 503
+    assert unavailable.headers["x-ms-session-id"] == "existing"
+    assert json.loads(unavailable.body)["error"] == str(failure)
+
+    generated = asyncio.run(copilot(DummyRequest({"message": "valid"})))
+    assert generated.status_code == 503
+    assert "x-ms-session-id" not in generated.headers
+
+    failure = RuntimeError("SDK rejected the session.")
+    failed = asyncio.run(
+        copilot(DummyRequest({"message": "valid"}, headers={"x-ms-session-id": "existing"}))
+    )
+    assert failed.status_code == 500
+    assert failed.headers["x-ms-session-id"] == "existing"
+    assert json.loads(failed.body)["error"] == str(failure)
+
+
 def test_http_handler_records_invalid_json_event(monkeypatch: Any) -> None:
     span = _install_recording_span(monkeypatch)
 
