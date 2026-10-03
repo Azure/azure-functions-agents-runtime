@@ -1,31 +1,84 @@
-"""MCP server discovery and translation to Microsoft Agent Framework tools."""
+"""Read-only discovery of remote MCP server descriptors."""
 
 from __future__ import annotations
 
-import asyncio
 import json
-import time
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, Self, cast
 
-from agent_framework import MCPStreamableHTTPTool
-
-from .._credential import build_credential, build_credential_with_client_id
 from .._logger import logger
 from ..config.env import has_unresolved_placeholders, resolve_env_vars_in_data
 
-type MCPTool = MCPStreamableHTTPTool
+type MCPTransport = Literal["http", "streamable-http"]
 
-_DISCOVERED_MCP_SERVERS_CACHE: dict[Path, dict[str, MCPTool]] = {}
-_DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS = 300
+
+def _freeze_headers(
+    headers: Mapping[str, object] | Iterable[tuple[str, object]],
+) -> tuple[tuple[str, str], ...]:
+    entries = headers.items() if isinstance(headers, Mapping) else headers
+    return tuple((str(key), str(value)) for key, value in entries)
+
+
+def _freeze_tool_filter(tools: Iterable[object] | None) -> tuple[str, ...] | None:
+    if tools is None:
+        return None
+    entries = tuple(tools)
+    if any(tool == "*" for tool in entries):
+        return None
+    return tuple(str(tool) for tool in entries)
+
+
+@dataclass(frozen=True)
+class MCPServerDescriptor:
+    """Immutable MCP configuration with no SDK objects or acquired credentials."""
+
+    name: str
+    url: str
+    transport: MCPTransport = "http"
+    headers: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+    tools: tuple[str, ...] | None = None
+    auth_scope: str | None = None
+    client_id: str | None = None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        name: str,
+        url: str,
+        transport: MCPTransport = "http",
+        headers: Mapping[str, object] | Iterable[tuple[str, object]] = (),
+        tools: Iterable[object] | None = None,
+        auth_scope: str | None = None,
+        client_id: str | None = None,
+    ) -> Self:
+        """Copy mutable inputs into the immutable descriptor shape."""
+        scope = auth_scope.strip() if auth_scope is not None else None
+        if scope == "":
+            logger.warning("MCP server auth requires a non-empty 'scope'")
+        return cls(
+            name=name,
+            url=url,
+            transport=transport,
+            headers=_freeze_headers(headers),
+            tools=_freeze_tool_filter(tools),
+            auth_scope=scope,
+            client_id=(client_id.strip() or None) if client_id is not None else None,
+        )
+
+
+type MCPTool = MCPServerDescriptor
+
+_DISCOVERED_MCP_SERVERS_CACHE: dict[Path, dict[str, MCPServerDescriptor]] = {}
 
 
 @dataclass
 class MCPDiscoveryResult:
     """Result of MCP server discovery including successes and failures."""
 
-    servers: dict[str, MCPTool]  # {server_name: MCPTool}
+    servers: dict[str, MCPServerDescriptor]
     failed_loads: list[tuple[str, str]]  # [(server_name, error_message), ...]
 
 
@@ -34,84 +87,11 @@ def clear_mcp_cache() -> None:
     _DISCOVERED_MCP_SERVERS_CACHE.clear()
 
 
-def _build_header_provider(server: dict[str, Any]) -> Any:
-    headers = server.get("headers")
-    static_headers = (
-        {str(key): str(value) for key, value in headers.items()}
-        if isinstance(headers, dict)
-        else {}
-    )
-
-    auth = server.get("auth")
-    if not isinstance(auth, dict):
-        if not static_headers:
-            return None
-
-        def static_header_provider(_ctx: Any) -> dict[str, str]:
-            return dict(static_headers)
-
-        return static_header_provider
-
-    scope = str(auth.get("scope", "")).strip()
-    if not scope:
-        logger.warning("MCP server auth requires a non-empty 'scope'")
-        if not static_headers:
-            return None
-
-        def missing_scope_header_provider(_ctx: Any) -> dict[str, str]:
-            return dict(static_headers)
-
-        return missing_scope_header_provider
-
-    client_id = str(auth.get("client_id", "")).strip()
-    if has_unresolved_placeholders(client_id):
-        client_id = ""
-
-    credential = build_credential_with_client_id(client_id) if client_id else build_credential()
-    cached_token: dict[str, str | int] = {"token": "", "expires_on": 0}
-
-    def default_credential_header_provider(_ctx: Any) -> dict[str, str]:
-        now = int(time.time())
-        expires_on = int(cached_token["expires_on"])
-        if not cached_token["token"] or expires_on - _DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS <= now:
-            token = credential.get_token(scope)
-            cached_token["token"] = token.token
-            cached_token["expires_on"] = token.expires_on
-
-        result = dict(static_headers)
-        result["Authorization"] = f"Bearer {cached_token['token']}"
-        return result
-
-    return default_credential_header_provider
-
-
-def _build_http_client(header_provider: Any) -> Any:
-    if header_provider is None:
-        return None
-
-    from httpx import AsyncClient
-
-    async def inject_headers(request: Any) -> None:
-        headers = await asyncio.to_thread(header_provider, {})
-        for key, value in headers.items():
-            request.headers[key] = value
-
-    return AsyncClient(follow_redirects=True, event_hooks={"request": [inject_headers]})
-
-
-def _build_mcp_tool(name: str, server: dict[str, Any]) -> tuple[MCPTool | None, str | None]:
-    """Translate a single mcp.json entry to a MAF MCP tool object.
-    
-    Returns (tool, error_message). If tool is None, error_message explains why.
-    """
+def _build_mcp_descriptor(
+    name: str, server: dict[str, Any]
+) -> tuple[MCPServerDescriptor | None, str | None]:
+    """Translate one supported mcp.json entry without acquiring runtime resources."""
     server_type = str(server.get("type", "")).lower()
-    raw_tools = server.get("tools", ["*"])
-    if isinstance(raw_tools, list) and any(tool == "*" for tool in raw_tools):
-        allowed_tools: list[str] | None = None
-    elif isinstance(raw_tools, list):
-        allowed_tools = [str(tool) for tool in raw_tools]
-    else:
-        allowed_tools = None
     if "command" in server or server_type in {"local", "stdio"}:
         error = "MCP stdio transport is not supported"
         logger.warning("%s; skipping server '%s'", error, name)
@@ -135,16 +115,19 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> tuple[MCPTool | None, 
             error = f"could not resolve url '{url}'"
             logger.warning("MCP server '%s': %s, skipping", name, error)
             return None, error
-        header_provider = _build_header_provider(server)
-
-        return MCPStreamableHTTPTool(
+        headers = server.get("headers")
+        raw_tools = server.get("tools")
+        auth = server.get("auth")
+        scope = str(auth.get("scope", "")) if isinstance(auth, dict) else None
+        client_id = str(auth.get("client_id", "")) if isinstance(auth, dict) else None
+        return MCPServerDescriptor.create(
             name=name,
             url=url,
-            allowed_tools=allowed_tools,
-            load_tools=True,
-            load_prompts=False,
-            header_provider=header_provider,
-            http_client=_build_http_client(header_provider),
+            transport=cast(MCPTransport, server_type or "http"),
+            headers=headers if isinstance(headers, dict) else (),
+            tools=raw_tools if isinstance(raw_tools, list) else None,
+            auth_scope=scope,
+            client_id=client_id,
         ), None
 
     if server_type:
@@ -198,23 +181,23 @@ def discover_mcp_servers(app_root: Path) -> MCPDiscoveryResult:
         _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
         return MCPDiscoveryResult(servers={}, failed_loads=[])
 
-    tools: dict[str, MCPTool] = {}
+    descriptors: dict[str, MCPServerDescriptor] = {}
     failed_loads: list[tuple[str, str]] = []
     for name in sorted(servers.keys()):
         config = servers[name]
         if not isinstance(name, str) or not isinstance(config, dict):
             continue
-        built, error = _build_mcp_tool(name, config)
+        built, error = _build_mcp_descriptor(name, config)
         if built is not None:
-            tools[name] = built
+            descriptors[name] = built
         elif error is not None:
             failed_loads.append((name, error))
 
-    if tools:
-        logger.info("Loaded %d MCP server(s) from %s", len(tools), path)
+    if descriptors:
+        logger.info("Loaded %d MCP server(s) from %s", len(descriptors), path)
     else:
         logger.info("No valid MCP servers found in %s", path)
     if failed_loads:
         logger.warning("Failed to load %d MCP server(s)", len(failed_loads))
-    _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = tools
-    return MCPDiscoveryResult(servers=dict(tools), failed_loads=failed_loads)
+    _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = descriptors
+    return MCPDiscoveryResult(servers=dict(descriptors), failed_loads=failed_loads)

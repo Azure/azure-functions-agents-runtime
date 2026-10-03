@@ -8,14 +8,21 @@ import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
+from ._copilot_capabilities import (
+    available_tools,
+    mcp_configuration,
+    permission_handler,
+    skill_instructions,
+)
 from ._copilot_session_fs import (
     HOST_PATH_CONVENTIONS,
     SESSION_STATE_ROOT,
     NativeSessionFs,
     open_session_fs,
 )
+from ._copilot_tool_calls import CopilotToolCalls, tool_result_text
 from ._credential import build_async_credential
 from ._harness import (
     AppHarness,
@@ -34,21 +41,20 @@ from .client_manager import InferenceTarget
 if TYPE_CHECKING:
     from azure.core.credentials_async import AsyncTokenCredential
     from copilot import CopilotClient
-    from copilot.generated.rpc import PermissionDecision
     from copilot.session import (
         CopilotSession,
         CreateSessionFsHandler,
-        PermissionInvocation,
+        MCPServerConfig,
         ProviderConfig,
         ProviderTokenArgs,
         SystemMessageConfig,
         ToolSearchConfig,
     )
-    from copilot.session_events import PermissionRequest, SessionEvent
+    from copilot.session_events import SessionEvent
     from copilot.tools import Tool, ToolInvocation, ToolResult
 
     from ._copilot_providers import ProviderTokenSource
-    from ._function_tool import FunctionTool
+    from ._tool_descriptor import ToolDescriptor
     from .runner import AgentResult
 
 
@@ -63,6 +69,12 @@ class _SessionOptions(TypedDict):
     enable_session_telemetry: bool
     request_extensions: bool
     tool_search: ToolSearchConfig
+    working_directory: str
+    mcp_servers: dict[str, MCPServerConfig]
+    enable_skills: bool
+    included_builtin_skills: list[str]
+    skill_directories: list[str]
+    disabled_skills: list[str]
     on_event: Callable[[SessionEvent], None]
     create_session_fs_handler: CreateSessionFsHandler
 
@@ -252,41 +264,23 @@ async def shutdown() -> None:
         raise CopilotPreviewError("Copilot preview shutdown failed for one or more workers.")
 
 
-def _deny_permission(
-    _request: PermissionRequest, _invocation: PermissionInvocation
-) -> PermissionDecision:
-    from copilot.generated.rpc import PermissionDecisionDeniedByRules
-
-    return PermissionDecisionDeniedByRules(rules=[])
-
-
-def _tool(function: FunctionTool, calls: list[dict[str, Any]]) -> Tool:
+def _tool(function: ToolDescriptor, calls: CopilotToolCalls) -> Tool:
     from copilot.tools import Tool, ToolResult
 
     async def invoke(invocation: ToolInvocation) -> ToolResult:
-        record: dict[str, Any] = {
-            "type": "tool_start",
-            "tool_call_id": invocation.tool_call_id,
-            "tool_name": function.name,
-            "arguments": invocation.arguments,
-        }
-        calls.append(record)
+        calls.start_custom(invocation)
         try:
-            contents = await function.invoke(
+            result = await function.invoke(
                 arguments=invocation.arguments,
                 tool_call_id=invocation.tool_call_id,
             )
-            if not isinstance(contents, list) or any(
-                getattr(item, "type", None) != "text" for item in contents
-            ):
-                raise CopilotPreviewError("Copilot preview tools must return text or JSON.")
-            text = "\n".join(item.text or "" for item in contents)
+            text = tool_result_text(result)
         except Exception:
             logger.warning("Copilot custom tool failed: tool=%s", function.name)
             text = '{"error":"Custom tool failed or returned unsupported content."}'
-            record["result"] = text
+            calls.complete_custom(invocation.tool_call_id, text)
             return ToolResult(text_result_for_llm=text, result_type="failure")
-        record["result"] = text
+        calls.complete_custom(invocation.tool_call_id, text)
         return ToolResult(text_result_for_llm=text, result_type="success")
 
     return Tool(
@@ -350,13 +344,19 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
             "Remove the cap or use the MAF harness."
         )
     from copilot.session import SystemMessageReplaceConfig, ToolSearchConfig
-    from copilot.session_events import AssistantMessageData, AssistantUsageData
+    from copilot.session_events import (
+        AssistantMessageData,
+        AssistantUsageData,
+        ToolExecutionCompleteData,
+        ToolExecutionStartData,
+    )
 
+    from ._skill_policy import SkillPolicy
     from .runner import AgentResult, _AgentUsageRecorder, _session_lock_bounded_by
 
     owner = _runtime(harness)
     native_id = _native_id(request.agent_slug, request.session_id)
-    calls: list[dict[str, Any]] = []
+    calls = CopilotToolCalls()
     messages: list[str] = []
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -382,6 +382,10 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     input_tokens = (input_tokens or 0) + used_input
                 if used_output is not None:
                     output_tokens = (output_tokens or 0) + used_output
+            case ToolExecutionStartData() as started:
+                calls.start_native(started)
+            case ToolExecutionCompleteData() as completed:
+                calls.complete_native(completed)
 
     token_source = _RequestTokenSource(owner)
     try:
@@ -400,13 +404,22 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
             )
             owner._filesystems.add(storage)
             cleanup.push_async_callback(owner.release_filesystem, storage)
+            mcp_servers = await mcp_configuration(
+                request.mcp_servers, protect_headers=calls.protect_headers
+            )
             client = await owner.client()
+            skill_policy = SkillPolicy.create(
+                approved=request.skills,
+                discovered=request.skill_catalog,
+                working_directory=owner.workspace,
+            )
+            on_permission_request = permission_handler(skill_policy)
             options = _SessionOptions(
                 model=request.model,
                 tools=[_tool(function, calls) for function in request.tools],
-                available_tools=[f"custom:{function.name}" for function in request.tools],
+                available_tools=available_tools(request),
                 system_message=SystemMessageReplaceConfig(
-                    mode="replace", content=request.instructions or ""
+                    mode="replace", content=skill_instructions(request.instructions, request.skills)
                 ),
                 provider=provider,
                 streaming=False,
@@ -414,29 +427,24 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 enable_session_telemetry=False,
                 request_extensions=False,
                 tool_search=ToolSearchConfig(enabled=False),
+                working_directory=str(owner.workspace),
+                mcp_servers=mcp_servers,
+                enable_skills=bool(request.skills),
+                included_builtin_skills=[],
+                skill_directories=[str(skill.path) for skill in request.skills],
+                disabled_skills=list(skill_policy.disabled_names),
                 on_event=on_event,
                 create_session_fs_handler=lambda _session: storage,
             )
             if request.new_session:
                 session = await client.create_session(
-                    session_id=native_id, on_permission_request=_deny_permission, **options
+                    session_id=native_id, on_permission_request=on_permission_request, **options
                 )
             else:
                 session = await client.resume_session(
-                    native_id, on_permission_request=_deny_permission, **options
+                    native_id, on_permission_request=on_permission_request, **options
                 )
             async with _session_context(session):
-                metadata = await session.rpc.tools.get_current_metadata()
-                if metadata.tools is None:
-                    raise CopilotPreviewError("Copilot did not report its model-visible tool catalog.")
-                actual_names = sorted(item.name for item in metadata.tools)
-                expected_names = sorted(function.name for function in request.tools)
-                if actual_names != expected_names:
-                    raise CopilotPreviewError(
-                        "Copilot model-visible tool catalog differs from the configured custom tools. "
-                        "No prompt was sent."
-                    )
-                logger.info("Copilot tool catalog verified: custom_tool_count=%d", len(expected_names))
                 logger.info(
                     "Copilot request target: provider=%s model=%s",
                     harness.provider.kind if harness.provider is not None else None,
@@ -468,7 +476,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 session_id=request.session_id,
                 content=content,
                 content_intermediate=messages[:-1],
-                tool_calls=calls,
+                tool_calls=calls.calls,
             )
     except asyncio.CancelledError:
         raise

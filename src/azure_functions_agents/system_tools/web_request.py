@@ -29,7 +29,7 @@ import aiohttp
 import aiohttp.abc
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .._function_tool import FunctionTool, tool
+from .._function_tool import tool
 from .._logger import logger
 from .._observability import (
     FaultDomain,
@@ -37,6 +37,7 @@ from .._observability import (
     record_web_request,
     start_span,
 )
+from .._tool_descriptor import ToolDescriptor
 from ..config.schema import WebRequestConfig
 
 # ---------------------------------------------------------------------------
@@ -557,7 +558,7 @@ def _encode_query(query: dict[str, str] | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def create_web_request_tools(config: WebRequestConfig) -> list[FunctionTool]:
+def create_web_request_tools(config: WebRequestConfig) -> list[ToolDescriptor]:
     """Create the ``web_request`` tool bound to a resolved agent's config.
 
     Built once per agent at registration; each invocation performs its own

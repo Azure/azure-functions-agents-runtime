@@ -7,10 +7,10 @@ import types
 from pathlib import Path
 
 import pytest
-from agent_framework import FunctionTool
 from pydantic import ValidationError
 
 from azure_functions_agents._function_tool import tool, workflow_tool
+from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.discovery.tools import (
     clear_tool_discovery_cache,
     discover_project_tools,
@@ -24,7 +24,7 @@ def _write_tool_file(app_root: Path, name: str, body: str) -> None:
     (tools_dir / f"{name}.py").write_text(textwrap.dedent(body), encoding="utf-8")
 
 
-def _tool_names(tools: list[FunctionTool]) -> list[str]:
+def _tool_names(tools: list[ToolDescriptor]) -> list[str]:
     return sorted(tool_obj.name for tool_obj in tools)
 
 
@@ -127,6 +127,56 @@ def test_discover_user_tools_returns_empty_when_tools_dir_missing(tmp_path: Path
     result = discover_user_tools(tmp_path)
     assert result.tools == []
     assert result.failed_loads == []
+
+
+def test_discovery_records_neutral_metadata_without_maf_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from azure_functions_agents import _maf_tools
+
+    def forbidden(**kwargs):
+        raise AssertionError("Discovery must not construct MAF tools")
+
+    monkeypatch.setattr(_maf_tools, "FunctionTool", forbidden)
+    _write_tool_file(
+        tmp_path,
+        "ordinary",
+        """
+        from azure_functions_agents import tool
+
+        @tool(name="selected", description="Authored description")
+        def lookup(value: int) -> int:
+            return value
+        """,
+    )
+    [descriptor] = discover_project_tools(tmp_path).user_tools
+
+    assert type(descriptor) is ToolDescriptor
+    assert descriptor.name == "selected"
+    assert descriptor.description == "Authored description"
+    assert descriptor.parameters()["properties"]["value"]["type"] == "integer"
+    assert descriptor.policy.maf_compatibility_key is None
+
+
+def test_raw_maf_tools_discover_as_compatibility_descriptors(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "legacy",
+        """
+        from agent_framework import FunctionTool
+
+        class ExtendedTool(FunctionTool):
+            pass
+
+        lookup = ExtendedTool(name="legacy_lookup", func=lambda value: value)
+        """,
+    )
+    [descriptor] = discover_project_tools(tmp_path).user_tools
+
+    assert type(descriptor) is ToolDescriptor
+    assert descriptor.name == "legacy_lookup"
+    assert descriptor.policy.maf_only_options == ("custom tool class",)
+    assert descriptor.policy.maf_compatibility_key is not None
 
 
 def test_workflow_tool_only_is_not_normal_user_tool(tmp_path: Path) -> None:

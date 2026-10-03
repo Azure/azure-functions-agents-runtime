@@ -15,18 +15,25 @@ from agent_framework import (
     BaseChatClient,
     ChatMiddlewareLayer,
     ChatResponse,
+    ChatResponseUpdate,
+    Content,
+    FunctionInvocationLayer,
     HistoryProvider,
     Message,
+    ResponseStream,
     SessionContext,
 )
 
-from azure_functions_agents import runner
+from azure_functions_agents import _maf_tools, runner
+from azure_functions_agents._function_tool import tool
+from azure_functions_agents._harness import AppHarness, HarnessKind
 from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     AgentFrameworkCompactionConfig,
     AgentFrameworkConfiguration,
 )
+from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 
 
 @pytest.fixture(autouse=True)
@@ -98,6 +105,107 @@ class _SharedHistoryProvider(HistoryProvider):
         self.messages.extend(messages)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("selection", ["collection", "invalid-name", "empty", "unspecified"])
+async def test_public_maf_skill_source_paths_preserve_sdk_collection_semantics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: Any, stream: bool, selection: str
+) -> None:
+    import agent_framework
+
+    class SkillMetadataChatClient(FunctionInvocationLayer[Any], BaseChatClient[Any]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.messages: list[str] = []
+
+        def _inner_get_response(
+            self,
+            *,
+            messages: Sequence[Message],
+            stream: bool,
+            options: Mapping[str, Any],
+            **kwargs: Any,
+        ) -> Any:
+            self.messages.extend(message.text for message in messages)
+            self.messages.append(str(options.get("instructions") or ""))
+            if stream:
+                async def updates() -> Any:
+                    yield ChatResponseUpdate(
+                        contents=[Content.from_text("complete")], role="assistant"
+                    )
+
+                return ResponseStream(updates(), finalizer=ChatResponse.from_updates)
+
+            async def response() -> ChatResponse[Any]:
+                return ChatResponse(messages=[Message("assistant", ["complete"])])
+
+            return response()
+
+    collection = tmp_path / "collection"
+    extra = tmp_path / "extra-collection"
+    invalid = tmp_path / "invalid-skill"
+    for directory, name in (
+        (collection / "alpha", "alpha"),
+        (collection / "beta", "beta"),
+        (extra / "gamma", "gamma"),
+        (invalid, "Bad_Name"),
+    ):
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Description for {name}\n---\nInstructions.\n",
+            encoding="utf-8",
+        )
+    paths = (
+        [extra, collection] if selection == "collection"
+        else [invalid, collection] if selection == "invalid-name"
+        else [] if selection == "empty" else None
+    )
+    passed_paths: list[list[Path]] = []
+    original_from_paths = agent_framework.SkillsProvider.from_paths
+
+    def from_paths(received: Sequence[Path], **kwargs: Any) -> Any:
+        passed_paths.append(list(received))
+        return original_from_paths(received, **kwargs)
+
+    monkeypatch.setattr(agent_framework.SkillsProvider, "from_paths", from_paths)
+    chat_client = SkillMetadataChatClient()
+    monkeypatch.setattr(
+        _maf_tools.get_client_manager(),
+        "build_chat_client_with_target",
+        lambda _model: (chat_client, InferenceTarget()),
+    )
+    monkeypatch.setattr(runner, "_build_history_provider", lambda _slug: None)
+    harness = AppHarness(HarnessKind.MAF, tmp_path)
+    kwargs = dict(tools=[], mcp_tools=[], skill_paths=paths, _harness=harness)
+    if stream:
+        events = [
+            json.loads(chunk.removeprefix("data: ").strip())
+            async for chunk in runner.run_agent_stream("prompt", **kwargs)
+        ]
+        assert any(event["type"] == "done" for event in events)
+        assert not any(event["type"] == "error" for event in events)
+    else:
+        response = await runner.run_agent("prompt", **kwargs)
+        assert response.content == "complete"
+    advertised = "\n".join(chat_client.messages)
+    if selection in {"collection", "invalid-name"}:
+        assert passed_paths == [paths]
+        assert "alpha" in advertised and "beta" in advertised
+        if selection == "collection":
+            assert "gamma" in advertised
+        else:
+            assert "Bad_Name" not in advertised
+            assert any(
+                record.name == "agent_framework._skills"
+                and "invalid name" in record.getMessage()
+                and "Bad_Name" in record.getMessage()
+                for record in caplog.records
+            )
+    else:
+        assert passed_paths == []
+        assert "alpha" not in advertised and "beta" not in advertised
+
+
 def test_build_agent_session_forces_provider_managed_history(
     monkeypatch: Any,
 ) -> None:
@@ -117,7 +225,7 @@ def test_build_agent_session_forces_provider_managed_history(
         raising=False,
     )
     monkeypatch.setattr(
-        runner.get_client_manager(),
+        _maf_tools.get_client_manager(),
         "build_chat_client_with_target",
         lambda _model: (object(), InferenceTarget()),
     )
@@ -223,7 +331,7 @@ def test_build_agent_session_forwards_system_instructions(monkeypatch: Any) -> N
         raising=False,
     )
     monkeypatch.setattr(
-        runner.get_client_manager(),
+        _maf_tools.get_client_manager(),
         "build_chat_client_with_target",
         lambda _model: (object(), InferenceTarget()),
     )
@@ -320,11 +428,14 @@ def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
     """Harness agents receive all shared tools and return their delegation error tracker."""
     captured_agent_options: list[dict[str, Any]] = []
     captured_delegate_options: list[tuple[Any, Any, float]] = []
-    local_tool = SimpleNamespace(name="local_tool")
-    mcp_tool = SimpleNamespace(name="mcp_tool")
-    sandbox_tool = SimpleNamespace(name="sandbox_tool")
-    web_request_tool = SimpleNamespace(name="web_request_tool")
-    delegate_tool = SimpleNamespace(name="delegate_billing")
+    local_tool = tool(lambda: "ok", name="local_tool")
+    mcp_tool = MCPServerDescriptor(
+        name="mcp_tool", url="https://fixture.invalid/mcp", transport="streamable-http",
+        headers=(), tools=None, auth_scope=None, client_id=None,
+    )
+    sandbox_tool = tool(lambda: "ok", name="sandbox_tool")
+    web_request_tool = tool(lambda: "ok", name="web_request_tool")
+    delegate_tool = tool(lambda: "ok", name="delegate_billing")
     delegate_tracker = runner._DelegateErrorTracker()
     subagents = [SimpleNamespace(agent="billing")]
     catalog = object()
@@ -339,6 +450,7 @@ def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
         received_catalog: Any,
         *,
         coordinator_deadline: float,
+        _harness: Any = None,
     ) -> tuple[list[Any], runner._DelegateErrorTracker]:
         captured_delegate_options.append(
             (received_subagents, received_catalog, coordinator_deadline)
@@ -354,7 +466,7 @@ def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
         raising=False,
     )
     monkeypatch.setattr(
-        runner.get_client_manager(),
+        _maf_tools.get_client_manager(),
         "build_chat_client_with_target",
         lambda _model: (object(), InferenceTarget()),
     )
@@ -436,7 +548,7 @@ def test_fresh_harness_agents_reload_history_for_same_session(
         return _SharedHistoryProvider(stored_messages)
 
     monkeypatch.setattr(
-        runner.get_client_manager(),
+        _maf_tools.get_client_manager(),
         "build_chat_client_with_target",
         lambda _model: (client, InferenceTarget()),
     )
@@ -552,7 +664,7 @@ async def test_qualified_agent_name_round_trips_history_without_entering_model_r
     ) as provider_client:
         chat_client = OpenAIChatClient(model="offline-model", async_client=provider_client)
         monkeypatch.setattr(
-            runner.get_client_manager(),
+            _maf_tools.get_client_manager(),
             "build_chat_client_with_target",
             lambda _model: (chat_client, InferenceTarget()),
         )
@@ -603,7 +715,7 @@ def test_harness_compacts_model_context_without_rewriting_stored_history(
     stored_messages: list[Message] = []
 
     monkeypatch.setattr(
-        runner.get_client_manager(),
+        _maf_tools.get_client_manager(),
         "build_chat_client_with_target",
         lambda _model: (client, InferenceTarget()),
     )

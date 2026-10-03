@@ -426,6 +426,8 @@ async def test_run_agent_stream_logs_usage_from_real_maf_final_response(
 
 @pytest.mark.asyncio
 async def test_real_maf_final_response_aggregates_two_tool_call_turns() -> None:
+    from azure_functions_agents._maf_tools import build_maf_tools
+
     class TwoTurnChatClient(FunctionInvocationLayer[Any], BaseChatClient[Any]):
         def __init__(self) -> None:
             super().__init__()
@@ -472,9 +474,10 @@ async def test_real_maf_final_response_aggregates_two_tool_call_turns() -> None:
             return response()
 
     lookup = tool(lambda: "found", name="lookup")
-    non_streaming_response = await Agent(TwoTurnChatClient(), tools=[lookup]).run("prompt")
+    maf_tools = build_maf_tools([lookup])
+    non_streaming_response = await Agent(TwoTurnChatClient(), tools=maf_tools).run("prompt")
 
-    stream = Agent(TwoTurnChatClient(), tools=[lookup]).run("prompt", stream=True)
+    stream = Agent(TwoTurnChatClient(), tools=maf_tools).run("prompt", stream=True)
     async for _ in stream:
         pass
     streaming_response = await stream.get_final_response()

@@ -21,7 +21,7 @@ from agent_framework import (
     ResponseStream,
 )
 
-from azure_functions_agents import runner
+from azure_functions_agents import _maf_tools, runner
 from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
 
@@ -335,7 +335,7 @@ async def test_run_agent_stream_continues_after_loading_skill(
     )
     chat_client = LoadSkillChatClient()
     monkeypatch.setattr(
-        runner.get_client_manager(),
+        _maf_tools.get_client_manager(),
         "build_chat_client_with_target",
         lambda _model: (chat_client, InferenceTarget()),
     )
@@ -1100,7 +1100,7 @@ def test_discover_user_tools_flattens_single_basemodel_parameter(tmp_path: Path)
         assert "path" in parameters["properties"]
         assert "params" not in parameters["properties"]
         assert (
-            asyncio.run(tool.invoke(arguments={"path": "/subscriptions/1"}, skip_parsing=True))
+            asyncio.run(tool.invoke(arguments={"path": "/subscriptions/1"}))
             == "/subscriptions/1"
         )
     finally:
