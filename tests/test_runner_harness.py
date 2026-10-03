@@ -19,12 +19,14 @@ from agent_framework import (
 )
 
 from azure_functions_agents import runner
+from azure_functions_agents._function_tool import tool
 from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     AgentFrameworkCompactionConfig,
     AgentFrameworkConfiguration,
 )
+from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 
 # ---------------------------------------------------------------------------
 # Minimal fake Agent
@@ -255,11 +257,14 @@ def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
     """Harness agents receive all shared tools and return their delegation error tracker."""
     captured_agent_options: list[dict[str, Any]] = []
     captured_delegate_options: list[tuple[Any, Any, float]] = []
-    local_tool = SimpleNamespace(name="local_tool")
-    mcp_tool = SimpleNamespace(name="mcp_tool")
-    sandbox_tool = SimpleNamespace(name="sandbox_tool")
-    web_request_tool = SimpleNamespace(name="web_request_tool")
-    delegate_tool = SimpleNamespace(name="delegate_billing")
+    local_tool = tool(lambda: "ok", name="local_tool")
+    mcp_tool = MCPServerDescriptor(
+        name="mcp_tool", url="https://fixture.invalid/mcp", transport="streamable-http",
+        headers=(), tools=None, auth_scope=None, client_id=None,
+    )
+    sandbox_tool = tool(lambda: "ok", name="sandbox_tool")
+    web_request_tool = tool(lambda: "ok", name="web_request_tool")
+    delegate_tool = tool(lambda: "ok", name="delegate_billing")
     delegate_tracker = runner._DelegateErrorTracker()
     subagents = [SimpleNamespace(agent="billing")]
     catalog = object()
@@ -274,6 +279,7 @@ def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
         received_catalog: Any,
         *,
         coordinator_deadline: float,
+        _harness: Any = None,
     ) -> tuple[list[Any], runner._DelegateErrorTracker]:
         captured_delegate_options.append(
             (received_subagents, received_catalog, coordinator_deadline)

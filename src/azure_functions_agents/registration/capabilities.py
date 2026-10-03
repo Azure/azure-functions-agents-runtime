@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from .._function_tool import WorkflowTool
 from .._logger import logger
 from .._slug import delegate_tool_name
+from .._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
 from ..config import ResolvedAgent
-from ..discovery.mcp import MCPTool
+from ..discovery.mcp import MCPServerDescriptor
+from ..discovery.skills import SkillDescriptor, describe_skill_catalog, describe_skill_paths
 
 if TYPE_CHECKING:
     from .._harness import AppHarness
@@ -23,16 +26,62 @@ if TYPE_CHECKING:
 SANDBOX_TOOL_NAME = "execute_python"
 
 
-@dataclass
+@dataclass(frozen=True)
 class AgentCapabilities:
     """Resolved capability bundle for one agent — passed through to the runner."""
 
-    filtered_user_tools: list[Any] | None = None
-    filtered_workflow_tools: list[WorkflowTool] = field(default_factory=list)
-    filtered_mcp_tools: list[MCPTool] | None = None
-    enabled_skill_paths: list[Path] = field(default_factory=list)
-    web_request_tools: list[Any] | None = None
+    filtered_user_tools: tuple[ToolDescriptor, ...] | None = None
+    filtered_workflow_tools: tuple[WorkflowTool, ...] = ()
+    filtered_mcp_tools: tuple[MCPServerDescriptor, ...] | None = None
+    enabled_skill_paths: tuple[Path, ...] = ()
+    web_request_tools: tuple[ToolDescriptor, ...] | None = None
+    skills: tuple[SkillDescriptor, ...] = ()
+    skill_catalog: tuple[SkillDescriptor, ...] = ()
     _harness: AppHarness | None = field(default=None, repr=False, compare=False)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        filtered_user_tools: Sequence[ToolInput] | None = None,
+        filtered_workflow_tools: Sequence[WorkflowTool] = (),
+        filtered_mcp_tools: Sequence[MCPServerDescriptor] | None = None,
+        enabled_skill_paths: Sequence[Path] = (),
+        web_request_tools: Sequence[ToolInput] | None = None,
+        skills: Sequence[SkillDescriptor] | None = None,
+        skill_catalog: Sequence[SkillDescriptor] = (),
+        _harness: AppHarness | None = None,
+    ) -> AgentCapabilities:
+        approved = (
+            describe_skill_paths(enabled_skill_paths) if skills is None else tuple(skills)
+        )
+        catalog = _merge_skill_descriptors(skill_catalog, approved)
+        return cls(
+            filtered_user_tools=(
+                None if filtered_user_tools is None else describe_tools(filtered_user_tools)
+            ),
+            filtered_workflow_tools=tuple(filtered_workflow_tools),
+            filtered_mcp_tools=(
+                None if filtered_mcp_tools is None else tuple(filtered_mcp_tools)
+            ),
+            enabled_skill_paths=tuple(skill.path for skill in approved),
+            web_request_tools=(
+                None if web_request_tools is None else describe_tools(web_request_tools)
+            ),
+            skills=approved,
+            skill_catalog=catalog,
+            _harness=_harness,
+        )
+
+
+def _merge_skill_descriptors(
+    discovered: Sequence[SkillDescriptor], approved: Sequence[SkillDescriptor]
+) -> tuple[SkillDescriptor, ...]:
+    catalog = list(discovered)
+    for skill in approved:
+        if skill not in catalog:
+            catalog.append(skill)
+    return tuple(catalog)
 
 
 def with_runtime_skill_paths(
@@ -40,21 +89,25 @@ def with_runtime_skill_paths(
     skill_paths: list[Path] | tuple[Path, ...],
 ) -> AgentCapabilities:
     """Return direct-role capabilities augmented with runtime-owned skills."""
+    runtime_skills = describe_skill_paths(skill_paths)
+    runtime_catalog = describe_skill_catalog(skill_paths)
+    project_skills = capabilities.skills or describe_skill_paths(capabilities.enabled_skill_paths)
+    approved = _merge_skill_descriptors(project_skills, runtime_skills)
     return replace(
         capabilities,
-        enabled_skill_paths=[*capabilities.enabled_skill_paths, *skill_paths],
+        enabled_skill_paths=tuple(skill.path for skill in approved),
+        skills=approved,
+        skill_catalog=_merge_skill_descriptors(
+            capabilities.skill_catalog,
+            _merge_skill_descriptors(runtime_catalog, approved),
+        ),
     )
 
 
-def _tool_name(tool: object) -> str:
-    name = getattr(tool, "name", "") or ""
-    return str(name)
-
-
-def _filter_tools_by_name(tools: list[Any], exclude_names: set[str]) -> list[Any]:
-    if not exclude_names:
-        return list(tools)
-    return [tool for tool in tools if _tool_name(tool) not in exclude_names]
+def _filter_tools_by_name(
+    tools: Sequence[ToolInput], exclude_names: set[str]
+) -> tuple[ToolDescriptor, ...]:
+    return tuple(tool for tool in describe_tools(tools) if tool.name not in exclude_names)
 
 
 def _workflows_enabled(resolved: ResolvedAgent) -> bool:
@@ -67,30 +120,31 @@ def _workflow_exclude_names(resolved: ResolvedAgent) -> set[str]:
     return set(resolved.workflows.exclude)
 
 
-def _build_web_request_tools(resolved: ResolvedAgent) -> list[Any]:
-    """Build the (stateless) ``web_request`` tool once per agent, or ``[]`` when disabled."""
+def _build_web_request_tools(resolved: ResolvedAgent) -> tuple[ToolDescriptor, ...]:
+    """Build the stateless ``web_request`` descriptor once per enabled agent."""
     if resolved.tools_disabled or resolved.web_request_config is None:
-        return []
+        return ()
     # Imported lazily so registration import cost stays low when the tool is unused.
     web_request_module = import_module("azure_functions_agents.system_tools.web_request")
-    return list(web_request_module.create_web_request_tools(resolved.web_request_config))
+    return describe_tools(web_request_module.create_web_request_tools(resolved.web_request_config))
 
 
 def build_capabilities(
     resolved: ResolvedAgent,
     *,
-    discovered_user_tools: list[Any],
-    discovered_workflow_tools: list[WorkflowTool] | None = None,
-    discovered_mcp_tools: dict[str, MCPTool],
-    discovered_skills: dict[str, Path],
+    discovered_user_tools: Sequence[ToolInput],
+    discovered_workflow_tools: Sequence[WorkflowTool] | None = None,
+    discovered_mcp_tools: Mapping[str, MCPServerDescriptor],
+    discovered_skills: Mapping[str, Path],
+    discovered_skill_descriptors: Sequence[SkillDescriptor] | None = None,
 ) -> AgentCapabilities:
     """Apply resolved capability filters and return the final runner inputs."""
     exclude_names = set(resolved.tool_filter.exclude or [])
 
     if resolved.tools_disabled:
-        filtered_user_tools: list[Any] = []
+        filtered_user_tools: tuple[ToolDescriptor, ...] = ()
     else:
-        filtered_user_tools = _filter_tools_by_name(list(discovered_user_tools), exclude_names)
+        filtered_user_tools = _filter_tools_by_name(discovered_user_tools, exclude_names)
 
     workflow_tools = list(discovered_workflow_tools or [])
     if _workflows_enabled(resolved):
@@ -103,36 +157,45 @@ def build_capabilities(
                 resolved.source_file or "<unknown>",
                 sorted(unknown_workflow_names),
             )
-        filtered_workflow_tools = [
+        filtered_workflow_tools = tuple(
             tool for tool in workflow_tools if tool.name not in workflow_exclude_names
-        ]
+        )
     else:
-        filtered_workflow_tools = []
+        filtered_workflow_tools = ()
 
     if resolved.mcp_disabled:
-        filtered_mcp_tools: list[MCPTool] = []
+        filtered_mcp_tools: tuple[MCPServerDescriptor, ...] = ()
     else:
-        filtered_mcp_tools = [
+        filtered_mcp_tools = tuple(
             discovered_mcp_tools[name]
             for name in resolved.enabled_mcp_names
             if name in discovered_mcp_tools
-        ]
+        )
 
+    skill_catalog = (
+        tuple(discovered_skill_descriptors)
+        if discovered_skill_descriptors is not None
+        else tuple(
+            SkillDescriptor.create(name=name, description="", path=path)
+            for name, path in discovered_skills.items()
+        )
+    )
+    skills_by_name = {skill.name: skill for skill in skill_catalog}
     if resolved.skills_disabled:
-        enabled_skill_paths: list[Path] = []
+        approved_skills: tuple[SkillDescriptor, ...] = ()
     else:
-        # Filter to enabled skills
-        enabled_skill_paths = [
-            discovered_skills[name]
+        approved_skills = tuple(
+            skills_by_name[name]
             for name in resolved.enabled_skills_names
-            if name in discovered_skills
-        ]
+            if name in skills_by_name
+        )
 
-    return AgentCapabilities(
+    return AgentCapabilities.create(
         filtered_user_tools=filtered_user_tools,
         filtered_workflow_tools=filtered_workflow_tools,
         filtered_mcp_tools=filtered_mcp_tools,
-        enabled_skill_paths=enabled_skill_paths,
+        skills=approved_skills,
+        skill_catalog=skill_catalog,
         web_request_tools=_build_web_request_tools(resolved),
     )
 
@@ -146,10 +209,10 @@ def existing_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities
     remote functions (unknown at composition time) — MAF's ``Agent.run()``
     independently rejects those collisions once expanded.
     """
-    names = {_tool_name(tool) for tool in capabilities.filtered_user_tools or []}
-    names.update(_tool_name(tool) for tool in capabilities.filtered_mcp_tools or [])
-    names.update(_tool_name(tool) for tool in capabilities.filtered_workflow_tools or [])
-    names.update(_tool_name(tool) for tool in capabilities.web_request_tools or [])
+    names = {tool.name for tool in capabilities.filtered_user_tools or ()}
+    names.update(tool.name for tool in capabilities.filtered_mcp_tools or ())
+    names.update(tool.name for tool in capabilities.filtered_workflow_tools)
+    names.update(tool.name for tool in capabilities.web_request_tools or ())
     if resolved.sandbox_config is not None and not resolved.tools_disabled:
         names.add(SANDBOX_TOOL_NAME)
     names.discard("")

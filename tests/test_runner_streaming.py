@@ -1074,7 +1074,7 @@ def test_discover_user_tools_flattens_single_basemodel_parameter(tmp_path: Path)
         assert "path" in parameters["properties"]
         assert "params" not in parameters["properties"]
         assert (
-            asyncio.run(tool.invoke(arguments={"path": "/subscriptions/1"}, skip_parsing=True))
+            asyncio.run(tool.invoke(arguments={"path": "/subscriptions/1"}))
             == "/subscriptions/1"
         )
     finally:

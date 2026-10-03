@@ -118,6 +118,14 @@ spans and the sandbox/`web_request` tool spans together.
 
 Plus `af.lifecycle_stage=agent_run`, and `af.fault_domain` if the run fails.
 
+In the default-off Copilot preview, native MCP and `skill` / `view` / `bash` calls,
+including permission denials, populate `AgentResult.tool_calls` and the existing
+tool/error counts from public SDK `tool.execution_start` / `tool.execution_complete`
+events once per `toolCallId`. Custom wrapper calls are deduplicated;
+`skill.invoked` metadata is not an extra call. The same sensitive-data policy
+applies; raw native envelopes, MCP headers, and credentials are not exposed.
+Counting once is not a guarantee of exactly-once tool effects.
+
 #### Span events (runtime lifecycle milestones)
 
 These `agent.run {name}` span events mark runtime-owned input/output-contract boundaries. They carry

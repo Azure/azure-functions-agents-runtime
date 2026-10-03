@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import re
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
-from ._function_tool import FunctionTool, tool
 from ._logger import logger
+from ._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
 from .client_manager import ProviderKind as ProviderKind
 from .client_manager import (
     _is_active_client_manager_builtin,
@@ -22,6 +22,8 @@ from .client_manager import (
 from .config.env import EnvVar, raw_env_value
 from .config.paths import get_app_root
 from .config.schema import HTTP_TRIGGER_TYPE, AgentConfiguration, ResolvedAgent
+from .discovery.mcp import MCPServerDescriptor
+from .discovery.skills import SkillDescriptor
 
 if TYPE_CHECKING:
     from ._copilot_providers import CopilotProvider
@@ -69,9 +71,12 @@ class HarnessRequest:
     session_id: str
     new_session: bool
     model: str
-    tools: list[FunctionTool]
+    tools: tuple[ToolDescriptor, ...]
     max_output_tokens: int | None
     deadline: float
+    mcp_servers: tuple[MCPServerDescriptor, ...] = ()
+    skills: tuple[SkillDescriptor, ...] = ()
+    skill_catalog: tuple[SkillDescriptor, ...] = ()
 
 
 _HARNESSES: dict[Path, AppHarness] = {}
@@ -203,21 +208,12 @@ def validate_configuration(configuration: AgentConfiguration) -> None:
     )
 
 
-def prepare_tools(tools: list[FunctionTool | Callable[..., Any]]) -> list[FunctionTool]:
+def prepare_tools(tools: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
     """Preserve existing schemas/invocation, rejecting unsupported policy instead of dropping it."""
-    prepared: list[FunctionTool] = []
+    prepared = describe_tools(tools)
     names: set[str] = set()
-    for candidate in tools:
-        function = candidate if isinstance(candidate, FunctionTool) else tool(candidate)
-        if (
-            type(function) is not FunctionTool
-            or function.approval_mode != "never_require"
-            or function.max_invocations is not None
-            or function.max_invocation_exceptions is not None
-            or function.declaration_only
-            or function.result_parser is not None
-            or getattr(function, "_context_parameter_name", None) is not None
-        ):
+    for function in prepared:
+        if function.policy.approval_mode != "never_require" or function.policy.maf_only_options:
             raise UnsupportedCapabilityError(
                 "Copilot preview supports simple FunctionTool callables only; custom tool "
                 "classes, approval, invocation limits, declaration-only tools, result parsers, "
@@ -228,7 +224,6 @@ def prepare_tools(tools: list[FunctionTool | Callable[..., Any]]) -> list[Functi
         if function.name in names:
             raise UnsupportedCapabilityError("Copilot preview requires unique custom tool names.")
         names.add(function.name)
-        prepared.append(function)
     return prepared
 
 
@@ -246,8 +241,6 @@ def validate_agent(
         non_http_trigger=resolved.trigger is not None and resolved.trigger.type != HTTP_TRIGGER_TYPE,
         debug_chat_ui=resolved.builtin_endpoints.debug_chat_ui,
         mcp_endpoint=resolved.builtin_endpoints.mcp,
-        mcp=bool(capabilities.filtered_mcp_tools),
-        skills=bool(capabilities.enabled_skill_paths),
         subagents=bool(resolved.subagents),
         workflows=resolved.workflows is not None and resolved.workflows.enabled,
     )
@@ -273,5 +266,4 @@ def bind_harness(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Ap
         return capabilities._harness
     harness = get_harness()
     validate_agent(harness, resolved, capabilities)
-    capabilities._harness = harness
     return harness

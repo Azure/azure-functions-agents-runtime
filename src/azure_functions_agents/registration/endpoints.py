@@ -6,6 +6,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -183,6 +184,8 @@ async def _run_builtin_agent(
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
         skill_paths=capabilities.enabled_skill_paths,
+        skills=capabilities.skills,
+        skill_catalog=capabilities.skill_catalog,
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
@@ -222,6 +225,8 @@ def _run_builtin_agent_stream(
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
         skill_paths=capabilities.enabled_skill_paths,
+        skills=capabilities.skills,
+        skill_catalog=capabilities.skill_catalog,
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
@@ -780,6 +785,7 @@ def register_builtin_endpoints(
     """Register built-in debug chat UI, REST chat, and MCP endpoints for one agent."""
 
     harness = bind_harness(resolved, capabilities)
+    capabilities = replace(capabilities, _harness=harness)
     slug = validate_agent_slug(resolved.slug)
     builtin_endpoints = resolved.builtin_endpoints
 

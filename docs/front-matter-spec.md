@@ -18,7 +18,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
   - Code execution sandbox configuration
   - Outbound web request tool (`web_request`) — enabled by default, SSRF-guarded
 - Default runtime settings (model, timeout)
-- Harness-only Microsoft Agent Framework execution with optional token-budget conversation-history compaction
+- Default Microsoft Agent Framework execution with optional token-budget conversation-history compaction
 
 **MCP server discovery:**
 - MCP servers (defined in `mcp.json`), including connector-backed MCP servers
@@ -42,6 +42,11 @@ For runtime settings (model, timeout):
 For capabilities (MCP, skills, tools):
 1. **Auto-discovered** — MCP servers from `mcp.json`, plus skills and tools from their directories
 2. **Filtered per-agent** using exclude lists in agent front matter
+
+The default-off [Copilot preview](copilot-preview-operations.md#mcp-and-scoped-skills)
+uses the same MCP and skill authoring/filter fields; it adds no per-agent harness
+selector or new skill configuration keys. Its execution and qualification limits
+are separate from the default MAF path.
 
 ### Quick Reference: Required vs Optional
 
@@ -231,9 +236,10 @@ retain authoritative full Blob/File history while compaction
 bounds only the message context sent to the model. Specialist runs remain fresh, single-task leaf
 executions with no nested delegation or persistent history. Harness instructions are empty, and the
 runtime disables todo, plan/execute mode, file memory, web search, and automatic tool approval;
-these controls are intentionally not author-configurable. For configured skills, the runtime allows
-`load_skill`, `read_skill_resource`, and `run_skill_script` without approval so autonomous turns can
-continue.
+these controls are intentionally not author-configurable. For configured skills,
+MAF's `load_skill` / `read_skill_resource` tools remain noninteractive, with the
+existing nested resource recursion. Copilot's native helper support does not
+establish MAF file-script support.
 
 On the experimental Copilot opt-in (`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`), a non-null effective
 `max_context_window_tokens` is rejected before inference rather than mapped to a different threshold;
@@ -687,11 +693,18 @@ thread. The Durable orchestrator continues to use `yield`.
 For a handler that also uses `@tool(schema=Params)`, the runtime converts the
 dictionary to the Pydantic model before it calls the handler.
 
-Normal custom tools keep their existing behavior. Plain public functions and `@tool`/`FunctionTool` values in `tools/*.py` are normal MAF tools; `@workflow_tool` marks a callable for workflow execution. Use both decorators when a callable should be available both directly in chat and inside workflow tasks. Use `_`-prefixed helpers for functions that should be neither normal tools nor workflow tools.
+Normal custom tools keep their existing behavior. Plain public functions and
+ordinary `@tool` values in `tools/*.py` produce neutral normal-tool metadata;
+legacy `FunctionTool` extensions remain MAF-only compatibility surfaces.
+`@workflow_tool` marks a callable for workflow execution. Use both decorators
+when a callable should be available both directly in chat and inside workflow
+tasks; either decorator order is supported. This does not enable workflow roles
+in the Copilot preview. Use `_`-prefixed helpers for functions that should be
+neither normal tools nor workflow tools.
 
 `workflows.exclude` filters only that agent's workflow Activity targets; it does
 not affect normal tools or another agent's workflow policy. Conversely,
-`tools.exclude` filters normal MAF tools and does not hide workflow tools.
+`tools.exclude` filters normal tools and does not hide workflow tools.
 
 Any agent may enable workflows. Invocation remains governed independently by its
 configured trigger and built-in endpoints. `builtin_endpoints.debug_chat_ui`
@@ -790,14 +803,37 @@ mcp:
 mcp: false
 ```
 
-**Note:** `mcp.exclude` entries must match MCP servers discovered from `mcp.json`. See [MCP documentation](https://modelcontextprotocol.io/) for server definitions.
+**Per-server tool selection (`mcp.json`):** The existing runtime `tools` field
+filters tools within one server; it is distinct from the frontmatter
+`mcp.exclude` server filter and is not an MCP protocol field.
+
+- Omitted, or any list containing `"*"`: all tools.
+- `[]`: no tools.
+- Any other list: exact tool names only, not patterns.
+
+```json
+{
+  "servers": {
+    "status-api": {
+      "url": "$APPROVED_MCP_URL",
+      "tools": ["get_status"]
+    }
+  }
+}
+```
+
+**Note:** `mcp.exclude` entries must match server names discovered from `mcp.json`.
+For transports, headers, and Entra auth, see the repository's
+[MCP Server Configuration](https://github.com/Azure/azure-functions-agents-runtime#mcp-server-configuration).
+The Copilot preview keeps these selections, with the
+[between-turn auth and approval boundary](copilot-preview-operations.md#mcp-and-scoped-skills).
 
 ---
 
 #### `skills`
 - **Type:** `object` or `boolean`
 - **Location:** Agent (front matter) for filtering only
-- **Description:** Skill filtering configuration. Skills follow MAF's file-based skill format: each skill lives in its own subdirectory under `skills/` with a `SKILL.md` file. At runtime the discovered skills are exposed through MAF's `SkillsProvider`, which gives the agent `load_skill` / `read_skill_resource` tools that operate scoped to the skill directory. See the [MAF file-based skills docs](https://learn.microsoft.com/en-us/agent-framework/agents/skills?pivots=programming-language-python#file-based-skills-1) for the authoritative `SKILL.md` format, naming rules, and resource conventions.
+- **Description:** Skill filtering configuration. Each skill lives in its own directory under `skills/` with a `SKILL.md` file; discovery recursively indexes valid files by name and description. The selected SDK owns instruction loading and supported resource/script mechanisms. The default MAF adapter uses `SkillsProvider` and its `load_skill` / `read_skill_resource` tools; the Copilot preview uses native skills and scoped helpers. See the [MAF file-based skills docs](https://learn.microsoft.com/en-us/agent-framework/agents/skills?pivots=programming-language-python#file-based-skills-1) for the existing `SKILL.md` format and naming rules.
 
 **Minimal `SKILL.md` example (refer to MAF docs for the full specification):**
 ```markdown
@@ -813,15 +849,18 @@ Skill body — instructions, examples, references to in-directory resources.
 
 **Organizing skill content:**
 
-Skills can include reference material in `references/` and `assets/` subdirectories. MAF's `read_skill_resource` tool allows the agent to read these files on demand at runtime (progressive disclosure):
+Skills can include reference material in `references/` and `assets/`
+subdirectories. The selected SDK's resource helper reads these files on demand
+(progressive disclosure): MAF uses `read_skill_resource`; Copilot uses scoped
+native `view`.
 
 ```
 my-skill/
 ├── SKILL.md              # Main skill file (keep <500 lines)
 ├── references/
-│   └── api-spec.md       # Agent reads via read_skill_resource when needed
+│   └── api-spec.md       # Agent reads on demand via its SDK's resource helper
 └── assets/
-    └── example.py        # Agent reads via read_skill_resource when needed
+    └── example.py        # Example content, read on demand
 ```
 
 In the `SKILL.md` body, reference the available resources so the agent knows they exist:
@@ -833,8 +872,8 @@ description: Skill for interacting with Foo API
 
 # Foo API Skill
 
-When you need detailed API information, use the read_skill_resource tool to read
-files from the references/ directory.
+When you need detailed API information, read the files from the references/
+directory on demand.
 
 ## Available Resources
 - `references/api-spec.md` - Full API specification
@@ -856,6 +895,20 @@ skills: false
 ```
 
 **Note:** All skills under `skills/` are auto-discovered and available to all agents by default. Use `exclude` to filter out unwanted skills.
+
+**Copilot preview boundary:** Only individual approved skill directories and
+names are exposed. A resource or script target belongs to the most-specific
+canonical discovered skill root containing it, and that owning skill must be
+approved. An enabled parent does not grant access to an excluded nested child;
+an independently enabled child retains access under an excluded ancestor.
+`skills: false` exposes no skill helpers. This policy does not grant general
+project-code reads or shell commands.
+
+Approved literal script invocations run trusted deployment-owned code with host
+privileges, not an OS sandbox. See
+[supported native script forms](copilot-preview-operations.md#supported-native-script-forms).
+MAF retains its existing nested resource recursion; Copilot's stronger subtree
+policy does not fix the MAF nested-exclusion gap or establish MAF script parity.
 
 ---
 

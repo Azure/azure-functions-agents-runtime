@@ -28,6 +28,8 @@ from azure_functions_agents._harness import (
     ProviderKind,
     UnsupportedCapabilityError,
 )
+from azure_functions_agents._maf_tools import build_maf_tools
+from azure_functions_agents._tool_descriptor import ToolDescriptor, describe_tool
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.client_manager import (
     ClientManager,
@@ -49,6 +51,8 @@ from azure_functions_agents.config.schema import (
     TriggerSpec,
     WorkflowConfig,
 )
+from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.discovery.tools import discover_user_tools
 from azure_functions_agents.registration._handlers import make_http_agent_handler
 from azure_functions_agents.registration.capabilities import build_capabilities
@@ -463,12 +467,26 @@ def test_foundry_configuration_is_frozen_without_authentication(preview, monkeyp
     assert not selected.storage_root.exists()
 
 
-@pytest.mark.parametrize("field", ["filtered_mcp_tools", "enabled_skill_paths"])
-def test_enabled_unsupported_capabilities_fail(preview, field):
+def test_registered_mcp_and_skill_descriptors_are_supported(preview):
     resolved, capabilities = _sample()
-    capabilities = replace(capabilities, **{field: [object()]})
-    with pytest.raises(UnsupportedCapabilityError):
-        _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
+    server = MCPServerDescriptor(
+        name="selected", url="https://fixture.invalid/mcp", transport="streamable-http",
+        headers=(), tools=("lookup",), auth_scope=None, client_id=None,
+    )
+    approved = SkillDescriptor(name="approved", description="Approved", path=preview / "approved")
+    excluded = SkillDescriptor(name="excluded", description="Excluded", path=preview / "excluded")
+    capabilities = replace(
+        capabilities,
+        filtered_mcp_tools=(server,),
+        enabled_skill_paths=(approved.path,),
+        skills=(approved,),
+        skill_catalog=(approved, excluded),
+    )
+
+    _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
+
+    assert capabilities.skills == (approved,)
+    assert capabilities.skill_catalog == (approved, excluded)
 
 
 def test_direct_preview_keeps_other_roles_and_surfaces_rejected(preview):
@@ -604,11 +622,13 @@ def test_sandbox_name_collision_fails_during_registration(preview):
 def test_maf_keeps_tool_objects_that_copilot_cannot_adapt(tmp_path):
     resolved, capabilities = _sample()
     maf_only = FunctionTool(name="bounded", func=lambda: "ok", max_invocations=1)
-    capabilities = replace(capabilities, filtered_user_tools=[maf_only])
+    descriptor = describe_tool(maf_only)
+    capabilities = replace(capabilities, filtered_user_tools=(descriptor,))
 
     _harness.validate_agent(AppHarness(HarnessKind.MAF, tmp_path), resolved, capabilities)
 
-    assert capabilities.filtered_user_tools == [maf_only]
+    assert capabilities.filtered_user_tools == (descriptor,)
+    assert build_maf_tools(capabilities.filtered_user_tools) == [maf_only]
 
 
 def test_maf_only_configuration_is_not_silently_discarded(preview):
@@ -676,21 +696,81 @@ def test_direct_preview_forks_before_maf_construction_or_blob(preview, monkeypat
     maf.assert_not_called()
 
 
-def test_standalone_unsupported_call_fails_before_backend(preview, monkeypatch):
+def test_standalone_skill_paths_are_adapted_with_full_discovered_inventory(preview, monkeypatch):
     from azure_functions_agents import _copilot
 
-    invoke = AsyncMock()
+    parent = preview / "skills" / "parent"
+    child = parent / "excluded-child"
+    child.mkdir(parents=True)
+    (parent / "SKILL.md").write_text(
+        "---\nname: parent\ndescription: Parent skill\n---\n", encoding="utf-8"
+    )
+    (child / "SKILL.md").write_text(
+        "---\nname: excluded-child\ndescription: Excluded child\n---\n", encoding="utf-8"
+    )
+    invoke = AsyncMock(return_value=runner.AgentResult("session", "reply"))
     monkeypatch.setattr(_copilot, "run", invoke)
-    with pytest.raises(UnsupportedCapabilityError, match="skills"):
-        asyncio.run(
-            runner.run_agent(
-                "hello",
-                tools=[],
-                mcp_tools=[],
-                skill_paths=[preview / "unsupported-skill"],
-            )
+    asyncio.run(
+        runner.run_agent(
+            "hello", tools=[], mcp_tools=[], skill_paths=[parent],
         )
-    invoke.assert_not_called()
+    )
+    request = invoke.call_args.args[1]
+    assert [skill.name for skill in request.skills] == ["parent"]
+    assert {skill.name for skill in request.skill_catalog} == {"parent", "excluded-child"}
+    assert request.skills[0].path == parent.resolve()
+    assert request.mcp_servers == ()
+    assert type(request.tools) is tuple
+
+
+def test_explicit_skill_roots_outside_app_include_nested_ownership(preview, monkeypatch):
+    from azure_functions_agents import _copilot
+
+    app_root = preview / "app"
+    app_root.mkdir()
+    parent = preview / "external" / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    (parent / "SKILL.md").write_text(
+        "---\nname: external-parent\ndescription: Parent\n---\n", encoding="utf-8",
+    )
+    (child / "SKILL.md").write_text(
+        "---\nname: external-child\ndescription: Child\n---\n", encoding="utf-8",
+    )
+    harness = _harness.get_harness(app_root, new_app=True)
+    invoke = AsyncMock(return_value=runner.AgentResult("session", "reply"))
+    monkeypatch.setattr(_copilot, "run", invoke)
+
+    asyncio.run(runner.run_agent(
+        "hello", tools=[], mcp_tools=[], skill_paths=[parent], _harness=harness,
+    ))
+
+    request = invoke.call_args.args[1]
+    assert [skill.name for skill in request.skills] == ["external-parent"]
+    assert {skill.name for skill in request.skill_catalog} == {
+        "external-parent", "external-child",
+    }
+
+
+def test_maf_standalone_does_not_discover_unrequested_skills(tmp_path, monkeypatch):
+    from azure_functions_agents import _maf_tools
+
+    unused = tmp_path / "skills" / "unused"
+    unused.mkdir(parents=True)
+    (unused / "SKILL.md").write_text(
+        "---\nname: invalid--name\ndescription: Not requested\n---\n", encoding="utf-8",
+    )
+    invoke = AsyncMock(return_value=runner.AgentResult("session", "reply"))
+    monkeypatch.setattr(_maf_tools, "run", invoke)
+
+    result = asyncio.run(runner.run_agent(
+        "hello", tools=[], mcp_tools=[], skill_paths=None,
+        _harness=AppHarness(HarnessKind.MAF, tmp_path),
+    ))
+
+    request = invoke.call_args.args[1]
+    assert result.content == "reply"
+    assert request.skills == request.skill_catalog == ()
 
 
 def test_direct_preview_composes_host_tools_in_maf_order(preview, monkeypatch):
@@ -889,7 +969,7 @@ def test_copilot_sandbox_tool_uses_public_http_session_id(preview, monkeypatch):
             ),
         }
     )
-    capabilities._harness = _harness.get_harness()
+    capabilities = replace(capabilities, _harness=_harness.get_harness())
     requests = []
 
     def build_sandbox(_resolved, session_id):
@@ -918,8 +998,9 @@ def test_copilot_sandbox_tool_uses_public_http_session_id(preview, monkeypatch):
         "execute_python",
         "web_request",
     ]
-    contents = asyncio.run(requests[0].tools[1].invoke(arguments={"code": "6 * 7"}))
-    assert contents[0].text == f"{public_id}:6 * 7"
+    result = asyncio.run(requests[0].tools[1].invoke(arguments={"code": "6 * 7"}))
+    assert result == f"{public_id}:6 * 7"
+    assert all(type(descriptor) is ToolDescriptor for descriptor in requests[0].tools)
 
 
 def test_off_import_and_index_do_not_import_sdk_or_launch_process(tmp_path):

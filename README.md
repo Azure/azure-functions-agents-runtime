@@ -22,7 +22,8 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 MAF remains the default. A separate
 [Copilot preview sample](samples/copilot-preview/README.md) supports an explicit
 `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=true` opt-in for non-streaming HTTP,
-filtered explicit Python tools, the configured `web_request` tool, session-bound
+filtered explicit Python tools, remote HTTP MCP servers, scoped project skills,
+the configured `web_request` tool, session-bound
 ACA `execute_python` adapter wiring, host-validated structured results on
 authored HTTP-trigger routes, and SDK-owned native sessions. The flag is read
 once per app: **restart the host** to opt in or out. Each harness
@@ -34,16 +35,18 @@ Blob setting is configured. Configured Blob failures never fall back to disk.
 The SDK owns sessions, continuation, recovery, compaction and file formats;
 the host supplies filesystem operations, metadata and path containment.
 ACA catalog/session scoping is unit-qualified; real Copilot-to-ACA
-execution remains a separately gated acceptance item. Ambient SDK
-shell/file/web/todo/task/human-input tools are disabled. This is **not**
+execution remains a separately gated acceptance item. Native `skill`, `view`,
+and `bash` helpers are limited to approved skill loading, resource reads, and
+literal script invocations; general shell/project-file access and other ambient
+SDK tools remain disabled or denied. This is **not**
 production activation: the preview remains local-only and single-worker.
 Earlier real-service results do not qualify the rewritten filesystem adapter.
 Deployed-host and dual-harness end-to-end qualification remain in #1357 and
-final rollout remains in #1337. MCP/skills/role/streaming
-parity is unchanged. Configured output-token caps are not supported in this
+final rollout remains in #1337. Delegation, workflow roles, and streaming
+remain unsupported. Configured output-token caps are not supported in this
 Copilot preview; MAF retains its output-limit controls. See
 [`docs/copilot-preview-operations.md`](docs/copilot-preview-operations.md) for
-storage settings, inspection, errors and targeted cleanup.
+MCP auth limits, scoped skill helpers, storage settings, errors and targeted cleanup.
 The sample documents OpenAI key, Azure OpenAI key/Entra and Foundry Entra setup.
 Custom `ClientManager`
 implementations remain MAF-only and are rejected explicitly when Copilot is on.
@@ -465,7 +468,12 @@ def reverse_string(text: str) -> str:
     return text[::-1]
 ```
 
-`@tool` is re-exported from `agent_framework`. Functions can be sync or async; types in the signature feed MAF's automatic JSON-Schema generation. Tools that need richer schemas can be declared with `agent_framework.FunctionTool` directly.
+The runtime's ordinary `@tool` produces an SDK-free descriptor. Functions can be
+sync or async; signature types and Pydantic schemas supply input validation, and
+the selected harness adapts the descriptor to its SDK. Tools return ordinary
+Python values. Existing raw `agent_framework.FunctionTool` extensions and
+MAF-only decorator keyword arguments remain MAF compatibility surfaces;
+unsupported extensions fail explicitly on the Copilot preview.
 
 Dynamic Workflow tools live in the same `tools/` directory but must opt in
 explicitly with `@workflow_tool` so they can run safely as Durable
@@ -589,12 +597,21 @@ Tools from configured MCP servers are automatically available to the agent at ru
 - **`type`** — optional. When set, must be `"http"` or `"streamable-http"`. When omitted, an entry with a `url` is treated as HTTP.
 - **`url`** — the MCP server endpoint URL (required)
 - **`headers`** — optional HTTP headers (e.g. for authentication)
-- **`tools`** — optional array of tool name patterns to allow (default: `["*"]`)
+- **`tools`** — optional exact-name allowlist. Omitted or any list containing `"*"` allows all tools; `[]` allows none; other lists allow only the named tools. Patterns such as `"get_*"` are not supported.
 - **`auth`** — optional Azure Identity authentication configuration. Set `auth.scope` to the token scope required by the MCP server. The runtime uses `DefaultAzureCredential` to acquire the token.
 
-The runtime loads MCP tools and skips MCP prompts. This avoids startup/runtime failures from connector-backed MCP servers that support tools but reject `prompts/list`.
+MCP tools are the supported capability; MCP prompts are not surfaced. The MAF
+adapter skips prompt loading for connector-backed servers that reject
+`prompts/list`. Copilot uses normal native SDK connection and tool loading.
+Per-agent [`mcp: false` / `mcp.exclude`](docs/front-matter-spec.md#mcp) can further
+narrow the selected servers.
 
 By default, MCP auth follows the app-wide identity selection: `AZURE_CLIENT_ID` when set, otherwise the system-assigned identity/default Azure credential chain. To choose a user-assigned managed identity for a single MCP server without changing the app-wide identity, set `auth.client_id` in that server's `mcp.json` entry. If the configured client ID is empty or an unresolved placeholder, the runtime falls back to the app-wide identity selection.
+
+In the Copilot preview, fresh MCP headers are supplied at native session
+create/resume between completed turns, not refreshed mid-turn. This is not full
+MAF auth parity. See the [MCP and scoped skills boundary](docs/copilot-preview-operations.md#mcp-and-scoped-skills)
+for noninteractive approvals, auth precedence, and unqualified scenarios.
 
 > **Note**: Entries without a `url`, with unresolved placeholders in `url`, or with a `type` other than `"http"` / `"streamable-http"`, are ignored with a warning. Use the remote HTTP transport instead.
 

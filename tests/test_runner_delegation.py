@@ -36,6 +36,10 @@ from agent_framework import MCPStreamableHTTPTool, tool
 
 import azure_functions_agents._observability as obs
 import azure_functions_agents.runner as runner
+from azure_functions_agents._function_tool import tool as runtime_tool
+from azure_functions_agents._harness import AppHarness, HarnessKind
+from azure_functions_agents._maf_tools import build_maf_tools
+from azure_functions_agents._tool_descriptor import ToolDescriptor, describe_tool
 from azure_functions_agents.client_manager import (
     ClientManager,
     InferenceTarget,
@@ -51,6 +55,7 @@ from azure_functions_agents.config.schema import (
     SubagentRef,
     ToolsFilter,
 )
+from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows.schema import WorkflowPlanPolicy
@@ -256,6 +261,17 @@ def _tool_names(agent: Any) -> set[str]:
     return {str(getattr(tool, "name", "")) for tool in agent.default_options.get("tools", [])}
 
 
+def _static_tool(name: str) -> ToolDescriptor:
+    return runtime_tool(lambda: "ok", name=name)
+
+
+def _mcp_descriptor(name: str) -> MCPServerDescriptor:
+    return MCPServerDescriptor(
+        name=name, url="https://fixture.invalid/mcp", transport="streamable-http",
+        headers=(), tools=None, auth_scope=None, client_id=None,
+    )
+
+
 def _catalog_of(*entries: tuple[str, ResolvedAgent]) -> Any:
     return build_catalog(
         {slug: CatalogEntry(resolved=resolved, capabilities=AgentCapabilities()) for slug, resolved in entries}
@@ -308,8 +324,8 @@ def test_sanitize_delegate_failure_message_identical_across_exception_classes() 
 
 
 def test_assemble_agent_inputs_for_delegated_role_has_only_its_own_tools() -> None:
-    user_tool = SimpleNamespace(name="own_user_tool")
-    mcp_tool = SimpleNamespace(name="own_mcp_tool")
+    user_tool = _static_tool("own_user_tool")
+    mcp_tool = _mcp_descriptor("own_mcp_tool")
 
     resolved_tools, instructions = runner._assemble_agent_inputs(
         instructions="be a specialist",
@@ -337,11 +353,11 @@ def test_assemble_agent_inputs_for_delegated_role_has_only_its_own_tools() -> No
 def test_assemble_agent_inputs_for_direct_role_has_full_tool_superset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    user_tool = SimpleNamespace(name="own_user_tool")
-    mcp_tool = SimpleNamespace(name="own_mcp_tool")
-    sandbox_tool = SimpleNamespace(name="run_code")
-    web_request_tool = SimpleNamespace(name="web_request")
-    delegate_tool = SimpleNamespace(name="delegate_billing")
+    user_tool = _static_tool("own_user_tool")
+    mcp_tool = _mcp_descriptor("own_mcp_tool")
+    sandbox_tool = _static_tool("run_code")
+    web_request_tool = _static_tool("web_request")
+    delegate_tool = _static_tool("delegate_billing")
     policy = WorkflowPlanPolicy(
         allowed_tools=frozenset({"own_user_tool"}),
         allowed_subagents=frozenset({"billing"}),
@@ -351,9 +367,9 @@ def test_assemble_agent_inputs_for_direct_role_has_full_tool_superset(
     def _build_workflow_tools(**kwargs: object) -> list[object]:
         captured.update(kwargs)
         return [
-            SimpleNamespace(name="start_workflow"),
-            SimpleNamespace(name="get_workflow_status"),
-            SimpleNamespace(name="list_workflows"),
+            _static_tool("start_workflow"),
+            _static_tool("get_workflow_status"),
+            _static_tool("list_workflows"),
         ]
 
     monkeypatch.setattr(
@@ -718,6 +734,30 @@ async def test_build_subagent_tools_returns_empty_when_no_subagents_declared() -
         [], None, coordinator_deadline=loop.time() + 30
     )
     assert tools_empty_list == []
+
+
+@pytest.mark.asyncio
+async def test_delegate_captures_parent_context_without_mutating_catalog(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    parent = AppHarness(HarnessKind.MAF, tmp_path)
+    resolved = _make_resolved(slug="leaf")
+    catalog = _catalog_of(("leaf", resolved))
+    observed: list[AppHarness | None] = []
+
+    async def leaf(resolved, capabilities, task, *, timeout, execution_role):
+        observed.append(capabilities._harness)
+        return "reply"
+
+    monkeypatch.setattr(runner, "run_leaf_agent_task", leaf)
+    tools, _ = await runner.build_subagent_tools(
+        [SubagentRef(agent="leaf")], catalog,
+        coordinator_deadline=asyncio.get_running_loop().time() + 1,
+        _harness=parent,
+    )
+    assert await tools[0].invoke(arguments={"task": "work"}) == "reply"
+    assert observed == [parent]
+    assert catalog["leaf"].capabilities._harness is None
 
 
 @pytest.mark.asyncio
@@ -1306,24 +1346,10 @@ async def test_real_maf_agent_run_raises_on_expanded_mcp_function_collision() ->
     mcp_server = _FakeMCPServerWithExpandedFunctions("delegate_billing")
     delegate_tool = tool(lambda: "ignored", name="delegate_billing")
 
-    resolved_tools, effective_instructions = runner._assemble_agent_inputs(
-        instructions="be a coordinator",
-        tools=[],
-        mcp_tools=[mcp_server],
-        sandbox_tools=None,
-        web_request_tools=None,
-        system_addendum=None,
-        workflow_enabled=False,
-        workflow_durable_client=None,
-        workflow_agent_slug=None,
-        agent_name="coordinator",
-        resolved_id=None,
-        delegate_tools=[delegate_tool],
-        workflow_policy=None,
-    )
+    resolved_tools = [mcp_server, *build_maf_tools((describe_tool(delegate_tool),))]
     agent = runner._build_role_agent(
         _RunnableFakeChatClient(),
-        agent_instructions=effective_instructions,
+        agent_instructions="be a coordinator",
         tools=resolved_tools,
         skill_paths=None,
         agent_name="coordinator",
@@ -1665,7 +1691,7 @@ async def test_real_delegate_tool_invoke_produces_nested_execute_tool_and_invoke
     tools, _tracker = await runner.build_subagent_tools(
         [SubagentRef(agent="billing")], catalog, coordinator_deadline=loop.time() + 30
     )
-    tool = tools[0]
+    tool = build_maf_tools(tools)[0]
 
     tracer = ot_trace.get_tracer("test-coordinator")
     with tracer.start_as_current_span("agent.run coordinator"):

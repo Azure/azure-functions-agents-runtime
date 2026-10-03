@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from azure_functions_agents._function_tool import WorkflowTool
+from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config.schema import SubagentRef, WebRequestConfig
+from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.registration import capabilities as capabilities_module
 from azure_functions_agents.registration.capabilities import (
     AgentCapabilities,
@@ -46,8 +51,15 @@ def _resolved(
     )
 
 
-def _named_tool(name: str) -> Any:
-    return SimpleNamespace(name=name)
+def _named_tool(name: str) -> ToolDescriptor:
+    return ToolDescriptor.create(name=name, description="", func=lambda: "ok")
+
+
+def _mcp_server(name: str) -> MCPServerDescriptor:
+    return MCPServerDescriptor(
+        name=name, url="https://fixture.invalid/mcp", transport="streamable-http",
+        headers=(), tools=None, auth_scope=None, client_id=None,
+    )
 
 
 def test_build_capabilities_maps_enabled_skills_to_paths(tmp_path: Path) -> None:
@@ -61,7 +73,7 @@ def test_build_capabilities_maps_enabled_skills_to_paths(tmp_path: Path) -> None
         discovered_mcp_tools={},
         discovered_skills={"alpha": skill_dir_a, "beta": skill_dir_b},
     )
-    assert capabilities.enabled_skill_paths == [skill_dir_a, skill_dir_b]
+    assert capabilities.enabled_skill_paths == (skill_dir_a, skill_dir_b)
 
 
 def test_build_capabilities_skips_unknown_enabled_skill_names(tmp_path: Path) -> None:
@@ -73,7 +85,34 @@ def test_build_capabilities_skips_unknown_enabled_skill_names(tmp_path: Path) ->
         discovered_mcp_tools={},
         discovered_skills={"alpha": skill_dir_a},
     )
-    assert capabilities.enabled_skill_paths == [skill_dir_a]
+    assert capabilities.enabled_skill_paths == (skill_dir_a,)
+
+
+def test_skill_metadata_is_filtered_without_discarding_excluded_ownership(tmp_path: Path) -> None:
+    approved = SkillDescriptor(name="parent", description="Parent", path=tmp_path / "parent")
+    excluded = SkillDescriptor(
+        name="child", description="Child", path=approved.path / "child",
+    )
+    capabilities = build_capabilities(
+        _resolved(enabled_skills_names=["parent"]),
+        discovered_user_tools=[],
+        discovered_mcp_tools={},
+        discovered_skills={skill.name: skill.path for skill in (approved, excluded)},
+        discovered_skill_descriptors=(approved, excluded),
+    )
+
+    assert capabilities.skills == (approved,)
+    assert capabilities.skill_catalog == (approved, excluded)
+    assert capabilities.enabled_skill_paths == (approved.path,)
+
+
+def test_catalog_metadata_does_not_silently_flatten_ambiguous_canonical_roots(tmp_path: Path) -> None:
+    first = SkillDescriptor(name="first", description="First", path=tmp_path)
+    alias = SkillDescriptor(name="alias", description="Alias", path=tmp_path)
+    capabilities = AgentCapabilities.create(skills=(first,), skill_catalog=(first, alias))
+
+    assert capabilities.skills == (first,)
+    assert capabilities.skill_catalog == (first, alias)
 
 
 def test_build_capabilities_skills_disabled_returns_empty(tmp_path: Path) -> None:
@@ -85,13 +124,21 @@ def test_build_capabilities_skills_disabled_returns_empty(tmp_path: Path) -> Non
         discovered_mcp_tools={},
         discovered_skills={"alpha": skill_dir_a},
     )
-    assert capabilities.enabled_skill_paths == []
+    assert capabilities.enabled_skill_paths == ()
+    assert capabilities.skills == ()
+    assert [skill.name for skill in capabilities.skill_catalog] == ["alpha"]
 
 
 def test_with_runtime_skill_paths_returns_direct_role_copy(tmp_path: Path) -> None:
     project_skill = tmp_path / "project"
     runtime_skill = tmp_path / "runtime"
-    capabilities = AgentCapabilities(enabled_skill_paths=[project_skill])
+    runtime_skill.mkdir()
+    (runtime_skill / "SKILL.md").write_text(
+        "---\nname: runtime\ndescription: Runtime guidance\n---\n", encoding="utf-8"
+    )
+    capabilities = AgentCapabilities.create(
+        skills=(SkillDescriptor(name="project", description="Project", path=project_skill),)
+    )
 
     direct_capabilities = capabilities_module.with_runtime_skill_paths(
         capabilities,
@@ -99,8 +146,10 @@ def test_with_runtime_skill_paths_returns_direct_role_copy(tmp_path: Path) -> No
     )
 
     assert direct_capabilities is not capabilities
-    assert direct_capabilities.enabled_skill_paths == [project_skill, runtime_skill]
-    assert capabilities.enabled_skill_paths == [project_skill]
+    assert direct_capabilities.enabled_skill_paths == (project_skill, runtime_skill)
+    assert capabilities.enabled_skill_paths == (project_skill,)
+    assert [skill.name for skill in direct_capabilities.skills] == ["project", "runtime"]
+    assert [skill.name for skill in capabilities.skill_catalog] == ["project"]
 
 
 def test_build_capabilities_filters_user_tools_by_exclude_name() -> None:
@@ -123,7 +172,7 @@ def test_build_capabilities_warns_for_unknown_workflow_exclude(
     capabilities = build_capabilities(
         resolved,
         discovered_user_tools=[],
-        discovered_workflow_tools=[_named_tool("known")],
+        discovered_workflow_tools=[WorkflowTool(name="known", description="", handler=None)],
         discovered_mcp_tools={},
         discovered_skills={},
     )
@@ -139,24 +188,25 @@ def test_build_capabilities_tools_disabled_returns_empty_user_tools() -> None:
         discovered_mcp_tools={},
         discovered_skills={},
     )
-    assert capabilities.filtered_user_tools == []
+    assert capabilities.filtered_user_tools == ()
 
 
 def test_build_capabilities_mcp_disabled_returns_empty_mcp_tools() -> None:
     capabilities = build_capabilities(
         _resolved(enabled_mcp_names=["srv"], mcp_disabled=True),
         discovered_user_tools=[],
-        discovered_mcp_tools={"srv": SimpleNamespace(name="srv")},  # type: ignore[dict-item]
+        discovered_mcp_tools={"srv": _mcp_server("srv")},
         discovered_skills={},
     )
-    assert capabilities.filtered_mcp_tools == []
+    assert capabilities.filtered_mcp_tools == ()
 
 
-def test_agent_capabilities_defaults_are_independent_lists() -> None:
+def test_agent_capabilities_defaults_are_immutable() -> None:
     a = AgentCapabilities()
     b = AgentCapabilities()
-    a.enabled_skill_paths.append(Path("x"))
-    assert b.enabled_skill_paths == []
+    assert a.enabled_skill_paths == b.enabled_skill_paths == ()
+    with pytest.raises(FrozenInstanceError):
+        a.enabled_skill_paths = (Path("x"),)
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +260,7 @@ def test_build_capabilities_web_request_config_none_suppresses_tool_and_skips_im
         discovered_skills={},
     )
 
-    assert capabilities.web_request_tools == []
+    assert capabilities.web_request_tools == ()
 
 
 def test_build_capabilities_tools_disabled_suppresses_web_request_tool_and_skips_import(
@@ -228,7 +278,7 @@ def test_build_capabilities_tools_disabled_suppresses_web_request_tool_and_skips
         discovered_skills={},
     )
 
-    assert capabilities.web_request_tools == []
+    assert capabilities.web_request_tools == ()
 
 
 # ---------------------------------------------------------------------------
@@ -241,8 +291,8 @@ def test_existing_tool_names_aggregates_all_categories() -> None:
     resolved = _resolved(sandbox_config=SimpleNamespace())
     capabilities = AgentCapabilities(
         filtered_user_tools=[_named_tool("user_tool")],
-        filtered_mcp_tools=[_named_tool("mcp_tool")],  # type: ignore[list-item]
-        filtered_workflow_tools=[_named_tool("workflow_tool")],  # type: ignore[list-item]
+        filtered_mcp_tools=(_mcp_server("mcp_tool"),),
+        filtered_workflow_tools=(WorkflowTool(name="workflow_tool", description="", handler=None),),
         web_request_tools=[_named_tool("web_request")],
     )
 
@@ -290,8 +340,8 @@ def test_validate_subagent_tool_names_passes_when_no_collision() -> None:
     "capabilities_kwargs",
     [
         {"filtered_user_tools": [_named_tool("delegate_billing")]},
-        {"filtered_mcp_tools": [_named_tool("delegate_billing")]},
-        {"filtered_workflow_tools": [_named_tool("delegate_billing")]},
+        {"filtered_mcp_tools": (_mcp_server("delegate_billing"),)},
+        {"filtered_workflow_tools": (WorkflowTool(name="delegate_billing", description="", handler=None),)},
         {"web_request_tools": [_named_tool("delegate_billing")]},
     ],
 )
