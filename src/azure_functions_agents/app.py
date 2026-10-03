@@ -11,6 +11,7 @@ from typing import Any, cast
 import azure.durable_functions as df
 import azure.functions as func
 
+from ._agent_identity import agent_id
 from ._harness import get_harness, validate_agent
 from ._logger import logger
 from ._observability import configure_observability
@@ -297,6 +298,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
         # Collect agent summary info
         agent_info: dict[str, Any] = {
+            "agent_id": agent_id(resolved.slug),
             "source_file": source_marker(resolved.source_file),
             "registered_capabilities": capability_names,
         }

@@ -28,6 +28,7 @@ from agent_framework import (
 from agent_framework._feature_stage import ExperimentalWarning
 
 from . import runner as _runner
+from ._agent_identity import agent_id
 from ._harness import AppHarness, HarnessRequest
 from ._history_identity import validate_agent_slug
 from ._logger import logger
@@ -43,7 +44,7 @@ from ._tool_descriptor import (
 )
 from .client_manager import InferenceTarget, get_client_manager
 from .config import ResolvedAgent, SubagentRef
-from .config.env import runtime_env_value
+from .config.env import EnvVar, runtime_env_value
 from .config.paths import get_app_root
 from .config.paths import resolve_config_dir as resolve_config_dir
 from .config.schema import AgentConfiguration
@@ -367,11 +368,15 @@ def _build_role_agent(
         if skill_paths
         else None
     )
+    site_name = runtime_env_value(EnvVar.WEBSITE_SITE_NAME)
+    maf_agent_name = f"{site_name}/{agent_name or 'main'}" if site_name else agent_name
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=ExperimentalWarning)
         return create_harness_agent(
             chat_client,
-            name=agent_name,
+            id=agent_id(agent_name or "main"),
+            name=maf_agent_name,
             harness_instructions="",
             agent_instructions=agent_instructions,
             tools=adapted_tools,

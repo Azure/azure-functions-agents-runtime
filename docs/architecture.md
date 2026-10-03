@@ -65,7 +65,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/config/loader.py` | Loads YAML front matter and `agents.config.yaml` into typed models. | `load_agent_specs()`, `load_global_config()` |
 | `azure_functions_agents/config/merge.py` | Applies defaults, overrides, and per-agent filters to produce runtime config, including each agent's identity `slug` (via `_slug.py`) and its normalized `subagents` list. | `compose()` |
 | `azure_functions_agents/_slug.py` | Derives an agent's identity slug from its `.agent.md` filename (and the `delegate_<slug>` tool-name convention) in one shared place, so naming, config composition, and delegation can never compute a slug differently. | `_function_name_from_source()`, `delegate_tool_name()` |
-| `azure_functions_agents/_agent_identity.py` | Supplies the shared readable app correlation key plus canonical slug used for agent identity, including persistence paths. | `agent_id()`, `resolve_app_correlation_key()` |
+| `azure_functions_agents/_agent_identity.py` | Derives a deterministic, human-readable MAF agent id from a best-effort app correlation key (platform owner plus deployment id/site name when available) and canonical agent slug for telemetry and external registration flows; no UUID is generated. | `resolve_app_correlation_key()`, `agent_id()` |
 | `azure_functions_agents/_history_identity.py`, `_blob_history.py`, `_file_history.py` | Validate the canonical slug and persist MAF conversation history by agent/session identity. Imported and used only on the MAF path; acquired Blob clients and owned storage credentials register their own shutdown callback. | `validate_agent_slug()`, `BlobHistoryProvider`, `ScopedFileHistoryProvider`, `_blob_history.shutdown()` |
 | `azure_functions_agents/_session_storage.py` | Harness-neutral Blob configuration, storage-specific identity/container precedence, sanitized backend errors, and owned service/credential construction. Does not import either persistence implementation. | `BlobStorageSettings`, `SessionStorageError`, `blob_storage_from_environment()`, `open_blob_service()` |
 | `azure_functions_agents/_native_session_identity.py` | SDK-independent, frozen Copilot storage routing and readable session prefixes, with shared agent identity and session/path validation. Resolved only when Copilot is selected. | `StorageRoute`, `StorageMode`, `resolve_route()`, `session_prefix()` |
@@ -84,7 +84,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/system_tools/sandbox.py` | Builds the ACA Dynamic Sessions-backed `execute_python` tool for a resolved agent/session, using a fresh GUID when no explicit session id is provided. | `create_sandbox_tools()` |
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
 | `azure_functions_agents/runner.py` | SDK-free execution coordinator: assembles filtered capability requests and dispatches to the selected harness. MAF agent/session/stream/result construction belongs to its adapter. Coordinates per-request delegation and stateless workflow leaf execution on the MAF path; attempts one internal token-usage record through the shared logger for each actual invocation attempt. | `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
-| `azure_functions_agents/_maf_tools.py` | MAF execution and compatibility adapter: constructs MAF tools, agents, sessions and skills configuration, maps streaming/results, and isolates raw public `FunctionTool` and MAF-only decorator extensions. Existing client-manager and history-provider extensions remain MAF-owned. | MAF capability and execution mapping |
+| `azure_functions_agents/_maf_tools.py` | MAF execution and compatibility adapter: constructs MAF tools, agents, sessions and skills configuration, maps streaming/results, and isolates raw public `FunctionTool` and MAF-only decorator extensions. Its shared MAF constructor supplies stable IDs and site-qualified readable names without changing canonical slugs. Existing client-manager and history-provider extensions remain MAF-owned. | MAF capability and execution mapping |
 | `azure_functions_agents/_mcp_auth.py` | Shared MCP header/auth boundary. Materializes fresh static headers for Copilot create/resume; supplies the existing per-request cached header provider for MAF. Preserves scope warnings, credential precedence, and generated `Authorization` without exposing secrets. | `materialize_mcp_headers()`, `build_mcp_header_provider()` |
 | `azure_functions_agents/_maf_mcp.py` | Lazily maps selected MCP server descriptors to MAF HTTP wrappers at execution, using the shared header provider. | MAF MCP adapter |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable MAF inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. Its pure internal built-in resolver preserves MAF provider/model precedence without constructing a chat client; an identity check protects Copilot from custom-manager fallback. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
@@ -227,7 +227,14 @@ Registration does not run the agent itself. Instead, `registration/_handlers.py`
 authored `null` values to clear inherited leaves or subtrees,
 then validates the effective token limits. `ResolvedAgent.agent_configuration` is always a concrete
 configuration object. With the default MAF harness, the MAF adapter constructs every role with MAF's
-`create_harness_agent`. Direct execution uses the runtime history provider, keyed by
+`create_harness_agent`. The shared builder keeps MAF `id` as the full stable
+correlation-key/slug value and uses `<Function App name>/<canonical slug>` for MAF
+`name` when the trimmed `WEBSITE_SITE_NAME` is non-blank, preserving site-name
+casing. Without site metadata it preserves the caller's name, including an omitted
+`None`; with site metadata an omitted or empty name uses `main`. These MAF names
+feed `gen_ai.agent.name`, not runtime `af.agent.name`, and do not replace slugs in
+routes, tools, catalogs, history, locks, workflow authorization, or the Copilot preview.
+Direct execution uses the runtime history provider, keyed by
 `(agent_slug, session_id)`, where endpoint registration supplies the same validated slug used in
 the route and the public session ID is returned to the caller and supplied on later turns. This
 matches workflow management's
