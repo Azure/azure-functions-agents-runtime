@@ -7,6 +7,7 @@ import textwrap
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -34,20 +35,100 @@ async def test_closing_the_public_stream_closes_the_selected_generator(monkeypat
     closed = []
     harness = AppHarness(HarnessKind.MAF, Path.cwd())
 
-    async def selected(_prompt, **kwargs):
-        assert kwargs["_harness"] is harness
-        try:
-            yield "data: fixture\n\n"
-            yield "data: unused\n\n"
-        finally:
-            closed.append(True)
+    class _SelectedRunner:
+        def run_agent_stream(self, _prompt, **kwargs):
+            async def _stream():
+                try:
+                    yield "data: fixture\n\n"
+                    yield "data: unused\n\n"
+                finally:
+                    closed.append(True)
 
-    monkeypatch.setattr(maf, "run_agent_stream", selected)
+            return _stream()
+
+    monkeypatch.setattr(runner, "get_agent_runner", lambda selected: _SelectedRunner())
     stream = runner.run_agent_stream("fixture", _harness=harness)
 
     assert await anext(stream) == "data: fixture\n\n"
     await stream.aclose()
     assert closed == [True]
+
+
+@pytest.mark.asyncio
+async def test_bound_harness_run_agent_stream_discovers_tools_and_mcp_from_bound_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root_a = tmp_path / "root-a"
+    root_a.mkdir()
+    harness = AppHarness(HarnessKind.MAF, root_a)
+    seen: list[dict[str, Any]] = []
+
+    async def fake_builder(**kwargs: Any):
+        seen.append(kwargs)
+        return _Agent(), object(), "test-session", None, InferenceTarget()
+
+    monkeypatch.setattr(maf, "_build_agent_session", fake_builder)
+    monkeypatch.setattr(
+        maf,
+        "discover_user_tools",
+        lambda app_root: SimpleNamespace(
+            tools=[SimpleNamespace(name=f"user:{Path(app_root).resolve().name}")]
+        ),
+    )
+    monkeypatch.setattr(
+        maf,
+        "discover_mcp_servers",
+        lambda app_root: SimpleNamespace(
+            servers={f"mcp:{Path(app_root).resolve().name}": SimpleNamespace(name=f"mcp:{Path(app_root).resolve().name}")}
+        ),
+    )
+    async def collect(**kwargs: Any) -> list[str]:
+        return [chunk async for chunk in runner.run_agent_stream("prompt", _harness=harness, **kwargs)]
+
+    await collect(tools=None, mcp_tools=None)
+    await collect(tools=[], mcp_tools=[])
+
+    assert seen[0]["app_root"] == root_a
+    assert seen[0]["tools"] is None
+    assert seen[0]["mcp_tools"] is None
+    resolved_tools, _ = maf.assemble_agent_inputs(
+        instructions=None,
+        tools=seen[0]["tools"],
+        mcp_tools=seen[0]["mcp_tools"],
+        app_root=seen[0]["app_root"],
+        sandbox_tools=None,
+        web_request_tools=None,
+        system_addendum=None,
+        workflow_enabled=False,
+        workflow_durable_client=None,
+        workflow_agent_slug=None,
+        agent_name=None,
+        resolved_id=None,
+        delegate_tools=None,
+        workflow_policy=None,
+    )
+    assert {tool.name for tool in resolved_tools} == {"user:root-a", "mcp:root-a"}
+
+    assert seen[1]["tools"] == []
+    assert seen[1]["mcp_tools"] == []
+    assert seen[1]["app_root"] == root_a
+    resolved_disabled, _ = maf.assemble_agent_inputs(
+        instructions=None,
+        tools=seen[1]["tools"],
+        mcp_tools=seen[1]["mcp_tools"],
+        app_root=seen[1]["app_root"],
+        sandbox_tools=None,
+        web_request_tools=None,
+        system_addendum=None,
+        workflow_enabled=False,
+        workflow_durable_client=None,
+        workflow_agent_slug=None,
+        agent_name=None,
+        resolved_id=None,
+        delegate_tools=None,
+        workflow_policy=None,
+    )
+    assert resolved_disabled == []
 
 
 class _Content:

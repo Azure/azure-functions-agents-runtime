@@ -17,9 +17,10 @@ from ..._observability import FaultDomain, LifecycleStage, start_span
 from ...client_manager import InferenceTarget, get_client_manager
 from ...config import ResolvedAgent, SubagentRef
 from ...config.env import EnvVar, runtime_env_value
-from ...config.paths import resolve_config_dir
+from ...config.paths import get_app_root, resolve_config_dir
 from ...config.schema import AgentConfiguration
-from ...discovery.mcp import MCPTool
+from ...discovery.mcp import MCPTool, discover_mcp_servers
+from ...discovery.tools import discover_user_tools
 from ...registration._handlers import _looks_like_tool_error
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
@@ -93,6 +94,65 @@ class _CleanupHookStream(Protocol):
 
 class _StreamErrorCarrier(Protocol):
     _stream_error: BaseException | None
+
+
+def assemble_agent_inputs(
+    *,
+    instructions: str | None,
+    tools: list[AgentFunctionTool] | None,
+    mcp_tools: list[MCPTool] | None,
+    app_root: Path | None = None,
+    sandbox_tools: list[FunctionTool] | None,
+    web_request_tools: list[FunctionTool] | None,
+    system_addendum: str | None,
+    workflow_enabled: bool,
+    workflow_durable_client: DurableFunctionsClient | None,
+    workflow_agent_slug: str | None,
+    agent_name: str | None,
+    resolved_id: str | None,
+    delegate_tools: list[FunctionTool] | None,
+    workflow_policy: WorkflowPlanPolicy | None,
+) -> tuple[list[AgentTool], str | None]:
+    """Assemble tools and system instructions for MAF-backed roles."""
+    from ...workflows.tools import build_workflow_tools
+
+    discovery_root = app_root if app_root is not None else get_app_root()
+    resolved_tools: list[AgentTool] = []
+    resolved_tools.extend(discover_user_tools(discovery_root).tools if tools is None else tools)
+
+    if sandbox_tools:
+        resolved_tools.extend(sandbox_tools)
+
+    if web_request_tools:
+        resolved_tools.extend(web_request_tools)
+
+    if workflow_enabled:
+        resolved_tools.extend(
+            build_workflow_tools(
+                session_id=resolved_id or "",
+                workflow_agent_slug=workflow_agent_slug or agent_name or "main",
+                agent_name=agent_name or "main",
+                durable_client=workflow_durable_client,
+                policy=workflow_policy,
+            )
+        )
+
+    resolved_mcp_tools = (
+        list(discover_mcp_servers(discovery_root).servers.values())
+        if mcp_tools is None
+        else list(mcp_tools)
+    )
+    if resolved_mcp_tools:
+        resolved_tools.extend(resolved_mcp_tools)
+
+    if delegate_tools:
+        resolved_tools.extend(delegate_tools)
+
+    effective_instructions = instructions.strip() if instructions and instructions.strip() else None
+    if system_addendum:
+        effective_instructions = (effective_instructions or "") + system_addendum
+
+    return resolved_tools, effective_instructions
 
 
 def _response_usage_details(response: _UsageDetailsCarrier) -> UsageDetails | None:
@@ -272,14 +332,13 @@ def _build_delegated_agent(
     resolved: ResolvedAgent, capabilities: AgentCapabilities
 ) -> tuple[Agent[Any], InferenceTarget]:
     """Build a stateless specialist without expanding its own subagents."""
-    from azure_functions_agents import runner
-
     client_manager = get_client_manager()
     chat_client, inference_target = client_manager.build_chat_client_with_target(resolved.model)
-    resolved_tools, effective_instructions = runner._assemble_agent_inputs(
+    resolved_tools, effective_instructions = assemble_agent_inputs(
         instructions=resolved.instructions,
         tools=list(capabilities.filtered_user_tools or []),
         mcp_tools=list(capabilities.filtered_mcp_tools or []),
+        app_root=None,
         sandbox_tools=None,
         web_request_tools=capabilities.web_request_tools,
         system_addendum=None,
@@ -407,10 +466,11 @@ async def _build_agent_session(
             subagents, catalog, coordinator_deadline=effective_deadline
         )
 
-    resolved_tools, effective_instructions = runner._assemble_agent_inputs(
+    resolved_tools, effective_instructions = assemble_agent_inputs(
         instructions=instructions,
         tools=tools,
         mcp_tools=mcp_tools,
+        app_root=app_root,
         sandbox_tools=sandbox_tools,
         web_request_tools=web_request_tools,
         system_addendum=system_addendum,

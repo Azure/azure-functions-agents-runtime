@@ -37,24 +37,11 @@ class CopilotRuntime:
         self.workspace = self.native_root / "workspace"
         self._client: CopilotClient | None = None
         self._failed_client: CopilotClient | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
         self._start_lock = asyncio.Lock()
         self._credential: AsyncTokenCredential | None = None
         self._filesystems: set[CopilotSessionFs] = set()
         self._close_callback = self.close
         self._exit_callback = self._exit
-
-    def admit_loop(self) -> None:
-        """Bind this owner to one event loop; concurrent requests on that loop are allowed."""
-        loop = asyncio.get_running_loop()
-        with self._harness._resources.guard:
-            if self._loop is not None and self._loop is not loop:
-                raise CopilotPreviewError(
-                    "Copilot preview reuses one event loop per runtime owner. "
-                    "Concurrent requests on that loop are allowed. "
-                    "Await shutdown_client_manager() before closing a standalone event loop."
-                )
-            self._loop = loop
 
     def _register_resources(self) -> None:
         _harness_lifecycle._register_shutdown(self._close_callback)
@@ -89,7 +76,6 @@ class CopilotRuntime:
         self._forget_client(client)
 
     async def client(self) -> CopilotClient:
-        self.admit_loop()
         async with self._start_lock:
             if self._client is not None:
                 return self._client
@@ -144,7 +130,6 @@ class CopilotRuntime:
         with self._harness._resources.guard:
             if self._harness._resources.runtime is self:
                 self._harness._resources.runtime = None
-            self._loop = None
         _harness_lifecycle._unregister_shutdown(self._close_callback)
         atexit.unregister(self._exit_callback)
 
@@ -171,7 +156,6 @@ class CopilotRuntime:
         return self._credential
 
     async def _entra_token(self, scope: str, diagnostic: str) -> str:
-        self.admit_loop()
         try:
             token = await self.credential().get_token(scope)
         except Exception:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -20,17 +19,10 @@ from ._session_id import SESSION_ID_PATTERN
 from ._slug import delegate_tool_name
 from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
-from .config.paths import get_app_root
 from .config.schema import AgentConfiguration
-from .discovery.mcp import MCPTool, discover_mcp_servers
-from .discovery.tools import discover_user_tools
-from .harness._harness_binding import (
-    AppHarness,
-    HarnessKind,
-    HarnessRequest,
-    UnsupportedCapabilityError,
-    get_harness,
-)
+from .discovery.mcp import MCPTool
+from .harness._agent_runner import get_agent_runner
+from .harness._harness_binding import AppHarness, get_harness
 from .harness._history_identity import validate_agent_slug
 from .registration.capabilities import AgentCapabilities
 from .registration.catalog import AgentCatalog, CatalogEntry
@@ -136,44 +128,25 @@ def _assemble_agent_inputs(
     delegate_tools: list[FunctionTool] | None,
     workflow_policy: WorkflowPlanPolicy | None,
 ) -> tuple[list[AgentTool], str | None]:
-    """Assemble tools and system instructions shared by all agent roles."""
-    app_root = get_app_root()
-    resolved_tools: list[AgentTool] = []
-    resolved_tools.extend(discover_user_tools(app_root).tools if tools is None else tools)
+    """Compatibility shim for the MAF-local tool assembly helper."""
+    from .harness.agent_framework._maf_execution import assemble_agent_inputs
 
-    if sandbox_tools:
-        resolved_tools.extend(sandbox_tools)
-
-    if web_request_tools:
-        resolved_tools.extend(web_request_tools)
-
-    if workflow_enabled:
-        from .workflows.tools import build_workflow_tools
-
-        resolved_tools.extend(
-            build_workflow_tools(
-                session_id=resolved_id or "",
-                workflow_agent_slug=workflow_agent_slug or agent_name or "main",
-                agent_name=agent_name or "main",
-                durable_client=workflow_durable_client,
-                policy=workflow_policy,
-            )
-        )
-
-    resolved_mcp_tools = (
-        list(discover_mcp_servers(app_root).servers.values()) if mcp_tools is None else list(mcp_tools)
+    return assemble_agent_inputs(
+        instructions=instructions,
+        tools=tools,
+        mcp_tools=mcp_tools,
+        app_root=None,
+        sandbox_tools=sandbox_tools,
+        web_request_tools=web_request_tools,
+        system_addendum=system_addendum,
+        workflow_enabled=workflow_enabled,
+        workflow_durable_client=workflow_durable_client,
+        workflow_agent_slug=workflow_agent_slug,
+        agent_name=agent_name,
+        resolved_id=resolved_id,
+        delegate_tools=delegate_tools,
+        workflow_policy=workflow_policy,
     )
-    if resolved_mcp_tools:
-        resolved_tools.extend(resolved_mcp_tools)
-
-    if delegate_tools:
-        resolved_tools.extend(delegate_tools)
-
-    effective_instructions = instructions.strip() if instructions and instructions.strip() else None
-    if system_addendum:
-        effective_instructions = (effective_instructions or "") + system_addendum
-
-    return resolved_tools, effective_instructions
 
 
 async def run_leaf_agent_task(
@@ -186,14 +159,12 @@ async def run_leaf_agent_task(
 ) -> str:
     """Run one fresh stateless specialist and return its response text."""
     harness = capabilities._harness or get_harness()
-    if harness.name is HarnessKind.COPILOT:
-        from .harness.copilot_sdk._copilot_preview import reject_unsupported
-
-        reject_unsupported(**{execution_role: True})
-    from .harness.agent_framework import _maf_execution
-
-    return await _maf_execution.run_leaf_agent_task(
-        resolved, capabilities, task, timeout=timeout, execution_role=execution_role
+    return await get_agent_runner(harness).run_leaf_agent_task(
+        resolved,
+        capabilities,
+        task,
+        timeout=timeout,
+        execution_role=execution_role,
     )
 
 
@@ -360,64 +331,13 @@ async def run_agent(
 ) -> AgentResult:
     """Execute through the bound harness; ``None`` tools discover and ``[]`` disables."""
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
-    history_agent_slug = validate_agent_slug(
-        _resolve_history_agent_slug(agent_name, workflow_agent_slug)
-    )
-    loop = asyncio.get_running_loop()
-    coordinator_deadline = loop.time() + timeout
+    coordinator_deadline = asyncio.get_running_loop().time() + timeout
     harness = _harness or get_harness()
-    if harness.name is HarnessKind.COPILOT:
-        from .harness.copilot_sdk import _copilot_preview
-
-        configuration = agent_configuration or AgentConfiguration()
-        _copilot_preview.validate_configuration(configuration)
-        resolved_mcp = (
-            list(discover_mcp_servers(harness.app_root).servers.values())
-            if mcp_tools is None
-            else mcp_tools
-        )
-        _copilot_preview.reject_unsupported(
-            mcp=bool(resolved_mcp),
-            skills=bool(skill_paths),
-            subagents=bool(subagents),
-            workflows=workflow_enabled or workflow_policy is not None,
-        )
-        resolved_model = model or harness.default_model
-        if not resolved_model:
-            raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
-        user_tools = (
-            list(discover_user_tools(harness.app_root).tools) if tools is None else list(tools)
-        )
-        resolved_tools = _copilot_preview.prepare_tools(
-            [*user_tools, *list(sandbox_tools or []), *list(web_request_tools or [])]
-        )
-        validated_id = _validate_session_id(session_id)
-        effective_instructions = instructions.strip() if instructions and instructions.strip() else None
-        if system_addendum:
-            effective_instructions = (effective_instructions or "") + system_addendum
-        from .harness.copilot_sdk import _copilot_execution
-
-        return await _copilot_execution.run(
-            harness,
-            HarnessRequest(
-                prompt=prompt,
-                instructions=effective_instructions,
-                agent_slug=history_agent_slug,
-                session_id=validated_id or uuid.uuid4().hex,
-                new_session=validated_id is None or _session_is_new,
-                model=resolved_model,
-                tools=resolved_tools,
-                max_output_tokens=configuration.max_output_tokens,
-                deadline=coordinator_deadline,
-            ),
-        )
-
-    from .harness.agent_framework import _maf_execution
-
-    return await _maf_execution.run_agent(
+    return await get_agent_runner(harness).run_agent(
         prompt,
         instructions=instructions,
         timeout=timeout,
+        deadline=coordinator_deadline,
         tools=tools,
         mcp_tools=mcp_tools,
         skill_paths=skill_paths,
@@ -434,9 +354,7 @@ async def run_agent(
         subagents=subagents,
         catalog=catalog,
         workflow_policy=workflow_policy,
-        _harness=harness,
-        _session_is_new=_session_is_new,
-        _deadline=coordinator_deadline,
+        session_is_new=_session_is_new,
     )
 
 
@@ -465,44 +383,38 @@ async def run_agent_stream(
     _harness: AppHarness | None = None,
 ) -> AsyncIterator[str]:
     """Yield existing SSE events; selection failures emit one terminal error."""
+    timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
+    validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
     try:
         harness = _harness or get_harness()
-        if harness.name is HarnessKind.COPILOT:
-            from .harness.copilot_sdk._copilot_preview import reject_unsupported
-
-            reject_unsupported(streaming=True)
+        selected = get_agent_runner(harness)
+        stream = selected.run_agent_stream(
+            prompt,
+            instructions=instructions,
+            timeout=timeout,
+            tools=tools,
+            mcp_tools=mcp_tools,
+            skill_paths=skill_paths,
+            model=model,
+            session_id=session_id,
+            sandbox_tools=sandbox_tools,
+            system_addendum=system_addendum,
+            workflow_enabled=workflow_enabled,
+            workflow_durable_client=workflow_durable_client,
+            workflow_agent_slug=workflow_agent_slug,
+            agent_name=agent_name,
+            display_name=display_name,
+            web_request_tools=web_request_tools,
+            agent_configuration=agent_configuration,
+            subagents=subagents,
+            catalog=catalog,
+            workflow_policy=workflow_policy,
+        )
     except (ValueError, RuntimeError) as exc:
         logger.error("Agent harness selection failed: %s", exc)
         yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
         return
-    timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
-    validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
-    deadline = asyncio.get_running_loop().time() + timeout
-    from .harness.agent_framework import _maf_execution
 
-    async with aclosing(_maf_execution.run_agent_stream(
-        prompt,
-        instructions=instructions,
-        timeout=timeout,
-        tools=tools,
-        mcp_tools=mcp_tools,
-        skill_paths=skill_paths,
-        model=model,
-        session_id=session_id,
-        sandbox_tools=sandbox_tools,
-        system_addendum=system_addendum,
-        workflow_enabled=workflow_enabled,
-        workflow_durable_client=workflow_durable_client,
-        workflow_agent_slug=workflow_agent_slug,
-        agent_name=agent_name,
-        display_name=display_name,
-        web_request_tools=web_request_tools,
-        agent_configuration=agent_configuration,
-        subagents=subagents,
-        catalog=catalog,
-        workflow_policy=workflow_policy,
-        _harness=harness,
-        _deadline=deadline,
-    )) as stream:
+    async with aclosing(stream) as stream:
         async for event in stream:
             yield event

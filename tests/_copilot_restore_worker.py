@@ -43,7 +43,6 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
         session_storage=resolve_route(app_root),
     )
     owner = get_runtime(harness)
-    owner.admit_loop()
     native_id = _copilot._copilot_session_id("agent", "restore")
     result: dict[str, object] = {
         "phase": phase,

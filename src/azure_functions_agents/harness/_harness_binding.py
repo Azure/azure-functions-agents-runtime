@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from .._function_tool import FunctionTool
     from ..config.schema import ResolvedAgent
     from ..registration.capabilities import AgentCapabilities
+    from ._agent_runner import AgentRunner
     from .copilot_sdk._copilot_providers import CopilotProvider
     from .copilot_sdk._copilot_runtime import CopilotRuntime
     from .copilot_sdk._copilot_session_identity import StorageRoute
@@ -38,6 +39,7 @@ class UnsupportedCapabilityError(ValueError):
 @dataclass
 class _HarnessResources:
     guard: threading.Lock = field(default_factory=threading.Lock)
+    runner: AgentRunner | None = None
     runtime: CopilotRuntime | None = None
 
 

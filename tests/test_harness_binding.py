@@ -64,6 +64,7 @@ def test_app_binding_is_frozen_and_identity_distinct(binding_root):
     assert first != second
     assert first._resources is not second._resources
     assert first._resources.guard is not second._resources.guard
+    assert first._resources.runner is second._resources.runner is None
     assert first._resources.runtime is second._resources.runtime is None
     assert "_resources" not in repr(first)
     with pytest.raises(FrozenInstanceError):
@@ -71,7 +72,7 @@ def test_app_binding_is_frozen_and_identity_distinct(binding_root):
 
 
 def test_resource_cell_has_only_a_guard_and_runtime(binding_root):
-    assert [item.name for item in fields(binding._HarnessResources)] == ["guard", "runtime"]
+    assert [item.name for item in fields(binding._HarnessResources)] == ["guard", "runner", "runtime"]
     assert [item.name for item in fields(binding.AppHarness)] == [
         "name", "app_root", "storage_root", "default_model", "provider",
         "session_storage", "_resources",
@@ -84,6 +85,7 @@ def test_resource_cell_has_only_a_guard_and_runtime(binding_root):
     harness = binding.AppHarness(binding.HarnessKind.MAF, binding_root)
     assert harness._resources.guard.acquire(blocking=False)
     harness._resources.guard.release()
+    assert harness._resources.runner is None
     with pytest.raises(TypeError, match="_resources"):
         binding.AppHarness(binding.HarnessKind.MAF, binding_root, _resources=harness._resources)
 
@@ -109,6 +111,7 @@ def test_replace_gets_fresh_resources_without_changing_settings(binding_root):
     assert clone.session_storage is original.session_storage
     assert clone._resources is not original._resources
     assert clone._resources.guard is not original._resources.guard
+    assert clone._resources.runner is None
     assert clone._resources.runtime is None
     assert original._resources.runtime is owner
 

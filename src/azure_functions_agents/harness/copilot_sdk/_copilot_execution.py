@@ -287,7 +287,6 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     from ...runner import AgentResult
 
     owner = get_runtime(harness)
-    owner.admit_loop()
     copilot_id = _copilot_session_id(request.agent_slug, request.session_id)
     calls: list[ToolCallEvidence] = []
     messages: list[str] = []

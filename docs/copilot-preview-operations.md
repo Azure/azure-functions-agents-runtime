@@ -110,11 +110,11 @@ errors. Blob rename can require copy/delete and is **not crash-atomic**.
 These file operations are not a whole-session transaction.
 
 Turns for the same `(agent, session)` are serialized within one Python
-process, with bounded waiting. Independent sessions remain concurrent. The
-same-loop runtime-owner guard permits concurrent invocation admission within
-that process.
-Cross-worker overlap is unsupported and caller-owned, as on the MAF path;
-Blob storage alone does not coordinate turns across workers.
+process, with bounded waiting. Independent sessions remain concurrent.
+Supported Azure Functions invocations in that process share the worker event
+loop while reusing the same app-owned runtime and native client. Cross-worker
+overlap is unsupported and caller-owned, as on the MAF path; Blob storage
+alone does not coordinate turns across workers.
 
 ## Inspecting a session
 
