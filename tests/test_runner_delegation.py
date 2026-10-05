@@ -1204,7 +1204,7 @@ async def test_real_maf_leaf_span_reports_agent_name_and_stable_id(
     site_name: str | None,
     execution_role: str,
 ) -> None:
-    """Real delegate/workflow leaf spans qualify names without changing IDs or slug grants."""
+    """Real leaf spans report site/slug identity without changing canonical slug grants."""
     exporter = _install_maf_tracer(monkeypatch)
     monkeypatch.setenv("WEBSITE_OWNER_NAME", "sub+rg-eastuswebspace")
     monkeypatch.setenv("WEBSITE_DEPLOYMENT_ID", "deployment-123")
@@ -1270,7 +1270,7 @@ async def test_real_maf_leaf_span_reports_agent_name_and_stable_id(
     assert invoke_span.attributes is not None
     assert invoke_span.attributes.get("gen_ai.agent.name") == expected_name
     assert invoke_span.attributes.get("gen_ai.agent.id") == (
-        "sub+rg-eastuswebspace/deployment-123/billing"
+        f"{site_name.lower() if site_name else 'local'}/billing"
     )
     assert invoke_span.attributes.get("gen_ai.agent.name") != resolved.name
 

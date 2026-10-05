@@ -167,7 +167,7 @@ def test_build_role_agent_uses_stable_agent_id(
     site_name: str | None,
     expected_site_name: str | None,
 ) -> None:
-    """Fresh harnesses keep stable IDs independent of their readable app-qualified names."""
+    """Fresh harnesses use site/slug IDs and preserve readable site-name casing."""
     captured: list[dict[str, Any]] = []
 
     def fake_create_harness_agent(_client: Any, **kwargs: Any) -> _FakeAgent:
@@ -200,9 +200,8 @@ def test_build_role_agent_uses_stable_agent_id(
 
     slug = agent_name or "main"
     expected_name = f"{expected_site_name}/{slug}" if expected_site_name else agent_name
-    assert [options["id"] for options in captured] == [
-        f"sub+rg-eastuswebspace/deployment-123/{slug}"
-    ] * 2
+    expected_id = f"{expected_site_name.lower() if expected_site_name else 'local'}/{slug}"
+    assert [options["id"] for options in captured] == [expected_id] * 2
     assert [options["name"] for options in captured] == [expected_name] * 2
 
 
@@ -465,6 +464,7 @@ def test_fresh_harness_agents_reload_history_for_same_session(
         }
         first_agent, first_session, _, _, _ = await runner._build_agent_session(**common)
         assert first_agent.name == expected_name
+        assert first_agent.id == f"{site_name.lower() if site_name else 'local'}/{slug}"
         assert first_session.session_id == "shared-session"
         await first_agent.run("Use the Premium plan.", session=first_session)
         assert [message.text for message in stored_messages] == [

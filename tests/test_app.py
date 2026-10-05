@@ -595,19 +595,32 @@ def test_create_function_app_rejects_invalid_workflow_subagent_grants(
 class TestStructuredIndexingLog:
     """Tests for the structured JSON indexing log emitted by create_function_app."""
 
+    @pytest.mark.parametrize(
+        ("site_name", "expected_id"),
+        [(None, "local/main"), (" \t ", "local/main"), (" Contoso-Agents ", "contoso-agents/main")],
+    )
     def test_emits_agent_runtime_indexed_log(
         self,
         caplog: pytest.LogCaptureFixture,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        site_name: str | None,
+        expected_id: str,
     ) -> None:
         """Test that create_function_app emits a structured indexing log."""
         import json
+
+        monkeypatch.delenv("WEBSITE_SITE_NAME", raising=False)
+        if site_name is not None:
+            monkeypatch.setenv("WEBSITE_SITE_NAME", site_name)
+        monkeypatch.setenv("WEBSITE_OWNER_NAME", "ignored-owner")
+        monkeypatch.setenv("WEBSITE_DEPLOYMENT_ID", "ignored-deployment")
 
         _write_agent(
             tmp_path,
             "main.agent.md",
             """
-            name: Main
+            name: Authored Display Name
             description: Main agent
             builtin_endpoints:
                 debug_chat_ui: true
@@ -631,6 +644,7 @@ class TestStructuredIndexingLog:
         assert log_json["agent_count"] == 1
         assert len(log_json["agents"]) == 1
         assert log_json["agents"][0]["source_file"].endswith("main.agent.md")
+        assert log_json["agents"][0]["agent_id"] == expected_id
         assert "discovered_capabilities" in log_json
 
     def test_indexing_log_includes_trigger_type(

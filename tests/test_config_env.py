@@ -17,8 +17,6 @@ from azure_functions_agents.config.schema import BuiltinEndpointsConfig
 @pytest.mark.parametrize(
     ("variable", "name"),
     [
-        (EnvVar.WEBSITE_DEPLOYMENT_ID, "WEBSITE_DEPLOYMENT_ID"),
-        (EnvVar.WEBSITE_OWNER_NAME, "WEBSITE_OWNER_NAME"),
         (EnvVar.WEBSITE_SITE_NAME, "WEBSITE_SITE_NAME"),
     ],
 )

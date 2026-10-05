@@ -62,7 +62,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/config/loader.py` | Loads YAML front matter and `agents.config.yaml` into typed models. | `load_agent_specs()`, `load_global_config()` |
 | `azure_functions_agents/config/merge.py` | Applies defaults, overrides, and per-agent filters to produce runtime config, including each agent's identity `slug` (via `_slug.py`) and its normalized `subagents` list. | `compose()` |
 | `azure_functions_agents/_slug.py` | Derives an agent's identity slug from its `.agent.md` filename (and the `delegate_<slug>` tool-name convention) in one shared place, so naming, config composition, and delegation can never compute a slug differently. | `_function_name_from_source()`, `delegate_tool_name()` |
-| `azure_functions_agents/_agent_identity.py` | Derives a deterministic, human-readable MAF agent id from a best-effort app correlation key (platform owner plus deployment id/site name when available) and canonical agent slug for telemetry and external registration flows; no UUID is generated. | `resolve_app_correlation_key()`, `agent_id()` |
+| `azure_functions_agents/_agent_identity.py` | Derives a deterministic, human-readable MAF agent id from trimmed, lower-case `WEBSITE_SITE_NAME` (or `local`) plus the canonical filename-derived agent slug for telemetry and external registration flows. Identical site and slug inputs produce the same ID; renaming the site changes it, and local projects with the same slug share an ID. | `agent_id()` |
 | `azure_functions_agents/_history_identity.py`, `_blob_history.py`, `_file_history.py` | Validate the canonical slug before using it as a path segment and persist conversation history by `(agent_slug, session_id)`. | `validate_agent_slug()`, `BlobHistoryProvider`, `ScopedFileHistoryProvider` |
 | `azure_functions_agents/config/validation.py` | Post-merge sanity checks for resolved agents, including rejecting unknown/duplicate/self references in both independent Sub Agent grants against the app-wide slug index. | `validate_resolved_agent()`, `validate_subagent_references()`, `validate_workflow_subagent_references()` |
 | `azure_functions_agents/discovery/skills.py` | Walks `skills/<name>/SKILL.md` files, validates frontmatter, and caches the name→directory map for MAF's `SkillsProvider`. | `discover_skills()`, `clear_skills_cache()` |
@@ -213,8 +213,9 @@ Registration does not run the agent itself. Instead, `registration/_handlers.py`
 authored `null` values to clear inherited leaves or subtrees,
 then validates the effective token limits. `ResolvedAgent.agent_configuration` is always a concrete
 configuration object. With the default MAF harness, the runner constructs every role with MAF's
-`create_harness_agent`. The shared builder keeps MAF `id` as the full stable
-correlation-key/slug value and uses `<Function App name>/<canonical slug>` for MAF
+`create_harness_agent`. The shared builder supplies MAF `id` as
+`<lower-case site name>/<canonical slug>` (or `local/<slug>`) and uses
+`<Function App name>/<canonical slug>` for MAF
 `name` when the trimmed `WEBSITE_SITE_NAME` is non-blank, preserving site-name
 casing. Without site metadata it preserves the caller's name, including an omitted
 `None`; with site metadata an omitted or empty name uses `main`. These MAF names
