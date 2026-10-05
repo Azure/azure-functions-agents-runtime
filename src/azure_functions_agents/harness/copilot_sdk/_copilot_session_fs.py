@@ -172,7 +172,7 @@ class CopilotSessionFs(SessionFsProvider):
         await self._call(lambda: self.backend.rename(source, target))
 
     async def close(self) -> None:
-        """Close only this provider's resources, retaining ownership on failure."""
+        """Close only this provider's resources."""
         async with self._lock:
             if self._closed:
                 return

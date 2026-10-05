@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from ..._function_tool import FunctionTool
     from ...runner import AgentResult, ToolCallEvidence
     from ._copilot_providers import ProviderTokenSource
+    from ._copilot_session_fs import CopilotSessionFs
 
 
 class _SessionOptions(TypedDict):
@@ -155,6 +156,10 @@ async def _abort(session: CopilotSession) -> None:
         logger.error("Copilot session abort failed.")
 
 
+async def _close_storage(storage: CopilotSessionFs) -> None:
+    await asyncio.wait_for(storage.close(), timeout=5)
+
+
 @asynccontextmanager
 async def _bounded_cleanup(
     operation: Callable[[], Awaitable[None]], diagnostic: str
@@ -207,6 +212,20 @@ async def _open_session(
     return await client.resume_session(
         session_id, on_permission_request=_deny_permission, **options
     )
+
+
+async def _acquire_client(owner: CopilotRuntime, deadline: float) -> CopilotClient:
+    try:
+        return await owner.client()
+    except TimeoutError:
+        if asyncio.get_running_loop().time() >= deadline:
+            raise
+        raise CopilotPreviewError("Copilot native runtime startup timed out.") from None
+    except CopilotPreviewError:
+        raise
+    except Exception:
+        logger.error("Copilot native startup failed; native details were not logged.")
+        raise CopilotPreviewError("Copilot native runtime startup failed.") from None
 
 
 async def _verify_tool_catalog(session: CopilotSession, functions: list[FunctionTool]) -> None:
@@ -327,12 +346,11 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                 workspace_path=str(owner.workspace),
                 deadline=request.deadline,
             )
-            owner.own_filesystem(storage)
             async with _bounded_cleanup(
-                lambda: owner.release_filesystem(storage),
+                lambda: _close_storage(storage),
                 "Copilot session storage could not be closed.",
             ):
-                client = await owner.client()
+                client = await _acquire_client(owner, request.deadline)
                 options = _SessionOptions(
                     model=request.model,
                     tools=[_tool(function, calls) for function in request.tools],

@@ -116,6 +116,23 @@ loop while reusing the same app-owned runtime and native client. Cross-worker
 overlap is unsupported and caller-owned, as on the MAF path; Blob storage
 alone does not coordinate turns across workers.
 
+## Runtime lifetime and shutdown
+
+Each Copilot-enabled app binding owns one lazy SDK client and one shared
+credential for that warm worker. Requests reuse that client, but each request
+owns its own `SessionFs` adapter: the adapter stays open until session
+disconnect cleanup completes, then closes before the request returns, including
+on failure or cancellation. Startup failures attempt bounded immediate cleanup
+and report the startup failure rather than any cleanup follow-on error.
+
+There is no retained failed-client/filesystem retry registry and no process-exit
+`atexit` fallback. The supported shutdown path is the runtime's explicit async
+shutdown (`shutdown_client_manager()` / harness shutdown), which attempts a
+bounded graceful stop and then bounded `force_stop`, still attempts credential
+cleanup, reports cleanup failures immediately, and clears cached handles so a
+stopped or closing resource is never reused. This preview does **not** claim
+that every host termination awaits that async shutdown path.
+
 ## Inspecting a session
 
 Use the app's shared agent identity and returned session ID to identify only

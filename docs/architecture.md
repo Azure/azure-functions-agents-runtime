@@ -105,7 +105,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/harness/copilot_sdk/_copilot_providers.py` | Copilot provider interface, registry, sanitized settings and frozen OpenAI / Azure OpenAI / Foundry mappings. SDK provider config is built lazily. | `CopilotProvider`, `OpenAIProvider`, `AzureOpenAIProvider`, `FoundryProvider`, `_PROVIDERS` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_runner.py` | Copilot-local implementation of the three-operation bound runner contract. Preserves early unsupported-method rejection before native/provider acquisition, prepares Copilot-qualified tools, and forwards the supported path to native execution. | `create_runner()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_execution.py` | Per-request create/resume, host-qualified custom tools and exact catalog validation, scoped synchronous event subscription, result/usage translation, and exception-aware bounded session/filesystem cleanup. | `run()` |
-| `azure_functions_agents/harness/copilot_sdk/_copilot_runtime.py` | Lazy app-owned SDK stdio client, credentials and open filesystem handles, acquired once through the binding cell. Registers its own stable close callback; verified complete shutdown clears its cell reference without clearing standalone selection. No global runtime-owner map. | `CopilotRuntime`, `get_runtime()` |
+| `azure_functions_agents/harness/copilot_sdk/_copilot_runtime.py` | Lazy app-owned SDK stdio client and shared credential owner, acquired once through the binding cell behind a startup lock. Registers its own stable close callback; explicit async shutdown clears cached handles after bounded cleanup so stopped or closing resources are never reused, without clearing standalone selection. No global runtime-owner map, deferred retry registry, or process-exit cleanup path. | `CopilotRuntime`, `get_runtime()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_session_fs.py` | Actual SDK `SessionFsProvider` implementation for opaque files, with one route-based backend factory selection, callback serialization/deadlines, text conversion and SDK-shaped errors. | `CopilotSessionFs`, `SessionFileBackend`, `open_session_fs()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_session_paths.py` | Selected Windows/POSIX callback path policies and independently selected physical-host policy; exact workspace mapping, lexical containment and local platform rules. | `SessionPathPolicy`, `select_session_path_policy()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_session_local.py`, `_copilot_session_blob.py` | Ordinary byte filesystem operations and flat-Blob filesystem adaptation, structurally conforming to the shared backend Protocol. No native-file interpretation or storage format changes. | `LocalSessionFileBackend`, `BlobSessionFileBackend` |
@@ -278,19 +278,24 @@ every call; compaction controls accumulated message-history growth.
 `false` or `0` selects the unchanged MAF path; `true` or `1` selects the
 internal local-qualification preview. Boolean text is case-insensitive and trimmed; a present empty
 value or any other value is an error. Each app construction captures a fresh
-immutable binding, carried as an internal `AgentCapabilities` handle into
-closures. Existing closures retain their selection. Standalone calls capture
+immutable `AppHarness` binding that is carried into handler, delegate, and
+workflow closures as the app execution context. Existing closures retain their
+selection. Standalone calls capture
 and retain a separate first-use default per resolved app root; app construction
 does not replace that default. Restart to switch an existing app/default.
 Legacy `runtime:` front matter remains ignored.
 
 The binding's private resource cell holds only a lock and an optional acquired
 Copilot runtime owner, not conversation state. Native clients are lazy and
-app-owned; separate bindings and `dataclasses.replace` clones get separate cells.
-Shutdown visits acquired owners through common callbacks without backend
-discovery, and successful close permits a fresh owner without changing cached
-standalone selection. Existing shared MAF authoring/provider dependencies remain;
-this containment does not make the whole package MAF-dependency-free.
+app-owned; separate bindings and `dataclasses.replace` clones get separate
+cells. That runtime owner retains only the reusable SDK client and shared
+credential. Per-request `SessionFs` adapters stay request-scoped: they remain
+open until session disconnect cleanup completes, then close before the request
+returns, including on cancellation or failure. Shutdown visits acquired owners
+through common callbacks without backend discovery, and successful close permits
+a fresh owner without changing cached standalone selection. Existing shared MAF
+authoring/provider dependencies remain; this containment does not make the
+whole package MAF-dependency-free.
 Supported Azure Functions handlers all await the preview on the worker's active
 event loop; no handler path creates a second loop or hops between loops during
 request processing. The preview remains separately limited to a local host and a
@@ -434,17 +439,23 @@ Distributed coordination is tracked separately in
 Shared configuration and registration route persistence to the selected
 harness without importing, initializing, probing or cleaning up the opposite
 persistence implementation. MAF owns its existing history provider; Copilot
-constructs, uses and closes its SessionFs adapter, keeping SDK-specific
-persistence types behind that boundary. Cancellation remains session-scoped.
-The already-open provider is returned by the SDK's per-session callback factory
-before create/resume; the SDK builds its own RPC adapter. The public session
-request chooses create or resume without host history probes, and the SDK
-session is disconnected before its filesystem closes. Request deadlines bound
-lock waits, startup, execution and filesystem callbacks; abort, disconnect and
-adapter-close cleanup each have a bounded five-second grace. Standalone callers
-still await `shutdown_client_manager()` before closing the loop that owns active
-preview resources; reuse across separately created loops is not diagnosed or
-supported.
+constructs, uses and closes only the current request's SessionFs adapter,
+keeping SDK-specific persistence types behind that boundary. Cancellation
+remains session-scoped. The already-open provider is returned by the SDK's
+per-session callback factory before create/resume; the SDK builds its own RPC
+adapter. The public session request chooses create or resume without host
+history probes, and the SDK session is disconnected before its filesystem
+closes. Request deadlines bound lock waits, startup, execution and filesystem
+callbacks; abort, disconnect and adapter-close cleanup each have a bounded
+five-second grace. Startup failures attempt bounded immediate cleanup and keep
+the original startup error authoritative. Explicit async shutdown attempts
+graceful stop, then bounded `force_stop`, still attempts credential cleanup,
+reports cleanup failures without a deferred retry registry, and clears cached
+handles so stopped or closing resources are never reused. There is no `atexit`
+or process-exit cleanup contract if the host does not await shutdown.
+Standalone callers still await `shutdown_client_manager()` before closing the
+loop that owns active preview resources; reuse across separately created loops
+is not diagnosed or supported.
 
 The preview remains local-only and single-worker: startup rejects
 `FUNCTIONS_WORKER_PROCESS_COUNT` other than `1` and deployed
