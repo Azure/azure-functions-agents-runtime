@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -42,6 +42,18 @@ type AgentFunctionTool = FunctionTool | Callable[..., Any]
 type AgentTool = AgentFunctionTool | MCPTool
 
 
+class ToolCallEvidence(TypedDict):
+    """Framework-neutral evidence for one observed tool call."""
+
+    type: Literal["tool_start"]
+    tool_call_id: str | None
+    tool_name: str | None
+    arguments: Any
+    turn_id: NotRequired[str]
+    result: NotRequired[Any]
+    success: NotRequired[bool]
+
+
 def _runtime_timeout_default() -> float:
     env_timeout = runtime_env_value("AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS")
     if env_timeout:
@@ -67,10 +79,11 @@ class AgentResult:
     session_id: str
     content: str
     content_intermediate: list[str] = field(default_factory=list)
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    tool_calls: list[ToolCallEvidence] = field(default_factory=list)
     reasoning: str | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
     delegate_error_count: int = 0
+    model: str = "unknown"
 
 
 def _validate_session_id(session_id: str | None) -> str | None:

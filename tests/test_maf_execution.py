@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from agent_framework import BaseChatClient, ChatMiddlewareLayer, ChatResponse, Message
+from agent_framework import BaseChatClient, ChatMiddlewareLayer, ChatResponse, Content, Message
 
 from azure_functions_agents import runner
 from azure_functions_agents._agent_identity import agent_id
@@ -253,10 +253,10 @@ def test_configured_blob_history_failure_never_falls_back(monkeypatch):
 async def test_direct_result_and_usage_use_public_result_and_shared_recorder(monkeypatch, caplog):
     response = SimpleNamespace(
         text="",
-        messages=[SimpleNamespace(contents=[
-            SimpleNamespace(type="text", text="fallback"),
-            SimpleNamespace(type="function_call", call_id="call", name="tool", arguments="{}"),
-            SimpleNamespace(type="function_result", call_id="call", result="result"),
+        messages=[Message("assistant", [
+            Content("text", text="fallback"),
+            Content("function_call", call_id="call", name="tool", arguments="{}"),
+            Content("function_result", call_id="call", result="result"),
         ])],
         usage_details={"input_token_count": 3, "output_token_count": 2},
     )
@@ -271,8 +271,9 @@ async def test_direct_result_and_usage_use_public_result_and_shared_recorder(mon
     assert result.delegate_error_count == 2
     assert result.tool_calls == [{
         "type": "tool_start", "tool_call_id": "call", "tool_name": "tool",
-        "arguments": "{}", "result": "result",
+        "arguments": "{}", "result": "result", "turn_id": "response-0", "success": True,
     }]
+    assert result.model == "fixture"
     assert agent.run.call_args.kwargs["options"] == {
         "reasoning": {"effort": "low", "summary": "auto"}
     }
@@ -359,7 +360,7 @@ class _Stream:
 
 
 def item(kind, **kwargs):
-    return SimpleNamespace(type=kind, **kwargs)
+    return Content(kind, **kwargs)
 
 
 def install_stream(monkeypatch, stream, *, tracker=None):

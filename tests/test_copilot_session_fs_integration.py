@@ -3,7 +3,6 @@ from __future__ import annotations
 import errno
 import os
 import sys
-import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
@@ -417,7 +416,6 @@ def integration_route(environ: Mapping[str, str], local_dir: Path) -> StorageRou
             raise ValueError(f"{SERVICE_URI} requires an https service URI without SAS.")
     return StorageRoute(
         local_dir=local_dir,
-        correlation_key="integration-" + uuid.uuid4().hex,
         blob=BlobStorageSettings(
             container_name=container,
             connection_string=connection or None,

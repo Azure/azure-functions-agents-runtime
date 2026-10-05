@@ -308,10 +308,10 @@ harness's persistence implementation.
 **Identity and path construction.** Store ordinary local files or individual
 blobs at `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`.
 Reuse `_agent_identity.agent_id(slug)` unchanged: its readable result already
-includes the app correlation key and canonical agent slug. The correlation key
-joins the trimmed, available `WEBSITE_OWNER_NAME` and `WEBSITE_DEPLOYMENT_ID`
-(or `WEBSITE_SITE_NAME` fallback) with `/`, lowercases them, and uses `local`
-when no platform metadata is available. Do not add another app-identity segment
+includes the trimmed, lower-case `WEBSITE_SITE_NAME` (or `local` when blank or
+unset) and canonical agent slug. Owner and deployment metadata do not affect
+the ID. Consume this helper directly rather than freezing a separate identity
+prefix or duplicating its normalization. Do not add another app-identity segment
 or a separate hash/version scheme. Preserve existing session-ID validation and
 path containment. Store every SDK-requested file without a filename whitelist
 or interpretation of its contents.
@@ -447,6 +447,7 @@ restriction; its selected-persistence isolation and the contracts in decisions
 | 23 | Session concurrency boundary | Distributed leases/fencing/OS locks / process-local serialization | Match the current MAF boundary: serialize only same-session turns within a Python process, with bounded waiting and no distributed exclusion. Cross-worker overlap is unsupported and caller-owned. | Human (larohra) | 2026-10-02 |
 | 24 | Interface separation scope | Broad execution-interface rewrite / persistence-only boundary | Keep the interface split narrowly about persistence. Shared app/configuration/registration routes through the selected harness; MAF owns its existing history provider, Copilot owns SessionFs. Construct/use/close only the selected persistence adapter, without opposite-harness imports, storage initialization, history probes, or cleanup, and without expanding scope into unrelated tool/model/discovery refactors. | Human (larohra) | 2026-10-02 |
 | 25 | Harness organizational containment | Persistence-only separation / contain harness-specific execution and persistence together | Keep common app binding/request contracts, cleanup plumbing, and neutral storage settings under `harness/`; place MAF execution/history in `harness/agent_framework/` and Copilot execution/providers/SessionFs in `harness/copilot_sdk/`. Preserve public runner signatures, app-owned resource lifetimes, selected-persistence isolation, and all existing selection, persistence, role, and preview contracts. This supersedes only decision 24's organizational restriction, not its prohibition on unrelated tool/model/discovery redesign. | Human (larohra) | 2026-10-05 |
+| 26 | Shared agent identity authority | Retain owner/deployment correlation / consume the current shared site-qualified helper unchanged | Use `_agent_identity.agent_id(slug)` as the sole authority: trimmed, lower-case `WEBSITE_SITE_NAME` or `local`, followed by canonical slug. Keep `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}` and existing validation/containment; do not cache a separate identity prefix, restore owner/deployment inputs, or add migration/version logic. This supersedes decision 22's correlation-key assumption only; SDK ownership, storage selection and app-resource/provider/settings lifetimes remain unchanged. | Human (larohra) | 2026-10-05 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -466,7 +467,7 @@ where mocks cannot establish process, transport, authentication, or durability.
 | Delegation/workflows | Prove fresh same-specialist concurrent sessions, catalog/role isolation, no child SSE, parent cancellation and specialist-local errors, Workflow Sub Agent grants/results, existing management/Activity retry/timeout/authorization, and at-least-once semantics. |
 | Role storage/trigger execution | Run a non-HTTP trigger with its generated identity, serialization, logging/error behavior, and direct capabilities. Persistent direct state uses the selected harness's storage path only; delegates and Workflow Sub Agents leave no persistent Copilot session tree and dispose ephemeral state. |
 | SessionFs file contract | Exercise exact byte preservation and SDK-visible behavior for read, write, append, exists, stat, directory listing with entry types, mkdir, remove, rename, and documented file errors on both local and Blob adapters. Preserve all SDK-requested files opaquely rather than host-specific file whitelists or content interpretation. |
-| Identity/path isolation | Verify native paths reuse the shared agent ID, including its app correlation key exactly once, followed by validated session ID and SDK-relative path. Cover partial/local identity fallbacks and containment enforcement without introducing separate identity hashes. |
+| Identity/path isolation | Verify native paths consume the unchanged shared site-qualified agent ID exactly once, followed by validated session ID and SDK-relative path. Cover trimmed/mixed-case/blank site names, ignored owner/deployment values, local fallback and containment without adding identity hashes or cached prefixes. |
 | Backend configuration/errors | Verify Blob selection from existing storage configuration, local selection only when no Blob configuration is present, reuse of existing identity/container behavior, and explicit surfacing of Blob auth/network/configuration failures without fallback to local storage. |
 | Persistence boundary isolation | Verify that only the selected harness's persistence implementation is imported, initialized, exercised, and closed. The Copilot path must not probe or clean up MAF history storage, and the MAF path must not initialize Copilot SessionFs. |
 | Harness containment | Verify unchanged public runner exports/signatures and shared result, usage, and lock behavior after containing private execution/persistence implementations. App-bound resources remain isolated, standalone defaults remain cached, and shutdown visits only acquired owners. |
@@ -506,3 +507,7 @@ Keep documentation aligned with the runtime's implemented behavior:
   containment of harness-specific execution and persistence on 2026-10-05.
   Decision 25 records that boundary without changing selection, session ownership,
   storage, role, or preview behavior.
+- **Identity sign-off:** Laveesh Rohra (`larohra`) approved the unchanged shared
+  site-qualified identity authority on 2026-10-05. Decision 26 replaces the older
+  owner/deployment assumption without changing SDK session ownership or storage
+  configuration and without authorizing existing-data work.

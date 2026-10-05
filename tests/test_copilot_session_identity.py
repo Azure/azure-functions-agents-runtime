@@ -4,6 +4,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from azure_functions_agents._agent_identity import agent_id
 from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import (
     StorageMode,
     resolve_route,
@@ -69,19 +70,20 @@ def test_storage_precedence_and_values_are_frozen_without_secret_reprs(configure
     monkeypatch.delenv("AzureWebJobsStorage")
     monkeypatch.setenv("WEBSITE_SITE_NAME", "changed")
     assert route.mode is StorageMode.BLOB
-    assert session_prefix(route, "agent", "session") == "copilot-native/local/agent/session"
+    assert route.blob.connection_string == "AccountKey=fixture-secret"
+    assert session_prefix(route, "agent", "session") == "copilot-native/changed/agent/session"
     with pytest.raises(FrozenInstanceError):
-        route.correlation_key = "changed"
+        route.local_dir = configured / "changed"
 
 
 @pytest.mark.parametrize(
     ("owner", "deployment", "site", "expected"),
     [
         (None, None, None, "local"),
-        (" Owner+RG ", " Deployment ", "ignored", "owner+rg/deployment"),
-        (" Owner+RG ", None, " Site ", "owner+rg/site"),
-        (" Owner+RG ", None, None, "owner+rg"),
-        (None, " Deployment ", "ignored", "deployment"),
+        (" Owner+RG ", " Deployment ", "ignored", "ignored"),
+        (" Owner+RG ", None, " Site ", "site"),
+        (" Owner+RG ", None, None, "local"),
+        (None, " Deployment ", "ignored", "ignored"),
         (None, None, " Site ", "site"),
         ("  ", "\t", " Site ", "site"),
     ],
@@ -97,6 +99,7 @@ def test_native_paths_reuse_shared_readable_identity_once(
         if value is not None:
             monkeypatch.setenv(name, value)
     route = resolve_route(configured)
+    assert agent_id("agent_one") == f"{expected}/agent_one"
     assert session_prefix(route, "agent_one", "one.test") == (
         f"copilot-native/{expected}/agent_one/one.test"
     )
@@ -115,7 +118,7 @@ def test_agent_slug_is_validated_before_becoming_a_path(configured, slug):
 
 
 @pytest.mark.parametrize("site", ["../escape", "/absolute", "path\\escape", "path//escape"])
-def test_unsafe_shared_correlation_segments_are_not_adopted(configured, monkeypatch, site):
+def test_unsafe_shared_identity_segments_are_not_adopted(configured, monkeypatch, site):
     monkeypatch.setenv("WEBSITE_SITE_NAME", site)
     with pytest.raises(ValueError, match="identity"):
         session_prefix(resolve_route(configured), "agent", "session")
@@ -125,4 +128,3 @@ def test_blank_storage_settings_remain_unconfigured(configured, monkeypatch):
     monkeypatch.setenv("AzureWebJobsStorage", " ")
     monkeypatch.setenv("AzureWebJobsStorage__blobServiceUri", "\t")
     assert resolve_route(configured).mode is StorageMode.LOCAL
-

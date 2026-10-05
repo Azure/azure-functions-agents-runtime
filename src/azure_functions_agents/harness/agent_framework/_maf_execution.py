@@ -8,7 +8,7 @@ import json
 import sys
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from ..._agent_identity import agent_id
 from ..._function_tool import FunctionTool
@@ -27,9 +27,18 @@ from .. import _harness_execution
 from .._history_identity import validate_agent_slug
 
 if TYPE_CHECKING:
-    from agent_framework import Agent, AgentResponse, HistoryProvider, SupportsChatGetResponse
+    from agent_framework import (
+        Agent,
+        AgentResponse,
+        Content,
+        HistoryProvider,
+        Message,
+        RoleLiteral,
+        SupportsChatGetResponse,
+    )
 
     from azure_functions_agents import runner
+    from azure_functions_agents.runner import ToolCallEvidence
 
     from ...workflows.schema import WorkflowPlanPolicy
     from .._harness_binding import AppHarness
@@ -38,6 +47,7 @@ type AgentFunctionTool = FunctionTool | Callable[..., Any]
 type AgentTool = AgentFunctionTool | MCPTool
 
 _FINAL_USAGE_TIMEOUT_SECONDS = 1.0
+_ASSISTANT_ROLE: Final[RoleLiteral] = "assistant"
 
 
 def _response_usage_details(response: Any) -> Any:
@@ -322,22 +332,29 @@ async def _build_agent_session(
     return agent, session, resolved_id, delegate_error_tracker, inference_target
 
 
-def _content_type(item: Any) -> str:
-    """Return the content item's type, defaulting to an empty string."""
-    return str(getattr(item, "type", "") or "")
+def _content_type(item: Content) -> str:
+    """Return the declared Agent Framework content type."""
+    return item.type
 
 
-def _content_text(item: Any) -> str:
-    return str(getattr(item, "text", "") or "")
+def _content_text(item: Content) -> str:
+    return item.text or ""
 
 
-def _function_call_event(item: Any) -> dict[str, Any]:
-    return {
+def _function_call_event(item: Content, *, turn_id: str | None = None) -> ToolCallEvidence:
+    event: ToolCallEvidence = {
         "type": "tool_start",
-        "tool_call_id": getattr(item, "call_id", None) or getattr(item, "id", None),
-        "tool_name": getattr(item, "name", None),
-        "arguments": getattr(item, "arguments", None),
+        "tool_call_id": item.call_id or item.id,
+        "tool_name": item.name,
+        "arguments": item.arguments,
     }
+    if turn_id is not None:
+        event["turn_id"] = turn_id
+    return event
+
+
+def _message_role(message: Message) -> str:
+    return message.role
 
 
 def _merge_tool_arguments(previous: Any, current: Any) -> Any:
@@ -365,12 +382,12 @@ def _is_complete_json_argument(value: Any) -> bool:
     return True
 
 
-def _function_result_event(item: Any) -> dict[str, Any]:
+def _function_result_event(item: Content) -> dict[str, Any]:
     return {
         "type": "tool_end",
-        "tool_call_id": getattr(item, "call_id", None) or getattr(item, "id", None),
-        "tool_name": getattr(item, "name", None),
-        "result": getattr(item, "result", None),
+        "tool_call_id": item.call_id or item.id,
+        "tool_name": item.name,
+        "result": item.result,
     }
 
 
@@ -477,33 +494,42 @@ async def run_agent(
     if not text:
         try:
             for msg in response.messages:
-                for item in getattr(msg, "contents", None) or []:
+                for item in msg.contents:
                     if _content_type(item) == "text":
                         text += _content_text(item)
         except Exception as exc:
             logger.debug("Failed to extract response text: %s", exc)
 
-    tool_calls: list[dict[str, Any]] = []
+    tool_calls: list[ToolCallEvidence] = []
     try:
+        assistant_index = -1
         for msg in response.messages:
-            for item in getattr(msg, "contents", None) or []:
+            is_assistant = _message_role(msg) == _ASSISTANT_ROLE
+            if is_assistant:
+                assistant_index += 1
+            turn_id = f"response-{assistant_index}" if is_assistant else None
+            for item in msg.contents:
                 ctype = _content_type(item)
                 if ctype == "function_call":
-                    tool_calls.append(_function_call_event(item))
+                    tool_calls.append(_function_call_event(item, turn_id=turn_id))
                 elif ctype == "function_result":
-                    call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+                    call_id = item.call_id or item.id
+                    if not call_id:
+                        continue
                     matched = next(
                         (tc for tc in reversed(tool_calls) if tc.get("tool_call_id") == call_id),
                         None,
                     )
                     if matched is not None:
-                        matched["result"] = getattr(item, "result", None)
+                        matched["result"] = item.result
+                        matched["success"] = not _looks_like_tool_error(item.result)
     except Exception as exc:
         logger.debug("Failed to extract tool_calls: %s", exc)
 
     return runner.AgentResult(
         session_id=resolved_id,
         content=text,
+        model=inference_target.model or model or "unknown",
         tool_calls=tool_calls,
         delegate_error_count=delegate_error_tracker.count if delegate_error_tracker else 0,
     )
@@ -593,10 +619,10 @@ async def run_agent_stream(
                 deadline,
                 agent_slug=history_agent_slug,
             ):
-                pending_tool_calls: dict[str, dict[str, Any]] = {}
+                pending_tool_calls: dict[str, ToolCallEvidence] = {}
                 emitted_tool_calls: set[str] = set()
 
-                def buffer_function_call(item: Any) -> tuple[str | None, dict[str, Any]]:
+                def buffer_function_call(item: Content) -> tuple[str | None, ToolCallEvidence]:
                     event = _function_call_event(item)
                     call_id = event.get("tool_call_id")
                     if not isinstance(call_id, str) or not call_id:
@@ -619,7 +645,7 @@ async def run_agent_stream(
                     return call_id, pending
 
                 async def emit_tool_start_if_ready(
-                    call_id: str, event: dict[str, Any]
+                    call_id: str, event: ToolCallEvidence
                 ) -> AsyncIterator[str]:
                     if call_id in emitted_tool_calls:
                         return

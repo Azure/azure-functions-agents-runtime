@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 from ..._logger import logger
 from ...client_manager import InferenceTarget
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from copilot.tools import Tool, ToolInvocation, ToolResult
 
     from ..._function_tool import FunctionTool
-    from ...runner import AgentResult
+    from ...runner import AgentResult, ToolCallEvidence
     from ._copilot_providers import ProviderTokenSource
 
 
@@ -86,11 +86,11 @@ def _deny_permission(
     return PermissionDecisionDeniedByRules(rules=[])
 
 
-def _tool(function: FunctionTool, calls: list[dict[str, Any]]) -> Tool:
+def _tool(function: FunctionTool, calls: list[ToolCallEvidence]) -> Tool:
     from copilot.tools import Tool, ToolResult
 
     async def invoke(invocation: ToolInvocation) -> ToolResult:
-        record: dict[str, Any] = {
+        record: ToolCallEvidence = {
             "type": "tool_start",
             "tool_call_id": invocation.tool_call_id,
             "tool_name": function.name,
@@ -111,8 +111,10 @@ def _tool(function: FunctionTool, calls: list[dict[str, Any]]) -> Tool:
             logger.warning("Copilot custom tool failed: tool=%s", function.name)
             text = '{"error":"Custom tool failed or returned unsupported content."}'
             record["result"] = text
+            record["success"] = False
             return ToolResult(text_result_for_llm=text, result_type="failure")
         record["result"] = text
+        record["success"] = True
         return ToolResult(text_result_for_llm=text, result_type="success")
 
     return Tool(
@@ -202,7 +204,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     owner = get_runtime(harness)
     owner.admit_loop()
     copilot_id = _copilot_session_id(request.agent_slug, request.session_id)
-    calls: list[dict[str, Any]] = []
+    calls: list[ToolCallEvidence] = []
     messages: list[str] = []
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -326,6 +328,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     content=content,
                     content_intermediate=messages[:-1],
                     tool_calls=calls,
+                    model=request.model,
                 )
     except asyncio.CancelledError:
         raise

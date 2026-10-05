@@ -84,11 +84,11 @@ ordinary local file or one Blob for each SDK file, under this readable name:
 copilot-native/{agent_id}/{session_id}/{sdk_relative_path}
 ```
 
-`agent_id` is the shared `_agent_identity.agent_id(slug)` result: the app
-correlation key plus canonical agent slug. The correlation key slash-joins the
-trimmed, available `WEBSITE_OWNER_NAME` and `WEBSITE_DEPLOYMENT_ID` values,
-using `WEBSITE_SITE_NAME` in place of a missing deployment ID. It is lowercased;
-without platform metadata it is `local`. For agent `main` without platform metadata,
+`agent_id` is the unchanged shared `_agent_identity.agent_id(slug)` result:
+trimmed, lower-case `WEBSITE_SITE_NAME` plus canonical agent slug. An unset,
+empty or whitespace-only site name uses `local`; owner and deployment values
+do not affect it. The adapter calls this helper directly rather than caching
+or reconstructing an identity prefix. For agent `main` without a site name,
 the session prefix is `copilot-native/local/main/{session_id}/`.
 
 The name is relative to the configured Blob container or local storage root.

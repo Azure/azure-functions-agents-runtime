@@ -6,6 +6,12 @@
 
 One agent can also declare a `subagents:` list so its own model can call other agents as `delegate_<slug>` tools during a normal `agent.run()` — chat-time multi-agent delegation (FRD 0007). That feature layers a small amount of extra structure onto the same pipeline (an app-wide identity index and an immutable, slug-keyed catalog built before any `FunctionApp` mutation) rather than introducing a new one; see Section 5, "Multi-agent delegation (subagents)".
 
+Agent evaluation is external and cross-cutting rather than a startup pipeline stage. The preview
+Vally executor invokes the existing synchronous chat route under Core Tools or in staging and
+translates generic response/tool evidence into a Vally trajectory. Vally owns stimuli, graders,
+repeated trials, scores, reports and CI verdicts; the executor does not add a second discovery,
+composition, registration or execution path (FRD 0010).
+
 ## 2. High-level data flow
 
 ```mermaid
@@ -65,7 +71,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/config/loader.py` | Loads YAML front matter and `agents.config.yaml` into typed models. | `load_agent_specs()`, `load_global_config()` |
 | `azure_functions_agents/config/merge.py` | Applies defaults, overrides, and per-agent filters to produce runtime config, including each agent's identity `slug` (via `_slug.py`) and its normalized `subagents` list. | `compose()` |
 | `azure_functions_agents/_slug.py` | Derives an agent's identity slug from its `.agent.md` filename (and the `delegate_<slug>` tool-name convention) in one shared place, so naming, config composition, and delegation can never compute a slug differently. | `_function_name_from_source()`, `delegate_tool_name()` |
-| `azure_functions_agents/_agent_identity.py` | Derives a deterministic, human-readable MAF agent id from a best-effort app correlation key (platform owner plus deployment id/site name when available) and canonical agent slug for telemetry and external registration flows; no UUID is generated. | `resolve_app_correlation_key()`, `agent_id()` |
+| `azure_functions_agents/_agent_identity.py` | Sole shared identity authority: trimmed, lower-case `WEBSITE_SITE_NAME` (or `local`) plus canonical slug. MAF and Copilot consume this helper unchanged; owner/deployment metadata does not affect it. | `agent_id()` |
 | `azure_functions_agents/harness/_history_identity.py` | Shared SDK-free canonical slug validation, consumed by both selected implementations. | `validate_agent_slug()` |
 | `azure_functions_agents/harness/agent_framework/_maf_blob_history.py`, `_maf_file_history.py` | Preserve MAF JSONL history by agent/session identity. Imported and used only on the MAF path; acquired Blob clients and owned credentials register their shutdown callback. | `BlobHistoryProvider`, `ScopedFileHistoryProvider`, `_maf_blob_history.shutdown()` |
 | `azure_functions_agents/harness/_session_storage.py` | Harness-neutral Blob configuration, storage-specific identity/container precedence, sanitized backend errors, and owned service/credential construction. Does not import either persistence implementation. | `BlobStorageSettings`, `SessionStorageError`, `blob_storage_from_environment()`, `open_blob_service()` |
@@ -84,7 +90,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/registration/_auth.py` | Enforces inbound endpoint auth: maps the configured `auth.mode` to a Functions `AuthLevel` (API key / anonymous) and enforces Entra ID identity by trusting the platform-validated Easy Auth `x-ms-client-principal` header (never validating tokens in-app), with optional tenant/audience/client-id allowlists. Because `entra` routes are anonymous, the header is trusted only with non-spoofable evidence Easy Auth is enforced (`WEBSITE_AUTH_ENABLED` / `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH`); fails closed (401) otherwise. | `resolve_endpoint_auth_level()`, `authorize_entra_request()` |
 | `azure_functions_agents/system_tools/sandbox.py` | Builds the ACA Dynamic Sessions-backed `execute_python` tool for a resolved agent/session, using a fresh GUID when no explicit session id is provided. | `create_sandbox_tools()` |
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
-| `azure_functions_agents/runner.py` | Public result/defaults/signatures, input and delegate policy, and selected-path lazy dispatch. Keeps the host tool-assembly and `delegate_<slug>` hooks; implementations reuse the same public `AgentResult`. | `AgentResult`, `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
+| `azure_functions_agents/runner.py` | Public result/defaults/signatures, input and delegate policy, and selected-path lazy dispatch. Keeps host tool/delegate hooks and the canonical `AgentResult` / `ToolCallEvidence`; implementations return effective model and completed tool evidence, including deterministic MAF response batch IDs and result success. | `AgentResult`, `ToolCallEvidence`, `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
 | `azure_functions_agents/harness/agent_framework/_maf_execution.py` | MAF role/session construction, non-streaming and streaming execution, event interpretation, and teardown. Preserves stable IDs, readable names, provider options, history, and stateless specialist roles; calls the top-level runner's host hooks at execution time. | `run_agent()`, `run_agent_stream()`, `run_leaf_agent_task()` |
 | `azure_functions_agents/harness/_harness_execution.py` | One shared usage recorder and bounded process-local `(agent_slug, session_id)` lock implementation, consumed through module-qualified access by both harnesses. | `_AgentUsageRecorder`, `_session_lock_bounded_by()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable MAF inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. Its pure internal built-in resolver preserves MAF provider/model precedence without constructing a chat client; an identity check protects Copilot from custom-manager fallback. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
@@ -107,6 +113,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/workflows/schema.py`, `workflows/tools.py` | Define workflow plans and policies, including the data-driven `when` predicate, bounded `for_each`, plan-authored retry, timeout, and continuation, and per-field decorator precedence. Start-time validation freezes the effective execution policy into orchestration input. Continuation stays plan-only. List/status/cancel/terminate operations use the captured workflow-agent policy and agent/session identity. | `WorkflowPlanPolicy`, `WorkflowTaskExecution`, `WorkflowCondition`, `validate_plan()`, `resolve_workflow_task_execution()`, `build_workflow_tools()` |
 | `azure_functions_agents/_function_tool.py` | Thin local shim around MAF `FunctionTool` creation so project tools can use `@tool`, plus `@workflow_tool` metadata for Dynamic Workflow Activity targets. | `tool()`, `workflow_tool()` |
 | `azure_functions_agents/_logger.py` | Shared package logger used across discovery, registration, and runtime code. | `logger` |
+| `integrations/vally-executor-azure-functions/` | Private, path-loadable Vally 0.16.0 executor for the existing synchronous chat endpoint. Owns target authentication, isolated sessions, hard deadlines, response checking and trajectory conversion, not graders, scoring or reports. Python runtime modules do not import Vally contracts. | `AzureFunctionsAgentExecutor`, `registerExecutors()` |
 | `azure_functions_agents/_observability.py` | Cross-cutting OpenTelemetry bootstrap and conventions: enables MAF `gen_ai` instrumentation and, when the optional `[monitor]` extra is installed, the Azure Monitor exporter, provides the `af.*` span/attribute helpers (fault domain, lifecycle stage), the resolved sensitive-data flag from `ENABLE_SENSITIVE_DATA`, minimal dynamic-session and delegate-call metrics, and third-party log-noise control. | `configure_observability()`, `start_span()`, `current_span()`, `FaultDomain`, `LifecycleStage`, `record_delegate_call()` |
 
 ### How the packages line up
@@ -228,8 +235,8 @@ Registration does not run the agent itself. Instead, `registration/_handlers.py`
 authored `null` values to clear inherited leaves or subtrees,
 then validates the effective token limits. `ResolvedAgent.agent_configuration` is always a concrete
 configuration object. With the default MAF harness, the runner constructs every role with MAF's
-`create_harness_agent`. The shared builder keeps MAF `id` as the full stable
-correlation-key/slug value and uses `<Function App name>/<canonical slug>` for MAF
+`create_harness_agent`. The shared builder uses the unchanged site-qualified
+`agent_id(slug)` for MAF `id` and `<Function App name>/<canonical slug>` for MAF
 `name` when the trimmed `WEBSITE_SITE_NAME` is non-blank, preserving site-name
 casing. Without site metadata it preserves the caller's name, including an omitted
 `None`; with site metadata an omitted or empty name uses `main`. These MAF names
@@ -387,12 +394,10 @@ The native namespace is:
 copilot-native/{agent_id}/{session_id}/{sdk_relative_path}
 ```
 
-`agent_id` comes from `_agent_identity.agent_id(slug)` and already includes
-the shared app correlation key and canonical slug. The correlation key
-slash-joins the trimmed, available `WEBSITE_OWNER_NAME` and
-`WEBSITE_DEPLOYMENT_ID` values, using `WEBSITE_SITE_NAME` in place of a missing
-deployment ID. It is lowercased and becomes `local` when platform metadata is
-absent. There is no additional app segment or host format version. Session IDs
+`agent_id` comes directly from unchanged `_agent_identity.agent_id(slug)`:
+trimmed, lower-case `WEBSITE_SITE_NAME` (or `local`) and canonical slug. Owner
+and deployment values do not affect the ID. No separate prefix is cached or
+reconstructed, and there is no additional app segment or host format version. Session IDs
 retain their existing validation, and normalized SDK paths must stay within
 the adapter's configured filesystem roots.
 

@@ -1271,7 +1271,7 @@ async def test_real_maf_leaf_span_reports_agent_name_and_stable_id(
     assert invoke_span.attributes is not None
     assert invoke_span.attributes.get("gen_ai.agent.name") == expected_name
     assert invoke_span.attributes.get("gen_ai.agent.id") == (
-        "sub+rg-eastuswebspace/deployment-123/billing"
+        f"{site_name.lower() if site_name else 'local'}/billing"
     )
     assert invoke_span.attributes.get("gen_ai.agent.name") != resolved.name
 
