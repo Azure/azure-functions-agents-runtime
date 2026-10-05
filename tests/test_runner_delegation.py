@@ -37,8 +37,6 @@ from agent_framework import MCPStreamableHTTPTool, tool
 import azure_functions_agents._observability as obs
 import azure_functions_agents.runner as runner
 from azure_functions_agents._function_tool import tool as runtime_tool
-from azure_functions_agents._harness import AppHarness, HarnessKind
-from azure_functions_agents._maf_tools import build_maf_tools
 from azure_functions_agents._tool_descriptor import ToolDescriptor, describe_tool
 from azure_functions_agents.client_manager import (
     ClientManager,
@@ -56,6 +54,9 @@ from azure_functions_agents.config.schema import (
     ToolsFilter,
 )
 from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
+from azure_functions_agents.harness.agent_framework import _maf_execution as maf
+from azure_functions_agents.harness.agent_framework._maf_tools import build_maf_tools
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows.schema import WorkflowPlanPolicy
@@ -427,7 +428,7 @@ def test_build_delegated_agent_never_wires_its_own_declared_subagents() -> None:
         instructions="handle billing",
     )
 
-    agent, _ = runner._build_delegated_agent(resolved, AgentCapabilities())
+    agent, _ = maf._build_delegated_agent(resolved, AgentCapabilities())
 
     # Structural proof of single-level delegation (Decision #6): even though
     # `resolved.subagents` is non-empty, _build_delegated_agent's signature
@@ -523,7 +524,7 @@ def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and
     )
 
     coordinator_chat_client = get_client_manager().build_chat_client("coordinator-model")
-    runner._build_role_agent(
+    maf._build_role_agent(
         coordinator_chat_client,
         agent_instructions="be a coordinator",
         tools=[coordinator_only_tool],
@@ -533,7 +534,7 @@ def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and
         agent_configuration=AgentConfiguration(),
     )
 
-    runner._build_delegated_agent(billing_resolved, billing_capabilities)
+    maf._build_delegated_agent(billing_resolved, billing_capabilities)
 
     coordinator_client, coordinator_options = captured[0]
     billing_client, billing_options = captured[1]
@@ -570,7 +571,7 @@ async def test_single_level_delegation_end_to_end_with_mutual_subagents_refs_doe
     catalog = _catalog_of(("a", resolved_a), ("b", resolved_b))
 
     built_agents: list[Any] = []
-    real_build_delegated_agent = runner._build_delegated_agent
+    real_build_delegated_agent = maf._build_delegated_agent
 
     def _capturing_build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Any:
         agent, inference_target = real_build_delegated_agent(resolved, capabilities)
@@ -985,7 +986,7 @@ async def test_delegate_adapter_effective_timeout_uses_coordinator_remaining_whe
     # budget-exhausted check returns *before ever calling the builder at
     # all*, not just before running the specialist's `respond()` body.
     build_calls = 0
-    original_build_delegated_agent = runner._build_delegated_agent
+    original_build_delegated_agent = maf._build_delegated_agent
 
     def _counting_build_delegated_agent(resolved: ResolvedAgent, caps: AgentCapabilities) -> Any:
         nonlocal build_calls
@@ -1053,7 +1054,7 @@ async def test_delegate_adapter_concurrent_calls_to_same_specialist_run_on_indep
     """FRD 0007 §5 Decision #20 (revised #14): no per-specialist lock.
 
     Because ``_build_delegate_tool``'s handler builds a FRESH specialist
-    ``Agent`` on every call (:func:`runner._build_delegated_agent`), two
+    ``Agent`` on every call (:func:`maf._build_delegated_agent`), two
     concurrent calls to the *same* declared specialist never share a live
     agent instance to race — or serialize — on. This replaces the old
     lock-based design's ``test_delegate_adapter_serializes_concurrent_calls_
@@ -1310,7 +1311,7 @@ async def test_real_maf_leaf_span_reports_agent_name_and_stable_id(
     assert invoke_span.attributes is not None
     assert invoke_span.attributes.get("gen_ai.agent.name") == expected_name
     assert invoke_span.attributes.get("gen_ai.agent.id") == (
-        "sub+rg-eastuswebspace/deployment-123/billing"
+        f"{site_name.lower() if site_name else 'local'}/billing"
     )
     assert invoke_span.attributes.get("gen_ai.agent.name") != resolved.name
 

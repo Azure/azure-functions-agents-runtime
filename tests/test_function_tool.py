@@ -9,23 +9,23 @@ from unittest.mock import Mock
 import pytest
 from pydantic import BaseModel, field_validator
 
-from azure_functions_agents import _maf_tools
 from azure_functions_agents._function_tool import (
     get_workflow_tool_handler,
     get_workflow_tool_metadata,
     tool,
     workflow_tool,
 )
-from azure_functions_agents._harness import (
+from azure_functions_agents._tool_descriptor import ToolDescriptor, describe_tool
+from azure_functions_agents.config.schema import AgentConfiguration
+from azure_functions_agents.discovery.skills import SkillDescriptor
+from azure_functions_agents.harness._harness_binding import (
     AppHarness,
     HarnessKind,
     HarnessRequest,
     UnsupportedCapabilityError,
-    prepare_tools,
 )
-from azure_functions_agents._tool_descriptor import ToolDescriptor, describe_tool
-from azure_functions_agents.config.schema import AgentConfiguration
-from azure_functions_agents.discovery.skills import SkillDescriptor
+from azure_functions_agents.harness.agent_framework import _maf_execution, _maf_tools
+from azure_functions_agents.harness.copilot_sdk._copilot_preview import prepare_tools
 
 
 def test_ordinary_authoring_never_constructs_maf_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -309,7 +309,7 @@ async def test_maf_adapter_preserves_caller_skill_source_path_intent(
 
     async def capture(**kwargs: Any) -> Any:
         seen.append(kwargs["skill_paths"])
-        _maf_tools._build_role_agent(
+        _maf_execution._build_role_agent(
             Mock(),
             agent_instructions=None,
             tools=(),
@@ -320,7 +320,7 @@ async def test_maf_adapter_preserves_caller_skill_source_path_intent(
         )
         raise RuntimeError("captured source paths")
 
-    monkeypatch.setattr(_maf_tools._runner, "_build_agent_session", capture)
+    monkeypatch.setattr(_maf_execution._runner, "_build_agent_session", capture)
     harness = AppHarness(HarnessKind.MAF, Path.cwd())
     options = {
         "timeout": 1,
@@ -339,13 +339,13 @@ async def test_maf_adapter_preserves_caller_skill_source_path_intent(
     }
     if streaming:
         events = [
-            event async for event in _maf_tools.run_stream(harness, request, display_name=None, **options)
+            event async for event in _maf_execution.run_stream(harness, request, display_name=None, **options)
         ]
         assert len(events) == 1
         assert "captured source paths" in events[0]
     else:
         with pytest.raises(RuntimeError, match="captured source paths"):
-            await _maf_tools.run(harness, request, **options)
+            await _maf_execution.run(harness, request, **options)
     assert seen == [expected]
     if expected:
         provider.from_paths.assert_called_once_with(

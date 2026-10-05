@@ -12,8 +12,8 @@ from typing import Any
 
 import pytest
 
-from azure_functions_agents import _harness
 from azure_functions_agents.config import paths
+from azure_functions_agents.harness import _harness_binding as _harness
 
 
 def _load_verifier():

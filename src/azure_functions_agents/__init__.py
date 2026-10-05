@@ -110,7 +110,6 @@ except ImportError:
 
 
 from ._function_tool import tool, workflow_tool  # noqa: E402
-from ._harness import _shutdown_harnesses  # noqa: E402
 from .app import create_function_app  # noqa: E402
 from .client_manager import (  # noqa: E402
     ClientManager,
@@ -120,6 +119,7 @@ from .client_manager import (  # noqa: E402
 )
 from .client_manager import shutdown_client_manager as _shutdown_client_manager  # noqa: E402
 from .config.paths import resolve_config_dir, set_app_root  # noqa: E402
+from .harness._harness_lifecycle import _shutdown_harnesses  # noqa: E402
 from .runner import (  # noqa: E402
     DEFAULT_MODEL,
     DEFAULT_TIMEOUT,

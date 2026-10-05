@@ -211,7 +211,7 @@ def describe_tool(candidate: ToolInput) -> ToolDescriptor:
     if isinstance(candidate, ToolDescriptor):
         return candidate
     if _is_maf_tool(candidate):
-        from ._maf_tools import describe_maf_tool
+        from .harness.agent_framework._maf_tools import describe_maf_tool
 
         return describe_maf_tool(candidate)
     from ._function_tool import tool

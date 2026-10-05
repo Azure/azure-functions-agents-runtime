@@ -13,7 +13,6 @@ import azure.functions as func
 import pytest
 from azure.durable_functions import DurableFunctionsClient
 
-from azure_functions_agents._harness import AppHarness, HarnessKind
 from azure_functions_agents._session_id import SESSION_ID_PATTERN
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
@@ -23,6 +22,7 @@ from azure_functions_agents.config.schema import (
 )
 from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.discovery.skills import SkillDescriptor
+from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.registration._naming import _function_name_from_source
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
@@ -33,7 +33,7 @@ from azure_functions_agents.registration.endpoints import (
     _run_builtin_agent_stream,
     register_builtin_endpoints,
 )
-from azure_functions_agents.runner import _SESSION_ID_PATTERN
+from azure_functions_agents.runner import _SESSION_ID_PATTERN, AgentResult
 from azure_functions_agents.workflows.context import (
     new_workflow_instance_id,
     session_instance_prefix,
@@ -145,6 +145,47 @@ def _resolved_agent(
         metadata={},
         source_file=str(source) if source is not None else None,
     )
+
+
+def test_unbound_stream_captures_validated_harness_before_runtime_effects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from azure_functions_agents.registration import endpoints
+
+    resolved = _resolved_agent(
+        name="Agent", is_main=True, builtin_endpoints=BuiltinEndpointsConfig(), slug="agent"
+    )
+    capabilities = AgentCapabilities()
+    harness = AppHarness(HarnessKind.MAF, tmp_path)
+    order: list[str] = []
+    captured: dict[str, Any] = {}
+    expected = object()
+
+    def bind(actual_resolved: ResolvedAgent, actual_capabilities: AgentCapabilities) -> AppHarness:
+        assert actual_resolved is resolved
+        assert actual_capabilities is capabilities
+        order.append("bind")
+        return harness
+
+    def sandbox(*args: Any) -> list[Any]:
+        order.append("sandbox")
+        return []
+
+    def stream(prompt: str, **kwargs: Any) -> Any:
+        order.append("stream")
+        captured.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(endpoints, "bind_harness", bind)
+    monkeypatch.setattr(endpoints, "build_sandbox_tools_for_session", sandbox)
+    monkeypatch.setattr(endpoints, "_run_agent_stream", stream)
+
+    assert _run_builtin_agent_stream(
+        "prompt", resolved=resolved, capabilities=capabilities, session_id="session"
+    ) is expected
+    assert order == ["bind", "sandbox", "stream"]
+    assert captured["_harness"] is harness
+    assert capabilities._harness is None
 
 
 def _response_text(response: func.HttpResponse) -> str:
@@ -530,7 +571,12 @@ def test_debug_chat_endpoint_skips_input_schema_validation(
     async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
         run_calls["prompt"] = prompt
         run_calls["kwargs"] = kwargs
-        return SimpleNamespace(session_id="session-123", content="ok", tool_calls=[])
+        return SimpleNamespace(
+            session_id="session-123",
+            content="ok",
+            model="gpt-test",
+            tool_calls=[],
+        )
 
     monkeypatch.setattr(
         "azure_functions_agents.registration.endpoints._run_builtin_agent",
@@ -548,8 +594,10 @@ def test_debug_chat_endpoint_skips_input_schema_validation(
     assert json.loads(_response_text(response)) == {
         "session_id": "session-123",
         "response": "ok",
+        "model": "gpt-test",
         "tool_calls": [],
     }
+    assert response.headers["x-ms-session-id"] == "session-123"
     assert run_calls["prompt"] == "hello"
 
 
@@ -617,11 +665,19 @@ def test_handle_chat_reports_delegate_error_count_on_span(
     )
     spans = _install_start_span_capture(monkeypatch)
 
-    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
-        return SimpleNamespace(
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> AgentResult:
+        return AgentResult(
             session_id="session-123",
             content="ok, but the billing specialist failed",
-            tool_calls=[{"name": "delegate_billing", "result": "ok"}],
+            tool_calls=[
+                {
+                    "type": "tool_start",
+                    "tool_call_id": "delegate-1",
+                    "tool_name": "delegate_billing",
+                    "arguments": {},
+                    "result": "ok",
+                }
+            ],
             delegate_error_count=2,
         )
 
@@ -666,11 +722,10 @@ def test_handle_mcp_agent_chat_reports_delegate_error_count_on_span(
     )
     spans = _install_start_span_capture(monkeypatch)
 
-    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
-        return SimpleNamespace(
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> AgentResult:
+        return AgentResult(
             session_id="session-456",
             content="ok, but the shipping specialist failed",
-            tool_calls=[],
             delegate_error_count=1,
         )
 
@@ -691,6 +746,7 @@ def test_handle_mcp_agent_chat_reports_delegate_error_count_on_span(
     assert json.loads(result) == {
         "session_id": "session-456",
         "response": "ok, but the shipping specialist failed",
+        "model": "unknown",
         "tool_calls": [],
     }
     [span] = spans
@@ -720,13 +776,11 @@ def test_handle_mcp_agent_chat_refreshes_span_session_id_when_caller_omits_it(
     )
     spans = _install_start_span_capture(monkeypatch)
 
-    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> AgentResult:
         assert kwargs["session_id"] is None  # caller omitted it
-        return SimpleNamespace(
+        return AgentResult(
             session_id="runner-generated-session-id",
             content="ok",
-            tool_calls=[],
-            delegate_error_count=0,
         )
 
     monkeypatch.setattr(
@@ -944,9 +998,9 @@ def test_workflows_enabled_passes_client_to_run_builtin_agent(
     )
     run_calls: dict[str, Any] = {}
 
-    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> AgentResult:
         run_calls["kwargs"] = kwargs
-        return SimpleNamespace(session_id="session-123", content="ok", tool_calls=[])
+        return AgentResult(session_id="session-123", content="ok")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration.endpoints._run_builtin_agent",
@@ -1125,9 +1179,9 @@ def test_workflows_disabled_does_not_pass_client_to_run_builtin_agent(
     )
     run_calls: dict[str, Any] = {}
 
-    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> AgentResult:
         run_calls["kwargs"] = kwargs
-        return SimpleNamespace(session_id="session-123", content="ok", tool_calls=[])
+        return AgentResult(session_id="session-123", content="ok")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration.endpoints._run_builtin_agent",
@@ -1193,7 +1247,7 @@ def test_history_endpoint_returns_empty_without_session_header(
         return None
 
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         fake_build,
     )
     app = FakeFunctionApp()
@@ -1226,7 +1280,7 @@ def test_history_endpoint_returns_empty_when_storage_unconfigured(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         lambda **kwargs: None,
     )
     app = FakeFunctionApp()
@@ -1254,7 +1308,7 @@ def test_history_endpoint_filters_to_user_and_assistant_text(
         ]
     )
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         lambda **kwargs: provider,
     )
     app = FakeFunctionApp()
@@ -1290,7 +1344,7 @@ def test_history_endpoint_passes_route_slug_to_storage_lookup(
         return provider
 
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         fake_build,
     )
     app = FakeFunctionApp()
@@ -1336,7 +1390,7 @@ def test_resolved_slug_is_used_by_routes_chat_stream_mcp_and_history(
         fake_run_builtin_agent_stream,
     )
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         lambda *, agent_slug: calls.append(("history", agent_slug)) or provider,
     )
     app = FakeFunctionApp()
@@ -1433,7 +1487,7 @@ def test_history_endpoints_keep_same_session_independent_across_agents(
         "support": _FakeHistoryProvider([SimpleNamespace(role="assistant", text="support")]),
     }
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         lambda *, agent_slug: providers[agent_slug],
     )
     app = FakeFunctionApp()
@@ -1484,7 +1538,7 @@ def test_history_endpoint_caps_to_latest_messages(
         ]
     )
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         lambda **kwargs: provider,
     )
     app = FakeFunctionApp()
@@ -1513,7 +1567,7 @@ def test_history_endpoint_returns_500_on_provider_error(
             raise RuntimeError("boom")
 
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         lambda **kwargs: _BoomProvider(),
     )
     app = FakeFunctionApp()
@@ -1594,8 +1648,8 @@ def test_entra_chat_with_easy_auth_principal_proceeds(
     app = FakeFunctionApp()
     resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
 
-    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
-        return SimpleNamespace(session_id="s-1", content="ok", tool_calls=[])
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> AgentResult:
+        return AgentResult(session_id="s-1", content="ok")
 
     monkeypatch.setattr(
         "azure_functions_agents.registration.endpoints._run_builtin_agent",

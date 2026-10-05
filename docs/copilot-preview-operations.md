@@ -171,11 +171,11 @@ ordinary local file or one Blob for each SDK file, under this readable name:
 copilot-native/{agent_id}/{session_id}/{sdk_relative_path}
 ```
 
-`agent_id` is the shared `_agent_identity.agent_id(slug)` result: the app
-correlation key plus canonical agent slug. The correlation key slash-joins the
-trimmed, available `WEBSITE_OWNER_NAME` and `WEBSITE_DEPLOYMENT_ID` values,
-using `WEBSITE_SITE_NAME` in place of a missing deployment ID. It is lowercased;
-without platform metadata it is `local`. For agent `main` without platform metadata,
+`agent_id` is the unchanged shared `_agent_identity.agent_id(slug)` result:
+trimmed, lower-case `WEBSITE_SITE_NAME` plus canonical agent slug. An unset,
+empty or whitespace-only site name uses `local`; owner and deployment values
+do not affect it. The adapter calls this helper directly rather than caching
+or reconstructing an identity prefix. For agent `main` without a site name,
 the session prefix is `copilot-native/local/main/{session_id}/`.
 
 The name is relative to the configured Blob container or local storage root.
@@ -280,7 +280,11 @@ Use isolated local settings or offline fixtures, not a customer's storage:
 - The preview requires a local host and a single Functions worker. An app
   with the flag on fails to start when
   `FUNCTIONS_WORKER_PROCESS_COUNT` is set to anything other than `1`, or when
-  `WEBSITE_INSTANCE_ID` shows a deployed Functions instance. Both rejections are
+  `WEBSITE_INSTANCE_ID` shows a deployed Functions instance. These are
+  **pre-existing Azure Functions platform settings**, not settings introduced
+  by this feature. Rejecting these values is this runtime's bounded preview
+  qualification policy, not a Copilot SDK or Functions platform limitation.
+  Both rejections are
   `UnsupportedCapabilityError`s raised before any native process, download or
   provider call. They stay until deployed-host and multi-worker qualification
   lands (issues #1357 and #1337).

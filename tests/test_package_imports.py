@@ -83,10 +83,12 @@ from pathlib import Path
 
 selected, root = sys.argv[1], Path(sys.argv[2])
 opposite = (
-    ["azure_functions_agents._copilot", "azure_functions_agents._copilot_session_fs",
-     "azure_functions_agents._native_session_identity", "copilot"]
+    ["azure_functions_agents.harness.copilot_sdk", "copilot"]
     if selected == "maf"
-    else ["azure_functions_agents._blob_history", "azure_functions_agents._file_history"]
+    else [
+        "azure_functions_agents.harness.agent_framework._maf_blob_history",
+        "azure_functions_agents.harness.agent_framework._maf_file_history",
+    ]
 )
 for name in opposite:
     sys.modules[name] = None
@@ -105,13 +107,14 @@ for name in (
     os.environ.pop(name, None)
 
 import azure_functions_agents as runtime
-from azure_functions_agents import _harness, runner
+from azure_functions_agents import runner
+from azure_functions_agents.harness import _harness_binding as _harness
 
 async def run():
     harness = _harness.get_harness(root, new_app=True)
     if selected == "copilot":
         import copilot
-        from tests.test_copilot import _fake_client
+        from tests.test_copilot_execution import _fake_client
         client = _fake_client()
         copilot.CopilotClient = lambda **kwargs: client
         result = await runner.run_agent("offline", tools=[], mcp_tools=[], _harness=harness)
@@ -120,7 +123,8 @@ async def run():
         client.stop.assert_awaited_once()
     else:
         from agent_framework import Message
-        provider = runner._build_history_provider("agent")
+        from azure_functions_agents.harness.agent_framework import _maf_execution
+        provider = _maf_execution._build_history_provider("agent")
         await provider.save_messages("session", [Message("user", ["ordinary MAF history"])])
         assert [message.text for message in await provider.get_messages("session")] == [
             "ordinary MAF history"

@@ -14,7 +14,10 @@ from copilot.session_events import (
 from copilot.tools import ToolInvocation, ToolResult
 from pydantic import BaseModel
 
-from azure_functions_agents._copilot_tool_calls import CopilotToolCalls, tool_result_text
+from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import (
+    CopilotToolCalls,
+    tool_result_text,
+)
 from azure_functions_agents.registration._handlers import _tool_error_count
 
 
@@ -92,6 +95,7 @@ def test_native_start_and_completion_are_one_public_call(name):
         "tool_name": name,
         "arguments": {"value": "safe"},
         "result": '{"ok":true}',
+        "success": True,
     }]
     assert _tool_error_count(recorded.calls) == 0
 
@@ -156,8 +160,9 @@ def test_native_failures_and_denials_use_the_existing_error_result_accounting():
     assert "private" not in repr(recorded.calls)
     assert "reasoning" not in repr(recorded.calls)
     assert set(recorded.calls[0]) == {
-        "type", "tool_call_id", "tool_name", "arguments", "result",
+        "type", "tool_call_id", "tool_name", "arguments", "result", "success",
     }
+    assert all(call["success"] is False for call in recorded.calls)
 
 
 def test_native_results_project_only_public_text_not_envelopes_or_hidden_content():

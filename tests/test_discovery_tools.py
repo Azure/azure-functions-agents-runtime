@@ -132,7 +132,7 @@ def test_discover_user_tools_returns_empty_when_tools_dir_missing(tmp_path: Path
 def test_discovery_records_neutral_metadata_without_maf_construction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from azure_functions_agents import _maf_tools
+    from azure_functions_agents.harness.agent_framework import _maf_tools
 
     def forbidden(**kwargs):
         raise AssertionError("Discovery must not construct MAF tools")

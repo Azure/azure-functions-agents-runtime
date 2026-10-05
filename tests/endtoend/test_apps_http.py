@@ -222,7 +222,7 @@ def test_structured_report_happy_path(structured_io_host: Served) -> None:
 
 @requires_llm
 def test_chat_happy_path(builtin_endpoints_host: Served) -> None:
-    """A valid chat request returns 200 with a response payload and session id."""
+    """A valid chat request returns the runtime evidence consumed by external evaluators."""
     client, endpoints = builtin_endpoints_host
     chat = find_endpoint(endpoints, route_exact="agents/main/chat", method="POST")
 
@@ -230,7 +230,7 @@ def test_chat_happy_path(builtin_endpoints_host: Served) -> None:
 
     expect_status(resp, 200)
     expect_header(resp, "x-ms-session-id")
-    expect_json_keys(resp, ("session_id", "response"))
+    expect_json_keys(resp, ("session_id", "response", "model", "tool_calls"))
 
 
 # --------------------------------------------------------------------------- #

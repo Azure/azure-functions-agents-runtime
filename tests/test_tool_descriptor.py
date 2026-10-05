@@ -167,20 +167,11 @@ def test_sdk_imports_stay_in_named_adapter_and_legacy_boundaries() -> None:
     source = Path(__file__).resolve().parents[1] / "src" / "azure_functions_agents"
     maf_boundaries = {
         "__init__.py",
-        "_maf_tools.py",
-        "_maf_mcp.py",
         "client_manager.py",
         "_observability.py",
-        "_blob_history.py",
-        "_file_history.py",
     }
-    copilot_boundaries = {
-        "_copilot.py",
-        "_copilot_capabilities.py",
-        "_copilot_providers.py",
-        "_copilot_session_fs.py",
-        "_copilot_tool_calls.py",
-    }
+    maf_package = source / "harness" / "agent_framework"
+    copilot_package = source / "harness" / "copilot_sdk"
     violations: list[str] = []
     for path in source.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -202,8 +193,15 @@ def test_sdk_imports_stay_in_named_adapter_and_legacy_boundaries() -> None:
                 if import_call and isinstance(argument, ast.Constant) and isinstance(argument.value, str):
                     modules = [argument.value]
             for module in modules:
-                if module.startswith("agent_framework") and path.name not in maf_boundaries:
+                if (
+                    module.startswith("agent_framework")
+                    and path.parent != maf_package
+                    and path.name not in maf_boundaries
+                ):
                     violations.append(f"{path.relative_to(source)}:{node.lineno}: {module}")
-                if (module == "copilot" or module.startswith("copilot.")) and path.name not in copilot_boundaries:
+                if (
+                    (module == "copilot" or module.startswith("copilot."))
+                    and path.parent != copilot_package
+                ):
                     violations.append(f"{path.relative_to(source)}:{node.lineno}: {module}")
     assert violations == []

@@ -57,6 +57,7 @@ nav:
       - Triggers: triggers.md
       - Observability: observability.md
       - Copilot preview operations: copilot-preview-operations.md
+      - Agent evaluations: evaluation.md
       - Dynamic workflows: workflows.md
   - Reference:
       - Front matter spec: front-matter-spec.md

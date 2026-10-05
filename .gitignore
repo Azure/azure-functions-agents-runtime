@@ -13,6 +13,11 @@
 .worktrees
 .worktrees/
 
+# Node.js dependencies and generated TypeScript output
+node_modules/
+dist/
+test-dist/
+
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 

@@ -14,14 +14,14 @@ import azure.functions as func
 from azure.durable_functions import DurableFunctionsClient
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
-from .._harness import AppHarness, HarnessKind, bind_harness, get_harness
-from .._history_identity import validate_agent_slug
 from .._logger import logger
 from .._observability import FaultDomain, LifecycleStage, start_span
 from .._session_id import SESSION_ID_PATTERN
-from .._session_storage import SessionStorageError
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
+from ..harness._harness_binding import AppHarness, HarnessKind, bind_harness, get_harness
+from ..harness._history_identity import validate_agent_slug
+from ..harness._session_storage import SessionStorageError
 from ._auth import authorize_entra_request, resolve_endpoint_auth_level
 from ._handlers import (
     _SESSION_ID_HEADER,
@@ -34,6 +34,7 @@ from .capabilities import AgentCapabilities
 from .catalog import AgentCatalog
 
 if TYPE_CHECKING:
+    from ..runner import AgentResult
     from ..workflows.schema import WorkflowPlanPolicy
 
 _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
@@ -58,7 +59,7 @@ def _format_exception_message(exc: Exception) -> str:
     return message if message else f"{type(exc).__name__}: {exc!r}"
 
 
-async def _run_agent(*args: Any, **kwargs: Any) -> Any:
+async def _run_agent(*args: Any, **kwargs: Any) -> AgentResult:
     from ..runner import run_agent
 
     return await run_agent(*args, **kwargs)
@@ -169,7 +170,7 @@ async def _run_builtin_agent(
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
     _session_is_new: bool = False,
-) -> Any:
+) -> AgentResult:
     harness = bind_harness(resolved, capabilities)
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
@@ -212,6 +213,7 @@ def _run_builtin_agent_stream(
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> AsyncIterator[str]:
+    harness = bind_harness(resolved, capabilities)
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
     return _run_agent_stream(
@@ -242,7 +244,7 @@ def _run_builtin_agent_stream(
         agent_configuration=resolved.agent_configuration,
         subagents=resolved.subagents,
         catalog=catalog,
-        _harness=capabilities._harness,
+        _harness=harness,
     )
 
 
@@ -360,6 +362,7 @@ def _register_http_chat(
                         {
                             "session_id": result.session_id,
                             "response": result.content,
+                            "model": result.model,
                             "tool_calls": result.tool_calls,
                         }
                     ),
@@ -552,6 +555,7 @@ def _register_mcp_endpoint(
                     {
                         "session_id": result.session_id,
                         "response": result.content,
+                        "model": result.model,
                         "tool_calls": result.tool_calls,
                     }
                 )
@@ -724,7 +728,7 @@ def _register_history_endpoint(
                 media_type="application/json",
             )
 
-        from .._blob_history import build_blob_provider_from_environment
+        from ..harness.agent_framework._maf_blob_history import build_blob_provider_from_environment
 
         provider = build_blob_provider_from_environment(agent_slug=slug)
         if provider is None:

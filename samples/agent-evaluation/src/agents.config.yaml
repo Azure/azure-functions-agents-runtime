@@ -1,0 +1,4 @@
+# Keep the sample target small while leaving provider/model selection to environment variables.
+timeout: 120
+agent_configuration:
+  max_output_tokens: 256

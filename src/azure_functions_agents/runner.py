@@ -3,29 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import uuid
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
 
 from pydantic import BaseModel, Field
 
 from ._function_tool import tool
-from ._harness import (
-    AppHarness,
-    ExecutionRole,
-    HarnessKind,
-    HarnessRequest,
-    UnsupportedCapabilityError,
-    get_harness,
-    prepare_tools,
-    reject_unsupported,
-    validate_configuration,
-)
-from ._history_identity import validate_agent_slug
 from ._logger import logger
 from ._observability import (
     FaultDomain,
@@ -39,19 +26,43 @@ from ._observability import (
 from ._session_id import SESSION_ID_PATTERN
 from ._slug import delegate_tool_name
 from ._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
-from .client_manager import InferenceTarget
 from .client_manager import get_client_manager as get_client_manager
 from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
 from .config.schema import AgentConfiguration
-from .discovery.mcp import MCPServerDescriptor, discover_mcp_servers
+from .discovery.mcp import MCPServerDescriptor
+from .discovery.mcp import discover_mcp_servers as discover_mcp_servers
 from .discovery.skills import (
     SkillDescriptor,
     describe_skill_catalog,
     describe_skill_paths,
     discover_skills,
 )
-from .discovery.tools import discover_user_tools
+from .discovery.tools import discover_user_tools as discover_user_tools
+from .harness._harness_binding import (
+    AppHarness,
+    ExecutionRole,
+    HarnessKind,
+    HarnessRequest,
+    UnsupportedCapabilityError,
+    get_harness,
+)
+from .harness._harness_execution import (
+    _AgentUsageRecorder as _AgentUsageRecorder,
+)
+from .harness._harness_execution import (
+    _get_session_lock as _get_session_lock,
+)
+from .harness._harness_execution import (
+    _model_publisher as _model_publisher,
+)
+from .harness._harness_execution import (
+    _normalize_usage_details as _normalize_usage_details,
+)
+from .harness._harness_execution import (
+    _session_lock_bounded_by as _session_lock_bounded_by,
+)
+from .harness._history_identity import validate_agent_slug
 from .registration.capabilities import (
     AgentCapabilities,
     _merge_skill_descriptors,
@@ -69,6 +80,7 @@ type _AgentExecutionRole = ExecutionRole
 
 # Retained private MAF compatibility seams; ordinary execution returns only AgentResult/SSE.
 _MAF_COMPAT_NAMES = frozenset({
+    "_FINAL_USAGE_TIMEOUT_SECONDS",
     "_assemble_agent_inputs",
     "_build_agent_session",
     "_build_chat_options_from_environment",
@@ -92,10 +104,22 @@ _MAF_COMPAT_NAMES = frozenset({
 
 def __getattr__(name: str) -> Any:
     if name in _MAF_COMPAT_NAMES:
-        from . import _maf_tools
+        from .harness.agent_framework import _maf_execution
 
-        return getattr(_maf_tools, name)
+        return getattr(_maf_execution, name)
     raise AttributeError(name)
+
+
+class ToolCallEvidence(TypedDict):
+    """Framework-neutral evidence for one observed tool call."""
+
+    type: Literal["tool_start"]
+    tool_call_id: str | None
+    tool_name: str | None
+    arguments: Any
+    turn_id: NotRequired[str]
+    result: NotRequired[Any]
+    success: NotRequired[bool]
 
 
 def _runtime_timeout_default() -> float:
@@ -114,99 +138,6 @@ def _runtime_timeout_default() -> float:
 DEFAULT_TIMEOUT = _runtime_timeout_default()
 DEFAULT_MODEL: str | None = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL") or None
 _SESSION_ID_PATTERN = SESSION_ID_PATTERN
-_USAGE_FIELD_NAMES = {
-    "input_token_count": "input_tokens",
-    "output_token_count": "output_tokens",
-}
-_FINAL_USAGE_TIMEOUT_SECONDS = 1.0
-
-
-def _normalize_usage_details(usage_details: Any) -> dict[str, int]:
-    if not isinstance(usage_details, Mapping):
-        return {}
-    normalized: dict[str, int] = {}
-    for source_name, record_name in _USAGE_FIELD_NAMES.items():
-        value = usage_details.get(source_name)
-        if (
-            record_name not in normalized
-            and isinstance(value, int)
-            and not isinstance(value, bool)
-            and value >= 0
-        ):
-            normalized[record_name] = value
-    return normalized
-
-
-def _model_publisher(provider: str | None) -> str | None:
-    return "openai" if provider in {"openai", "azure_openai"} else None
-
-
-@dataclass
-class _AgentUsageRecorder:
-    """Attempt at most one internal token-usage record per invocation."""
-
-    agent_name: str
-    execution_role: _AgentExecutionRole
-    inference_target: InferenceTarget = field(default_factory=InferenceTarget)
-    _emission_attempted: bool = field(default=False, init=False)
-
-    def emit(self, usage_details: Any = None) -> None:
-        try:
-            usage = _normalize_usage_details(usage_details)
-        except Exception:
-            usage = {}
-        self.emit_counts(
-            input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens")
-        )
-
-    def emit_counts(self, *, input_tokens: int | None, output_tokens: int | None) -> None:
-        if self._emission_attempted:
-            return
-        self._emission_attempted = True
-        try:
-            payload = {
-                "agent_name": self.agent_name,
-                "event_name": "agent_token_usage",
-                "execution_role": self.execution_role,
-                "input_tokens": input_tokens,
-                "model": self.inference_target.model,
-                "model_publisher": _model_publisher(self.inference_target.provider),
-                "output_tokens": output_tokens,
-                "provider": self.inference_target.provider,
-            }
-            logger.info(
-                "Agent token usage: %s",
-                json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
-            )
-        except Exception:
-            return
-
-
-_SESSION_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
-_SESSION_LOCKS_GUARD = asyncio.Lock()
-
-
-async def _get_session_lock(session_id: str, agent_slug: str = "main") -> asyncio.Lock:
-    key = (agent_slug, session_id)
-    async with _SESSION_LOCKS_GUARD:
-        lock = _SESSION_LOCKS.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            _SESSION_LOCKS[key] = lock
-        return lock
-
-
-@contextlib.asynccontextmanager
-async def _session_lock_bounded_by(
-    session_id: str, deadline: float, *, agent_slug: str = "main"
-) -> AsyncIterator[None]:
-    lock = await _get_session_lock(session_id, agent_slug)
-    loop = asyncio.get_running_loop()
-    await asyncio.wait_for(lock.acquire(), timeout=max(0.0, deadline - loop.time()))
-    try:
-        yield
-    finally:
-        lock.release()
 
 
 @dataclass
@@ -216,10 +147,11 @@ class AgentResult:
     session_id: str
     content: str
     content_intermediate: list[str] = field(default_factory=list)
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    tool_calls: list[ToolCallEvidence] = field(default_factory=list)
     reasoning: str | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
     delegate_error_count: int = 0
+    model: str = "unknown"
 
 
 def _validate_session_id(session_id: str | None) -> str | None:
@@ -264,8 +196,10 @@ async def run_leaf_agent_task(
     """Run a fresh stateless specialist under its existing role contract."""
     harness = _harness or capabilities._harness or get_harness()
     if harness.name is HarnessKind.COPILOT:
+        from .harness.copilot_sdk._copilot_preview import reject_unsupported
+
         reject_unsupported(**{execution_role: True})
-    from ._maf_tools import run_leaf_agent_task as run_maf_leaf
+    from .harness.agent_framework._maf_execution import run_leaf_agent_task as run_maf_leaf
 
     return await run_maf_leaf(
         resolved, capabilities, task, timeout=timeout, execution_role=execution_role
@@ -314,7 +248,7 @@ class _DelegateTaskParams(BaseModel):
         description=(
             "A complete, self-contained instruction for the specialist. The "
             "specialist does not see the coordinator's conversation history "
-            "or any other context — include every fact, detail, and "
+            "or any other context \u2014 include every fact, detail, and "
             "requirement the specialist needs to complete the task."
         )
     )
@@ -428,6 +362,8 @@ def _request(
         )
     )
     if harness.name is HarnessKind.COPILOT:
+        from .harness.copilot_sdk._copilot_preview import prepare_tools
+
         descriptors = prepare_tools(descriptors)
     servers = (
         tuple(discover_mcp_servers(harness.app_root).servers.values())
@@ -520,6 +456,8 @@ async def run_agent(
     deadline = asyncio.get_running_loop().time() + timeout
     harness = _harness or get_harness()
     if harness.name is HarnessKind.COPILOT:
+        from .harness.copilot_sdk._copilot_preview import reject_unsupported, validate_configuration
+
         validate_configuration(agent_configuration or AgentConfiguration())
         reject_unsupported(
             subagents=bool(subagents), workflows=workflow_enabled or workflow_policy is not None
@@ -547,10 +485,10 @@ async def run_agent(
         deadline=deadline,
     )
     if harness.name is HarnessKind.COPILOT:
-        from ._copilot import run
+        from .harness.copilot_sdk._copilot_execution import run
 
         return await run(harness, request)
-    from ._maf_tools import run as run_maf
+    from .harness.agent_framework._maf_execution import run as run_maf
 
     return await run_maf(
         harness,
@@ -602,6 +540,8 @@ async def run_agent_stream(
     try:
         harness = _harness or get_harness()
         if harness.name is HarnessKind.COPILOT:
+            from .harness.copilot_sdk._copilot_preview import reject_unsupported
+
             reject_unsupported(streaming=True)
     except (ValueError, RuntimeError) as exc:
         logger.error("Agent harness selection failed: %s", exc)
@@ -634,7 +574,7 @@ async def run_agent_stream(
         logger.error("Failed to build agent session: %s", exc, exc_info=True)
         yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
         return
-    from ._maf_tools import run_stream
+    from .harness.agent_framework._maf_execution import run_stream
 
     stream = run_stream(
         harness,

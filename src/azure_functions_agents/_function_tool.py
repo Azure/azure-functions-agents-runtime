@@ -21,7 +21,7 @@ from ._tool_descriptor import (
 )
 
 if TYPE_CHECKING:
-    from ._maf_tools import FunctionTool
+    from .harness.agent_framework._maf_tools import FunctionTool
 
 __all__ = [
     "FunctionTool",
@@ -39,7 +39,7 @@ _WORKFLOW_TOOL_HANDLER_ATTR = "__azure_functions_agents_workflow_handler__"
 
 def __getattr__(name: str) -> Any:
     if name == "FunctionTool":
-        from ._maf_tools import FunctionTool
+        from .harness.agent_framework._maf_tools import FunctionTool
 
         return FunctionTool
     raise AttributeError(name)
@@ -162,7 +162,7 @@ def tool(
             workflow_metadata=get_workflow_tool_metadata(inner),
         )
         if kwargs:
-            from ._maf_tools import with_maf_options
+            from .harness.agent_framework._maf_tools import with_maf_options
 
             return with_maf_options(descriptor, kwargs)
         return descriptor

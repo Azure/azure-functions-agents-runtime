@@ -17,7 +17,7 @@ from ..discovery.mcp import MCPServerDescriptor
 from ..discovery.skills import SkillDescriptor, describe_skill_catalog, describe_skill_paths
 
 if TYPE_CHECKING:
-    from .._harness import AppHarness
+    from ..harness._harness_binding import AppHarness
 
 # Hardcoded (not imported from system_tools.sandbox) to avoid pulling in
 # that module's heavy optional deps (aiohttp, azure.identity) — matches the

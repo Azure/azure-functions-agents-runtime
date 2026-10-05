@@ -18,12 +18,13 @@ from copilot.session_events import (
     PermissionRequestWrite,
 )
 
-from azure_functions_agents import _copilot_capabilities
-from azure_functions_agents._harness import CopilotPreviewError, HarnessRequest
 from azure_functions_agents._skill_policy import SkillPolicy
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.discovery.skills import SkillDescriptor
+from azure_functions_agents.harness._harness_binding import HarnessRequest
+from azure_functions_agents.harness.copilot_sdk import _copilot_capabilities
+from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
 
 
 def _request(**changes):

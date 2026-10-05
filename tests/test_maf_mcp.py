@@ -13,7 +13,6 @@ from agent_framework import MCPStreamableHTTPTool
 from azure.core.credentials import AccessToken
 from httpx import AsyncClient, MockTransport, Request, Response
 
-import azure_functions_agents._maf_mcp as maf_mcp
 import azure_functions_agents._mcp_auth as mcp_auth
 from azure_functions_agents._mcp_auth import MCPHeaderProvider
 from azure_functions_agents.discovery.mcp import (
@@ -21,6 +20,7 @@ from azure_functions_agents.discovery.mcp import (
     clear_mcp_cache,
     discover_mcp_servers,
 )
+from azure_functions_agents.harness.agent_framework import _maf_mcp as maf_mcp
 
 _SCOPE = "https://resource.example/.default"
 

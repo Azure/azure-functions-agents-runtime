@@ -4,7 +4,7 @@ title: Copilot SDK agent harness
 status: Finalized
 author: larohra
 created: 2026-09-28
-updated: 2026-10-02
+updated: 2026-10-05
 issues:
   - https://github.com/Azure/azure-functions-bucees-planning/issues/1332
 pull_requests: []
@@ -78,13 +78,27 @@ planned SDK-neutral representation and per-harness adaptation. The persistence
 interface in section 4.5 is narrower: it routes storage without changing shared
 tool definitions or discovery contracts.
 
-| Pipeline stage | Existing modules | Required responsibility |
+**Internal containment.** Keep the public `runner.py` exports and signatures.
+Place common app binding and request contracts, resource-cleanup plumbing, and
+neutral storage settings under `harness/`; contain MAF-specific execution and history in
+`harness/agent_framework/`, and Copilot-specific execution, providers, and
+SessionFs in `harness/copilot_sdk/`. Shared boundaries do not import either
+harness's persistence implementation. Implementation-specific execution and
+persistence SDK types stay inside their selected implementation, without a new
+public plugin protocol or changes to tool, model, discovery, role, or preview
+contracts. Private host identifiers name Copilot explicitly; SDK-owned APIs and
+persisted path segments stay unchanged.
+App bindings, requests, and harness vocabularies each have one canonical shared
+definition. Both implementations consume the same result, usage, and session-lock
+contracts rather than duplicate them.
+
+| Pipeline stage | Modules / boundaries | Required responsibility |
 | --- | --- | --- |
 | discover | `discovery/tools.py`, `discovery/mcp.py`, `discovery/skills.py`, `_function_tool.py` | Keep project inventories and discovery rules; separate framework wrapping from author intent. Do not run inference or launch the native runtime during discovery. |
 | translate | `config/schema.py`, `config/merge.py`, `config/validation.py` | Preserve typed composition, inheritance/null semantics, and effective capability validation. Interpret no new harness selector in agent files. |
 | compose/register | `app.py`, `registration/capabilities.py`, `registration/catalog.py`, `registration/_handlers.py`, `registration/endpoints.py`, `registration/triggers.py` | Resolve the app's preview choice before harness-specific bootstrap; validate the complete catalog before FunctionApp mutation; pass resolved values to lazy handlers. Keep Azure registration and inbound authorization here. |
-| execute | `runner.py`, `client_manager.py`, internal Copilot adapter | Create/resume sessions, bind approved tools, enforce deadlines, and translate events/results. `ClientManager` remains provider access, not the agent loop, tool dispatcher, or session manager. |
-| persist | `_agent_identity.py`, `_history_identity.py`, `_session_id.py`, separate native SessionFs adapter; existing `_blob_history.py`/`_file_history.py` on the MAF path | Route persistence only through the selected harness. Preserve validation and path-containment rules, reuse the shared readable agent ID for native paths, and treat Copilot session bytes as opaque SDK-owned files. |
+| execute | Public `runner.py`, `client_manager.py`, common `harness/` binding, implementations under `harness/agent_framework/` and `harness/copilot_sdk/` | Create/resume sessions, bind approved tools, enforce deadlines, and translate events/results. `ClientManager` remains provider access, not the agent loop, tool dispatcher, or session manager. |
+| persist | `_agent_identity.py`, `_session_id.py`, shared identity validation and storage settings under `harness/`, selected harness's history or SessionFs implementation | Route persistence only through the selected harness. Preserve validation and path-containment rules, reuse the shared readable agent ID for native paths, and treat Copilot session bytes as opaque SDK-owned files. |
 | cross-cutting | `workflows/*`, `system_tools/*`, `_observability.py` | Preserve workflow authorization/Activities, system-tool policies, correlation, and content controls independently of SDK object types. |
 
 ### 4.1 App-level preview selection
@@ -109,6 +123,8 @@ It creates a small immutable internal app execution context containing the
 resolved app-root identity and the selected execution adapter. This is a bound
 execution interface, not a public harness registry; selecting it does not create
 a native client or start inference.
+The immutable binding may hold an app-owned mutable resource holder; that holder
+does not own conversation semantics or acquire SDK/storage resources at selection.
 
 Registration accepts that context explicitly and captures it in HTTP, streaming,
 MCP, non-HTTP trigger, and history-handler closures. `register_workflow_runtime()`
@@ -308,8 +324,8 @@ This interface maps to the pipeline as follows:
 | --- | --- | --- |
 | discover | `discovery/tools.py`, `discovery/mcp.py`, `discovery/skills.py`, `_function_tool.py` compatibility layer | Read project files and imports, validate existing authoring rules, and emit neutral inventories. Do not create harness SDK objects. |
 | translate | `config/schema.py`, `config/merge.py`, `config/validation.py` | Keep typed config composition and validation independent of harness SDK types. |
-| register | `registration/capabilities.py`, `registration/catalog.py`, `_harness.py` | Filter neutral inventories into immutable role capabilities and build `HarnessRequest` with descriptors only. |
-| execute | MAF adapter, Copilot adapter, `runner.py`, `_copilot.py` | Map descriptors to the selected SDK at the execution boundary and preserve the same runtime contract. |
+| register | `registration/capabilities.py`, `registration/catalog.py`, `harness/_harness_binding.py` | Filter neutral inventories into immutable role capabilities; bind the app context without mutating them. |
+| execute | `runner.py`, `harness/agent_framework/_maf_execution.py`, `harness/agent_framework/_maf_tools.py`, `harness/agent_framework/_maf_mcp.py`, `harness/copilot_sdk/_copilot_execution.py`, `harness/copilot_sdk/_copilot_capabilities.py` | Assemble an SDK-free `HarnessRequest`, then map descriptors to the selected SDK at the execution boundary and preserve the same runtime contract. |
 
 Phase-out acceptance is structural for the neutral core. Removing MAF from that
 core means deleting the MAF adapter and its dependency. Discovery, registration,
@@ -473,13 +489,21 @@ existing role contract already adds it.
 ### 4.4 Native runtime lifetime
 
 The proposed default is the external native Rust runtime over stdio, with one
-lazily initialized, process-long SDK client per frozen app/storage context in a
-Functions worker, reused across invocations with isolated sessions. Concurrent
-initialization must not launch duplicate runtimes for the same context.
+lazily initialized, process-long SDK client owned by each frozen app binding in a
+Functions worker, reused across invocations with isolated sessions. Distinct app
+bindings, including bindings for the same root, do not share that client.
+Concurrent initialization must not launch duplicate runtimes for one binding.
 Request cancellation must not close the shared client or poison unrelated
 sessions; worker shutdown must release its client/process.
 Initialization, process-local session-lock waits, execution, and storage
 operations are bounded by the request deadline.
+
+The standalone first-use cache retains app bindings, not conversation state.
+A shared shutdown callback set may retain acquired resource owners so all can be
+closed without importing unselected implementations. The selected app binding
+owns its client, credentials, and open filesystem handles; the SDK remains the
+sole session authority. Preserve the single-event-loop restriction and explicit
+standalone shutdown before closing that loop.
 
 No embedded FFI dependency is proposed. A compatible Python SDK/native-runtime/
 protocol combination, deployment asset acquisition, and supported Functions
@@ -511,10 +535,10 @@ harness's persistence implementation.
 **Identity and path construction.** Store ordinary local files or individual
 blobs at `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`.
 Reuse `_agent_identity.agent_id(slug)` unchanged: its readable result already
-includes the app correlation key and canonical agent slug. The correlation key
-joins the trimmed, available `WEBSITE_OWNER_NAME` and `WEBSITE_DEPLOYMENT_ID`
-(or `WEBSITE_SITE_NAME` fallback) with `/`, lowercases them, and uses `local`
-when no platform metadata is available. Do not add another app-identity segment
+includes the trimmed, lower-case `WEBSITE_SITE_NAME` (or `local` when blank or
+unset) and canonical agent slug. Owner and deployment metadata do not affect
+the ID. Consume this helper directly rather than freezing a separate identity
+prefix or duplicating its normalization. Do not add another app-identity segment
 or a separate hash/version scheme. Preserve existing session-ID validation and
 path containment. Store every SDK-requested file without a filename whitelist
 or interpretation of its contents.
@@ -644,6 +668,11 @@ superseded designs, not to the redesigned thin adapter. Section 4.5 defines the
 current persistence contract; its interface separation does not replace the
 planned capability adaptation in section 4.3.1.
 
+The approved harness-package containment supersedes only the older
+persistence-only organizational restriction, not selected-persistence isolation.
+The shared site-qualified identity authority supersedes the older
+owner/deployment correlation assumption without changing SDK ownership.
+
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
 | 1 | Harness destination | Permanent plugins / sole Copilot harness | Sole Copilot end state; thin internal adapter, no public harness framework | Human (supplied requirements) | 2026-09-28 |
@@ -691,6 +720,8 @@ planned capability adaptation in section 4.3.1.
 | 43 | Native identity and path scheme | New opaque hash scheme / shared readable identity | Use `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`, with `agent_id` supplied by the shared helper and already containing the app correlation key and canonical slug. Retain session-ID validation and path containment without a separate hash scheme or host format version. | Human (larohra) | 2026-10-02 |
 | 44 | Session concurrency boundary | Distributed leases/fencing/OS locks / process-local serialization | Match the current MAF boundary: serialize only same-session turns within a Python process, with bounded waiting and no distributed exclusion. Cross-worker overlap is unsupported and caller-owned. | Human (larohra) | 2026-10-02 |
 | 45 | Interface separation scope | Broad execution-interface rewrite / persistence-only boundary | Keep the interface split narrowly about persistence. Shared app/configuration/registration routes through the selected harness; MAF owns its existing history provider, Copilot owns SessionFs. Construct/use/close only the selected persistence adapter, without opposite-harness imports, storage initialization, history probes, or cleanup, and without expanding scope into unrelated tool/model/discovery refactors. | Human (larohra) | 2026-10-02 |
+| 46 | Harness organizational containment | Persistence-only separation / contain harness-specific execution and persistence together | Keep common app binding/request contracts, cleanup plumbing, and neutral storage settings under `harness/`; place MAF execution/history in `harness/agent_framework/` and Copilot execution/providers/SessionFs in `harness/copilot_sdk/`. Preserve public runner signatures, app-owned resource lifetimes, selected-persistence isolation, and all existing selection, persistence, role, and preview contracts. This supersedes only the persistence-only organizational restriction, not its prohibition on unrelated tool/model/discovery redesign. | Human (larohra) | 2026-10-05 |
+| 47 | Shared agent identity authority | Retain owner/deployment correlation / consume the current shared site-qualified helper unchanged | Use `_agent_identity.agent_id(slug)` as the sole authority: trimmed, lower-case `WEBSITE_SITE_NAME` or `local`, followed by canonical slug. Keep `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}` and existing validation/containment; do not cache a separate identity prefix, restore owner/deployment inputs, or add migration/version logic. This supersedes the older correlation-key assumption only; SDK ownership, storage selection and app-resource/provider/settings lifetimes remain unchanged. | Human (larohra) | 2026-10-05 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -716,9 +747,10 @@ where mocks cannot establish process, transport, authentication, or durability.
 | Delegation/workflows | Prove fresh same-specialist concurrent sessions, catalog/role isolation, no child SSE, parent cancellation and specialist-local errors, Workflow Sub Agent grants/results, existing management/Activity retry/timeout/authorization, and at-least-once semantics. |
 | Role storage/trigger execution | Run a non-HTTP trigger with its generated identity, serialization, logging/error behavior, and direct capabilities. Persistent direct state uses the selected harness's storage path only; delegates and Workflow Sub Agents leave no persistent Copilot session tree and dispose ephemeral state. |
 | SessionFs file contract | Exercise exact byte preservation and SDK-visible behavior for read, write, append, exists, stat, directory listing with entry types, mkdir, remove, rename, and documented file errors on both local and Blob adapters. Preserve all SDK-requested files opaquely rather than host-specific file whitelists or content interpretation. |
-| Identity/path isolation | Verify native paths reuse the shared agent ID, including its app correlation key exactly once, followed by validated session ID and SDK-relative path. Cover partial/local identity fallbacks and containment enforcement without introducing separate identity hashes. |
+| Identity/path isolation | Verify native paths consume the unchanged shared site-qualified agent ID exactly once, followed by validated session ID and SDK-relative path. Cover trimmed/mixed-case/blank site names, ignored owner/deployment values, local fallback and containment without adding identity hashes or cached prefixes. |
 | Backend configuration/errors | Verify Blob selection from existing storage configuration, local selection only when no Blob configuration is present, reuse of existing identity/container behavior, and explicit surfacing of Blob auth/network/configuration failures without fallback to local storage. |
 | Persistence boundary isolation | Verify that only the selected harness's persistence implementation is imported, initialized, exercised, and closed. The Copilot path must not probe or clean up MAF history storage, and the MAF path must not initialize Copilot SessionFs. |
+| Harness containment | Verify unchanged public runner exports/signatures and shared result, usage, and lock behavior after containing private execution/persistence implementations. App-bound resources remain isolated, standalone defaults remain cached, and shutdown visits only acquired owners. |
 | Same-process concurrency | Verify bounded waiting and serialization for concurrent turns targeting the same `(agent, session)` within one Python process, while independent sessions remain concurrent. Do not require distributed exclusion, cross-worker ownership, or OS-level locking for this feature. |
 | SDK integration boundary | Exercise real SDK callbacks against the adapter and verify that the host does not interpret native session contents, claim recovery semantics, or impose its own compaction/summary protocol. |
 | Hosting/telemetry | Demonstrate supported Functions deployment assets, lazy single-client startup, concurrent isolation, bounded cancellation/shutdown, and no orphan native process. Verify usage/correlation/error accounting and sensitive-data-off behavior in host and native telemetry. |
@@ -794,3 +826,12 @@ The sample must be copy/paste complete for setup, request, expected failure, and
   limits; section 6 defines acceptance, not achieved results. Implementation
   must meet those requirements. Linux helper execution and managed-approval
   scenarios remain unverified.
+- **Organizational sign-off:** Laveesh Rohra (`larohra`) approved behavior-preserving
+  containment of harness-specific execution and persistence on 2026-10-05.
+  Its separate architecture checkpoint returned **APPROVE** for canonical
+  binding/request contracts, app-owned resource lifetimes, and selected-persistence
+  isolation without changing selection, session ownership, storage, role, or preview behavior.
+- **Identity sign-off:** Laveesh Rohra (`larohra`) approved the unchanged shared
+  site-qualified identity authority on 2026-10-05. It replaces the older
+  owner/deployment assumption without changing SDK session ownership or storage
+  configuration and without authorizing existing-data work.
