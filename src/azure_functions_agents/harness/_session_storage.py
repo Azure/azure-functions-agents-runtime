@@ -6,7 +6,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .config.env import EnvVar, raw_env_value, runtime_env_value
+from ..config.env import EnvVar, raw_env_value, runtime_env_value
 
 if TYPE_CHECKING:
     from azure.core.credentials_async import AsyncTokenCredential
@@ -83,7 +83,7 @@ async def open_blob_service(settings: BlobStorageSettings) -> OwnedBlobService:
         )
     if not settings.blob_service_url:
         raise ValueError("Blob storage requires a connection string or service URI.")
-    from ._credential import build_async_credential_with_client_id
+    from .._credential import build_async_credential_with_client_id
 
     async with AsyncExitStack() as cleanup:
         credential = build_async_credential_with_client_id(settings.client_id)

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
+from unittest.mock import AsyncMock
 
 import pytest
 from agent_framework import (
@@ -27,12 +29,58 @@ from azure_functions_agents.config.schema import (
     AgentFrameworkCompactionConfig,
     AgentFrameworkConfiguration,
 )
+from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
+from azure_functions_agents.harness.agent_framework import _maf_execution as maf
 
 
 @pytest.fixture(autouse=True)
 def _isolate_app_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("WEBSITE_OWNER_NAME", "WEBSITE_DEPLOYMENT_ID", "WEBSITE_SITE_NAME"):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.asyncio
+async def test_public_runner_preserves_the_deadline_set_before_selection(monkeypatch):
+    loop = asyncio.get_running_loop()
+    selected_at = []
+    harness = AppHarness(HarnessKind.MAF, Path.cwd())
+
+    def select():
+        selected_at.append(loop.time())
+        return harness
+
+    invoke = AsyncMock(return_value=runner.AgentResult("session", "fixture reply"))
+    monkeypatch.setattr(runner, "get_harness", select)
+    monkeypatch.setattr(maf, "run_agent", invoke)
+
+    result = await runner.run_agent("fixture", timeout=0.1)
+
+    assert result.content == "fixture reply"
+    assert invoke.call_args.kwargs["_harness"] is harness
+    assert invoke.call_args.kwargs["_deadline"] <= selected_at[0] + 0.1
+
+
+@pytest.mark.asyncio
+async def test_selection_cannot_restart_an_expired_public_invocation_budget(monkeypatch):
+    harness = AppHarness(HarnessKind.MAF, Path.cwd())
+    invoke = AsyncMock(return_value=SimpleNamespace(text="must not run", messages=[]))
+    build = AsyncMock(return_value=(
+        SimpleNamespace(run=invoke), object(), "selection_budget_regression",
+        None, InferenceTarget(),
+    ))
+
+    def select():
+        time.sleep(0.01)
+        return harness
+
+    monkeypatch.setattr(runner, "get_harness", select)
+    monkeypatch.setattr(maf, "_build_agent_session", build)
+
+    with pytest.raises(RuntimeError, match="Agent run timed out after"):
+        await runner.run_agent("fixture", timeout=0.001)
+
+    build.assert_awaited_once()
+    invoke.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -117,19 +165,19 @@ def test_build_agent_session_forces_provider_managed_history(
         raising=False,
     )
     monkeypatch.setattr(
-        runner.get_client_manager(),
+        maf.get_client_manager(),
         "build_chat_client_with_target",
         lambda _model: (object(), InferenceTarget()),
     )
     history_calls: list[str] = []
     monkeypatch.setattr(
-        runner,
+        maf,
         "_build_history_provider",
         lambda agent_slug: history_calls.append(agent_slug) or object(),
     )
 
     asyncio.run(
-        runner._build_agent_session(
+        maf._build_agent_session(
             instructions="do stuff",
             session_id="shared-session",
             tools=[],
@@ -188,7 +236,7 @@ def test_build_role_agent_uses_stable_agent_id(
     )
 
     for _ in range(2):
-        runner._build_role_agent(
+        maf._build_role_agent(
             object(),
             agent_instructions=None,
             tools=[],
@@ -223,14 +271,14 @@ def test_build_agent_session_forwards_system_instructions(monkeypatch: Any) -> N
         raising=False,
     )
     monkeypatch.setattr(
-        runner.get_client_manager(),
+        maf.get_client_manager(),
         "build_chat_client_with_target",
         lambda _model: (object(), InferenceTarget()),
     )
-    monkeypatch.setattr(runner, "_build_history_provider", lambda agent_slug: object())
+    monkeypatch.setattr(maf, "_build_history_provider", lambda agent_slug: object())
 
     asyncio.run(
-        runner._build_agent_session(
+        maf._build_agent_session(
             instructions="Markdown system prompt.",
             session_id="instruction-session",
             tools=[],
@@ -288,7 +336,7 @@ def test_build_role_agent_skips_approval_for_all_skill_tools(
         raising=False,
     )
 
-    agent = runner._build_role_agent(
+    agent = maf._build_role_agent(
         object(),
         agent_instructions=None,
         tools=[],
@@ -354,19 +402,19 @@ def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
         raising=False,
     )
     monkeypatch.setattr(
-        runner.get_client_manager(),
+        maf.get_client_manager(),
         "build_chat_client_with_target",
         lambda _model: (object(), InferenceTarget()),
     )
     monkeypatch.setattr(
-        runner,
+        maf,
         "_build_history_provider",
         lambda agent_slug: history_calls.append(agent_slug) or object(),
     )
     monkeypatch.setattr(runner, "build_subagent_tools", fake_build_subagent_tools)
 
     _, _, _, returned_tracker, _ = asyncio.run(
-        runner._build_agent_session(
+        maf._build_agent_session(
             instructions="coordinate specialists",
             session_id="shared-session",
             tools=[local_tool],
@@ -402,13 +450,13 @@ def test_build_history_provider_scopes_local_storage_by_agent(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
     captured_blob_slugs: list[str] = []
-    monkeypatch.setattr(runner, "resolve_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(maf, "resolve_config_dir", lambda: tmp_path)
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         lambda *, agent_slug: captured_blob_slugs.append(agent_slug) or None,
     )
 
-    provider = runner._build_history_provider("billing")
+    provider = maf._build_history_provider("billing")
 
     assert captured_blob_slugs == ["billing"]
     assert provider.storage_path == tmp_path / "agent-sessions" / "billing"
@@ -436,12 +484,12 @@ def test_fresh_harness_agents_reload_history_for_same_session(
         return _SharedHistoryProvider(stored_messages)
 
     monkeypatch.setattr(
-        runner.get_client_manager(),
+        maf.get_client_manager(),
         "build_chat_client_with_target",
         lambda _model: (client, InferenceTarget()),
     )
     monkeypatch.setattr(
-        runner,
+        maf,
         "_build_history_provider",
         build_history_provider,
     )
@@ -462,7 +510,7 @@ def test_fresh_harness_agents_reload_history_for_same_session(
             "web_request_tools": None,
             "agent_configuration": AgentConfiguration(),
         }
-        first_agent, first_session, _, _, _ = await runner._build_agent_session(**common)
+        first_agent, first_session, _, _, _ = await maf._build_agent_session(**common)
         assert first_agent.name == expected_name
         assert first_session.session_id == "shared-session"
         await first_agent.run("Use the Premium plan.", session=first_session)
@@ -471,7 +519,7 @@ def test_fresh_harness_agents_reload_history_for_same_session(
             "response",
         ]
 
-        second_agent, second_session, _, _, _ = await runner._build_agent_session(**common)
+        second_agent, second_session, _, _, _ = await maf._build_agent_session(**common)
         assert second_agent.name == expected_name
         assert second_agent.id == first_agent.id
         assert second_session.session_id == "shared-session"
@@ -528,12 +576,12 @@ async def test_qualified_agent_name_round_trips_history_without_entering_model_r
         )
 
     monkeypatch.setenv("WEBSITE_SITE_NAME", "Contoso-Agents")
-    monkeypatch.setattr(runner, "resolve_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(maf, "resolve_config_dir", lambda: tmp_path)
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         lambda **_kwargs: None,
     )
-    history_provider = runner._build_history_provider("billing")
+    history_provider = maf._build_history_provider("billing")
     await history_provider.save_messages(
         "shared-session",
         [
@@ -552,11 +600,11 @@ async def test_qualified_agent_name_round_trips_history_without_entering_model_r
     ) as provider_client:
         chat_client = OpenAIChatClient(model="offline-model", async_client=provider_client)
         monkeypatch.setattr(
-            runner.get_client_manager(),
+            maf.get_client_manager(),
             "build_chat_client_with_target",
             lambda _model: (chat_client, InferenceTarget()),
         )
-        agent, session, resolved_id, _, _ = await runner._build_agent_session(
+        agent, session, resolved_id, _, _ = await maf._build_agent_session(
             instructions=None,
             session_id="shared-session",
             tools=[],
@@ -574,7 +622,7 @@ async def test_qualified_agent_name_round_trips_history_without_entering_model_r
         result = await agent.run("Which plan did I choose?", session=session)
         assert result.text == "response"
 
-    history = await runner._build_history_provider("billing").get_messages("shared-session")
+    history = await maf._build_history_provider("billing").get_messages("shared-session")
     assert [message.text for message in history] == [
         "Use the Premium plan.", "response", "Which plan did I choose?", "response"
     ]
@@ -603,12 +651,12 @@ def test_harness_compacts_model_context_without_rewriting_stored_history(
     stored_messages: list[Message] = []
 
     monkeypatch.setattr(
-        runner.get_client_manager(),
+        maf.get_client_manager(),
         "build_chat_client_with_target",
         lambda _model: (client, InferenceTarget()),
     )
     monkeypatch.setattr(
-        runner,
+        maf,
         "_build_history_provider",
         lambda agent_slug: _SharedHistoryProvider(stored_messages),
     )
@@ -634,10 +682,10 @@ def test_harness_compacts_model_context_without_rewriting_stored_history(
                 ),
             ),
         }
-        first_agent, first_session, _, _, _ = await runner._build_agent_session(**common)
+        first_agent, first_session, _, _, _ = await maf._build_agent_session(**common)
         await first_agent.run(first_prompt, session=first_session)
 
-        second_agent, second_session, _, _, _ = await runner._build_agent_session(**common)
+        second_agent, second_session, _, _, _ = await maf._build_agent_session(**common)
         await second_agent.run(second_prompt, session=second_session)
 
     asyncio.run(run_two_turns())
@@ -678,7 +726,7 @@ def test_run_agent_uses_session_builder_with_configuration(monkeypatch: Any) -> 
             InferenceTarget(),
         )
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_session_builder)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_session_builder)
 
     result = asyncio.run(
         runner.run_agent(
@@ -706,7 +754,7 @@ def test_run_agent_uses_session_builder_with_default_configuration(monkeypatch: 
         session_calls.append(kwargs)
         return _FakeAgent("response"), object(), "session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_session_builder)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_session_builder)
 
     result = asyncio.run(runner.run_agent("hello"))
 
@@ -731,7 +779,7 @@ def test_run_agent_stream_uses_session_builder_with_configuration(monkeypatch: A
 
         return _StreamingAgent(), object(), "stream-harness-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_session_builder)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_session_builder)
 
     async def collect() -> list[str]:
         return [
@@ -767,7 +815,7 @@ def test_run_agent_passes_agent_configuration_to_builder(monkeypatch: Any) -> No
         captured.append(kwargs)
         return _FakeAgent(), object(), "s", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_harness_builder)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_harness_builder)
 
     asyncio.run(runner.run_agent("prompt", agent_configuration=config))
 

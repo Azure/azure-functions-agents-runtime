@@ -24,6 +24,8 @@ from agent_framework import (
 from azure_functions_agents import runner
 from azure_functions_agents._function_tool import tool
 from azure_functions_agents.client_manager import InferenceTarget
+from azure_functions_agents.harness import _harness_execution as shared
+from azure_functions_agents.harness.agent_framework import _maf_execution as maf
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 
 
@@ -69,7 +71,7 @@ def _install_primary_agent(
     ) -> tuple[Any, Any, str, None, InferenceTarget]:
         return agent, object(), session_id, None, inference_target or InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", build)
+    monkeypatch.setattr(maf, "_build_agent_session", build)
 
 
 async def _collect_stream(stream: AsyncIterator[str]) -> list[str]:
@@ -77,7 +79,7 @@ async def _collect_stream(stream: AsyncIterator[str]) -> list[str]:
 
 
 def test_normalize_usage_details_keeps_only_non_negative_integer_counts() -> None:
-    assert runner._normalize_usage_details(
+    assert shared._normalize_usage_details(
         {
             "input_token_count": 0,
             "output_token_count": 12,
@@ -96,14 +98,14 @@ def test_normalize_usage_details_keeps_only_non_negative_integer_counts() -> Non
         "output_tokens": 12,
     }
 
-    assert runner._normalize_usage_details(
+    assert shared._normalize_usage_details(
         {
             "input_token_count": True,
             "output_token_count": -1,
             "total_token_count": "12",
         }
     ) == {}
-    assert runner._normalize_usage_details(None) == {}
+    assert shared._normalize_usage_details(None) == {}
 
 
 @pytest.mark.parametrize(
@@ -129,7 +131,7 @@ def test_normalize_usage_details_ignores_additional_maf_13_usage_details(
         **provider_usage,
     )
 
-    assert runner._normalize_usage_details(usage_details) == {
+    assert shared._normalize_usage_details(usage_details) == {
         "input_tokens": 10,
         "output_tokens": 8,
     }
@@ -148,11 +150,11 @@ def test_model_publisher_is_derived_only_for_known_openai_transports(
     provider: str | None,
     expected: str | None,
 ) -> None:
-    assert runner._model_publisher(provider) == expected
+    assert shared._model_publisher(provider) == expected
 
 
 def test_usage_recorder_emits_deterministic_json_once_through_shared_logger(caplog: Any) -> None:
-    recorder = runner._AgentUsageRecorder(
+    recorder = shared._AgentUsageRecorder(
         agent_name="billing",
         execution_role="workflow_subagent",
         inference_target=InferenceTarget("azure_openai", "gpt-4o"),
@@ -187,7 +189,7 @@ def test_usage_recorder_emits_deterministic_json_once_through_shared_logger(capl
 
 
 def test_usage_recorder_logs_null_counts_when_usage_is_unavailable(caplog: Any) -> None:
-    recorder = runner._AgentUsageRecorder(
+    recorder = shared._AgentUsageRecorder(
         agent_name="main",
         execution_role="primary",
     )
@@ -202,7 +204,7 @@ def test_usage_recorder_logs_null_counts_when_usage_is_unavailable(caplog: Any) 
 
 
 def test_usage_recorder_logs_available_token_counts_independently(caplog: Any) -> None:
-    recorder = runner._AgentUsageRecorder(
+    recorder = shared._AgentUsageRecorder(
         agent_name="main",
         execution_role="primary",
     )
@@ -221,7 +223,7 @@ def test_usage_recorder_logs_available_token_counts_independently(caplog: Any) -
 
 
 def test_usage_recorder_accepts_backend_neutral_counts_once(caplog: Any) -> None:
-    recorder = runner._AgentUsageRecorder(
+    recorder = shared._AgentUsageRecorder(
         agent_name="main",
         execution_role="primary",
         inference_target=InferenceTarget("foundry", "gpt-preview"),
@@ -247,8 +249,8 @@ def test_usage_recorder_never_changes_agent_behavior_when_logging_fails(monkeypa
         logging_attempts += 1
         raise RuntimeError("logging unavailable")
 
-    monkeypatch.setattr(runner.logger, "info", fail_logging)
-    recorder = runner._AgentUsageRecorder(agent_name="main", execution_role="primary")
+    monkeypatch.setattr(shared.logger, "info", fail_logging)
+    recorder = shared._AgentUsageRecorder(agent_name="main", execution_role="primary")
 
     recorder.emit({"input_token_count": 4})
     recorder.emit()
@@ -370,7 +372,7 @@ async def test_run_agent_build_failure_emits_no_usage_record(
     async def fail_build(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("configuration failed")
 
-    monkeypatch.setattr(runner, "_build_agent_session", fail_build)
+    monkeypatch.setattr(maf, "_build_agent_session", fail_build)
     with (
         caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"),
         pytest.raises(RuntimeError, match="configuration failed"),
@@ -623,7 +625,7 @@ async def test_run_agent_stream_bounds_hanging_final_response(
         def run(self, *args: Any, **kwargs: Any) -> Stream:
             return Stream()
 
-    monkeypatch.setattr(runner, "_FINAL_USAGE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(maf, "_FINAL_USAGE_TIMEOUT_SECONDS", 0.01)
     _install_primary_agent(monkeypatch, Agent())
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         events = await asyncio.wait_for(
@@ -705,7 +707,7 @@ async def test_leaf_agent_logs_distinct_attempts_and_execution_roles(
         "azure_openai",
         "gpt-deployment",
     )
-    monkeypatch.setattr(runner, "_build_delegated_agent", lambda *args: (Agent(), target))
+    monkeypatch.setattr(maf, "_build_delegated_agent", lambda *args: (Agent(), target))
     resolved = SimpleNamespace(slug="analyst")
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         for _ in range(2):
@@ -761,7 +763,7 @@ async def test_leaf_agent_failure_logs_once(
             await asyncio.Event().wait()
 
     monkeypatch.setattr(
-        runner,
+        maf,
         "_build_delegated_agent",
         lambda *args: (Agent(), InferenceTarget("foundry", "model-one")),
     )
@@ -795,7 +797,7 @@ async def test_leaf_agent_cancellation_logs_once(monkeypatch: Any, caplog: Any) 
             await asyncio.Event().wait()
 
     monkeypatch.setattr(
-        runner,
+        maf,
         "_build_delegated_agent",
         lambda *args: (Agent(), InferenceTarget()),
     )
@@ -828,7 +830,7 @@ async def test_leaf_agent_construction_failure_emits_no_usage_record(
     def fail_build(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("configuration failed")
 
-    monkeypatch.setattr(runner, "_build_delegated_agent", fail_build)
+    monkeypatch.setattr(maf, "_build_delegated_agent", fail_build)
     with (
         caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"),
         pytest.raises(RuntimeError, match="configuration failed"),

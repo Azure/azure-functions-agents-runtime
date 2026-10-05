@@ -1,19 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
-from azure.storage.blob import aio
 
-from azure_functions_agents import _credential
-from azure_functions_agents._native_session_identity import (
+from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import (
     StorageMode,
     resolve_route,
     session_prefix,
 )
-from azure_functions_agents._session_storage import BlobStorageSettings, open_blob_service
 
 STORAGE_ENV = (
     "AzureWebJobsStorage",
@@ -80,27 +75,6 @@ def test_storage_precedence_and_values_are_frozen_without_secret_reprs(configure
 
 
 @pytest.mark.parametrize(
-    ("storage_client", "app_client", "expected"),
-    [
-        (None, None, ""),
-        (None, " app ", "app"),
-        ("", " app ", "app"),
-        ("  ", " app ", ""),
-        (" storage ", " app ", "storage"),
-    ],
-)
-def test_storage_specific_client_id_preserves_existing_precedence(
-    configured, monkeypatch, storage_client, app_client, expected
-):
-    monkeypatch.setenv("AzureWebJobsStorage__blobServiceUri", "https://fixture.invalid")
-    if storage_client is not None:
-        monkeypatch.setenv("AzureWebJobsStorage__clientId", storage_client)
-    if app_client is not None:
-        monkeypatch.setenv("AZURE_CLIENT_ID", app_client)
-    assert resolve_route(configured).blob.client_id == expected
-
-
-@pytest.mark.parametrize(
     ("owner", "deployment", "site", "expected"),
     [
         (None, None, None, "local"),
@@ -152,66 +126,3 @@ def test_blank_storage_settings_remain_unconfigured(configured, monkeypatch):
     monkeypatch.setenv("AzureWebJobsStorage__blobServiceUri", "\t")
     assert resolve_route(configured).mode is StorageMode.LOCAL
 
-
-@pytest.mark.asyncio
-async def test_owned_blob_construction_uses_only_its_frozen_identity(configured, monkeypatch):
-    calls = []
-    credential = SimpleNamespace(close=AsyncMock())
-    service = SimpleNamespace(close=AsyncMock())
-
-    def build_credential(client_id):
-        calls.append(("credential", client_id))
-        return credential
-
-    def build_service(**kwargs):
-        calls.append(("service", kwargs))
-        return service
-
-    monkeypatch.setattr(_credential, "build_async_credential_with_client_id", build_credential)
-    monkeypatch.setattr(aio, "BlobServiceClient", build_service)
-    monkeypatch.setenv("AzureWebJobsStorage__blobServiceUri", " https://fixture.invalid ")
-    monkeypatch.setenv("AzureWebJobsStorage__clientId", " frozen-identity ")
-    route = resolve_route(configured)
-    monkeypatch.setenv("AzureWebJobsStorage__clientId", "changed")
-    owned = await open_blob_service(route.blob)
-    assert calls == [
-        ("credential", "frozen-identity"),
-        ("service", {"account_url": "https://fixture.invalid", "credential": credential}),
-    ]
-    await owned.close()
-    service.close.assert_awaited_once()
-    credential.close.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_owned_blob_constructor_failure_closes_its_credential(monkeypatch):
-    credential = SimpleNamespace(close=AsyncMock())
-    monkeypatch.setattr(
-        _credential, "build_async_credential_with_client_id", lambda _client_id: credential
-    )
-
-    def fail(**_kwargs):
-        raise ValueError("fixture configuration failure")
-
-    monkeypatch.setattr(aio, "BlobServiceClient", fail)
-    with pytest.raises(ValueError):
-        await open_blob_service(BlobStorageSettings(blob_service_url="https://fixture.invalid"))
-    credential.close.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_owned_blob_connection_string_uses_no_identity_builder(monkeypatch):
-    service = SimpleNamespace(close=AsyncMock())
-    client = SimpleNamespace(from_connection_string=lambda connection: service)
-    monkeypatch.setattr(aio, "BlobServiceClient", client)
-
-    def denied(_client_id):
-        raise AssertionError("Connection strings must not construct an identity")
-
-    monkeypatch.setattr(_credential, "build_async_credential_with_client_id", denied)
-    owned = await open_blob_service(BlobStorageSettings(
-        connection_string="fixture-connection", blob_service_url="https://ignored.invalid"
-    ))
-    assert owned.service is service and owned.credential is None
-    await owned.close()
-    service.close.assert_awaited_once()

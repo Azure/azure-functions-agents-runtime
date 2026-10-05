@@ -13,7 +13,6 @@ import azure.functions as func
 import jsonschema
 from azurefunctions.extensions.http.fastapi import Request, Response
 
-from .._harness import HarnessKind, bind_harness
 from .._logger import logger
 from .._observability import (
     ATTR_FAULT_DOMAIN,
@@ -22,9 +21,10 @@ from .._observability import (
     capture_sensitive_data,
     start_span,
 )
-from .._session_storage import SessionStorageError
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
+from ..harness._harness_binding import HarnessKind, bind_harness
+from ..harness._session_storage import SessionStorageError
 from ._auth import authorize_entra_request
 from ._trigger_serialization import serialize_trigger_data
 from .capabilities import AgentCapabilities

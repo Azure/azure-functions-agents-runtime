@@ -24,15 +24,20 @@ from azure.core.exceptions import (
 from azure.core.pipeline.transport import AsyncHttpResponse, HttpRequest
 from azure.storage.blob import BlobProperties, StorageErrorCode
 
-from azure_functions_agents import _copilot_session_fs as fs
-from azure_functions_agents._copilot_session_fs import open_session_fs
-from azure_functions_agents._native_session_identity import (
-    NativeSessionError,
+from azure_functions_agents.harness._session_storage import BlobStorageSettings, OwnedBlobService
+from azure_functions_agents.harness.copilot_sdk import (
+    _copilot_session_blob as blob_backend,
+)
+from azure_functions_agents.harness.copilot_sdk import (
+    _copilot_session_paths as session_paths,
+)
+from azure_functions_agents.harness.copilot_sdk._copilot_session_fs import open_session_fs
+from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import (
+    CopilotSessionError,
     StorageMode,
     resolve_route,
     session_prefix,
 )
-from azure_functions_agents._session_storage import BlobStorageSettings, OwnedBlobService
 
 
 def storage_error(status, code):
@@ -217,7 +222,7 @@ def memory_blobs(monkeypatch):
         store.credentials.append(credential)
         return OwnedBlobService(service, credential)
 
-    monkeypatch.setattr(fs, "open_blob_service", open_owned)
+    monkeypatch.setattr(blob_backend, "open_blob_service", open_owned)
     return store
 
 
@@ -522,7 +527,7 @@ async def test_closed_adapter_rejects_callbacks_and_closes_only_owned_resources(
 )
 def test_paths_cannot_escape_virtual_roots(path, conventions):
     with pytest.raises(OSError):
-        fs.normalize_callback_path(path, conventions)
+        session_paths.normalize_callback_path(path, conventions)
 
 
 @pytest.mark.parametrize(
@@ -539,7 +544,7 @@ def test_paths_cannot_escape_virtual_roots(path, conventions):
     ],
 )
 def test_only_the_exact_current_workspace_is_mapped(path, conventions, workspace, expected):
-    assert fs.normalize_callback_path(path, conventions, workspace) == expected
+    assert session_paths.normalize_callback_path(path, conventions, workspace) == expected
 
 
 @pytest.mark.parametrize(
@@ -555,7 +560,7 @@ def test_only_the_exact_current_workspace_is_mapped(path, conventions, workspace
 )
 def test_recorded_unknown_workspaces_are_not_adopted_by_suffix(path, conventions, workspace):
     with pytest.raises(OSError):
-        fs.normalize_callback_path(path, conventions, workspace)
+        session_paths.normalize_callback_path(path, conventions, workspace)
 
 
 @pytest.mark.asyncio
@@ -632,13 +637,13 @@ async def test_blob_failures_are_not_absence_or_a_fallback(local_route, memory_b
             403, StorageErrorCode.AUTHENTICATION_FAILED
         )
         for operation in (provider.stat, provider.exists, provider.read_file):
-            with pytest.raises(NativeSessionError) as caught:
+            with pytest.raises(CopilotSessionError) as caught:
                 await operation("/workspace/file")
             assert caught.value.errno == errno.EACCES
             assert "fixture-secret" not in str(caught.value)
         memory_blobs.failures.clear()
         memory_blobs.failures[("write", name)] = ServiceRequestError("fixture-secret")
-        with pytest.raises(NativeSessionError) as caught:
+        with pytest.raises(CopilotSessionError) as caught:
             await provider.write_file("/workspace/file", "not acknowledged")
         assert caught.value.errno == errno.EIO
         assert memory_blobs.files[name].content == b"acknowledged"
@@ -660,7 +665,7 @@ async def test_missing_container_is_not_a_missing_file(local_route, memory_blobs
     name = session_prefix(route, "agent", "session") + "/workspace/missing"
     try:
         memory_blobs.failures[("stat", name)] = storage_error(404, StorageErrorCode.CONTAINER_NOT_FOUND)
-        with pytest.raises(NativeSessionError) as caught:
+        with pytest.raises(CopilotSessionError) as caught:
             await provider.exists("/workspace/missing")
         assert caught.value.errno == errno.EIO
         assert not route.local_dir.exists()
@@ -679,7 +684,7 @@ async def test_blob_copy_delete_failure_surfaces_without_a_host_rollback(local_r
     try:
         await provider.write_file("/workspace/source", "opaque")
         memory_blobs.failures[("delete", prefix + "source")] = ServiceRequestError("fixture-secret")
-        with pytest.raises(NativeSessionError):
+        with pytest.raises(CopilotSessionError):
             await provider.rename("/workspace/source", "/workspace/target")
         assert memory_blobs.files[prefix + "source"].content == b"opaque"
         assert memory_blobs.files[prefix + "target"].content == b"opaque"
@@ -703,8 +708,8 @@ async def test_connection_string_rename_preserves_file_bytes_and_directory_metad
         await provider.write_file("/workspace/source/opaque.sdk", content)
         await provider.mkdir("/workspace/source/empty", recursive=False)
         metadata = {
-            "": fs.DIRECTORY_METADATA | {"fixture": "directory"},
-            "empty/": fs.DIRECTORY_METADATA | {"fixture": "empty-directory"},
+            "": blob_backend.DIRECTORY_METADATA | {"fixture": "directory"},
+            "empty/": blob_backend.DIRECTORY_METADATA | {"fixture": "empty-directory"},
             "opaque.sdk": {"fixture": "file"},
         }
         for suffix, values in metadata.items():
@@ -743,7 +748,7 @@ async def test_connection_string_rename_failure_keeps_source_and_existing_target
         await provider.write_file("/workspace/target", "target bytes")
         failed_name = prefix + ("source" if operation == "read" else "target")
         memory_blobs.failures[(operation, failed_name)] = ServiceRequestError("fixture-secret")
-        with pytest.raises(NativeSessionError) as caught:
+        with pytest.raises(CopilotSessionError) as caught:
             await provider.rename("/workspace/source", "/workspace/target")
         assert caught.value.errno == errno.EIO
         assert memory_blobs.files[prefix + "source"].content == b"source bytes"
@@ -774,7 +779,7 @@ async def test_interrupted_directory_operation_keeps_implicit_parent_usable(
             else ("copy", prefix + "target/child")
         )
         memory_blobs.failures[failure] = ServiceRequestError("fixture-secret")
-        with pytest.raises(NativeSessionError) as caught:
+        with pytest.raises(CopilotSessionError) as caught:
             if interrupted == "rm":
                 await provider.rm("/workspace/source", recursive=True, force=False)
             else:
@@ -799,7 +804,7 @@ async def test_interrupted_directory_operation_keeps_implicit_parent_usable(
             assert not await provider.exists("/workspace/source/child")
         marker = memory_blobs.files[prefix + "source/"]
         assert marker.content == b""
-        assert marker.properties.metadata == fs.DIRECTORY_METADATA
+        assert marker.properties.metadata == blob_backend.DIRECTORY_METADATA
         assert await provider.read_file("/workspace/source/sibling") == "sibling bytes"
     finally:
         await provider.close()
@@ -821,7 +826,7 @@ async def test_unlink_last_child_of_implicit_directory_recreates_empty_marker(
         await provider.rm("/workspace/parent/child", recursive=False, force=False)
         assert (await provider.stat("/workspace/parent")).is_directory
         assert await provider.readdir("/workspace/parent") == []
-        assert memory_blobs.files[marker].properties.metadata == fs.DIRECTORY_METADATA
+        assert memory_blobs.files[marker].properties.metadata == blob_backend.DIRECTORY_METADATA
     finally:
         await provider.close()
 
@@ -838,7 +843,7 @@ async def test_missing_parent_marker_recreation_failure_is_not_hidden(local_rout
         await provider.write_file("/workspace/parent/kept", "kept bytes")
         del memory_blobs.files[marker]
         memory_blobs.failures[("write", marker)] = ServiceRequestError("fixture-secret")
-        with pytest.raises(NativeSessionError) as caught:
+        with pytest.raises(CopilotSessionError) as caught:
             await provider.write_file("/workspace/parent/new", "new bytes")
         assert caught.value.errno == errno.EIO
         assert marker not in memory_blobs.files
@@ -866,10 +871,10 @@ async def test_missing_parent_marker_handling_does_not_mask_other_storage_failur
     marker = session_prefix(route, "agent", "session") + "/workspace/"
     try:
         memory_blobs.failures[("metadata", marker)] = storage_error(status, code)
-        with pytest.raises(NativeSessionError) as caught:
+        with pytest.raises(CopilotSessionError) as caught:
             await provider.write_file("/workspace/new", "new bytes")
         assert caught.value.errno == expected
-        assert memory_blobs.files[marker].properties.metadata == fs.DIRECTORY_METADATA
+        assert memory_blobs.files[marker].properties.metadata == blob_backend.DIRECTORY_METADATA
     finally:
         await provider.close()
 
@@ -881,7 +886,7 @@ async def test_blob_initialization_failure_closes_service_and_credential(local_r
         blob=BlobStorageSettings(container_name="container", blob_service_url="https://fixture.invalid"),
     )
     memory_blobs.failures[("container", "container")] = ServiceRequestError("fixture-secret")
-    with pytest.raises(NativeSessionError):
+    with pytest.raises(CopilotSessionError):
         await open_session_fs(route, "agent", "session")
     assert [service.close_count for service in memory_blobs.services] == [1]
     memory_blobs.credentials[0].close.assert_awaited_once()
@@ -891,7 +896,7 @@ async def test_blob_initialization_failure_closes_service_and_credential(local_r
 @pytest.mark.asyncio
 async def test_invalid_configured_blob_does_not_construct_local_files(local_route):
     route = replace(local_route, blob=BlobStorageSettings(connection_string="fixture-secret"))
-    with pytest.raises(NativeSessionError) as caught:
+    with pytest.raises(CopilotSessionError) as caught:
         await open_session_fs(route, "agent", "session")
     assert "fixture-secret" not in str(caught.value)
     assert not route.local_dir.exists()
@@ -922,7 +927,7 @@ async def test_expired_open_deadline_still_closes_configured_blob_resources(loca
         local_route,
         blob=BlobStorageSettings(container_name="container", blob_service_url="https://fixture.invalid"),
     )
-    with pytest.raises(NativeSessionError) as caught:
+    with pytest.raises(CopilotSessionError) as caught:
         await open_session_fs(
             route, "agent", "session", deadline=asyncio.get_running_loop().time() - 1
         )
@@ -938,7 +943,7 @@ async def test_service_close_failure_is_reported_after_credential_close(file_cas
         return
     service = store.services[0]
     monkeypatch.setattr(service, "close", AsyncMock(side_effect=ServiceRequestError("fixture-secret")))
-    with pytest.raises(NativeSessionError) as caught:
+    with pytest.raises(CopilotSessionError) as caught:
         await provider.close()
     assert caught.value.errno == errno.EIO
     assert "fixture-secret" not in str(caught.value)
@@ -951,8 +956,8 @@ async def test_native_storage_neither_imports_nor_probes_maf_history(local_route
     history = local_route.local_dir / "agent-sessions" / "agent" / "session.jsonl"
     history.parent.mkdir(parents=True)
     history.write_bytes(b"uninterpreted MAF bytes\x00")
-    monkeypatch.setitem(sys.modules, "azure_functions_agents._blob_history", None)
-    monkeypatch.setitem(sys.modules, "azure_functions_agents._file_history", None)
+    monkeypatch.setitem(sys.modules, "azure_functions_agents.harness.agent_framework._maf_blob_history", None)
+    monkeypatch.setitem(sys.modules, "azure_functions_agents.harness.agent_framework._maf_file_history", None)
     provider = await open_session_fs(local_route, "agent", "session", conventions="posix")
     try:
         await provider.write_file("/workspace/sdk-file", "native")
@@ -1003,7 +1008,7 @@ async def test_backend_constructor_failure_closes_both_owned_resources(
             raise ServiceRequestError("fixture-secret")
 
         monkeypatch.setattr(MemoryService, "close", fail_close)
-    with pytest.raises(NativeSessionError) as caught:
+    with pytest.raises(CopilotSessionError) as caught:
         await open_session_fs(route, "agent", "session")
     assert "fixture-secret" not in str(caught.value)
     assert memory_blobs.services[0].close_count == 1

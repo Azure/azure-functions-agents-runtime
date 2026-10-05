@@ -16,23 +16,7 @@ import pytest
 from azure.core.credentials import AccessToken
 from pydantic import BaseModel, Field
 
-from azure_functions_agents import _copilot, _harness, runner
-from azure_functions_agents._copilot_providers import (
-    AzureOpenAIProvider,
-    FoundryProvider,
-    OpenAIProvider,
-)
-from azure_functions_agents._copilot_session_fs import open_session_fs
 from azure_functions_agents._function_tool import tool, workflow_tool
-from azure_functions_agents._harness import (
-    AppHarness,
-    CopilotPreviewError,
-    HarnessKind,
-    HarnessRequest,
-    ProviderKind,
-    UnsupportedCapabilityError,
-)
-from azure_functions_agents._native_session_identity import NativeSessionError, resolve_route
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.client_manager import (
     ClientManager,
@@ -40,14 +24,50 @@ from azure_functions_agents.client_manager import (
     set_client_manager,
 )
 from azure_functions_agents.config import paths
+from azure_functions_agents.harness import (
+    _harness_binding as _harness,
+)
+from azure_functions_agents.harness import (
+    _harness_execution as _execution,
+)
+from azure_functions_agents.harness import (
+    _harness_lifecycle as _lifecycle,
+)
+from azure_functions_agents.harness._harness_binding import (
+    AppHarness,
+    HarnessKind,
+    HarnessRequest,
+    ProviderKind,
+    UnsupportedCapabilityError,
+)
+from azure_functions_agents.harness.agent_framework import _maf_execution
+from azure_functions_agents.harness.copilot_sdk import (
+    _copilot_execution as _copilot,
+)
+from azure_functions_agents.harness.copilot_sdk import (
+    _copilot_preview as _preview,
+)
+from azure_functions_agents.harness.copilot_sdk import (
+    _copilot_runtime as _runtime,
+)
+from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
+from azure_functions_agents.harness.copilot_sdk._copilot_providers import (
+    AzureOpenAIProvider,
+    FoundryProvider,
+    OpenAIProvider,
+)
+from azure_functions_agents.harness.copilot_sdk._copilot_session_fs import open_session_fs
+from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import (
+    CopilotSessionError,
+    resolve_route,
+)
 
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
 
 
 @pytest.fixture
 def preview(monkeypatch, tmp_path):
-    monkeypatch.setattr(_copilot, "_RUNTIMES", {})
-    monkeypatch.setattr(_harness, "_SHUTDOWN_CALLBACKS", set())
+    monkeypatch.setattr(_lifecycle, "_SHUTDOWN_CALLBACKS", set())
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SESSION_DIR", str(tmp_path / "state"))
     monkeypatch.delenv("AzureWebJobsStorage", raising=False)
     monkeypatch.delenv("AzureWebJobsStorage__blobServiceUri", raising=False)
@@ -91,6 +111,19 @@ def _fake_client():
         return SessionEvent(data=data, id=uuid4(), timestamp=datetime.now(UTC), type=event_type)
 
     session = AsyncMock()
+    session.unsubscribe = Mock()
+    session.handlers = []
+
+    def on(handler):
+        session.handlers.append(handler)
+
+        def unsubscribe():
+            session.handlers.remove(handler)
+
+        session.unsubscribe.side_effect = unsubscribe
+        return session.unsubscribe
+
+    session.on = Mock(side_effect=on)
     session.rpc = SimpleNamespace(tools=SimpleNamespace(
         get_current_metadata=AsyncMock(return_value=SimpleNamespace(tools=[]))
     ))
@@ -132,7 +165,7 @@ async def test_sdk_owns_create_and_resume_without_history_probes(preview, monkey
         session.get_events.assert_not_awaited()
         session.disconnect.assert_awaited_once()
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
 
 @pytest.mark.asyncio
@@ -177,12 +210,12 @@ async def test_sdk_factory_receives_the_open_opaque_filesystem(preview, monkeypa
         assert "continue_pending_work" not in options
         assert "infinite_sessions" not in options
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
 
 def test_native_sdk_identity_is_readable_and_agent_scoped():
-    assert _copilot._native_id("main", "example") == "main.example"
-    assert _copilot._native_id("billing", "shared") != _copilot._native_id("support", "shared")
+    assert _copilot._copilot_session_id("main", "example") == "main.example"
+    assert _copilot._copilot_session_id("billing", "shared") != _copilot._copilot_session_id("support", "shared")
 
 
 async def _invoke_native_tool(function, arguments):
@@ -220,7 +253,7 @@ async def test_tool_adapter_runs_sync_and_async_callables(is_async):
             effects.append(value)
             return f"sync:{value}"
 
-    [function] = _harness.prepare_tools([candidate])
+    [function] = _preview.prepare_tools([candidate])
     result, calls = await _invoke_native_tool(function, {"value": "ok"})
 
     assert result.result_type == "success"
@@ -259,7 +292,7 @@ async def test_tool_adapter_supports_both_workflow_decorator_orders():
 
     first = tool(name="tool_outer")(workflow_tool(tool_outer))
     second = workflow_tool(tool(name="workflow_outer")(workflow_outer))
-    prepared = _harness.prepare_tools([first, second])
+    prepared = _preview.prepare_tools([first, second])
 
     first_result, _ = await _invoke_native_tool(prepared[0], {"value": "ok"})
     second_result, _ = await _invoke_native_tool(prepared[1], {"value": "ok"})
@@ -356,7 +389,7 @@ async def test_sdk_receives_only_combined_custom_catalog(preview, monkeypatch):
         assert options["enable_config_discovery"] is False
         assert options["tool_search"]["enabled"] is False
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
 
 @pytest.mark.asyncio
@@ -380,55 +413,7 @@ async def test_sdk_rejects_ambient_catalog_before_prompt(preview, monkeypatch):
             await _copilot.run(preview, replace(_request(), tools=[function]))
         session.send_and_wait.assert_not_awaited()
     finally:
-        await _copilot.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_failed_start_uses_sdk_stop_and_force_stop_then_retries(preview, monkeypatch):
-    import copilot
-    from copilot import RuntimeConnection
-
-    failed = _fake_client()
-    failed.start.side_effect = RuntimeError("native failed")
-    failed.stop.side_effect = TimeoutError("stop stalled")
-    recovered = _fake_client()
-    clients = iter([failed, recovered])
-    factory = Mock(side_effect=lambda **_: next(clients))
-    monkeypatch.setattr(copilot, "CopilotClient", factory)
-    owner = _copilot._runtime(preview)
-    try:
-        with pytest.raises(RuntimeError):
-            await owner.client()
-        failed.stop.assert_awaited_once()
-        failed.force_stop.assert_awaited_once()
-        assert await owner.client() is recovered
-        assert factory.call_count == 2
-        assert factory.call_args.kwargs["mode"] == "empty"
-        assert "env" not in factory.call_args.kwargs
-        connection = factory.call_args.kwargs.get("connection")
-        assert connection is None or (
-            isinstance(connection, RuntimeConnection) and connection.path is None
-        )
-        assert "request_handler" not in factory.call_args.kwargs
-    finally:
-        await _copilot.shutdown()
-    recovered.stop.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_shutdown_closes_every_app_owner_even_if_one_fails(preview, monkeypatch):
-    first = _copilot._runtime(preview)
-    second = _copilot._runtime(replace(preview, storage_root=preview.storage_root / "other"))
-    assert _copilot._runtime(preview) is first
-    failed_close = AsyncMock(side_effect=RuntimeError("stop failed"))
-    good_close = AsyncMock()
-    monkeypatch.setattr(first, "close", failed_close)
-    monkeypatch.setattr(second, "close", good_close)
-    with suppress(Exception):
-        await _copilot.shutdown()
-    failed_close.assert_awaited_once()
-    good_close.assert_awaited_once()
-    assert not _copilot._RUNTIMES
+        await _lifecycle._shutdown_harnesses()
 
 
 @pytest.mark.asyncio
@@ -451,7 +436,7 @@ async def test_provider_options_use_sdk_declared_types(
         get_token=AsyncMock(return_value=AccessToken("not-a-credential", 9999999999)),
         close=AsyncMock(),
     )
-    monkeypatch.setattr(_copilot, "build_async_credential", lambda: credential)
+    monkeypatch.setattr(_runtime, "build_async_credential", lambda: credential)
     client = _fake_client()
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
@@ -477,126 +462,7 @@ async def test_provider_options_use_sdk_declared_types(
             if provider.kind is ProviderKind.AZURE_OPENAI:
                 assert "azure" not in provider_options
     finally:
-        await _copilot.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_openai_provider_callback_uses_frozen_startup_key(preview, monkeypatch):
-    owner = _copilot._runtime(preview)
-    monkeypatch.setenv("OPENAI_API_KEY", "sentinel-one")
-    provider = _copilot._provider(preview, owner, "per-agent-model")
-
-    assert provider == {
-        "type": "openai",
-        "wire_api": "responses",
-        "base_url": "https://api.openai.com/v1",
-        "model_id": "per-agent-model",
-        "wire_model": "per-agent-model",
-        "bearer_token_provider": provider["bearer_token_provider"],
-    }
-    callback = provider["bearer_token_provider"]
-    assert await callback(SimpleNamespace()) == "not-a-credential"
-    monkeypatch.setenv("OPENAI_API_KEY", "sentinel-two")
-    assert await callback(SimpleNamespace()) == "not-a-credential"
-
-
-def test_azure_api_key_provider_avoids_credential_construction(preview, monkeypatch):
-    selected = replace(
-        preview,
-        provider=AzureOpenAIProvider(
-            "https://fixture.openai.azure.com",
-            "2024-10-21",
-            "sentinel-not-a-secret",
-        ),
-    )
-    monkeypatch.setattr(
-        _copilot,
-        "build_async_credential",
-        Mock(side_effect=AssertionError("Azure API key must not build a credential")),
-    )
-
-    provider = _copilot._provider(selected, _copilot._runtime(selected), "azure-deployment")
-
-    assert provider == {
-        "type": "azure",
-        "wire_api": "responses",
-        "base_url": "https://fixture.openai.azure.com",
-        "model_id": "azure-deployment",
-        "wire_model": "azure-deployment",
-        "azure": {"api_version": "2024-10-21"},
-        "api_key": "sentinel-not-a-secret",
-    }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("provider", "endpoint", "scope"),
-    [
-        (
-            AzureOpenAIProvider,
-            "https://fixture.openai.azure.com",
-            "https://cognitiveservices.azure.com/.default",
-        ),
-        (
-            FoundryProvider,
-            "https://fixture.services.ai.azure.com/api/projects/test",
-            "https://ai.azure.com/.default",
-        ),
-    ],
-)
-async def test_entra_callbacks_refresh_overlap_and_close(
-    preview, monkeypatch, provider, endpoint, scope
-):
-    selected = replace(preview, provider=provider(endpoint))
-    issued = 0
-
-    async def get_token(received_scope):
-        nonlocal issued
-        assert received_scope == scope
-        issued += 1
-        current = issued
-        await asyncio.sleep(0)
-        return AccessToken(f"sentinel-token-{current}", 9999999999)
-
-    credential = SimpleNamespace(get_token=AsyncMock(side_effect=get_token), close=AsyncMock())
-    build = Mock(return_value=credential)
-    monkeypatch.setattr(_copilot, "build_async_credential", build)
-    owner = _copilot._runtime(selected)
-    config = _copilot._provider(selected, owner, "deployment")
-    callback = config["bearer_token_provider"]
-
-    first = await callback(SimpleNamespace())
-    second = await callback(SimpleNamespace())
-    overlapped = await asyncio.gather(callback(SimpleNamespace()), callback(SimpleNamespace()))
-    await owner.close()
-
-    assert first == "sentinel-token-1"
-    assert second == "sentinel-token-2"
-    assert set(overlapped) == {"sentinel-token-3", "sentinel-token-4"}
-    assert credential.get_token.await_count == 4
-    build.assert_called_once_with()
-    credential.close.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_entra_callback_failure_is_sanitized(preview, monkeypatch):
-    selected = replace(
-        preview,
-        provider=AzureOpenAIProvider("https://fixture.openai.azure.com"),
-    )
-    credential = SimpleNamespace(
-        get_token=AsyncMock(side_effect=RuntimeError("sentinel-private-credential-detail")),
-        close=AsyncMock(),
-    )
-    monkeypatch.setattr(_copilot, "build_async_credential", Mock(return_value=credential))
-    owner = _copilot._runtime(selected)
-    callback = _copilot._provider(selected, owner, "deployment")["bearer_token_provider"]
-    try:
-        with pytest.raises(CopilotPreviewError, match=r"Azure OpenAI.*Entra") as error:
-            await callback(SimpleNamespace())
-        assert "sentinel-private-credential-detail" not in str(error.value)
-    finally:
-        await owner.close()
+        await _lifecycle._shutdown_harnesses()
 
 
 @pytest.mark.asyncio
@@ -640,7 +506,7 @@ async def test_concurrent_entra_failure_diagnostic_is_request_scoped(preview, mo
         return session
 
     client.create_session.side_effect = create_session
-    monkeypatch.setattr(_copilot, "build_async_credential", Mock(return_value=credential))
+    monkeypatch.setattr(_runtime, "build_async_credential", Mock(return_value=credential))
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     bad_request = replace(_request(), prompt="bad", session_id="bad")
     good_request = replace(_request(), prompt="good", session_id="good")
@@ -651,7 +517,7 @@ async def test_concurrent_entra_failure_diagnostic_is_request_scoped(preview, mo
             return_exceptions=True,
         )
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
     assert isinstance(bad_result, CopilotPreviewError)
     assert "Azure OpenAI" in str(bad_result)
@@ -664,7 +530,6 @@ def _registered_azure_chat(monkeypatch, tmp_path, *, blob_setting=None):
     root = tmp_path / "app"
     shutil.copytree(SAMPLE, root)
     monkeypatch.setattr(_harness, "_HARNESSES", {})
-    monkeypatch.setattr(_copilot, "_RUNTIMES", {})
     monkeypatch.setattr(paths, "_app_root", root)
     monkeypatch.setenv(_harness.FLAG, "true")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "azure_openai")
@@ -703,14 +568,14 @@ async def test_registered_blob_configuration_failure_is_safe_without_start_or_fa
     storage_credential = SimpleNamespace(
         get_token=AsyncMock(side_effect=AssertionError("Storage auth must not run")), close=AsyncMock()
     )
-    monkeypatch.setattr(_copilot, "build_async_credential", lambda: provider_credential)
+    monkeypatch.setattr(_runtime, "build_async_credential", lambda: provider_credential)
     monkeypatch.setattr(
         _credential, "build_async_credential_with_client_id", lambda _client_id: storage_credential
     )
     native = Mock(side_effect=AssertionError("Native startup must not run"))
     maf = AsyncMock(side_effect=AssertionError("MAF fallback must not run"))
     monkeypatch.setattr(copilot, "CopilotClient", native)
-    monkeypatch.setattr(runner, "_build_agent_session", maf)
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", maf)
     chat = _registered_azure_chat(monkeypatch, tmp_path, blob_setting=(setting, value))
     monkeypatch.setenv(_harness.FLAG, "false")
     try:
@@ -727,7 +592,7 @@ async def test_registered_blob_configuration_failure_is_safe_without_start_or_fa
         provider_credential.get_token.assert_not_awaited()
         storage_credential.get_token.assert_not_awaited()
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
     provider_credential.close.assert_awaited_once()
     if setting == "AzureWebJobsStorage__blobServiceUri":
         storage_credential.close.assert_awaited_once()
@@ -745,16 +610,16 @@ async def test_credential_constructor_failure_is_sanitized_at_public_route(
     build = Mock(side_effect=RuntimeError(sentinel))
     native = Mock(side_effect=AssertionError("Native runtime must not start"))
     maf = AsyncMock(side_effect=AssertionError("MAF fallback must not run"))
-    monkeypatch.setattr(_copilot, "build_async_credential", build)
+    monkeypatch.setattr(_runtime, "build_async_credential", build)
     monkeypatch.setattr(copilot, "CopilotClient", native)
-    monkeypatch.setattr(runner, "_build_agent_session", maf)
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", maf)
     chat = _registered_azure_chat(monkeypatch, tmp_path)
     try:
         response = await chat(
             SimpleNamespace(headers={}, json=AsyncMock(return_value={"prompt": "hello"}))
         )
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
     body = response.body.decode()
     assert response.status_code == 500
@@ -786,16 +651,16 @@ async def test_credential_callback_failure_is_sanitized_at_public_route(
 
     client.create_session.side_effect = create_session
     maf = AsyncMock(side_effect=AssertionError("MAF fallback must not run"))
-    monkeypatch.setattr(_copilot, "build_async_credential", Mock(return_value=credential))
+    monkeypatch.setattr(_runtime, "build_async_credential", Mock(return_value=credential))
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
-    monkeypatch.setattr(runner, "_build_agent_session", maf)
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", maf)
     chat = _registered_azure_chat(monkeypatch, tmp_path)
     try:
         response = await chat(
             SimpleNamespace(headers={}, json=AsyncMock(return_value={"prompt": "hello"}))
         )
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
     body = response.body.decode()
     assert response.status_code == 500
@@ -823,7 +688,7 @@ async def test_provider_auth_failure_is_sanitized_at_public_route(
     maf = AsyncMock(side_effect=AssertionError("MAF fallback must not run"))
     monkeypatch.setenv("AZURE_OPENAI_API_KEY", "sentinel-private-api-key")
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
-    monkeypatch.setattr(runner, "_build_agent_session", maf)
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", maf)
     chat = _registered_azure_chat(monkeypatch, tmp_path)
     monkeypatch.setenv("AZURE_OPENAI_API_KEY", "sentinel-private-api-key")
     try:
@@ -831,7 +696,7 @@ async def test_provider_auth_failure_is_sanitized_at_public_route(
             SimpleNamespace(headers={}, json=AsyncMock(return_value={"prompt": "hello"}))
         )
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
     body = response.body.decode()
     assert response.status_code == 500
@@ -854,7 +719,7 @@ async def test_provider_config_is_resupplied_on_resume(preview, monkeypatch):
         await _copilot.run(preview, _request())
         await _copilot.run(preview, _request(new_session=False))
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
     created = client.create_session.call_args.kwargs["provider"]
     resumed = client.resume_session.call_args.kwargs["provider"]
@@ -876,7 +741,7 @@ async def test_late_custom_manager_replacement_fails_before_native_execution(
 
     replace_client_manager(CustomManager())
     native = Mock(side_effect=AssertionError("Native runtime must not be acquired"))
-    monkeypatch.setattr(_copilot, "_runtime", native)
+    monkeypatch.setattr(_copilot, "get_runtime", native)
 
     with pytest.raises(UnsupportedCapabilityError, match=r"ClientManager.*MAF-only"):
         await _copilot.run(preview, _request())
@@ -901,7 +766,7 @@ async def test_sdk_resume_failure_is_safe_and_never_creates_a_session(preview, m
         client.resume_session.assert_awaited_once()
         client.create_session.assert_not_awaited()
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
 
 async def _sdk_file(preview):
@@ -939,7 +804,7 @@ async def test_resume_retry_preserves_opaque_sdk_files(preview, monkeypatch):
         session.get_events.assert_not_awaited()
         assert await _sdk_file(preview) == "\x00opaque\r\n"
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
 
 @pytest.mark.asyncio
@@ -968,7 +833,7 @@ async def test_create_rpc_failure_preserves_sdk_writes_without_host_rollback(pre
         client.get_session_metadata.assert_not_awaited()
         assert await _sdk_file(preview) == "SDK owns this write"
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
 
 @pytest.mark.asyncio
@@ -992,12 +857,12 @@ async def test_startup_failure_closes_the_open_filesystem(preview, monkeypatch):
             await _copilot.run(preview, _request())
         assert len(providers) == 1
         assert providers[0]._closed
-        assert not _copilot._runtime(preview)._filesystems
+        assert not _runtime.get_runtime(preview)._filesystems
         client.create_session.assert_not_awaited()
         client.stop.assert_awaited_once()
         client.get_session_metadata.assert_not_awaited()
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
 
 @pytest.mark.asyncio
@@ -1007,18 +872,18 @@ async def test_filesystem_failure_stops_before_native_start_without_fallback(pre
     native = Mock(side_effect=AssertionError("Native startup must not run"))
     maf = AsyncMock(side_effect=AssertionError("MAF fallback must not run"))
     monkeypatch.setattr(copilot, "CopilotClient", native)
-    monkeypatch.setattr(runner, "_build_agent_session", maf)
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", maf)
     monkeypatch.setattr(_copilot, "open_session_fs", AsyncMock(
-        side_effect=NativeSessionError(errno.EIO, "Configured storage failed.")
+        side_effect=CopilotSessionError(errno.EIO, "Configured storage failed.")
     ))
     try:
-        with pytest.raises(NativeSessionError) as caught:
+        with pytest.raises(CopilotSessionError) as caught:
             await _copilot.run(preview, _request())
         assert caught.value.errno == errno.EIO
         native.assert_not_called()
         maf.assert_not_awaited()
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
 
 @pytest.mark.asyncio
@@ -1035,9 +900,9 @@ async def test_detach_failure_does_not_mask_the_original_failure(preview, monkey
         with pytest.raises(CopilotPreviewError, match="model-visible tool catalog"):
             await _copilot.run(preview, _request())
         session.disconnect.assert_awaited_once()
-        assert not _copilot._runtime(preview)._filesystems
+        assert not _runtime.get_runtime(preview)._filesystems
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
 
 @pytest.mark.asyncio
@@ -1051,9 +916,9 @@ async def test_detach_failure_alone_still_fails_the_turn(preview, monkeypatch):
     try:
         with pytest.raises(CopilotPreviewError, match="could not be disconnected"):
             await _copilot.run(preview, _request())
-        assert not _copilot._runtime(preview)._filesystems
+        assert not _runtime.get_runtime(preview)._filesystems
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
 
 @pytest.mark.asyncio
@@ -1064,7 +929,7 @@ async def test_maf_history_does_not_block_or_get_loaded_by_copilot(preview, monk
     history.parent.mkdir(parents=True)
     history.write_bytes(b"unrelated MAF-owned history")
     maf_history = Mock(side_effect=AssertionError("MAF history must not be constructed"))
-    monkeypatch.setattr(runner, "_build_history_provider", maf_history)
+    monkeypatch.setattr(_maf_execution, "_build_history_provider", maf_history)
     client = _fake_client()
     client.get_session_metadata.return_value = SimpleNamespace(session_id="existing")
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
@@ -1076,7 +941,7 @@ async def test_maf_history_does_not_block_or_get_loaded_by_copilot(preview, monk
         maf_history.assert_not_called()
         assert history.read_bytes() == b"unrelated MAF-owned history"
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
 
 def test_portable_output_limit_is_rejected_during_registration(tmp_path, monkeypatch):
@@ -1109,33 +974,13 @@ def test_portable_output_limit_is_rejected_during_registration(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_distinct_same_root_app_contexts_never_share_a_native_client(preview, monkeypatch):
-    import copilot
-
-    second = replace(preview)
-    first_client, second_client = _fake_client(), _fake_client()
-    factory = Mock(side_effect=[first_client, second_client])
-    monkeypatch.setattr(copilot, "CopilotClient", factory)
-    first_owner = _copilot._runtime(preview)
-    second_owner = _copilot._runtime(second)
-    try:
-        assert first_owner is not second_owner
-        assert await first_owner.client() is first_client
-        assert await second_owner.client() is second_client
-        assert await first_owner.client() is first_client
-        assert factory.call_count == 2
-        first_client.start.assert_awaited_once()
-        second_client.start.assert_awaited_once()
-    finally:
-        await _copilot.shutdown()
-
-
-@pytest.mark.asyncio
 async def test_native_client_uses_an_existing_host_working_directory(preview, monkeypatch):
     """The pinned runtime validates the session cwd against the real host filesystem."""
     import copilot
 
-    from azure_functions_agents._copilot_session_fs import HOST_PATH_CONVENTIONS
+    from azure_functions_agents.harness.copilot_sdk._copilot_session_paths import (
+        HOST_PATH_CONVENTIONS,
+    )
 
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
     client = _fake_client()
@@ -1144,7 +989,7 @@ async def test_native_client_uses_an_existing_host_working_directory(preview, mo
     try:
         await _copilot.run(preview, _request(new_session=True))
     finally:
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
     session_fs = factory.call_args.kwargs["session_fs"]
     working_directory = Path(session_fs["initial_working_directory"])
@@ -1158,8 +1003,8 @@ async def test_native_client_uses_an_existing_host_working_directory(preview, mo
 async def test_same_session_wait_is_bounded_while_other_sessions_remain_concurrent(preview, monkeypatch):
     import copilot
 
-    monkeypatch.setattr(runner, "_SESSION_LOCKS", {})
-    monkeypatch.setattr(runner, "_SESSION_LOCKS_GUARD", asyncio.Lock())
+    monkeypatch.setattr(_execution, "_SESSION_LOCKS", {})
+    monkeypatch.setattr(_execution, "_SESSION_LOCKS_GUARD", asyncio.Lock())
     started, release = asyncio.Event(), asyncio.Event()
     client = _fake_client()
     sessions = []
@@ -1206,7 +1051,7 @@ async def test_same_session_wait_is_bounded_while_other_sessions_remain_concurre
     finally:
         release.set()
         await first
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
 
 @pytest.mark.asyncio
@@ -1220,7 +1065,7 @@ async def test_interrupted_turn_aborts_disconnects_and_closes_only_its_adapter(
     order = []
     client = _fake_client()
     session = client.create_session.return_value
-    owner = _copilot._runtime(preview)
+    owner = _runtime.get_runtime(preview)
     original_release = owner.release_filesystem
 
     async def wait_forever(*_args, **_kwargs):
@@ -1267,7 +1112,7 @@ async def test_interrupted_turn_aborts_disconnects_and_closes_only_its_adapter(
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
-        await _copilot.shutdown()
+        await _lifecycle._shutdown_harnesses()
 
 
 @pytest.mark.asyncio
@@ -1288,17 +1133,225 @@ async def test_failed_adapter_close_is_retained_for_selected_owner_shutdown(prev
 
     monkeypatch.setattr(_copilot, "open_session_fs", open_with_close_fault)
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
-    owner = _copilot._runtime(preview)
+    owner = _runtime.get_runtime(preview)
     with pytest.raises(CopilotPreviewError, match="storage"):
         await _copilot.run(preview, _request())
     assert owner._filesystems == {providers[0]}
     client.create_session.return_value.disconnect.assert_awaited_once()
 
-    await _copilot.shutdown()
+    await _lifecycle._shutdown_harnesses()
 
     providers[0].backend.close.assert_awaited()
     assert providers[0].backend.close.await_count == 2
     assert providers[0]._closed
     assert not owner._filesystems
     client.stop.assert_awaited_once()
-    assert not _copilot._RUNTIMES
+    assert preview._resources.runtime is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome", ["success", "sdk_timeout", "send_failure", "empty", "no_reply", "late_token"]
+)
+async def test_send_scope_observes_usage_once_and_unsubscribes(preview, monkeypatch, outcome):
+    import copilot
+    from copilot.session_events import (
+        AssistantMessageData,
+        AssistantUsageData,
+        SessionEvent,
+        SessionEventType,
+    )
+
+    def event(kind, data):
+        return SessionEvent(data=data, id=uuid4(), timestamp=datetime.now(UTC), type=kind)
+
+    selected = preview
+    if outcome == "late_token":
+        selected = replace(preview, provider=AzureOpenAIProvider("https://fixture.openai.azure.com"))
+        monkeypatch.setattr(_runtime, "build_async_credential", Mock(return_value=SimpleNamespace(
+            get_token=AsyncMock(side_effect=RuntimeError("private token failure")),
+            close=AsyncMock(),
+        )))
+    client = _fake_client()
+    session = client.create_session.return_value
+    recorder = Mock()
+    monkeypatch.setattr(_execution, "_AgentUsageRecorder", Mock(return_value=recorder))
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+
+    async def metadata():
+        assert session.handlers == []
+        session.on.assert_not_called()
+        return SimpleNamespace(tools=[])
+
+    async def send(*_args, **_kwargs):
+        assert len(session.handlers) == 1
+        for data in (
+            AssistantUsageData(model="fixture", input_tokens=2, output_tokens=3),
+            AssistantUsageData(model="fixture", input_tokens=5, output_tokens=7),
+        ):
+            session.handlers[0](event(SessionEventType.ASSISTANT_USAGE, data))
+        session.handlers[0](event(
+            SessionEventType.ASSISTANT_MESSAGE,
+            AssistantMessageData(content="intermediate", message_id="intermediate"),
+        ))
+        if outcome == "sdk_timeout":
+            raise TimeoutError("SDK wait expired without aborting")
+        if outcome == "send_failure":
+            raise RuntimeError("private send failure")
+        if outcome == "late_token":
+            callback = client.create_session.call_args.kwargs["provider"]["bearer_token_provider"]
+            with pytest.raises(CopilotPreviewError):
+                await callback(SimpleNamespace())
+        if outcome == "no_reply":
+            return None
+        final = event(
+            SessionEventType.ASSISTANT_MESSAGE,
+            AssistantMessageData(
+                content="   " if outcome == "empty" else "final reply", message_id="final",
+            ),
+        )
+        session.handlers[0](final)
+        return final
+
+    async def disconnect():
+        assert session.handlers == []
+
+    session.rpc.tools.get_current_metadata.side_effect = metadata
+    session.send_and_wait.side_effect = send
+    session.disconnect.side_effect = disconnect
+    try:
+        if outcome == "success":
+            result = await _copilot.run(selected, _request())
+            assert result.content == "final reply"
+            assert result.content_intermediate == ["intermediate"]
+        else:
+            diagnostic = {
+                "sdk_timeout": "deadline",
+                "send_failure": "No fallback",
+                "empty": "no final model reply",
+                "no_reply": "no final model reply",
+                "late_token": "Entra token",
+            }[outcome]
+            with pytest.raises(CopilotPreviewError, match=diagnostic):
+                await _copilot.run(selected, _request())
+        assert "on_event" not in client.create_session.call_args.kwargs
+        session.on.assert_called_once()
+        session.unsubscribe.assert_called_once()
+        recorder.emit_counts.assert_called_once_with(input_tokens=7, output_tokens=10)
+        assert session.abort.await_count == (outcome in {"sdk_timeout", "send_failure"})
+        session.disconnect.assert_awaited_once()
+        client.stop.assert_not_awaited()
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["filesystem", "create", "catalog", "subscribe"])
+async def test_failures_before_send_do_not_publish_usage_or_abort(preview, monkeypatch, boundary):
+    import copilot
+
+    client = _fake_client()
+    session = client.create_session.return_value
+    recorder = Mock()
+    monkeypatch.setattr(_execution, "_AgentUsageRecorder", Mock(return_value=recorder))
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    if boundary == "filesystem":
+        monkeypatch.setattr(_copilot, "open_session_fs", AsyncMock(
+            side_effect=CopilotSessionError(errno.EIO, "Configured storage failed."),
+        ))
+    elif boundary == "create":
+        client.create_session.side_effect = RuntimeError("private create failure")
+    elif boundary == "catalog":
+        session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(tools=None)
+    else:
+        session.on.side_effect = RuntimeError("private observer failure")
+    try:
+        with pytest.raises((CopilotPreviewError, CopilotSessionError)):
+            await _copilot.run(preview, _request())
+        session.send_and_wait.assert_not_awaited()
+        session.abort.assert_not_awaited()
+        recorder.emit_counts.assert_not_called()
+        session.unsubscribe.assert_not_called()
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failures_preserve_original_request_cancellation(preview, monkeypatch):
+    import copilot
+
+    client = _fake_client()
+    session = client.create_session.return_value
+    original = asyncio.CancelledError("request cancelled")
+    session.send_and_wait.side_effect = original
+    session.abort.side_effect = RuntimeError("private abort failure")
+    session.disconnect.side_effect = RuntimeError("private detach failure")
+    opened = []
+    original_open = _copilot.open_session_fs
+
+    async def open_with_failure(*args, **kwargs):
+        provider = await original_open(*args, **kwargs)
+        provider.backend.close = AsyncMock(side_effect=[OSError(errno.EIO, "private close failure"), None])
+        opened.append(provider)
+        return provider
+
+    monkeypatch.setattr(_copilot, "open_session_fs", open_with_failure)
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    owner = _runtime.get_runtime(preview)
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await _copilot.run(preview, _request())
+    assert caught.value is original
+    session.abort.assert_awaited_once()
+    session.unsubscribe.assert_called_once()
+    session.disconnect.assert_awaited_once()
+    assert owner._filesystems == {opened[0]}
+    client.stop.assert_not_awaited()
+    await _lifecycle._shutdown_harnesses()
+    assert opened[0]._closed
+    assert preview._resources.runtime is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("send_fails", [False, True])
+async def test_observer_cleanup_failure_does_not_replace_send_failure(preview, monkeypatch, send_fails):
+    import copilot
+
+    client = _fake_client()
+    session = client.create_session.return_value
+    unsubscribe = Mock(side_effect=RuntimeError("private unsubscribe failure"))
+    session.on = Mock(return_value=unsubscribe)
+    original = CopilotPreviewError("Original request failure.")
+    if send_fails:
+        session.send_and_wait.side_effect = original
+    recorder = Mock()
+    monkeypatch.setattr(_execution, "_AgentUsageRecorder", Mock(return_value=recorder))
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(CopilotPreviewError) as caught:
+            await _copilot.run(preview, _request())
+        if send_fails:
+            assert caught.value is original
+        else:
+            assert "private unsubscribe" not in str(caught.value)
+        unsubscribe.assert_called_once()
+        recorder.emit_counts.assert_called_once_with(input_tokens=None, output_tokens=None)
+        session.disconnect.assert_awaited_once()
+        assert session.abort.await_count == send_fails
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+async def test_real_sdk_wait_timeout_requires_the_host_abort():
+    from copilot.session import CopilotSession
+
+    client = SimpleNamespace(request=AsyncMock(return_value={"messageId": "fixture-message"}))
+    session = CopilotSession("fixture-session", client)
+    with pytest.raises(TimeoutError):
+        await session.send_and_wait("offline prompt", timeout=0.01)
+    assert [call.args[0] for call in client.request.await_args_list] == ["session.send"]
+    assert not session._event_handlers
+    await _copilot._abort(session)
+    assert [call.args[0] for call in client.request.await_args_list] == [
+        "session.send", "session.abort",
+    ]

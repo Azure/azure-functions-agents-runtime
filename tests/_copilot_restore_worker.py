@@ -10,17 +10,23 @@ from pathlib import Path
 
 
 async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> int:
-    from azure_functions_agents import _copilot
-    from azure_functions_agents import _copilot_session_fs as fs
-    from azure_functions_agents._copilot_providers import OpenAIProvider
-    from azure_functions_agents._harness import AppHarness, HarnessKind
-    from azure_functions_agents._native_session_identity import resolve_route
+    from azure_functions_agents.harness import _harness_lifecycle
+    from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
+    from azure_functions_agents.harness.copilot_sdk import (
+        _copilot_execution as _copilot,
+    )
+    from azure_functions_agents.harness.copilot_sdk import (
+        _copilot_session_fs as fs,
+    )
+    from azure_functions_agents.harness.copilot_sdk._copilot_providers import OpenAIProvider
+    from azure_functions_agents.harness.copilot_sdk._copilot_runtime import get_runtime
+    from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import resolve_route
 
     paths: list[str] = []
     denied_paths: list[str] = []
-    original = fs.NativeSessionFs._path
+    original = fs.CopilotSessionFs._path
 
-    def record(self: fs.NativeSessionFs, path: str) -> str:
+    def record(self: fs.CopilotSessionFs, path: str) -> str:
         paths.append(path)
         try:
             return original(self, path)
@@ -28,7 +34,7 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
             denied_paths.append(path)
             raise
 
-    fs.NativeSessionFs._path = record
+    fs.CopilotSessionFs._path = record
 
     app_root = session_dir / "app"
     app_root.mkdir(parents=True, exist_ok=True)
@@ -36,8 +42,9 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
         HarnessKind.COPILOT, app_root, storage_root, "offline-model", OpenAIProvider("offline"),
         session_storage=resolve_route(app_root),
     )
-    owner = _copilot._runtime(harness)
-    native_id = _copilot._native_id("agent", "restore")
+    owner = get_runtime(harness)
+    owner.admit_loop()
+    native_id = _copilot._copilot_session_id("agent", "restore")
     result: dict[str, object] = {
         "phase": phase,
         "pid": os.getpid(),
@@ -52,6 +59,7 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
             workspace_path=str(owner.workspace),
             deadline=asyncio.get_running_loop().time() + 120,
         )
+        owner.own_filesystem(storage)
         client = await owner.client()
         session = await _open_session(client, native_id, phase, storage)
         result["event_count"] = len(await session.get_events())
@@ -70,9 +78,9 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
         finally:
             try:
                 if storage is not None:
-                    await storage.close()
+                    await owner.release_filesystem(storage)
             finally:
-                await _copilot.shutdown()
+                await _harness_lifecycle._shutdown_harnesses()
     root = session_dir / "copilot-native" / "local" / "agent" / "restore"
     result["files"] = sorted(
         path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()
@@ -90,7 +98,7 @@ async def _open_session(client, native_id, phase, storage):
         ToolSearchConfig,
     )
 
-    from azure_functions_agents import _copilot
+    from azure_functions_agents.harness.copilot_sdk import _copilot_execution as _copilot
     options = {
         "model": "offline-model",
         "tools": [],

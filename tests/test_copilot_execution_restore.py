@@ -35,7 +35,7 @@ def run_worker(
         "COPILOT_SKIP_CLI_DOWNLOAD": "1",
     }
     completed = subprocess.run(
-        [sys.executable, "-m", "tests._native_restore_worker", str(phase), str(session_dir),
+        [sys.executable, "-m", "tests._copilot_restore_worker", str(phase), str(session_dir),
          str(storage_root), str(out)],
         cwd=str(cwd),
         env=environment,

@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 from agent_framework import FileHistoryProvider, Message
 
-from azure_functions_agents._file_history import ScopedFileHistoryProvider
+from azure_functions_agents.harness.agent_framework._maf_file_history import (
+    ScopedFileHistoryProvider,
+)
 
 
 def _message(text: str) -> Message:

@@ -18,18 +18,26 @@ from azure.storage.blob.aio import BlobServiceClient
 from copilot.generated import rpc
 from copilot.session_fs_provider import create_session_fs_adapter
 
-from azure_functions_agents import _copilot_session_fs as fs
-from azure_functions_agents._copilot_session_fs import open_session_fs
-from azure_functions_agents._native_session_identity import (
-    NativeSessionError,
-    StorageRoute,
-    resolve_route,
-    session_prefix,
-)
-from azure_functions_agents._session_storage import (
+from azure_functions_agents.harness._session_storage import (
     BlobStorageSettings,
     OwnedBlobService,
     open_blob_service,
+)
+from azure_functions_agents.harness.copilot_sdk import (
+    _copilot_session_blob as blob_backend,
+)
+from azure_functions_agents.harness.copilot_sdk import (
+    _copilot_session_fs as fs,
+)
+from azure_functions_agents.harness.copilot_sdk import (
+    _copilot_session_paths as session_paths,
+)
+from azure_functions_agents.harness.copilot_sdk._copilot_session_fs import open_session_fs
+from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import (
+    CopilotSessionError,
+    StorageRoute,
+    resolve_route,
+    session_prefix,
 )
 from tests._blob_sdk_errors import ScriptedBlobTransport
 from tests.test_copilot_session_fs import file_case as file_case
@@ -115,13 +123,17 @@ async def test_real_sdk_handler_reports_missing_file(tmp_path, monkeypatch):
 async def test_real_sdk_create_resume_factory_registers_callbacks_before_rpc(file_case, tmp_path, resume):
     from copilot import CopilotClient, RuntimeConnection
 
-    from azure_functions_agents._copilot import _deny_permission
+    from azure_functions_agents.harness.copilot_sdk._copilot_execution import _deny_permission
 
-    provider, _, _ = file_case
+    provider, route, _ = file_case
     workspace = tmp_path / "host-workspace"
     workspace.mkdir()
-    provider.workspace_path = str(workspace)
-    provider.conventions = fs.HOST_PATH_CONVENTIONS
+    await provider.close()
+    provider = await open_session_fs(
+        route, "agent", "session",
+        workspace_path=str(workspace),
+        conventions=session_paths.HOST_PATH_CONVENTIONS,
+    )
     client = CopilotClient(
         connection=RuntimeConnection.for_stdio(path=sys.executable),
         mode="empty",
@@ -129,8 +141,8 @@ async def test_real_sdk_create_resume_factory_registers_callbacks_before_rpc(fil
         telemetry=None,
         session_fs={
             "initial_working_directory": str(workspace),
-            "session_state_path": fs.SESSION_STATE_ROOT,
-            "conventions": fs.HOST_PATH_CONVENTIONS,
+            "session_state_path": session_paths.SESSION_STATE_ROOT,
+            "conventions": session_paths.HOST_PATH_CONVENTIONS,
         },
     )
     methods, factory_sessions = [], []
@@ -272,7 +284,7 @@ async def test_pinned_sdk_exists_masks_errors_but_the_provider_does_not(file_cas
     monkeypatch.setattr(provider.backend, "stat", AsyncMock(
         side_effect=ServiceRequestError("fixture-secret")
     ))
-    with pytest.raises(NativeSessionError) as caught:
+    with pytest.raises(CopilotSessionError) as caught:
         await provider.exists("/workspace/file")
     assert caught.value.errno == errno.EIO
     result = await handler.exists(rpc.SessionFSExistsRequest(
@@ -298,13 +310,13 @@ async def test_real_blob_sdk_error_pipeline_distinguishes_file_absence(status, c
     service = BlobServiceClient(
         "https://fixture.invalid", transport=transport, retry_total=0
     )
-    backend = fs._BlobFileBackend(OwnedBlobService(service), "container", "owned-prefix")
-    provider = fs.NativeSessionFs(backend)
+    backend = blob_backend.BlobSessionFileBackend(OwnedBlobService(service), "container", "owned-prefix")
+    provider = fs.CopilotSessionFs(backend)
     try:
         if expected is None:
             assert await provider._call(lambda: backend._properties("owned-prefix/file")) is None
         else:
-            with pytest.raises(NativeSessionError) as caught:
+            with pytest.raises(CopilotSessionError) as caught:
                 await provider._call(lambda: backend._properties("owned-prefix/file"))
             assert caught.value.errno == expected
         assert len(transport.requests) == 1
@@ -319,8 +331,8 @@ async def test_real_blob_sdk_identity_rename_copies_then_deletes_without_leases(
     credential = SimpleNamespace(
         get_token=AsyncMock(return_value=AccessToken("fixture-token", 0)), close=AsyncMock()
     )
-    backend = fs._BlobFileBackend(OwnedBlobService(service, credential), "container", "owned-prefix")
-    provider = fs.NativeSessionFs(backend)
+    backend = blob_backend.BlobSessionFileBackend(OwnedBlobService(service, credential), "container", "owned-prefix")
+    provider = fs.CopilotSessionFs(backend)
     try:
         await provider._call(lambda: backend._copy_delete("owned-prefix/source", "owned-prefix/target"))
         copy, delete = transport.requests
@@ -330,7 +342,7 @@ async def test_real_blob_sdk_identity_rename_copies_then_deletes_without_leases(
         assert parse_qs(urlsplit(copy.url).query).get("comp") is None
         assert "x-ms-lease-id" not in copy.headers and "x-ms-lease-id" not in delete.headers
         assert copy.headers["x-ms-copy-source-authorization"] == "Bearer fixture-token"
-        credential.get_token.assert_awaited_once_with(fs.STORAGE_TOKEN_SCOPE)
+        credential.get_token.assert_awaited_once_with(blob_backend.STORAGE_TOKEN_SCOPE)
     finally:
         await provider.close()
     credential.close.assert_awaited_once()
@@ -342,7 +354,7 @@ async def test_real_blob_sdk_identity_rename_copies_then_deletes_without_leases(
     ("content", "metadata", "suffix"),
     [
         ("\x00opaque\r\n雪".encode(), {"fixture": "file"}, "file"),
-        (b"", fs.DIRECTORY_METADATA | {"fixture": "directory"}, "directory/"),
+        (b"", blob_backend.DIRECTORY_METADATA | {"fixture": "directory"}, "directory/"),
     ],
 )
 async def test_real_account_key_blob_sdk_rename_preserves_bytes_metadata_and_source_on_failure(
@@ -354,12 +366,12 @@ async def test_real_account_key_blob_sdk_rename_preserves_bytes_metadata_and_sou
         "AccountKey=Zml4dHVyZS1rZXk=;EndpointSuffix=core.windows.net",
         transport=transport, retry_total=0,
     )
-    backend = fs._BlobFileBackend(OwnedBlobService(service), "container", "owned-prefix")
-    provider = fs.NativeSessionFs(backend)
+    backend = blob_backend.BlobSessionFileBackend(OwnedBlobService(service), "container", "owned-prefix")
+    provider = fs.CopilotSessionFs(backend)
     source, target = f"owned-prefix/source/{suffix}", f"owned-prefix/target/{suffix}"
     try:
         if upload_fails:
-            with pytest.raises(NativeSessionError) as caught:
+            with pytest.raises(CopilotSessionError) as caught:
                 await provider._call(lambda: backend._copy_delete(source, target))
             assert caught.value.errno == errno.EIO
         else:

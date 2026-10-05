@@ -16,10 +16,16 @@ import httpx
 import pytest
 from azure.core.credentials import AccessToken
 
-from azure_functions_agents import _copilot, _harness, runner, shutdown_client_manager
+from azure_functions_agents import runner, shutdown_client_manager
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.config import paths
 from azure_functions_agents.config.schema import WebRequestConfig
+from azure_functions_agents.harness import _harness_binding as _harness
+from azure_functions_agents.harness.agent_framework import _maf_execution
+from azure_functions_agents.harness.copilot_sdk import (
+    _copilot_runtime as _runtime,
+)
+from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
 from azure_functions_agents.system_tools.web_request import create_web_request_tools
 
 pytestmark = pytest.mark.skipif(
@@ -311,7 +317,6 @@ def native(monkeypatch, tmp_path, request):
     shutil.copytree(SAMPLE, app_root)
     monkeypatch.setattr(copilot, "CopilotClient", create_client)
     monkeypatch.setattr(_harness, "_HARNESSES", {})
-    monkeypatch.setattr(_copilot, "_RUNTIMES", {})
     monkeypatch.setattr(paths, "_app_root", app_root)
     monkeypatch.setenv(_harness.FLAG, "true")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", provider_name)
@@ -333,7 +338,7 @@ def native(monkeypatch, tmp_path, request):
     credential = SimpleNamespace(
         get_token=AsyncMock(return_value=AccessToken(SENTINEL, 9999999999)), close=AsyncMock()
     )
-    monkeypatch.setattr(_copilot, "build_async_credential", lambda: credential)
+    monkeypatch.setattr(_runtime, "build_async_credential", lambda: credential)
     monkeypatch.setenv("GITHUB_TOKEN", "ambient-auth-must-not-be-forwarded")
     monkeypatch.delenv("AzureWebJobsStorage", raising=False)
     monkeypatch.delenv("AzureWebJobsStorage__blobServiceUri", raising=False)
@@ -418,7 +423,7 @@ async def test_native_provider_auth_failure_is_sanitized_through_public_route(
     native, monkeypatch, caplog
 ):
     maf = AsyncMock(side_effect=AssertionError("MAF fallback must not run"))
-    monkeypatch.setattr(runner, "_build_agent_session", maf)
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", maf)
     app = create_function_app(native.root)
     chat = next(
         item.get_user_function()
@@ -523,7 +528,7 @@ async def test_sdk_remains_the_only_resume_authority_after_journal_damage(native
             journal.unlink()
         else:
             journal.write_text("" if damage == "empty" else "malformed\n", encoding="utf-8")
-        send_probe = AsyncMock(side_effect=_harness.CopilotPreviewError(
+        send_probe = AsyncMock(side_effect=CopilotPreviewError(
             "SDK resume probe completed; no prompt was sent."
         ))
         monkeypatch.setattr(CopilotSession, "send_and_wait", send_probe)

@@ -334,8 +334,8 @@ async def test_package_shutdown_closes_manager_even_if_acquired_harness_cleanup_
     from unittest.mock import AsyncMock
 
     import azure_functions_agents as runtime
-    import azure_functions_agents._harness as harness
     import azure_functions_agents.client_manager as managers
+    from azure_functions_agents.harness import _harness_lifecycle as harness
 
     selected_close = AsyncMock(
         side_effect=RuntimeError("native cleanup failed") if cleanup_fails else None
@@ -360,8 +360,8 @@ async def test_package_shutdown_closes_manager_even_if_acquired_harness_cleanup_
 async def test_maf_manager_shutdown_does_not_close_other_persistence(monkeypatch) -> None:
     from unittest.mock import AsyncMock
 
-    import azure_functions_agents._harness as harness
     import azure_functions_agents.client_manager as managers
+    from azure_functions_agents.harness import _harness_lifecycle as harness
 
     other_close = AsyncMock(side_effect=AssertionError("Unselected persistence must not close"))
     monkeypatch.setattr(harness, "_SHUTDOWN_CALLBACKS", {other_close})

@@ -1,4 +1,4 @@
-"""SDK-independent native session routing and readable storage paths."""
+"""Copilot session routing and readable storage paths without SDK state."""
 
 from __future__ import annotations
 
@@ -6,21 +6,21 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from ._agent_identity import agent_id, resolve_app_correlation_key
-from ._history_identity import validate_agent_slug
-from ._session_id import SESSION_ID_PATTERN
-from ._session_storage import (
+from ..._agent_identity import agent_id, resolve_app_correlation_key
+from ..._session_id import SESSION_ID_PATTERN
+from ...config.paths import resolve_config_dir
+from .._history_identity import validate_agent_slug
+from .._session_storage import (
     BlobStorageSettings,
     SessionStorageError,
     blob_storage_from_environment,
 )
-from .config.paths import resolve_config_dir
 
 NAMESPACE = "copilot-native"
 
 
-class NativeSessionError(SessionStorageError):
-    """A sanitized native filesystem or backend configuration failure."""
+class CopilotSessionError(SessionStorageError):
+    """A sanitized Copilot filesystem or backend configuration failure."""
 
 
 class StorageMode(StrEnum):
@@ -60,7 +60,7 @@ def validate_identity(agent_slug: str, session_id: str) -> None:
 
 
 def session_prefix(route: StorageRoute, agent_slug: str, session_id: str) -> str:
-    """Return the native root using the shared agent ID exactly once."""
+    """Return the unchanged native namespace using the shared agent ID once."""
     validate_identity(agent_slug, session_id)
     identity = agent_id(agent_slug, correlation_key=route.correlation_key)
     if any(
@@ -72,3 +72,7 @@ def session_prefix(route: StorageRoute, agent_slug: str, session_id: str) -> str
     ):
         raise ValueError("Invalid native agent identity path.")
     return f"{NAMESPACE}/{identity}/{session_id}"
+
+
+def _path_error(code: int) -> OSError:
+    return OSError(code, "Native session filesystem operation failed.")

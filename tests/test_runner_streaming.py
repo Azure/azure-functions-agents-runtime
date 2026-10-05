@@ -24,6 +24,30 @@ from agent_framework import (
 from azure_functions_agents import runner
 from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
+from azure_functions_agents.harness import _harness_execution as shared
+from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
+from azure_functions_agents.harness.agent_framework import _maf_execution as maf
+
+
+@pytest.mark.asyncio
+async def test_closing_the_public_stream_closes_the_selected_generator(monkeypatch):
+    closed = []
+    harness = AppHarness(HarnessKind.MAF, Path.cwd())
+
+    async def selected(_prompt, **kwargs):
+        assert kwargs["_harness"] is harness
+        try:
+            yield "data: fixture\n\n"
+            yield "data: unused\n\n"
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(maf, "run_agent_stream", selected)
+    stream = runner.run_agent_stream("fixture", _harness=harness)
+
+    assert await anext(stream) == "data: fixture\n\n"
+    await stream.aclose()
+    assert closed == [True]
 
 
 class _Content:
@@ -222,7 +246,7 @@ def _install_start_span_capture(monkeypatch: Any) -> list[_CapturedSpan]:
         spans.append(span)
         yield span
 
-    monkeypatch.setattr(runner, "start_span", _fake_start_span)
+    monkeypatch.setattr(maf, "start_span", _fake_start_span)
     return spans
 
 
@@ -243,7 +267,7 @@ def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> No
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
@@ -318,14 +342,14 @@ async def test_run_agent_stream_continues_after_loading_skill(
         monkeypatch.setenv("WEBSITE_SITE_NAME", site_name)
     spans = _install_start_span_capture(monkeypatch)
     constructed_agents: list[Any] = []
-    original_build_role_agent = runner._build_role_agent
+    original_build_role_agent = maf._build_role_agent
 
     def build_role_agent(*args: Any, **kwargs: Any) -> Any:
         agent = original_build_role_agent(*args, **kwargs)
         constructed_agents.append(agent)
         return agent
 
-    monkeypatch.setattr(runner, "_build_role_agent", build_role_agent)
+    monkeypatch.setattr(maf, "_build_role_agent", build_role_agent)
     history_calls: list[str] = []
     skill_dir = tmp_path / "test-skill"
     skill_dir.mkdir()
@@ -335,12 +359,12 @@ async def test_run_agent_stream_continues_after_loading_skill(
     )
     chat_client = LoadSkillChatClient()
     monkeypatch.setattr(
-        runner.get_client_manager(),
+        maf.get_client_manager(),
         "build_chat_client_with_target",
         lambda _model: (chat_client, InferenceTarget()),
     )
     monkeypatch.setattr(
-        runner,
+        maf,
         "_build_history_provider",
         lambda agent_slug: history_calls.append(agent_slug) or None,
     )
@@ -394,7 +418,7 @@ def test_run_agent_stream_bounds_stalled_generator_by_coordinator_deadline(
     ) -> tuple[_StallingAgent, object, str, None, InferenceTarget]:
         return _StallingAgent(), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
         return [
@@ -454,7 +478,7 @@ def test_run_agent_stream_finalizes_when_deadline_exhausted_between_updates(
     ) -> tuple[_CleanupTrackingAgent, object, str, None, InferenceTarget]:
         return _CleanupTrackingAgent(fake_stream), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
 
     async def drive() -> list[str]:
         gen = runner.run_agent_stream("prompt", timeout=0.05)
@@ -516,7 +540,7 @@ def test_run_agent_stream_finalizes_when_cancelled_while_suspended_at_a_yield(
     ) -> tuple[_CleanupTrackingAgent, object, str, None, InferenceTarget]:
         return _CleanupTrackingAgent(fake_stream), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
 
     async def drive() -> None:
         gen = runner.run_agent_stream("prompt", timeout=30.0)
@@ -562,7 +586,7 @@ def test_finalize_maf_stream_is_a_safe_no_op_for_none() -> None:
     own ``agent.run(..., stream=True)`` call raising before ``stream`` is ever
     assigned) must not raise.
     """
-    asyncio.run(runner._finalize_maf_stream(None, asyncio.CancelledError()))
+    asyncio.run(maf._finalize_maf_stream(None, asyncio.CancelledError()))
 
 
 def test_finalize_maf_stream_walks_the_entire_inner_stream_chain() -> None:
@@ -578,7 +602,7 @@ def test_finalize_maf_stream_walks_the_entire_inner_stream_chain() -> None:
     outer = _FakeHookStream(inner=middle)
 
     exc = TimeoutError("boom")
-    asyncio.run(runner._finalize_maf_stream(outer, exc))
+    asyncio.run(maf._finalize_maf_stream(outer, exc))
 
     assert outer.cleanup_calls == [exc]
     assert middle.cleanup_calls == [exc]
@@ -601,7 +625,7 @@ def test_finalize_maf_stream_does_not_clobber_an_already_set_stream_error() -> N
     stream = _FakeHookStream()
     stream._stream_error = original_error
 
-    asyncio.run(runner._finalize_maf_stream(stream, asyncio.CancelledError()))
+    asyncio.run(maf._finalize_maf_stream(stream, asyncio.CancelledError()))
 
     assert stream.cleanup_calls == [original_error]
     # Left exactly as it was -- this function never reset a value it didn't set.
@@ -618,7 +642,7 @@ def test_finalize_maf_stream_swallows_a_broken_inner_cleanup_hook_and_keeps_walk
     inner = _FakeHookStream()
     outer = _FakeHookStream(inner=inner, raise_on_cleanup=True)
 
-    asyncio.run(runner._finalize_maf_stream(outer, TimeoutError()))  # must not raise
+    asyncio.run(maf._finalize_maf_stream(outer, TimeoutError()))  # must not raise
 
     assert len(outer.cleanup_calls) == 1
     assert len(inner.cleanup_calls) == 1
@@ -645,10 +669,10 @@ def test_run_agent_bounds_lock_wait_by_coordinator_deadline(monkeypatch: Any) ->
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), resolved_id, None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
 
     async def scenario() -> BaseException | None:
-        lock = await runner._get_session_lock(resolved_id)
+        lock = await shared._get_session_lock(resolved_id)
         await lock.acquire()
         try:
             await runner.run_agent("prompt", timeout=0.05, session_id=resolved_id)
@@ -684,10 +708,10 @@ def test_run_agent_stream_bounds_lock_wait_by_coordinator_deadline(monkeypatch: 
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), resolved_id, None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
 
     async def scenario() -> list[str]:
-        lock = await runner._get_session_lock(resolved_id)
+        lock = await shared._get_session_lock(resolved_id)
         await lock.acquire()
         try:
             return [
@@ -721,10 +745,10 @@ def test_session_lock_bounded_by_releases_lock_after_successful_body() -> None:
     resolved_id = "test-session-lock-cm-success"
 
     async def scenario() -> tuple[bool, bool]:
-        lock = await runner._get_session_lock(resolved_id)
+        lock = await shared._get_session_lock(resolved_id)
         loop = asyncio.get_event_loop()
         locked_during_body = False
-        async with runner._session_lock_bounded_by(resolved_id, loop.time() + 5.0):
+        async with shared._session_lock_bounded_by(resolved_id, loop.time() + 5.0):
             locked_during_body = lock.locked()
         return locked_during_body, lock.locked()
 
@@ -735,9 +759,9 @@ def test_session_lock_bounded_by_releases_lock_after_successful_body() -> None:
 
 def test_session_locks_remain_independent_across_agent_slugs() -> None:
     async def run() -> None:
-        billing = await runner._get_session_lock("shared-session", "billing")
-        support = await runner._get_session_lock("shared-session", "support")
-        same_billing = await runner._get_session_lock("shared-session", "billing")
+        billing = await shared._get_session_lock("shared-session", "billing")
+        support = await shared._get_session_lock("shared-session", "support")
+        same_billing = await shared._get_session_lock("shared-session", "billing")
 
         assert billing is same_billing
         assert billing is not support
@@ -777,8 +801,8 @@ def test_public_runners_pass_agent_slug_to_bounded_session_lock(
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _NonStreamingAgent(), object(), "shared-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_session_lock_bounded_by", fake_lock)
-    monkeypatch.setattr(runner, "_build_agent_session", fake_non_streaming_session)
+    monkeypatch.setattr(shared, "_session_lock_bounded_by", fake_lock)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_non_streaming_session)
 
     asyncio.run(runner.run_agent("prompt", agent_name="billing"))
 
@@ -787,7 +811,7 @@ def test_public_runners_pass_agent_slug_to_bounded_session_lock(
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), "shared-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_streaming_session)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_streaming_session)
 
     async def collect() -> list[str]:
         return [
@@ -840,10 +864,10 @@ def test_session_lock_bounded_by_releases_lock_on_body_exception() -> None:
     resolved_id = "test-session-lock-cm-body-exception"
 
     async def scenario() -> bool:
-        lock = await runner._get_session_lock(resolved_id)
+        lock = await shared._get_session_lock(resolved_id)
         loop = asyncio.get_event_loop()
         with contextlib.suppress(ValueError):
-            async with runner._session_lock_bounded_by(resolved_id, loop.time() + 5.0):
+            async with shared._session_lock_bounded_by(resolved_id, loop.time() + 5.0):
                 raise ValueError("boom")
         return lock.locked()
 
@@ -858,10 +882,10 @@ def test_session_lock_bounded_by_does_not_release_on_acquire_timeout() -> None:
     resolved_id = "test-session-lock-cm-acquire-timeout"
 
     async def scenario() -> tuple[BaseException | None, bool]:
-        lock = await runner._get_session_lock(resolved_id)
+        lock = await shared._get_session_lock(resolved_id)
         await lock.acquire()  # simulate a concurrent turn already holding it
         try:
-            async with runner._session_lock_bounded_by(resolved_id, asyncio.get_event_loop().time()):
+            async with shared._session_lock_bounded_by(resolved_id, asyncio.get_event_loop().time()):
                 pass  # pragma: no cover - must never be entered
         except BaseException as exc:  # captured for assertion, not swallowed
             caught: BaseException | None = exc
@@ -897,7 +921,7 @@ def test_run_agent_stream_reports_delegate_error_count_on_span(monkeypatch: Any)
     ) -> tuple[_Agent, object, str, runner._DelegateErrorTracker, InferenceTarget]:
         return _Agent(), object(), "test-session", tracker, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
@@ -927,7 +951,7 @@ def test_run_agent_stream_reports_zero_tool_errors_without_delegation(monkeypatc
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
@@ -961,7 +985,7 @@ def test_run_agent_stream_counts_ordinary_tool_errors_without_delegation(
     ) -> tuple[_ToolErrorAgent, object, str, None, InferenceTarget]:
         return _ToolErrorAgent(), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
@@ -993,7 +1017,7 @@ def test_run_agent_stream_sums_ordinary_and_delegate_tool_errors(monkeypatch: An
     ) -> tuple[_ToolErrorAgent, object, str, runner._DelegateErrorTracker, InferenceTarget]:
         return _ToolErrorAgent(), object(), "test-session", tracker, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
@@ -1023,7 +1047,7 @@ def test_run_agent_stream_reports_display_name_on_span(monkeypatch: Any) -> None
     ) -> tuple[_Agent, object, str, None, InferenceTarget]:
         return _Agent(), object(), "test-session", None, InferenceTarget()
 
-    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+    monkeypatch.setattr(maf, "_build_agent_session", fake_build_agent_session)
 
     async def collect() -> list[str]:
         return [
@@ -1044,7 +1068,7 @@ def test_build_chat_options_from_environment(monkeypatch: Any) -> None:
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "medium")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", "detailed")
 
-    assert runner._build_chat_options_from_environment() == {
+    assert maf._build_chat_options_from_environment() == {
         "reasoning": {
             "effort": "medium",
             "summary": "detailed",
@@ -1056,14 +1080,14 @@ def test_build_chat_options_omits_reasoning_when_unset(monkeypatch: Any) -> None
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
 
-    assert runner._build_chat_options_from_environment() is None
+    assert maf._build_chat_options_from_environment() is None
 
 
 def test_build_chat_options_allows_partial_reasoning_configuration(monkeypatch: Any) -> None:
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "low")
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
 
-    assert runner._build_chat_options_from_environment() == {
+    assert maf._build_chat_options_from_environment() == {
         "reasoning": {
             "effort": "low",
         }

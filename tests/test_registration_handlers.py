@@ -10,7 +10,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from azure_functions_agents._harness import AppHarness, HarnessKind
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     AgentFrameworkCompactionConfig,
@@ -21,6 +20,7 @@ from azure_functions_agents.config.schema import (
     ResolvedAgent,
     ToolsFilter,
 )
+from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.registration._handlers import (
     _tool_error_count,
     _total_tool_error_count,
@@ -324,7 +324,7 @@ def test_http_handler_maps_sanitized_storage_errors_without_host_lifecycle_statu
 ) -> None:
     import errno
 
-    from azure_functions_agents._session_storage import SessionStorageError
+    from azure_functions_agents.harness._session_storage import SessionStorageError
 
     failure: Exception = SessionStorageError(errno.EACCES, "Storage authentication failed.")
 

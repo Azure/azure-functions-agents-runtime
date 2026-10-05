@@ -7,7 +7,7 @@ from typing import Any
 
 from agent_framework import FileHistoryProvider
 
-from ._history_identity import validate_agent_slug
+from .._history_identity import validate_agent_slug
 
 
 class ScopedFileHistoryProvider(FileHistoryProvider):

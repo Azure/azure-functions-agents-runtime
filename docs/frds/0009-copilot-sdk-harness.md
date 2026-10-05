@@ -4,7 +4,7 @@ title: Copilot SDK agent harness
 status: Finalized
 author: larohra
 created: 2026-09-28
-updated: 2026-10-02
+updated: 2026-10-05
 issues:
   - https://github.com/Azure/azure-functions-bucees-planning/issues/1332
 pull_requests: []
@@ -76,13 +76,27 @@ workflow types; do not expose a harness registry or a new public plugin protocol
 Tool and MCP adaptation remain execution concerns. The persistence interface
 does not change shared tool definitions or discovery contracts.
 
-| Pipeline stage | Existing modules | Required responsibility |
+**Internal containment.** Keep the public `runner.py` exports and signatures.
+Place common app binding and request contracts, resource-cleanup plumbing, and
+neutral storage settings under `harness/`; contain MAF-specific execution and history in
+`harness/agent_framework/`, and Copilot-specific execution, providers, and
+SessionFs in `harness/copilot_sdk/`. Shared boundaries do not import either
+harness's persistence implementation. Implementation-specific execution and
+persistence SDK types stay inside their selected implementation, without a new
+public plugin protocol or changes to tool, model, discovery, role, or preview
+contracts. Private host identifiers name Copilot explicitly; SDK-owned APIs and
+persisted path segments stay unchanged.
+App bindings, requests, and harness vocabularies each have one canonical shared
+definition. Both implementations consume the same result, usage, and session-lock
+contracts rather than duplicate them.
+
+| Pipeline stage | Modules / boundaries | Required responsibility |
 | --- | --- | --- |
 | discover | `discovery/tools.py`, `discovery/mcp.py`, `discovery/skills.py`, `_function_tool.py` | Keep project inventories and discovery rules; separate framework wrapping from author intent. Do not run inference or launch the native runtime during discovery. |
 | translate | `config/schema.py`, `config/merge.py`, `config/validation.py` | Preserve typed composition, inheritance/null semantics, and effective capability validation. Interpret no new harness selector in agent files. |
 | compose/register | `app.py`, `registration/capabilities.py`, `registration/catalog.py`, `registration/_handlers.py`, `registration/endpoints.py`, `registration/triggers.py` | Resolve the app's preview choice before harness-specific bootstrap; validate the complete catalog before FunctionApp mutation; pass resolved values to lazy handlers. Keep Azure registration and inbound authorization here. |
-| execute | `runner.py`, `client_manager.py`, internal Copilot adapter | Create/resume sessions, bind approved tools, enforce deadlines, and translate events/results. `ClientManager` remains provider access, not the agent loop, tool dispatcher, or session manager. |
-| persist | `_agent_identity.py`, `_history_identity.py`, `_session_id.py`, separate native SessionFs adapter; existing `_blob_history.py`/`_file_history.py` on the MAF path | Route persistence only through the selected harness. Preserve validation and path-containment rules, reuse the shared readable agent ID for native paths, and treat Copilot session bytes as opaque SDK-owned files. |
+| execute | Public `runner.py`, `client_manager.py`, common `harness/` binding, implementations under `harness/agent_framework/` and `harness/copilot_sdk/` | Create/resume sessions, bind approved tools, enforce deadlines, and translate events/results. `ClientManager` remains provider access, not the agent loop, tool dispatcher, or session manager. |
+| persist | `_agent_identity.py`, `_session_id.py`, shared identity validation and storage settings under `harness/`, selected harness's history or SessionFs implementation | Route persistence only through the selected harness. Preserve validation and path-containment rules, reuse the shared readable agent ID for native paths, and treat Copilot session bytes as opaque SDK-owned files. |
 | cross-cutting | `workflows/*`, `system_tools/*`, `_observability.py` | Preserve workflow authorization/Activities, system-tool policies, correlation, and content controls independently of SDK object types. |
 
 ### 4.1 App-level preview selection
@@ -107,6 +121,8 @@ It creates a small immutable internal app execution context containing the
 resolved app-root identity and the selected execution adapter. This is a bound
 execution interface, not a public harness registry; selecting it does not create
 a native client or start inference.
+The immutable binding may hold an app-owned mutable resource holder; that holder
+does not own conversation semantics or acquire SDK/storage resources at selection.
 
 Registration accepts that context explicitly and captures it in HTTP, streaming,
 MCP, non-HTTP trigger, and history-handler closures. `register_workflow_runtime()`
@@ -246,13 +262,21 @@ do not replace remote execution with a local SDK shell or code interpreter.
 ### 4.4 Native runtime lifetime
 
 The proposed default is the external native Rust runtime over stdio, with one
-lazily initialized, process-long SDK client per frozen app/storage context in a
-Functions worker, reused across invocations with isolated sessions. Concurrent
-initialization must not launch duplicate runtimes for the same context.
+lazily initialized, process-long SDK client owned by each frozen app binding in a
+Functions worker, reused across invocations with isolated sessions. Distinct app
+bindings, including bindings for the same root, do not share that client.
+Concurrent initialization must not launch duplicate runtimes for one binding.
 Request cancellation must not close the shared client or poison unrelated
 sessions; worker shutdown must release its client/process.
 Initialization, process-local session-lock waits, execution, and storage
 operations are bounded by the request deadline.
+
+The standalone first-use cache retains app bindings, not conversation state.
+A shared shutdown callback set may retain acquired resource owners so all can be
+closed without importing unselected implementations. The selected app binding
+owns its client, credentials, and open filesystem handles; the SDK remains the
+sole session authority. Preserve the single-event-loop restriction and explicit
+standalone shutdown before closing that loop.
 
 No embedded FFI dependency is proposed. A compatible Python SDK/native-runtime/
 protocol combination, deployment asset acquisition, and supported Functions
@@ -392,6 +416,9 @@ Rows 1-19 are preserved as historical design record. Decisions 20-24 supersede
 the active storage and host-recovery implications of decisions 4, 7, 11, 13,
 14, and 15. Those earlier rows remain history, not the current persistence
 contract or qualification evidence for the redesigned thin adapter boundary.
+Decision 25 supersedes only decision 24's persistence-only organizational
+restriction; its selected-persistence isolation and the contracts in decisions
+20-23 remain unchanged.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
@@ -419,6 +446,7 @@ contract or qualification evidence for the redesigned thin adapter boundary.
 | 22 | Native identity and path scheme | New opaque hash scheme / shared readable identity | Use `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`, with `agent_id` supplied by the shared helper and already containing the app correlation key and canonical slug. Retain session-ID validation and path containment without a separate hash scheme or host format version. | Human (larohra) | 2026-10-02 |
 | 23 | Session concurrency boundary | Distributed leases/fencing/OS locks / process-local serialization | Match the current MAF boundary: serialize only same-session turns within a Python process, with bounded waiting and no distributed exclusion. Cross-worker overlap is unsupported and caller-owned. | Human (larohra) | 2026-10-02 |
 | 24 | Interface separation scope | Broad execution-interface rewrite / persistence-only boundary | Keep the interface split narrowly about persistence. Shared app/configuration/registration routes through the selected harness; MAF owns its existing history provider, Copilot owns SessionFs. Construct/use/close only the selected persistence adapter, without opposite-harness imports, storage initialization, history probes, or cleanup, and without expanding scope into unrelated tool/model/discovery refactors. | Human (larohra) | 2026-10-02 |
+| 25 | Harness organizational containment | Persistence-only separation / contain harness-specific execution and persistence together | Keep common app binding/request contracts, cleanup plumbing, and neutral storage settings under `harness/`; place MAF execution/history in `harness/agent_framework/` and Copilot execution/providers/SessionFs in `harness/copilot_sdk/`. Preserve public runner signatures, app-owned resource lifetimes, selected-persistence isolation, and all existing selection, persistence, role, and preview contracts. This supersedes only decision 24's organizational restriction, not its prohibition on unrelated tool/model/discovery redesign. | Human (larohra) | 2026-10-05 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -441,6 +469,7 @@ where mocks cannot establish process, transport, authentication, or durability.
 | Identity/path isolation | Verify native paths reuse the shared agent ID, including its app correlation key exactly once, followed by validated session ID and SDK-relative path. Cover partial/local identity fallbacks and containment enforcement without introducing separate identity hashes. |
 | Backend configuration/errors | Verify Blob selection from existing storage configuration, local selection only when no Blob configuration is present, reuse of existing identity/container behavior, and explicit surfacing of Blob auth/network/configuration failures without fallback to local storage. |
 | Persistence boundary isolation | Verify that only the selected harness's persistence implementation is imported, initialized, exercised, and closed. The Copilot path must not probe or clean up MAF history storage, and the MAF path must not initialize Copilot SessionFs. |
+| Harness containment | Verify unchanged public runner exports/signatures and shared result, usage, and lock behavior after containing private execution/persistence implementations. App-bound resources remain isolated, standalone defaults remain cached, and shutdown visits only acquired owners. |
 | Same-process concurrency | Verify bounded waiting and serialization for concurrent turns targeting the same `(agent, session)` within one Python process, while independent sessions remain concurrent. Do not require distributed exclusion, cross-worker ownership, or OS-level locking for this feature. |
 | SDK integration boundary | Exercise real SDK callbacks against the adapter and verify that the host does not interpret native session contents, claim recovery semantics, or impose its own compaction/summary protocol. |
 | Hosting/telemetry | Demonstrate supported Functions deployment assets, lazy single-client startup, concurrent isolation, bounded cancellation/shutdown, and no orphan native process. Verify usage/correlation/error accounting and sensitive-data-off behavior in host and native telemetry. |
@@ -465,9 +494,15 @@ Keep documentation aligned with the runtime's implemented behavior:
 - **Architecture review:** Reviewed the persistence-only interface and SDK-owned
   session boundary. App-bound harness selection, Durable lifecycle, and
   provider/model contracts previously approved in decisions 8-10 and 16-19
-  remain in force. The active interface split is persistence-only: MAF keeps its
-  existing history provider, and Copilot uses a thin SessionFs adapter.
+  remain in force. A separate architecture checkpoint on 2026-10-05 returned
+  **APPROVE** for decision 25's organizational containment, including canonical
+  binding/request contracts, app-owned resource lifetimes, and selected-persistence
+  isolation.
 - **Human sign-off:** Laveesh Rohra (`larohra`) approved this revised persistence
   design on 2026-10-02. Decisions 20-24 supersede the earlier storage/recovery
   mechanics from decisions 4, 7, 11, 13, 14, and 15 while preserving those rows
   as historical record.
+- **Organizational sign-off:** Laveesh Rohra (`larohra`) approved behavior-preserving
+  containment of harness-specific execution and persistence on 2026-10-05.
+  Decision 25 records that boundary without changing selection, session ownership,
+  storage, role, or preview behavior.

@@ -193,7 +193,11 @@ Use isolated local settings or offline fixtures, not a customer's storage:
 - The preview requires a local host and a single Functions worker. An app
   with the flag on fails to start when
   `FUNCTIONS_WORKER_PROCESS_COUNT` is set to anything other than `1`, or when
-  `WEBSITE_INSTANCE_ID` shows a deployed Functions instance. Both rejections are
+  `WEBSITE_INSTANCE_ID` shows a deployed Functions instance. These are
+  **pre-existing Azure Functions platform settings**, not settings introduced
+  by this feature. Rejecting these values is this runtime's bounded preview
+  qualification policy, not a Copilot SDK or Functions platform limitation.
+  Both rejections are
   `UnsupportedCapabilityError`s raised before any native process, download or
   provider call. They stay until deployed-host and multi-worker qualification
   lands (issues #1357 and #1337).
