@@ -7,11 +7,11 @@ import textwrap
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from agent_framework import (
+    AgentResponse,
     BaseChatClient,
     ChatResponse,
     ChatResponseUpdate,
@@ -587,12 +587,53 @@ class _FakeHookStream:
             raise RuntimeError("boom: hostile cleanup hook")
 
 
+class _InnerStreamWrapper:
+    def __init__(self, inner: object) -> None:
+        self._inner_stream = inner
+
+
+class _HookOnlyStream:
+    _inner_stream = None
+
+    def __init__(self) -> None:
+        self.cleanup_calls = 0
+
+    async def _run_cleanup_hooks(self) -> None:
+        self.cleanup_calls += 1
+
+
 def test_finalize_maf_stream_is_a_safe_no_op_for_none() -> None:
     """``stream=None`` (nothing was ever captured — e.g. ``run_agent_stream``'s
     own ``agent.run(..., stream=True)`` call raising before ``stream`` is ever
     assigned) must not raise.
     """
     asyncio.run(maf._finalize_maf_stream(None, asyncio.CancelledError()))
+
+
+def test_finalize_maf_stream_ignores_plain_async_generators_without_private_hooks() -> None:
+    """Plain async generators do not expose MAF's private cleanup seam and should
+    be ignored rather than raising during timeout/cancellation finalization.
+    """
+
+    async def generator() -> AsyncIterator[None]:
+        if False:
+            yield None
+
+    asyncio.run(maf._finalize_maf_stream(generator(), asyncio.CancelledError()))
+
+
+def test_finalize_maf_stream_traverses_wrapper_without_cleanup_hooks() -> None:
+    """Traversal must continue through wrappers that only expose ``_inner_stream``."""
+    inner = _FakeHookStream()
+    asyncio.run(maf._finalize_maf_stream(_InnerStreamWrapper(inner), asyncio.CancelledError()))
+    assert len(inner.cleanup_calls) == 1
+
+
+def test_finalize_maf_stream_runs_hook_without_stream_error_slot() -> None:
+    """Hook-only wrappers remain valid cleanup surfaces even without ``_stream_error``."""
+    stream = _HookOnlyStream()
+    asyncio.run(maf._finalize_maf_stream(stream, asyncio.CancelledError()))
+    assert stream.cleanup_calls == 1
 
 
 def test_finalize_maf_stream_walks_the_entire_inner_stream_chain() -> None:
@@ -800,7 +841,7 @@ def test_public_runners_pass_agent_slug_to_bounded_session_lock(
             options: dict[str, Any] | None = None,
         ) -> Any:
             del session, options
-            return SimpleNamespace(text="done", messages=[])
+            return AgentResponse(messages=[Message("assistant", ["done"])])
 
     async def fake_non_streaming_session(
         **_kwargs: Any,

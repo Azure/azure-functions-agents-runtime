@@ -36,6 +36,8 @@ from .registration.capabilities import AgentCapabilities
 from .registration.catalog import AgentCatalog, CatalogEntry
 
 if TYPE_CHECKING:
+    from azure.durable_functions import DurableFunctionsClient
+
     from .workflows.schema import WorkflowPlanPolicy
 
 type AgentFunctionTool = FunctionTool | Callable[..., Any]
@@ -127,7 +129,7 @@ def _assemble_agent_inputs(
     web_request_tools: list[FunctionTool] | None,
     system_addendum: str | None,
     workflow_enabled: bool,
-    workflow_durable_client: Any | None,
+    workflow_durable_client: DurableFunctionsClient | None,
     workflow_agent_slug: str | None,
     agent_name: str | None,
     resolved_id: str | None,
@@ -345,7 +347,7 @@ async def run_agent(
     sandbox_tools: list[FunctionTool] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
-    workflow_durable_client: Any | None = None,
+    workflow_durable_client: DurableFunctionsClient | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
     web_request_tools: list[FunctionTool] | None = None,
@@ -451,7 +453,7 @@ async def run_agent_stream(
     sandbox_tools: list[FunctionTool] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
-    workflow_durable_client: Any | None = None,
+    workflow_durable_client: DurableFunctionsClient | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
     display_name: str | None = None,

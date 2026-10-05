@@ -32,7 +32,7 @@ from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
-from agent_framework import MCPStreamableHTTPTool, tool
+from agent_framework import AgentResponse, MCPStreamableHTTPTool, Message, tool
 
 import azure_functions_agents._observability as obs
 import azure_functions_agents.runner as runner
@@ -256,7 +256,7 @@ class _FakeSpecialistAgent:
 
     async def run(self, task: Any = None, **kwargs: Any) -> Any:
         text = await self._respond(str(task or ""))
-        return SimpleNamespace(text=text)
+        return AgentResponse(messages=[Message("assistant", [text])])
 
 
 def _tool_names(agent: Any) -> set[str]:

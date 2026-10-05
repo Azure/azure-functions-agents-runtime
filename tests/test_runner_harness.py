@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from agent_framework import (
+    AgentResponse,
     AgentSession,
     BaseChatClient,
     ChatMiddlewareLayer,
@@ -67,7 +68,7 @@ def test_run_agent_reports_model_and_tool_evidence_by_assistant_message(monkeypa
 
     class FakeAgent:
         async def run(self, *args: Any, **kwargs: Any) -> Any:
-            return SimpleNamespace(text="done", messages=messages, usage_details=None)
+            return AgentResponse(messages=messages)
 
     async def fake_session_builder(
         **kwargs: Any,
@@ -108,7 +109,7 @@ def test_run_agent_does_not_guess_batch_or_correlate_missing_ids(monkeypatch: An
 
     class FakeAgent:
         async def run(self, *args: Any, **kwargs: Any) -> Any:
-            return SimpleNamespace(text="done", messages=messages, usage_details=None)
+            return AgentResponse(messages=messages)
 
     async def fake_session_builder(
         **kwargs: Any,
@@ -193,7 +194,7 @@ class _FakeAgent:
         self._response_text = response_text
 
     async def run(self, _prompt: str, *, session: Any, options: Any = None) -> Any:
-        return SimpleNamespace(text=self._response_text, messages=[])
+        return AgentResponse(messages=[Message("assistant", [self._response_text])])
 
 
 class _RecordingStoringChatClient(ChatMiddlewareLayer, BaseChatClient):
