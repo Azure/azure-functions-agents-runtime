@@ -6,7 +6,7 @@ import asyncio
 import atexit
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final, Literal
 
 from ..._credential import build_async_credential
 from ..._logger import logger
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from ._copilot_session_fs import CopilotSessionFs
 
 _START_TIMEOUT_SECONDS = 30
+_EMPTY_CLIENT_MODE: Final[Literal["empty"]] = "empty"
 
 
 class CopilotRuntime:
@@ -44,12 +45,13 @@ class CopilotRuntime:
         self._exit_callback = self._exit
 
     def admit_loop(self) -> None:
-        """Select the lifetime's event loop before any asynchronous acquisition."""
+        """Bind this owner to one event loop; concurrent requests on that loop are allowed."""
         loop = asyncio.get_running_loop()
         with self._harness._resources.guard:
             if self._loop is not None and self._loop is not loop:
                 raise CopilotPreviewError(
-                    "Copilot preview requires one event loop per worker. "
+                    "Copilot preview reuses one event loop per runtime owner. "
+                    "Concurrent requests on that loop are allowed. "
                     "Await shutdown_client_manager() before closing a standalone event loop."
                 )
             self._loop = loop
@@ -98,7 +100,8 @@ class CopilotRuntime:
 
             client = CopilotClient(
                 connection=RuntimeConnection.for_stdio(),
-                mode="empty",
+                # Let this runtime own provider, tool, and session-fs wiring.
+                mode=_EMPTY_CLIENT_MODE,
                 base_directory=str(self.native_root),
                 working_directory=str(self.native_root),
                 use_logged_in_user=False,

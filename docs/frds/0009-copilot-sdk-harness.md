@@ -20,9 +20,11 @@ the agent-execution harness, while retaining this runtime's markdown authoring,
 Azure Functions surfaces, capability policy, and workflow behavior. Copilot
 becomes the sole harness in the end state, not another public plugin. A temporary
 app-level preview flag leaves MAF as the default and enables isolated Copilot
-previews with explicit capability checks. For Copilot-owned sessions, the host
-provides only a thin filesystem adapter and storage selection boundary; the SDK
-owns continuation, compaction, recovery, file contents, and format compatibility.
+previews with explicit capability checks. Today's shipped runtime still keeps
+MAF as the default and limits Copilot to an internal local-only preview. For
+Copilot-owned sessions, the host provides only a thin filesystem adapter and
+storage selection boundary; the SDK owns continuation, compaction, recovery,
+file contents, and format compatibility.
 
 ## 2. Motivation / problem
 
@@ -39,7 +41,8 @@ This specification describes intended behavior for the bounded Copilot preview.
 The current [architecture](../architecture.md) and
 [authoring specification](../front-matter-spec.md) document today's runtime;
 this FRD defines the future Copilot-path contracts that preserve those product
-surfaces while narrowing the host's persistence responsibility.
+surfaces while narrowing the host's persistence responsibility. The preview
+described here is the current bounded implementation path toward that end state.
 
 ## 3. Goals / Non-goals
 

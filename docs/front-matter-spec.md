@@ -238,8 +238,9 @@ continue.
 On the experimental Copilot opt-in (`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`), a non-null effective
 `max_context_window_tokens` is rejected before inference rather than mapped to a different threshold;
 omitting it or clearing it with `null` selects Copilot's native compaction defaults. Configured
-`max_output_tokens` is rejected on that path. Both fields behave as described above on the default
-MAF path.
+`max_output_tokens` is rejected on that path. The underlying Copilot SDK/provider surface has
+similarly named token-budget fields, but this bounded internal preview does not map or expose them
+as a supported authoring contract. Both fields behave as described above on the default MAF path.
 
 Session storage is not an `agent_configuration` or front-matter setting.
 The selected harness uses the existing `AzureWebJobsStorage` connection string

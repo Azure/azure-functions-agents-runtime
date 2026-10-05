@@ -270,7 +270,7 @@ every call; compaction controls accumulated message-history growth.
 
 `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` is the only harness selector. Unset,
 `false` or `0` selects the unchanged MAF path; `true` or `1` selects the
-preview. Boolean text is case-insensitive and trimmed; a present empty
+internal local-qualification preview. Boolean text is case-insensitive and trimmed; a present empty
 value or any other value is an error. Each app construction captures a fresh
 immutable binding, carried as an internal `AgentCapabilities` handle into
 closures. Existing closures retain their selection. Standalone calls capture
@@ -285,6 +285,10 @@ Shutdown visits acquired owners through common callbacks without backend
 discovery, and successful close permits a fresh owner without changing cached
 standalone selection. Existing shared MAF authoring/provider dependencies remain;
 this containment does not make the whole package MAF-dependency-free.
+The runtime owner guard rejects only cross-event-loop reuse of one cached
+owner, not same-loop admission of concurrent invocations within the same
+process. The preview remains separately limited to a local host and a single
+Functions worker.
 
 The runner forks **before** MAF client, history, tool-loop or role construction.
 The built-in manager's pure target resolver selects provider/model without
@@ -413,8 +417,10 @@ Blob rename may require copy/delete and is **not crash-atomic**. Filesystem
 operations do not constitute a host-owned whole-session transaction.
 
 Turns for one `(agent, session)` are serialized only within a Python process,
-with bounded waiting; independent sessions remain concurrent. Cross-worker
-overlap is unsupported and caller-owned, matching the MAF boundary.
+with bounded waiting; independent sessions remain concurrent. The same-loop
+runtime-owner guard described above still permits admitting concurrent
+invocations within that process. Cross-worker overlap is unsupported and
+caller-owned, matching the MAF boundary.
 Distributed coordination is tracked separately in
 [planning issue #1361](https://github.com/Azure/azure-functions-bucees-planning/issues/1361).
 

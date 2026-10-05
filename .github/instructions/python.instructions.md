@@ -36,7 +36,8 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
 ## Structure and naming
 
 - Prefer guard clauses, early returns, and helpers over deeply nested control
-  flow.
+  flow, but keep justified nesting when it preserves cleanup, cancellation, or
+  error-precedence invariants such as `try`/`finally`.
 - When callers share validation, normalization, or identity rules, extend one
   existing helper and use it at every relevant surface. Do not duplicate its
   logic or force distinct contracts through a helper that does not fit them.

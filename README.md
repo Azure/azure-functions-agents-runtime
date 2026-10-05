@@ -22,7 +22,8 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 
 MAF remains the default. A separate
 [Copilot preview sample](samples/copilot-preview/README.md) supports an explicit
-`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=true` opt-in for non-streaming HTTP,
+`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=true` opt-in for **internal local
+qualification only**, not a customer-facing production contract, covering non-streaming HTTP,
 filtered explicit Python tools, the configured `web_request` tool, session-bound
 ACA `execute_python` adapter wiring, host-validated structured results on
 authored HTTP-trigger routes, and SDK-owned native sessions. The flag is read
@@ -203,7 +204,9 @@ By default, agents execute through Microsoft Agent Framework's harness-agent mec
 defaults and recursive per-agent overrides configure model output and conversation compaction
 limits. The Copilot opt-in rejects configured output limits rather than silently
 dropping them, and rejects a non-null `max_context_window_tokens`; clearing that
-value with `null` selects Copilot's native compaction defaults.
+value with `null` selects Copilot's native compaction defaults. The underlying
+Copilot SDK/provider surface has similarly named token-budget fields, but this
+bounded preview does not map or expose them as a supported authoring contract.
 
 ```yaml
 # agents.config.yaml
@@ -643,8 +646,10 @@ Copilot session files use a separate namespace:
 is the shared readable app correlation key plus canonical agent slug, for
 example `local/main` when platform metadata is absent. Files are opaque
 to the host; their contents, continuation, recovery and compaction belong to
-the SDK. Only the selected harness's persistence adapter is initialized or
-closed, with no opposite-harness history probes. MAF behavior is unchanged.
+the SDK. This separate namespace applies only to the current internal Copilot
+preview; the default MAF path and its `agent-sessions/` history layout are
+unchanged. Only the selected harness's persistence adapter is initialized or
+closed, with no opposite-harness history probes.
 
 Session ids must match `^[A-Za-z0-9._-]{1,128}$` — anything else is rejected at the API boundary.
 The same caller-visible session id may be reused across agents for correlation, but each agent's

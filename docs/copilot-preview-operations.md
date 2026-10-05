@@ -1,6 +1,6 @@
 # Copilot preview: session storage operations
 
-Operational reference for the **default-off** Copilot harness preview and its
+Operational reference for the **default-off internal** Copilot harness preview and its
 native session persistence. Design rationale lives in
 [`architecture.md`](architecture.md#bounded-copilot-migration-preview); the
 runnable local walkthrough lives in the
@@ -30,7 +30,7 @@ default per resolved app root.
 | Value | Result |
 | --- | --- |
 | Unset, `false`, `0` | MAF (default). No Copilot SDK import, native process, download, auth or telemetry. |
-| `true`, `1` | Copilot preview for every role served by that app. |
+| `true`, `1` | Internal Copilot preview for local qualification of every role served by that app. |
 | Present but empty, whitespace-only, or any other text | Explicit configuration error; the app does not start. |
 
 Values are trimmed and case-insensitive. Changing the variable does **not**
@@ -110,7 +110,9 @@ errors. Blob rename can require copy/delete and is **not crash-atomic**.
 These file operations are not a whole-session transaction.
 
 Turns for the same `(agent, session)` are serialized within one Python
-process, with bounded waiting. Independent sessions remain concurrent.
+process, with bounded waiting. Independent sessions remain concurrent. The
+same-loop runtime-owner guard permits concurrent invocation admission within
+that process.
 Cross-worker overlap is unsupported and caller-owned, as on the MAF path;
 Blob storage alone does not coordinate turns across workers.
 
@@ -193,10 +195,9 @@ Use isolated local settings or offline fixtures, not a customer's storage:
 - The preview requires a local host and a single Functions worker. An app
   with the flag on fails to start when
   `FUNCTIONS_WORKER_PROCESS_COUNT` is set to anything other than `1`, or when
-  `WEBSITE_INSTANCE_ID` shows a deployed Functions instance. These are
-  **pre-existing Azure Functions platform settings**, not settings introduced
-  by this feature. Rejecting these values is this runtime's bounded preview
-  qualification policy, not a Copilot SDK or Functions platform limitation.
+  `WEBSITE_INSTANCE_ID` shows a deployed Functions instance. Rejecting those
+  pre-existing Azure Functions platform settings is this runtime's bounded
+  preview qualification policy, not a Copilot SDK or Functions platform limit.
   Both rejections are
   `UnsupportedCapabilityError`s raised before any native process, download or
   provider call. They stay until deployed-host and multi-worker qualification

@@ -91,7 +91,7 @@ async def test_cross_loop_rejection_precedes_credentials_filesystem_and_start(pr
     monkeypatch.setattr(runtime, "build_async_credential", credential)
 
     async def other_loop():
-        with pytest.raises(CopilotPreviewError, match="one event loop"):
+        with pytest.raises(CopilotPreviewError, match="runtime owner"):
             await execution.run(preview, _request())
 
     await asyncio.to_thread(asyncio.run, other_loop())
