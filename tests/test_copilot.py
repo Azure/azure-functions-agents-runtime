@@ -144,6 +144,7 @@ async def test_tool_adapter_runs_sync_and_async_callables(is_async):
     assert result.text_result_for_llm == f"{'async' if is_async else 'sync'}:ok"
     assert effects == ["ok"]
     assert calls[0]["result"] == result.text_result_for_llm
+    assert calls[0]["success"] is True
 
 
 class _PositiveInput(BaseModel):
@@ -164,6 +165,7 @@ async def test_tool_adapter_validates_pydantic_before_effect():
     assert result.result_type == "failure"
     assert effects == []
     assert calls[0]["result"] == '{"error":"Custom tool failed or returned unsupported content."}'
+    assert calls[0]["success"] is False
 
 
 @pytest.mark.asyncio
@@ -196,6 +198,7 @@ async def test_tool_adapter_returns_recoverable_failure():
     assert result.result_type == "failure"
     assert "private tool detail" not in result.text_result_for_llm
     assert calls[0]["result"] == result.text_result_for_llm
+    assert calls[0]["success"] is False
 
 
 @pytest.mark.asyncio
@@ -375,6 +378,7 @@ async def test_provider_options_use_sdk_declared_types(
         result = await _copilot.run(selected, _request())
         resumed = await _copilot.run(selected, _request(new_session=False))
         assert result.content == "synthetic reply"
+        assert result.model == "gpt-4.1-mini"
         assert resumed.content == "synthetic reply"
         allowed = get_type_hints(ProviderConfig)
         for options in (
