@@ -29,6 +29,12 @@ from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, d
 class _Content:
     def __init__(self, type: str, **kwargs: Any) -> None:
         self.type = type
+        self.arguments = None
+        self.call_id = None
+        self.id = None
+        self.name = None
+        self.result = None
+        self.text = None
         for key, value in kwargs.items():
             setattr(self, key, value)
 
