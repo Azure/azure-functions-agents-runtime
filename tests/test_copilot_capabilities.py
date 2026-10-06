@@ -60,10 +60,10 @@ def scoped_skills(tmp_path):
     )
     (excluded / "reference.txt").write_text("excluded resource", encoding="utf-8")
     descriptors = tuple(
-        SkillDescriptor.create(name=name, description=description, path=path)
-        for name, description, path in (
-            ("approved", "Approved description.", approved),
-            ("excluded", "Excluded description.", excluded),
+        SkillDescriptor.create(name=name, path=path)
+        for name, path in (
+            ("approved", approved),
+            ("excluded", excluded),
         )
     )
     policy = SkillPolicy.create(
@@ -109,18 +109,6 @@ def test_available_tools_uses_the_public_sdk_source_selector_syntax(scoped_skill
         "custom:host_tool", "mcp:*",
     ]
     assert _copilot_capabilities.available_tools(_request()) == []
-
-
-def test_replace_prompt_projects_only_approved_names_and_descriptions(scoped_skills):
-    _policy, skills = scoped_skills
-    prompt = _copilot_capabilities.skill_instructions("Author instructions.", skills[:1])
-
-    assert prompt.count("Author instructions.") == 1
-    assert "- approved: Approved description." in prompt
-    assert "excluded" not in prompt
-    assert "approved instructions" not in prompt
-    assert _copilot_capabilities.skill_instructions("Author instructions.", ()) == "Author instructions."
-    assert _copilot_capabilities.skill_instructions(None, ()) == ""
 
 
 @pytest.mark.asyncio

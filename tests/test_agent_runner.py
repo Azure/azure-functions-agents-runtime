@@ -11,13 +11,75 @@ import pytest
 
 from azure_functions_agents import runner
 from azure_functions_agents._tool_descriptor import ToolDescriptor
-from azure_functions_agents.discovery.mcp import MCPServerDescriptor
-from azure_functions_agents.discovery.skills import SkillDescriptor
+from azure_functions_agents.config.loader import load_agent_specs, load_global_config
+from azure_functions_agents.config.merge import compose
+from azure_functions_agents.discovery.mcp import MCPServerDescriptor, discover_mcp_servers
+from azure_functions_agents.discovery.skills import SkillDescriptor, discover_skills
+from azure_functions_agents.discovery.tools import discover_user_tools
 from azure_functions_agents.harness import _agent_runner
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.harness.agent_framework import _maf_execution
 from azure_functions_agents.harness.copilot_sdk import _copilot_execution, _copilot_runtime
-from azure_functions_agents.registration.capabilities import AgentCapabilities
+from azure_functions_agents.registration.capabilities import AgentCapabilities, build_capabilities
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+@pytest.mark.parametrize("skills_disabled", [False, True])
+async def test_shared_scenario_inventory_is_filtered_once_and_forwarded_unchanged(
+    kind, skills_disabled, monkeypatch
+):
+    root = Path(__file__).parent / "fixtures" / "config_scenarios" / "21_skill_root_boundaries"
+    discovered = discover_skills(root)
+    tools = discover_user_tools(root).tools
+    servers = discover_mcp_servers(root).servers
+    spec = load_agent_specs(root, strict=True)[0]
+    if skills_disabled:
+        spec = spec.model_copy(update={"skills": False})
+    resolved = compose(
+        spec,
+        load_global_config(root),
+        discovered_mcp_names=list(servers),
+        discovered_skill_names=list(discovered.skills),
+    )
+    capabilities = build_capabilities(
+        resolved,
+        discovered_user_tools=tools,
+        discovered_mcp_tools=servers,
+        discovered_skills=discovered.skills,
+        discovered_skill_descriptors=discovered.descriptors,
+    )
+    before = capabilities
+    execution = AsyncMock(return_value=runner.AgentResult("session", "reply"))
+    backend = _maf_execution if kind is HarnessKind.MAF else _copilot_execution
+    monkeypatch.setattr(backend, "run", execution)
+    no_parse = Mock(side_effect=AssertionError("Filtered descriptors must not be rediscovered"))
+    monkeypatch.setattr(runner, "describe_skill_catalog", no_parse)
+    harness = AppHarness(kind, root, default_model="fixture-model")
+
+    await _agent_runner.get_agent_runner(harness).run_agent(
+        "prompt",
+        deadline=123.0,
+        tools=capabilities.filtered_user_tools,
+        mcp_tools=capabilities.filtered_mcp_tools,
+        skills=capabilities.skills,
+        skill_catalog=capabilities.skill_catalog,
+    )
+
+    request = execution.call_args.args[1]
+    assert set(discovered.skills) == {"parent", "grouped", "excluded"}
+    assert {skill.name for skill in request.skills} == (
+        set() if skills_disabled else {"parent", "grouped"}
+    )
+    assert request.skills == capabilities.skills
+    assert request.skill_catalog == discovered.descriptors
+    assert request.tools == capabilities.filtered_user_tools
+    assert [tool.name for tool in request.tools] == ["local_tool"]
+    assert request.mcp_servers == capabilities.filtered_mcp_tools
+    assert [server.name for server in request.mcp_servers] == ["selected"]
+    assert request.skill_source_paths is None
+    assert capabilities == before
+    no_parse.assert_not_called()
 
 
 def test_get_agent_runner_caches_per_binding_resource_cell(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -153,10 +215,10 @@ async def test_cached_facade_forwards_neutral_capabilities_to_selected_execution
         name="selected", url="https://fixture.invalid/mcp", tools=["lookup"]
     )
     approved = SkillDescriptor.create(
-        name="approved", description="Approved skill", path=tmp_path / "approved"
+        name="approved", path=tmp_path / "approved"
     )
     excluded = SkillDescriptor.create(
-        name="excluded", description="Excluded skill", path=tmp_path / "excluded"
+        name="excluded", path=tmp_path / "excluded"
     )
     execution = AsyncMock(return_value=runner.AgentResult("session", "answer"))
     backend = _maf_execution if kind is HarnessKind.MAF else _copilot_execution
@@ -200,7 +262,7 @@ async def test_cached_leaf_facade_binds_immutable_capabilities_to_its_app_root(
     descriptor = ToolDescriptor.create(name="local", description="Local", func=lambda: "ok")
     server = MCPServerDescriptor.create(name="remote", url="https://fixture.invalid/mcp")
     skill = SkillDescriptor.create(
-        name="approved", description="Approved", path=tmp_path / "approved"
+        name="approved", path=tmp_path / "approved"
     )
     capabilities = AgentCapabilities(
         filtered_user_tools=(descriptor,), filtered_mcp_tools=(server,),
@@ -238,7 +300,6 @@ async def test_cached_maf_facade_preserves_raw_skill_source_path_intent(
     observed = []
     parser = Mock(side_effect=AssertionError("MAF collections must not use the individual parser"))
     monkeypatch.setattr(runner, "describe_skill_catalog", parser)
-    monkeypatch.setattr(runner, "describe_skill_paths", parser)
 
     async def execute(actual_harness, request, **kwargs):
         observed.append((actual_harness, request))

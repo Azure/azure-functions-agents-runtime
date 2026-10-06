@@ -76,6 +76,31 @@ def test_build_capabilities_maps_enabled_skills_to_paths(tmp_path: Path) -> None
     assert capabilities.enabled_skill_paths == (skill_dir_a, skill_dir_b)
 
 
+def test_filtering_retains_same_name_candidates_for_sdk_selection(tmp_path: Path) -> None:
+    candidates = (
+        SkillDescriptor("shared", tmp_path / "first" / "shared"),
+        SkillDescriptor("shared", tmp_path / "second" / "shared"),
+    )
+    capabilities = build_capabilities(
+        _resolved(enabled_skills_names=["shared"]),
+        discovered_user_tools=[],
+        discovered_mcp_tools={},
+        discovered_skills={"shared": candidates[0].path},
+        discovered_skill_descriptors=candidates,
+    )
+
+    assert capabilities.skills == capabilities.skill_catalog == candidates
+    assert capabilities.enabled_skill_paths == tuple(skill.path for skill in candidates)
+    excluded = build_capabilities(
+        _resolved(enabled_skills_names=[]),
+        discovered_user_tools=[],
+        discovered_mcp_tools={},
+        discovered_skills={"shared": candidates[0].path},
+        discovered_skill_descriptors=candidates,
+    )
+    assert excluded.skills == ()
+    assert excluded.skill_catalog == candidates
+
 def test_build_capabilities_skips_unknown_enabled_skill_names(tmp_path: Path) -> None:
     skill_dir_a = tmp_path / "alpha"
     skill_dir_a.mkdir()
@@ -89,9 +114,9 @@ def test_build_capabilities_skips_unknown_enabled_skill_names(tmp_path: Path) ->
 
 
 def test_skill_metadata_is_filtered_without_discarding_excluded_ownership(tmp_path: Path) -> None:
-    approved = SkillDescriptor(name="parent", description="Parent", path=tmp_path / "parent")
+    approved = SkillDescriptor(name="parent", path=tmp_path / "parent")
     excluded = SkillDescriptor(
-        name="child", description="Child", path=approved.path / "child",
+        name="child", path=approved.path / "child",
     )
     capabilities = build_capabilities(
         _resolved(enabled_skills_names=["parent"]),
@@ -107,8 +132,8 @@ def test_skill_metadata_is_filtered_without_discarding_excluded_ownership(tmp_pa
 
 
 def test_catalog_metadata_does_not_silently_flatten_ambiguous_canonical_roots(tmp_path: Path) -> None:
-    first = SkillDescriptor(name="first", description="First", path=tmp_path)
-    alias = SkillDescriptor(name="alias", description="Alias", path=tmp_path)
+    first = SkillDescriptor(name="first", path=tmp_path)
+    alias = SkillDescriptor(name="alias", path=tmp_path)
     capabilities = AgentCapabilities.create(skills=(first,), skill_catalog=(first, alias))
 
     assert capabilities.skills == (first,)
@@ -137,7 +162,7 @@ def test_with_runtime_skill_paths_returns_direct_role_copy(tmp_path: Path) -> No
         "---\nname: runtime\ndescription: Runtime guidance\n---\n", encoding="utf-8"
     )
     capabilities = AgentCapabilities.create(
-        skills=(SkillDescriptor(name="project", description="Project", path=project_skill),)
+        skills=(SkillDescriptor(name="project", path=project_skill),)
     )
 
     direct_capabilities = capabilities_module.with_runtime_skill_paths(

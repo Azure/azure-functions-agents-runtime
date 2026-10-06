@@ -32,8 +32,6 @@ from .discovery.mcp import discover_mcp_servers as discover_mcp_servers
 from .discovery.skills import (
     SkillDescriptor,
     describe_skill_catalog,
-    describe_skill_paths,
-    discover_skills,
 )
 from .discovery.tools import discover_user_tools as discover_user_tools
 from .harness._agent_runner import get_agent_runner
@@ -47,7 +45,6 @@ from .harness._history_identity import validate_agent_slug
 from .registration.capabilities import (
     AgentCapabilities,
     _merge_skill_descriptors,
-    _select_skill_roots,
 )
 from .registration.catalog import AgentCatalog, CatalogEntry
 
@@ -327,35 +324,14 @@ def _request(
         else tuple(mcp_tools)
     )
     skill_source_paths: tuple[Path, ...] | None = None
-    explicit_catalog: tuple[SkillDescriptor, ...] = ()
     if harness.name is HarnessKind.MAF and skills is None:
         approved: tuple[SkillDescriptor, ...] = ()
         skill_source_paths = tuple(skill_paths) if skill_paths is not None else None
-    elif skill_catalog is None and harness.name is HarnessKind.COPILOT:
-        explicit_paths = (
-            tuple(skill.path for skill in skills)
-            if skills is not None
-            else tuple(skill_paths or ())
-        )
-        explicit_catalog = describe_skill_catalog(explicit_paths)
-        approved = (
-            tuple(skills)
-            if skills is not None
-            else _select_skill_roots(explicit_catalog, explicit_paths)
-        )
+    elif skills is not None:
+        approved = tuple(skills)
     else:
-        approved = (
-            tuple(skills) if skills is not None else describe_skill_paths(skill_paths or ())
-        )
-    if skill_catalog is not None:
-        discovered = tuple(skill_catalog)
-    elif harness.name is HarnessKind.COPILOT:
-        discovered = _merge_skill_descriptors(
-            discover_skills(harness.app_root).descriptors,
-            explicit_catalog,
-        )
-    else:
-        discovered = approved
+        approved = describe_skill_catalog(skill_paths or ())
+    discovered = tuple(skill_catalog) if skill_catalog is not None else approved
     validated_id = _validate_session_id(session_id)
     effective = instructions.strip() if instructions and instructions.strip() else None
     if system_addendum:

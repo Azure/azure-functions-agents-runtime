@@ -834,7 +834,11 @@ The Copilot preview keeps these selections, with the
 #### `skills`
 - **Type:** `object` or `boolean`
 - **Location:** Agent (front matter) for filtering only
-- **Description:** Skill filtering configuration. Each skill lives in its own directory under `skills/` with a `SKILL.md` file; discovery recursively indexes valid files by name and description. The selected SDK owns instruction loading and supported resource/script mechanisms. The default MAF adapter uses `SkillsProvider` and its `load_skill` / `read_skill_resource` tools; the Copilot preview uses native skills and scoped helpers. See the [MAF file-based skills docs](https://learn.microsoft.com/en-us/agent-framework/agents/skills?pivots=programming-language-python#file-based-skills-1) for the existing `SKILL.md` format and naming rules.
+- **Description:** Skill filtering configuration. Shared discovery searches `skills/` through two child directory levels and stops at each directory containing `SKILL.md`. Grouping folders are supported; nested `SKILL.md` documents below a skill root belong to that skill rather than becoming independently selectable skills. Exclusions match directory basenames. Both harnesses receive the same filtered paths; the selected SDK reads and validates skill metadata and owns instruction loading and resource/script mechanisms. The default MAF adapter uses `SkillsProvider`; the Copilot preview uses native skills and scoped helpers. See the [MAF file-based skills docs](https://learn.microsoft.com/en-us/agent-framework/agents/skills?pivots=programming-language-python#file-based-skills-1) for the `SKILL.md` format. MAF requires its authored `name` to match the containing directory name.
+
+Discovery does not parse skill frontmatter, advertise authored descriptions, or
+confirm that a candidate will load. Invalid metadata and duplicate-name handling
+belong to the selected SDK at execution time, not app indexing.
 
 **Minimal `SKILL.md` example (refer to MAF docs for the full specification):**
 ```markdown
@@ -885,7 +889,7 @@ This progressive disclosure pattern keeps the agent's context window lean while 
 
 **Agent filtering - Use exclude lists:**
 ```yaml
-# Exclude specific skills (matched against the SKILL.md `name` field)
+# Exclude specific skill directory names
 skills:
   exclude: ["security-review", "compliance-checker"]
 ```
@@ -895,13 +899,14 @@ skills:
 skills: false
 ```
 
-**Note:** All skills under `skills/` are auto-discovered and available to all agents by default. Use `exclude` to filter out unwanted skills.
+**Note:** All discovered skill directory candidates are available to agents by default. Use `exclude` to filter them before forwarding paths to the selected SDK.
 
 **Copilot preview boundary:** Only individual approved skill directories and
 names are exposed. A resource or script target belongs to the most-specific
 canonical discovered skill root containing it, and that owning skill must be
-approved. An enabled parent does not grant access to an excluded nested child;
-an independently enabled child retains access under an excluded ancestor.
+approved. Separately supplied overlapping roots keep independent ownership:
+an enabled parent does not grant access to an explicitly indexed, excluded child.
+Implicit nested documents are part of their containing skill, not extra grants.
 `skills: false` exposes no skill helpers. This policy does not grant general
 project-code reads or shell commands.
 
@@ -1471,7 +1476,7 @@ _(saved as `agent.md` — available at `/agents/main/chat`, same endpoint as `ma
 
 > **Not supported:** `*.agents.md` (plural) is **not** a recognised pattern. Files named e.g. `report.agents.md` are silently ignored by the loader. Use the singular `.agent.md` or `.claude.md` suffix.
 
-> **Breaking change (FRD 0007):** Duplicate agent slugs — including two file stems that *sanitize* to the same value (for example `daily-report.agent.md` and `daily_report.agent.md`), and duplicates across the root and an `agents/` subfolder — now fail app startup instead of silently auto-suffixing. This unifies agent-slug collision handling with the pre-existing duplicate-skill and duplicate-workflow-tool checks, and is required because a slug is now also a prompt-visible identity (the `delegate_<slug>` tool name); a silently renamed agent could otherwise leave a `subagents:` reference pointing at the wrong agent, or leave two different agents indistinguishable to a coordinator's model. If you relied on the old auto-suffix behavior, rename the colliding file(s) so every agent slug is unique.
+> **Breaking change (FRD 0007):** Duplicate agent slugs — including two file stems that *sanitize* to the same value (for example `daily-report.agent.md` and `daily_report.agent.md`), and duplicates across the root and an `agents/` subfolder — now fail app startup instead of silently auto-suffixing. This unifies agent-slug collision handling with duplicate-workflow-tool checks, and is required because a slug is now also a prompt-visible identity (the `delegate_<slug>` tool name); a silently renamed agent could otherwise leave a `subagents:` reference pointing at the wrong agent, or leave two different agents indistinguishable to a coordinator's model. Skill content validation now belongs to the selected SDK, not startup discovery. If you relied on the old auto-suffix behavior, rename the colliding file(s) so every agent slug is unique.
 
 In other words, the display `name:` field is never used to derive registered Azure Function names, routes, or runtime identifiers; it is presentation-only. See also [`name`](#name).
 

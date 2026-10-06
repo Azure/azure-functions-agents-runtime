@@ -283,8 +283,8 @@ def test_registered_mcp_and_skill_descriptors_are_supported(preview):
         name="selected", url="https://fixture.invalid/mcp", transport="streamable-http",
         headers=(), tools=("lookup",), auth_scope=None, client_id=None,
     )
-    approved = SkillDescriptor(name="approved", description="Approved", path=preview / "approved")
-    excluded = SkillDescriptor(name="excluded", description="Excluded", path=preview / "excluded")
+    approved = SkillDescriptor(name="approved", path=preview / "approved")
+    excluded = SkillDescriptor(name="excluded", path=preview / "excluded")
     capabilities = replace(
         capabilities,
         filtered_mcp_tools=(server,),
@@ -441,7 +441,7 @@ def test_direct_preview_forks_before_maf_construction_or_blob(preview, monkeypat
     maf.assert_not_called()
 
 
-def test_standalone_skill_paths_are_adapted_with_full_discovered_inventory(preview, monkeypatch):
+def test_standalone_skill_root_does_not_promote_implicit_nested_documents(preview, monkeypatch):
     parent = preview / "skills" / "parent"
     child = parent / "excluded-child"
     child.mkdir(parents=True)
@@ -460,17 +460,17 @@ def test_standalone_skill_paths_are_adapted_with_full_discovered_inventory(previ
     )
     request = invoke.call_args.args[1]
     assert [skill.name for skill in request.skills] == ["parent"]
-    assert {skill.name for skill in request.skill_catalog} == {"parent", "excluded-child"}
+    assert {skill.name for skill in request.skill_catalog} == {"parent"}
     assert request.skills[0].path == parent.resolve()
     assert request.mcp_servers == ()
     assert type(request.tools) is tuple
 
 
-def test_explicit_skill_roots_outside_app_include_nested_ownership(preview, monkeypatch):
+def test_independently_explicit_roots_outside_app_preserve_nested_ownership(preview, monkeypatch):
     app_root = preview / "app"
     app_root.mkdir()
-    parent = preview / "external" / "parent"
-    child = parent / "child"
+    parent = preview / "external" / "external-parent"
+    child = parent / "external-child"
     child.mkdir(parents=True)
     (parent / "SKILL.md").write_text(
         "---\nname: external-parent\ndescription: Parent\n---\n", encoding="utf-8",
@@ -488,22 +488,18 @@ def test_explicit_skill_roots_outside_app_include_nested_ownership(preview, monk
         catalog_calls.append(tuple(paths))
         return original_catalog(paths)
 
-    def duplicate_parse(paths):
-        raise AssertionError("Explicit approved roots must use the single catalog parse")
-
     monkeypatch.setattr(runner, "describe_skill_catalog", catalog)
-    monkeypatch.setattr(runner, "describe_skill_paths", duplicate_parse)
 
     asyncio.run(runner.run_agent(
-        "hello", tools=[], mcp_tools=[], skill_paths=[parent], _harness=harness,
+        "hello", tools=[], mcp_tools=[], skill_paths=[parent, child], _harness=harness,
     ))
 
     request = invoke.call_args.args[1]
-    assert [skill.name for skill in request.skills] == ["external-parent"]
+    assert [skill.name for skill in request.skills] == ["external-parent", "external-child"]
     assert {skill.name for skill in request.skill_catalog} == {
         "external-parent", "external-child",
     }
-    assert catalog_calls == [(parent,)]
+    assert catalog_calls == [(parent, child)]
 
 
 def test_maf_standalone_does_not_discover_unrequested_skills(tmp_path, monkeypatch):

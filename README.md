@@ -256,7 +256,7 @@ my-app/
 
 ### Shared capabilities
 - **Markdown-first** — agent instructions, trigger config, and tool bindings in `.agent.md` files
-- **Skills** — progressive-disclosure prompt modules under `skills/<name>/SKILL.md` (loaded on demand via MAF's `SkillsProvider`)
+- **Skills** — shared directory discovery under `skills/` searches through two child levels and stops at each `SKILL.md` root. Filter by directory name; the selected SDK validates metadata and loads content on demand. Nested documents remain resources of the containing skill, not independent skill roots.
 - **Custom tools** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and they become callable
 - **Connector-backed MCP tools** — call Office 365, Teams, SQL, Salesforce, SAP, and other connectors through HTTP MCP servers
 - **MCP servers** — connect to external remote HTTP MCP servers for additional tools

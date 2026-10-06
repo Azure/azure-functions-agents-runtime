@@ -31,7 +31,7 @@ def test_catalog_snapshots_capability_lists_without_sdk_objects(tmp_path: Path) 
         name="remote", url="https://fixture.invalid/mcp", transport="http",
         headers=(), tools=None, auth_scope=None, client_id=None,
     )
-    skill = SkillDescriptor(name="selected", description="Selected", path=tmp_path / "selected")
+    skill = SkillDescriptor(name="selected", path=tmp_path / "selected")
     users, servers, skills = [user], [server], [skill]
     capabilities = AgentCapabilities(
         filtered_user_tools=users, filtered_mcp_tools=servers, skills=skills, skill_catalog=skills,
@@ -54,11 +54,11 @@ def test_catalog_snapshots_capability_lists_without_sdk_objects(tmp_path: Path) 
 
 
 def test_runtime_guidance_copy_never_changes_catalog_leaf_inventory(tmp_path: Path) -> None:
-    project = SkillDescriptor(name="project", description="Project", path=tmp_path / "project")
+    project = SkillDescriptor(name="project", path=tmp_path / "project")
     excluded = SkillDescriptor(
-        name="excluded-child", description="Excluded", path=project.path / "excluded-child",
+        name="excluded-child", path=project.path / "excluded-child",
     )
-    runtime = tmp_path / "runtime"
+    runtime = tmp_path / "data-driven-workflows"
     runtime.mkdir()
     (runtime / "SKILL.md").write_text(
         "---\nname: data-driven-workflows\ndescription: Workflow guidance\n---\n",
@@ -77,7 +77,7 @@ def test_runtime_guidance_copy_never_changes_catalog_leaf_inventory(tmp_path: Pa
 
     assert [skill.name for skill in direct.skills] == ["project", "data-driven-workflows"]
     assert {skill.name for skill in direct.skill_catalog} == {
-        "project", "excluded-child", "data-driven-workflows", "runtime-child",
+        "project", "excluded-child", "data-driven-workflows",
     }
     assert catalog["leaf"].capabilities.skills == (project,)
     assert catalog["leaf"].capabilities.skill_catalog == (project, excluded)

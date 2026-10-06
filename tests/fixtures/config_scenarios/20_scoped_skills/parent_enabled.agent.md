@@ -1,9 +1,7 @@
 ---
 name: Parent Enabled
-description: Excludes a nested child while retaining the parent skill.
-skills:
-  exclude:
-    - guide-child
+description: Retains the parent skill and its nested resource documents.
+skills: true
 ---
 
 Use only the parent skill.

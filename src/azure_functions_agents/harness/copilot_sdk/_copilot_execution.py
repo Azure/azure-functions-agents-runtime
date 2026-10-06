@@ -16,7 +16,6 @@ from ._copilot_capabilities import (
     available_tools,
     mcp_configuration,
     permission_handler,
-    skill_instructions,
 )
 from ._copilot_preview import CopilotPreviewError, validate_copilot_client_manager
 from ._copilot_runtime import CopilotRuntime, get_runtime
@@ -371,7 +370,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     tools=[_tool(function, calls) for function in request.tools],
                     available_tools=available_tools(request),
                     system_message=SystemMessageReplaceConfig(
-                        mode="replace", content=skill_instructions(request.instructions, request.skills)
+                        mode="replace", content=request.instructions or ""
                     ),
                     provider=provider,
                     streaming=False,

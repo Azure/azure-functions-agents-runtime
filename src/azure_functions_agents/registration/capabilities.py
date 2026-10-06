@@ -84,27 +84,14 @@ def _merge_skill_descriptors(
     return tuple(catalog)
 
 
-def _select_skill_roots(
-    catalog: Sequence[SkillDescriptor], paths: Sequence[Path]
-) -> tuple[SkillDescriptor, ...]:
-    roots = tuple(path.resolve() for path in paths)
-    return tuple(
-        skill
-        for path in roots
-        for skill in catalog
-        if skill.path == path
-    )
-
-
 def with_runtime_skill_paths(
     capabilities: AgentCapabilities,
     skill_paths: list[Path] | tuple[Path, ...],
 ) -> AgentCapabilities:
     """Return direct-role capabilities augmented with runtime-owned skills."""
     runtime_catalog = describe_skill_catalog(skill_paths)
-    runtime_skills = _select_skill_roots(runtime_catalog, skill_paths)
     project_skills = capabilities.skills or describe_skill_paths(capabilities.enabled_skill_paths)
-    approved = _merge_skill_descriptors(project_skills, runtime_skills)
+    approved = _merge_skill_descriptors(project_skills, runtime_catalog)
     return replace(
         capabilities,
         enabled_skill_paths=tuple(skill.path for skill in approved),
@@ -188,18 +175,18 @@ def build_capabilities(
         tuple(discovered_skill_descriptors)
         if discovered_skill_descriptors is not None
         else tuple(
-            SkillDescriptor.create(name=name, description="", path=path)
+            SkillDescriptor.create(name=name, path=path)
             for name, path in discovered_skills.items()
         )
     )
-    skills_by_name = {skill.name: skill for skill in skill_catalog}
     if resolved.skills_disabled:
         approved_skills: tuple[SkillDescriptor, ...] = ()
     else:
         approved_skills = tuple(
-            skills_by_name[name]
+            skill
             for name in resolved.enabled_skills_names
-            if name in skills_by_name
+            for skill in skill_catalog
+            if skill.name == name
         )
 
     return AgentCapabilities.create(

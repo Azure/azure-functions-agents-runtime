@@ -499,9 +499,9 @@ def test_trigger_handlers_forward_selected_descriptors_and_full_skill_metadata(
         name="selected", url="https://fixture.invalid/mcp", transport="http",
         headers=(), tools=("lookup",), auth_scope=None, client_id=None,
     )
-    approved = SkillDescriptor(name="parent", description="Parent", path=tmp_path / "parent")
+    approved = SkillDescriptor(name="parent", path=tmp_path / "parent")
     excluded = SkillDescriptor(
-        name="excluded-child", description="Excluded", path=approved.path / "child",
+        name="excluded-child", path=approved.path / "child",
     )
     capabilities = AgentCapabilities.create(
         filtered_user_tools=(), filtered_mcp_tools=(server,),

@@ -1,9 +1,9 @@
 ---
-name: Child Enabled
-description: Enables a nested child independently of its excluded parent.
+name: Parent Excluded
+description: Excludes the parent without promoting its nested resource documents.
 skills:
   exclude:
     - guide-parent
 ---
 
-Use only the child skill.
+No project skill is enabled.

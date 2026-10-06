@@ -1,53 +1,28 @@
-"""Discover skill metadata without loading resources or constructing SDK providers."""
+"""Discover skill directory candidates without parsing SDK-owned content."""
 
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-import frontmatter
-
 from .._logger import logger
 
-# Mirrors :data:`agent_framework._skills.VALID_NAME_RE` and ``MAX_NAME_LENGTH``.
-# We pre-validate here because :class:`SkillsProvider` does *not* raise on
-# invalid names — it logs a warning and silently drops the skill, which gives
-# users an agent that mysteriously lacks the skill with no startup error.
-# By failing loud here we turn that into a clear configuration error.
-# If MAF tightens or loosens these rules, update both constants below to
-# match ``agent_framework._skills``.
-_VALID_SKILL_NAME = re.compile(r"^[a-z0-9]([a-z0-9]*-[a-z0-9])*[a-z0-9]*$")
-_MAX_SKILL_NAME_LENGTH = 64
 _SKILL_FILE_NAME = "SKILL.md"
+_SKILL_ROOT_SEARCH_DEPTH = 2
 
 
 @dataclass(frozen=True)
 class SkillDescriptor:
-    """Immutable skill metadata with a canonical individual skill root."""
+    """Immutable directory identity with a canonical individual skill root."""
 
     name: str
-    description: str
     path: Path
 
     @classmethod
-    def create(cls, *, name: str, description: str, path: Path) -> SkillDescriptor:
-        """Normalize metadata and preserve the existing skill-name validation."""
-        name = name.strip()
-        path = path.resolve()
-        skill_file = path / _SKILL_FILE_NAME
-        if not name:
-            raise ValueError(
-                f"Skill at {skill_file} is missing a 'name' field in its frontmatter."
-            )
-        if not _VALID_SKILL_NAME.match(name) or len(name) > _MAX_SKILL_NAME_LENGTH:
-            raise ValueError(
-                f"Skill name {name!r} at {skill_file} is invalid. Names must match "
-                f"{_VALID_SKILL_NAME.pattern} (lowercase letters, digits, and single "
-                f"hyphens) and be at most {_MAX_SKILL_NAME_LENGTH} characters."
-            )
-        return cls(name=name, description=description.strip(), path=path)
+    def create(cls, *, name: str, path: Path) -> SkillDescriptor:
+        """Freeze supplied identity without interpreting SDK-owned metadata."""
+        return cls(name=name, path=path.resolve())
 
 
 _DISCOVERED_SKILLS_CACHE: dict[Path, tuple[SkillDescriptor, ...]] = {}
@@ -55,7 +30,7 @@ _DISCOVERED_SKILLS_CACHE: dict[Path, tuple[SkillDescriptor, ...]] = {}
 
 @dataclass
 class SkillDiscoveryResult:
-    """Result of skill discovery including successes and failures."""
+    """Directory inventory with legacy name-map and failed-load result fields."""
 
     skills: dict[str, Path]  # {skill_name: skill_directory}
     failed_loads: list[tuple[str, str]]  # [(skill_file, error_message), ...]
@@ -77,74 +52,76 @@ def _resolve_skills_dir(app_root: Path) -> Path | None:
 
 
 def _describe_skill_files(skill_files: Sequence[Path]) -> SkillDiscoveryResult:
-    """Read only frontmatter, preserving parse skips and duplicate-name errors."""
+    """Identify canonical directory candidates without reading their contents."""
     discovered: dict[str, Path] = {}
     descriptors: list[SkillDescriptor] = []
-    failed_loads: list[tuple[str, str]] = []
+    identities: set[tuple[str, Path]] = set()
     for skill_file in skill_files:
-        try:
-            post = frontmatter.load(skill_file)
-        except Exception as exc:
-            error_msg = f"{type(exc).__name__}: {exc}"
-            failed_loads.append((str(skill_file), error_msg))
-            logger.warning("Failed to parse skill frontmatter %s: %s", skill_file, exc)
+        path = skill_file.parent.resolve()
+        identity = (path.name, path)
+        if identity in identities:
             continue
-
-        descriptor = SkillDescriptor.create(
-            name=str(post.metadata.get("name") or ""),
-            description=str(post.metadata.get("description") or ""),
-            path=skill_file.parent,
-        )
-        if descriptor.name in discovered:
-            raise ValueError(
-                f"Duplicate skill name {descriptor.name!r}: defined at both "
-                f"{discovered[descriptor.name]} and {skill_file.parent}."
-            )
-        discovered[descriptor.name] = descriptor.path
+        identities.add(identity)
+        descriptor = SkillDescriptor(name=path.name, path=path)
+        discovered.setdefault(descriptor.name, descriptor.path)
         descriptors.append(descriptor)
 
-    return SkillDiscoveryResult(
-        skills=discovered, failed_loads=failed_loads, descriptors=tuple(descriptors)
-    )
+    return SkillDiscoveryResult(skills=discovered, failed_loads=[], descriptors=tuple(descriptors))
 
 
 def describe_skill_paths(paths: Sequence[Path]) -> tuple[SkillDescriptor, ...]:
-    """Describe explicitly supplied individual roots without recursive loading."""
-    result = _describe_skill_files([path / _SKILL_FILE_NAME for path in paths])
-    if result.failed_loads:
-        logger.warning("Failed to load %d skill file(s)", len(result.failed_loads))
-    return result.descriptors
+    """Identify explicitly supplied individual roots without reading SKILL.md."""
+    return _describe_skill_files(
+        [path / _SKILL_FILE_NAME for path in paths if (path / _SKILL_FILE_NAME).is_file()]
+    ).descriptors
 
 
 def describe_skill_catalog(paths: Sequence[Path]) -> tuple[SkillDescriptor, ...]:
-    """Index ownership metadata under explicit roots without approving descendants."""
-    files_by_root: dict[tuple[Path, Path], Path] = {}
-    for path in paths:
-        for skill_file in path.resolve().rglob(_SKILL_FILE_NAME):
-            if skill_file.is_file():
-                key = (skill_file.parent.resolve(), skill_file.resolve())
-                files_by_root.setdefault(key, skill_file)
-    skill_files = sorted(files_by_root.values(), key=lambda path: str(path).lower())
-    result = _describe_skill_files(skill_files)
-    if result.failed_loads:
-        logger.warning("Failed to load %d skill file(s)", len(result.failed_loads))
+    """Identify MAF-compatible roots beneath explicitly supplied search paths."""
+    result = _describe_skill_files(_find_skill_files(paths))
     return result.descriptors
 
 
-def discover_skills(app_root: Path) -> SkillDiscoveryResult:
-    """Return discovered skills and any failed skill loads.
+def _find_skill_files(paths: Sequence[Path]) -> list[Path]:
+    """Find roots through two child levels, without descending through a skill."""
+    files: list[Path] = []
 
-    Walks ``{app_root}/skills/`` for ``SKILL.md`` files. Each file is parsed
-    for YAML frontmatter; the ``name`` field becomes the dictionary key and
-    the containing directory becomes the value. Invalid names and duplicate
-    names raise :class:`ValueError` so misconfiguration fails loudly at app
-    startup rather than silently at request time.
+    def visit(directory: Path, depth: int) -> None:
+        skill_file = directory / _SKILL_FILE_NAME
+        if skill_file.is_file():
+            files.append(skill_file)
+            return
+        if depth == _SKILL_ROOT_SEARCH_DEPTH:
+            return
+        try:
+            children = list(directory.iterdir())
+        except OSError as exc:
+            logger.warning("Failed to scan skill directory %s: %s", directory, exc)
+            return
+        for child in children:
+            if child.is_dir():
+                visit(child, depth + 1)
+
+    for path in paths:
+        if path.is_dir():
+            visit(path, 0)
+    return files
+
+
+def discover_skills(app_root: Path) -> SkillDiscoveryResult:
+    """Return candidates without performing SDK-owned skill content validation.
+
+    Search ``skills/`` through two child levels, stopping at each skill root.
+    Directory names identify candidates; the selected SDK validates their contents.
     """
     resolved_root = Path(app_root).resolve()
     cached = _DISCOVERED_SKILLS_CACHE.get(resolved_root)
     if cached is not None:
+        cached_skills: dict[str, Path] = {}
+        for descriptor in cached:
+            cached_skills.setdefault(descriptor.name, descriptor.path)
         return SkillDiscoveryResult(
-            skills={descriptor.name: descriptor.path for descriptor in cached},
+            skills=cached_skills,
             failed_loads=[],
             descriptors=cached,
         )
@@ -154,18 +131,13 @@ def discover_skills(app_root: Path) -> SkillDiscoveryResult:
         _DISCOVERED_SKILLS_CACHE[resolved_root] = ()
         return SkillDiscoveryResult(skills={}, failed_loads=[])
 
-    skill_files = sorted(
-        (p for p in skills_dir.rglob(_SKILL_FILE_NAME) if p.is_file()),
-        key=lambda p: str(p).lower(),
-    )
+    skill_files = _find_skill_files((skills_dir,))
     if not skill_files:
         logger.info("No %s files found in %s", _SKILL_FILE_NAME, skills_dir)
         _DISCOVERED_SKILLS_CACHE[resolved_root] = ()
         return SkillDiscoveryResult(skills={}, failed_loads=[])
 
     result = _describe_skill_files(skill_files)
-    logger.info("Discovered %d skill(s) under %s", len(result.skills), skills_dir)
-    if result.failed_loads:
-        logger.warning("Failed to load %d skill file(s)", len(result.failed_loads))
+    logger.info("Discovered %d skill candidate(s) under %s", len(result.descriptors), skills_dir)
     _DISCOVERED_SKILLS_CACHE[resolved_root] = result.descriptors
     return result

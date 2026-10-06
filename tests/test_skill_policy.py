@@ -8,16 +8,21 @@ from pathlib import Path
 import pytest
 
 from azure_functions_agents._skill_policy import SkillPolicy
-from azure_functions_agents.discovery.skills import SkillDescriptor, discover_skills
+from azure_functions_agents.discovery.skills import SkillDescriptor, describe_skill_catalog
 
 SCOPED_SKILLS_FIXTURE = (
     Path(__file__).parent / "fixtures" / "config_scenarios" / "20_scoped_skills"
 )
 
 
+def _explicit_nested_skills() -> tuple[SkillDescriptor, ...]:
+    parent = SCOPED_SKILLS_FIXTURE / "skills" / "guide-parent"
+    return describe_skill_catalog([parent, parent / "guide-child"])
+
+
 def _skill(root: Path, name: str) -> SkillDescriptor:
     root.mkdir(parents=True, exist_ok=True)
-    return SkillDescriptor.create(name=name, description=f"{name} description", path=root)
+    return SkillDescriptor.create(name=name, path=root)
 
 
 def _file(path: Path, content: str = "resource\n") -> Path:
@@ -55,7 +60,7 @@ def approved_skill(tmp_path: Path) -> tuple[SkillPolicy, SkillDescriptor]:
 def test_most_specific_owner_has_an_independent_grant(
     approved_name: str, denied_name: str
 ) -> None:
-    discovered = discover_skills(SCOPED_SKILLS_FIXTURE).descriptors
+    discovered = _explicit_nested_skills()
     skills = {skill.name: skill for skill in discovered}
     policy = SkillPolicy.create(
         approved=(skills[approved_name],),
@@ -75,7 +80,7 @@ def test_most_specific_owner_has_an_independent_grant(
 
 
 def test_disabling_all_skills_grants_no_helpers() -> None:
-    discovered = discover_skills(SCOPED_SKILLS_FIXTURE).descriptors
+    discovered = _explicit_nested_skills()
     policy = SkillPolicy.create(
         approved=(), discovered=discovered, working_directory=SCOPED_SKILLS_FIXTURE
     )
@@ -256,7 +261,7 @@ def test_canonical_alias_root_with_conflicting_names_is_ambiguous(tmp_path: Path
     script = _file(skill.path / "scripts" / "report.py")
     alias = tmp_path / "alias"
     _symlink(alias, skill.path, directory=True)
-    other = SkillDescriptor(name="excluded", description="Alias", path=alias)
+    other = SkillDescriptor(name="excluded", path=alias)
     policy = SkillPolicy.create(
         approved=(skill,), discovered=(skill, other), working_directory=tmp_path
     )

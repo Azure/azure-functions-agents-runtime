@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 
     from ..._skill_policy import SkillPolicy
     from ...discovery.mcp import MCPServerDescriptor
-    from ...discovery.skills import SkillDescriptor
     from .._harness_binding import HarnessRequest
 
 
@@ -59,25 +58,6 @@ async def mcp_configuration(
             headers=headers,
         )
     return configured
-
-
-def skill_instructions(
-    instructions: str | None, skills: tuple[SkillDescriptor, ...]
-) -> str:
-    """Project the validated catalog when replace mode omits native skill names."""
-    if not skills:
-        return instructions or ""
-    catalog = "\n".join(
-        f"- {skill.name}: {' '.join(skill.description.splitlines())}" for skill in skills
-    )
-    return "\n\n".join(
-        part
-        for part in (
-            instructions or "",
-            f"Available skills (load by name with the skill tool):\n{catalog}",
-        )
-        if part
-    )
 
 
 def permission_handler(

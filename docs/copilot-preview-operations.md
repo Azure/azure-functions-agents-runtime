@@ -88,15 +88,20 @@ policy. Standard SDK managed settings and approval restrictions remain in force.
 ### Skill ownership and helpers
 
 Use existing `SKILL.md`, `skills: false`, and `skills.exclude` authoring.
-Copilot receives individual approved directories and explicit disabled names;
-approved names/descriptions are advertised automatically. Native `skill` loads
+Both harnesses receive the same filtered directory candidates from shared discovery.
+The scan stops at `SKILL.md` roots and searches through two child levels; it does
+not read metadata or resources. Copilot receives individual approved directories
+and disabled directory names. The host adds no skill catalog to the authored
+instructions; the existing replace prompt mode is unchanged. The SDK advertises, validates, and loads
+skill content; a candidate is not a confirmed loaded skill. Native `skill` loads
 instructions, `view` reads approved resources, and `bash` can start only approved
 literal script invocations. Other ambient SDK tools remain excluded or denied.
 
 Every resource or script target must belong to an approved most-specific
 canonical discovered skill root. Excluded roots remain ownership metadata:
-an enabled parent cannot authorize its excluded nested child, while an
-independently enabled child retains its grant under an excluded ancestor.
+independently supplied overlapping roots keep separate grants. An enabled parent
+cannot authorize an explicitly indexed excluded child. Implicit nested documents
+belong to the containing skill rather than becoming independently selectable roots.
 Traversal, symlink escapes, ambiguous ownership, and general project-file access
 are denied. `skills: false` exposes no skill/helper capabilities.
 
@@ -106,7 +111,9 @@ that it originated in a skill. Skills are trusted deployment-owned code.
 Permitted scripts run with host privileges, not in an OS sandbox, and the policy
 does not constrain their internal effects. MAF retains its existing skill
 behavior, including nested resource recursion; this does not establish MAF
-file-script parity.
+file-script parity. Native automatic skill advertising and instruction loading
+under the unchanged replace prompt mode have not been live-qualified. Python
+session options alone do not prove that this mode preserves native advertising.
 
 ### Supported native script forms
 

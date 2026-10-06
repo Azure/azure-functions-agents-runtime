@@ -290,7 +290,7 @@ async def test_maf_adapter_preserves_caller_skill_source_path_intent(
     provider = Mock()
     monkeypatch.setattr(agent_framework, "SkillsProvider", provider)
     monkeypatch.setattr(agent_framework, "create_harness_agent", Mock())
-    selected = SkillDescriptor(name="selected", description="Selected", path=Path("selected"))
+    selected = SkillDescriptor(name="selected", path=Path("selected"))
     request = HarnessRequest(
         prompt="test",
         instructions=None,

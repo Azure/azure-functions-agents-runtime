@@ -535,10 +535,10 @@ def _skill_inventory(root):
         encoding="utf-8",
     )
     return tuple(
-        SkillDescriptor.create(name=name, description=description, path=path)
-        for name, description, path in (
-            ("approved", "Approved description.", approved),
-            ("excluded", "Excluded description.", excluded),
+        SkillDescriptor.create(name=name, path=path)
+        for name, path in (
+            ("approved", approved),
+            ("excluded", excluded),
         )
     )
 
@@ -605,9 +605,7 @@ async def test_create_resume_keep_filtered_capabilities_and_refresh_static_mcp_h
             assert options["enable_config_discovery"] is False
             assert options["enable_session_telemetry"] is False
             assert options["request_extensions"] is False
-            assert "- approved: Approved description." in options["system_message"]["content"]
-            assert "excluded" not in options["system_message"]["content"]
-            assert "approved content" not in options["system_message"]["content"]
+            assert options["system_message"] == {"mode": "replace", "content": request.instructions}
         assert created["mcp_servers"]["all"]["headers"] == {
             "X-Static": "unchanged", "Authorization": "Bearer first-token-sentinel",
         }
@@ -645,6 +643,14 @@ async def test_native_skill_exposure_matches_approved_inventory_on_create_and_re
     from copilot.session_events import PermissionRequestRead, PermissionRequestUrl
 
     skills = _skill_inventory(preview.app_root)
+    read_text = Path.read_text
+
+    def forbid_skill_reads(path, *args, **kwargs):
+        if path.name == "SKILL.md":
+            raise AssertionError("The host must not read SDK-owned skill content")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", forbid_skill_reads)
     client = _fake_client()
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
@@ -675,11 +681,7 @@ async def test_native_skill_exposure_matches_approved_inventory_on_create_and_re
             {"session_id": "main.example"},
         )
         assert denied.kind == PermissionDecisionDeniedByRules.kind
-        assert options["system_message"]["content"].count("Be helpful.") == 1
-        if enabled:
-            assert "- approved: Approved description." in options["system_message"]["content"]
-        else:
-            assert options["system_message"]["content"] == "Be helpful."
+        assert options["system_message"] == {"mode": "replace", "content": "Be helpful."}
     finally:
         await _lifecycle._shutdown_harnesses()
 

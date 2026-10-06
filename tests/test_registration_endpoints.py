@@ -444,9 +444,9 @@ def test_builtin_execution_paths_forward_filtered_and_discovered_inventory(
         name="remote", url="https://fixture.invalid/mcp", transport="http",
         headers=(), tools=(), auth_scope=None, client_id=None,
     )
-    approved = SkillDescriptor(name="parent", description="Parent", path=tmp_path / "parent")
+    approved = SkillDescriptor(name="parent", path=tmp_path / "parent")
     excluded = SkillDescriptor(
-        name="child", description="Child", path=approved.path / "child",
+        name="child", path=approved.path / "child",
     )
     capabilities = AgentCapabilities.create(
         filtered_user_tools=(), filtered_mcp_tools=(server,),

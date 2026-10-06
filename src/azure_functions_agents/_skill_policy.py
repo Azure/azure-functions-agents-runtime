@@ -20,9 +20,7 @@ def _canonical_descriptors(
     descriptors: tuple[SkillDescriptor, ...],
 ) -> tuple[SkillDescriptor, ...]:
     return tuple(
-        SkillDescriptor.create(
-            name=descriptor.name, description=descriptor.description, path=descriptor.path
-        )
+        SkillDescriptor.create(name=descriptor.name, path=descriptor.path)
         for descriptor in descriptors
     )
 

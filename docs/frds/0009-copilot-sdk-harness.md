@@ -295,9 +295,9 @@ The descriptor set has three shapes:
 - **MCP server descriptor.** Server name, URL, transport, repr-hidden static
   headers, a tool filter of all, none, or a finite set, and optional Entra scope
   and client ID. It does not contain an SDK client, live token, or wrapper tool.
-- **Skill descriptor.** Skill name, description, approved path, and metadata
-  needed by the selected SDK. It does not eagerly inspect or load every resource
-  or script and contains no provider state.
+- **Skill descriptor.** Canonical candidate directory path and its directory-name
+  filter identity. Descriptors contain no authored description, provider state,
+  parsed metadata, or loaded content.
 
 The ordinary runtime `@tool` authoring seam stays stable. Authors keep using
 runtime `@tool` syntax, schema validation, sync or async callables, and current
@@ -327,10 +327,11 @@ compatibility layer while they exist. Their migration remains an explicit open
 item. Issue #1334 calls out that MAF `FunctionTool` extension compatibility
 needs a separate decision.
 
-Skill discovery and filtering stay shared. Discovery keeps the existing
-malformed-frontmatter logging and skip behavior, name validation, duplicate
-checks, and per-agent exclusions. The runtime passes approved skill paths and
-metadata to the selected adapter. The harness SDK owns how skills advertise
+Skill discovery and filtering stay shared. Discovery finds directory candidates;
+registration applies directory-name exclusions. The selected SDK owns metadata
+parsing, validation, duplicate-name selection, and content loading. A candidate
+is not a confirmed loaded skill. The runtime passes approved paths to the selected
+adapter. The harness SDK owns how skills advertise
 instructions, load content, access resources, or execute supported skill
 mechanisms. Do not create a runtime-owned skill loader, prompt engine, three-tool
 abstraction, or script executor only to force parity between SDKs.
@@ -413,18 +414,26 @@ retain the agreed skill-helper handling and default deny. Do not install a
 global approve-all handler or broaden shell/read/edit access. The helper's
 managed-approval limits still apply; section 8 records the qualification limits.
 
-**Skills adaptation.** `discovery/skills.py` recursively indexes valid `SKILL.md`
-files by name. `registration/capabilities.py` applies the existing `skills: false`
-and `skills.exclude` frontmatter selections to produce the approved `(name, path)`
-inventory, including independently enabled nested skills. Add no authoring keys.
-Keep canonical discovered roots, including excluded roots, as read-only
-target-ownership metadata; they grant no access.
+**Skills adaptation.** `discovery/skills.py` searches each input directory through
+two child levels, checking the input itself first and stopping at each `SKILL.md`
+root. Grouping folders are allowed. Discovery reads no content and imports no
+SDK. Directory basenames supply the common exclusion identity; the selected SDK
+validates authored metadata. Missing and non-directory inputs are ignored;
+unreadable directory scans are skipped with host diagnostics. Explicit inputs and
+directory traversal retain their order. Distinct same-name candidates reach the
+SDK rather than being discarded before content validation.
+
+`registration/capabilities.py` applies `skills: false` and `skills.exclude` to this
+same candidate inventory for both harnesses. Nested documents under a skill root
+belong to that skill, not independently selectable skills. Separately supplied
+explicit parent and child paths can still produce overlapping roots.
+Canonical discovered paths, including excluded candidates, remain read-only
+target-ownership metadata. Add no authoring keys or access grants.
 
 The adapter defines how skills run for its harness. MAF uses public
 `SkillsProvider.from_paths` over the approved paths. Its current resource/script
-recursion includes nested skill directories under an approved parent. Preserve
-that flag-off baseline; it does not enforce the stronger Copilot subtree policy.
-The MAF nested-exclusion gap is separate from this amendment.
+recursion includes nested documents under an approved parent. Preserve that
+resource-loading behavior and raw standalone MAF path semantics.
 
 Copilot registers only individual approved skill directory paths and explicit
 `disabled_skills` names from the same frontmatter selections, using supported
@@ -433,16 +442,18 @@ ancestor root or copy skills into a collection folder.
 
 Each resource or script target belongs to the most-specific canonical discovered
 skill root containing it. Permit a target only when its owning skill is in the
-agent's approved inventory. An enabled parent cannot authorize an excluded nested
-child. An independently enabled child keeps its own grant when its ancestor is
-excluded. Resolve canonical paths before ownership checks; reject traversal,
+agent's approved inventory. For independently supplied overlapping roots, an
+enabled parent cannot authorize an excluded child, and an independently enabled
+child keeps its grant when its ancestor is excluded. Implicit nested documents
+remain part of their parent. Resolve canonical paths before ownership checks; reject traversal,
 symlink or alias escapes, out-of-root targets, missing or ambiguous ownership,
 and string-prefix overlaps that are not path containment. No broad ancestor
 grant is allowed. `skills: false` exposes no skill or helper capabilities.
 
-Malformed skill frontmatter remains logged and skipped like MAF. Existing
-missing, invalid, and duplicate skill-name validation remains unchanged. Do not
-add a global skill/provider cache; all provider state is per-role and per-run.
+Skill content validation and its errors/skips belong to each SDK, not app indexing.
+The host no longer parses metadata, checks name/directory matching, validates
+descriptions, or rejects duplicate authored names. Discovery may cache candidate
+paths, never parsed content or provider state. All provider state is per-role and per-run.
 Supported skill execution is owned by the selected SDK's configured
 capabilities. Do not add a host script runner, new execution limits, or interactive
 approval gates in this amendment. Skills remain trusted deployment-owned code, not
@@ -479,11 +490,12 @@ effects. Supported command forms and arguments need implementation coverage unde
 this contract. They are not a new authoring surface or another user policy
 question.
 
-The native skill schema takes a skill name and does not enumerate approved names.
-Give the model the approved skill names and descriptions automatically. Prefer a
-supported SDK prompt or catalog presentation. If replace-mode integration needs
-it, a tiny adapter projection of already validated names and descriptions is an
-acceptable fallback. That fallback is not a loader or prompt engine.
+Pass selected directories to the SDK without a host-generated skill catalog.
+Preserve authored instructions and the existing replace prompt mode. The SDK owns
+skill advertising, instruction loading, and metadata validation. Native automatic
+advertising under replace mode remains unqualified; do not add a catalog fallback
+or change prompt modes to hide that limit. Shared candidate discovery does not
+establish identical SDK parsing or loading results.
 
 The disabled SDK built-ins list reflects SDK 1.0.14. The runtime may expose more
 later. For enabled skills on Linux, `builtin:skill`, `builtin:view`, and
@@ -767,6 +779,9 @@ persistence, or compatibility contracts.
 | 47 | Shared agent identity authority | Retain owner/deployment correlation / consume the current shared site-qualified helper unchanged | Use `_agent_identity.agent_id(slug)` as the sole authority: trimmed, lower-case `WEBSITE_SITE_NAME` or `local`, followed by canonical slug. Keep `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}` and existing validation/containment; do not cache a separate identity prefix, restore owner/deployment inputs, or add migration/version logic. This supersedes the older correlation-key assumption only; SDK ownership, storage selection and app-resource/provider/settings lifetimes remain unchanged. | Human (larohra) | 2026-10-05 |
 | 48 | Bound runner composition | Keep harness branches in public runner helpers / introduce a broad lifecycle or history interface / bind one private three-method execution implementation per app context | Keep `AppHarness` as the once-selected app binding and cache one concrete private `AgentRunner` facade per app context. That facade forwards `run_agent`, `run_agent_stream`, and `run_leaf_agent_task` to one selected backend implementation housed in its harness package, with no additional history or lifecycle interface. Public runner exports remain compatibility shims, inactive backend imports stay lazy, unsupported Copilot stream/leaf methods fail before runtime/provider acquisition, and existing deadlines, SSE error boundaries, cleanup, standalone caching, and app-clone isolation remain unchanged. | Human (larohra) | 2026-10-05 |
 | 49 | Runtime owner lifetime | Retain failed-client/filesystem registries and process-exit fallback / bounded app-owned client+credential only, with request-owned adapter cleanup | Keep one lazy reused SDK client and shared credential per app binding behind a startup lock. Remove failed-client retention, runtime-owned filesystem retention, request-deferred adapter registries, and process-exit cleanup. Startup failures do bounded immediate cleanup and report the original error; request-local abort/disconnect/adapter cleanup preserves original failure or cancellation precedence; explicit async shutdown attempts graceful stop then bounded force-stop, also attempts credential cleanup, reports cleanup failures immediately, and clears cached handles so stopped/closing resources are never reused. | Human (larohra) | 2026-10-05 |
+| 50 | Shared skill-root discovery parity | Unbounded independent nested roots / MAF-compatible shared boundary search | Shared SDK-free discovery searches each input directory through two child levels, stops at a directory containing `SKILL.md`, and permits grouping directories. Both harnesses consume the same frozen filtered project inventory. A nested `SKILL.md` is part of its containing skill unless independently supplied as an explicit root. Preserve raw standalone MAF path behavior and most-specific ownership checks for independently supplied overlapping roots. This supersedes unbounded app discovery and the independently selectable implicit nested-root assumptions, not resource recursion, exclusions on actual discovered names, or helper permission boundaries. | Human (larohra) | 2026-10-06 |
+| 51 | Path-only discovery ownership | Host metadata parser / shared directory candidates with SDK-owned validation | Shared discovery finds roots and registration filters directory identities, without reading `SKILL.md` or importing either SDK. Each SDK validates and loads its selected paths. Preserve distinct same-name candidates for SDK selection and most-specific path ownership; ambiguous helper ownership remains denied. Retain Copilot replace mode with selected directory names only, not host-parsed descriptions. This supersedes host metadata validation, duplicate-name errors, and automatic description projection, not tool/MCP contracts or SDK execution boundaries. Native names-only selection remains to be qualified. | Human (larohra) | 2026-10-06 |
+| 52 | Native skill advertising ownership | Host names-only catalog / SDK-owned advertising | Remove the manual Copilot skill catalog completely, including names-only projection. Forward selected paths as MAF does; preserve authored instructions and the existing prompt mode. Native advertising/loading under replace mode remains unqualified and must not trigger a silent host fallback or prompt-mode change. This supersedes the names-only projection allowance, not shared candidate filtering or SDK-specific permissions. | Human (larohra) | 2026-10-06 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -785,7 +800,7 @@ where mocks cannot establish process, transport, authentication, or durability.
 | Tools | Cover ordinary runtime `@tool` mapping to neutral metadata, sync/async, Pydantic, both decorator orders, workflow-only tools, approval options, and denied ambient capabilities. Assert MAF maps neutral tools to `FunctionTool`, Copilot maps them to Copilot tools, callable/effect counts remain stable, and no unexpected interactive approval gate appears. Unmapped MAF-only extensions fail explicitly on Copilot. |
 | Import boundary / neutral interface | Structurally assert `HarnessRequest` and discovery/registration outputs contain only immutable SDK-free descriptors. Assert `agent_framework` imports are limited to the MAF adapter and named MAF-compat public surfaces, and Copilot imports are limited to the Copilot adapter. Delete-or-stub the MAF adapter in a smoke test to prove discovery, registration, runner contracts, and Copilot descriptor mapping do not change. |
 | MCP compatibility | Exercise remote HTTP/streamable-HTTP mapping at public create/resume and existing per-agent disable/exclude filters. Test omitted `tools`, any list containing `"*"`, `[]`, and exact-name allowlists through native `mcpServers.tools`. Preserve discovery warnings, skipped entries, and `failed_loads`. Complete an actual MCP call and turn, then resume the same native session through the existing lock/disconnect lifecycle and make another call with fresh headers. Prove prior user/tool/assistant history reaches the resumed model and new headers replace old ones. Verify static headers without auth; empty/whitespace scope warnings without token acquisition; default credentials for missing/unresolved client IDs; resolved client-ID selection; and generated `Authorization` precedence. Token, connection, initialization, and tool errors follow ordinary SDK/runtime error-result propagation. Verify ordinary configured MCP calls use the MCP-only SDK approve-once branch without interaction. Shell/read/edit requests must retain the scoped skill-helper policy and default deny. Assert no host-added side-effect retry, stale-token, OAuth, dropped-capability, or empty-session fallback. |
-| Skills compatibility | Exercise canonical `(name, path)` inventory construction and existing `skills: false`/`skills.exclude` selections, including valid nested skills. Build approved skill descriptors plus read-only discovered-root ownership metadata. Verify MAF maps approved paths through public `SkillsProvider.from_paths` without changing its existing nested resource/script behavior. Copilot registers only individual approved paths and explicit `disabled_skills` names, with no broad roots or collection-folder copies. For Copilot, an approved parent plus an excluded nested child must deny child registration, resource reads, and scripts; an excluded parent plus an independently enabled nested child must allow the child through its own inventory, not its parent. Resolve each target to its most-specific canonical discovered root; reject traversal, symlink/alias escapes, out-of-root targets, ambiguous ownership, and string-prefix overlaps. `skills: false` exposes no skill/helper capabilities. Cover malformed-frontmatter logging-and-skip, existing name validation and duplicate errors, and role isolation. Verify no runtime-owned skill loader, prompt engine, three-tool abstraction, host script runner, or new approval gate is introduced. Verify approved names/descriptions reach the model without duplicate author prompts. These nested cases are acceptance requirements, not established live evidence; the live exclusion case covered siblings only. |
+| Skills compatibility | Compare the shared candidate scanner against public MAF file discovery on native-valid documents: input roots, grouping folders, depth boundaries, traversal/input order, missing/unreadable inputs, and stopping at a root even when its contents are invalid. Prove discovery never reads skill content or imports an SDK. Cover directory-name exclusions, `skills: false`, frozen inventory forwarding to both adapters without rediscovery, same-name candidate retention for SDK validation, and raw standalone MAF path compatibility. Preserve MAF resource recursion. Copilot receives individual selected paths and disabled directory identities, without any host-generated skill catalog; assert authored instructions and prompt mode are unchanged on create and resume. Independently explicit overlapping roots retain most-specific ownership and traversal/symlink/ambiguity denials; implicit nested documents are not extra roots. No host metadata parser, loader, prompt engine, script runner, or new approval gate is introduced. Native advertising/loading under replace mode requires separate qualification; Python options and scanner tests do not establish native parser parity. |
 | Native skill helpers | Verify the Linux allowlist is `builtin:skill`, `builtin:view`, and `builtin:bash` where skills are enabled. Create and resume both install the same default-deny `on_permission_request` policy. Return `ApproveOnce` only for approved resource files in their permitted owning skill tree or validated approved-script commands. Exercise narrow literal script forms and arguments; deny unknown, ambiguous, and compound forms, broad shell prefixes, chaining, substitution, pipelines, and redirection. Reject arbitrary Bash before and after skill loading, regardless of intent, `cwd`, `toolCallId`, `possiblePaths` alone, or `allowedTools` metadata. A validated approved script may run from any turn; it runs with host privileges without skill-origin attestation or an OS sandbox. No approve-all, session-wide grants, or callback bypass is allowed. Linux execution remains to be exercised during implementation. |
 | Native tool accounting | Through public SDK `tool.execution_start` and `tool.execution_complete` events, verify allowed and permission-denied native `skill`, `view`, and `bash` calls appear exactly once per `toolCallId` in `AgentResult.tool_calls`, tool/error counts, and existing telemetry. Verify custom calls already captured by wrappers are not duplicated and `skill.invoked` metadata is not a second generic call. Preserve public `tool_start`/`tool_end`/`error` meanings, sanitized results, and sensitive-data/redaction policy without raw native envelopes or new public logging interfaces. Existing deadline/cancellation behavior and already-dispatched-effect limits remain unchanged. |
 | Compatibility/role isolation | Verify flag-off MCP/tool behavior and unchanged MAF skill discovery/script behavior without Copilot startup. A minimal focused flag-off check is acceptable for this amendment. Structurally prove per-run provider state, capability-copy/catalog-leaf non-mutation, project-skill retention, and no unintended `data-driven-workflows` leakage. |
@@ -886,3 +901,19 @@ The sample must be copy/paste complete for setup, request, expected failure, and
   explicit async shutdown only, preserved failure/cancellation precedence, and
   no failed-handle retry registry or process-exit fallback. Laveesh Rohra
   (`larohra`) had already explicitly approved that behavior contract the same day.
+- **Shared discovery sign-off:** Laveesh Rohra (`larohra`) approved MAF-compatible
+  shared discovery on 2026-10-06: "please fix it to match exactly how the MAF code
+  handels it" and "the discovery code should be the same for both harnesses and
+  the discovered capabilities should be frowarded to the right harness."
+  A separate architecture checklist accepts one SDK-free root scanner,
+  existing registration-owned exclusions, neutral frozen adapter inputs, and
+  unchanged raw standalone MAF paths. The shared skill-root discovery amendment
+  supersedes implicit nested-root selection; historical decisions remain recorded.
+- **Path-only ownership sign-off:** Laveesh Rohra (`larohra`) clarified that
+  exclusions use slugs and "We should never need to read the SKILL.md, that
+  should only be part of the harness internal implementation, not our job."
+  The bounded implementation follows that separation with SDK-owned content
+  validation and no private parser dependency. The smallest prompt adaptation
+  retains replace mode without host-generated skill advertising. Architecture review checks shared
+  candidate ownership, frozen filtering, unchanged raw MAF paths, and explicit
+  native qualification limits. This does not approve a prompt-mode expansion.
