@@ -171,6 +171,36 @@ async def test_run_records_hosted_skill_span_and_result_attributes(
 
 
 @pytest.mark.asyncio
+async def test_run_records_failure_once_through_span_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skill, _ = _make_skill(tmp_path)
+    span = _CapturedSpan({})
+    failure = RuntimeError("run failed")
+
+    @contextlib.contextmanager
+    def recording_start_span(*_args: Any, **_kwargs: Any) -> Iterator[_CapturedSpan]:
+        try:
+            yield span
+        except BaseException as exc:
+            span.record_exception(exc)
+            raise
+
+    async def run_agent(_prompt: str, **_kwargs: Any) -> AgentResult:
+        raise failure
+
+    monkeypatch.setattr(hosted_skill_module, "start_span", recording_start_span)
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+
+    with pytest.raises(RuntimeError, match="run failed"):
+        await skill.run("Prepare order")
+
+    assert span.attributes["af.agent.outcome"] == "error"
+    assert span.exceptions == [failure]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("content", "expected_error"),
     [

@@ -420,9 +420,10 @@ agent file no longer fails startup and instead becomes an inert catalog entry.
 - [ ] Regression: existing runner streaming, endpoint, registration, delegation,
   workflow, harness, package-export, and app-composition tests remain green.
 
-No configuration scenario fixture is required because discovery and
-frontmatter interpretation do not change. If implementation changes how an
-authoring file is interpreted, add a mirrored scenario before that change.
+The `20_hosted_skill` configuration scenario mirrors a surfaced app agent and
+an unreferenced endpoint-less internal agent. It verifies that the internal
+agent loads, composes, and validates as an inert catalog entry for HostedSkill
+selection.
 
 ## 7. Docs impact
 

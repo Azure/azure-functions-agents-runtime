@@ -88,9 +88,8 @@ class HostedSkill:
                 _set_run_result_attributes(span, result)
                 span.set_attribute("af.agent.outcome", "success")
                 return result
-            except Exception as exc:
+            except Exception:
                 span.set_attribute("af.agent.outcome", "error")
-                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
                 raise
 
     async def stream(
