@@ -44,8 +44,8 @@ For capabilities (MCP, skills, tools):
 2. **Filtered per-agent** using exclude lists in agent front matter
 
 The default-off [Copilot preview](copilot-preview-operations.md#mcp-and-scoped-skills)
-requires `mcp: false` and `skills: false` when these capabilities are discovered;
-it adds no per-agent harness selector or new skill configuration keys. Its execution and qualification limits
+uses the same MCP and skill authoring/filter fields; it adds no per-agent harness
+selector or new skill configuration keys. Its execution and qualification limits
 are separate from the default MAF path.
 
 ### Quick Reference: Required vs Optional
@@ -824,16 +824,15 @@ filters tools within one server; it is distinct from the frontmatter
 **Note:** `mcp.exclude` entries must match server names discovered from `mcp.json`.
 For transports, headers, and Entra auth, see the repository's
 [MCP Server Configuration](https://github.com/Azure/azure-functions-agents-runtime#mcp-server-configuration).
-The custom-only Copilot preview rejects selected MCP servers before effects;
-set `mcp: false`. See its
-[capability boundary](copilot-preview-operations.md#mcp-and-scoped-skills).
+The Copilot preview keeps these selections, with the
+[between-turn auth and approval boundary](copilot-preview-operations.md#mcp-and-scoped-skills).
 
 ---
 
 #### `skills`
 - **Type:** `object` or `boolean`
 - **Location:** Agent (front matter) for filtering only
-- **Description:** Skill filtering configuration. Shared discovery searches `skills/` through two child directory levels and stops at each directory containing `SKILL.md`. Grouping folders are supported; nested `SKILL.md` documents below a skill root belong to that skill rather than becoming independently selectable skills. Exclusions match directory basenames. The default MAF adapter forwards filtered paths to `SkillsProvider`; the SDK reads and validates skill metadata and owns instruction loading and resource/script mechanisms. The custom-only Copilot preview rejects selected skills before effects. See the [MAF file-based skills docs](https://learn.microsoft.com/en-us/agent-framework/agents/skills?pivots=programming-language-python#file-based-skills-1) for the `SKILL.md` format. MAF requires its authored `name` to match the containing directory name.
+- **Description:** Skill filtering configuration. Shared discovery searches `skills/` through two child directory levels and stops at each directory containing `SKILL.md`. Grouping folders are supported; nested `SKILL.md` documents below a skill root belong to that skill rather than becoming independently selectable skills. Exclusions match directory basenames. Both harnesses receive the same filtered paths; the selected SDK reads and validates skill metadata and owns instruction loading and resource/script mechanisms. The default MAF adapter uses `SkillsProvider`; the Copilot preview uses native skills and scoped helpers. See the [MAF file-based skills docs](https://learn.microsoft.com/en-us/agent-framework/agents/skills?pivots=programming-language-python#file-based-skills-1) for the `SKILL.md` format. MAF requires its authored `name` to match the containing directory name.
 
 Discovery does not parse skill frontmatter, advertise authored descriptions, or
 confirm that a candidate will load. Invalid metadata and duplicate-name handling
@@ -854,8 +853,9 @@ Skill body — instructions, examples, references to in-directory resources.
 **Organizing skill content:**
 
 Skills can include reference material in `references/` and `assets/`
-subdirectories. MAF's `read_skill_resource` helper reads these files on demand
-(progressive disclosure).
+subdirectories. The selected SDK's resource helper reads these files on demand
+(progressive disclosure): MAF uses `read_skill_resource`; Copilot uses scoped
+native `view`.
 
 ```
 my-skill/
@@ -903,12 +903,20 @@ skills: false
 
 **Note:** All discovered skill directory candidates are available to agents by default. Use `exclude` to filter them before forwarding paths to the selected SDK.
 
-**Copilot preview boundary:** Selected skills are not supported in this
-custom-only build. Set `skills: false` to disable project skills explicitly.
-Composition and standalone execution reject selected skills before native,
-provider, or storage acquisition. There is no host-owned skill catalog or
-content loader, and no native skill/read/shell helper grant.
-MAF retains its existing skill behavior, including nested resource recursion.
+**Copilot preview boundary:** Only individual approved skill directories and
+names are exposed. A resource or script target belongs to the most-specific
+canonical discovered skill root containing it, and that owning skill must be
+approved. Separately supplied overlapping roots keep independent ownership:
+an enabled parent does not grant access to an explicitly indexed, excluded child.
+Implicit nested documents are part of their containing skill, not extra grants.
+`skills: false` exposes no skill helpers. This policy does not grant general
+project-code reads or shell commands.
+
+Approved literal script invocations run trusted deployment-owned code with host
+privileges, not an OS sandbox. See
+[supported native script forms](copilot-preview-operations.md#supported-native-script-forms).
+MAF retains its existing nested resource recursion; Copilot's stronger subtree
+policy does not fix the MAF nested-exclusion gap or establish MAF script parity.
 
 ---
 

@@ -63,8 +63,6 @@ class _CopilotHarnessRunner:
         configuration = agent_configuration or AgentConfiguration()
         _copilot_preview.validate_configuration(configuration)
         _copilot_preview.reject_unsupported(
-            mcp=bool(mcp_tools),
-            skills=bool(skill_paths or skills),
             subagents=bool(subagents),
             workflows=workflow_enabled or workflow_policy is not None,
         )
@@ -90,9 +88,6 @@ class _CopilotHarnessRunner:
             workflow_agent_slug=workflow_agent_slug,
             agent_configuration=configuration,
             deadline=deadline,
-        )
-        _copilot_preview.reject_unsupported(
-            mcp=bool(request.mcp_servers), skills=bool(request.skills)
         )
         request = replace(request, tools=_copilot_preview.prepare_tools(request.tools))
         return await _copilot_execution.run(self._harness, request)

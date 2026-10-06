@@ -145,8 +145,6 @@ def validate_copilot_agent(
     validate_copilot_client_manager()
     validate_configuration(resolved.agent_configuration)
     reject_unsupported(
-        mcp=bool(capabilities.filtered_mcp_tools),
-        skills=bool(capabilities.skills or capabilities.enabled_skill_paths),
         non_http_trigger=resolved.trigger is not None and resolved.trigger.type != HTTP_TRIGGER_TYPE,
         debug_chat_ui=resolved.builtin_endpoints.debug_chat_ui,
         mcp_endpoint=resolved.builtin_endpoints.mcp,

@@ -61,6 +61,7 @@ from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import
     CopilotSessionError,
     resolve_route,
 )
+from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import CopilotToolCalls
 
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
 
@@ -217,80 +218,7 @@ async def test_sdk_factory_receives_the_open_opaque_filesystem(preview, monkeypa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("new_session", [False, True])
-@pytest.mark.parametrize("capability", ["mcp", "skills"])
-async def test_deferred_request_capabilities_fail_before_resource_acquisition(
-    preview, monkeypatch, new_session, capability,
-):
-    from azure_functions_agents.discovery.mcp import MCPServerDescriptor
-    from azure_functions_agents.discovery.skills import SkillDescriptor
-
-    acquire = Mock(side_effect=AssertionError("No native owner before capability validation"))
-    storage = AsyncMock(side_effect=AssertionError("No storage before capability validation"))
-    monkeypatch.setattr(_copilot, "get_runtime", acquire)
-    monkeypatch.setattr(_copilot, "open_session_fs", storage)
-    options = (
-        {"mcp_servers": (MCPServerDescriptor.create(
-            name="remote", url="https://fixture.invalid/mcp",
-            auth_scope="https://fixture.invalid/.default",
-        ),)}
-        if capability == "mcp"
-        else {"skills": (SkillDescriptor.create(name="approved", path=preview.app_root),)}
-    )
-    with pytest.raises(UnsupportedCapabilityError, match=capability):
-        await _copilot.run(preview, replace(_request(new_session=new_session), **options))
-    acquire.assert_not_called()
-    storage.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("new_session", [False, True])
-async def test_custom_only_session_permission_callback_denies_all_ambient_sources(
-    preview, monkeypatch, new_session,
-):
-    import copilot
-    from copilot.rpc import PermissionDecisionDeniedByRules
-    from copilot.session_events import (
-        PermissionRequestMcp,
-        PermissionRequestRead,
-        PermissionRequestShell,
-        PermissionRequestUrl,
-    )
-
-    client = _fake_client()
-    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
-    try:
-        await _copilot.run(preview, _request(new_session=new_session))
-        method = client.create_session if new_session else client.resume_session
-        options = method.call_args.kwargs
-        assert options["available_tools"] == []
-        assert options["enable_config_discovery"] is False
-        assert options["tool_search"]["enabled"] is False
-        assert not set(options) & {
-            "mcp_servers", "working_directory", "skill_directories",
-            "disabled_skills", "included_builtin_skills", "enable_skills",
-        }
-        requests = [
-            PermissionRequestMcp(
-                read_only=True, server_name="remote", tool_name="lookup", tool_title="Lookup"
-            ),
-            PermissionRequestRead(intention="read", path=str(preview.app_root / "SKILL.md")),
-            PermissionRequestShell(
-                intention="run", full_command_text="python approved.py", commands=[],
-                possible_paths=[], possible_urls=[], can_offer_session_approval=True,
-                has_write_file_redirection=False,
-            ),
-            PermissionRequestUrl(intention="browse", url="https://fixture.invalid"),
-        ]
-        for request in requests:
-            decision = options["on_permission_request"](request, {"session_id": "main.example"})
-            assert decision.kind == PermissionDecisionDeniedByRules.kind
-    finally:
-        await _lifecycle._shutdown_harnesses()
-
-
-@pytest.mark.asyncio
-async def test_same_session_resume_resets_custom_calls_and_unsubscribes_each_turn(
+async def test_same_session_resume_resets_native_calls_and_unsubscribes_each_turn(
     preview, monkeypatch
 ):
     import copilot
@@ -301,8 +229,8 @@ async def test_same_session_resume_resets_custom_calls_and_unsubscribes_each_tur
         ToolExecutionCompleteResult,
         ToolExecutionStartData,
     )
-    from copilot.tools import ToolInvocation
 
+    from azure_functions_agents.discovery.mcp import MCPServerDescriptor
     from azure_functions_agents.registration._handlers import _tool_error_count
 
     client = _fake_client()
@@ -329,12 +257,6 @@ async def test_same_session_resume_resets_custom_calls_and_unsubscribes_each_tur
                 ),
             ),
         ))
-        method = client.create_session if turn == 1 else client.resume_session
-        [custom_tool] = method.call_args.kwargs["tools"]
-        await custom_tool.handler(ToolInvocation(
-            session_id="main.example", tool_call_id="reused-id", tool_name="lookup",
-            arguments={"turn": turn},
-        ))
         final = _sdk_event(
             SessionEventType.ASSISTANT_MESSAGE,
             AssistantMessageData(content=f"reply-{turn}", message_id=f"reply-{turn}"),
@@ -344,16 +266,8 @@ async def test_same_session_resume_resets_custom_calls_and_unsubscribes_each_tur
 
     session.send_and_wait.side_effect = send
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
-    @tool
-    def lookup(turn: int) -> str:
-        if turn == 2:
-            raise RuntimeError("private denied output")
-        return "first-result"
-
-    session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(
-        tools=[SimpleNamespace(name="lookup")]
-    )
-    request = replace(_request(), tools=(lookup,))
+    server = MCPServerDescriptor.create(name="selected", url="https://fixture.invalid/mcp")
+    request = replace(_request(), mcp_servers=(server,))
     try:
         first = await _copilot.run(preview, request)
         assert session.handlers == []
@@ -402,7 +316,7 @@ async def _invoke_native_tool(function, arguments):
     from copilot.tools import ToolInvocation
 
     [descriptor] = _preview.prepare_tools([function])
-    calls = []
+    calls = CopilotToolCalls()
     native_tool = _copilot._tool(descriptor, calls)
     assert native_tool.handler is not None
     result = await native_tool.handler(
@@ -413,7 +327,7 @@ async def _invoke_native_tool(function, arguments):
             arguments=arguments,
         )
     )
-    return result, calls
+    return result, calls.calls
 
 
 @pytest.mark.asyncio
@@ -511,7 +425,7 @@ async def test_tool_adapter_propagates_cancellation():
     from copilot.tools import ToolInvocation
 
     [descriptor] = _preview.prepare_tools([wait_forever])
-    calls = []
+    calls = CopilotToolCalls()
     native_tool = _copilot._tool(descriptor, calls)
     assert native_tool.handler is not None
     task = asyncio.create_task(
@@ -529,7 +443,7 @@ async def test_tool_adapter_propagates_cancellation():
 
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert calls == [
+    assert calls.calls == [
         {
             "type": "tool_start",
             "tool_call_id": "call-cancel",
@@ -595,13 +509,357 @@ async def test_custom_only_catalog_mismatch_fails_before_observer_or_send(previe
             await _copilot.run(preview, replace(_request(), tools=functions))
         options = client.create_session.call_args.kwargs
         assert options["available_tools"] == ["custom:allowed_tool"]
-        assert "skill_directories" not in options
-        assert "mcp_servers" not in options
+        assert options["enable_skills"] is False
         assert options["enable_config_discovery"] is False
         session.rpc.tools.get_current_metadata.assert_awaited_once()
         session.on.assert_not_called()
         session.send_and_wait.assert_not_awaited()
         session.disconnect.assert_awaited_once()
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+def _skill_inventory(root):
+    from azure_functions_agents.discovery.skills import SkillDescriptor
+
+    approved = root / "skills" / "approved"
+    excluded = approved / "nested"
+    excluded.mkdir(parents=True)
+    (approved / "SKILL.md").write_text(
+        "---\nname: approved\ndescription: Approved description.\n---\napproved content\n",
+        encoding="utf-8",
+    )
+    (approved / "reference.txt").write_text("approved resource", encoding="utf-8")
+    (excluded / "SKILL.md").write_text(
+        "---\nname: excluded\ndescription: Excluded description.\n---\nexcluded content\n",
+        encoding="utf-8",
+    )
+    return tuple(
+        SkillDescriptor.create(name=name, path=path)
+        for name, path in (
+            ("approved", approved),
+            ("excluded", excluded),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_resume_keep_filtered_capabilities_and_refresh_static_mcp_headers(
+    preview, monkeypatch,
+):
+    import copilot
+
+    from azure_functions_agents import _mcp_auth
+    from azure_functions_agents._tool_descriptor import ToolDescriptor
+    from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+
+    credential = SimpleNamespace(get_token=Mock(side_effect=[
+        AccessToken("first-token-sentinel", 9999999999),
+        AccessToken("second-token-sentinel", 9999999999),
+    ]))
+    monkeypatch.setattr(_mcp_auth, "build_credential", Mock(return_value=credential))
+    servers = tuple(
+        MCPServerDescriptor.create(name=name, url=f"https://{name}.example/mcp", **options)
+        for name, options in (
+            ("all", {
+                "auth_scope": "https://remote.example/.default",
+                "headers": {"Authorization": "static-sentinel", "X-Static": "unchanged"},
+            }),
+            ("none", {"tools": []}),
+            ("selected", {"tools": ["lookup"], "transport": "streamable-http"}),
+        )
+    )
+    host_tool = ToolDescriptor.create(name="host_tool", description="Host tool", func=lambda: "ok")
+    skills = _skill_inventory(preview.app_root)
+    request = replace(
+        _request(), tools=(host_tool,), mcp_servers=servers, skills=skills[:1], skill_catalog=skills
+    )
+    client = _fake_client()
+    client.resume_session.return_value = _fake_client().resume_session.return_value
+    factory = Mock(return_value=client)
+    monkeypatch.setattr(copilot, "CopilotClient", factory)
+    try:
+        first = await _copilot.run(preview, request)
+        second = await _copilot.run(preview, replace(request, new_session=False))
+        assert first.session_id == second.session_id == "example"
+        created = client.create_session.call_args.kwargs
+        resumed = client.resume_session.call_args.kwargs
+        assert created["session_id"] == client.resume_session.call_args.args[0] == "main.example"
+        for options in (created, resumed):
+            assert set(options["mcp_servers"]) == {"all", "none", "selected"}
+            assert options["mcp_servers"]["all"]["tools"] == ["*"]
+            assert options["mcp_servers"]["none"]["tools"] == []
+            assert options["mcp_servers"]["selected"]["tools"] == ["lookup"]
+            assert options["mcp_servers"]["selected"]["type"] == "http"
+            assert options["mcp_servers"]["selected"]["url"] == "https://selected.example/mcp"
+            assert options["skill_directories"] == [str(skills[0].path)]
+            assert options["disabled_skills"] == ["excluded"]
+            assert options["included_builtin_skills"] == []
+            assert options["enable_skills"] is True
+            assert options["available_tools"] == [
+                "custom:host_tool", "mcp:*", "builtin:skill", "builtin:view", "builtin:bash",
+            ]
+            assert options["working_directory"] == factory.call_args.kwargs[
+                "session_fs"
+            ]["initial_working_directory"]
+            assert options["enable_config_discovery"] is False
+            assert options["enable_session_telemetry"] is False
+            assert options["request_extensions"] is False
+            assert options["system_message"] == {"mode": "replace", "content": request.instructions}
+        assert created["mcp_servers"]["all"]["headers"] == {
+            "X-Static": "unchanged", "Authorization": "Bearer first-token-sentinel",
+        }
+        assert resumed["mcp_servers"]["all"]["headers"] == {
+            "X-Static": "unchanged", "Authorization": "Bearer second-token-sentinel",
+        }
+        assert created["mcp_servers"] is not resumed["mcp_servers"]
+        assert created["mcp_servers"]["all"]["headers"] is not resumed["mcp_servers"]["all"]["headers"]
+        assert servers[0].headers == (("Authorization", "static-sentinel"), ("X-Static", "unchanged"))
+        assert credential.get_token.call_count == 2
+        assert all(
+            args.args == ("https://remote.example/.default",)
+            for args in credential.get_token.call_args_list
+        )
+        client.create_session.assert_awaited_once()
+        client.resume_session.assert_awaited_once()
+        client.get_session_metadata.assert_not_awaited()
+        for session in (client.create_session.return_value, client.resume_session.return_value):
+            session.disconnect.assert_awaited_once()
+            session.get_events.assert_not_awaited()
+            session.rpc.tools.get_current_metadata.assert_not_awaited()
+        assert factory.call_args.kwargs["telemetry"] is None
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_session", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_native_skill_exposure_matches_approved_inventory_on_create_and_resume(
+    preview, monkeypatch, new_session, enabled,
+):
+    import copilot
+    from copilot.rpc import PermissionDecisionApproveOnce, PermissionDecisionDeniedByRules
+    from copilot.session_events import PermissionRequestRead, PermissionRequestUrl
+
+    skills = _skill_inventory(preview.app_root)
+    read_text = Path.read_text
+
+    def forbid_skill_reads(path, *args, **kwargs):
+        if path.name == "SKILL.md":
+            raise AssertionError("The host must not read SDK-owned skill content")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", forbid_skill_reads)
+    client = _fake_client()
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        await _copilot.run(preview, replace(
+            _request(new_session=new_session),
+            skills=skills[:1] if enabled else (),
+            skill_catalog=skills,
+        ))
+        session_call = client.create_session.call_args if new_session else client.resume_session.call_args
+        options = session_call.kwargs
+        assert options["enable_skills"] is enabled
+        assert options["skill_directories"] == ([str(skills[0].path)] if enabled else [])
+        assert options["disabled_skills"] == (["excluded"] if enabled else ["approved", "excluded"])
+        assert options["available_tools"] == (
+            ["builtin:skill", "builtin:view", "builtin:bash"] if enabled else []
+        )
+        assert options["included_builtin_skills"] == []
+        handler = options["on_permission_request"]
+        read = handler(
+            PermissionRequestRead(intention="resource", path=str(skills[0].path / "reference.txt")),
+            {"session_id": "main.example"},
+        )
+        assert read.kind == (
+            PermissionDecisionApproveOnce.kind if enabled else PermissionDecisionDeniedByRules.kind
+        )
+        denied = handler(
+            PermissionRequestUrl(intention="skill", url="https://remote.example/"),
+            {"session_id": "main.example"},
+        )
+        assert denied.kind == PermissionDecisionDeniedByRules.kind
+        assert options["system_message"] == {"mode": "replace", "content": "Be helpful."}
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_session", [False, True])
+async def test_mcp_authentication_failure_stops_before_native_session_without_retry(
+    preview, monkeypatch, new_session,
+):
+    import copilot
+
+    from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+    from azure_functions_agents.harness.copilot_sdk import _copilot_capabilities
+
+    materialize = Mock(side_effect=RuntimeError("private auth sentinel"))
+    monkeypatch.setattr(_copilot_capabilities, "materialize_mcp_headers", materialize)
+    factory = Mock(side_effect=AssertionError("no native process or fallback"))
+    monkeypatch.setattr(copilot, "CopilotClient", factory)
+    providers = []
+    original_open = _copilot.open_session_fs
+
+    async def observe_open(*args, **kwargs):
+        provider = await original_open(*args, **kwargs)
+        providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(_copilot, "open_session_fs", observe_open)
+    server = MCPServerDescriptor.create(
+        name="selected", url="https://remote.example/mcp", auth_scope="https://remote.example/.default"
+    )
+    try:
+        with pytest.raises(CopilotPreviewError, match="MCP authentication") as caught:
+            await _copilot.run(preview, replace(
+                _request(new_session=new_session), mcp_servers=(server,)
+            ))
+        assert "private auth sentinel" not in str(caught.value)
+        materialize.assert_called_once_with(server)
+        factory.assert_not_called()
+        assert len(providers) == 1
+        assert providers[0]._closed
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_session", [False, True])
+async def test_mcp_session_failure_does_not_drop_capabilities_reset_or_retry(
+    preview, monkeypatch, new_session,
+):
+    import copilot
+
+    from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+
+    server = MCPServerDescriptor.create(
+        name="selected", url="https://remote.example/mcp", tools=["lookup"]
+    )
+    client = _fake_client()
+    method = client.create_session if new_session else client.resume_session
+    method.side_effect = RuntimeError("private MCP connection detail")
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(CopilotPreviewError, match="No fallback") as caught:
+            await _copilot.run(preview, replace(
+                _request(new_session=new_session), mcp_servers=(server,)
+            ))
+        assert "private MCP connection detail" not in str(caught.value)
+        method.assert_awaited_once()
+        other = client.resume_session if new_session else client.create_session
+        other.assert_not_awaited()
+        assert method.call_args.kwargs["mcp_servers"]["selected"]["tools"] == ["lookup"]
+        assert method.call_args.kwargs["available_tools"] == ["mcp:*"]
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+async def test_native_skill_mcp_denials_and_custom_calls_feed_existing_result_metrics(
+    preview, monkeypatch,
+):
+    import copilot
+    from copilot.rpc import PermissionDecisionDeniedByRules
+    from copilot.session_events import (
+        PermissionRequestRead,
+        SessionEventType,
+        SkillInvokedData,
+        ToolExecutionCompleteData,
+        ToolExecutionCompleteError,
+        ToolExecutionCompleteResult,
+        ToolExecutionStartData,
+    )
+    from copilot.tools import ToolInvocation
+
+    from azure_functions_agents._tool_descriptor import ToolDescriptor
+    from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+    from azure_functions_agents.registration._handlers import _set_run_result_attributes
+
+    skills = _skill_inventory(preview.app_root)
+    host_tool = ToolDescriptor.create(name="host_tool", description="Host tool", func=lambda: "host result")
+    server = MCPServerDescriptor.create(name="selected", url="https://remote.example/mcp")
+    client = _fake_client()
+    session = client.create_session.return_value
+
+    async def send(*_args, **_kwargs):
+        options = client.create_session.call_args.kwargs
+        [on_event] = session.handlers
+        assert "on_event" not in options
+
+        def emit(event_type, data):
+            on_event(_sdk_event(event_type, data))
+
+        emit(SessionEventType.TOOL_EXECUTION_START, ToolExecutionStartData(
+            tool_call_id="skill", tool_name="skill", arguments={"name": "approved"},
+        ))
+        emit(SessionEventType.SKILL_INVOKED, SkillInvokedData(
+            content="private skill instructions", name="approved", path=str(skills[0].path),
+            allowed_tools=["bash", "edit", "*"],
+        ))
+        emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+            tool_call_id="skill", success=True,
+            result=ToolExecutionCompleteResult(content="Loaded approved."),
+        ))
+        denied = options["on_permission_request"](
+            PermissionRequestRead(
+                intention="claims an approved skill", path=str(skills[1].path / "SKILL.md"),
+                tool_call_id="denied-view",
+            ),
+            {"session_id": "main.example"},
+        )
+        assert denied.kind == PermissionDecisionDeniedByRules.kind
+        emit(SessionEventType.TOOL_EXECUTION_START, ToolExecutionStartData(
+            tool_call_id="denied-view", tool_name="view", arguments={"path": "excluded"},
+        ))
+        for _duplicate in range(2):
+            emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+                tool_call_id="denied-view", success=False,
+                error=ToolExecutionCompleteError(message="private native denial detail"),
+            ))
+        emit(SessionEventType.TOOL_EXECUTION_START, ToolExecutionStartData(
+            tool_call_id="mcp", tool_name="remote_lookup", arguments={"query": "safe"},
+            mcp_server_name="selected", mcp_tool_name="lookup",
+        ))
+        emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+            tool_call_id="mcp", success=True,
+            result=ToolExecutionCompleteResult(content='{"remote":"result"}'),
+        ))
+        emit(SessionEventType.TOOL_EXECUTION_START, ToolExecutionStartData(
+            tool_call_id="custom", tool_name="host_tool", arguments={},
+        ))
+        [native_tool] = options["tools"]
+        await native_tool.handler(ToolInvocation(
+            session_id="main.example", tool_call_id="custom", tool_name="host_tool", arguments={},
+        ))
+        emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+            tool_call_id="custom", success=True,
+            result=ToolExecutionCompleteResult(content="SDK wrapper duplicate"),
+        ))
+        emit(SessionEventType.TOOL_EXECUTION_COMPLETE, ToolExecutionCompleteData(
+            tool_call_id="completion-only-bash", success=False,
+            error=ToolExecutionCompleteError(message="private shell detail"),
+        ))
+        return session.send_and_wait.return_value
+
+    session.send_and_wait.side_effect = send
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        result = await _copilot.run(preview, replace(
+            _request(), tools=(host_tool,), mcp_servers=(server,),
+            skills=skills[:1], skill_catalog=skills,
+        ))
+        assert [call["tool_call_id"] for call in result.tool_calls] == [
+            "skill", "denied-view", "mcp", "custom", "completion-only-bash",
+        ]
+        assert result.tool_calls[3]["result"] == "host result"
+        assert "private" not in repr(result.tool_calls)
+        span = Mock()
+        _set_run_result_attributes(span, result)
+        span.set_attribute.assert_any_call("af.agent.tool_call_count", 5)
+        span.set_attribute.assert_any_call("af.agent.tool_error_count", 2)
     finally:
         await _lifecycle._shutdown_harnesses()
 
@@ -647,8 +905,8 @@ async def test_native_custom_tools_preserve_json_results_and_fresh_parameter_sch
         func=lambda value: {"value": value, "items": [True, None]},
     )
     registered_parameters = descriptor.parameters()
-    first = _copilot._tool(descriptor, [])
-    second = _copilot._tool(descriptor, [])
+    first = _copilot._tool(descriptor, CopilotToolCalls())
+    second = _copilot._tool(descriptor, CopilotToolCalls())
     first.parameters["properties"]["value"]["description"] = "SDK-side mutation"
 
     assert second.parameters == registered_parameters
@@ -1807,7 +2065,10 @@ async def test_invocation_owned_cleanup_unsubscribes_before_disconnect_and_files
     try:
         if outcome == "success":
             result = await _copilot.run(preview, _request())
-            assert result.tool_calls == []
+            assert len(result.tool_calls) == 1
+            assert result.tool_calls[0]["tool_call_id"] == "denied-view"
+            assert result.tool_calls[0]["success"] is False
+            assert "private denied detail" not in repr(result.tool_calls)
         else:
             error = asyncio.CancelledError if outcome == "cancelled" else CopilotPreviewError
             with pytest.raises(error) as caught:

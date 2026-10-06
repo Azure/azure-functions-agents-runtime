@@ -24,7 +24,7 @@ MAF remains the default. A separate
 [Copilot preview sample](samples/copilot-preview/README.md) supports an explicit
 `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=true` opt-in for **internal local
 qualification only**, not a customer-facing production contract, covering non-streaming HTTP,
-filtered explicit Python tools,
+filtered explicit Python tools, remote HTTP MCP servers, scoped project skills,
 the configured `web_request` tool, session-bound
 ACA `execute_python` adapter wiring, host-validated structured results on
 authored HTTP-trigger routes, and SDK-owned native sessions. The flag is read
@@ -40,9 +40,9 @@ Blob setting is configured. Configured Blob failures never fall back to disk.
 The SDK owns sessions, continuation, recovery, compaction and file formats;
 the host supplies filesystem operations, metadata and path containment.
 ACA catalog/session scoping is unit-qualified; real Copilot-to-ACA
-execution remains a separately gated acceptance item. Outbound MCP and skills
-are rejected before resource acquisition; use `mcp: false` and `skills: false`
-for this custom-only preview. General shell/project-file access and ambient
+execution remains a separately gated acceptance item. Native `skill`, `view`,
+and `bash` helpers are limited to approved skill loading, resource reads, and
+literal script invocations; general shell/project-file access and other ambient
 SDK tools remain disabled or denied. This is **not**
 production activation: the preview remains local-only and single-worker.
 Earlier real-service results do not qualify the rewritten filesystem adapter.
@@ -51,7 +51,7 @@ final rollout remains in #1337. Delegation, workflow roles, and streaming
 remain unsupported. Configured output-token caps are not supported in this
 Copilot preview; MAF retains its output-limit controls. See
 [`docs/copilot-preview-operations.md`](docs/copilot-preview-operations.md) for
-current capability limits, storage settings, errors and targeted cleanup.
+MCP auth limits, scoped skill helpers, storage settings, errors and targeted cleanup.
 The sample documents OpenAI key, Azure OpenAI key/Entra and Foundry Entra setup.
 Custom `ClientManager`
 implementations remain MAF-only and are rejected explicitly when Copilot is on.
@@ -620,15 +620,16 @@ Tools from configured MCP servers are automatically available to the agent at ru
 
 MCP tools are the supported capability; MCP prompts are not surfaced. The MAF
 adapter skips prompt loading for connector-backed servers that reject
-`prompts/list`. The custom-only Copilot preview rejects outbound MCP.
+`prompts/list`. Copilot uses normal native SDK connection and tool loading.
 Per-agent [`mcp: false` / `mcp.exclude`](docs/front-matter-spec.md#mcp) can further
 narrow the selected servers.
 
 By default, MCP auth follows the app-wide identity selection: `AZURE_CLIENT_ID` when set, otherwise the system-assigned identity/default Azure credential chain. To choose a user-assigned managed identity for a single MCP server without changing the app-wide identity, set `auth.client_id` in that server's `mcp.json` entry. If the configured client ID is empty or an unresolved placeholder, the runtime falls back to the app-wide identity selection.
 
-MAF refreshes outbound authentication through its per-request header provider.
-The Copilot preview requires MCP to be disabled explicitly; see the
-[MCP and scoped skills boundary](docs/copilot-preview-operations.md#mcp-and-scoped-skills).
+In the Copilot preview, fresh MCP headers are supplied at native session
+create/resume between completed turns, not refreshed mid-turn. This is not full
+MAF auth parity. See the [MCP and scoped skills boundary](docs/copilot-preview-operations.md#mcp-and-scoped-skills)
+for noninteractive approvals, auth precedence, and unqualified scenarios.
 
 > **Note**: Entries without a `url`, with unresolved placeholders in `url`, or with a `type` other than `"http"` / `"streamable-http"`, are ignored with a warning. Use the remote HTTP transport instead.
 
