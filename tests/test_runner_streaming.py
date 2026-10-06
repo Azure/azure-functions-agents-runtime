@@ -7,11 +7,11 @@ import textwrap
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from agent_framework import (
+    AgentResponse,
     BaseChatClient,
     ChatResponse,
     ChatResponseUpdate,
@@ -23,6 +23,7 @@ from agent_framework import (
 
 from azure_functions_agents import runner
 from azure_functions_agents.client_manager import InferenceTarget
+from azure_functions_agents.config import paths
 from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
 from azure_functions_agents.harness import _harness_execution as shared
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
@@ -34,21 +35,97 @@ async def test_closing_the_public_stream_closes_the_selected_generator(monkeypat
     closed = []
     harness = AppHarness(HarnessKind.MAF, Path.cwd())
 
-    async def selected(bound_harness, request, **kwargs):
-        assert bound_harness is harness
-        assert request.prompt == "fixture"
-        try:
-            yield "data: fixture\n\n"
-            yield "data: unused\n\n"
-        finally:
-            closed.append(True)
+    class _SelectedRunner:
+        def run_agent_stream(self, _prompt, **kwargs):
+            async def _stream():
+                try:
+                    yield "data: fixture\n\n"
+                    yield "data: unused\n\n"
+                finally:
+                    closed.append(True)
 
-    monkeypatch.setattr(maf, "run_stream", selected)
+            return _stream()
+
+    monkeypatch.setattr(runner, "get_agent_runner", lambda selected: _SelectedRunner())
     stream = runner.run_agent_stream("fixture", _harness=harness)
 
     assert await anext(stream) == "data: fixture\n\n"
     await stream.aclose()
     assert closed == [True]
+
+
+@pytest.mark.asyncio
+async def test_bound_harness_run_agent_stream_discovers_tools_and_mcp_from_bound_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root_a = tmp_path / "root-a"
+    root_a.mkdir()
+    (root_a / "tools").mkdir()
+    (root_a / "tools" / "local.py").write_text(
+        "def user_root_a() -> str:\n    return 'root-a'\n", encoding="utf-8"
+    )
+    (root_a / "mcp.json").write_text(
+        json.dumps({"servers": {"mcp_root_a": {"url": "https://fixture.invalid/mcp"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(paths, "_app_root", tmp_path / "unrelated-root")
+    harness = AppHarness(HarnessKind.MAF, root_a)
+    seen: list[dict[str, Any]] = []
+
+    async def fake_builder(**kwargs: Any):
+        seen.append(kwargs)
+        return _Agent(), object(), "test-session", None, InferenceTarget()
+
+    monkeypatch.setattr(runner, "_build_agent_session", fake_builder)
+    async def collect(**kwargs: Any) -> list[str]:
+        return [chunk async for chunk in runner.run_agent_stream("prompt", _harness=harness, **kwargs)]
+
+    await collect(tools=None, mcp_tools=None)
+    await collect(tools=[], mcp_tools=[])
+
+    assert seen[0]["app_root"] == root_a
+    assert [item.name for item in seen[0]["tools"]] == ["user_root_a"]
+    assert [item.name for item in seen[0]["mcp_tools"]] == ["mcp_root_a"]
+    assert seen[0]["_harness"] is harness
+    resolved_tools, _ = maf.assemble_agent_inputs(
+        instructions=None,
+        tools=seen[0]["tools"],
+        mcp_tools=seen[0]["mcp_tools"],
+        app_root=seen[0]["app_root"],
+        sandbox_tools=None,
+        web_request_tools=None,
+        system_addendum=None,
+        workflow_enabled=False,
+        workflow_durable_client=None,
+        workflow_agent_slug=None,
+        agent_name=None,
+        resolved_id=None,
+        delegate_tools=None,
+        workflow_policy=None,
+    )
+    assert {tool.name for tool in resolved_tools} == {"user_root_a", "mcp_root_a"}
+
+    assert seen[1]["tools"] == ()
+    assert seen[1]["mcp_tools"] == ()
+    assert seen[1]["_harness"] is harness
+    assert seen[1]["app_root"] == root_a
+    resolved_disabled, _ = maf.assemble_agent_inputs(
+        instructions=None,
+        tools=seen[1]["tools"],
+        mcp_tools=seen[1]["mcp_tools"],
+        app_root=seen[1]["app_root"],
+        sandbox_tools=None,
+        web_request_tools=None,
+        system_addendum=None,
+        workflow_enabled=False,
+        workflow_durable_client=None,
+        workflow_agent_slug=None,
+        agent_name=None,
+        resolved_id=None,
+        delegate_tools=None,
+        workflow_policy=None,
+    )
+    assert resolved_disabled == []
 
 
 class _Content:
@@ -588,12 +665,53 @@ class _FakeHookStream:
             raise RuntimeError("boom: hostile cleanup hook")
 
 
+class _InnerStreamWrapper:
+    def __init__(self, inner: object) -> None:
+        self._inner_stream = inner
+
+
+class _HookOnlyStream:
+    _inner_stream = None
+
+    def __init__(self) -> None:
+        self.cleanup_calls = 0
+
+    async def _run_cleanup_hooks(self) -> None:
+        self.cleanup_calls += 1
+
+
 def test_finalize_maf_stream_is_a_safe_no_op_for_none() -> None:
     """``stream=None`` (nothing was ever captured — e.g. ``run_agent_stream``'s
     own ``agent.run(..., stream=True)`` call raising before ``stream`` is ever
     assigned) must not raise.
     """
     asyncio.run(maf._finalize_maf_stream(None, asyncio.CancelledError()))
+
+
+def test_finalize_maf_stream_ignores_plain_async_generators_without_private_hooks() -> None:
+    """Plain async generators do not expose MAF's private cleanup seam and should
+    be ignored rather than raising during timeout/cancellation finalization.
+    """
+
+    async def generator() -> AsyncIterator[None]:
+        if False:
+            yield None
+
+    asyncio.run(maf._finalize_maf_stream(generator(), asyncio.CancelledError()))
+
+
+def test_finalize_maf_stream_traverses_wrapper_without_cleanup_hooks() -> None:
+    """Traversal must continue through wrappers that only expose ``_inner_stream``."""
+    inner = _FakeHookStream()
+    asyncio.run(maf._finalize_maf_stream(_InnerStreamWrapper(inner), asyncio.CancelledError()))
+    assert len(inner.cleanup_calls) == 1
+
+
+def test_finalize_maf_stream_runs_hook_without_stream_error_slot() -> None:
+    """Hook-only wrappers remain valid cleanup surfaces even without ``_stream_error``."""
+    stream = _HookOnlyStream()
+    asyncio.run(maf._finalize_maf_stream(stream, asyncio.CancelledError()))
+    assert stream.cleanup_calls == 1
 
 
 def test_finalize_maf_stream_walks_the_entire_inner_stream_chain() -> None:
@@ -801,7 +919,7 @@ def test_public_runners_pass_agent_slug_to_bounded_session_lock(
             options: dict[str, Any] | None = None,
         ) -> Any:
             del session, options
-            return SimpleNamespace(text="done", messages=[])
+            return AgentResponse(messages=[Message("assistant", ["done"])])
 
     async def fake_non_streaming_session(
         **_kwargs: Any,

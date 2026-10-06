@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from agent_framework import (
+    AgentResponse,
     AgentSession,
     BaseChatClient,
     ChatMiddlewareLayer,
@@ -29,6 +30,7 @@ from agent_framework import (
 from azure_functions_agents import runner
 from azure_functions_agents._function_tool import tool
 from azure_functions_agents.client_manager import InferenceTarget
+from azure_functions_agents.config import paths
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     AgentFrameworkCompactionConfig,
@@ -72,7 +74,7 @@ def test_run_agent_reports_model_and_tool_evidence_by_assistant_message(monkeypa
 
     class FakeAgent:
         async def run(self, *args: Any, **kwargs: Any) -> Any:
-            return SimpleNamespace(text="done", messages=messages, usage_details=None)
+            return AgentResponse(messages=messages)
 
     async def fake_session_builder(
         **kwargs: Any,
@@ -113,7 +115,7 @@ def test_run_agent_does_not_guess_batch_or_correlate_missing_ids(monkeypatch: An
 
     class FakeAgent:
         async def run(self, *args: Any, **kwargs: Any) -> Any:
-            return SimpleNamespace(text="done", messages=messages, usage_details=None)
+            return AgentResponse(messages=messages)
 
     async def fake_session_builder(
         **kwargs: Any,
@@ -155,37 +157,113 @@ async def test_public_runner_preserves_the_deadline_set_before_selection(monkeyp
         return harness
 
     invoke = AsyncMock(return_value=runner.AgentResult("session", "fixture reply"))
+
+    class _SelectedRunner:
+        async def run_agent(self, prompt: str, **kwargs: Any) -> runner.AgentResult:
+            return await invoke(prompt, **kwargs)
+
     monkeypatch.setattr(runner, "get_harness", select)
-    monkeypatch.setattr(maf, "run", invoke)
+    monkeypatch.setattr(runner, "get_agent_runner", lambda selected: _SelectedRunner())
 
     result = await runner.run_agent("fixture", timeout=0.1)
 
     assert result.content == "fixture reply"
-    assert invoke.call_args.args[0] is harness
-    assert invoke.call_args.args[1].deadline <= selected_at[0] + 0.1
+    assert invoke.call_args.kwargs["deadline"] <= selected_at[0] + 0.1
 
 
 @pytest.mark.asyncio
 async def test_selection_cannot_restart_an_expired_public_invocation_budget(monkeypatch):
     harness = AppHarness(HarnessKind.MAF, Path.cwd())
-    invoke = AsyncMock(return_value=SimpleNamespace(text="must not run", messages=[]))
-    build = AsyncMock(return_value=(
-        SimpleNamespace(run=invoke), object(), "selection_budget_regression",
-        None, InferenceTarget(),
-    ))
+    invoke = AsyncMock(return_value=runner.AgentResult("session", "must not run"))
+
+    class _SelectedRunner:
+        async def run_agent(self, prompt: str, **kwargs: Any) -> runner.AgentResult:
+            if kwargs["deadline"] <= asyncio.get_running_loop().time():
+                raise RuntimeError("Agent run timed out after 0.001s")
+            return await invoke(prompt, **kwargs)
 
     def select():
         time.sleep(0.01)
         return harness
 
     monkeypatch.setattr(runner, "get_harness", select)
-    monkeypatch.setattr(runner, "_build_agent_session", build)
+    monkeypatch.setattr(runner, "get_agent_runner", lambda selected: _SelectedRunner())
 
-    with pytest.raises(RuntimeError, match="Agent run timed out after"):
+    with pytest.raises(RuntimeError, match=r"Agent run timed out after|timed out"):
         await runner.run_agent("fixture", timeout=0.001)
 
-    build.assert_awaited_once()
     invoke.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bound_harness_run_agent_discovers_tools_and_mcp_from_bound_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root_a = tmp_path / "root-a"
+    root_a.mkdir()
+    (root_a / "tools").mkdir()
+    (root_a / "tools" / "local.py").write_text(
+        "def user_root_a() -> str:\n    return 'root-a'\n", encoding="utf-8"
+    )
+    (root_a / "mcp.json").write_text(
+        json.dumps({"servers": {"mcp_root_a": {"url": "https://fixture.invalid/mcp"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(paths, "_app_root", tmp_path / "unrelated-root")
+    harness = AppHarness(HarnessKind.MAF, root_a)
+    seen: list[dict[str, Any]] = []
+
+    async def fake_builder(**kwargs: Any) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
+        seen.append(kwargs)
+        return _FakeAgent(), object(), "session", None, InferenceTarget()
+
+    monkeypatch.setattr(runner, "_build_agent_session", fake_builder)
+    await runner.run_agent("prompt", _harness=harness, tools=None, mcp_tools=None)
+    await runner.run_agent("prompt", _harness=harness, tools=[], mcp_tools=[])
+
+    assert seen[0]["app_root"] == root_a
+    assert [item.name for item in seen[0]["tools"]] == ["user_root_a"]
+    assert [item.name for item in seen[0]["mcp_tools"]] == ["mcp_root_a"]
+    assert seen[0]["_harness"] is harness
+    resolved_tools, _ = maf.assemble_agent_inputs(
+        instructions=None,
+        tools=seen[0]["tools"],
+        mcp_tools=seen[0]["mcp_tools"],
+        app_root=seen[0]["app_root"],
+        sandbox_tools=None,
+        web_request_tools=None,
+        system_addendum=None,
+        workflow_enabled=False,
+        workflow_durable_client=None,
+        workflow_agent_slug=None,
+        agent_name=None,
+        resolved_id=None,
+        delegate_tools=None,
+        workflow_policy=None,
+    )
+    assert {tool.name for tool in resolved_tools} == {"user_root_a", "mcp_root_a"}
+
+    assert seen[1]["tools"] == ()
+    assert seen[1]["mcp_tools"] == ()
+    assert seen[1]["_harness"] is harness
+    assert seen[1]["app_root"] == root_a
+    resolved_disabled, _ = maf.assemble_agent_inputs(
+        instructions=None,
+        tools=seen[1]["tools"],
+        mcp_tools=seen[1]["mcp_tools"],
+        app_root=seen[1]["app_root"],
+        sandbox_tools=None,
+        web_request_tools=None,
+        system_addendum=None,
+        workflow_enabled=False,
+        workflow_durable_client=None,
+        workflow_agent_slug=None,
+        agent_name=None,
+        resolved_id=None,
+        delegate_tools=None,
+        workflow_policy=None,
+    )
+    assert resolved_disabled == []
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +276,7 @@ class _FakeAgent:
         self._response_text = response_text
 
     async def run(self, _prompt: str, *, session: Any, options: Any = None) -> Any:
-        return SimpleNamespace(text=self._response_text, messages=[])
+        return AgentResponse(messages=[Message("assistant", [self._response_text])])
 
 
 class _RecordingStoringChatClient(ChatMiddlewareLayer, BaseChatClient):

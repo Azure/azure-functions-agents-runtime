@@ -6,7 +6,7 @@ import asyncio
 import atexit
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final, Literal
 
 from ..._credential import build_async_credential
 from ..._logger import logger
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from ._copilot_session_fs import CopilotSessionFs
 
 _START_TIMEOUT_SECONDS = 30
+_EMPTY_CLIENT_MODE: Final[Literal["empty"]] = "empty"
 
 
 class CopilotRuntime:
@@ -36,23 +37,11 @@ class CopilotRuntime:
         self.workspace = self.native_root / "workspace"
         self._client: CopilotClient | None = None
         self._failed_client: CopilotClient | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
         self._start_lock = asyncio.Lock()
         self._credential: AsyncTokenCredential | None = None
         self._filesystems: set[CopilotSessionFs] = set()
         self._close_callback = self.close
         self._exit_callback = self._exit
-
-    def admit_loop(self) -> None:
-        """Select the lifetime's event loop before any asynchronous acquisition."""
-        loop = asyncio.get_running_loop()
-        with self._harness._resources.guard:
-            if self._loop is not None and self._loop is not loop:
-                raise CopilotPreviewError(
-                    "Copilot preview requires one event loop per worker. "
-                    "Await shutdown_client_manager() before closing a standalone event loop."
-                )
-            self._loop = loop
 
     def _register_resources(self) -> None:
         _harness_lifecycle._register_shutdown(self._close_callback)
@@ -87,7 +76,6 @@ class CopilotRuntime:
         self._forget_client(client)
 
     async def client(self) -> CopilotClient:
-        self.admit_loop()
         async with self._start_lock:
             if self._client is not None:
                 return self._client
@@ -98,7 +86,8 @@ class CopilotRuntime:
 
             client = CopilotClient(
                 connection=RuntimeConnection.for_stdio(),
-                mode="empty",
+                # Let this runtime own provider, tool, and session-fs wiring.
+                mode=_EMPTY_CLIENT_MODE,
                 base_directory=str(self.native_root),
                 working_directory=str(self.native_root),
                 use_logged_in_user=False,
@@ -141,7 +130,6 @@ class CopilotRuntime:
         with self._harness._resources.guard:
             if self._harness._resources.runtime is self:
                 self._harness._resources.runtime = None
-            self._loop = None
         _harness_lifecycle._unregister_shutdown(self._close_callback)
         atexit.unregister(self._exit_callback)
 
@@ -168,7 +156,6 @@ class CopilotRuntime:
         return self._credential
 
     async def _entra_token(self, scope: str, diagnostic: str) -> str:
-        self.admit_loop()
         try:
             token = await self.credential().get_token(scope)
         except Exception:

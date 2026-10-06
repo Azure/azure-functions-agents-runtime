@@ -6,6 +6,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
@@ -39,12 +40,12 @@ from .discovery.skills import (
     discover_skills,
 )
 from .discovery.tools import discover_user_tools as discover_user_tools
+from .harness._agent_runner import get_agent_runner
 from .harness._harness_binding import (
     AppHarness,
     ExecutionRole,
     HarnessKind,
     HarnessRequest,
-    UnsupportedCapabilityError,
     get_harness,
 )
 from .harness._harness_execution import (
@@ -71,6 +72,8 @@ from .registration.capabilities import (
 from .registration.catalog import AgentCatalog, CatalogEntry
 
 if TYPE_CHECKING:
+    from azure.durable_functions import DurableFunctionsClient
+
     from .workflows.schema import WorkflowPlanPolicy
 
 type AgentFunctionTool = ToolInput
@@ -195,14 +198,12 @@ async def run_leaf_agent_task(
 ) -> str:
     """Run a fresh stateless specialist under its existing role contract."""
     harness = _harness or capabilities._harness or get_harness()
-    if harness.name is HarnessKind.COPILOT:
-        from .harness.copilot_sdk._copilot_preview import reject_unsupported
-
-        reject_unsupported(**{execution_role: True})
-    from .harness.agent_framework._maf_execution import run_leaf_agent_task as run_maf_leaf
-
-    return await run_maf_leaf(
-        resolved, capabilities, task, timeout=timeout, execution_role=execution_role
+    return await get_agent_runner(harness).run_leaf_agent_task(
+        resolved,
+        capabilities,
+        task,
+        timeout=timeout,
+        execution_role=execution_role,
     )
 
 
@@ -437,7 +438,7 @@ async def run_agent(
     sandbox_tools: Sequence[ToolInput] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
-    workflow_durable_client: Any | None = None,
+    workflow_durable_client: DurableFunctionsClient | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
     web_request_tools: Sequence[ToolInput] | None = None,
@@ -453,23 +454,13 @@ async def run_agent(
     """Execute a prompt; None inventories discover, explicit empty inventories disable."""
     validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
-    deadline = asyncio.get_running_loop().time() + timeout
+    coordinator_deadline = asyncio.get_running_loop().time() + timeout
     harness = _harness or get_harness()
-    if harness.name is HarnessKind.COPILOT:
-        from .harness.copilot_sdk._copilot_preview import reject_unsupported, validate_configuration
-
-        validate_configuration(agent_configuration or AgentConfiguration())
-        reject_unsupported(
-            subagents=bool(subagents), workflows=workflow_enabled or workflow_policy is not None
-        )
-        if not (model or harness.default_model):
-            raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
-    request = _request(
-        harness,
+    return await get_agent_runner(harness).run_agent(
         prompt,
         instructions=instructions,
-        session_id=session_id,
-        session_is_new=_session_is_new,
+        timeout=timeout,
+        deadline=coordinator_deadline,
         tools=tools,
         mcp_tools=mcp_tools,
         skill_paths=skill_paths,
@@ -479,33 +470,16 @@ async def run_agent(
         web_request_tools=web_request_tools,
         system_addendum=system_addendum,
         model=model,
+        session_id=session_id,
         agent_name=agent_name,
         workflow_agent_slug=workflow_agent_slug,
-        agent_configuration=agent_configuration,
-        deadline=deadline,
-    )
-    if harness.name is HarnessKind.COPILOT:
-        from .harness.copilot_sdk._copilot_execution import run
-
-        return await run(harness, request)
-    from .harness.agent_framework._maf_execution import run as run_maf
-
-    return await run_maf(
-        harness,
-        request,
-        timeout=timeout,
-        instructions=instructions,
-        system_addendum=system_addendum,
-        session_id=session_id,
-        model=model,
-        agent_name=agent_name,
         agent_configuration=agent_configuration,
         workflow_enabled=workflow_enabled,
         workflow_durable_client=workflow_durable_client,
-        workflow_agent_slug=workflow_agent_slug,
         subagents=subagents,
         catalog=catalog,
         workflow_policy=workflow_policy,
+        session_is_new=_session_is_new,
     )
 
 
@@ -522,7 +496,7 @@ async def run_agent_stream(
     sandbox_tools: Sequence[ToolInput] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
-    workflow_durable_client: Any | None = None,
+    workflow_durable_client: DurableFunctionsClient | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
     display_name: str | None = None,
@@ -536,66 +510,41 @@ async def run_agent_stream(
     _harness: AppHarness | None = None,
 ) -> AsyncIterator[str]:
     """Yield the existing SSE vocabulary under the selected app context."""
-    validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
-    try:
-        harness = _harness or get_harness()
-        if harness.name is HarnessKind.COPILOT:
-            from .harness.copilot_sdk._copilot_preview import reject_unsupported
-
-            reject_unsupported(streaming=True)
-    except (ValueError, RuntimeError) as exc:
-        logger.error("Agent harness selection failed: %s", exc)
-        yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
-        return
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
+    validate_agent_slug(_resolve_history_agent_slug(agent_name, workflow_agent_slug))
     deadline = asyncio.get_running_loop().time() + timeout
     try:
-        request = _request(
-            harness,
+        harness = _harness or get_harness()
+        selected = get_agent_runner(harness)
+        stream = selected.run_agent_stream(
             prompt,
             instructions=instructions,
-            session_id=session_id,
-            session_is_new=False,
+            timeout=timeout,
+            deadline=deadline,
             tools=tools,
             mcp_tools=mcp_tools,
             skill_paths=skill_paths,
             skills=skills,
             skill_catalog=skill_catalog,
-            sandbox_tools=sandbox_tools,
-            web_request_tools=web_request_tools,
-            system_addendum=system_addendum,
             model=model,
-            agent_name=agent_name,
+            session_id=session_id,
+            sandbox_tools=sandbox_tools,
+            system_addendum=system_addendum,
+            workflow_enabled=workflow_enabled,
+            workflow_durable_client=workflow_durable_client,
             workflow_agent_slug=workflow_agent_slug,
+            agent_name=agent_name,
+            display_name=display_name,
+            web_request_tools=web_request_tools,
             agent_configuration=agent_configuration,
-            deadline=deadline,
+            subagents=subagents,
+            catalog=catalog,
+            workflow_policy=workflow_policy,
         )
     except Exception as exc:
-        logger.error("Failed to build agent session: %s", exc, exc_info=True)
+        logger.error("Agent harness selection failed: %s", exc)
         yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
         return
-    from .harness.agent_framework._maf_execution import run_stream
-
-    stream = run_stream(
-        harness,
-        request,
-        timeout=timeout,
-        instructions=instructions,
-        system_addendum=system_addendum,
-        session_id=session_id,
-        model=model,
-        agent_name=agent_name,
-        display_name=display_name,
-        agent_configuration=agent_configuration,
-        workflow_enabled=workflow_enabled,
-        workflow_durable_client=workflow_durable_client,
-        workflow_agent_slug=workflow_agent_slug,
-        subagents=subagents,
-        catalog=catalog,
-        workflow_policy=workflow_policy,
-    )
-    try:
+    async with aclosing(stream) as stream:
         async for event in stream:
             yield event
-    finally:
-        await stream.aclose()

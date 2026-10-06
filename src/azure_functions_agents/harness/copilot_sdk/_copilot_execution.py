@@ -25,16 +25,19 @@ from ._copilot_session_identity import CopilotSessionError
 from ._copilot_tool_calls import CopilotToolCalls, tool_result_text
 
 if TYPE_CHECKING:
+    from copilot import CopilotClient
     from copilot.session import (
         CopilotSession,
         CreateSessionFsHandler,
         MCPServerConfig,
+        PermissionInvocation,
+        PermissionRequestResult,
         ProviderConfig,
         ProviderTokenArgs,
         SystemMessageConfig,
         ToolSearchConfig,
     )
-    from copilot.session_events import SessionEvent
+    from copilot.session_events import PermissionRequest, SessionEvent
     from copilot.tools import Tool, ToolInvocation, ToolResult
 
     from ..._tool_descriptor import ToolDescriptor
@@ -182,6 +185,92 @@ def _event_subscription(
         unsubscribe()
 
 
+async def _open_session(
+    client: CopilotClient,
+    session_id: str,
+    *,
+    new_session: bool,
+    options: _SessionOptions,
+    on_permission_request: Callable[
+        [PermissionRequest, PermissionInvocation], PermissionRequestResult
+    ],
+) -> CopilotSession:
+    if new_session:
+        return await client.create_session(
+            session_id=session_id, on_permission_request=on_permission_request, **options
+        )
+    return await client.resume_session(
+        session_id, on_permission_request=on_permission_request, **options
+    )
+
+
+async def _verify_tool_catalog(
+    session: CopilotSession, functions: tuple[ToolDescriptor, ...]
+) -> None:
+    metadata = await session.rpc.tools.get_current_metadata()
+    if metadata.tools is None:
+        raise CopilotPreviewError("Copilot did not report its model-visible tool catalog.")
+    actual_names = sorted(item.name for item in metadata.tools)
+    expected_names = sorted(function.name for function in functions)
+    if actual_names != expected_names:
+        raise CopilotPreviewError(
+            "Copilot model-visible tool catalog differs from the configured custom tools. "
+            "No prompt was sent."
+        )
+    logger.info("Copilot tool catalog verified: custom_tool_count=%d", len(expected_names))
+
+
+async def _send_turn(
+    session: CopilotSession,
+    *,
+    prompt: str,
+    deadline: float,
+) -> SessionEvent | None:
+    try:
+        return await session.send_and_wait(
+            prompt,
+            timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
+        )
+    except BaseException:
+        await _abort(session)
+        raise
+
+
+def _final_reply_content(response: SessionEvent | None) -> str:
+    from copilot.session_events import AssistantMessageData
+
+    match response.data if response is not None else None:
+        case AssistantMessageData(content=content) if content.strip():
+            return content
+        case _:
+            raise CopilotPreviewError(
+                "Copilot returned no final model reply. Check provider "
+                "authentication and model/deployment access."
+            )
+
+
+async def _run_session_turn(
+    session: CopilotSession,
+    *,
+    prompt: str,
+    deadline: float,
+    on_event: Callable[[SessionEvent], None],
+    recorder: _harness_execution._AgentUsageRecorder,
+    get_usage: Callable[[], tuple[int | None, int | None]],
+    token_source: _RequestTokenSource,
+) -> str:
+    with _event_subscription(session, on_event):
+        try:
+            response = await _send_turn(session, prompt=prompt, deadline=deadline)
+            token_error = token_source.take_error()
+            if token_error is not None:
+                raise token_error
+            return _final_reply_content(response)
+        finally:
+            input_tokens, output_tokens = get_usage()
+            recorder.emit_counts(input_tokens=input_tokens, output_tokens=output_tokens)
+
+
 async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     validate_copilot_client_manager()
     if request.max_output_tokens is not None:
@@ -200,7 +289,6 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
     from ...runner import AgentResult
 
     owner = get_runtime(harness)
-    owner.admit_loop()
     copilot_id = _copilot_session_id(request.agent_slug, request.session_id)
     calls = CopilotToolCalls()
     messages: list[str] = []
@@ -281,67 +369,32 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     disabled_skills=list(skill_policy.disabled_names),
                     create_session_fs_handler=lambda _session: storage,
                 )
-                if request.new_session:
-                    session = await client.create_session(
-                        session_id=copilot_id, on_permission_request=on_permission_request, **options
-                    )
-                else:
-                    session = await client.resume_session(
-                        copilot_id, on_permission_request=on_permission_request, **options
-                    )
+                session = await _open_session(
+                    client,
+                    copilot_id,
+                    new_session=request.new_session,
+                    options=options,
+                    on_permission_request=on_permission_request,
+                )
                 async with _bounded_cleanup(
                     session.disconnect, "Copilot native session could not be disconnected."
                 ):
-                    # MCP discovery and native skill availability remain SDK-owned.
                     if not request.mcp_servers and not request.skills:
-                        metadata = await session.rpc.tools.get_current_metadata()
-                        if metadata.tools is None:
-                            raise CopilotPreviewError(
-                                "Copilot did not report its model-visible tool catalog."
-                            )
-                        actual_names = sorted(item.name for item in metadata.tools)
-                        expected_names = sorted(function.name for function in request.tools)
-                        if actual_names != expected_names:
-                            raise CopilotPreviewError(
-                                "Copilot model-visible tool catalog differs from the configured custom tools. "
-                                "No prompt was sent."
-                            )
-                        logger.info(
-                            "Copilot tool catalog verified: custom_tool_count=%d", len(expected_names)
-                        )
+                        await _verify_tool_catalog(session, request.tools)
                     logger.info(
                         "Copilot request target: provider=%s model=%s",
                         harness.provider.kind if harness.provider is not None else None,
                         request.model,
                     )
-                    with _event_subscription(session, on_event):
-                        try:
-                            try:
-                                response = await session.send_and_wait(
-                                    request.prompt,
-                                    timeout=max(
-                                        0.0,
-                                        request.deadline - asyncio.get_running_loop().time(),
-                                    ),
-                                )
-                            except BaseException:
-                                await _abort(session)
-                                raise
-                            token_error = token_source.take_error()
-                            if token_error is not None:
-                                raise token_error
-                            match response.data if response is not None else None:
-                                case AssistantMessageData(content=content) if content.strip():
-                                    pass
-                                case _:
-                                    raise CopilotPreviewError(
-                                        "Copilot returned no final model reply. Check provider "
-                                        "authentication and model/deployment access."
-                                    )
-                        finally:
-                            recorder.emit_counts(
-                                input_tokens=input_tokens, output_tokens=output_tokens
-                            )
+                    content = await _run_session_turn(
+                        session,
+                        prompt=request.prompt,
+                        deadline=request.deadline,
+                        on_event=on_event,
+                        recorder=recorder,
+                        get_usage=lambda: (input_tokens, output_tokens),
+                        token_source=token_source,
+                    )
                 return AgentResult(
                     session_id=request.session_id,
                     content=content,

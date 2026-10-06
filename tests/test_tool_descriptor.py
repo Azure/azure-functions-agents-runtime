@@ -179,7 +179,7 @@ def test_sdk_imports_stay_in_named_adapter_and_legacy_boundaries() -> None:
             modules: list[str] = []
             if isinstance(node, ast.Import):
                 modules = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            elif isinstance(node, ast.ImportFrom) and node.module is not None and node.level == 0:
                 modules = [node.module]
             elif isinstance(node, ast.Call) and node.args:
                 function = node.func

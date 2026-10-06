@@ -310,6 +310,33 @@ async def test_run_agent_success_with_maf_optional_usage_absent_logs_unavailable
     assert payload["output_tokens"] is None
 
 
+@pytest.mark.asyncio
+async def test_run_agent_ignores_usage_accessor_failure(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    class BrokenResponse:
+        def __init__(self) -> None:
+            self.messages: list[Message] = []
+            self.text = ""
+
+        @property
+        def usage_details(self) -> Any:
+            raise RuntimeError("usage unavailable")
+
+    class Agent:
+        async def run(self, *args: Any, **kwargs: Any) -> Any:
+            return BrokenResponse()
+
+    _install_primary_agent(monkeypatch, Agent())
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        result = await runner.run_agent("prompt")
+
+    assert result.content == ""
+    payload = _usage_payloads(caplog)[0]
+    assert payload["input_tokens"] is None
+    assert payload["output_tokens"] is None
+
+
 @pytest.mark.parametrize(
     ("failure", "expected_exception"),
     [("error", ValueError), ("timeout", RuntimeError)],
@@ -643,6 +670,39 @@ async def test_run_agent_stream_bounds_hanging_final_response(
 
 
 @pytest.mark.asyncio
+async def test_run_agent_stream_ignores_usage_accessor_failure(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    class BrokenResponse:
+        @property
+        def usage_details(self) -> Any:
+            raise RuntimeError("usage unavailable")
+
+    class Stream:
+        def __aiter__(self) -> Stream:
+            return self
+
+        async def __anext__(self) -> Any:
+            raise StopAsyncIteration
+
+        async def get_final_response(self) -> Any:
+            return BrokenResponse()
+
+    class Agent:
+        def run(self, *args: Any, **kwargs: Any) -> Stream:
+            return Stream()
+
+    _install_primary_agent(monkeypatch, Agent())
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        events = await _collect_stream(runner.run_agent_stream("prompt"))
+
+    assert json.loads(events[-1].removeprefix("data: "))["type"] == "done"
+    payload = _usage_payloads(caplog)[0]
+    assert payload["input_tokens"] is None
+    assert payload["output_tokens"] is None
+
+
+@pytest.mark.asyncio
 async def test_run_agent_stream_yields_done_before_collecting_usage_on_close(
     monkeypatch: Any, caplog: Any
 ) -> None:
@@ -701,9 +761,12 @@ async def test_leaf_agent_logs_distinct_attempts_and_execution_roles(
 ) -> None:
     class Agent:
         async def run(self, *args: Any, **kwargs: Any) -> Any:
-            return SimpleNamespace(
-                text="done",
-                usage_details={"input_token_count": 2, "output_token_count": 1},
+            return AgentResponse(
+                messages=[Message("assistant", ["done"])],
+                usage_details=UsageDetails(
+                    input_token_count=2,
+                    output_token_count=1,
+                ),
             )
 
     target = InferenceTarget(

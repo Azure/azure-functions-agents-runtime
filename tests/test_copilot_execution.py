@@ -301,6 +301,17 @@ def test_native_sdk_identity_is_readable_and_agent_scoped():
     assert _copilot._copilot_session_id("billing", "shared") != _copilot._copilot_session_id("support", "shared")
 
 
+def test_tool_result_text_preserves_plain_text_and_rejects_sdk_content():
+    from agent_framework import Content
+
+    assert _copilot.tool_result_text("first\nsecond") == "first\nsecond"
+    with pytest.raises(TypeError, match="SDK objects"):
+        _copilot.tool_result_text([
+            Content("text", text="first"),
+            Content("text", text="second"),
+        ])
+
+
 async def _invoke_native_tool(function, arguments):
     from copilot.tools import ToolInvocation
 

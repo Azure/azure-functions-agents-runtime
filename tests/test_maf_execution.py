@@ -13,12 +13,14 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from agent_framework import (
+    AgentResponse,
     BaseChatClient,
     ChatMiddlewareLayer,
     ChatResponse,
     Content,
     FunctionTool,
     Message,
+    UsageDetails,
 )
 
 from azure_functions_agents import runner
@@ -164,8 +166,8 @@ async def test_session_builder_consumes_actual_host_hooks_and_none_vs_empty(
     users = Mock(return_value=SimpleNamespace(tools=[user_tool]))
     mcps = Mock(return_value=SimpleNamespace(servers={"server": server}))
     monkeypatch.setattr(_maf_mcp, "build_maf_mcp_tools", lambda servers: [mcp_tool])
-    monkeypatch.setattr(runner, "discover_user_tools", users)
-    monkeypatch.setattr(runner, "discover_mcp_servers", mcps)
+    monkeypatch.setattr(maf, "discover_user_tools", users)
+    monkeypatch.setattr(maf, "discover_mcp_servers", mcps)
     tracker = runner._DelegateErrorTracker()
     delegates = AsyncMock(return_value=([delegate_tool], tracker))
     monkeypatch.setattr(runner, "build_subagent_tools", delegates)
@@ -280,14 +282,13 @@ def test_configured_blob_history_failure_never_falls_back(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_direct_result_and_usage_use_public_result_and_shared_recorder(monkeypatch, caplog):
-    response = SimpleNamespace(
-        text="",
+    response = AgentResponse(
         messages=[Message("assistant", [
             Content("text", text="fallback"),
             Content("function_call", call_id="call", name="tool", arguments="{}"),
             Content("function_result", call_id="call", result="result"),
         ])],
-        usage_details={"input_token_count": 3, "output_token_count": 2},
+        usage_details=UsageDetails(input_token_count=3, output_token_count=2),
     )
     agent = SimpleNamespace(run=AsyncMock(return_value=response))
     build = install_agent(monkeypatch, agent, tracker=SimpleNamespace(count=2))
@@ -340,8 +341,9 @@ async def test_lock_wait_exhaustion_emits_no_invocation_usage(monkeypatch, caplo
 @pytest.mark.asyncio
 @pytest.mark.parametrize("role", ["delegate", "workflow_subagent"])
 async def test_leaf_invocations_are_fresh_and_use_common_accounting(monkeypatch, caplog, role):
-    agents = [SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(
-        text="reply", usage_details={"output_token_count": 2}
+    agents = [SimpleNamespace(run=AsyncMock(return_value=AgentResponse(
+        messages=[Message("assistant", ["reply"])],
+        usage_details=UsageDetails(output_token_count=2),
     ))) for _ in range(2)]
     build = Mock(side_effect=[(agent, InferenceTarget()) for agent in agents])
     monkeypatch.setattr(runner, "_build_delegated_agent", build)
@@ -385,7 +387,10 @@ class _Stream:
 
     async def get_final_response(self):
         self.final_calls += 1
-        return SimpleNamespace(usage_details={"input_token_count": 4, "output_token_count": 3})
+        return AgentResponse(
+            messages=[],
+            usage_details=UsageDetails(input_token_count=4, output_token_count=3),
+        )
 
 
 def item(kind, **kwargs):

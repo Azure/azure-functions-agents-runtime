@@ -6,9 +6,9 @@ import asyncio
 import contextlib
 import json
 import sys
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypedDict, cast
 
 from azure_functions_agents import runner as _runner
 
@@ -22,12 +22,13 @@ from ...config.env import EnvVar, runtime_env_value
 from ...config.paths import get_app_root
 from ...config.paths import resolve_config_dir as resolve_config_dir
 from ...config.schema import AgentConfiguration
-from ...discovery.mcp import MCPServerDescriptor
+from ...discovery.mcp import MCPServerDescriptor, discover_mcp_servers
+from ...discovery.tools import discover_user_tools
 from ...registration._handlers import _looks_like_tool_error
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
 from .. import _harness_execution
-from .._harness_binding import AppHarness, HarnessRequest
+from .._harness_binding import AppHarness, ExecutionRole, HarnessRequest
 from .._history_identity import validate_agent_slug
 from ._maf_tools import FunctionTool, build_maf_tools
 
@@ -35,44 +36,144 @@ if TYPE_CHECKING:
     from agent_framework import (
         Agent,
         AgentResponse,
+        AgentResponseUpdate,
+        AgentSession,
         Content,
         HistoryProvider,
         MCPStreamableHTTPTool,
         Message,
+        ResponseStream,
         RoleLiteral,
         SupportsChatGetResponse,
+        UsageDetails,
     )
+    from azure.durable_functions import DurableFunctionsClient
 
     from azure_functions_agents.runner import ToolCallEvidence
 
     from ...workflows.schema import WorkflowPlanPolicy
-
 type AgentFunctionTool = ToolInput
 type AgentTool = FunctionTool | MCPStreamableHTTPTool
+type _AgentResponseStream = ResponseStream[AgentResponseUpdate, AgentResponse[Any]]
+type _FunctionArguments = str | Mapping[str, Any] | None
+type _DelegatedExecutionRole = Literal["delegate", "workflow_subagent"]
 
 _FINAL_USAGE_TIMEOUT_SECONDS = 1.0
 _ASSISTANT_ROLE: Final[RoleLiteral] = "assistant"
+_PRIMARY_EXECUTION_ROLE: Final[ExecutionRole] = "primary"
 
 
-def _response_usage_details(response: Any) -> Any:
+class _ReasoningOptions(TypedDict, total=False):
+    effort: str
+    summary: str
+
+
+class _ChatOptions(TypedDict):
+    reasoning: _ReasoningOptions
+
+
+class _ToolResultEvent(TypedDict):
+    type: Literal["tool_end"]
+    tool_call_id: str | None
+    tool_name: str | None
+    result: Any
+
+
+class _UsageDetailsCarrier(Protocol):
+    usage_details: UsageDetails | None
+
+
+class _FinalResponseStream(Protocol):
+    async def get_final_response(self) -> _UsageDetailsCarrier: ...
+
+
+class _InnerStreamCarrier(Protocol):
+    _inner_stream: object | None
+
+
+class _CleanupHookStream(Protocol):
+    async def _run_cleanup_hooks(self) -> None: ...
+
+
+class _StreamErrorCarrier(Protocol):
+    _stream_error: BaseException | None
+
+
+def _response_usage_details(response: _UsageDetailsCarrier) -> UsageDetails | None:
     try:
-        return getattr(response, "usage_details", None)
+        return response.usage_details
     except Exception:
+        logger.debug("Failed to read MAF usage details from final response.", exc_info=True)
         return None
 
 
-async def _stream_usage_details(stream: Any, *, remaining_timeout: float) -> Any:
+def _coerce_final_response_stream(stream: object | None) -> _FinalResponseStream | None:
+    if stream is None:
+        return None
+    get_final_response = getattr(stream, "get_final_response", None)
+    if not callable(get_final_response):
+        return None
+    return cast(_FinalResponseStream, stream)
+
+
+async def _stream_usage_details(
+    stream: _FinalResponseStream | None, *, remaining_timeout: float
+) -> UsageDetails | None:
+    if stream is None or remaining_timeout <= 0:
+        return None
     try:
-        get_final_response = getattr(stream, "get_final_response", None)
-        if not callable(get_final_response) or remaining_timeout <= 0:
-            return None
         response = await asyncio.wait_for(
-            get_final_response(),
+            stream.get_final_response(),
             timeout=min(remaining_timeout, _FINAL_USAGE_TIMEOUT_SECONDS),
         )
-        return _response_usage_details(response)
     except Exception:
+        logger.debug("Failed to retrieve final MAF response for usage details.", exc_info=True)
         return None
+    return _response_usage_details(response)
+
+
+def _coerce_inner_stream_carrier(stream: object | None) -> _InnerStreamCarrier | None:
+    if stream is None:
+        return None
+    if not hasattr(stream, "_inner_stream"):
+        return None
+    return cast(_InnerStreamCarrier, stream)
+
+
+def _coerce_cleanup_hook_stream(stream: object) -> _CleanupHookStream | None:
+    run_cleanup_hooks = getattr(stream, "_run_cleanup_hooks", None)
+    if not callable(run_cleanup_hooks):
+        return None
+    return cast(_CleanupHookStream, stream)
+
+
+def _coerce_stream_error_carrier(stream: object) -> _StreamErrorCarrier | None:
+    if not hasattr(stream, "_stream_error"):
+        return None
+    return cast(_StreamErrorCarrier, stream)
+
+
+async def _run_private_cleanup_hooks(
+    stream: _CleanupHookStream,
+    *,
+    error_carrier: _StreamErrorCarrier | None,
+    exc: BaseException,
+) -> None:
+    if error_carrier is None:
+        await stream._run_cleanup_hooks()
+        return
+    if error_carrier._stream_error is not None:
+        await stream._run_cleanup_hooks()
+        return
+    error_carrier._stream_error = exc
+    try:
+        await stream._run_cleanup_hooks()
+    finally:
+        error_carrier._stream_error = None
+
+
+def _sse_frame(payload: object, *, default: Callable[[object], object] | None = None) -> str:
+    return f"data: {json.dumps(payload, default=default)}\n\n"
 
 
 def _resolve_sessions_dir(agent_slug: str) -> Path:
@@ -100,9 +201,9 @@ def _build_history_provider(agent_slug: str) -> Any:
     )
 
 
-def _build_chat_options_from_environment() -> dict[str, Any] | None:
+def _build_chat_options_from_environment() -> _ChatOptions | None:
     """Build provider chat options from supported runtime environment variables."""
-    reasoning: dict[str, str] = {}
+    reasoning: _ReasoningOptions = {}
     effort = runtime_env_value(EnvVar.REASONING_EFFORT)
     if effort:
         reasoning["effort"] = effort
@@ -114,7 +215,7 @@ def _build_chat_options_from_environment() -> dict[str, Any] | None:
     return {"reasoning": reasoning}
 
 
-def _assemble_agent_inputs(
+def assemble_agent_inputs(
     *,
     instructions: str | None,
     tools: Sequence[ToolInput] | None,
@@ -123,7 +224,7 @@ def _assemble_agent_inputs(
     web_request_tools: Sequence[ToolInput] | None,
     system_addendum: str | None,
     workflow_enabled: bool,
-    workflow_durable_client: Any | None,
+    workflow_durable_client: DurableFunctionsClient | None,
     workflow_agent_slug: str | None,
     agent_name: str | None,
     resolved_id: str | None,
@@ -133,7 +234,7 @@ def _assemble_agent_inputs(
 ) -> tuple[list[AgentTool], str | None]:
     root = app_root or get_app_root()
     descriptors = [
-        *describe_tools(_runner.discover_user_tools(root).tools if tools is None else tools),
+        *describe_tools(discover_user_tools(root).tools if tools is None else tools),
         *describe_tools(sandbox_tools or ()),
         *describe_tools(web_request_tools or ()),
     ]
@@ -151,7 +252,7 @@ def _assemble_agent_inputs(
         )
     resolved_tools: list[AgentTool] = list(build_maf_tools(descriptors))
     servers = (
-        tuple(_runner.discover_mcp_servers(root).servers.values())
+        tuple(discover_mcp_servers(root).servers.values())
         if mcp_tools is None
         else tuple(mcp_tools)
     )
@@ -165,6 +266,9 @@ def _assemble_agent_inputs(
     if system_addendum:
         effective = (effective or "") + system_addendum
     return resolved_tools, effective
+
+
+_assemble_agent_inputs = assemble_agent_inputs
 
 
 def _build_role_agent(
@@ -268,7 +372,7 @@ async def run_leaf_agent_task(
     task: str,
     *,
     timeout: float,
-    execution_role: Literal["delegate", "workflow_subagent"],
+    execution_role: _DelegatedExecutionRole,
 ) -> str:
     """Run one fresh stateless MAF specialist and return its response text."""
     specialist_agent, inference_target = _runner._build_delegated_agent(resolved, capabilities)
@@ -278,7 +382,10 @@ async def run_leaf_agent_task(
         inference_target=inference_target,
     )
     try:
-        response: AgentResponse[Any] = await asyncio.wait_for(specialist_agent.run(task), timeout=timeout)
+        response: AgentResponse[Any] = await asyncio.wait_for(
+            specialist_agent.run(task),
+            timeout=timeout,
+        )
     except asyncio.CancelledError:
         usage_recorder.emit()
         raise
@@ -292,23 +399,21 @@ async def run_leaf_agent_task(
     return response.text
 
 
-async def _finalize_maf_stream(stream: Any, exc: BaseException) -> None:
+async def _finalize_maf_stream(stream: object | None, exc: BaseException) -> None:
     """Best-effort finalize the MAF stream chain on cancellation or timeout."""
-    while stream is not None:
-        next_stream = getattr(stream, "_inner_stream", None)
-        run_cleanup_hooks = getattr(stream, "_run_cleanup_hooks", None)
-        if callable(run_cleanup_hooks):
+    current = stream
+    while current is not None:
+        inner_stream_carrier = _coerce_inner_stream_carrier(current)
+        next_stream = inner_stream_carrier._inner_stream if inner_stream_carrier is not None else None
+        cleanup_stream = _coerce_cleanup_hook_stream(current)
+        if cleanup_stream is not None:
             with contextlib.suppress(Exception):
-                has_stream_error_slot = hasattr(stream, "_stream_error")
-                if has_stream_error_slot and stream._stream_error is None:
-                    stream._stream_error = exc
-                    try:
-                        await run_cleanup_hooks()
-                    finally:
-                        stream._stream_error = None
-                else:
-                    await run_cleanup_hooks()
-        stream = next_stream
+                await _run_private_cleanup_hooks(
+                    cleanup_stream,
+                    error_carrier=_coerce_stream_error_carrier(current),
+                    exc=exc,
+                )
+        current = next_stream
 
 
 async def _build_agent_session(
@@ -322,7 +427,7 @@ async def _build_agent_session(
     sandbox_tools: Sequence[ToolInput] | None,
     system_addendum: str | None,
     workflow_enabled: bool,
-    workflow_durable_client: Any | None,
+    workflow_durable_client: DurableFunctionsClient | None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None,
     web_request_tools: Sequence[ToolInput] | None = None,
@@ -333,7 +438,7 @@ async def _build_agent_session(
     workflow_policy: WorkflowPlanPolicy | None = None,
     app_root: Path | None = None,
     _harness: AppHarness | None = None,
-) -> tuple[Any, Any, str, _runner._DelegateErrorTracker | None, InferenceTarget]:
+) -> tuple[Agent[Any], AgentSession, str, _runner._DelegateErrorTracker | None, InferenceTarget]:
     """Construct the existing fresh MAF agent/session and invocation metadata."""
     from agent_framework import AgentSession
 
@@ -368,6 +473,7 @@ async def _build_agent_session(
         instructions=instructions,
         tools=tools,
         mcp_tools=mcp_tools,
+        app_root=app_root,
         sandbox_tools=sandbox_tools,
         web_request_tools=web_request_tools,
         system_addendum=system_addendum,
@@ -378,7 +484,6 @@ async def _build_agent_session(
         resolved_id=resolved_id,
         delegate_tools=delegate_tools,
         workflow_policy=workflow_policy,
-        app_root=app_root,
     )
     agent = _runner._build_role_agent(
         chat_client,
@@ -417,7 +522,7 @@ def _message_role(message: Message) -> str:
     return message.role
 
 
-def _merge_tool_arguments(previous: Any, current: Any) -> Any:
+def _merge_tool_arguments(previous: _FunctionArguments, current: _FunctionArguments) -> _FunctionArguments:
     if previous is None:
         return current
     if current is None:
@@ -429,7 +534,7 @@ def _merge_tool_arguments(previous: Any, current: Any) -> Any:
     return current
 
 
-def _is_complete_json_argument(value: Any) -> bool:
+def _is_complete_json_argument(value: _FunctionArguments) -> bool:
     if not isinstance(value, str):
         return value is not None
     text = value.strip()
@@ -442,13 +547,27 @@ def _is_complete_json_argument(value: Any) -> bool:
     return True
 
 
-def _function_result_event(item: Content) -> dict[str, Any]:
+def _function_result_event(item: Content) -> _ToolResultEvent:
     return {
         "type": "tool_end",
         "tool_call_id": item.call_id or item.id,
         "tool_name": item.name,
         "result": item.result,
     }
+
+
+def _attach_tool_result(tool_calls: list[ToolCallEvidence], item: Content) -> None:
+    call_id = item.call_id or item.id
+    if not call_id:
+        return
+    matched = next(
+        (tool_call for tool_call in reversed(tool_calls) if tool_call["tool_call_id"] == call_id),
+        None,
+    )
+    if matched is None:
+        return
+    matched["result"] = item.result
+    matched["success"] = not _looks_like_tool_error(item.result)
 
 
 async def run(
@@ -463,7 +582,7 @@ async def run(
     agent_name: str | None,
     agent_configuration: AgentConfiguration | None,
     workflow_enabled: bool,
-    workflow_durable_client: Any | None,
+    workflow_durable_client: DurableFunctionsClient | None,
     workflow_agent_slug: str | None,
     subagents: list[SubagentRef] | None,
     catalog: AgentCatalog | None,
@@ -513,7 +632,7 @@ async def run(
                 raise TimeoutError
             usage_recorder = _harness_execution._AgentUsageRecorder(
                 agent_name=agent_name or "main",
-                execution_role="primary",
+                execution_role=_PRIMARY_EXECUTION_ROLE,
                 inference_target=inference_target,
             )
             try:
@@ -565,16 +684,7 @@ async def run(
                 if ctype == "function_call":
                     tool_calls.append(_function_call_event(item, turn_id=turn_id))
                 elif ctype == "function_result":
-                    call_id = item.call_id or item.id
-                    if not call_id:
-                        continue
-                    matched = next(
-                        (tc for tc in reversed(tool_calls) if tc.get("tool_call_id") == call_id),
-                        None,
-                    )
-                    if matched is not None:
-                        matched["result"] = item.result
-                        matched["success"] = not _looks_like_tool_error(item.result)
+                    _attach_tool_result(tool_calls, item)
     except Exception as exc:
         logger.debug("Failed to extract tool_calls: %s", exc)
 
@@ -600,7 +710,7 @@ async def run_stream(
     display_name: str | None,
     agent_configuration: AgentConfiguration | None,
     workflow_enabled: bool,
-    workflow_durable_client: Any | None,
+    workflow_durable_client: DurableFunctionsClient | None,
     workflow_agent_slug: str | None,
     subagents: list[SubagentRef] | None,
     catalog: AgentCatalog | None,
@@ -641,10 +751,10 @@ async def run_stream(
         )
     except Exception as exc:
         logger.error("Failed to build agent session: %s", exc, exc_info=True)
-        yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+        yield _sse_frame({"type": "error", "content": str(exc)})
         return
 
-    yield f"data: {json.dumps({'type': 'session', 'session_id': resolved_id})}\n\n"
+    yield _sse_frame({"type": "session", "session_id": resolved_id})
 
     with _runner.start_span(
         f"agent.run {agent_name or 'agent'}",
@@ -669,23 +779,23 @@ async def run_stream(
 
                 def buffer_function_call(item: Content) -> tuple[str | None, ToolCallEvidence]:
                     event = _function_call_event(item)
-                    call_id = event.get("tool_call_id")
-                    if not isinstance(call_id, str) or not call_id:
+                    call_id = event["tool_call_id"]
+                    if not call_id:
                         return None, event
                     pending = pending_tool_calls.setdefault(
                         call_id,
                         {
                             "type": "tool_start",
                             "tool_call_id": call_id,
-                            "tool_name": event.get("tool_name"),
+                            "tool_name": event["tool_name"],
                             "arguments": None,
                         },
                     )
-                    if event.get("tool_name"):
+                    if event["tool_name"]:
                         pending["tool_name"] = event["tool_name"]
                     pending["arguments"] = _merge_tool_arguments(
-                        pending.get("arguments"),
-                        event.get("arguments"),
+                        pending["arguments"],
+                        event["arguments"],
                     )
                     return call_id, pending
 
@@ -694,10 +804,10 @@ async def run_stream(
                 ) -> AsyncIterator[str]:
                     if call_id in emitted_tool_calls:
                         return
-                    if not _is_complete_json_argument(event.get("arguments")):
+                    if not _is_complete_json_argument(event["arguments"]):
                         return
                     emitted_tool_calls.add(call_id)
-                    yield f"data: {json.dumps(event)}\n\n"
+                    yield _sse_frame(event)
 
                 async def emit_tool_start_before_result(call_id: str | None) -> AsyncIterator[str]:
                     if call_id is None or call_id in emitted_tool_calls:
@@ -706,15 +816,15 @@ async def run_stream(
                     if event is None:
                         return
                     emitted_tool_calls.add(call_id)
-                    yield f"data: {json.dumps(event)}\n\n"
+                    yield _sse_frame(event)
 
-                stream: Any = None
+                stream: _AgentResponseStream | None = None
                 stream_settled = False
                 usage_recorder: _harness_execution._AgentUsageRecorder | None = None
                 try:
                     usage_recorder = _harness_execution._AgentUsageRecorder(
                         agent_name=agent_name or "main",
-                        execution_role="primary",
+                        execution_role=_PRIMARY_EXECUTION_ROLE,
                         inference_target=inference_target,
                     )
                     stream = agent.run(
@@ -723,61 +833,61 @@ async def run_stream(
                         session=session,
                         options=_runner._build_chat_options_from_environment(),
                     )
+                    final_response_stream = _coerce_final_response_stream(stream)
                     stream_iter = stream.__aiter__()
                     while True:
                         try:
                             remaining = max(0.0, deadline - loop.time())
                             if remaining <= 0:
                                 raise TimeoutError
-                            update = await asyncio.wait_for(stream_iter.__anext__(), timeout=remaining)
+                            update: AgentResponseUpdate = await asyncio.wait_for(
+                                stream_iter.__anext__(),
+                                timeout=remaining,
+                            )
                         except StopAsyncIteration:
                             break
                         except (TimeoutError, asyncio.CancelledError) as exc:
                             await _runner._finalize_maf_stream(stream, exc)
                             stream_settled = True
                             raise
-                        for item in getattr(update, "contents", None) or []:
+                        for item in update.contents:
                             ctype = _content_type(item)
                             if ctype == "text":
                                 text = _content_text(item)
                                 if text:
-                                    yield f"data: {json.dumps({'type': 'delta', 'content': text})}\n\n"
+                                    yield _sse_frame({"type": "delta", "content": text})
                             elif ctype == "text_reasoning":
                                 text = _content_text(item)
                                 if text:
-                                    yield (
-                                        f"data: {json.dumps({'type': 'intermediate', 'content': text})}\n\n"
-                                    )
+                                    yield _sse_frame({"type": "intermediate", "content": text})
                             elif ctype == "function_call":
                                 call_id, event = buffer_function_call(item)
                                 if call_id is None:
-                                    yield f"data: {json.dumps(event)}\n\n"
+                                    yield _sse_frame(event)
                                 else:
                                     async for output in emit_tool_start_if_ready(call_id, event):
                                         yield output
                             elif ctype == "function_result":
-                                call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
-                                async for output in emit_tool_start_before_result(
-                                    call_id if isinstance(call_id, str) else None
-                                ):
+                                call_id = item.call_id or item.id
+                                async for output in emit_tool_start_before_result(call_id):
                                     yield output
                                 result_event = _function_result_event(item)
                                 if _looks_like_tool_error(result_event.get("result")):
                                     ordinary_tool_error_count += 1
-                                yield f"data: {json.dumps(result_event, default=str)}\n\n"
+                                yield _sse_frame(result_event, default=str)
                     for call_id, event in pending_tool_calls.items():
                         if call_id not in emitted_tool_calls:
                             emitted_tool_calls.add(call_id)
-                            yield f"data: {json.dumps(event)}\n\n"
+                            yield _sse_frame(event)
                     span.set_attribute("af.agent.outcome", "success")
                     stream_settled = True
                     try:
-                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        yield _sse_frame({"type": "done"})
                     finally:
                         usage_details = None
                         try:
                             usage_details = await _runner._stream_usage_details(
-                                stream,
+                                final_response_stream,
                                 remaining_timeout=max(0.0, deadline - loop.time()),
                             )
                         finally:
@@ -792,7 +902,7 @@ async def run_stream(
                     span.record_exception(
                         TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
                     )
-                    yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
+                    yield _sse_frame({"type": "error", "content": f"Timeout after {timeout}s"})
                 except asyncio.CancelledError:
                     if usage_recorder is not None:
                         usage_recorder.emit()
@@ -806,7 +916,7 @@ async def run_stream(
                     logger.error("Agent stream failed: %s", exc, exc_info=True)
                     span.set_attribute("af.agent.outcome", "error")
                     span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
-                    yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+                    yield _sse_frame({"type": "error", "content": str(exc)})
                 finally:
                     if not stream_settled:
                         exc_at_teardown = sys.exc_info()[1] or asyncio.CancelledError(
@@ -820,7 +930,7 @@ async def run_stream(
             span.record_exception(
                 TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
             )
-            yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
+            yield _sse_frame({"type": "error", "content": f"Timeout after {timeout}s"})
         finally:
             span.set_attribute(
                 "af.agent.tool_error_count",

@@ -11,13 +11,10 @@ import pytest
 from azure_functions_agents.harness import _harness_lifecycle as lifecycle
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.harness.copilot_sdk import (
-    _copilot_execution as execution,
-)
-from azure_functions_agents.harness.copilot_sdk import (
     _copilot_runtime as runtime,
 )
 from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
-from tests.test_copilot_execution import _fake_client, _request
+from tests.test_copilot_execution import _fake_client
 from tests.test_copilot_execution import preview as preview
 
 
@@ -26,7 +23,7 @@ def test_owner_construction_is_thread_safe_and_resource_free(preview):
         owners = list(pool.map(lambda _: runtime.get_runtime(preview), range(32)))
     assert all(owner is owners[0] for owner in owners)
     assert preview._resources.runtime is owners[0]
-    assert owners[0]._client is owners[0]._credential is owners[0]._loop is None
+    assert owners[0]._client is owners[0]._credential is None
     assert not owners[0]._filesystems
     assert not owners[0].workspace.exists()
     assert not lifecycle._SHUTDOWN_CALLBACKS
@@ -73,42 +70,6 @@ async def test_concurrent_startup_shares_one_client(preview, monkeypatch):
     finally:
         release.set()
         await owner.close()
-    assert preview._resources.runtime is None
-
-
-@pytest.mark.asyncio
-async def test_cross_loop_rejection_precedes_credentials_filesystem_and_start(preview, monkeypatch):
-    import copilot
-
-    client = _fake_client()
-    factory = Mock(return_value=client)
-    monkeypatch.setattr(copilot, "CopilotClient", factory)
-    owner = runtime.get_runtime(preview)
-    owner.admit_loop()
-    open_files = AsyncMock(side_effect=AssertionError("Cross-loop filesystem acquisition"))
-    credential = Mock(side_effect=AssertionError("Cross-loop credential acquisition"))
-    monkeypatch.setattr(execution, "open_session_fs", open_files)
-    monkeypatch.setattr(runtime, "build_async_credential", credential)
-
-    async def other_loop():
-        with pytest.raises(CopilotPreviewError, match="one event loop"):
-            await execution.run(preview, _request())
-
-    await asyncio.to_thread(asyncio.run, other_loop())
-    open_files.assert_not_awaited()
-    credential.assert_not_called()
-    factory.assert_not_called()
-    await owner.close()
-
-    async def fresh_lifetime():
-        fresh = runtime.get_runtime(preview)
-        assert fresh is not owner
-        assert await fresh.client() is client
-        await fresh.close()
-
-    await asyncio.to_thread(asyncio.run, fresh_lifetime())
-    client.start.assert_awaited_once()
-    client.stop.assert_awaited_once()
     assert preview._resources.runtime is None
 
 
