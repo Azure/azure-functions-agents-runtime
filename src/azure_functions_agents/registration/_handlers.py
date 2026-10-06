@@ -13,7 +13,6 @@ import azure.functions as func
 import jsonschema
 from azurefunctions.extensions.http.fastapi import Request, Response
 
-from .._harness import HarnessKind, bind_harness
 from .._logger import logger
 from .._observability import (
     ATTR_FAULT_DOMAIN,
@@ -24,6 +23,8 @@ from .._observability import (
 )
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
+from ..harness._harness_binding import HarnessKind, bind_harness
+from ..harness._session_storage import SessionStorageError
 from ..response_contract import (
     InvalidResponseJsonError,
     ResponseSchemaValidationError,
@@ -510,6 +511,20 @@ def make_http_agent_handler(
                     status_code=200,
                     media_type="text/plain",
                     headers={_SESSION_ID_HEADER: session_id},
+                )
+            except SessionStorageError as exc:
+                span.set_attribute("af.agent.outcome", "error")
+                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                logger.error("HTTP agent '%s' storage failed: %s", resolved.name, exc)
+                return Response(
+                    content=json.dumps({"error": str(exc)}),
+                    status_code=exc.status_code,
+                    media_type="application/json",
+                    headers=(
+                        {_SESSION_ID_HEADER: session_id}
+                        if echo_failed_session_id or turn_completed
+                        else None
+                    ),
                 )
             except Exception as exc:
                 span.set_attribute("af.agent.outcome", "error")

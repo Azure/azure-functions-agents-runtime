@@ -9,14 +9,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, Protocol, Self
 from urllib.parse import urlsplit
 
-from ._harness import UnsupportedCapabilityError
-from .client_manager import ProviderKind
-from .config.env import EnvVar, runtime_env_value
+from ...client_manager import ProviderKind
+from ...config.env import EnvVar, runtime_env_value
+from .._harness_binding import UnsupportedCapabilityError
 
 if TYPE_CHECKING:
     from copilot.session import ProviderConfig, ProviderTokenArgs
 
-BearerTokenProvider = Callable[["ProviderTokenArgs"], Awaitable[str]]
+type BearerTokenProvider = Callable[[ProviderTokenArgs], Awaitable[str]]
 type ProviderWireType = Literal["openai", "azure"]
 type WireApi = Literal["responses"]
 
@@ -30,9 +30,7 @@ _FOUNDRY_OPENAI_V1_SUFFIX: Final = "/openai/v1"
 
 
 class ProviderTokenSource(Protocol):
-    def bearer_token_provider(
-        self, scope: str, diagnostic: str
-    ) -> BearerTokenProvider:
+    def bearer_token_provider(self, scope: str, diagnostic: str) -> BearerTokenProvider:
         """Return a request-scoped bearer-token callback."""
 
 

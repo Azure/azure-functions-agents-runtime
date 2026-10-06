@@ -11,8 +11,8 @@ from typing import Any, TypeVar, cast, get_type_hints
 import azure.durable_functions as df
 import azure.functions as func
 
-from ._harness import AppHarness, HarnessKind, UnsupportedCapabilityError
 from .client_manager import get_client_manager
+from .harness._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
 from .hosted_skill import HostedSkill
 from .registration.catalog import AgentCatalog, CatalogEntry
 

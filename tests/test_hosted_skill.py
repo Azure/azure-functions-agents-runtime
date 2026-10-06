@@ -9,13 +9,13 @@ from typing import Any
 import pytest
 
 import azure_functions_agents.hosted_skill as hosted_skill_module
-from azure_functions_agents._harness import AppHarness, HarnessKind
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     BuiltinEndpointsConfig,
     ResolvedAgent,
     ToolsFilter,
 )
+from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.hosted_skill import HostedSkill
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry

@@ -1,109 +1,45 @@
-"""Azure Blob Storage-backed :class:`HistoryProvider` for MAF agent sessions.
-
-The Microsoft Agent Framework ships :class:`FileHistoryProvider` for local
-disk storage and :class:`InMemoryHistoryProvider` for tests, but does not yet
-provide a blob-backed implementation. This module fills that gap so the
-runtime can persist multi-turn history to the same storage account that
-Azure Functions already requires (``AzureWebJobsStorage``) — no extra
-resources, no file-share mounts, no storage account keys, and true
-multi-instance support.
-
-Wire format
------------
-
-One blob per agent/session pair, named
-``{blob_prefix}{agent_slug}/{session_id}.jsonl`` inside a single container
-(default: ``azure-functions-agents``). Blobs are
-**Append Blobs**: every call to :meth:`save_messages` appends the JSON Lines
-serialization of just the new messages from the current turn — this matches
-the contract that MAF's :meth:`HistoryProvider.after_run` only ever passes
-the per-turn delta (input + response messages), never the full history.
-
-Concurrency
------------
-
-``BlobClient.append_block`` is atomic on the server side, so two Function
-instances appending to the same session blob simultaneously cannot interleave
-within a single block. The documented runtime contract is still
-"one active turn per agent/session pair" — cross-instance turn ordering is the
-caller's responsibility.
-
-Configuration
--------------
-
-The provider accepts either an Azure Storage connection string or an
-identity-based ``(blob_service_url, credential)`` pair. Helpers in this
-module resolve those from the standard Azure Functions
-``AzureWebJobsStorage`` settings:
-
-* ``AzureWebJobsStorage`` — connection string (local dev, Azurite).
-* ``AzureWebJobsStorage__blobServiceUri`` (+ optional
-  ``AzureWebJobsStorage__clientId``) — identity-based; uses
-  :class:`DefaultAzureCredential`, honoring the user-assigned client id when
-  present (matches the Bicep samples in this repo).
-"""
+"""Append-blob JSONL history for Microsoft Agent Framework sessions."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import json
-import os
 from collections.abc import Mapping, Sequence
-from typing import Any, ClassVar
+from contextlib import AsyncExitStack
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from agent_framework import HistoryProvider, Message
-from azure.core.exceptions import (
-    ResourceExistsError,
-    ResourceNotFoundError,
+from azure.core.exceptions import AzureError, ResourceExistsError, ResourceNotFoundError
+
+from ..._logger import logger
+from .._harness_lifecycle import _register_shutdown, _unregister_shutdown
+from .._history_identity import validate_agent_slug
+from .._session_storage import (
+    DEFAULT_CONTAINER_NAME,
+    SessionStorageError,
+    blob_storage_from_environment,
+    storage_client_id,
 )
 
-from ._history_identity import validate_agent_slug
-from ._logger import logger
+if TYPE_CHECKING:
+    from azure.core.credentials_async import AsyncTokenCredential
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-DEFAULT_CONTAINER_NAME = "azure-functions-agents"
 DEFAULT_BLOB_PREFIX = "agent-sessions/"
 DEFAULT_SOURCE_ID = "blob_history"
 
-_CONN_STRING_ENV = "AzureWebJobsStorage"
-_BLOB_SERVICE_URI_ENV = "AzureWebJobsStorage__blobServiceUri"
-_CLIENT_ID_ENV = "AzureWebJobsStorage__clientId"
-_CONTAINER_ENV = "AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER"
-
-
-# ---------------------------------------------------------------------------
-# Process-wide caches
-# ---------------------------------------------------------------------------
-
-# The BlobServiceClient is keyed by a non-secret identifier (account URL for
-# identity-based, or a stable hash sentinel for connection strings) so that
-# secrets never live inside dict keys that could leak into reprs / logs.
+# Cache keys never contain the raw connection string.
 _SERVICE_CLIENTS: dict[str, Any] = {}
 _SERVICE_CLIENTS_LOCK = asyncio.Lock()
-
-# Container existence check is process-wide: we only need to create it once
-# per (cache_key, container_name).
+_OWNED_CREDENTIALS: dict[int, AsyncTokenCredential] = {}
 _ENSURED_CONTAINERS: set[tuple[str, str]] = set()
 _ENSURED_CONTAINERS_LOCK = asyncio.Lock()
 
 
-# ---------------------------------------------------------------------------
-# Provider
-# ---------------------------------------------------------------------------
-
-
 class BlobHistoryProvider(HistoryProvider):
-    """Append-blob-backed :class:`HistoryProvider`.
-
-    Each agent/session pair is stored as a single Append Blob named
-    ``{blob_prefix}{agent_slug}/{session_id}.jsonl``. Messages are written as
-    JSON Lines — one ``Message.to_dict()`` payload per line.
-    """
+    """Store each agent/session's per-turn message deltas in one Append Blob."""
 
     DEFAULT_SOURCE_ID: ClassVar[str] = DEFAULT_SOURCE_ID
 
@@ -147,10 +83,6 @@ class BlobHistoryProvider(HistoryProvider):
             connection_string=connection_string,
             blob_service_url=blob_service_url,
         )
-
-    # ------------------------------------------------------------------
-    # MAF HistoryProvider surface
-    # ------------------------------------------------------------------
 
     async def get_messages(
         self,
@@ -208,7 +140,6 @@ class BlobHistoryProvider(HistoryProvider):
 
         payload = "".join(f"{_serialize_message(message)}\n" for message in messages)
         data = payload.encode("utf-8")
-
         blob_client = await self._get_blob_client(session_id)
         try:
             await blob_client.append_block(data)
@@ -216,16 +147,9 @@ class BlobHistoryProvider(HistoryProvider):
         except ResourceNotFoundError:
             pass
 
-        # Blob does not exist yet — create it and retry. Suppress the
-        # "already exists" race that happens when another instance wins
-        # the create.
         with contextlib.suppress(ResourceExistsError):
             await blob_client.create_append_blob()
         await blob_client.append_block(data)
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
 
     def _blob_name(self, session_id: str | None) -> str:
         stem = session_id or "default"
@@ -253,6 +177,7 @@ class BlobHistoryProvider(HistoryProvider):
                 credential=self._credential,
             )
             _SERVICE_CLIENTS[self._cache_key] = client
+            _register_shutdown(shutdown)
             return client
 
     async def _ensure_container(self, service_client: Any) -> None:
@@ -266,11 +191,6 @@ class BlobHistoryProvider(HistoryProvider):
             with contextlib.suppress(ResourceExistsError):
                 await container_client.create_container()
             _ENSURED_CONTAINERS.add(key)
-
-
-# ---------------------------------------------------------------------------
-# Module-level helpers
-# ---------------------------------------------------------------------------
 
 
 def _serialize_message(message: Message) -> str:
@@ -294,12 +214,7 @@ def _service_client_cache_key(
     connection_string: str | None,
     blob_service_url: str | None,
 ) -> str:
-    """Build a non-secret cache key for the :class:`BlobServiceClient` cache.
-
-    We intentionally avoid storing the raw connection string as a dict key so
-    that secrets do not surface in error reprs or debug dumps. A short hash
-    is sufficient because we only need stable equality for the cache.
-    """
+    """Preserve the non-secret account URL or hashed connection cache key."""
     if blob_service_url:
         return f"url::{blob_service_url}"
     assert connection_string is not None
@@ -319,20 +234,42 @@ def _build_service_client(
         return BlobServiceClient.from_connection_string(connection_string)
     assert blob_service_url is not None
     if credential is None:
-        from ._credential import build_async_credential_with_client_id
+        from ..._credential import build_async_credential_with_client_id
 
-        # Precedence: storage-specific identity (AzureWebJobsStorage__clientId) wins,
-        # then app-wide AZURE_CLIENT_ID, then bare DefaultAzureCredential().
-        client_id = (
-            os.environ.get(_CLIENT_ID_ENV) or os.environ.get("AZURE_CLIENT_ID") or ""
-        ).strip()
-        credential = build_async_credential_with_client_id(client_id)
+        owned_credential = build_async_credential_with_client_id(storage_client_id())
+        _OWNED_CREDENTIALS[id(owned_credential)] = owned_credential
+        _register_shutdown(shutdown)
+        credential = owned_credential
     return BlobServiceClient(account_url=blob_service_url, credential=credential)
 
 
-# ---------------------------------------------------------------------------
-# Factory used by the runner
-# ---------------------------------------------------------------------------
+async def _close_service(cache_key: str) -> None:
+    try:
+        await asyncio.wait_for(_SERVICE_CLIENTS[cache_key].close(), timeout=5)
+    except (AzureError, OSError):
+        logger.error("MAF history storage client cleanup failed.")
+        raise SessionStorageError(errno.EIO, "MAF history storage cleanup failed.") from None
+    _SERVICE_CLIENTS.pop(cache_key, None)
+
+
+async def _close_credential(credential: AsyncTokenCredential) -> None:
+    try:
+        await asyncio.wait_for(credential.close(), timeout=5)
+    except (AzureError, OSError):
+        logger.error("MAF history storage credential cleanup failed.")
+        raise SessionStorageError(errno.EIO, "MAF history storage cleanup failed.") from None
+    _OWNED_CREDENTIALS.pop(id(credential), None)
+
+
+async def shutdown() -> None:
+    """Close only this provider's cached clients and owned credentials."""
+    async with AsyncExitStack() as cleanup:
+        cleanup.callback(_ENSURED_CONTAINERS.clear)
+        for credential in tuple(_OWNED_CREDENTIALS.values()):
+            cleanup.push_async_callback(_close_credential, credential)
+        for cache_key in tuple(_SERVICE_CLIENTS):
+            cleanup.push_async_callback(_close_service, cache_key)
+    _unregister_shutdown(shutdown)
 
 
 def build_blob_provider_from_environment(
@@ -340,45 +277,35 @@ def build_blob_provider_from_environment(
     agent_slug: str,
     container_name: str | None = None,
 ) -> BlobHistoryProvider | None:
-    """Construct a :class:`BlobHistoryProvider` from ``AzureWebJobsStorage`` env vars.
-
-    Returns ``None`` if neither a connection string nor a blob service URI is
-    configured. Honors both the connection-string form (used locally with
-    Azurite) and the identity-based form
-    (``AzureWebJobsStorage__blobServiceUri``) that Azure Functions deploys
-    use with managed identity.
-    """
-    conn = (os.environ.get(_CONN_STRING_ENV) or "").strip()
-    uri = (os.environ.get(_BLOB_SERVICE_URI_ENV) or "").strip()
-    if not conn and not uri:
+    """Construct history from connection-string-first Azure Functions Blob settings."""
+    settings = blob_storage_from_environment(container_name=container_name)
+    if settings is None:
         return None
-    container = container_name or (os.environ.get(_CONTAINER_ENV) or "").strip() or None
-    kwargs: dict[str, Any] = {}
-    if container:
-        kwargs["container_name"] = container
-    if conn:
+    if settings.connection_string:
         logger.info(
             "BlobHistoryProvider: using AzureWebJobsStorage connection string (container=%s).",
-            container or DEFAULT_CONTAINER_NAME,
+            settings.container_name,
         )
         return BlobHistoryProvider(
             agent_slug=agent_slug,
-            connection_string=conn,
-            **kwargs,
+            connection_string=settings.connection_string,
+            container_name=settings.container_name,
         )
     logger.info(
         "BlobHistoryProvider: using AzureWebJobsStorage__blobServiceUri=%s (container=%s).",
-        uri,
-        container or DEFAULT_CONTAINER_NAME,
+        settings.blob_service_url,
+        settings.container_name,
     )
     return BlobHistoryProvider(
         agent_slug=agent_slug,
-        blob_service_url=uri,
-        **kwargs,
+        blob_service_url=settings.blob_service_url,
+        container_name=settings.container_name,
     )
 
 
 def reset_caches_for_testing() -> None:
     """Drop the module-level caches. Test-only helper."""
     _SERVICE_CLIENTS.clear()
+    _OWNED_CREDENTIALS.clear()
     _ENSURED_CONTAINERS.clear()
+    _unregister_shutdown(shutdown)

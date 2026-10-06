@@ -38,6 +38,7 @@ azurefunctions-agents-runtime
 - [Front matter spec](front-matter-spec.md) — the `.agent.md` and `agents.config.yaml` field reference
 - [Triggers](triggers.md) — supported trigger types and payload shapes
 - [Observability](observability.md) — tracing and telemetry
+- [Copilot preview operations](copilot-preview-operations.md) — default-off, local-only preview with SDK-owned session files; MAF remains the default
 - [Agent evaluations](evaluation.md) — preview Vally executor for local and staging targets
 - [Dynamic workflows](workflows.md) — experimental durable DAG execution
 

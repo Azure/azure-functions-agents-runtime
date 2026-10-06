@@ -393,24 +393,52 @@ async def test_foundry_stateless_request_does_not_include_encrypted_content() ->
 
 
 @pytest.mark.asyncio
-async def test_shutdown_closes_maf_manager_even_if_copilot_cleanup_fails(
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_package_shutdown_closes_manager_even_if_acquired_harness_cleanup_fails(
     monkeypatch: pytest.MonkeyPatch,
+    cleanup_fails: bool,
 ) -> None:
     from unittest.mock import AsyncMock
 
-    import azure_functions_agents._copilot as copilot
+    import azure_functions_agents as runtime
     import azure_functions_agents.client_manager as managers
+    from azure_functions_agents.harness import _harness_lifecycle as harness
 
+    selected_close = AsyncMock(
+        side_effect=RuntimeError("native cleanup failed") if cleanup_fails else None
+    )
+    monkeypatch.setattr(harness, "_SHUTDOWN_CALLBACKS", {selected_close})
     manager = MAFClientManager()
     close = AsyncMock()
     monkeypatch.setattr(manager, "close", close)
     monkeypatch.setattr(managers, "_INSTANCE", manager)
-    monkeypatch.setattr(
-        copilot, "shutdown", AsyncMock(side_effect=RuntimeError("native cleanup failed"))
-    )
-
-    with pytest.raises(RuntimeError, match="native cleanup failed"):
-        await managers.shutdown_client_manager()
+    if cleanup_fails:
+        with pytest.raises(RuntimeError, match="native cleanup failed"):
+            await runtime.shutdown_client_manager()
+    else:
+        await runtime.shutdown_client_manager()
 
     close.assert_awaited_once()
     assert managers._INSTANCE is None
+    selected_close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_maf_manager_shutdown_does_not_close_other_persistence(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    import azure_functions_agents.client_manager as managers
+    from azure_functions_agents.harness import _harness_lifecycle as harness
+
+    other_close = AsyncMock(side_effect=AssertionError("Unselected persistence must not close"))
+    monkeypatch.setattr(harness, "_SHUTDOWN_CALLBACKS", {other_close})
+    manager = MAFClientManager()
+    close = AsyncMock()
+    monkeypatch.setattr(manager, "close", close)
+    monkeypatch.setattr(managers, "_INSTANCE", manager)
+
+    await managers.shutdown_client_manager()
+    await managers.shutdown_client_manager()
+
+    close.assert_awaited_once()
+    other_close.assert_not_awaited()

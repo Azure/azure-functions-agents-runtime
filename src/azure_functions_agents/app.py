@@ -9,7 +9,6 @@ from typing import Any, cast
 import azure.functions as func
 
 from ._agent_identity import agent_id
-from ._harness import get_harness, validate_agent
 from ._hosted_skill_app import HostedSkillDFApp, HostedSkillFunctionApp
 from ._logger import logger
 from ._observability import configure_observability
@@ -26,6 +25,7 @@ from .config.validation import (
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
 from .discovery.tools import discover_project_tools
+from .harness._harness_binding import get_harness, validate_agent
 from .registration.capabilities import (
     build_capabilities,
     validate_subagent_tool_names,

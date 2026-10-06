@@ -13,13 +13,14 @@ import azure.functions as func
 from azure.durable_functions import DurableFunctionsClient
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
-from .._harness import AppHarness, HarnessKind, bind_harness, get_harness
-from .._history_identity import validate_agent_slug
 from .._logger import logger
 from .._observability import FaultDomain, LifecycleStage, start_span
 from .._session_id import SESSION_ID_PATTERN
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
+from ..harness._harness_binding import AppHarness, HarnessKind, bind_harness, get_harness
+from ..harness._history_identity import validate_agent_slug
+from ..harness._session_storage import SessionStorageError
 from ._auth import authorize_entra_request, resolve_endpoint_auth_level
 from ._handlers import (
     _SESSION_ID_HEADER,
@@ -362,6 +363,10 @@ def _register_http_chat(
                     media_type="application/json",
                     headers={_SESSION_ID_HEADER: result.session_id},
                 )
+            except SessionStorageError as exc:
+                span.set_attribute("af.agent.outcome", "error")
+                span.set_error(str(exc), fault_domain=FaultDomain.UNKNOWN)
+                return _json_error(str(exc), status_code=exc.status_code)
             except ValueError as exc:
                 span.set_attribute("af.agent.outcome", "error")
                 span.set_error(str(exc), fault_domain=FaultDomain.APP)
@@ -717,7 +722,7 @@ def _register_history_endpoint(
                 media_type="application/json",
             )
 
-        from .._blob_history import build_blob_provider_from_environment
+        from ..harness.agent_framework._maf_blob_history import build_blob_provider_from_environment
 
         provider = build_blob_provider_from_environment(agent_slug=slug)
         if provider is None:

@@ -9,8 +9,8 @@ from typing import get_type_hints
 import pytest
 from azurefunctions.extensions.http.fastapi import JSONResponse, Request
 
-from azure_functions_agents import _harness
 from azure_functions_agents.config import paths
+from azure_functions_agents.harness import _harness_binding as _harness
 
 
 def _load_sample(monkeypatch: pytest.MonkeyPatch) -> ModuleType:

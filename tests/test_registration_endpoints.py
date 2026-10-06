@@ -1157,7 +1157,7 @@ def test_history_endpoint_returns_empty_without_session_header(
         return None
 
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         fake_build,
     )
     app = FakeFunctionApp()
@@ -1190,7 +1190,7 @@ def test_history_endpoint_returns_empty_when_storage_unconfigured(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         lambda **kwargs: None,
     )
     app = FakeFunctionApp()
@@ -1218,7 +1218,7 @@ def test_history_endpoint_filters_to_user_and_assistant_text(
         ]
     )
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         lambda **kwargs: provider,
     )
     app = FakeFunctionApp()
@@ -1254,7 +1254,7 @@ def test_history_endpoint_passes_route_slug_to_storage_lookup(
         return provider
 
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         fake_build,
     )
     app = FakeFunctionApp()
@@ -1300,7 +1300,7 @@ def test_resolved_slug_is_used_by_routes_chat_stream_mcp_and_history(
         fake_run_builtin_agent_stream,
     )
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         lambda *, agent_slug: calls.append(("history", agent_slug)) or provider,
     )
     app = FakeFunctionApp()
@@ -1397,7 +1397,7 @@ def test_history_endpoints_keep_same_session_independent_across_agents(
         "support": _FakeHistoryProvider([SimpleNamespace(role="assistant", text="support")]),
     }
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         lambda *, agent_slug: providers[agent_slug],
     )
     app = FakeFunctionApp()
@@ -1448,7 +1448,7 @@ def test_history_endpoint_caps_to_latest_messages(
         ]
     )
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         lambda **kwargs: provider,
     )
     app = FakeFunctionApp()
@@ -1477,7 +1477,7 @@ def test_history_endpoint_returns_500_on_provider_error(
             raise RuntimeError("boom")
 
     monkeypatch.setattr(
-        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        "azure_functions_agents.harness.agent_framework._maf_blob_history.build_blob_provider_from_environment",
         lambda **kwargs: _BoomProvider(),
     )
     app = FakeFunctionApp()

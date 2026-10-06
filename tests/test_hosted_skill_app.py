@@ -10,7 +10,6 @@ import pytest
 
 import azure_functions_agents._hosted_skill_app as hosted_app_module
 from azure_functions_agents import HostedSkill
-from azure_functions_agents._harness import AppHarness, HarnessKind
 from azure_functions_agents._hosted_skill_app import (
     HostedSkillDFApp,
     HostedSkillFunctionApp,
@@ -23,6 +22,7 @@ from azure_functions_agents.config.schema import (
     ToolsFilter,
     WorkflowConfig,
 )
+from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 

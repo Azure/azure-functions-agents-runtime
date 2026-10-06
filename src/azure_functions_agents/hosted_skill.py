@@ -6,9 +6,9 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
-from ._harness import AppHarness
 from ._observability import FaultDomain, LifecycleStage, current_span, start_span
 from ._session_id import validate_session_id
+from .harness._harness_binding import AppHarness
 from .registration._handlers import (
     _set_run_result_attributes,
     build_sandbox_tools_for_session,
