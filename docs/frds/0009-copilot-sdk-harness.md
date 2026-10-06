@@ -311,8 +311,10 @@ Copilot instead of being silently flattened.
 Supplied JSON schemas retain MAF's top-level required-field,
 additional-property, enum, and primitive-type validation. Do not add full JSON
 Schema constraint enforcement in the Copilot adapter. Pydantic model constraints
-and coercion remain unchanged. Ordinary result conversion preserves MAF defaults
-for lists/dicts, Pydantic models, custom `to_dict()`, and string `.text` values in
+and coercion remain unchanged. Shared lightweight checks and invocation use the
+same Python-mode normalized values, without JSON reserialization. Ordinary result
+conversion preserves MAF defaults for lists/dicts, Pydantic models, custom
+`to_dict()`, and string `.text` values in
 one neutral helper; SDK-specific rich-result handling remains adapter-owned.
 
 `HarnessRequest` carries only these descriptors and other scalar execution

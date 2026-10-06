@@ -864,6 +864,8 @@ To add project-specific tools, drop a `.py` file into `tools/` and expose either
 Supplied JSON parameter schemas retain MAF's top-level required-field,
 additional-property, enum, and primitive-type checks, not full JSON Schema
 constraint enforcement. Pydantic models retain their validation and coercion.
+The lightweight checks and callable receive the same Python-mode normalized
+arguments, preserving MAF's acceptance/rejection of coerced values.
 Ordinary tool results preserve recursive list/dict conversion, Pydantic
 `model_dump()`, custom `to_dict()`, and string `.text` values through the shared
 result helper. MAF's SDK owns its rich result wrapping; Copilot rejects unsupported

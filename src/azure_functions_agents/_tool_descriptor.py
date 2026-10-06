@@ -215,15 +215,13 @@ class ToolDescriptor:
         if self.policy.maf_only_options:
             raise TypeError("This tool requires the MAF compatibility adapter.")
         values = dict(arguments)
-        schema_values = values
         if self.input_model is not None:
             try:
                 validated = self.input_model.model_validate(values)
                 values = validated.model_dump(exclude_unset=True)
-                schema_values = validated.model_dump(mode="json", exclude_unset=True)
             except ValidationError as exc:
                 raise TypeError(f"Invalid arguments for '{self.name}': {exc}") from exc
-        _validate_json_arguments(self.name, schema_values, self.parameters())
+        _validate_json_arguments(self.name, values, self.parameters())
         if inspect.iscoroutinefunction(self.func):
             result = self.func(**values)
         else:

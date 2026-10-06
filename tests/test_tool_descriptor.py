@@ -2,21 +2,138 @@ from __future__ import annotations
 
 import ast
 from dataclasses import FrozenInstanceError
+from datetime import date
 from enum import Enum
 from pathlib import Path
 from typing import Annotated
+from uuid import UUID
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
 from azure_functions_agents._function_tool import tool
 from azure_functions_agents._tool_descriptor import ToolDescriptor
-from azure_functions_agents.harness.agent_framework._maf_tools import describe_maf_tool
+from azure_functions_agents.harness.agent_framework._maf_tools import (
+    build_maf_tools,
+    describe_maf_tool,
+)
 
 
 class _Choice(Enum):
     FIRST = "first"
     SECOND = "second"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("annotation", "value", "accepted"),
+    [
+        (date, "2026-10-06", False),
+        (date, date(2026, 10, 6), False),
+        (date, "invalid", False),
+        (UUID, "12345678-1234-5678-1234-567812345678", False),
+        (UUID, UUID("12345678-1234-5678-1234-567812345678"), False),
+        (UUID, "invalid", False),
+        (date | None, "2026-10-06", True),
+        (date | None, None, True),
+        (UUID | None, "12345678-1234-5678-1234-567812345678", True),
+        (UUID | None, None, True),
+        (int, "3", True),
+        (_Choice, "first", True),
+    ],
+)
+async def test_python_normalized_operands_match_raw_and_authored_maf(
+    annotation, value, accepted
+):
+    from agent_framework import FunctionTool
+
+    calls = []
+
+    def echo(value):
+        calls.append(value)
+        return "accepted"
+
+    echo.__annotations__ = {"value": annotation}
+    native = FunctionTool(name="echo", description="Echo", func=echo)
+    raw_descriptor = describe_maf_tool(native)
+    authored = tool(echo)
+    adapted = build_maf_tools([authored])[0]
+    for candidate in (native, raw_descriptor, adapted, authored):
+        if accepted:
+            await candidate.invoke(arguments={"value": value})
+        else:
+            with pytest.raises(TypeError):
+                await candidate.invoke(arguments={"value": value})
+    if accepted:
+        assert len(calls) == 4
+        assert calls == [calls[0]] * 4
+    else:
+        assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("annotation", [date, UUID])
+@pytest.mark.parametrize(
+    "value", ["2026-10-06", "12345678-1234-5678-1234-567812345678", "invalid"]
+)
+async def test_supplied_raw_string_schema_keeps_maf_no_coercion_semantics(annotation, value):
+    from agent_framework import FunctionTool
+
+    calls = []
+
+    def echo(value):
+        calls.append(value)
+        return "accepted"
+
+    echo.__annotations__ = {"value": annotation}
+    native = FunctionTool(
+        name="echo", description="Echo", func=echo,
+        input_model={
+            "properties": {
+                "value": {"type": "string", "format": "date" if annotation is date else "uuid"}
+            },
+            "required": ["value"],
+        },
+    )
+    await native.invoke(arguments={"value": value})
+    assert await describe_maf_tool(native).invoke(arguments={"value": value}) == "accepted"
+    assert calls == [value, value]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("annotation", "value", "accepted"),
+    [
+        (date, "2026-10-06", False),
+        (date, date(2026, 10, 6), False),
+        (UUID, "12345678-1234-5678-1234-567812345678", False),
+        (UUID, UUID("12345678-1234-5678-1234-567812345678"), False),
+        (date | None, "2026-10-06", True),
+        (int, "3", True),
+        (_Choice, "first", True),
+    ],
+)
+async def test_explicit_author_model_matches_real_built_maf_tool(annotation, value, accepted):
+    arguments_model = create_model("Arguments", value=(annotation, ...))
+    calls = []
+
+    @tool(schema=arguments_model)
+    def echo(arguments):
+        calls.append(arguments.value)
+        return "accepted"
+
+    native = build_maf_tools([echo])[0]
+    for candidate in (native, echo):
+        if accepted:
+            await candidate.invoke(arguments={"value": value})
+        else:
+            with pytest.raises(TypeError):
+                await candidate.invoke(arguments={"value": value})
+    if accepted:
+        assert len(calls) == 2
+        assert calls[0] == calls[1]
+    else:
+        assert calls == []
 
 
 @pytest.mark.asyncio
@@ -82,7 +199,7 @@ async def test_raw_maf_top_level_rejections_match_neutral_invocation(arguments):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", [False, True])
-async def test_descriptor_validates_json_enums_but_invokes_with_python_values(
+async def test_enum_python_values_match_actual_maf_backend(
     asynchronous: bool,
 ) -> None:
     calls: list[_Choice] = []
@@ -96,11 +213,14 @@ async def test_descriptor_validates_json_enums_but_invokes_with_python_values(
         return {"choice": choice}
 
     descriptor = tool(coroutine if asynchronous else synchronous, name="enum_choice")
-    with pytest.raises(TypeError, match="Invalid arguments"):
-        await descriptor.invoke(arguments={"choice": "invalid"})
+    native = build_maf_tools([descriptor])[0]
+    for candidate in (descriptor, native):
+        with pytest.raises(TypeError, match="Invalid arguments"):
+            await candidate.invoke(arguments={"choice": "invalid"})
     assert calls == []
     assert await descriptor.invoke(arguments={"choice": "first"}) == {"choice": _Choice.FIRST}
-    assert calls == [_Choice.FIRST]
+    await native.invoke(arguments={"choice": "first"})
+    assert calls == [_Choice.FIRST, _Choice.FIRST]
 
 
 @pytest.mark.asyncio
@@ -113,12 +233,15 @@ async def test_descriptor_preserves_nested_and_list_enum_values() -> None:
         return choices, groups
 
     arguments = {"choices": ["first"], "groups": {"nested": ["second"]}}
-    with pytest.raises(TypeError, match="Invalid arguments"):
-        await nested.invoke(arguments={**arguments, "groups": {"nested": ["invalid"]}})
+    native = build_maf_tools([nested])[0]
+    for candidate in (nested, native):
+        with pytest.raises(TypeError, match="Invalid arguments"):
+            await candidate.invoke(arguments={**arguments, "groups": {"nested": ["invalid"]}})
     assert calls == []
     expected = ([_Choice.FIRST], {"nested": [_Choice.SECOND]})
     assert await nested.invoke(arguments=arguments) == expected
-    assert calls == [expected]
+    await native.invoke(arguments=arguments)
+    assert calls == [expected, expected]
 
 
 def test_descriptor_schema_is_an_independent_frozen_snapshot() -> None:
