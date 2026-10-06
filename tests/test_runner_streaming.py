@@ -24,6 +24,7 @@ from agent_framework import (
 from azure_functions_agents import runner
 from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
+from azure_functions_agents.streaming_events import HostedSkillEventKind
 
 
 class _Content:
@@ -1072,6 +1073,35 @@ def test_run_agent_events_reports_execution_surface_on_span(monkeypatch: Any) ->
 
     [span] = spans
     assert span.attributes["af.agent.execution_surface"] == "hosted_skill"
+    assert span.attributes["af.agent.session_id"] == "test-session"
+
+
+def test_run_agent_events_records_session_build_failure_on_span(monkeypatch: Any) -> None:
+    spans = _install_start_span_capture(monkeypatch)
+    failure = RuntimeError("session setup failed")
+
+    async def fake_build_agent_session(**_kwargs: Any) -> None:
+        raise failure
+
+    monkeypatch.setattr(runner, "_build_agent_session", fake_build_agent_session)
+
+    async def collect() -> list[object]:
+        return [
+            event
+            async for event in runner.run_agent_events(
+                "prompt",
+                agent_name="billing",
+                _execution_surface="hosted_skill",
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert [event.kind for event in events] == [HostedSkillEventKind.ERROR]
+    [span] = spans
+    assert span.attributes["af.agent.execution_surface"] == "hosted_skill"
+    assert span.attributes["af.agent.outcome"] == "error"
+    assert span.exceptions == [failure]
 
 
 def test_build_chat_options_from_environment(monkeypatch: Any) -> None:

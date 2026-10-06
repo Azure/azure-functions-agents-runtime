@@ -1336,36 +1336,6 @@ async def run_agent_events(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
 
-    try:
-        agent, session, resolved_id, delegate_error_tracker, inference_target = (
-            await _build_agent_session(
-                instructions=instructions,
-                session_id=session_id,
-                tools=tools,
-                mcp_tools=mcp_tools,
-                skill_paths=skill_paths,
-                model=model,
-                sandbox_tools=sandbox_tools,
-                system_addendum=system_addendum,
-                workflow_enabled=workflow_enabled,
-                workflow_durable_client=workflow_durable_client,
-                workflow_agent_slug=workflow_agent_slug,
-                agent_name=agent_name,
-                web_request_tools=web_request_tools,
-                agent_configuration=agent_configuration,
-                subagents=subagents,
-                catalog=catalog,
-                coordinator_deadline=deadline,
-                workflow_policy=workflow_policy,
-            )
-        )
-    except Exception as exc:
-        logger.error("Failed to build agent session: %s", exc, exc_info=True)
-        yield HostedSkillEvent(HostedSkillEventKind.ERROR, content=str(exc))
-        return
-
-    yield HostedSkillEvent(HostedSkillEventKind.SESSION, session_id=resolved_id)
-
     # `run_agent_stream` opens its *own* run-level span rather than relying on
     # a caller-provided one (B3): unlike the non-streaming path — where
     # `run_agent` returns synchronously and callers such as
@@ -1381,7 +1351,6 @@ async def run_agent_events(
         "af.agent.name": agent_name,
         "af.agent.display_name": display_name,
         "af.agent.trigger_type": "stream",
-        "af.agent.session_id": resolved_id,
         "af.agent.model": model,
     }
     if _execution_surface is not None:
@@ -1392,6 +1361,39 @@ async def run_agent_events(
         lifecycle_stage=LifecycleStage.AGENT_RUN,
         attributes=span_attributes,
     ) as span:
+        try:
+            agent, session, resolved_id, delegate_error_tracker, inference_target = (
+                await _build_agent_session(
+                    instructions=instructions,
+                    session_id=session_id,
+                    tools=tools,
+                    mcp_tools=mcp_tools,
+                    skill_paths=skill_paths,
+                    model=model,
+                    sandbox_tools=sandbox_tools,
+                    system_addendum=system_addendum,
+                    workflow_enabled=workflow_enabled,
+                    workflow_durable_client=workflow_durable_client,
+                    workflow_agent_slug=workflow_agent_slug,
+                    agent_name=agent_name,
+                    web_request_tools=web_request_tools,
+                    agent_configuration=agent_configuration,
+                    subagents=subagents,
+                    catalog=catalog,
+                    coordinator_deadline=deadline,
+                    workflow_policy=workflow_policy,
+                )
+            )
+        except Exception as exc:
+            logger.error("Failed to build agent session: %s", exc, exc_info=True)
+            span.set_attribute("af.agent.outcome", "error")
+            span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+            yield HostedSkillEvent(HostedSkillEventKind.ERROR, content=str(exc))
+            return
+
+        span.set_attribute("af.agent.session_id", resolved_id)
+        yield HostedSkillEvent(HostedSkillEventKind.SESSION, session_id=resolved_id)
+
         ordinary_tool_error_count = 0
         try:
             async with _session_lock_bounded_by(

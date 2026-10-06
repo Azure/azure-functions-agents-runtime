@@ -19,6 +19,10 @@ from azure_functions_agents.config.schema import (
 from azure_functions_agents.hosted_skill import HostedSkill
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry
+from azure_functions_agents.response_contract import (
+    InvalidResponseJsonError,
+    ResponseSchemaValidationError,
+)
 from azure_functions_agents.runner import AgentResult
 from azure_functions_agents.streaming_events import (
     HostedSkillEvent,
@@ -164,6 +168,61 @@ async def test_run_records_hosted_skill_span_and_result_attributes(
     assert span.attributes["af.agent.tool_call_count"] == 1
     assert span.attributes["af.agent.response_bytes"] == len("complete")
     assert span.attributes["af.agent.outcome"] == "success"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "expected_error"),
+    [
+        ("not JSON", InvalidResponseJsonError),
+        ('{"wrong": true}', ResponseSchemaValidationError),
+    ],
+)
+async def test_run_raises_response_contract_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    content: str,
+    expected_error: type[ValueError],
+) -> None:
+    skill, _ = _make_skill(
+        tmp_path,
+        response_schema={
+            "type": "object",
+            "required": ["ok"],
+            "properties": {"ok": {"type": "boolean"}},
+        },
+    )
+
+    async def run_agent(_prompt: str, **kwargs: Any) -> AgentResult:
+        return AgentResult(kwargs["session_id"], content)
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+
+    with pytest.raises(expected_error):
+        await skill.run("Return JSON")
+
+
+@pytest.mark.asyncio
+async def test_run_response_contract_returns_original_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skill, _ = _make_skill(
+        tmp_path,
+        response_schema={
+            "type": "object",
+            "required": ["ok"],
+            "properties": {"ok": {"type": "boolean"}},
+        },
+    )
+    result = AgentResult("session-one", '{"ok": true}')
+
+    async def run_agent(_prompt: str, **_kwargs: Any) -> AgentResult:
+        return result
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+
+    assert await skill.run("Return JSON", session_id="session-one") is result
 
 
 @pytest.mark.asyncio
