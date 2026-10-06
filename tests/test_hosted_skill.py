@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 import azure_functions_agents.hosted_skill as hosted_skill_module
+from azure_functions_agents._observability import FaultDomain
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     BuiltinEndpointsConfig,
@@ -230,6 +231,43 @@ async def test_run_raises_response_contract_errors(
 
     with pytest.raises(expected_error):
         await skill.run("Return JSON")
+
+
+@pytest.mark.asyncio
+async def test_run_records_response_contract_failure_as_app_fault_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skill, _ = _make_skill(
+        tmp_path,
+        response_schema={
+            "type": "object",
+            "required": ["ok"],
+            "properties": {"ok": {"type": "boolean"}},
+        },
+    )
+    span = _CapturedSpan({})
+
+    @contextlib.contextmanager
+    def recording_start_span(*_args: Any, **_kwargs: Any) -> Iterator[_CapturedSpan]:
+        try:
+            yield span
+        except BaseException as exc:
+            span.record_exception(exc)
+            raise
+
+    async def run_agent(_prompt: str, **kwargs: Any) -> AgentResult:
+        return AgentResult(kwargs["session_id"], "not JSON")
+
+    monkeypatch.setattr(hosted_skill_module, "start_span", recording_start_span)
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+
+    with pytest.raises(InvalidResponseJsonError) as caught:
+        await skill.run("Return JSON")
+
+    assert span.attributes["af.agent.outcome"] == "error"
+    assert span.exceptions == [caught.value]
+    assert span.fault_domains == [FaultDomain.APP]
 
 
 @pytest.mark.asyncio

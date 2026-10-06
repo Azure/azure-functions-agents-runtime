@@ -52,6 +52,7 @@ class HostedSkill:
         capabilities = self._entry.capabilities
         effective_prompt = self._effective_prompt(_validate_prompt(prompt))
         resolved_session_id, is_new_session = _resolve_session_id(session_id)
+        response_error: HostedSkillResponseError | None = None
         with start_span(
             f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
@@ -84,13 +85,21 @@ class HostedSkill:
                     _session_is_new=is_new_session,
                 )
                 if resolved.response_example or resolved.response_schema:
-                    validate_response_contract(result.content, resolved.response_schema)
-                _set_run_result_attributes(span, result)
-                span.set_attribute("af.agent.outcome", "success")
-                return result
+                    try:
+                        validate_response_contract(result.content, resolved.response_schema)
+                    except HostedSkillResponseError as exc:
+                        response_error = exc
+                        span.set_attribute("af.agent.outcome", "error")
+                        span.record_exception(exc, fault_domain=FaultDomain.APP)
+                if response_error is None:
+                    _set_run_result_attributes(span, result)
+                    span.set_attribute("af.agent.outcome", "success")
             except Exception:
                 span.set_attribute("af.agent.outcome", "error")
                 raise
+        if response_error is not None:
+            raise response_error
+        return result
 
     async def stream(
         self,
