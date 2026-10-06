@@ -125,6 +125,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/workflows/registry.py` | Defines immutable workflow handler entries/catalogs; production app composition passes this complete catalog explicitly rather than using the compatibility singleton allowlist as authorization. | `WorkflowHandlerCatalog`, `build_handler_catalog()` |
 | `azure_functions_agents/workflows/schema.py`, `workflows/tools.py` | Define workflow plans and policies, including the data-driven `when` predicate, bounded `for_each`, plan-authored retry, timeout, and continuation, and per-field decorator precedence. Start-time validation freezes the effective execution policy into orchestration input. Continuation stays plan-only. List/status/cancel/terminate operations use the captured workflow-agent policy and agent/session identity. | `WorkflowPlanPolicy`, `WorkflowTaskExecution`, `WorkflowCondition`, `validate_plan()`, `resolve_workflow_task_execution()`, `build_workflow_tools()` |
 | `azure_functions_agents/_tool_descriptor.py` | Frozen SDK-free tool name, description, callable, Pydantic input model, execution policy, and workflow metadata. Returns a fresh JSON schema and ordinary Python invocation values. | `ToolDescriptor`, `parameters()`, `invoke(arguments, tool_call_id)` |
+| `azure_functions_agents/_tool_result.py` | SDK-free ordinary Python result conversion matching MAF defaults; adapters retain rich SDK result policy and wrapping. | `tool_result_text()` |
 | `azure_functions_agents/_function_tool.py` | Ordinary `@tool` authoring produces neutral descriptors; `@workflow_tool` retains Activity metadata in either decorator order. MAF-only keyword arguments are handled by the compatibility adapter, not silently flattened for Copilot. | `tool()`, `workflow_tool()` |
 | `azure_functions_agents/_logger.py` | Shared package logger used across discovery, registration, and runtime code. | `logger` |
 | `integrations/vally-executor-azure-functions/` | Private, path-loadable Vally 0.16.0 executor for the existing synchronous chat endpoint. Owns target authentication, isolated sessions, hard deadlines, response checking and trajectory conversion, not graders, scoring or reports. Python runtime modules do not import Vally contracts. | `AzureFunctionsAgentExecutor`, `registerExecutors()` |
@@ -197,7 +198,7 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
    - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/discovery/tools.py:discover_project_tools()`, `src/azure_functions_agents/discovery/mcp.py:discover_mcp_servers()`, `src/azure_functions_agents/discovery/skills.py:discover_skills()`
    - **Input:** `app_root: Path`
    - **Output:** neutral tool, MCP server, and skill inventories, plus explicit workflow Activity targets and isolated legacy MAF compatibility entries
-   - **Notes:** all three discovery modules cache by resolved app root, so startup pays the disk/import cost once per process. Tools discovery records ordinary callable/schema metadata and explicit `@workflow_tool` opt-ins; filtering happens later. MCP discovery applies `resolve_env_vars_in_data()` and preserves warnings, skipped entries, and `failed_loads` reporting. A `url` is required; optional `type` must be `"http"` or `"streamable-http"`. Other transports (`stdio`, `sse`, etc.) are skipped with warnings. Descriptors contain static headers and auth declarations, never SDK wrappers or live tokens. Skill discovery recursively records names, descriptions, and canonical roots, preserving malformed-frontmatter logging/skips, existing name validation, and duplicate checks. `data-driven-workflows` remains reserved for runtime-owned workflow guidance.
+   - **Notes:** all three discovery modules cache by resolved app root, so startup pays the disk/import cost once per process. Tools discovery records ordinary callable/schema metadata and explicit `@workflow_tool` opt-ins; filtering happens later. MCP discovery applies `resolve_env_vars_in_data()` and preserves warnings, skipped entries, and `failed_loads` reporting. A `url` is required; optional `type` must be `"http"` or `"streamable-http"`. Other transports (`stdio`, `sse`, etc.) are skipped with warnings. Descriptors contain static headers and auth declarations, never SDK wrappers or live tokens. Skill discovery checks `SKILL.md` presence without reading content, searches through two child levels and stops at each root, and records canonical paths with directory-slug identities. SDKs own metadata validation and duplicate selection; distinct same-slug candidates are retained. `data-driven-workflows` remains reserved for runtime-owned workflow guidance.
 
 5. **Compose a per-agent runtime view**
    - **Implemented by:** `src/azure_functions_agents/config/merge.py:compose()`
@@ -859,6 +860,14 @@ The runner calls `build_chat_client_with_target()` and receives the client plus 
 ### Custom tools
 
 To add project-specific tools, drop a `.py` file into `tools/` and expose either ordinary `@tool`-decorated functions or plain functions that can be described by neutral `ToolDescriptor` objects. Discovery lives in `src/azure_functions_agents/discovery/tools.py:discover_project_tools()` (with `discover_user_tools()` kept as the normal-tool compatibility API), and the decorator is in `src/azure_functions_agents/_function_tool.py:tool()`. Sync/async invocation and Pydantic validation remain authoring contracts; selected adapters map them to MAF or Copilot tools.
+
+Supplied JSON parameter schemas retain MAF's top-level required-field,
+additional-property, enum, and primitive-type checks, not full JSON Schema
+constraint enforcement. Pydantic models retain their validation and coercion.
+Ordinary tool results preserve recursive list/dict conversion, Pydantic
+`model_dump()`, custom `to_dict()`, and string `.text` values through the shared
+result helper. MAF's SDK owns its rich result wrapping; Copilot rejects unsupported
+harness objects before mapping ordinary text to its SDK result.
 
 Raw public MAF `FunctionTool` extensions and MAF-only decorator keywords remain
 MAF compatibility surfaces. Unmapped extensions fail explicitly on Copilot.

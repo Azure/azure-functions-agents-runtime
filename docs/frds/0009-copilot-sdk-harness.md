@@ -308,6 +308,13 @@ Raw MAF `FunctionTool` subclasses and MAF-only `@tool` keyword arguments remain
 isolated in the MAF compatibility layer. Unmapped extensions fail explicitly on
 Copilot instead of being silently flattened.
 
+Supplied JSON schemas retain MAF's top-level required-field,
+additional-property, enum, and primitive-type validation. Do not add full JSON
+Schema constraint enforcement in the Copilot adapter. Pydantic model constraints
+and coercion remain unchanged. Ordinary result conversion preserves MAF defaults
+for lists/dicts, Pydantic models, custom `to_dict()`, and string `.text` values in
+one neutral helper; SDK-specific rich-result handling remains adapter-owned.
+
 `HarnessRequest` carries only these descriptors and other scalar execution
 settings. It does not carry `agent_framework` or Copilot SDK types. Registration
 remains the authority for per-agent filtering. The runner receives the filtered
@@ -450,6 +457,11 @@ symlink or alias escapes, out-of-root targets, missing or ambiguous ownership,
 and string-prefix overlaps that are not path containment. No broad ancestor
 grant is allowed. `skills: false` exposes no skill or helper capabilities.
 
+Distinct canonical roots sharing a directory slug are not ambiguous owners.
+Resource/script grants still require the exact approved `(slug, path)` pair.
+Conflicting identities for the same canonical root remain denied; selecting a
+slug does not authorize an unapproved sibling candidate path.
+
 Skill content validation and its errors/skips belong to each SDK, not app indexing.
 The host no longer parses metadata, checks name/directory matching, validates
 descriptions, or rejects duplicate authored names. Discovery may cache candidate
@@ -459,7 +471,8 @@ capabilities. Do not add a host script runner, new execution limits, or interact
 approval gates in this amendment. Skills remain trusted deployment-owned code, not
 an OS sandbox. Untrusted or adversarially mutable skill trees are unsupported.
 
-Native instruction loading is established. Resource access and script execution
+Native instruction loading under the unchanged replace mode remains unqualified
+after removing host catalog projection. Resource access and script execution
 through native skills use targeted native helpers. For enabled skills, the
 intended Linux Python-worker allowlist is `builtin:skill`, `builtin:view`, and
 `builtin:bash`. The host owns the

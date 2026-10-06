@@ -271,7 +271,7 @@ def test_canonical_alias_root_with_conflicting_names_is_ambiguous(tmp_path: Path
     assert not policy.allows_shell(_command("python", script))
 
 
-def test_duplicate_names_at_distinct_roots_are_not_an_approval_identity(tmp_path: Path) -> None:
+def test_distinct_same_name_roots_require_their_own_path_approval(tmp_path: Path) -> None:
     first = _skill(tmp_path / "first", "shared")
     second = _skill(tmp_path / "second", "shared")
     resource = _file(first.path / "references" / "guide.txt")
@@ -279,7 +279,42 @@ def test_duplicate_names_at_distinct_roots_are_not_an_approval_identity(tmp_path
         approved=(first,), discovered=(first, second), working_directory=tmp_path
     )
 
-    assert not policy.allows_read(str(resource))
+    assert policy.allows_read(str(resource))
+    assert not policy.allows_read(str(_file(second.path / "references" / "guide.txt")))
+
+
+@pytest.mark.asyncio
+async def test_forwarded_same_slug_candidates_keep_sdk_selected_root_permissions(tmp_path: Path):
+    from unittest.mock import Mock
+
+    from agent_framework import FileSkillsSource, SkillsSourceContext
+    from copilot.rpc import PermissionDecisionApproveOnce
+    from copilot.session_events import PermissionRequestRead
+
+    from azure_functions_agents.harness.copilot_sdk._copilot_capabilities import permission_handler
+
+    first = tmp_path / "first" / "shared"
+    second = tmp_path / "second" / "shared"
+    _file(first / "SKILL.md", "---\nname: wrong\ndescription: Invalid\n---\n")
+    _file(second / "SKILL.md", "---\nname: shared\ndescription: Valid second\n---\n")
+    resource = _file(second / "references" / "guide.txt")
+    script = _file(second / "scripts" / "report.py")
+    candidates = describe_skill_catalog([first, second])
+    assert [item.path for item in candidates] == [first.resolve(), second.resolve()]
+    loaded = await FileSkillsSource([item.path for item in candidates]).get_skills(
+        SkillsSourceContext(agent=Mock())
+    )
+    assert [item.frontmatter.description for item in loaded] == ["Valid second"]
+    policy = SkillPolicy.create(
+        approved=candidates, discovered=candidates, working_directory=tmp_path
+    )
+    assert policy.allows_read(str(resource))
+    assert policy.allows_shell(_command("python", script))
+    decision = permission_handler(policy)(
+        PermissionRequestRead(intention="resource", path=str(resource)),
+        {"session_id": "test"},
+    )
+    assert decision.kind == PermissionDecisionApproveOnce.kind
 
 
 @pytest.mark.parametrize(

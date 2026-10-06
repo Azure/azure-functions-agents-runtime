@@ -10,7 +10,6 @@ from dataclasses import dataclass, field, replace
 from types import MethodType
 from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
 
-import jsonschema
 from pydantic import BaseModel, Field, ValidationError, create_model
 
 import azure_functions_agents as _package
@@ -18,6 +17,55 @@ import azure_functions_agents as _package
 type ApprovalMode = Literal["always_require", "never_require"]
 type ToolCallable = Callable[..., Any]
 type ToolInput = ToolDescriptor | ToolCallable
+
+_JSON_PARAMETER_TYPES: dict[str, type[object] | tuple[type[object], ...]] = {
+    "string": str,
+    "integer": int,
+    "number": (int, float),
+    "boolean": bool,
+    "array": list,
+    "object": dict,
+    "null": type(None),
+}
+
+
+def _parameter_type_matches(value: Any, kind: str) -> bool:
+    expected = _JSON_PARAMETER_TYPES.get(kind)
+    if expected is None:
+        return True
+    if kind in {"integer", "number"} and isinstance(value, bool):
+        return False
+    return isinstance(value, expected)
+
+
+def _validate_json_arguments(
+    name: str, values: dict[str, Any], schema: dict[str, Any]
+) -> None:
+    """Preserve MAF's top-level checks without enforcing extra JSON Schema keywords."""
+    missing = {
+        key for key in schema.get("required", ()) if isinstance(key, str)
+    } - values.keys()
+    if missing:
+        raise TypeError(f"Invalid arguments for '{name}': missing {sorted(missing)}")
+    properties = schema.get("properties", {})
+    if schema.get("additionalProperties") is False:
+        extra = values.keys() - properties.keys()
+        if extra:
+            raise TypeError(f"Invalid arguments for '{name}': unexpected {sorted(extra)}")
+    for key, value in values.items():
+        rule = properties.get(key)
+        if not isinstance(rule, dict):
+            continue
+        choices = rule.get("enum")
+        if isinstance(choices, list) and choices and value not in choices:
+            raise TypeError(f"Invalid arguments for '{name}': '{key}' is not in {choices!r}")
+        kinds = rule.get("type")
+        if isinstance(kinds, str):
+            kinds = [kinds]
+        if isinstance(kinds, list):
+            types = [kind for kind in kinds if isinstance(kind, str)]
+            if types and not any(_parameter_type_matches(value, kind) for kind in types):
+                raise TypeError(f"Invalid arguments for '{name}': '{key}' must match {types!r}")
 
 
 @dataclass(frozen=True)
@@ -175,10 +223,7 @@ class ToolDescriptor:
                 schema_values = validated.model_dump(mode="json", exclude_unset=True)
             except ValidationError as exc:
                 raise TypeError(f"Invalid arguments for '{self.name}': {exc}") from exc
-        try:
-            jsonschema.validate(schema_values, self.parameters())
-        except jsonschema.ValidationError as exc:
-            raise TypeError(f"Invalid arguments for '{self.name}': {exc.message}") from exc
+        _validate_json_arguments(self.name, schema_values, self.parameters())
         if inspect.iscoroutinefunction(self.func):
             result = self.func(**values)
         else:

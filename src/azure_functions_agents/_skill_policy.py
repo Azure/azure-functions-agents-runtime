@@ -52,11 +52,8 @@ class SkillPolicy:
         approved = _canonical_descriptors(approved)
         discovered = _canonical_descriptors(discovered)
         root_counts = Counter(descriptor.path for descriptor in discovered)
-        name_counts = Counter(descriptor.name for descriptor in discovered)
         ambiguous_roots = frozenset(
-            descriptor.path
-            for descriptor in discovered
-            if root_counts[descriptor.path] > 1 or name_counts[descriptor.name] > 1
+            root for root, count in root_counts.items() if count > 1
         )
         disabled_names = tuple(
             sorted(

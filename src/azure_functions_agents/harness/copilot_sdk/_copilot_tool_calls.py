@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel
+from ..._tool_result import tool_result_text as _ordinary_tool_result_text
 
 if TYPE_CHECKING:
     from copilot.session_events import ToolExecutionCompleteData, ToolExecutionStartData
@@ -33,17 +33,7 @@ def _reject_harness_result(value: Any) -> None:
 
 def tool_result_text(result: Any) -> str:
     """Preserve ordinary text, empty, and JSON tool-result representations."""
-    _reject_harness_result(result)
-    if result is None:
-        return ""
-    if isinstance(result, str):
-        return result
-
-    def dump(value: Any) -> Any:
-        _reject_harness_result(value)
-        return value.model_dump() if isinstance(value, BaseModel) else str(value)
-
-    return json.dumps(result, default=dump)
+    return _ordinary_tool_result_text(result, validate_result=_reject_harness_result)
 
 
 @dataclass

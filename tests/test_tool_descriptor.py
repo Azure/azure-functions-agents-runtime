@@ -11,11 +11,73 @@ from pydantic import BaseModel, Field
 
 from azure_functions_agents._function_tool import tool
 from azure_functions_agents._tool_descriptor import ToolDescriptor
+from azure_functions_agents.harness.agent_framework._maf_tools import describe_maf_tool
 
 
 class _Choice(Enum):
     FIRST = "first"
     SECOND = "second"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rule", "value"),
+    [
+        ({"type": "integer", "minimum": 1}, 0),
+        ({"type": "string", "pattern": "^accepted$"}, "other"),
+        ({"type": "object", "required": ["nested"]}, {}),
+        ({"type": "array", "items": {"type": "integer"}}, ["other"]),
+        ({"type": "boolean", "enum": [1]}, True),
+        ({"type": ["unknown", "integer"]}, "other"),
+    ],
+)
+async def test_raw_maf_schema_acceptance_is_preserved_at_neutral_invocation(rule, value):
+    from agent_framework import FunctionTool
+
+    calls = []
+
+    def echo(value):
+        calls.append(value)
+        return "accepted"
+
+    native = FunctionTool(
+        name="echo", description="Echo",
+        func=echo,
+        input_model={
+            "type": "object", "properties": {"value": rule},
+            "required": ["value"], "additionalProperties": False,
+        },
+    )
+    result = await native.invoke(arguments={"value": value})
+    assert [item.text for item in result] == ["accepted"]
+    descriptor = describe_maf_tool(native)
+    assert descriptor.policy.maf_only_options == ()
+    assert await descriptor.invoke(arguments={"value": value}) == "accepted"
+    assert calls == [value, value]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [{}, {"value": "1"}, {"value": True}, {"value": 1, "extra": 2}, {"value": 3}],
+)
+async def test_raw_maf_top_level_rejections_match_neutral_invocation(arguments):
+    from agent_framework import FunctionTool
+
+    calls = []
+    native = FunctionTool(
+        name="echo", description="Echo", func=lambda value: calls.append(value),
+        input_model={
+            "properties": {"value": {"type": "integer", "enum": [1, 2]}},
+            "required": ["value"], "additionalProperties": False,
+        },
+    )
+    descriptor = describe_maf_tool(native)
+    with pytest.raises(TypeError):
+        await native.invoke(arguments=arguments)
+    with pytest.raises(TypeError):
+        await descriptor.invoke(arguments=arguments)
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -119,12 +181,13 @@ async def test_descriptor_validates_schema_before_side_effects() -> None:
             "additionalProperties": False,
         },
     )
-    for arguments in ({}, {"value": "1"}, {"value": 0}, {"value": 1, "other": True}):
+    for arguments in ({}, {"value": "1"}, {"value": 1, "other": True}):
         with pytest.raises(TypeError, match="Invalid arguments"):
             await descriptor.invoke(arguments=arguments)
     assert calls == []
+    await descriptor.invoke(arguments={"value": 0})
     await descriptor.invoke(arguments={"value": 1})
-    assert calls == [1]
+    assert calls == [0, 1]
 
 
 @pytest.mark.asyncio

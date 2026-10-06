@@ -30,6 +30,31 @@ class _DatedJsonResult(BaseModel):
     observed_at: datetime
 
 
+class _DictionaryResult:
+    def to_dict(self):
+        return {"value": "structured", "items": [1, True, None]}
+
+
+class _TextResult:
+    text = "ordinary custom text"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        _DictionaryResult(), _TextResult(),
+        {"nested": _DictionaryResult()},
+        [_TextResult(), {"nested": _DictionaryResult()}],
+    ],
+)
+def test_ordinary_custom_results_match_public_maf_default_parser(value):
+    from agent_framework import FunctionTool
+
+    expected = FunctionTool.parse_result(value)
+    assert len(expected) == 1
+    assert tool_result_text(value) == expected[0].text
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [

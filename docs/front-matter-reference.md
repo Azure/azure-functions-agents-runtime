@@ -199,7 +199,7 @@ Filter skills auto-discovered from `skills/` directory.
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
-| `exclude` | string[] | No | `[]` | Skill names to exclude. Matched against `SKILL.md` `name` field. |
+| `exclude` | string[] | No | `[]` | Skill directory slugs to exclude. Matched against the directory containing `SKILL.md`, without reading its contents. |
 
 **See:** [Front Matter Spec - skills](./front-matter-spec.md#skills)
 

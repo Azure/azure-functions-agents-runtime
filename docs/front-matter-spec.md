@@ -894,6 +894,10 @@ skills:
   exclude: ["security-review", "compliance-checker"]
 ```
 
+These values are directory slugs, not authored `SKILL.md` metadata. An excluded
+slug filters every matching candidate directory. See the
+[generated field reference](front-matter-reference.md#agent-skills).
+
 **Disable all skills for an agent:**
 ```yaml
 skills: false
