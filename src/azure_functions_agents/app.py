@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import azure.functions as func
 
+from ._agent_identity import agent_id
 from ._harness import get_harness, validate_agent
 from ._hosted_skill_app import HostedSkillDFApp, HostedSkillFunctionApp
 from ._logger import logger
@@ -304,6 +305,7 @@ def create_function_app(
 
         # Collect agent summary info
         agent_info: dict[str, Any] = {
+            "agent_id": agent_id(resolved.slug),
             "source_file": source_marker(resolved.source_file),
             "registered_capabilities": capability_names,
         }

@@ -14,6 +14,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Run agents on durable workflows** *(experimental, see [`docs/workflows.md`](docs/workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Hosted skills in ordinary Functions** — inject a markdown agent into your own trigger handler with `@app.hosted_skill`
+- **Evaluate authored behavior** *(preview)* — run native Vally evaluations against the same chat surface under Core Tools or in staging
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
 - **MAF execution controls** — set output limits and optional Microsoft Agent Framework token-budget conversation compaction
@@ -201,6 +202,14 @@ async def summarize(req: Request, skill: HostedSkill) -> Response:
 `HostedSkillEvent` values. The facade is intentionally not callable. See the
 [`hybrid-hosted-skill`](samples/hybrid-hosted-skill/) sample and
 [`HostedSkill injection`](docs/front-matter-spec.md#hostedskill-injection).
+
+### Agent evaluations (preview)
+
+The repository's Vally 0.16.0 custom executor tests an agent through its existing synchronous chat
+API. A native `eval.yaml` can target a local Core Tools host or deployed staging Function App and
+use Vally's deterministic or model-based graders, repeated trials, reports, and CI verdicts. The
+Python runtime remains evaluation-framework-neutral. See the [evaluation guide](docs/evaluation.md)
+and [evaluation sample](samples/agent-evaluation/).
 
 ### Agent configuration
 

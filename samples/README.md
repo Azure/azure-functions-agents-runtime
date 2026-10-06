@@ -25,6 +25,12 @@ two non-main workflow-enabled agents share one Durable engine while retaining
 separate policies. Run it locally with Azurite and use either agent's browser
 chat UI to start and observe an independent workflow.
 
+Development tooling samples:
+
+- [agent-evaluation](agent-evaluation/) — runnable receipt-agent Function App plus a native Vally
+	evaluation against its local or staging chat endpoint, with deterministic tool/output graders,
+	repeated trials, and JUnit output.
+
 For the separate **local-only, default-off Copilot harness experiment**, use
 [`copilot-preview`](copilot-preview/README.md). Its pinned setup and two-turn
 receipt verifier exercise a real Functions-host restart; it is not an `azd up`

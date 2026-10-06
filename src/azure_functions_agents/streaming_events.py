@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -34,7 +35,7 @@ class HostedSkillEvent:
     result: Any = None
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> HostedSkillEvent:
+    def from_dict(cls, payload: Mapping[str, Any]) -> HostedSkillEvent:
         """Create an event from the runner's existing payload shape."""
         return cls(
             HostedSkillEventKind(payload["type"]),

@@ -62,10 +62,11 @@ import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, NotRequired, TypedDict
 
 from pydantic import BaseModel, Field
 
+from ._agent_identity import agent_id
 from ._blob_history import build_blob_provider_from_environment
 from ._file_history import ScopedFileHistoryProvider
 from ._function_tool import FunctionTool, tool
@@ -94,7 +95,7 @@ from ._session_id import SESSION_ID_PATTERN, validate_session_id
 from ._slug import delegate_tool_name
 from .client_manager import InferenceTarget, get_client_manager
 from .config import ResolvedAgent, SubagentRef
-from .config.env import runtime_env_value
+from .config.env import EnvVar, runtime_env_value
 from .config.paths import get_app_root, resolve_config_dir
 from .config.schema import AgentConfiguration
 from .discovery.mcp import MCPTool, discover_mcp_servers
@@ -118,7 +119,10 @@ if TYPE_CHECKING:
     from agent_framework import (
         Agent,
         AgentResponse,
+        Content,
         HistoryProvider,
+        Message,
+        RoleLiteral,
         SupportsChatGetResponse,
     )
 
@@ -126,6 +130,18 @@ if TYPE_CHECKING:
 
 type AgentFunctionTool = FunctionTool | Callable[..., Any]
 type AgentTool = AgentFunctionTool | MCPTool
+
+
+class ToolCallEvidence(TypedDict):
+    """Framework-neutral evidence for one observed tool call."""
+
+    type: Literal["tool_start"]
+    tool_call_id: str | None
+    tool_name: str | None
+    arguments: Any
+    turn_id: NotRequired[str]
+    result: NotRequired[Any]
+    success: NotRequired[bool]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -160,6 +176,7 @@ _USAGE_FIELD_NAMES: dict[str, str] = {
     "output_token_count": "output_tokens",
 }
 _FINAL_USAGE_TIMEOUT_SECONDS = 1.0
+_ASSISTANT_ROLE: Final[RoleLiteral] = "assistant"
 
 
 def _normalize_usage_details(usage_details: Any) -> dict[str, int]:
@@ -301,7 +318,7 @@ class AgentResult:
     session_id: str
     content: str
     content_intermediate: list[str] = field(default_factory=list)
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    tool_calls: list[ToolCallEvidence] = field(default_factory=list)
     reasoning: str | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
     # Delegate (``delegate_<slug>``) calls that failed or timed out this run.
@@ -310,6 +327,7 @@ class AgentResult:
     # recognized by ``_looks_like_tool_error``'s JSON heuristic — see
     # ``registration._handlers._total_tool_error_count``.
     delegate_error_count: int = 0
+    model: str = "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -493,12 +511,15 @@ def _build_role_agent(
         if skill_paths
         else None
     )
+    site_name = runtime_env_value(EnvVar.WEBSITE_SITE_NAME)
+    maf_agent_name = f"{site_name}/{agent_name or 'main'}" if site_name else agent_name
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=ExperimentalWarning)
         return create_harness_agent(
             chat_client,
-            name=agent_name,
+            id=agent_id(agent_name or "main"),
+            name=maf_agent_name,
             harness_instructions="",
             agent_instructions=agent_instructions,
             tools=tools,
@@ -905,22 +926,29 @@ async def _build_agent_session(
 # ---------------------------------------------------------------------------
 
 
-def _content_type(item: Any) -> str:
-    """Return the ``type`` of a Content item, defaulting to ''."""
-    return str(getattr(item, "type", "") or "")
+def _content_type(item: Content) -> str:
+    """Return the declared Agent Framework content type."""
+    return item.type
 
 
-def _content_text(item: Any) -> str:
-    return str(getattr(item, "text", "") or "")
+def _content_text(item: Content) -> str:
+    return item.text or ""
 
 
-def _function_call_event(item: Any) -> dict[str, Any]:
-    return {
+def _function_call_event(item: Content, *, turn_id: str | None = None) -> ToolCallEvidence:
+    event: ToolCallEvidence = {
         "type": "tool_start",
-        "tool_call_id": getattr(item, "call_id", None) or getattr(item, "id", None),
-        "tool_name": getattr(item, "name", None),
-        "arguments": getattr(item, "arguments", None),
+        "tool_call_id": item.call_id or item.id,
+        "tool_name": item.name,
+        "arguments": item.arguments,
     }
+    if turn_id is not None:
+        event["turn_id"] = turn_id
+    return event
+
+
+def _message_role(message: Message) -> str:
+    return message.role
 
 
 def _merge_tool_arguments(previous: Any, current: Any) -> Any:
@@ -948,12 +976,12 @@ def _is_complete_json_argument(value: Any) -> bool:
     return True
 
 
-def _function_result_event(item: Any) -> dict[str, Any]:
+def _function_result_event(item: Content) -> dict[str, Any]:
     return {
         "type": "tool_end",
-        "tool_call_id": getattr(item, "call_id", None) or getattr(item, "id", None),
-        "tool_name": getattr(item, "name", None),
-        "result": getattr(item, "result", None),
+        "tool_call_id": item.call_id or item.id,
+        "tool_name": item.name,
+        "result": item.result,
     }
 
 
@@ -1177,35 +1205,44 @@ async def run_agent(
         # Fallback: walk messages → contents and pick out text items.
         try:
             for msg in response.messages:
-                for item in getattr(msg, "contents", None) or []:
+                for item in msg.contents:
                     if _content_type(item) == "text":
                         text += _content_text(item)
         except Exception as exc:
             logger.debug("Failed to extract response text: %s", exc)
 
     # Walk content items for tool-call records (best-effort metadata for callers).
-    tool_calls: list[dict[str, Any]] = []
+    tool_calls: list[ToolCallEvidence] = []
     try:
+        assistant_index = -1
         for msg in response.messages:
-            for item in getattr(msg, "contents", None) or []:
+            is_assistant = _message_role(msg) == _ASSISTANT_ROLE
+            if is_assistant:
+                assistant_index += 1
+            turn_id = f"response-{assistant_index}" if is_assistant else None
+            for item in msg.contents:
                 ctype = _content_type(item)
                 if ctype == "function_call":
-                    tool_calls.append(_function_call_event(item))
+                    tool_calls.append(_function_call_event(item, turn_id=turn_id))
                 elif ctype == "function_result":
                     # Attach result to most recent matching tool_start
-                    call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+                    call_id = item.call_id or item.id
+                    if not call_id:
+                        continue
                     matched = next(
                         (tc for tc in reversed(tool_calls) if tc.get("tool_call_id") == call_id),
                         None,
                     )
                     if matched is not None:
-                        matched["result"] = getattr(item, "result", None)
+                        matched["result"] = item.result
+                        matched["success"] = not _looks_like_tool_error(item.result)
     except Exception as exc:
         logger.debug("Failed to extract tool_calls: %s", exc)
 
     return AgentResult(
         session_id=resolved_id,
         content=text,
+        model=inference_target.model or model or "unknown",
         tool_calls=tool_calls,
         delegate_error_count=delegate_error_tracker.count if delegate_error_tracker else 0,
     )
@@ -1365,10 +1402,10 @@ async def run_agent_events(
                 deadline,
                 agent_slug=history_agent_slug,
             ):
-                pending_tool_calls: dict[str, dict[str, Any]] = {}
+                pending_tool_calls: dict[str, ToolCallEvidence] = {}
                 emitted_tool_calls: set[str] = set()
 
-                def buffer_function_call(item: Any) -> tuple[str | None, dict[str, Any]]:
+                def buffer_function_call(item: Content) -> tuple[str | None, ToolCallEvidence]:
                     event = _function_call_event(item)
                     call_id = event.get("tool_call_id")
                     if not isinstance(call_id, str) or not call_id:
@@ -1392,7 +1429,7 @@ async def run_agent_events(
                     return call_id, pending
 
                 async def emit_tool_start_if_ready(
-                    call_id: str, event: dict[str, Any]
+                    call_id: str, event: ToolCallEvidence
                 ) -> AsyncIterator[HostedSkillEvent]:
                     if call_id in emitted_tool_calls:
                         return

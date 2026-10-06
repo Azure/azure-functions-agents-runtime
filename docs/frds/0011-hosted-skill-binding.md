@@ -1,5 +1,5 @@
 ---
-frd: 0010
+frd: 0011
 title: HostedSkill binding
 status: Finalized
 author: victoriahall
@@ -11,7 +11,7 @@ pull_requests: []
 branch: hallvictoria/hosted-skill-binding
 ---
 
-# FRD 0010 - HostedSkill binding
+# FRD 0011 - HostedSkill binding
 
 ## 1. Summary
 
