@@ -33,6 +33,7 @@ __version__ = "0.1.0b16"
 # ---------------------------------------------------------------------------
 
 import warnings as _warnings
+from contextlib import AsyncExitStack
 from typing import Any
 
 # Global flag to control MAF warning suppression (can be temporarily disabled)
@@ -115,9 +116,10 @@ from .client_manager import (  # noqa: E402
     MAFClientManager,
     get_client_manager,
     set_client_manager,
-    shutdown_client_manager,
 )
+from .client_manager import shutdown_client_manager as _shutdown_client_manager  # noqa: E402
 from .config.paths import resolve_config_dir, set_app_root  # noqa: E402
+from .harness._harness_lifecycle import _shutdown_harnesses  # noqa: E402
 from .runner import (  # noqa: E402
     DEFAULT_MODEL,
     DEFAULT_TIMEOUT,
@@ -137,6 +139,14 @@ from .workflows.schema import (  # noqa: E402
     WorkflowRetryPolicy,
     WorkflowTerminalError,
 )
+
+
+async def shutdown_client_manager() -> None:
+    """Close acquired app execution owners and the active client manager."""
+    async with AsyncExitStack() as cleanup:
+        cleanup.push_async_callback(_shutdown_client_manager)
+        cleanup.push_async_callback(_shutdown_harnesses)
+
 
 __all__ = [
     "DEFAULT_MODEL",

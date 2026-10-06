@@ -16,10 +16,16 @@ import httpx
 import pytest
 from azure.core.credentials import AccessToken
 
-from azure_functions_agents import _copilot, _harness, runner, shutdown_client_manager
+from azure_functions_agents import runner, shutdown_client_manager
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.config import paths
 from azure_functions_agents.config.schema import WebRequestConfig
+from azure_functions_agents.harness import _harness_binding as _harness
+from azure_functions_agents.harness.agent_framework import _maf_execution
+from azure_functions_agents.harness.copilot_sdk import (
+    _copilot_runtime as _runtime,
+)
+from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
 from azure_functions_agents.system_tools.web_request import create_web_request_tools
 
 pytestmark = pytest.mark.skipif(
@@ -311,7 +317,6 @@ def native(monkeypatch, tmp_path, request):
     shutil.copytree(SAMPLE, app_root)
     monkeypatch.setattr(copilot, "CopilotClient", create_client)
     monkeypatch.setattr(_harness, "_HARNESSES", {})
-    monkeypatch.setattr(_copilot, "_RUNTIMES", {})
     monkeypatch.setattr(paths, "_app_root", app_root)
     monkeypatch.setenv(_harness.FLAG, "true")
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", provider_name)
@@ -333,9 +338,10 @@ def native(monkeypatch, tmp_path, request):
     credential = SimpleNamespace(
         get_token=AsyncMock(return_value=AccessToken(SENTINEL, 9999999999)), close=AsyncMock()
     )
-    monkeypatch.setattr(_copilot, "build_async_credential", lambda: credential)
+    monkeypatch.setattr(_runtime, "build_async_credential", lambda: credential)
     monkeypatch.setenv("GITHUB_TOKEN", "ambient-auth-must-not-be-forwarded")
-    monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
+    monkeypatch.delenv("AzureWebJobsStorage", raising=False)
+    monkeypatch.delenv("AzureWebJobsStorage__blobServiceUri", raising=False)
     for key in ("WEBSITE_INSTANCE_ID", "FUNCTIONS_WORKER_PROCESS_COUNT",
                 "AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY"):
         monkeypatch.delenv(key, raising=False)
@@ -443,7 +449,7 @@ async def test_real_native_markdown_tool_and_cold_runtime_resume(native):
         assert receipt in result["response"]
         assert len(native.clients) == 1
         assert len(native.created) == 1
-        assert native.metadata_lookups == native.created
+        assert native.metadata_lookups == []
         assert any(isinstance(event.data, AssistantTurnEndData) for event in native.histories[0])
         assert any(
             isinstance(event.data, AssistantMessageData) and receipt in event.data.content
@@ -465,7 +471,7 @@ async def test_real_native_markdown_tool_and_cold_runtime_resume(native):
         assert second["tool_calls"] == []
         assert len(native.clients) == 2
         assert native.resumed == native.created
-        assert native.metadata_lookups == native.created
+        assert native.metadata_lookups == []
         assert len(native.captured) == 3
         prior = native.captured[-1].get("messages") or native.captured[-1]["input"]
         assert prior[-1]["role"] == "user"
@@ -490,7 +496,7 @@ async def test_native_provider_auth_failure_is_sanitized_through_public_route(
     native, monkeypatch, caplog
 ):
     maf = AsyncMock(side_effect=AssertionError("MAF fallback must not run"))
-    monkeypatch.setattr(runner, "_build_agent_session", maf)
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", maf)
     app = create_function_app(native.root)
     chat = next(
         item.get_user_function()
@@ -573,7 +579,9 @@ async def test_native_startup_failure_preserves_completed_session(native, monkey
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("damage", ["missing", "empty", "malformed"])
-async def test_missing_or_corrupt_sdk_journal_never_starts_over(native, damage):
+async def test_sdk_remains_the_only_resume_authority_after_journal_damage(native, damage, monkeypatch):
+    from copilot.session import CopilotSession
+
     app = create_function_app(native.root)
     chat = next(
         item.get_user_function() for item in app.get_functions()
@@ -593,6 +601,10 @@ async def test_missing_or_corrupt_sdk_journal_never_starts_over(native, damage):
             journal.unlink()
         else:
             journal.write_text("" if damage == "empty" else "malformed\n", encoding="utf-8")
+        send_probe = AsyncMock(side_effect=CopilotPreviewError(
+            "SDK resume probe completed; no prompt was sent."
+        ))
+        monkeypatch.setattr(CopilotSession, "send_and_wait", send_probe)
         failed = await chat(SimpleNamespace(
             headers={"x-ms-session-id": public_id},
             json=AsyncMock(return_value={"prompt": "Recall the receipt."}),
@@ -603,6 +615,9 @@ async def test_missing_or_corrupt_sdk_journal_never_starts_over(native, damage):
         assert "session" in error.lower() or "conversation" in error.lower()
         assert len(native.captured) == 2
         assert len(native.created) == 1
+        assert len(native.resumed) == 1
+        assert native.metadata_lookups == []
+        assert send_probe.await_count in {0, 1}
     finally:
         await shutdown_client_manager()
 

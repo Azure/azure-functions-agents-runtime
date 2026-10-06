@@ -1,10 +1,11 @@
 # Local Copilot preview
 
-This **default-off, local-only** Functions sample exercises non-streaming
-Copilot chat and the authored `/preview` HTTP route with `make_receipt` and
-`web_request` (limited to `example.com`). It preserves completed-turn sessions
-across a local restart. ACA `execute_python` is disabled in the checked-in
-configuration.
+This **default-off** Functions sample exercises Copilot HTTP chat and
+the authored `/preview` HTTP route with `make_receipt` and `web_request`
+(limited to `example.com`). The SDK owns sessions and their opaque files;
+the host supplies filesystem callbacks backed by local files or Blob.
+Run locally with one worker only. ACA `execute_python` is disabled in the
+checked-in configuration.
 
 Requires Python 3.13/3.14, Azure Functions Core Tools 4, and `uv`. Model calls
 incur charges. You need one approved target: an OpenAI API key/model, an Azure OpenAI resource
@@ -14,6 +15,13 @@ Azure OpenAI or the project role approved by your Foundry administrator).
 
 `requirements.txt` installs this checkout with `[copilot]`. The SDK downloads
 its native runtime on first use if uncached.
+
+For the local-file walkthrough, use a terminal without `AzureWebJobsStorage`
+or `AzureWebJobsStorage__blobServiceUri` configured and leave those settings
+unconfigured in the sample's `local.settings.json`. Either existing setting
+automatically selects Blob, even locally; failures do not fall back to disk.
+Optional approved Blob setup is in the
+[operations guide](../../docs/copilot-preview-operations.md#storage-selection).
 
 ```powershell
 uv venv .venv --python 3.13
@@ -113,26 +121,29 @@ prints credentials.
 In a **second terminal at the repository root**:
 
 ```powershell
-.\.venv\Scripts\python.exe samples\copilot-preview\verify.py --phase first --evidence .preview-evidence.json
-# Stop/restart `func start --port 7071`, preserving provider variables and state.
-.\.venv\Scripts\python.exe samples\copilot-preview\verify.py --phase followup --evidence .preview-evidence.json
-.\.venv\Scripts\python.exe samples\copilot-preview\verify.py --phase negative
-```
-
-Expect `PASS first`, `PASS followup`, and `PASS negative`. To exercise the
-authored route while the host runs:
-
-```powershell
 $first = Invoke-RestMethod http://127.0.0.1:7071/agents/main/chat -Method Post `
   -ContentType application/json `
   -Body '{"prompt":"Call make_receipt once with tag ''demo''. Reply only with its result."}'
-$first.tool_calls
+$first | ConvertTo-Json -Depth 8
+```
+
+Check that `tool_calls` includes `make_receipt` and save the returned
+`session_id` in `$first`. Stop and restart `func start --port 7071` in the
+host terminal, preserving its provider settings and
+`AZURE_FUNCTIONS_AGENTS_SESSION_DIR`. Then, in the same second terminal,
+exercise the authored route with that session:
+
+```powershell
 $again = Invoke-WebRequest http://127.0.0.1:7071/preview -UseBasicParsing -Method Post `
   -ContentType application/json -Headers @{"x-ms-session-id"=$first.session_id} `
   -Body '{"prompt":"Recall the previous receipt without calling any tool."}'
 $again.Content
 $again.Headers["x-ms-session-id"]
 ```
+
+Check for the previous receipt in the response and the same session ID in the
+header. This exercises SDK continuation; it is not a host recovery or
+compaction guarantee.
 
 To exercise the configured `web_request` tool:
 
@@ -143,46 +154,36 @@ $web = Invoke-RestMethod http://127.0.0.1:7071/agents/main/chat -Method Post `
 $web.tool_calls | ConvertTo-Json -Depth 8
 ```
 
-This sample exercises direct turns; the local preview also supports authorized
-delegates and Dynamic Workflow management/Sub Agent Activities when configured
-in an app with local Durable storage. The chat SSE route has been exercised
-against the pinned native runtime with a synthetic provider, including tool
-ordering and disconnect behavior; live-provider and hosted streaming are not
-production-qualified. The preview
-does not support MCP, authored skills, Azure hosting, or MAF history import. Custom `ClientManager`
+The local adapter also supports SSE chat, declared chat delegates, Workflow
+Sub Agents, and Dynamic Workflow management when authored in an agent app.
+This sample remains a single-agent tool demonstration. MCP, general scoped
+skills, debug chat UI, non-HTTP triggers, and deployed hosting remain unsupported.
+Custom `ClientManager`
 instances are MAF-only and are rejected when Copilot is on. See
 [the architecture guide](../../docs/architecture.md#bounded-copilot-migration-preview)
 for the capability boundary.
 
 ## Flag off and cleanup
 
-Stop the host; set the flag to `false` and restart to restore MAF. Do not
-reuse a Copilot session ID in MAF. After stopping MAF, run `Pop-Location`
-to return to the repository root. Review `$run` and the cleanup block before
-running it; it removes only that run's state and sample evidence:
+The flag is read once per app, so stop the host, set the flag to `false` and
+restart to use MAF and its own history provider. When finished with the sample,
+keep the host stopped. In the original host terminal, return to the repository
+root and inspect only this run's files before cleanup:
 
 ```powershell
 # Stop the host.
-$env:AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT = "false"
-func start --port 7071
-# Stop the host again.
 Pop-Location
-if ($run -notmatch '^[a-f0-9]{32}$' -or
-    -not (Test-Path -LiteralPath .\samples\copilot-preview\src\main.agent.md)) {
-  throw "Cleanup requires the original run ID at this sample's repository root."
+$env:AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT = "false"
+if (Test-Path -LiteralPath $env:AZURE_FUNCTIONS_AGENTS_SESSION_DIR) {
+  Get-ChildItem -LiteralPath $env:AZURE_FUNCTIONS_AGENTS_SESSION_DIR -Recurse -File |
+    Select-Object FullName, Length, LastWriteTimeUtc
 }
-$state = Join-Path (Get-Location).ProviderPath ".preview-state\$run"
-$parent = Get-Item -LiteralPath (Split-Path $state) -ErrorAction SilentlyContinue
-$target = Get-Item -LiteralPath $state -ErrorAction SilentlyContinue
-$target | Select-Object FullName, LinkType, Target
-if (@($parent) + @($target) | Where-Object {
-    $null -ne $_ -and (-not $_.PSIsContainer -or
-      ($_.Attributes -band [IO.FileAttributes]::ReparsePoint))
-}) { throw "Refusing to remove a file or linked directory." }
-Remove-Item -LiteralPath $state -Recurse -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath .preview-evidence.json, `
-  samples\copilot-preview\src\local.settings.json -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath .\samples\copilot-preview\src\local.settings.json
 Remove-Item Env:OPENAI_API_KEY, Env:AZURE_OPENAI_API_KEY -ErrorAction SilentlyContinue
 ```
 
-Do not delete SDK caches or MAF history.
+Remove only the sample-owned files after reviewing the dedicated run directory;
+do not delete SDK caches, MAF history or shared Blob containers. Native files
+may contain conversation content, so do not publish them in diagnostics.
+For storage configuration, errors and targeted cleanup, see
+[`docs/copilot-preview-operations.md`](../../docs/copilot-preview-operations.md).

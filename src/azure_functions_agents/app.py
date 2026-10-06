@@ -9,7 +9,7 @@ from typing import Any, cast
 import azure.durable_functions as df
 import azure.functions as func
 
-from ._harness import get_harness, validate_agent
+from ._agent_identity import agent_id
 from ._logger import logger
 from ._observability import configure_observability
 from ._source_marker import source_marker
@@ -25,6 +25,7 @@ from .config.validation import (
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
 from .discovery.tools import discover_project_tools
+from .harness._harness_binding import get_harness, validate_agent
 from .registration.capabilities import (
     build_capabilities,
     validate_subagent_tool_names,
@@ -294,6 +295,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
         # Collect agent summary info
         agent_info: dict[str, Any] = {
+            "agent_id": agent_id(resolved.slug),
             "source_file": source_marker(resolved.source_file),
             "registered_capabilities": capability_names,
         }

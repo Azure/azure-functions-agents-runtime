@@ -10,7 +10,7 @@ identity in the same way.
 ``BlobHistoryProvider`` deliberately does **not** use these helpers because it
 follows a storage-specific precedence (``AzureWebJobsStorage__clientId`` wins,
 then falls back to ``AZURE_CLIENT_ID``); see
-:mod:`azure_functions_agents._blob_history`.
+:mod:`azure_functions_agents.harness.agent_framework._maf_blob_history`.
 """
 
 from __future__ import annotations

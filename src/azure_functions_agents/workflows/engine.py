@@ -39,8 +39,8 @@ from durabletask.task import (
     when_any,
 )
 
-from azure_functions_agents._harness import AppHarness
 from azure_functions_agents._logger import logger
+from azure_functions_agents.harness._harness_binding import AppHarness
 from azure_functions_agents.registration.catalog import AgentCatalog
 from azure_functions_agents.runner import run_leaf_agent_task
 

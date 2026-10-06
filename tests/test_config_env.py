@@ -3,13 +3,35 @@ from __future__ import annotations
 import pytest
 
 from azure_functions_agents.config.env import (
+    EnvVar,
     _to_bool,
     has_unresolved_placeholders,
     resolve_env_vars_in_data,
+    runtime_env_value,
     substitute_env_vars_in_text,
     substitute_env_vars_in_value,
 )
 from azure_functions_agents.config.schema import BuiltinEndpointsConfig
+
+
+@pytest.mark.parametrize(
+    ("variable", "name"),
+    [
+        (EnvVar.WEBSITE_INSTANCE_ID, "WEBSITE_INSTANCE_ID"),
+        (EnvVar.WEBSITE_SITE_NAME, "WEBSITE_SITE_NAME"),
+    ],
+)
+def test_runtime_env_value_reads_platform_variables(
+    monkeypatch: pytest.MonkeyPatch, variable: EnvVar, name: str
+) -> None:
+    monkeypatch.delenv(name, raising=False)
+    assert runtime_env_value(variable) == ""
+
+    monkeypatch.setenv(name, "  Platform-Value  ")
+    assert runtime_env_value(variable) == "Platform-Value"
+
+    monkeypatch.setenv(name, " \t ")
+    assert runtime_env_value(variable) == ""
 
 
 def test_substitute_env_vars_in_value_dollar(monkeypatch: pytest.MonkeyPatch) -> None:

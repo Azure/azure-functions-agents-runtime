@@ -26,13 +26,13 @@ from typing import Any
 import azure.functions as func
 
 from azure_functions_agents._function_tool import WorkflowTool
-from azure_functions_agents._harness import AppHarness, get_harness
 from azure_functions_agents._logger import logger
 from azure_functions_agents.config.schema import (
     TRIGGER_TYPES,
     ResolvedAgent,
     WorkflowSubagentRef,
 )
+from azure_functions_agents.harness._harness_binding import AppHarness, get_harness
 from azure_functions_agents.registration.catalog import AgentCatalog
 
 from . import registry

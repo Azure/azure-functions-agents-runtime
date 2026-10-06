@@ -12,13 +12,13 @@ import pytest
 from durabletask.task import TaskFailedError
 
 from azure_functions_agents._function_tool import WorkflowTool
-from azure_functions_agents._harness import AppHarness, HarnessKind
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     ResolvedAgent,
     ToolsFilter,
     WorkflowSubagentRef,
 )
+from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows import activity as workflow_activity
@@ -161,8 +161,9 @@ async def test_sub_agent_activity_retains_app_harness_and_reauthorizes(monkeypat
 async def test_activity_redelivery_uses_serving_app_binding_after_environment_change(
     monkeypatch, tmp_path,
 ):
-    from azure_functions_agents import _copilot, runner
-    from azure_functions_agents._harness import FLAG
+    from azure_functions_agents import runner
+    from azure_functions_agents.harness._harness_binding import FLAG
+    from azure_functions_agents.harness.copilot_sdk import _copilot_execution as _copilot
 
     first = AppHarness(HarnessKind.COPILOT, tmp_path / "first")
     replacement = AppHarness(HarnessKind.COPILOT, tmp_path / "replacement")
@@ -232,8 +233,8 @@ def _compatibility_activity(*, catalog, harness=None):
 
 
 def test_compatibility_activity_captures_default_harness_at_registration(monkeypatch, tmp_path):
-    from azure_functions_agents import _harness
     from azure_functions_agents.config import paths
+    from azure_functions_agents.harness import _harness_binding as _harness
 
     monkeypatch.setattr(_harness, "_HARNESSES", {})
     monkeypatch.setenv(_harness.FLAG, "false")
@@ -265,8 +266,10 @@ def test_compatibility_activity_captures_default_harness_at_registration(monkeyp
 def test_compatibility_activities_propagate_distinct_app_harnesses(
     monkeypatch, tmp_path, policy_aware,
 ):
-    from azure_functions_agents import _copilot, _harness, runner
+    from azure_functions_agents import runner
     from azure_functions_agents.config import paths
+    from azure_functions_agents.harness import _harness_binding as _harness
+    from azure_functions_agents.harness.copilot_sdk import _copilot_execution as _copilot
 
     first = AppHarness(HarnessKind.COPILOT, tmp_path / "first")
     replacement = AppHarness(HarnessKind.COPILOT, tmp_path / "replacement")

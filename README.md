@@ -13,27 +13,41 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Build custom tools in plain Python** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and pull in any package you need
 - **Run agents on durable workflows** *(experimental, see [`docs/workflows.md`](docs/workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
+- **Evaluate authored behavior** *(preview)* — run native Vally evaluations against the same chat surface under Core Tools or in staging
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
 - **MAF execution controls** — set output limits and optional Microsoft Agent Framework token-budget conversation compaction
 
 ### Experimental Copilot harness
 
-MAF remains the default. A separate, local-only
-[Copilot foundation sample](samples/copilot-preview/README.md) supports an explicit
-`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=true` opt-in for non-streaming HTTP,
+MAF remains the default. A separate
+[Copilot preview sample](samples/copilot-preview/README.md) supports an explicit
+`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=true` opt-in for **internal local
+qualification only**, not a customer-facing production contract, covering non-streaming HTTP,
 filtered explicit Python tools, the configured `web_request` tool, session-bound
 ACA `execute_python` adapter wiring, host-validated structured results on
-authored HTTP-trigger routes, and completed-turn native-session continuity. ACA
-catalog/session scoping is unit-qualified; real Copilot-to-ACA execution remains
-a separately gated acceptance item. It documents the pinned SDK/runtime,
-OpenAI key, Azure OpenAI key/Entra and Foundry Entra setup, supported tool
-policy, unsupported capabilities, real request/tool/follow-up verification and
-the flag-off restart path. Ambient SDK shell/file/web/todo/task/human-input
-tools are disabled. This is not production activation or session
-persistence/MCP/skills/role/streaming parity; existing MAF history is
-untouched. Configured output-token caps are not supported in this Copilot
-preview; MAF retains its output-limit controls. Custom `ClientManager`
+authored HTTP-trigger routes, and SDK-owned native sessions. The flag is read
+once per app: **restart the host** to opt in or out. Each harness
+constructs, uses and closes only its own persistence adapter: MAF keeps its
+history provider; Copilot uses the SDK's `SessionFs` callbacks. Copilot stores
+ordinary local files or one Blob per SDK file, using the existing
+`AzureWebJobsStorage` settings to select Blob and local files only when neither
+Blob setting is configured. Configured Blob failures never fall back to disk.
+The SDK owns sessions, continuation, recovery, compaction and file formats;
+the host supplies filesystem operations, metadata and path containment.
+ACA catalog/session scoping is unit-qualified; real Copilot-to-ACA
+execution remains a separately gated acceptance item. Ambient SDK
+shell/file/web/todo/task/human-input tools are disabled. This is **not**
+production activation: the preview remains local-only and single-worker.
+Earlier real-service results do not qualify the rewritten filesystem adapter.
+Deployed-host and dual-harness end-to-end qualification remain in #1357 and
+final rollout remains in #1337. MCP/skills/role/streaming
+parity is unchanged. Configured output-token caps are not supported in this
+Copilot preview; MAF retains its output-limit controls. See
+[`docs/copilot-preview-operations.md`](docs/copilot-preview-operations.md) for
+storage settings, inspection, errors and targeted cleanup.
+The sample documents OpenAI key, Azure OpenAI key/Entra and Foundry Entra setup.
+Custom `ClientManager`
 implementations remain MAF-only and are rejected explicitly when Copilot is on.
 
 ## Installation
@@ -176,12 +190,23 @@ Any `.agent.md` file can opt into built-in endpoints with `builtin_endpoints`. T
 
 If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint-only agents as well as triggered agents that also expose a chat UI or API. `builtin_endpoints.debug_chat_ui: true` automatically enables the backing chat APIs. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints, including the MCP tool. See [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
 
+### Agent evaluations (preview)
+
+The repository's Vally 0.16.0 custom executor tests an agent through its existing synchronous chat
+API. A native `eval.yaml` can target a local Core Tools host or deployed staging Function App and
+use Vally's deterministic or model-based graders, repeated trials, reports, and CI verdicts. The
+Python runtime remains evaluation-framework-neutral. See the [evaluation guide](docs/evaluation.md)
+and [evaluation sample](samples/agent-evaluation/).
+
 ### Agent configuration
 
 By default, agents execute through Microsoft Agent Framework's harness-agent mechanism. Optional global
 defaults and recursive per-agent overrides configure model output and conversation compaction
-limits. The local Copilot opt-in rejects configured output limits rather than silently
-dropping them.
+limits. The Copilot opt-in rejects configured output limits rather than silently
+dropping them, and rejects a non-null `max_context_window_tokens`; clearing that
+value with `null` selects Copilot's native compaction defaults. The underlying
+Copilot SDK/provider surface has similarly named token-budget fields, but this
+bounded preview does not map or expose them as a supported authoring contract.
 
 ```yaml
 # agents.config.yaml
@@ -587,7 +612,15 @@ By default, MCP auth follows the app-wide identity selection: `AZURE_CLIENT_ID` 
 
 ## Session storage
 
-Multi-turn conversations are persisted as JSON Lines, one record per message:
+The selected harness uses the existing Functions storage configuration.
+`AzureWebJobsStorage` (connection string) takes precedence over
+`AzureWebJobsStorage__blobServiceUri` (Entra authentication). Either setting
+selects Azure Blob Storage, including during local development with Azurite.
+Local files are selected only when neither is configured; configured Blob
+auth, network or configuration failures surface without a local fallback.
+
+With the default MAF harness, multi-turn conversations are persisted as JSON
+Lines, one record per message:
 
 - **Deployed apps (recommended).** When `AzureWebJobsStorage` is configured —
   as either a connection string or the identity-based
@@ -599,25 +632,33 @@ Multi-turn conversations are persisted as JSON Lines, one record per message:
   `AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER`). No file share, no storage
   account key, no mount path; the same identity that the function app
   already uses for `AzureWebJobsStorage` reads and writes sessions. In
-  multi-identity Function Apps, set `AZURE_CLIENT_ID` so
-  `DefaultAzureCredential` selects the intended managed identity.
-- **Local dev fallback.** When neither `AzureWebJobsStorage` nor
+  multi-identity Function Apps, storage honors
+  `AzureWebJobsStorage__clientId` before `AZURE_CLIENT_ID` to select the
+  intended managed identity.
+- **Local dev files.** When neither `AzureWebJobsStorage` nor
   `AzureWebJobsStorage__blobServiceUri` is set, history falls back to MAF's
   `FileHistoryProvider` writing to
   `{AZURE_FUNCTIONS_AGENTS_SESSION_DIR}/agent-sessions/{agent_slug}/{session_id}.jsonl`,
   defaulting to `~/.azure-functions-agents/agent-sessions/`.
 
+Copilot session files use a separate namespace:
+`copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`. Here `agent_id`
+is the shared readable app correlation key plus canonical agent slug, for
+example `local/main` when platform metadata is absent. Files are opaque
+to the host; their contents, continuation, recovery and compaction belong to
+the SDK. This separate namespace applies only to the current internal Copilot
+preview; the default MAF path and its `agent-sessions/` history layout are
+unchanged. Only the selected harness's persistence adapter is initialized or
+closed, with no opposite-harness history probes.
+
 Session ids must match `^[A-Za-z0-9._-]{1,128}$` — anything else is rejected at the API boundary.
 The same caller-visible session id may be reused across agents for correlation, but each agent's
 transcript remains independent.
 
-> **Breaking change:** Earlier releases stored unscoped history at
-> `agent-sessions/{session_id}.jsonl`; those files are not loaded automatically after upgrading.
-> If continuity is required, copy each file to its corresponding agent-specific path before
-> upgrading.
-> Azure Blob copies must preserve the Append Blob type so later appends continue to work.
-
-> **Single-process scope**: A per-agent/session `asyncio.Lock` serializes concurrent turns within a single Function instance. The contract is "one active turn per agent/session pair". Multi-instance distributed locking is intentionally out of scope.
+> **Single-process scope:** Turns for the same agent/session pair are serialized
+> within one Python process, with bounded waiting. Independent sessions remain
+> concurrent. Cross-worker overlap is unsupported and caller-owned; Blob
+> storage does not provide distributed turn coordination.
 
 ## Samples
 
