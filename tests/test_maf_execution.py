@@ -18,13 +18,13 @@ from agent_framework import (
     ChatMiddlewareLayer,
     ChatResponse,
     Content,
-    FunctionTool,
     Message,
     UsageDetails,
 )
 
 from azure_functions_agents import runner
 from azure_functions_agents._agent_identity import agent_id
+from azure_functions_agents._function_tool import tool
 from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
@@ -96,7 +96,7 @@ def test_public_entrypoints_keep_explicit_parameters_and_adapters_accept_neutral
 def test_backend_uses_canonical_host_and_accounting_without_private_facade_exports():
     assert maf._runner is runner
     assert maf._harness_execution is shared
-    assert runner._assemble_agent_inputs is maf.assemble_agent_inputs
+    assert not hasattr(runner, "_assemble_agent_inputs")
     for name in (
         "_AgentExecutionRole",
         "_AgentUsageRecorder",
@@ -183,9 +183,9 @@ def test_role_constructor_keeps_identity_options_compaction_and_skills(monkeypat
 async def test_session_builder_consumes_actual_host_hooks_and_none_vs_empty(
     monkeypatch, overrides
 ):
-    user_tool = FunctionTool(name="user", func=lambda: "user")
-    web_tool = FunctionTool(name="web", func=lambda: "web")
-    delegate_tool = FunctionTool(name="delegate_specialist", func=lambda: "specialist")
+    user_tool = tool(name="user")(lambda: "user")
+    web_tool = tool(name="web")(lambda: "web")
+    delegate_tool = tool(name="delegate_specialist")(lambda: "specialist")
     mcp_tool = object()
     server = MCPServerDescriptor.create(name="server", url="https://fixture.invalid/mcp")
     users = Mock(return_value=SimpleNamespace(tools=[user_tool]))
@@ -234,7 +234,11 @@ async def test_session_builder_consumes_actual_host_hooks_and_none_vs_empty(
     )
     assemble.assert_called_once()
     expected = [web_tool, delegate_tool] if overrides else [user_tool, web_tool, mcp_tool, delegate_tool]
-    assert role.call_args.kwargs["tools"] == expected
+    actual = role.call_args.kwargs["tools"]
+    assert [item.name for item in actual if item is not mcp_tool] == [
+        item.name for item in expected if item is not mcp_tool
+    ]
+    assert (mcp_tool in actual) is (not overrides)
     assert role.call_args.kwargs["agent_instructions"] == "host instructions\naddendum"
     assert role.call_args.kwargs["history_provider"] is history
     assert users.call_count == mcps.call_count == (0 if overrides else 1)

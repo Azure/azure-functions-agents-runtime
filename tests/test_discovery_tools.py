@@ -155,10 +155,9 @@ def test_discovery_records_neutral_metadata_without_maf_construction(
     assert descriptor.name == "selected"
     assert descriptor.description == "Authored description"
     assert descriptor.parameters()["properties"]["value"]["type"] == "integer"
-    assert descriptor.policy.maf_compatibility_key is None
 
 
-def test_raw_maf_tools_discover_as_compatibility_descriptors(tmp_path: Path) -> None:
+def test_raw_maf_tools_are_ignored_in_discovery(tmp_path: Path, caplog) -> None:
     _write_tool_file(
         tmp_path,
         "legacy",
@@ -171,12 +170,63 @@ def test_raw_maf_tools_discover_as_compatibility_descriptors(tmp_path: Path) -> 
         lookup = ExtendedTool(name="legacy_lookup", func=lambda value: value)
         """,
     )
-    [descriptor] = discover_project_tools(tmp_path).user_tools
+    assert discover_project_tools(tmp_path).user_tools == []
+    assert "Ignoring unsupported custom tool" in caplog.text
+    assert "legacy_lookup" not in caplog.text
 
-    assert type(descriptor) is ToolDescriptor
-    assert descriptor.name == "legacy_lookup"
-    assert descriptor.policy.maf_only_options == ("custom tool class",)
-    assert descriptor.policy.maf_compatibility_key is not None
+
+def test_discovery_ignores_sdk_attributes_and_keeps_local_fallback(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "opaque",
+        """
+        from agent_framework import FunctionTool
+
+        class OpaqueTool(FunctionTool):
+            def __getattribute__(self, name):
+                raise AssertionError("No SDK attributes may be inspected")
+
+        raw = object.__new__(OpaqueTool)
+
+        def local(value: str) -> str:
+            return value
+        """,
+    )
+    discovered = discover_project_tools(tmp_path)
+    assert discovered.failed_loads == []
+    assert _tool_names(discovered.user_tools) == ["local"]
+
+
+@pytest.mark.parametrize("copilot", [False, True])
+def test_runtime_only_authoring_scenario(copilot, monkeypatch, caplog) -> None:
+    from azure_functions_agents.app import create_function_app
+    from azure_functions_agents.config.loader import load_agent_specs, load_global_config
+    from azure_functions_agents.config.merge import compose
+    from azure_functions_agents.registration.capabilities import build_capabilities
+
+    root = Path(__file__).parent / "fixtures" / "config_scenarios" / "24_runtime_tool_authoring"
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT", str(copilot).lower())
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-only")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_MODEL", "fixture-model")
+    for name in ("WEBSITE_INSTANCE_ID", "FUNCTIONS_WORKER_PROCESS_COUNT"):
+        monkeypatch.delenv(name, raising=False)
+    discovered = discover_project_tools(root)
+    assert discovered.failed_loads == []
+    assert _tool_names(discovered.user_tools) == ["authored", "first_local"]
+    assert sorted(item.name for item in discovered.workflow_tools) == ["authored", "workflow_only"]
+    resolved = compose(
+        load_agent_specs(root)[0], load_global_config(root),
+        discovered_mcp_names=[], discovered_skill_names=[],
+    )
+    capabilities = build_capabilities(
+        resolved, discovered_user_tools=discovered.user_tools,
+        discovered_workflow_tools=discovered.workflow_tools,
+        discovered_mcp_tools={}, discovered_skills={},
+    )
+    assert _tool_names(list(capabilities.filtered_user_tools)) == ["authored", "first_local"]
+    assert create_function_app(root).get_functions()
+    assert "Ignoring unsupported custom tool" in caplog.text
 
 
 def test_workflow_tool_only_is_not_normal_user_tool(tmp_path: Path) -> None:

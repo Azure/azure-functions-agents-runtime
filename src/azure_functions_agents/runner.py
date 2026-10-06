@@ -57,14 +57,6 @@ type AgentFunctionTool = ToolInput
 type AgentTool = ToolDescriptor | MCPServerDescriptor
 
 
-def __getattr__(name: str) -> Any:
-    if name == "_assemble_agent_inputs":
-        from .harness.agent_framework import _maf_execution
-
-        return _maf_execution.assemble_agent_inputs
-    raise AttributeError(name)
-
-
 class ToolCallEvidence(TypedDict):
     """Framework-neutral evidence for one observed tool call."""
 
@@ -314,10 +306,6 @@ def _request(
             *(web_request_tools or ()),
         )
     )
-    if harness.name is HarnessKind.COPILOT:
-        from .harness.copilot_sdk._copilot_preview import prepare_tools
-
-        descriptors = prepare_tools(descriptors)
     servers = (
         tuple(discover_mcp_servers(harness.app_root).servers.values())
         if mcp_tools is None

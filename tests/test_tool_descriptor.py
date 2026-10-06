@@ -15,8 +15,35 @@ from azure_functions_agents._function_tool import tool
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.harness.agent_framework._maf_tools import (
     build_maf_tools,
-    describe_maf_tool,
 )
+
+
+def test_unsupported_programmatic_tools_are_ignored_without_inspection(caplog):
+    from agent_framework import FunctionTool
+
+    from azure_functions_agents._tool_descriptor import describe_tools
+    from azure_functions_agents.registration.capabilities import AgentCapabilities
+
+    class Opaque:
+        def __getattribute__(self, name):
+            raise AssertionError("Unsupported tool attributes must not be inspected")
+
+        def __call__(self, **kwargs):
+            raise AssertionError("Unsupported tool must not execute")
+
+    @tool
+    def allowed() -> str:
+        return "ok"
+
+    def undecorated() -> str:
+        return "ignored"
+
+    candidates = [FunctionTool(name="private-sentinel", func=undecorated), Opaque(), undecorated]
+    assert describe_tools(candidates) == ()
+    assert describe_tools([*candidates, allowed]) == (allowed,)
+    assert AgentCapabilities.create(filtered_user_tools=candidates).filtered_user_tools == ()
+    assert "Ignoring unsupported custom tool" in caplog.text
+    assert "private-sentinel" not in caplog.text
 
 
 class _Choice(Enum):
@@ -42,7 +69,7 @@ class _Choice(Enum):
         (_Choice, "first", True),
     ],
 )
-async def test_python_normalized_operands_match_raw_and_authored_maf(
+async def test_python_normalized_operands_match_real_and_authored_maf(
     annotation, value, accepted
 ):
     from agent_framework import FunctionTool
@@ -55,18 +82,17 @@ async def test_python_normalized_operands_match_raw_and_authored_maf(
 
     echo.__annotations__ = {"value": annotation}
     native = FunctionTool(name="echo", description="Echo", func=echo)
-    raw_descriptor = describe_maf_tool(native)
     authored = tool(echo)
     adapted = build_maf_tools([authored])[0]
-    for candidate in (native, raw_descriptor, adapted, authored):
+    for candidate in (native, adapted, authored):
         if accepted:
             await candidate.invoke(arguments={"value": value})
         else:
             with pytest.raises(TypeError):
                 await candidate.invoke(arguments={"value": value})
     if accepted:
-        assert len(calls) == 4
-        assert calls == [calls[0]] * 4
+        assert len(calls) == 3
+        assert calls == [calls[0]] * 3
     else:
         assert calls == []
 
@@ -76,7 +102,7 @@ async def test_python_normalized_operands_match_raw_and_authored_maf(
 @pytest.mark.parametrize(
     "value", ["2026-10-06", "12345678-1234-5678-1234-567812345678", "invalid"]
 )
-async def test_supplied_raw_string_schema_keeps_maf_no_coercion_semantics(annotation, value):
+async def test_supplied_string_schema_keeps_maf_no_coercion_semantics(annotation, value):
     from agent_framework import FunctionTool
 
     calls = []
@@ -86,17 +112,18 @@ async def test_supplied_raw_string_schema_keeps_maf_no_coercion_semantics(annota
         return "accepted"
 
     echo.__annotations__ = {"value": annotation}
-    native = FunctionTool(
-        name="echo", description="Echo", func=echo,
-        input_model={
+    schema = {
             "properties": {
                 "value": {"type": "string", "format": "date" if annotation is date else "uuid"}
             },
             "required": ["value"],
-        },
+        }
+    descriptor = ToolDescriptor.create(
+        name="echo", description="Echo", func=echo, parameters=schema,
     )
+    native = FunctionTool(name="echo", description="Echo", func=echo, input_model=schema)
     await native.invoke(arguments={"value": value})
-    assert await describe_maf_tool(native).invoke(arguments={"value": value}) == "accepted"
+    assert await descriptor.invoke(arguments={"value": value}) == "accepted"
     assert calls == [value, value]
 
 
@@ -148,7 +175,7 @@ async def test_explicit_author_model_matches_real_built_maf_tool(annotation, val
         ({"type": ["unknown", "integer"]}, "other"),
     ],
 )
-async def test_raw_maf_schema_acceptance_is_preserved_at_neutral_invocation(rule, value):
+async def test_maf_schema_acceptance_is_preserved_at_neutral_invocation(rule, value):
     from agent_framework import FunctionTool
 
     calls = []
@@ -157,18 +184,16 @@ async def test_raw_maf_schema_acceptance_is_preserved_at_neutral_invocation(rule
         calls.append(value)
         return "accepted"
 
-    native = FunctionTool(
-        name="echo", description="Echo",
-        func=echo,
-        input_model={
+    schema = {
             "type": "object", "properties": {"value": rule},
             "required": ["value"], "additionalProperties": False,
-        },
+        }
+    descriptor = ToolDescriptor.create(
+        name="echo", description="Echo", func=echo, parameters=schema,
     )
+    native = FunctionTool(name="echo", description="Echo", func=echo, input_model=schema)
     result = await native.invoke(arguments={"value": value})
     assert [item.text for item in result] == ["accepted"]
-    descriptor = describe_maf_tool(native)
-    assert descriptor.policy.maf_only_options == ()
     assert await descriptor.invoke(arguments={"value": value}) == "accepted"
     assert calls == [value, value]
 
@@ -178,18 +203,17 @@ async def test_raw_maf_schema_acceptance_is_preserved_at_neutral_invocation(rule
     "arguments",
     [{}, {"value": "1"}, {"value": True}, {"value": 1, "extra": 2}, {"value": 3}],
 )
-async def test_raw_maf_top_level_rejections_match_neutral_invocation(arguments):
-    from agent_framework import FunctionTool
+async def test_maf_top_level_rejections_match_neutral_invocation(arguments):
 
     calls = []
-    native = FunctionTool(
-        name="echo", description="Echo", func=lambda value: calls.append(value),
-        input_model={
+    schema = {
             "properties": {"value": {"type": "integer", "enum": [1, 2]}},
             "required": ["value"], "additionalProperties": False,
-        },
+        }
+    descriptor = ToolDescriptor.create(
+        name="echo", description="Echo", func=lambda value: calls.append(value), parameters=schema,
     )
-    descriptor = describe_maf_tool(native)
+    native = build_maf_tools([descriptor])[0]
     with pytest.raises(TypeError):
         await native.invoke(arguments=arguments)
     with pytest.raises(TypeError):

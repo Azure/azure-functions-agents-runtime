@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..._tool_descriptor import is_harness_object
 from ..._tool_result import tool_result_text as _ordinary_tool_result_text
 
 if TYPE_CHECKING:
@@ -17,21 +18,14 @@ if TYPE_CHECKING:
 
 _NATIVE_TOOL_FAILURE = '{"error":"Native tool failed or was denied."}'
 _REDACTED = "[REDACTED]"
-_HARNESS_RESULT_MODULES = ("agent_framework", "copilot")
-
-
-def _reject_harness_result(value: Any) -> None:
-    if any(
-        base.__module__ == module or base.__module__.startswith(f"{module}.")
-        for base in type(value).__mro__
-        for module in _HARNESS_RESULT_MODULES
-    ):
+def _reject_harness_result(value: object) -> None:
+    if is_harness_object(value):
         raise TypeError(
             "Copilot custom tools must return ordinary Python values, not harness SDK objects."
         )
 
 
-def tool_result_text(result: Any) -> str:
+def tool_result_text(result: object) -> str:
     """Preserve ordinary text, empty, and JSON tool-result representations."""
     return _ordinary_tool_result_text(result, validate_result=_reject_harness_result)
 

@@ -5,7 +5,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast, get_type_hints
+from typing import Any, get_type_hints
 
 from pydantic import BaseModel
 
@@ -16,7 +16,7 @@ from .._function_tool import (
     tool,
 )
 from .._logger import logger
-from .._tool_descriptor import ToolDescriptor, _is_maf_tool, describe_tool
+from .._tool_descriptor import ToolDescriptor, is_harness_object, warn_unsupported_tool
 
 type _CachedProjectTools = tuple[tuple[ToolDescriptor, ...], tuple[WorkflowTool, ...]]
 
@@ -81,27 +81,23 @@ def _is_workflow_marked(obj: object) -> bool:
 
 
 def _workflow_tool_from_member(module_name: str, name: str, obj: object) -> WorkflowTool | None:
-    metadata = get_workflow_tool_metadata(obj)
     handler: Callable[..., Any] | None = None
     default_tool_name = name
     default_description = ""
 
     if isinstance(obj, ToolDescriptor):
+        metadata = get_workflow_tool_metadata(obj)
         default_tool_name = obj.name
         default_description = obj.description
         handler = obj.func
         if metadata is None and handler is not None:
             metadata = get_workflow_tool_metadata(handler)
-    elif _is_maf_tool(obj):
-        descriptor = describe_tool(cast("Callable[..., Any]", obj))
-        default_tool_name = descriptor.name
-        default_description = descriptor.description
-        handler = descriptor.func
-        if metadata is None:
-            metadata = get_workflow_tool_metadata(handler)
     elif inspect.isfunction(obj) and obj.__module__ == module_name:
+        metadata = get_workflow_tool_metadata(obj)
         handler = obj
         default_description = (obj.__doc__ or "").strip()
+    else:
+        return None
 
     if metadata is None:
         return None
@@ -165,33 +161,34 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
 
-            picked: ToolDescriptor | None = None
+            members = []
             for name, obj in inspect.getmembers(module):
                 if name.startswith("_"):
                     continue
+                if is_harness_object(obj):
+                    warn_unsupported_tool()
+                    continue
+                members.append((name, obj))
+
+            picked: ToolDescriptor | None = None
+            for name, obj in members:
                 workflow_candidate = _workflow_tool_from_member(module_name, name, obj)
                 if workflow_candidate is not None:
                     workflow_tools.append(workflow_candidate)
 
-            for name, obj in inspect.getmembers(module):
-                if name.startswith("_"):
-                    continue
+            for _name, obj in members:
                 if isinstance(obj, ToolDescriptor):
                     picked = obj
                     logger.debug("Loaded tool %s", obj.name)
-                    break
-                if _is_maf_tool(obj):
-                    picked = describe_tool(cast("Callable[..., Any]", obj))
-                    logger.debug("Loaded legacy MAF tool %s", picked.name)
                     break
 
             # Fallback: first plain function defined in the module.
             if picked is None:
                 local_functions = [
                     (name, obj)
-                    for name, obj in inspect.getmembers(module, inspect.isfunction)
-                    if obj.__module__ == module_name
-                    and not name.startswith("_")
+                    for name, obj in members
+                    if inspect.isfunction(obj)
+                    and obj.__module__ == module_name
                     and not _is_workflow_marked(obj)
                 ]
                 if local_functions:

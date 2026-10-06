@@ -30,7 +30,7 @@ from ...registration.catalog import AgentCatalog
 from .. import _harness_execution
 from .._harness_binding import AppHarness, ExecutionRole, HarnessRequest
 from .._history_identity import validate_agent_slug
-from ._maf_tools import FunctionTool, build_maf_tools
+from ._maf_tools import build_maf_tools
 
 if TYPE_CHECKING:
     from agent_framework import (
@@ -39,6 +39,7 @@ if TYPE_CHECKING:
         AgentResponseUpdate,
         AgentSession,
         Content,
+        FunctionTool,
         HistoryProvider,
         MCPStreamableHTTPTool,
         Message,

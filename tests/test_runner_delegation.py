@@ -32,12 +32,13 @@ from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
-from agent_framework import AgentResponse, MCPStreamableHTTPTool, Message, tool
+from agent_framework import AgentResponse, MCPStreamableHTTPTool, Message
 
 import azure_functions_agents._observability as obs
 import azure_functions_agents.runner as runner
+from azure_functions_agents._function_tool import tool
 from azure_functions_agents._function_tool import tool as runtime_tool
-from azure_functions_agents._tool_descriptor import ToolDescriptor, describe_tool
+from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.client_manager import (
     ClientManager,
     InferenceTarget,
@@ -334,7 +335,7 @@ def test_assemble_agent_inputs_for_delegated_role_has_only_its_own_tools() -> No
     user_tool = _static_tool("own_user_tool")
     mcp_tool = _mcp_descriptor("own_mcp_tool")
 
-    resolved_tools, instructions = runner._assemble_agent_inputs(
+    resolved_tools, instructions = maf.assemble_agent_inputs(
         instructions="be a specialist",
         tools=[user_tool],
         mcp_tools=[mcp_tool],
@@ -384,7 +385,7 @@ def test_assemble_agent_inputs_for_direct_role_has_full_tool_superset(
         _build_workflow_tools,
     )
 
-    resolved_tools, _ = runner._assemble_agent_inputs(
+    resolved_tools, _ = maf.assemble_agent_inputs(
         instructions="be a coordinator",
         tools=[user_tool],
         mcp_tools=[mcp_tool],
@@ -1353,7 +1354,7 @@ async def test_real_maf_agent_run_raises_on_expanded_mcp_function_collision() ->
     mcp_server = _FakeMCPServerWithExpandedFunctions("delegate_billing")
     delegate_tool = tool(lambda: "ignored", name="delegate_billing")
 
-    resolved_tools = [mcp_server, *build_maf_tools((describe_tool(delegate_tool),))]
+    resolved_tools = [mcp_server, *build_maf_tools((delegate_tool,))]
     agent = maf._build_role_agent(
         _RunnableFakeChatClient(),
         agent_instructions="be a coordinator",

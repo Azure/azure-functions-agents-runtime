@@ -14,8 +14,8 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from azure_functions_agents import runner
-from azure_functions_agents._function_tool import FunctionTool
-from azure_functions_agents._tool_descriptor import ToolDescriptor, describe_tool
+from azure_functions_agents._function_tool import tool
+from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.client_manager import (
     ClientManager,
@@ -320,7 +320,7 @@ def test_direct_preview_keeps_other_roles_and_surfaces_rejected(preview):
 def test_direct_preview_accepts_explicit_host_system_tools(preview):
     resolved, capabilities = _sample()
     capabilities = replace(
-        capabilities, web_request_tools=[FunctionTool(name="web_request", func=lambda url: url)]
+        capabilities, web_request_tools=[tool(name="web_request")(lambda url: url)]
     )
     resolved = resolved.model_copy(update={
         "sandbox_config": DynamicSessionsCodeInterpreterConfig(
@@ -368,22 +368,21 @@ def test_sandbox_name_collision_fails_during_registration(preview):
     })
     capabilities = replace(
         capabilities,
-        filtered_user_tools=[FunctionTool(name="execute_python", func=lambda code: code)],
+        filtered_user_tools=[tool(name="execute_python")(lambda code: code)],
     )
     with pytest.raises(UnsupportedCapabilityError, match="unique custom tool names"):
         _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
 
 
-def test_maf_keeps_tool_objects_that_copilot_cannot_adapt(tmp_path):
+def test_maf_keeps_authored_options_that_copilot_cannot_adapt(tmp_path):
     resolved, capabilities = _sample()
-    maf_only = FunctionTool(name="bounded", func=lambda: "ok", max_invocations=1)
-    descriptor = describe_tool(maf_only)
+    descriptor = tool(name="bounded", max_invocations=1)(lambda: "ok")
     capabilities = replace(capabilities, filtered_user_tools=(descriptor,))
 
     _harness.validate_agent(AppHarness(HarnessKind.MAF, tmp_path), resolved, capabilities)
 
     assert capabilities.filtered_user_tools == (descriptor,)
-    assert build_maf_tools(capabilities.filtered_user_tools) == [maf_only]
+    assert build_maf_tools(capabilities.filtered_user_tools)[0].max_invocations == 1
 
 
 def test_maf_only_configuration_is_not_silently_discarded(preview):
@@ -418,12 +417,12 @@ def test_standalone_output_limit_fails_before_native_execution(preview, monkeypa
     {"max_invocation_exceptions": 1},
     {"approval_mode": "always_require"},
     {"result_parser": str},
-    {"func": None},
+    {"kind": "custom"},
 ])
 def test_unsupported_tool_policies_are_not_silently_lost(policy):
-    options = {"name": "bounded", "func": lambda value: value, **policy}
-    with pytest.raises(UnsupportedCapabilityError, match="simple FunctionTool"):
-        _preview.prepare_tools([FunctionTool(**options)])
+    descriptor = tool(name="bounded", **policy)(lambda value: value)
+    with pytest.raises(UnsupportedCapabilityError, match="runtime @tool"):
+        _preview.prepare_tools([descriptor])
 
 
 def test_direct_preview_forks_before_maf_construction_or_blob(preview, monkeypatch):
@@ -522,9 +521,9 @@ def test_maf_standalone_does_not_discover_unrequested_skills(tmp_path, monkeypat
 
 
 def test_direct_preview_composes_host_tools_in_maf_order(preview, monkeypatch):
-    user = FunctionTool(name="user_tool", func=lambda: "user")
-    sandbox = FunctionTool(name="execute_python", func=lambda code: code)
-    web = FunctionTool(name="web_request", func=lambda url: url)
+    user = tool(name="user_tool")(lambda: "user")
+    sandbox = tool(name="execute_python")(lambda code: code)
+    web = tool(name="web_request")(lambda url: url)
     invoke = AsyncMock(return_value=runner.AgentResult("public-id", "native reply"))
     monkeypatch.setattr(_copilot, "run", invoke)
     result = asyncio.run(runner.run_agent(
@@ -538,7 +537,7 @@ def test_direct_preview_composes_host_tools_in_maf_order(preview, monkeypatch):
 def test_combined_tool_collision_fails_before_native_startup(preview, monkeypatch):
     invoke = AsyncMock()
     monkeypatch.setattr(_copilot, "run", invoke)
-    duplicate = FunctionTool(name="web_request", func=lambda: "duplicate")
+    duplicate = tool(name="web_request")(lambda: "duplicate")
     with pytest.raises(UnsupportedCapabilityError, match="unique custom tool names"):
         asyncio.run(runner.run_agent(
             "hello", tools=[duplicate], mcp_tools=[], web_request_tools=[duplicate],
@@ -672,7 +671,7 @@ def test_copilot_sandbox_tool_uses_public_http_session_id(preview, monkeypatch):
     requests = []
 
     def build_sandbox(_resolved, session_id):
-        return [FunctionTool(name="execute_python", func=lambda code: f"{session_id}:{code}")]
+        return [tool(name="execute_python")(lambda code: f"{session_id}:{code}")]
 
     async def invoke(_selected, request):
         requests.append(request)

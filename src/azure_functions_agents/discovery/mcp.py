@@ -58,6 +58,7 @@ class MCPServerDescriptor:
         scope = auth_scope.strip() if auth_scope is not None else None
         if scope == "":
             logger.warning("MCP server auth requires a non-empty 'scope'")
+            scope = None
         return cls(
             name=name,
             url=url,

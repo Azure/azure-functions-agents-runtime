@@ -446,8 +446,8 @@ def test_discover_undefined_url_variable_is_skipped(
     [
         (None, None, None),
         ([], None, None),
-        ({}, "", None),
-        ({"scope": " \t "}, "", None),
+        ({}, None, None),
+        ({"scope": " \t "}, None, None),
         ({"scope": " https://resource.example/.default "}, "https://resource.example/.default", None),
         (
             {"scope": "https://resource.example/.default", "client_id": " client-123 "},
@@ -507,8 +507,11 @@ def test_discovery_substitutes_auth_inputs(
 
 @pytest.mark.parametrize("auth", [{}, {"scope": ""}, {"scope": " \t "}])
 def test_discover_mcp_servers_auth_without_scope_keeps_static_headers_and_warning(
-    auth: dict[str, str], tmp_path: Path, caplog: pytest.LogCaptureFixture
+    auth: dict[str, str], tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    forbidden = Mock(side_effect=AssertionError("Blank MCP scope must not acquire a credential"))
+    monkeypatch.setattr(mcp_auth, "_build_mcp_credential", forbidden)
     _write_mcp_config(
         tmp_path, {"url": "https://example.com/mcp", "headers": {"X-Test": "yes"}, "auth": auth}
     )
@@ -518,11 +521,12 @@ def test_discover_mcp_servers_auth_without_scope_keeps_static_headers_and_warnin
         assert mcp_auth.materialize_mcp_headers(server) == {"X-Test": "yes"}
         assert mcp_auth.materialize_mcp_headers(server) == {"X-Test": "yes"}
 
-    assert server.auth_scope == ""
+    assert server.auth_scope is None
     assert server.headers == (("X-Test", "yes"),)
     assert [record.getMessage() for record in caplog.records] == [
         "MCP server auth requires a non-empty 'scope'"
     ]
+    forbidden.assert_not_called()
 
 
 def test_discover_does_not_substitute_server_name_keys(

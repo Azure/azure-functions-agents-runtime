@@ -486,9 +486,12 @@ def reverse_string(text: str) -> str:
 The runtime's ordinary `@tool` produces an SDK-free descriptor. Functions can be
 sync or async; signature types and Pydantic schemas supply input validation, and
 the selected harness adapts the descriptor to its SDK. Tools return ordinary
-Python values. Existing raw `agent_framework.FunctionTool` extensions and
-MAF-only decorator keyword arguments remain MAF compatibility surfaces;
-unsupported extensions fail explicitly on the Copilot preview.
+Python values. Custom tools must use this runtime's `@tool`, or be local public
+functions in `tools/` (the first candidate per module is selected, preferring
+decorated tools). Raw `agent_framework.FunctionTool`, SDK decorators/objects,
+and undecorated functions passed programmatically are ignored with a warning.
+MAF-specific `@tool` keyword arguments pass to MAF for SDK-owned validation;
+unsupported authored options fail explicitly on the Copilot preview.
 
 Dynamic Workflow tools live in the same `tools/` directory but must opt in
 explicitly with `@workflow_tool` so they can run safely as Durable

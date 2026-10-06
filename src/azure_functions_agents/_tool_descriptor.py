@@ -8,15 +8,17 @@ import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from types import MethodType
-from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Literal, cast, get_args, get_origin, get_type_hints
 
 from pydantic import BaseModel, Field, ValidationError, create_model
 
 import azure_functions_agents as _package
 
+from ._logger import logger
+
 type ApprovalMode = Literal["always_require", "never_require"]
 type ToolCallable = Callable[..., Any]
-type ToolInput = ToolDescriptor | ToolCallable
+type ToolInput = object
 
 _JSON_PARAMETER_TYPES: dict[str, type[object] | tuple[type[object], ...]] = {
     "string": str,
@@ -93,11 +95,9 @@ class WorkflowTool:
 
 @dataclass(frozen=True)
 class ToolPolicy:
-    """Authoring policy, including an opaque reference to MAF-only extensions."""
+    """Harness-neutral authoring policy."""
 
     approval_mode: ApprovalMode = "never_require"
-    maf_only_options: tuple[str, ...] = ()
-    maf_compatibility_key: str | None = field(default=None, repr=False)
 
 
 def _parameter_annotation(annotation: Any) -> Any:
@@ -173,6 +173,7 @@ class ToolDescriptor:
     input_model_is_explicit: bool = False
     policy: ToolPolicy = field(default_factory=ToolPolicy)
     workflow_metadata: WorkflowToolMetadata | None = field(default=None, repr=False)
+    maf_options: tuple[tuple[str, Any], ...] = field(default=(), repr=False)
     _parameters_json: str = field(default="{}", repr=False)
 
     @classmethod
@@ -212,8 +213,8 @@ class ToolDescriptor:
         self, *, arguments: dict[str, Any], tool_call_id: str | None = None
     ) -> Any:
         """Validate arguments before calling once and awaiting at most once."""
-        if self.policy.maf_only_options:
-            raise TypeError("This tool requires the MAF compatibility adapter.")
+        if self.maf_options or requires_maf_context(self.func):
+            raise TypeError("This tool requires the MAF adapter.")
         values = dict(arguments)
         if self.input_model is not None:
             try:
@@ -242,25 +243,26 @@ class ToolDescriptor:
         return self
 
 
-def _is_maf_tool(candidate: object) -> bool:
-    """Recognize the legacy extension seam without importing its SDK."""
+def is_harness_object(candidate: object) -> bool:
+    """Recognize SDK-owned values without inspecting their attributes."""
     return any(
-        base.__name__ == "FunctionTool" and base.__module__.startswith("agent_framework")
+        base.__module__.split(".", 1)[0] in {"agent_framework", "copilot"}
         for base in type(candidate).__mro__
     )
 
 
-def describe_tool(candidate: ToolInput) -> ToolDescriptor:
-    if isinstance(candidate, ToolDescriptor):
-        return candidate
-    if _is_maf_tool(candidate):
-        from .harness.agent_framework._maf_tools import describe_maf_tool
-
-        return describe_maf_tool(candidate)
-    from ._function_tool import tool
-
-    return tool(candidate)
+def warn_unsupported_tool() -> None:
+    logger.warning(
+        "Ignoring unsupported custom tool; use the runtime @tool decorator "
+        "or a local public function in tools/."
+    )
 
 
 def describe_tools(candidates: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
-    return tuple(describe_tool(candidate) for candidate in candidates)
+    tools: list[ToolDescriptor] = []
+    for candidate in candidates:
+        if issubclass(type(candidate), ToolDescriptor):
+            tools.append(cast(ToolDescriptor, candidate))
+        else:
+            warn_unsupported_tool()
+    return tuple(tools)

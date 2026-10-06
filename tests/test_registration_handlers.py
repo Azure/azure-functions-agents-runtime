@@ -529,7 +529,7 @@ def test_trigger_handlers_forward_selected_descriptors_and_full_skill_metadata(
         assert request["mcp_tools"] == (server,)
         assert request["skills"] == (approved,)
         assert request["skill_catalog"] == (approved, excluded)
-        assert request["skill_paths"] == (approved.path,)
+        assert "skill_paths" not in request
         assert request["_harness"] is capabilities._harness
 
 

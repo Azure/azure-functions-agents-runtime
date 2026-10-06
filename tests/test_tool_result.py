@@ -40,7 +40,8 @@ class _StringResult(str):
 @pytest.mark.parametrize(
     "value",
     [
-        None, "text", 1, True, date(2026, 10, 6),
+        None, "text", 1, True, float("nan"), float("inf"), float("-inf"),
+        {"values": [float("nan"), float("inf")]}, date(2026, 10, 6),
         _MappingResult(), _TextResult(), _NonTextResult(),
         _ModelResult(observed_on=date(2026, 10, 6)),
         [_TextResult(), {"nested": _MappingResult()}],

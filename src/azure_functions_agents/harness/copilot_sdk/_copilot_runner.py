@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -88,6 +89,7 @@ class _CopilotHarnessRunner:
             agent_configuration=configuration,
             deadline=deadline,
         )
+        request = replace(request, tools=_copilot_preview.prepare_tools(request.tools))
         return await _copilot_execution.run(self._harness, request)
 
     def run_agent_stream(

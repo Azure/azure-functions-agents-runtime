@@ -348,7 +348,7 @@ async def test_tool_adapter_runs_sync_and_async_callables(is_async):
             effects.append(value)
             return f"sync:{value}"
 
-    [function] = _preview.prepare_tools([candidate])
+    [function] = _preview.prepare_tools([tool(candidate)])
     result, calls = await _invoke_native_tool(function, {"value": "ok"})
 
     assert result.result_type == "success"

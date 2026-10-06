@@ -59,6 +59,10 @@ def test_ordinary_custom_results_match_public_maf_default_parser(value):
     ("value", "expected"),
     [
         (None, ""),
+        (float("nan"), "NaN"),
+        (float("inf"), "Infinity"),
+        (float("-inf"), "-Infinity"),
+        ({"values": [float("nan"), float("inf")]}, '{"values": [NaN, Infinity]}'),
         ("ordinary text", "ordinary text"),
         ({"message": "café", "values": [1, True, None]}, '{"message": "caf\\u00e9", "values": [1, true, null]}'),
         ([1, {"ok": True}], '[1, {"ok": true}]'),

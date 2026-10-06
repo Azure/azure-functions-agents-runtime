@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gc
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import Any
@@ -15,7 +14,7 @@ from azure_functions_agents._function_tool import (
     tool,
     workflow_tool,
 )
-from azure_functions_agents._tool_descriptor import ToolDescriptor, describe_tool
+from azure_functions_agents._tool_descriptor import ToolDescriptor, describe_tools
 from azure_functions_agents.config.schema import AgentConfiguration
 from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness._harness_binding import (
@@ -41,7 +40,6 @@ def test_ordinary_authoring_never_constructs_maf_wrapper(monkeypatch: pytest.Mon
     assert type(local) is ToolDescriptor
     assert local.name == "lookup"
     assert local.description == "Authored description"
-    assert local.policy.maf_compatibility_key is None
     assert local.parameters()["properties"]["value"]["type"] == "integer"
 
 
@@ -114,13 +112,22 @@ async def test_maf_adapter_does_not_add_an_extra_pydantic_validation_pass() -> N
     assert effects == ["ok"]
 
 
-def test_raw_simple_maf_input_models_are_copied_to_neutral_validation() -> None:
+def test_raw_maf_input_models_never_enter_neutral_inventory() -> None:
     raw = _maf_tools.FunctionTool(name="raw", func=lambda value: value)
-    descriptor = describe_tool(raw)
+    assert describe_tools((raw,)) == ()
 
-    assert descriptor.input_model.__module__ == "azure_functions_agents._tool_descriptor"
-    assert descriptor.parameters() == raw.parameters()
-    assert _maf_tools.build_maf_tools((descriptor,))[0] is raw
+
+def test_runtime_decorators_never_wrap_or_inspect_raw_sdk_tools(caplog) -> None:
+    class OpaqueSDKTool(_maf_tools.FunctionTool):
+        def __getattribute__(self, name):
+            raise AssertionError("No SDK attribute introspection")
+
+    raw = object.__new__(OpaqueSDKTool)
+    assert tool(raw) is raw
+    assert workflow_tool(raw) is raw
+    assert get_workflow_tool_metadata(raw) is None
+    assert describe_tools((raw,)) == ()
+    assert "Ignoring unsupported custom tool" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -135,26 +142,20 @@ async def test_maf_only_options_retain_sdk_limits_without_entering_neutral_reque
     with pytest.raises(UnsupportedCapabilityError):
         prepare_tools((bounded,))
     [first] = _maf_tools.build_maf_tools((bounded,))
-    [second] = _maf_tools.build_maf_tools((bounded,))
-    assert first is second
     assert await first.invoke(arguments={"value": "first"}, skip_parsing=True) == "first"
     with pytest.raises(Exception, match="maximum invocation limit"):
-        await second.invoke(arguments={"value": "second"}, skip_parsing=True)
+        await first.invoke(arguments={"value": "second"}, skip_parsing=True)
     assert calls == ["first"]
 
 
-def test_raw_maf_subclass_stays_in_compatibility_layer() -> None:
+def test_raw_maf_subclass_is_ignored_by_both_adapters() -> None:
     class CustomTool(_maf_tools.FunctionTool):
         pass
 
     raw = CustomTool(name="custom", func=lambda value: value)
-    descriptor = describe_tool(raw)
-
-    assert type(descriptor) is ToolDescriptor
-    assert descriptor.policy.maf_only_options == ("custom tool class",)
-    assert _maf_tools.build_maf_tools((descriptor,)) == [raw]
-    with pytest.raises(UnsupportedCapabilityError):
-        prepare_tools((descriptor,))
+    assert describe_tools((raw,)) == ()
+    assert _maf_tools.build_maf_tools(describe_tools((raw,))) == []
+    assert prepare_tools((raw,)) == ()
 
 
 def test_authored_approval_is_preserved_for_maf_and_rejected_by_preview() -> None:
@@ -166,68 +167,29 @@ def test_authored_approval_is_preserved_for_maf_and_rejected_by_preview() -> Non
         prepare_tools((descriptor,))
 
 
-@pytest.mark.parametrize("raw", [False, True])
-def test_legacy_tool_registry_releases_thousand_declarations(raw: bool) -> None:
-    gc.collect()
-    baseline = set(_maf_tools._LEGACY_TOOLS)
-
-    def echo(value: str) -> str:
-        return value
-
-    descriptors = [
-        (
-            describe_tool(_maf_tools.FunctionTool(name=f"raw_{index}", func=echo, max_invocations=1))
-            if raw
-            else tool(echo, name=f"runtime_{index}", max_invocations=1)
-        )
-        for index in range(1000)
-    ]
-    assert len(_maf_tools._LEGACY_TOOLS) == len(baseline) + 1000
-    del descriptors
-    gc.collect()
-    assert set(_maf_tools._LEGACY_TOOLS) == baseline
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("raw", [False, True])
-async def test_legacy_tool_policy_owns_state_across_descriptor_copies(raw: bool) -> None:
+async def test_authored_options_survive_descriptor_and_workflow_copies() -> None:
     calls: list[str] = []
 
     def echo(value: str) -> str:
         calls.append(value)
         return value
 
-    sdk_tool = _maf_tools.FunctionTool(name="raw", func=echo, max_invocations=1) if raw else None
-    descriptor = describe_tool(sdk_tool) if raw else tool(echo, max_invocations=1)
+    descriptor = tool(echo, max_invocations=1)
     copied = replace(descriptor)
     workflow_copy = workflow_tool(name="activity")(descriptor)
-    key = descriptor.policy.maf_compatibility_key
-    assert copied.policy is descriptor.policy
-    assert workflow_copy.policy is descriptor.policy
-    del descriptor
-    gc.collect()
-
-    [first] = _maf_tools.build_maf_tools((copied,))
-    [second] = _maf_tools.build_maf_tools((workflow_copy,))
-    assert first is second
-    if raw:
-        assert first is sdk_tool
-    assert await first.invoke(arguments={"value": "first"}, skip_parsing=True) == "first"
-    with pytest.raises(Exception, match="maximum invocation limit"):
-        await second.invoke(arguments={"value": "second"}, skip_parsing=True)
-    assert calls == ["first"]
-    del copied
-    gc.collect()
-    assert key in _maf_tools._LEGACY_TOOLS
-    assert _maf_tools.build_maf_tools((workflow_copy,))[0] is first
-    del workflow_copy
-    gc.collect()
-    assert key not in _maf_tools._LEGACY_TOOLS
+    assert copied.maf_options == workflow_copy.maf_options == (("max_invocations", 1),)
+    for declaration in (copied, workflow_copy):
+        [wrapped] = _maf_tools.build_maf_tools((declaration,))
+        assert await wrapped.invoke(arguments={"value": "first"}, skip_parsing=True) == "first"
+        with pytest.raises(Exception, match="maximum invocation limit"):
+            await wrapped.invoke(arguments={"value": "second"}, skip_parsing=True)
+    assert calls == ["first", "first"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", [False, True])
-async def test_legacy_tool_materializes_the_live_bound_descriptor(asynchronous: bool) -> None:
+async def test_authored_options_materialize_the_live_bound_descriptor(asynchronous: bool) -> None:
     class Service:
         def __init__(self, name: str) -> None:
             self.name = name
@@ -241,11 +203,8 @@ async def test_legacy_tool_materializes_the_live_bound_descriptor(asynchronous: 
     descriptor = tool(Service.async_echo if asynchronous else Service.echo, max_invocations=1)
     first_bound = descriptor.__get__(Service("A"), Service)
     second_bound = descriptor.__get__(Service("B"), Service)
-    key = descriptor.policy.maf_compatibility_key
     assert first_bound.policy is descriptor.policy
     assert second_bound.policy is descriptor.policy
-    del descriptor
-    gc.collect()
     first, second = _maf_tools.build_maf_tools((first_bound, second_bound))
     assert first is not second
     assert await first.invoke(arguments={"value": "ok"}, skip_parsing=True) == "A:ok"
@@ -256,27 +215,46 @@ async def test_legacy_tool_materializes_the_live_bound_descriptor(asynchronous: 
     [fresh] = _maf_tools.build_maf_tools((first_bound,))
     assert fresh is not first
     assert await fresh.invoke(arguments={"value": "fresh"}, skip_parsing=True) == "A:fresh"
-    assert _maf_tools._LEGACY_TOOLS[key].tool is None
-    del first_bound, second_bound
-    gc.collect()
-    assert key not in _maf_tools._LEGACY_TOOLS
 
 
 @pytest.mark.asyncio
-async def test_raw_bound_maf_tool_retains_sdk_identity_and_counters() -> None:
-    class Service:
-        def echo(self, value: str) -> str:
-            return f"raw:{value}"
+async def test_maf_validates_and_honors_authored_result_parser_and_extension_options() -> None:
+    descriptor = tool(
+        lambda: {"value": "ok"}, name="parsed", result_parser=lambda value: value["value"],
+        additional_properties={"authored": True}, kind="custom", max_invocation_exceptions=2,
+    )
+    [wrapped] = _maf_tools.build_maf_tools((descriptor,))
+    assert [item.text for item in await wrapped.invoke(arguments={})] == ["ok"]
+    assert wrapped.additional_properties == {"authored": True}
+    assert wrapped.kind == "custom"
+    assert wrapped.max_invocation_exceptions == 2
+    for option in ("max_invocations", "max_invocation_exceptions"):
+        invalid = tool(lambda: "ok", name="invalid", **{option: 0})
+        with pytest.raises(ValueError, match="must be at least 1"):
+            _maf_tools.build_maf_tools((invalid,))
 
-    raw = _maf_tools.FunctionTool(name="raw_bound", func=Service().echo, max_invocations=1)
-    descriptor = describe_tool(raw)
-    [first] = _maf_tools.build_maf_tools((descriptor,))
-    [second] = _maf_tools.build_maf_tools((replace(descriptor),))
-    assert first is raw
-    assert second is raw
-    assert await first.invoke(arguments={"value": "ok"}, skip_parsing=True) == "raw:ok"
-    with pytest.raises(Exception, match="maximum invocation limit"):
-        await second.invoke(arguments={"value": "again"}, skip_parsing=True)
+
+@pytest.mark.asyncio
+async def test_maf_owns_authored_invocation_context_injection() -> None:
+    from agent_framework import FunctionInvocationContext
+
+    contexts = []
+
+    def contextual(value, context):
+        contexts.append(context)
+        return value
+
+    contextual.__annotations__ = {"value": str, "context": FunctionInvocationContext}
+    descriptor = tool(contextual)
+    assert "context" not in descriptor.parameters()["properties"]
+    with pytest.raises(UnsupportedCapabilityError):
+        prepare_tools((descriptor,))
+    [wrapped] = _maf_tools.build_maf_tools((descriptor,))
+    context = FunctionInvocationContext(wrapped, {"value": "ok"})
+    assert await wrapped.invoke(
+        arguments={"value": "ok"}, context=context, skip_parsing=True,
+    ) == "ok"
+    assert contexts == [context]
 
 
 @pytest.mark.asyncio

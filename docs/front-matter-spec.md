@@ -234,12 +234,7 @@ With the default MAF harness, execution applies whenever an agent runs directly,
 as a chat-time delegated specialist, or as a Workflow Sub Agent. Direct runs
 retain authoritative full Blob/File history while compaction
 bounds only the message context sent to the model. Specialist runs remain fresh, single-task leaf
-executions with no nested delegation or persistent history. Harness instructions are empty, and the
-runtime disables todo, plan/execute mode, file memory, web search, and automatic tool approval;
-these controls are intentionally not author-configurable. For configured skills,
-MAF's `load_skill` / `read_skill_resource` tools remain noninteractive, with the
-existing nested resource recursion. Copilot's native helper support does not
-establish MAF file-script support.
+executions with no nested delegation or persistent history.
 
 On the experimental Copilot opt-in (`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`), a non-null effective
 `max_context_window_tokens` is rejected before inference rather than mapped to a different threshold;
@@ -694,9 +689,12 @@ thread. The Durable orchestrator continues to use `yield`.
 For a handler that also uses `@tool(schema=Params)`, the runtime converts the
 dictionary to the Pydantic model before it calls the handler.
 
-Normal custom tools keep their existing behavior. Plain public functions and
-ordinary `@tool` values in `tools/*.py` produce neutral normal-tool metadata;
-legacy `FunctionTool` extensions remain MAF-only compatibility surfaces.
+Normal custom tools use the runtime's `@tool` or local public functions in
+`tools/*.py`. Discovery selects the first candidate per module, preferring
+runtime `@tool` descriptors. Raw `FunctionTool`, SDK decorators/objects, and
+undecorated programmatic functions outside discovery are ignored with a
+sanitized warning. MAF-specific runtime `@tool` keyword arguments are validated
+and applied by MAF; unsupported authored options fail explicitly on Copilot.
 `@workflow_tool` marks a callable for workflow execution. Use both decorators
 when a callable should be available both directly in chat and inside workflow
 tasks; either decorator order is supported. This does not enable workflow roles

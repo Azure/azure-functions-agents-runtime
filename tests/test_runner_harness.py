@@ -56,6 +56,62 @@ def test_agent_result_preserves_existing_positional_argument_order() -> None:
     assert result.model == "unknown"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+async def test_both_bound_runners_ignore_unsupported_values_before_execution(
+    kind, monkeypatch, caplog,
+):
+    from agent_framework import FunctionTool
+
+    from azure_functions_agents.harness.copilot_sdk import _copilot_execution
+
+    calls = []
+
+    def undecorated() -> str:
+        calls.append("unsupported")
+        return "ignored"
+
+    @tool
+    def authored() -> str:
+        return "allowed"
+
+    raw = FunctionTool(name="private-raw-name", func=undecorated, max_invocations=1)
+    harness = AppHarness(kind, Path.cwd(), default_model="fixture-model")
+    invoke = AsyncMock(return_value=runner.AgentResult("session", "captured"))
+    backend = maf if kind is HarnessKind.MAF else _copilot_execution
+    monkeypatch.setattr(backend, "run", invoke)
+    result = await runner.run_agent(
+        "fixture", tools=[raw, undecorated, authored], mcp_tools=[],
+        sandbox_tools=[raw, undecorated], web_request_tools=[raw, undecorated],
+        _harness=harness,
+    )
+    assert result.content == "captured"
+    request = invoke.call_args.args[1]
+    assert request.tools == (authored,)
+    assert calls == []
+    assert "Ignoring unsupported custom tool" in caplog.text
+    assert "private-raw-name" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_copilot_backend_rejects_authored_maf_options_before_effects(monkeypatch):
+    from azure_functions_agents.harness._harness_binding import UnsupportedCapabilityError
+    from azure_functions_agents.harness.copilot_sdk import _copilot_execution
+
+    @tool(max_invocations=1)
+    def bounded() -> str:
+        raise AssertionError("Unsupported authored option must not execute")
+
+    invoke = AsyncMock()
+    monkeypatch.setattr(_copilot_execution, "run", invoke)
+    harness = AppHarness(HarnessKind.COPILOT, Path.cwd(), default_model="fixture-model")
+    with pytest.raises(UnsupportedCapabilityError, match="MAF-specific options"):
+        await runner.run_agent(
+            "fixture", tools=[bounded], mcp_tools=[], _harness=harness,
+        )
+    invoke.assert_not_called()
+
+
 def test_run_agent_reports_model_and_tool_evidence_by_assistant_message(monkeypatch: Any) -> None:
     messages = [
         Message("assistant", [

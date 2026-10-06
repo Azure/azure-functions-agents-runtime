@@ -4,7 +4,7 @@ import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from functools import wraps
-from typing import TYPE_CHECKING, Any, cast, overload
+from typing import Any, cast, overload
 
 from pydantic import BaseModel
 
@@ -16,15 +16,11 @@ from ._tool_descriptor import (
     ToolPolicy,
     WorkflowTool,
     WorkflowToolMetadata,
-    _is_maf_tool,
-    requires_maf_context,
+    is_harness_object,
+    warn_unsupported_tool,
 )
 
-if TYPE_CHECKING:
-    from .harness.agent_framework._maf_tools import FunctionTool
-
 __all__ = [
-    "FunctionTool",
     "WorkflowTool",
     "WorkflowToolMetadata",
     "get_workflow_tool_handler",
@@ -37,15 +33,9 @@ _WORKFLOW_TOOL_METADATA_ATTR = "__azure_functions_agents_workflow_tool__"
 _WORKFLOW_TOOL_HANDLER_ATTR = "__azure_functions_agents_workflow_handler__"
 
 
-def __getattr__(name: str) -> Any:
-    if name == "FunctionTool":
-        from .harness.agent_framework._maf_tools import FunctionTool
-
-        return FunctionTool
-    raise AttributeError(name)
-
-
 def get_workflow_tool_metadata(target: object) -> WorkflowToolMetadata | None:
+    if is_harness_object(target):
+        return None
     if isinstance(target, ToolDescriptor):
         return target.workflow_metadata
     metadata = getattr(target, _WORKFLOW_TOOL_METADATA_ATTR, None)
@@ -135,36 +125,41 @@ def tool[SchemaT: BaseModel](
 
 
 def tool(
-    func: Callable[..., Any] | None = None,
+    func: object | None = None,
     *,
     name: str | None = None,
     description: str | None = None,
     schema: type[BaseModel] | None = None,
     approval_mode: ApprovalMode | None = None,
     **kwargs: Any,
-) -> ToolDescriptor | Callable[[Callable[..., Any]], ToolDescriptor]:
+) -> object:
     """Record a Python tool without constructing a harness SDK wrapper."""
-    def decorator(inner: Callable[..., Any]) -> ToolDescriptor:
+    def decorator(inner: object) -> object:
+        if is_harness_object(inner):
+            warn_unsupported_tool()
+            return inner
+        if not callable(inner):
+            warn_unsupported_tool()
+            return inner
         wrapped: Callable[..., Any] = inner
         input_model: type[BaseModel] | None = None
         if schema is not None:
             wrapped = _wrap_with_schema(inner, schema)
             input_model = schema
         descriptor = ToolDescriptor.create(
-            name=name or inner.__name__,
+            name=name or wrapped.__name__,
             description=(description or inner.__doc__ or "").strip(),
             func=wrapped,
             input_model=input_model,
             policy=ToolPolicy(
                 approval_mode=approval_mode or "never_require",
-                maf_only_options=("invocation context",) if requires_maf_context(inner) else (),
             ),
             workflow_metadata=get_workflow_tool_metadata(inner),
         )
         if kwargs:
-            from .harness.agent_framework._maf_tools import with_maf_options
-
-            return with_maf_options(descriptor, kwargs)
+            if "input_model" in kwargs:
+                raise TypeError("tool() supplies input_model through its schema argument.")
+            return replace(descriptor, maf_options=tuple(kwargs.items()))
         return descriptor
 
     if func is not None:
@@ -230,10 +225,13 @@ def workflow_tool[DecoratedT](
     )
 
     def decorator(inner: DecoratedT) -> DecoratedT:
+        if is_harness_object(inner):
+            warn_unsupported_tool()
+            return inner
         if isinstance(inner, ToolDescriptor):
             return cast("DecoratedT", replace(inner, workflow_metadata=metadata))
-        if not callable(inner) and not _is_maf_tool(inner):
-            raise TypeError("@workflow_tool can only decorate a callable or FunctionTool")
+        if not callable(inner):
+            raise TypeError("@workflow_tool can only decorate a callable or runtime @tool")
         setattr(inner, _WORKFLOW_TOOL_METADATA_ATTR, metadata)
         return inner
 
