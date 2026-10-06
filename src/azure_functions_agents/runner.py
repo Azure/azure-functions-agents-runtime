@@ -21,13 +21,9 @@ from ._observability import (
     current_span,
     record_delegate_call,
 )
-from ._observability import (
-    start_span as start_span,
-)
 from ._session_id import SESSION_ID_PATTERN
 from ._slug import delegate_tool_name
 from ._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
-from .client_manager import get_client_manager as get_client_manager
 from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
 from .config.schema import AgentConfiguration
@@ -43,25 +39,9 @@ from .discovery.tools import discover_user_tools as discover_user_tools
 from .harness._agent_runner import get_agent_runner
 from .harness._harness_binding import (
     AppHarness,
-    ExecutionRole,
     HarnessKind,
     HarnessRequest,
     get_harness,
-)
-from .harness._harness_execution import (
-    _AgentUsageRecorder as _AgentUsageRecorder,
-)
-from .harness._harness_execution import (
-    _get_session_lock as _get_session_lock,
-)
-from .harness._harness_execution import (
-    _model_publisher as _model_publisher,
-)
-from .harness._harness_execution import (
-    _normalize_usage_details as _normalize_usage_details,
-)
-from .harness._harness_execution import (
-    _session_lock_bounded_by as _session_lock_bounded_by,
 )
 from .harness._history_identity import validate_agent_slug
 from .registration.capabilities import (
@@ -78,38 +58,13 @@ if TYPE_CHECKING:
 
 type AgentFunctionTool = ToolInput
 type AgentTool = ToolDescriptor | MCPServerDescriptor
-type _AgentExecutionRole = ExecutionRole
-
-
-# Retained private MAF compatibility seams; ordinary execution returns only AgentResult/SSE.
-_MAF_COMPAT_NAMES = frozenset({
-    "_FINAL_USAGE_TIMEOUT_SECONDS",
-    "_assemble_agent_inputs",
-    "_build_agent_session",
-    "_build_chat_options_from_environment",
-    "_build_delegated_agent",
-    "_build_history_provider",
-    "_build_role_agent",
-    "_content_text",
-    "_content_type",
-    "_finalize_maf_stream",
-    "_function_call_event",
-    "_function_result_event",
-    "_is_complete_json_argument",
-    "_max_context_window_tokens",
-    "_merge_tool_arguments",
-    "_resolve_sessions_dir",
-    "_response_usage_details",
-    "_stream_usage_details",
-    "resolve_config_dir",
-})
 
 
 def __getattr__(name: str) -> Any:
-    if name in _MAF_COMPAT_NAMES:
+    if name == "_assemble_agent_inputs":
         from .harness.agent_framework import _maf_execution
 
-        return getattr(_maf_execution, name)
+        return _maf_execution.assemble_agent_inputs
     raise AttributeError(name)
 
 

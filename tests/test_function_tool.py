@@ -320,7 +320,7 @@ async def test_maf_adapter_preserves_caller_skill_source_path_intent(
         )
         raise RuntimeError("captured source paths")
 
-    monkeypatch.setattr(_maf_execution._runner, "_build_agent_session", capture)
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", capture)
     harness = AppHarness(HarnessKind.MAF, Path.cwd())
     options = {
         "timeout": 1,

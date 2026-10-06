@@ -653,9 +653,11 @@ exactly-once execution.
 ### 4.8 Preview limits and approved provider contract
 
 The Copilot preview remains local-only and requires a single Functions worker.
-Azure Functions hosting, public streaming/structured-response parity, MCP,
-scoped skills, delegation, workflows, full system-tool parity, and cross-worker
-session overlap are unsupported in this preview unless separately qualified.
+Azure Functions hosting, streaming, delegation, workflows, and cross-worker
+session overlap remain unsupported. MCP and scoped skills are available in the
+direct, non-streaming preview under section 4.3.2, but Linux native skill-helper
+execution and SDK managed-approval scenarios remain unqualified. Full
+structured-response and system-tool parity are not claimed.
 Unsupported capabilities fail explicitly without fallback. Configured output caps
 are rejected because this path does not yet expose a verified provider generation
 cap mapping.
@@ -879,7 +881,7 @@ The sample must be copy/paste complete for setup, request, expected failure, and
   owner/deployment assumption without changing SDK session ownership or storage
   configuration and without authorizing existing-data work.
 - **Lifecycle sign-off:** A dedicated architecture checkpoint on 2026-10-05
-  returned **APPROVE** for decision 28's bounded runtime lifetime contract:
+  returned **APPROVE** for the bounded runtime lifetime contract:
   app-owned lazy client plus shared credential, request-owned adapter cleanup,
   explicit async shutdown only, preserved failure/cancellation precedence, and
   no failed-handle retry registry or process-exit fallback. Laveesh Rohra

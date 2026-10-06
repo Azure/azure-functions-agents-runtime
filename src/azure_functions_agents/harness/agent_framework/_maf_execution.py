@@ -14,7 +14,7 @@ from azure_functions_agents import runner as _runner
 
 from ..._agent_identity import agent_id
 from ..._logger import logger
-from ..._observability import FaultDomain, LifecycleStage
+from ..._observability import FaultDomain, LifecycleStage, start_span
 from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
 from ...client_manager import InferenceTarget, get_client_manager
 from ...config import ResolvedAgent, SubagentRef
@@ -179,7 +179,7 @@ def _sse_frame(payload: object, *, default: Callable[[object], object] | None = 
 def _resolve_sessions_dir(agent_slug: str) -> Path:
     """Resolve and create the existing agent-scoped local history directory."""
     slug = validate_agent_slug(agent_slug)
-    base = Path(_runner.resolve_config_dir()).resolve() / "agent-sessions" / slug
+    base = Path(resolve_config_dir()).resolve() / "agent-sessions" / slug
     base.mkdir(parents=True, exist_ok=True)
     return base
 
@@ -268,9 +268,6 @@ def assemble_agent_inputs(
     return resolved_tools, effective
 
 
-_assemble_agent_inputs = assemble_agent_inputs
-
-
 def _build_role_agent(
     chat_client: SupportsChatGetResponse[Any],
     *,
@@ -338,7 +335,7 @@ def _build_delegated_agent(
     """Build a stateless specialist without expanding its own subagents."""
     client_manager = get_client_manager()
     chat_client, inference_target = client_manager.build_chat_client_with_target(resolved.model)
-    resolved_tools, effective_instructions = _runner._assemble_agent_inputs(
+    resolved_tools, effective_instructions = assemble_agent_inputs(
         instructions=resolved.instructions,
         tools=list(capabilities.filtered_user_tools or []),
         mcp_tools=list(capabilities.filtered_mcp_tools or []),
@@ -354,7 +351,7 @@ def _build_delegated_agent(
         workflow_policy=None,
         app_root=capabilities._harness.app_root if capabilities._harness is not None else None,
     )
-    agent = _runner._build_role_agent(
+    agent = _build_role_agent(
         chat_client,
         agent_instructions=effective_instructions,
         tools=resolved_tools,
@@ -375,7 +372,7 @@ async def run_leaf_agent_task(
     execution_role: _DelegatedExecutionRole,
 ) -> str:
     """Run one fresh stateless MAF specialist and return its response text."""
-    specialist_agent, inference_target = _runner._build_delegated_agent(resolved, capabilities)
+    specialist_agent, inference_target = _build_delegated_agent(resolved, capabilities)
     usage_recorder = _harness_execution._AgentUsageRecorder(
         agent_name=resolved.slug,
         execution_role=execution_role,
@@ -395,7 +392,7 @@ async def run_leaf_agent_task(
     except Exception:
         usage_recorder.emit()
         raise
-    usage_recorder.emit(_runner._response_usage_details(response))
+    usage_recorder.emit(_response_usage_details(response))
     return response.text
 
 
@@ -455,7 +452,7 @@ async def _build_agent_session(
         session = AgentSession(session_id=resolved_id)
 
     history_agent_slug = _runner._resolve_history_agent_slug(agent_name, workflow_agent_slug)
-    history_provider = _runner._build_history_provider(history_agent_slug)
+    history_provider = _build_history_provider(history_agent_slug)
 
     delegate_tools: list[ToolDescriptor] | None = None
     delegate_error_tracker: _runner._DelegateErrorTracker | None = None
@@ -469,7 +466,7 @@ async def _build_agent_session(
             subagents, catalog, coordinator_deadline=effective_deadline, _harness=_harness
         )
 
-    resolved_tools, effective_instructions = _runner._assemble_agent_inputs(
+    resolved_tools, effective_instructions = assemble_agent_inputs(
         instructions=instructions,
         tools=tools,
         mcp_tools=mcp_tools,
@@ -485,7 +482,7 @@ async def _build_agent_session(
         delegate_tools=delegate_tools,
         workflow_policy=workflow_policy,
     )
-    agent = _runner._build_role_agent(
+    agent = _build_role_agent(
         chat_client,
         agent_instructions=effective_instructions,
         tools=resolved_tools,
@@ -593,7 +590,7 @@ async def run(
     coordinator_deadline = request.deadline
 
     agent, session, resolved_id, delegate_error_tracker, inference_target = (
-        await _runner._build_agent_session(
+        await _build_agent_session(
             instructions=instructions,
             session_id=session_id,
             tools=request.tools,
@@ -640,7 +637,7 @@ async def run(
                     agent.run(
                         request.prompt,
                         session=session,
-                        options=_runner._build_chat_options_from_environment(),
+                        options=_build_chat_options_from_environment(),
                     ),
                     timeout=remaining_after_lock,
                 )
@@ -653,7 +650,7 @@ async def run(
             except Exception:
                 usage_recorder.emit()
                 raise
-            usage_recorder.emit(_runner._response_usage_details(response))
+            usage_recorder.emit(_response_usage_details(response))
     except TimeoutError:
         raise RuntimeError(f"Agent run timed out after {timeout}s") from None
 
@@ -722,7 +719,7 @@ async def run_stream(
 
     try:
         agent, session, resolved_id, delegate_error_tracker, inference_target = (
-            await _runner._build_agent_session(
+            await _build_agent_session(
                 instructions=instructions,
                 session_id=session_id,
                 tools=request.tools,
@@ -756,7 +753,7 @@ async def run_stream(
 
     yield _sse_frame({"type": "session", "session_id": resolved_id})
 
-    with _runner.start_span(
+    with start_span(
         f"agent.run {agent_name or 'agent'}",
         lifecycle_stage=LifecycleStage.AGENT_RUN,
         attributes={
@@ -831,7 +828,7 @@ async def run_stream(
                         request.prompt,
                         stream=True,
                         session=session,
-                        options=_runner._build_chat_options_from_environment(),
+                        options=_build_chat_options_from_environment(),
                     )
                     final_response_stream = _coerce_final_response_stream(stream)
                     stream_iter = stream.__aiter__()
@@ -847,7 +844,7 @@ async def run_stream(
                         except StopAsyncIteration:
                             break
                         except (TimeoutError, asyncio.CancelledError) as exc:
-                            await _runner._finalize_maf_stream(stream, exc)
+                            await _finalize_maf_stream(stream, exc)
                             stream_settled = True
                             raise
                         for item in update.contents:
@@ -886,7 +883,7 @@ async def run_stream(
                     finally:
                         usage_details = None
                         try:
-                            usage_details = await _runner._stream_usage_details(
+                            usage_details = await _stream_usage_details(
                                 final_response_stream,
                                 remaining_timeout=max(0.0, deadline - loop.time()),
                             )
@@ -896,7 +893,7 @@ async def run_stream(
                     if usage_recorder is not None:
                         usage_recorder.emit()
                     if not stream_settled:
-                        await _runner._finalize_maf_stream(stream, exc)
+                        await _finalize_maf_stream(stream, exc)
                         stream_settled = True
                     span.set_attribute("af.agent.outcome", "error")
                     span.record_exception(
@@ -911,7 +908,7 @@ async def run_stream(
                     if usage_recorder is not None:
                         usage_recorder.emit()
                     if not stream_settled:
-                        await _runner._finalize_maf_stream(stream, exc)
+                        await _finalize_maf_stream(stream, exc)
                         stream_settled = True
                     logger.error("Agent stream failed: %s", exc, exc_info=True)
                     span.set_attribute("af.agent.outcome", "error")
@@ -922,7 +919,7 @@ async def run_stream(
                         exc_at_teardown = sys.exc_info()[1] or asyncio.CancelledError(
                             "run_agent_stream torn down before completion"
                         )
-                        await _runner._finalize_maf_stream(stream, exc_at_teardown)
+                        await _finalize_maf_stream(stream, exc_at_teardown)
                         if usage_recorder is not None:
                             usage_recorder.emit()
         except TimeoutError:

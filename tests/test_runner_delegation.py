@@ -453,7 +453,7 @@ async def test_agent_configuration_applies_to_each_stateless_leaf_role(
         captured.append(kwargs)
         return _FakeSpecialistAgent("billing", respond)
 
-    monkeypatch.setattr(runner, "_build_role_agent", build_harness)
+    monkeypatch.setattr(maf, "_build_role_agent", build_harness)
 
     config = AgentConfiguration(
         max_output_tokens=4096,
@@ -578,7 +578,7 @@ async def test_single_level_delegation_end_to_end_with_mutual_subagents_refs_doe
         built_agents.append(agent)
         return agent, inference_target
 
-    monkeypatch.setattr(runner, "_build_delegated_agent", _capturing_build_delegated_agent)
+    monkeypatch.setattr(maf, "_build_delegated_agent", _capturing_build_delegated_agent)
 
     loop = asyncio.get_event_loop()
     tools, tracker = await runner.build_subagent_tools(
@@ -622,7 +622,7 @@ async def test_run_leaf_agent_task_builds_fresh_specialist_and_returns_text(
         built.append(agent)
         return _targeted_agent(agent)
 
-    monkeypatch.setattr(runner, "_build_delegated_agent", build)
+    monkeypatch.setattr(maf, "_build_delegated_agent", build)
     resolved = _make_resolved(slug="analyst")
     capabilities = AgentCapabilities()
 
@@ -657,7 +657,7 @@ async def test_run_leaf_agent_task_propagates_timeout(
         return task
 
     monkeypatch.setattr(
-        runner,
+        maf,
         "_build_delegated_agent",
         lambda resolved, capabilities: _targeted_agent(
             _FakeSpecialistAgent(resolved.slug, respond)
@@ -683,7 +683,7 @@ async def test_run_leaf_agent_task_propagates_cancellation(
         return task
 
     monkeypatch.setattr(
-        runner,
+        maf,
         "_build_delegated_agent",
         lambda resolved, capabilities: _targeted_agent(
             _FakeSpecialistAgent(resolved.slug, respond)
@@ -712,7 +712,7 @@ async def test_run_leaf_agent_task_propagates_construction_failure(
     def fail(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Any:
         raise RuntimeError("model configuration failed")
 
-    monkeypatch.setattr(runner, "_build_delegated_agent", fail)
+    monkeypatch.setattr(maf, "_build_delegated_agent", fail)
 
     with pytest.raises(RuntimeError, match="model configuration failed"):
         await runner.run_leaf_agent_task(
@@ -804,7 +804,7 @@ async def _build_single_delegate_tool(
 ) -> tuple[Any, Any]:
     """Build one real ``delegate_<slug>`` tool with a ``_FakeSpecialistAgent`` swapped in."""
     monkeypatch.setattr(
-        runner,
+        maf,
         "_build_delegated_agent",
         lambda resolved, caps: _targeted_agent(_FakeSpecialistAgent(slug, respond)),
     )
@@ -906,7 +906,7 @@ async def test_delegate_adapter_recovers_from_specialist_construction_failure_wi
     def _raising_build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Any:
         raise RuntimeError("client secret is hunter2")
 
-    monkeypatch.setattr(runner, "_build_delegated_agent", _raising_build_delegated_agent)
+    monkeypatch.setattr(maf, "_build_delegated_agent", _raising_build_delegated_agent)
 
     catalog = _catalog_of(("billing", _make_resolved(slug="billing")))
     loop = asyncio.get_event_loop()
@@ -993,7 +993,7 @@ async def test_delegate_adapter_effective_timeout_uses_coordinator_remaining_whe
         build_calls += 1
         return original_build_delegated_agent(resolved, caps)
 
-    monkeypatch.setattr(runner, "_build_delegated_agent", _counting_build_delegated_agent)
+    monkeypatch.setattr(maf, "_build_delegated_agent", _counting_build_delegated_agent)
 
     result = await tool.func(task="invoice #42")
 
@@ -1079,7 +1079,7 @@ async def test_delegate_adapter_concurrent_calls_to_same_specialist_run_on_indep
         built_instances.append(agent)
         return _targeted_agent(agent)
 
-    monkeypatch.setattr(runner, "_build_delegated_agent", _fake_build_delegated_agent)
+    monkeypatch.setattr(maf, "_build_delegated_agent", _fake_build_delegated_agent)
 
     catalog = _catalog_of(("billing", _make_resolved(slug="billing")))
     loop = asyncio.get_event_loop()
@@ -1127,7 +1127,7 @@ async def test_delegate_adapter_runs_different_specialists_in_parallel(
         respond = respond_billing if resolved.slug == "billing" else respond_shipping
         return _targeted_agent(_FakeSpecialistAgent(resolved.slug, respond))
 
-    monkeypatch.setattr(runner, "_build_delegated_agent", _fake_build_delegated_agent)
+    monkeypatch.setattr(maf, "_build_delegated_agent", _fake_build_delegated_agent)
 
     catalog = _catalog_of(
         ("billing", _make_resolved(slug="billing")),
@@ -1186,7 +1186,7 @@ async def test_delegate_spans_share_one_trace_id_under_concurrent_gather(
         respond = respond_a if resolved.slug == "a" else respond_b
         return _targeted_agent(_FakeSpecialistAgent(resolved.slug, respond))
 
-    monkeypatch.setattr(runner, "_build_delegated_agent", _fake_build_delegated_agent)
+    monkeypatch.setattr(maf, "_build_delegated_agent", _fake_build_delegated_agent)
 
     catalog = _catalog_of(("a", _make_resolved(slug="a")), ("b", _make_resolved(slug="b")))
     loop = asyncio.get_event_loop()
@@ -1354,7 +1354,7 @@ async def test_real_maf_agent_run_raises_on_expanded_mcp_function_collision() ->
     delegate_tool = tool(lambda: "ignored", name="delegate_billing")
 
     resolved_tools = [mcp_server, *build_maf_tools((describe_tool(delegate_tool),))]
-    agent = runner._build_role_agent(
+    agent = maf._build_role_agent(
         _RunnableFakeChatClient(),
         agent_instructions="be a coordinator",
         tools=resolved_tools,

@@ -1094,7 +1094,7 @@ async def test_registered_blob_configuration_failure_is_safe_without_start_or_fa
     native = Mock(side_effect=AssertionError("Native startup must not run"))
     maf = AsyncMock(side_effect=AssertionError("MAF fallback must not run"))
     monkeypatch.setattr(copilot, "CopilotClient", native)
-    monkeypatch.setattr(_maf_execution._runner, "_build_agent_session", maf)
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", maf)
     chat = _registered_azure_chat(monkeypatch, tmp_path, blob_setting=(setting, value))
     monkeypatch.setenv(_harness.FLAG, "false")
     try:
@@ -1131,7 +1131,7 @@ async def test_credential_constructor_failure_is_sanitized_at_public_route(
     maf = AsyncMock(side_effect=AssertionError("MAF fallback must not run"))
     monkeypatch.setattr(_runtime, "build_async_credential", build)
     monkeypatch.setattr(copilot, "CopilotClient", native)
-    monkeypatch.setattr(_maf_execution._runner, "_build_agent_session", maf)
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", maf)
     chat = _registered_azure_chat(monkeypatch, tmp_path)
     try:
         response = await chat(
@@ -1172,7 +1172,7 @@ async def test_credential_callback_failure_is_sanitized_at_public_route(
     maf = AsyncMock(side_effect=AssertionError("MAF fallback must not run"))
     monkeypatch.setattr(_runtime, "build_async_credential", Mock(return_value=credential))
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
-    monkeypatch.setattr(_maf_execution._runner, "_build_agent_session", maf)
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", maf)
     chat = _registered_azure_chat(monkeypatch, tmp_path)
     try:
         response = await chat(
@@ -1207,7 +1207,7 @@ async def test_provider_auth_failure_is_sanitized_at_public_route(
     maf = AsyncMock(side_effect=AssertionError("MAF fallback must not run"))
     monkeypatch.setenv("AZURE_OPENAI_API_KEY", "sentinel-private-api-key")
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
-    monkeypatch.setattr(_maf_execution._runner, "_build_agent_session", maf)
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", maf)
     chat = _registered_azure_chat(monkeypatch, tmp_path)
     monkeypatch.setenv("AZURE_OPENAI_API_KEY", "sentinel-private-api-key")
     try:
@@ -1443,7 +1443,7 @@ async def test_filesystem_failure_stops_before_native_start_without_fallback(pre
     native = Mock(side_effect=AssertionError("Native startup must not run"))
     maf = AsyncMock(side_effect=AssertionError("MAF fallback must not run"))
     monkeypatch.setattr(copilot, "CopilotClient", native)
-    monkeypatch.setattr(_maf_execution._runner, "_build_agent_session", maf)
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", maf)
     monkeypatch.setattr(_copilot, "open_session_fs", AsyncMock(
         side_effect=CopilotSessionError(errno.EIO, "Configured storage failed.")
     ))
@@ -1533,7 +1533,7 @@ async def test_maf_history_does_not_block_or_get_loaded_by_copilot(preview, monk
     history.parent.mkdir(parents=True)
     history.write_bytes(b"unrelated MAF-owned history")
     maf_history = Mock(side_effect=AssertionError("MAF history must not be constructed"))
-    monkeypatch.setattr(_maf_execution._runner, "_build_history_provider", maf_history)
+    monkeypatch.setattr(_maf_execution, "_build_history_provider", maf_history)
     client = _fake_client()
     client.get_session_metadata.return_value = SimpleNamespace(session_id="existing")
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))

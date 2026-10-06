@@ -430,7 +430,7 @@ def test_direct_preview_forks_before_maf_construction_or_blob(preview, monkeypat
     harness = _harness.get_harness()
     monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
     maf = AsyncMock(side_effect=AssertionError("MAF construction must not run"))
-    monkeypatch.setattr(runner, "_build_agent_session", maf)
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", maf)
     invoke = AsyncMock(return_value=runner.AgentResult("new-id", "native reply"))
     monkeypatch.setattr(_copilot, "run", invoke)
     result = asyncio.run(runner.run_agent("hello", tools=[], mcp_tools=[]))
@@ -569,7 +569,7 @@ def test_workflow_management_tools_qualify_for_adapter_but_workflows_stay_reject
 
 
 def test_stream_and_leaf_roles_never_fall_back(preview, monkeypatch):
-    monkeypatch.setattr(runner, "_build_agent_session", AsyncMock(side_effect=AssertionError))
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", AsyncMock(side_effect=AssertionError))
 
     async def collect():
         return [json.loads(event.removeprefix("data: ")) async for event in runner.run_agent_stream("hi")]

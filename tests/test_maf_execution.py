@@ -68,7 +68,7 @@ def install_agent(monkeypatch, agent, *, tracker=None):
     build = AsyncMock(
         return_value=(agent, object(), "session", tracker, InferenceTarget("openai", "fixture"))
     )
-    monkeypatch.setattr(runner, "_build_agent_session", build)
+    monkeypatch.setattr(maf, "_build_agent_session", build)
     return build
 
 
@@ -93,11 +93,36 @@ def test_public_entrypoints_keep_explicit_parameters_and_adapters_accept_neutral
         )
 
 
-def test_backend_callbacks_and_public_results_use_the_canonical_facade_and_accounting():
+def test_backend_uses_canonical_host_and_accounting_without_private_facade_exports():
     assert maf._runner is runner
-    assert runner._AgentUsageRecorder is shared._AgentUsageRecorder
-    assert runner._get_session_lock is shared._get_session_lock
-    assert runner._session_lock_bounded_by is shared._session_lock_bounded_by
+    assert maf._harness_execution is shared
+    assert runner._assemble_agent_inputs is maf.assemble_agent_inputs
+    for name in (
+        "_AgentExecutionRole",
+        "_AgentUsageRecorder",
+        "_get_session_lock",
+        "_session_lock_bounded_by",
+        "_model_publisher",
+        "_normalize_usage_details",
+        "_build_agent_session",
+        "_build_role_agent",
+        "_build_history_provider",
+        "_build_delegated_agent",
+        "_build_chat_options_from_environment",
+        "_response_usage_details",
+        "_stream_usage_details",
+        "_finalize_maf_stream",
+        "_FINAL_USAGE_TIMEOUT_SECONDS",
+        "_content_text",
+        "_content_type",
+        "_function_call_event",
+        "_function_result_event",
+        "_is_complete_json_argument",
+        "_max_context_window_tokens",
+        "_merge_tool_arguments",
+        "_resolve_sessions_dir",
+    ):
+        assert not hasattr(runner, name)
 
 
 def test_role_constructor_keeps_identity_options_compaction_and_skills(monkeypatch, tmp_path):
@@ -171,16 +196,16 @@ async def test_session_builder_consumes_actual_host_hooks_and_none_vs_empty(
     tracker = runner._DelegateErrorTracker()
     delegates = AsyncMock(return_value=([delegate_tool], tracker))
     monkeypatch.setattr(runner, "build_subagent_tools", delegates)
-    assemble = Mock(wraps=runner._assemble_agent_inputs)
-    monkeypatch.setattr(runner, "_assemble_agent_inputs", assemble)
+    assemble = Mock(wraps=maf.assemble_agent_inputs)
+    monkeypatch.setattr(maf, "assemble_agent_inputs", assemble)
     manager = SimpleNamespace(
         build_chat_client_with_target=Mock(return_value=(object(), InferenceTarget()))
     )
     monkeypatch.setattr(maf, "get_client_manager", lambda: manager)
     history = object()
-    monkeypatch.setattr(runner, "_build_history_provider", lambda slug: history)
+    monkeypatch.setattr(maf, "_build_history_provider", lambda slug: history)
     role = Mock(return_value=object())
-    monkeypatch.setattr(runner, "_build_role_agent", role)
+    monkeypatch.setattr(maf, "_build_role_agent", role)
     references = [SubagentRef(agent="specialist")]
     catalog = object()
 
@@ -239,7 +264,7 @@ async def test_real_maf_turns_reload_scoped_history_from_fresh_sessions(monkeypa
         build_chat_client_with_target=lambda model: (client, InferenceTarget())
     )
     monkeypatch.setattr(maf, "get_client_manager", lambda: manager)
-    monkeypatch.setattr(runner, "resolve_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(maf, "resolve_config_dir", lambda: tmp_path)
     first = await runner.run_agent(
         "one", tools=[], mcp_tools=[], session_id="shared", agent_name="billing", timeout=5
     )
@@ -346,7 +371,7 @@ async def test_leaf_invocations_are_fresh_and_use_common_accounting(monkeypatch,
         usage_details=UsageDetails(output_token_count=2),
     ))) for _ in range(2)]
     build = Mock(side_effect=[(agent, InferenceTarget()) for agent in agents])
-    monkeypatch.setattr(runner, "_build_delegated_agent", build)
+    monkeypatch.setattr(maf, "_build_delegated_agent", build)
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         for _ in agents:
             assert await maf.run_leaf_agent_task(
@@ -406,7 +431,7 @@ def install_stream(monkeypatch, stream, *, tracker=None):
     def start(*args, **kwargs):
         yield span
 
-    monkeypatch.setattr(runner, "start_span", start)
+    monkeypatch.setattr(maf, "start_span", start)
     return agent, span
 
 

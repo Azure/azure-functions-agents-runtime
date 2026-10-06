@@ -423,7 +423,7 @@ async def test_native_provider_auth_failure_is_sanitized_through_public_route(
     native, monkeypatch, caplog
 ):
     maf = AsyncMock(side_effect=AssertionError("MAF fallback must not run"))
-    monkeypatch.setattr(_maf_execution._runner, "_build_agent_session", maf)
+    monkeypatch.setattr(_maf_execution, "_build_agent_session", maf)
     app = create_function_app(native.root)
     chat = next(
         item.get_user_function()

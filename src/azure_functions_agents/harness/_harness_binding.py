@@ -60,7 +60,7 @@ class AppHarness:
 
 @dataclass(frozen=True)
 class HarnessRequest:
-    """Normalized inputs for the supported primary, non-streaming adapter."""
+    """SDK-free capability and execution inputs for direct and streaming turns."""
 
     prompt: str
     instructions: str | None
