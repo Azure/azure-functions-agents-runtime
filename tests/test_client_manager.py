@@ -242,6 +242,58 @@ def test_custom_manager_target_fallback_builds_client_once() -> None:
     assert target == InferenceTarget()
 
 
+def test_custom_manager_provider_validation_defaults_to_no_op() -> None:
+    class CustomManager(ClientManager):
+        def resolve_model(self, requested: str | None) -> str:
+            raise AssertionError("Default validation must not resolve a custom model")
+
+        def build_chat_client(self, model: str | None) -> Any:
+            raise AssertionError("Default validation must not construct a client")
+
+    CustomManager().validate_provider_settings("custom-model")
+
+
+def test_foundry_provider_validation_requires_nonblank_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "  ")
+
+    with pytest.raises(RuntimeError, match="FOUNDRY_PROJECT_ENDPOINT to be set"):
+        MAFClientManager().validate_provider_settings(None)
+
+
+def test_foundry_provider_validation_uses_model_fallback_without_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
+    monkeypatch.delenv("FOUNDRY_MODEL", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_MODEL", raising=False)
+
+    with (
+        patch.object(
+            MAFClientManager,
+            "_build_foundry",
+            side_effect=AssertionError("Validation must not construct a MAF client"),
+        ),
+        patch(
+            "azure_functions_agents.client_manager.build_async_credential",
+            side_effect=AssertionError("Validation must not construct a credential"),
+        ),
+    ):
+        MAFClientManager().validate_provider_settings(None)
+
+
+def test_provider_validation_rejects_unknown_explicit_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "unsupported")
+
+    with pytest.raises(RuntimeError, match="Unknown AZURE_FUNCTIONS_AGENTS_PROVIDER"):
+        MAFClientManager().validate_provider_settings("model-one")
+
+
 def test_maf_subclass_build_chat_client_override_keeps_virtual_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

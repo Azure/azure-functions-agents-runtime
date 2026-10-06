@@ -6,7 +6,7 @@ The runtime uses Microsoft Agent Framework, which supports Microsoft Foundry, Az
 
 | Provider | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Required env vars | Notes |
 | --- | --- | --- | --- |
-| Microsoft Foundry | `foundry` | `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL` | Recommended quickstart/sample path. Uses `DefaultAzureCredential`; run `az login` locally and set `AZURE_CLIENT_ID` in multi-identity Function Apps. |
+| Microsoft Foundry | `foundry` | `FOUNDRY_PROJECT_ENDPOINT`; optional `FOUNDRY_MODEL` | Recommended quickstart/sample path. Uses `DefaultAzureCredential`; run `az login` locally and set `AZURE_CLIENT_ID` in multi-identity Function Apps. If no model is configured, the provider default is used. |
 | Azure OpenAI | `azure_openai` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, optional `AZURE_OPENAI_API_VERSION` | Alternative Azure-hosted provider. `AZURE_OPENAI_DEPLOYMENT` takes precedence over `AZURE_FUNCTIONS_AGENTS_MODEL`. If `AZURE_OPENAI_API_KEY` is omitted the SDK uses `DefaultAzureCredential` (AAD). |
 | OpenAI | `openai` | `OPENAI_API_KEY`, optional `AZURE_FUNCTIONS_AGENTS_MODEL` (default `gpt-4o-mini`) | Alternative non-Azure provider. `AZURE_FUNCTIONS_AGENTS_MODEL` applies directly for OpenAI. |
 
@@ -112,6 +112,28 @@ func start
 ```
 
 Your agent is now running at `http://localhost:7071/agents/main/` with a built-in chat UI, HTTP API (`/agents/main/chat`, `/agents/main/chatstream`), and MCP tool exposed through the Functions MCP endpoint (`/runtime/webhooks/mcp`).
+
+## Call an agent from your Function
+
+When your application owns the route or trigger, omit the agent's `trigger`
+and `builtin_endpoints`, then inject it by filename-derived slug:
+
+```python
+from azurefunctions.extensions.http.fastapi import Request, Response
+from azure_functions_agents import HostedSkill, create_function_app
+
+app = create_function_app()
+
+
+@app.route(route="summarize", methods=["POST"])
+@app.hosted_skill(arg_name="skill", agent_name="summarizer")
+async def summarize(req: Request, skill: HostedSkill) -> Response:
+  result = await skill.run((await req.body()).decode("utf-8"))
+  return Response(result.content, media_type="text/plain")
+```
+
+Use `skill.run()` for one result or `skill.stream()` for structured events.
+See the [hybrid HostedSkill sample](../samples/hybrid-hosted-skill/).
 
 ## Where to go next
 

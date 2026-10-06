@@ -24,6 +24,12 @@ from .._observability import (
 )
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
+from ..response_contract import (
+    InvalidResponseJsonError,
+    ResponseSchemaValidationError,
+    response_format_instructions,
+    validate_response_contract,
+)
 from ._auth import authorize_entra_request
 from ._trigger_serialization import serialize_trigger_data
 from .capabilities import AgentCapabilities
@@ -38,15 +44,6 @@ AUTH_LEVEL_MAP = {
     "admin": func.AuthLevel.ADMIN,
 }
 _SESSION_ID_HEADER = "x-ms-session-id"
-
-
-def extract_json_from_response(text: str) -> str:
-    """Extract JSON from an agent response, stripping markdown code fences if present."""
-    stripped = text.strip()
-    fence_match = re.search(r"```(?:json)?\s*\n(.*?)```", stripped, re.DOTALL)
-    if fence_match:
-        return fence_match.group(1).strip()
-    return stripped
 
 
 def normalize_timer_schedule(schedule: str) -> str:
@@ -181,25 +178,6 @@ def _run_log_payload(resolved: ResolvedAgent, result: Any) -> dict[str, Any]:
         payload["response"] = content
         payload["tool_calls"] = tool_calls
     return payload
-
-
-def _response_format_instructions(resolved: ResolvedAgent) -> list[str]:
-    if resolved.response_example:
-        return [
-            "You MUST respond with ONLY a valid JSON object "
-            "(no markdown, no explanation, no code fences). "
-            "Your response must match this example format:\n"
-            f"```json\n{resolved.response_example}\n```"
-        ]
-    if resolved.response_schema:
-        schema_str = json.dumps(resolved.response_schema, indent=2)
-        return [
-            "You MUST respond with ONLY a valid JSON object "
-            "(no markdown, no explanation, no code fences). "
-            "Your response must conform to this JSON Schema:\n"
-            f"```json\n{schema_str}\n```"
-        ]
-    return []
 
 
 async def _run_agent(*args: Any, **kwargs: Any) -> Any:
@@ -422,7 +400,7 @@ def make_http_agent_handler(
                     return validation_error
 
                 parts: list[str] = []
-                parts.extend(_response_format_instructions(resolved))
+                parts.extend(response_format_instructions(resolved))
                 parts.append(f"HTTP request data:\n```json\n{body_json}\n```")
                 prompt = "\n\n".join(parts)
 
@@ -467,10 +445,12 @@ def make_http_agent_handler(
                     )
 
                 if resolved.response_example or resolved.response_schema:
-                    extracted = extract_json_from_response(result.content)
                     try:
-                        parsed = json.loads(extracted)
-                    except json.JSONDecodeError as exc:
+                        parsed = validate_response_contract(
+                            result.content,
+                            resolved.response_schema,
+                        )
+                    except InvalidResponseJsonError as exc:
                         logger.warning(
                             "HTTP agent '%s' returned invalid JSON: %s",
                             resolved.name,
@@ -493,37 +473,31 @@ def make_http_agent_handler(
                             media_type="application/json",
                             headers={_SESSION_ID_HEADER: session_id},
                         )
-                    if resolved.response_schema:
-                        try:
-                            jsonschema.validate(
-                                instance=parsed,
-                                schema=resolved.response_schema,
-                            )
-                        except jsonschema.ValidationError as exc:
-                            logger.warning(
-                                "HTTP agent '%s' returned JSON that failed schema validation: %s",
-                                resolved.name,
-                                exc,
-                            )
-                            span.set_attribute("af.agent.outcome", "error")
-                            span.set_error(
-                                "response schema validation failed", fault_domain=FaultDomain.APP
-                            )
-                            span.add_event(
-                                "af.response.schema_validation_failed",
-                                {ATTR_FAULT_DOMAIN: FaultDomain.APP},
-                            )
-                            return Response(
-                                content=json.dumps(
-                                    {
-                                        "error": "Agent response validation failed",
-                                        "details": exc.message,
-                                    }
-                                ),
-                                status_code=500,
-                                media_type="application/json",
-                                headers={_SESSION_ID_HEADER: session_id},
-                            )
+                    except ResponseSchemaValidationError as exc:
+                        logger.warning(
+                            "HTTP agent '%s' returned JSON that failed schema validation: %s",
+                            resolved.name,
+                            exc.details,
+                        )
+                        span.set_attribute("af.agent.outcome", "error")
+                        span.set_error(
+                            "response schema validation failed", fault_domain=FaultDomain.APP
+                        )
+                        span.add_event(
+                            "af.response.schema_validation_failed",
+                            {ATTR_FAULT_DOMAIN: FaultDomain.APP},
+                        )
+                        return Response(
+                            content=json.dumps(
+                                {
+                                    "error": "Agent response validation failed",
+                                    "details": exc.details,
+                                }
+                            ),
+                            status_code=500,
+                            media_type="application/json",
+                            headers={_SESSION_ID_HEADER: session_id},
+                        )
                     return Response(
                         content=json.dumps(parsed, ensure_ascii=False),
                         status_code=200,

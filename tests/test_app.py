@@ -7,7 +7,9 @@ from typing import Any
 
 import pytest
 
+import azure_functions_agents._hosted_skill_app as hosted_app_module
 import azure_functions_agents.app as app_module
+from azure_functions_agents import HostedSkill
 from azure_functions_agents.app import create_function_app
 
 # On-disk fixtures shared with test_config_fixtures.py's loader-level tests
@@ -348,6 +350,33 @@ def test_create_function_app_allows_endpoint_agent_without_trigger(
         "agents/main/chatstream",
         "agents/main/history",
     ]
+
+
+def test_create_function_app_catalogs_inert_agent_for_hosted_skill(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_agent(
+        tmp_path,
+        "internal.agent.md",
+        """
+        name: Internal
+        description: Used only through application code.
+        """,
+    )
+
+    class Manager:
+        def validate_provider_settings(self, _model: str | None) -> None:
+            pass
+
+    monkeypatch.setattr(hosted_app_module, "get_client_manager", lambda: Manager())
+    app = create_function_app(tmp_path)
+
+    @app.hosted_skill(arg_name="skill", agent_name="internal")
+    async def use_internal(skill: HostedSkill) -> None:
+        pass
+
+    assert app.get_functions() == []
 
 
 def test_create_function_app_raises_on_missing_http_route(tmp_path: Path) -> None:

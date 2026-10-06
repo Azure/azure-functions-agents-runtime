@@ -1,0 +1,270 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+import azure_functions_agents.hosted_skill as hosted_skill_module
+from azure_functions_agents._harness import AppHarness, HarnessKind
+from azure_functions_agents.config.schema import (
+    AgentConfiguration,
+    BuiltinEndpointsConfig,
+    ResolvedAgent,
+    ToolsFilter,
+)
+from azure_functions_agents.hosted_skill import HostedSkill
+from azure_functions_agents.registration.capabilities import AgentCapabilities
+from azure_functions_agents.registration.catalog import CatalogEntry
+from azure_functions_agents.runner import AgentResult
+from azure_functions_agents.streaming_events import (
+    HostedSkillEvent,
+    HostedSkillEventKind,
+)
+
+
+def _make_skill(
+    tmp_path: Path,
+    *,
+    response_schema: dict[str, Any] | None = None,
+) -> tuple[HostedSkill, AgentCapabilities]:
+    resolved = ResolvedAgent(
+        name="Internal",
+        slug="internal",
+        description="Internal skill",
+        trigger=None,
+        instructions="Follow policy.",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(),
+        model="model-one",
+        timeout=12.0,
+        enabled_mcp_names=[],
+        enabled_skills_names=[],
+        tool_filter=ToolsFilter(),
+        sandbox_config=None,
+        input_schema=None,
+        response_schema=response_schema,
+        response_example=None,
+        source_file=str(tmp_path / "internal.agent.md"),
+        agent_configuration=AgentConfiguration(),
+    )
+    capabilities = AgentCapabilities(
+        filtered_user_tools=["tool"],
+        filtered_mcp_tools=["mcp"],  # type: ignore[list-item]
+        enabled_skill_paths=[tmp_path / "skills" / "one"],
+        web_request_tools=["web"],
+    )
+    harness = AppHarness(HarnessKind.MAF, tmp_path)
+    return HostedSkill(CatalogEntry(resolved, capabilities), harness), capabilities
+
+
+@pytest.mark.asyncio
+async def test_run_forwards_catalog_values_with_one_session_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skill, capabilities = _make_skill(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def build_sandbox(_resolved: ResolvedAgent, session_id: str) -> list[str]:
+        captured["sandbox_session_id"] = session_id
+        return ["sandbox"]
+
+    async def run_agent(prompt: str, **kwargs: Any) -> AgentResult:
+        captured["prompt"] = prompt
+        captured.update(kwargs)
+        return AgentResult(kwargs["session_id"], "complete")
+
+    monkeypatch.setattr(hosted_skill_module, "build_sandbox_tools_for_session", build_sandbox)
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+
+    result = await skill.run("Prepare order")
+
+    assert result.session_id == captured["sandbox_session_id"] == captured["session_id"]
+    assert captured["prompt"] == "Prepare order"
+    assert captured["instructions"] == "Follow policy."
+    assert captured["model"] == "model-one"
+    assert captured["agent_name"] == "internal"
+    assert captured["_session_is_new"] is True
+    assert captured["tools"] == capabilities.filtered_user_tools
+    assert captured["tools"] is not capabilities.filtered_user_tools
+    assert captured["mcp_tools"] is not capabilities.filtered_mcp_tools
+    assert captured["skill_paths"] is not capabilities.enabled_skill_paths
+    assert captured["web_request_tools"] is not capabilities.web_request_tools
+
+    captured["tools"].append("mutated")
+    assert capabilities.filtered_user_tools == ["tool"]
+
+    await skill.run("Prepare another order")
+    assert captured["tools"] == ["tool"]
+
+
+@pytest.mark.asyncio
+async def test_run_reuses_explicit_session_and_rejects_invalid_input_before_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skill, _ = _make_skill(tmp_path)
+    calls = 0
+
+    async def run_agent(_prompt: str, **kwargs: Any) -> AgentResult:
+        nonlocal calls
+        calls += 1
+        return AgentResult(kwargs["session_id"], "complete")
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+
+    result = await skill.run("Continue", session_id="session-one")
+
+    assert result.session_id == "session-one"
+    assert calls == 1
+    with pytest.raises(ValueError, match="nonblank"):
+        await skill.run(" ")
+    with pytest.raises(ValueError, match="Invalid session_id"):
+        await skill.run("Continue", session_id="../unsafe")
+    assert calls == 1
+
+
+def test_hosted_skill_is_not_callable(tmp_path: Path) -> None:
+    skill, _ = _make_skill(tmp_path)
+
+    assert not callable(skill)
+
+
+@pytest.mark.asyncio
+async def test_stream_validates_completed_response_before_done(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skill, _ = _make_skill(
+        tmp_path,
+        response_schema={
+            "type": "object",
+            "required": ["ok"],
+            "properties": {"ok": {"type": "boolean"}},
+        },
+    )
+    closed = False
+
+    async def events() -> AsyncIterator[HostedSkillEvent]:
+        nonlocal closed
+        try:
+            yield HostedSkillEvent(HostedSkillEventKind.SESSION, session_id="session-one")
+            yield HostedSkillEvent(HostedSkillEventKind.DELTA, content='{"wrong": true}')
+            yield HostedSkillEvent(HostedSkillEventKind.DONE)
+        finally:
+            closed = True
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent_events", lambda *_a, **_k: events())
+
+    output = [event async for event in skill.stream("Return JSON")]
+
+    assert [event.kind for event in output] == [
+        HostedSkillEventKind.SESSION,
+        HostedSkillEventKind.DELTA,
+        HostedSkillEventKind.ERROR,
+    ]
+    assert output[-1].content == "Agent response validation failed"
+    assert closed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_id", [None, "session-one"])
+async def test_stream_binds_sandbox_and_runner_to_same_public_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session_id: str | None,
+) -> None:
+    skill, _ = _make_skill(tmp_path)
+    captured: dict[str, str] = {}
+
+    def build_sandbox(_resolved: ResolvedAgent, resolved_id: str) -> list[str]:
+        captured["sandbox"] = resolved_id
+        return ["sandbox"]
+
+    async def events(_prompt: str, **kwargs: Any) -> AsyncIterator[HostedSkillEvent]:
+        captured["runner"] = kwargs["session_id"]
+        yield HostedSkillEvent(
+            HostedSkillEventKind.SESSION,
+            session_id=kwargs["session_id"],
+        )
+        yield HostedSkillEvent(HostedSkillEventKind.DONE)
+
+    monkeypatch.setattr(hosted_skill_module, "build_sandbox_tools_for_session", build_sandbox)
+    monkeypatch.setattr(hosted_skill_module, "run_agent_events", events)
+
+    output = [event async for event in skill.stream("Prepare order", session_id=session_id)]
+
+    assert captured["sandbox"] == captured["runner"] == output[0].session_id
+    if session_id is not None:
+        assert output[0].session_id == session_id
+
+
+@pytest.mark.asyncio
+async def test_stream_cancellation_propagates_and_closes_core_iterator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skill, _ = _make_skill(tmp_path)
+    waiting = asyncio.Event()
+    closed = False
+
+    async def events() -> AsyncIterator[HostedSkillEvent]:
+        nonlocal closed
+        try:
+            yield HostedSkillEvent(HostedSkillEventKind.SESSION, session_id="session-one")
+            waiting.set()
+            await asyncio.Event().wait()
+        finally:
+            closed = True
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent_events", lambda *_a, **_k: events())
+    stream = skill.stream("Prepare order")
+
+    assert (await anext(stream)).kind is HostedSkillEventKind.SESSION
+    pending = asyncio.create_task(anext(stream))
+    await waiting.wait()
+    pending.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert closed is True
+
+
+@pytest.mark.asyncio
+async def test_stream_response_validation_excludes_reasoning_and_tool_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skill, _ = _make_skill(
+        tmp_path,
+        response_schema={
+            "type": "object",
+            "required": ["ok"],
+            "properties": {"ok": {"type": "boolean"}},
+        },
+    )
+
+    async def events() -> AsyncIterator[HostedSkillEvent]:
+        yield HostedSkillEvent(HostedSkillEventKind.SESSION, session_id="session-one")
+        yield HostedSkillEvent(HostedSkillEventKind.DELTA, content='{"ok":')
+        yield HostedSkillEvent(HostedSkillEventKind.INTERMEDIATE, content="not JSON")
+        yield HostedSkillEvent(
+            HostedSkillEventKind.TOOL_END,
+            tool_call_id="call-one",
+            result="not JSON",
+        )
+        yield HostedSkillEvent(HostedSkillEventKind.MESSAGE, content="true}")
+        yield HostedSkillEvent(HostedSkillEventKind.DONE)
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent_events", lambda *_a, **_k: events())
+
+    output = [event async for event in skill.stream("Return JSON")]
+
+    assert output[-1].kind is HostedSkillEventKind.DONE
+    assert sum(
+        event.kind in {HostedSkillEventKind.DONE, HostedSkillEventKind.ERROR}
+        for event in output
+    ) == 1

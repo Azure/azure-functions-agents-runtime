@@ -6,10 +6,10 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
-import azure.durable_functions as df
 import azure.functions as func
 
 from ._harness import get_harness, validate_agent
+from ._hosted_skill_app import HostedSkillDFApp, HostedSkillFunctionApp
 from ._logger import logger
 from ._observability import configure_observability
 from ._source_marker import source_marker
@@ -99,7 +99,9 @@ def _fail_on_duplicate_slugs(resolved_agents: list[ResolvedAgent]) -> set[str]:
     return set(sources_by_slug)
 
 
-def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
+def create_function_app(
+    app_root: Path | None = None,
+) -> HostedSkillFunctionApp | HostedSkillDFApp:
     """Build and return a fully-configured Azure Functions app.
 
     Two-pass composition: resolve, validate, and freeze every agent into a
@@ -215,16 +217,25 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         catalog,
         workflow_handler_catalog,
     )
-    app: func.FunctionApp = (
-        cast(func.FunctionApp, df.DFApp(http_auth_level=func.AuthLevel.FUNCTION))
+    app: HostedSkillFunctionApp | HostedSkillDFApp = (
+        HostedSkillDFApp(
+            catalog=catalog,
+            harness=harness,
+            http_auth_level=func.AuthLevel.FUNCTION,
+        )
         if workflow_agent_policies
-        else func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+        else HostedSkillFunctionApp(
+            catalog=catalog,
+            harness=harness,
+            http_auth_level=func.AuthLevel.FUNCTION,
+        )
     )
+    registration_app = cast(func.FunctionApp, app)
 
     # --- Two-pass composition, pass 2 (FRD 0007 §4.2): mutate `app` --------------------
     if workflow_agent_policies:
         register_workflow_runtime(
-            app,
+            registration_app,
             handler_catalog=workflow_handler_catalog,
             catalog=catalog,
             workflow_agent_policies=workflow_agent_policies,
@@ -271,7 +282,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         # no allocator or de-duplication pass is needed here anymore.
         if resolved.trigger is not None:
             register_agent(
-                app,
+                registration_app,
                 resolved,
                 direct_capabilities,
                 function_name=resolved.slug,
@@ -282,7 +293,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             )
         if _builtin_endpoints_enabled(resolved.builtin_endpoints):
             register_builtin_endpoints(
-                app,
+                registration_app,
                 resolved,
                 direct_capabilities,
                 workflows_enabled=workflows_enabled,

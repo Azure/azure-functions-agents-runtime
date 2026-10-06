@@ -609,11 +609,9 @@ def test_multi_agent_delegation_fixture() -> None:
     validate_resolved_agent(coordinator, discovered_mcp_names=[], discovered_skills=[])
     validate_resolved_agent(billing, discovered_mcp_names=[], discovered_skills=[])
 
-    # Shipping has no trigger and no builtin_endpoints: on its own this is an
-    # error, but once it is known to be referenced as a subagent the
-    # requirement relaxes (FRD 0007 Decision #18).
-    with pytest.raises(ValueError, match="field `trigger`"):
-        validate_resolved_agent(shipping, discovered_mcp_names=[], discovered_skills=[])
+    # Shipping has no trigger and no builtin_endpoints. It remains a valid
+    # inert catalog entry whether or not another agent references it.
+    validate_resolved_agent(shipping, discovered_mcp_names=[], discovered_skills=[])
     validate_resolved_agent(
         shipping,
         discovered_mcp_names=[],

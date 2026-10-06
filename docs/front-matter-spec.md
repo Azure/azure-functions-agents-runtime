@@ -28,7 +28,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - Can apply **exclude lists** to filter out unwanted MCP servers, skills, or tools
 - Can **override** runtime settings (model, timeout)
 - Can enable Dynamic Workflows on any agent
-- Must define **trigger** (how the agent is invoked)
+- May define a **trigger** or built-in endpoints; otherwise it remains an inert catalog entry for internal use
 - Can enable **HTTP/MCP endpoints** for testing and composition
 
 ### Configuration Precedence
@@ -48,7 +48,7 @@ For capabilities (MCP, skills, tools):
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
 | **Global** (`agents.config.yaml`) | None (entire file is optional) | `agent_configuration`, `system_tools`, `model`, `timeout`, `tools`, `http_auth` |
-| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `agent_configuration`, `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `workflows`, `subagents`, `input_schema`, `response_schema`, `response_example`, `metadata` |
+| **Agent** (`.agent.md` front matter) | `name`, `description` | `trigger`, `builtin_endpoints`, `agent_configuration`, `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `workflows`, `subagents`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
 ---
@@ -80,7 +80,7 @@ YAML front matter at the top of each agent file.
 **Required properties:**
 - `name` — String, display name for the agent
 - `description` — String, brief description of the agent's purpose
-- `trigger` — Object defining how the agent is invoked (optional only when at least one `builtin_endpoints` value is enabled)
+- `trigger` — Optional object defining an automatically registered invocation surface
 
 **Optional properties:**
 - `builtin_endpoints` — Object or boolean for enabling built-in chat UI, chat API, and MCP tool endpoints
@@ -128,6 +128,7 @@ Roles come from invocation surfaces and references, not file placement:
 | Role | How it is identified |
 | --- | --- |
 | Directly invokable agent | Defines a `trigger` or enables at least one `builtin_endpoints` value. |
+| HostedSkill target | Any discovered agent selected by its filename-derived identity slug through `@app.hosted_skill`. It may be inert with no registered surface. |
 | Chat coordinator | Declares top-level `subagents`; each reference becomes a `delegate_<slug>` tool during direct invocation. |
 | Chat Sub Agent | Is referenced by another agent's top-level `subagents`. It may omit its own trigger/endpoints when it is internal-only. |
 | Workflow-enabled agent | Sets `workflows.enabled: true`. |
@@ -135,6 +136,44 @@ Roles come from invocation surfaces and references, not file placement:
 
 These roles can overlap. For example, an agent can have its own HTTP trigger and
 also be referenced as another agent's Chat or Workflow Sub Agent.
+
+### HostedSkill injection
+
+`create_function_app()` returns an enhanced Azure Functions app with a
+`hosted_skill` decorator. Place it directly below the Azure Functions trigger
+decorator and select an agent by its filename-derived identity slug:
+
+```python
+from azurefunctions.extensions.http.fastapi import Request, Response
+from azure_functions_agents import HostedSkill, create_function_app
+
+app = create_function_app()
+
+
+@app.route(route="summarize", methods=["POST"])
+@app.hosted_skill(arg_name="skill", agent_name="summarizer")
+async def summarize(req: Request, skill: HostedSkill) -> Response:
+  result = await skill.run((await req.body()).decode("utf-8"))
+  return Response(result.content, media_type="text/plain")
+```
+
+The injected parameter is runtime-managed and hidden from Azure Functions
+binding discovery. Each Function invocation receives a fresh lightweight
+facade; model clients, agents, MCP resources, sandbox closures, and sessions
+are created only when `skill.run()` or `skill.stream()` is called. Supply a
+valid `session_id` to continue a conversation, or omit it to receive a new
+public session ID in the result/events.
+
+HostedSkill direct execution reuses `instructions`, `model`, `timeout`,
+`agent_configuration`, `response_schema`, tools, skills, MCP servers, sandbox,
+and `web_request` settings. `trigger`, `builtin_endpoints`, `logger`,
+`response_example`, and `metadata` configure other surfaces and do not change
+the call. `input_schema` is not applied because v1 accepts a string prompt.
+
+HostedSkill v1 runs only through the Microsoft Agent Framework. Decorator
+application rejects agents that declare chat-time `subagents`, enable Dynamic
+Workflows, or run under the app-level Copilot preview. Streaming yields typed
+`HostedSkillEvent` values rather than Server-Sent Events text.
 
 ---
 
@@ -160,7 +199,7 @@ Fields are organized into categories based on how they can be used:
 
 **Agent-Specific (Agent front matter only):**
 - `name`, `description` — Agent identity (required)
-- `trigger` — Invocation method (required unless at least one built-in endpoint is enabled, or the agent is referenced as an internal specialist via another agent's `subagents` or `workflows.subagents`)
+- `trigger` — Optional automatically registered invocation method
 - `builtin_endpoints` — Built-in chat UI, chat API, and MCP tool endpoints
 - `subagents` — Chat-time delegation to specialist agents (`delegate_<slug>` tools; see [`subagents`](#subagents))
 - `logger`, `substitute_variables` — Agent runtime behavior switches
@@ -171,10 +210,10 @@ Fields are organized into categories based on how they can be used:
 
 ### Required Fields (Agent Front Matter Only)
 
-**Summary:** Every `.agent.md` file must have `name` and `description`. It must
-also have either a `trigger` or at least one enabled `builtin_endpoints` value,
-unless another agent references it through `subagents` or
-`workflows.subagents` as an internal specialist.
+**Summary:** Every `.agent.md` file must have `name` and `description`. A file
+without a trigger or built-in endpoint is valid and remains an inert catalog
+entry until selected by an internal surface such as HostedSkill, chat-time
+delegation, or a Workflow Sub Agent grant.
 
 #### `name`
 - **Type:** `string`
@@ -244,7 +283,7 @@ Existing top-level `model` and `timeout` fields remain unchanged.
 - **Type:** `object`
 - **Typical location:** Agent only
 - **Can override:** N/A (agent-specific only)
-- **Description:** Defines how the agent is invoked. Required unless the agent enables at least one built-in endpoint. Endpoint-only agents can omit `trigger`.
+- **Description:** Defines an automatically registered Azure Functions invocation surface. Endpoint-only and inert internal agents can omit `trigger`.
 - **Structure:** `type` field specifies the trigger type, `args` contains type-specific configuration
 - **Important:** Only **one trigger per agent file** is allowed
 
@@ -1302,7 +1341,7 @@ Help with troubleshooting and "how do I..." questions with clear,
 step-by-step answers.
 ```
 
-*Note: `tech` has neither `trigger` nor `builtin_endpoints`, which would normally be invalid — it is valid here only because `main.agent.md` references it in `subagents:`. This registers `delegate_billing` and `delegate_tech` tools on the coordinator; `billing` remains independently reachable at its own `/billing` endpoint, and `tech` is reachable only through the coordinator.* See [`samples/multi-agent-delegation/`](../samples/multi-agent-delegation/) for the runnable version of this example.
+*Note: `tech` has neither `trigger` nor `builtin_endpoints`, so it is an inert catalog entry. The `subagents:` reference registers `delegate_tech` on the coordinator; `billing` remains independently reachable at its own `/billing` endpoint, and `tech` is reachable only through the coordinator in this example.* See [`samples/multi-agent-delegation/`](../samples/multi-agent-delegation/) for the runnable version of this example.
 
 ---
 
@@ -1313,7 +1352,10 @@ step-by-step answers.
 **Agent Front Matter (`.agent.md`):**
 1. **`name`** — Must always be present (string)
 2. **`description`** — Must always be present (string)
-3. **`trigger` or `builtin_endpoints`** — A trigger is required unless at least one built-in endpoint is enabled, **or** the agent is referenced as an internal specialist through another agent's `subagents` or `workflows.subagents` (see "Internal specialist agents" under [File Naming Conventions](#file-naming-conventions) below)
+
+`trigger` and `builtin_endpoints` are optional. When both are absent, the agent
+registers no automatic Azure Functions surface and remains available in the
+app-wide catalog for internal selection.
 
 **Global Configuration (`agents.config.yaml`):**
 - **No required properties** — The entire file is optional

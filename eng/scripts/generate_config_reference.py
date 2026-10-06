@@ -303,10 +303,10 @@ TOOLS_FILTER_DESCRIPTIONS = {
 AGENT_SPEC_REQUIRED_DESCRIPTIONS = {
     "name": "Display name for the agent. Does not control function name or route.",
     "description": "Brief description of the agent's purpose",
-    "trigger": "Required unless at least one `builtin_endpoints` value is enabled. [Details](#agent-trigger)",
 }
 
 AGENT_SPEC_OPTIONAL_DESCRIPTIONS = {
+    "trigger": "Automatically registered invocation surface. [Details](#agent-trigger)",
     "agent_configuration": "Portable and framework-specific execution settings. Recursively inherits global values. [Details](./front-matter-spec.md#agent_configuration)",
     "builtin_endpoints": "Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints)",
     "model": "Override LLM model for this agent",
@@ -426,11 +426,10 @@ def generate_markdown() -> str:
     # Agent required properties
     lines.append("| Property | Type | Required | Default | Description |")
     lines.append("|----------|------|----------|---------|-------------|")
-    for field in ["name", "description", "trigger"]:
+    for field in ["name", "description"]:
         field_info = AgentSpec.model_fields[field]
         field_type = format_type(field_info, field)
-        required = "**Conditional**" if field == "trigger" else "**Yes**"
-        lines.append(f"| `{field}` | {field_type} | {required} | N/A | {AGENT_SPEC_REQUIRED_DESCRIPTIONS[field]} |")
+        lines.append(f"| `{field}` | {field_type} | **Yes** | N/A | {AGENT_SPEC_REQUIRED_DESCRIPTIONS[field]} |")
 
     lines.extend(["", "### Optional Properties", ""])
 
@@ -438,7 +437,7 @@ def generate_markdown() -> str:
     lines.append("| Property | Type | Required | Default | Description |")
     lines.append("|----------|------|----------|---------|-------------|")
     for field_name, field_info in AgentSpec.model_fields.items():
-        if field_name in ("name", "description", "trigger", "instructions", "source_file", "is_main"):
+        if field_name in ("name", "description", "instructions", "source_file", "is_main"):
             continue
         field_type = format_type(field_info, field_name)
         default = get_default_value(field_info)
@@ -712,9 +711,6 @@ def generate_markdown() -> str:
         "**Agent Front Matter:**",
         "- `name` (always required)",
         "- `description` (always required)",
-        "- `trigger` (required unless at least one `builtin_endpoints` value is enabled, "
-        "or the agent is referenced as an internal specialist via another agent's "
-        "`subagents` or `workflows.subagents`)",
         "",
         "**Global Configuration:**",
         "- No required properties (entire file is optional)",

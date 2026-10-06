@@ -85,6 +85,10 @@ class ClientManager(ABC):
         """Construct a client and return any authoritative target metadata."""
         return self.build_chat_client(model), InferenceTarget()
 
+    def validate_provider_settings(self, model: str | None) -> None:
+        """Validate provider settings without constructing execution resources."""
+        return None
+
     async def close(self) -> None:
         """Release any resources held by the manager. Default: no-op."""
         return None
@@ -115,6 +119,26 @@ class MAFClientManager(ClientManager):
     def resolve_model(self, requested: str | None) -> str:
         """Resolve model as requested > provider-specific env > runtime env > default."""
         return self._resolve_model(requested, self._provider())
+
+    def validate_provider_settings(self, model: str | None) -> None:
+        """Validate built-in MAF provider settings without constructing a client."""
+        provider = self._provider()
+        self._resolve_model(model, provider)
+        if provider == ProviderKind.AZURE_OPENAI and not self._env("AZURE_OPENAI_ENDPOINT"):
+            raise RuntimeError(
+                "AZURE_FUNCTIONS_AGENTS_PROVIDER=azure_openai requires "
+                "AZURE_OPENAI_ENDPOINT to be set."
+            )
+        if provider == ProviderKind.FOUNDRY and not self._env("FOUNDRY_PROJECT_ENDPOINT"):
+            raise RuntimeError(
+                "AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry requires "
+                "FOUNDRY_PROJECT_ENDPOINT to be set."
+            )
+        if provider not in ProviderKind:
+            raise RuntimeError(
+                f"Unknown AZURE_FUNCTIONS_AGENTS_PROVIDER '{provider}'. "
+                "Use one of: openai, azure_openai, foundry."
+            )
 
     @classmethod
     def _resolve_model(cls, requested: str | None, provider: str) -> str:

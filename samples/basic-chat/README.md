@@ -52,7 +52,7 @@ Follow the [shared local development guide](../README.md#run-locally) in the sam
 
 - `AZURE_FUNCTIONS_AGENTS_PROVIDER`: set to `foundry`
 - `FOUNDRY_PROJECT_ENDPOINT`: required for local runs — your Microsoft Foundry project endpoint
-- `FOUNDRY_MODEL`: required for local runs — model deployment name (for example, `gpt-5.4`)
+- `FOUNDRY_MODEL`: optional model deployment name (for example, `gpt-5.4`); omit it to use the provider default
 - `ACA_SESSION_POOL_ENDPOINT`: optional; if empty, chat works but code execution (Python/Playwright) is unavailable
 
 ### Testing endpoints

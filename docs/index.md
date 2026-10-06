@@ -11,6 +11,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Build custom tools in plain Python** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and pull in any package you need
 - **Run agents on durable workflows** *(experimental, see [Dynamic workflows](workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
+- **Hosted skills in ordinary Functions** — inject a markdown agent into your own trigger handler with `@app.hosted_skill`
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
 - **Harness-only execution controls** — set portable output limits and optional Microsoft Agent Framework token-budget conversation compaction

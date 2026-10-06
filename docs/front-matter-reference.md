@@ -65,13 +65,13 @@ YAML front matter at the top of each agent markdown file.
 |----------|------|----------|---------|-------------|
 | `name` | string | **Yes** | N/A | Display name for the agent. Does not control function name or route. |
 | `description` | string | **Yes** | N/A | Brief description of the agent's purpose |
-| `trigger` | object | **Conditional** | N/A | Required unless at least one `builtin_endpoints` value is enabled. [Details](#agent-trigger) |
 
 ### Optional Properties
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `agent_configuration` | object | No | `null` | Portable and framework-specific execution settings. Recursively inherits global values. [Details](./front-matter-spec.md#agent_configuration) |
+| `trigger` | object | No | `null` | Automatically registered invocation surface. [Details](#agent-trigger) |
 | `builtin_endpoints` | boolean \| object | No | `false` | Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints) |
 | `model` | string | No | Inherited from global | Override LLM model for this agent |
 | `timeout` | number | No | Inherited from global | Override execution timeout (seconds) for this agent |
@@ -351,7 +351,6 @@ Applies to all string values in `agents.config.yaml`, `mcp.json`, and agent `.ag
 **Agent Front Matter:**
 - `name` (always required)
 - `description` (always required)
-- `trigger` (required unless at least one `builtin_endpoints` value is enabled, or the agent is referenced as an internal specialist via another agent's `subagents` or `workflows.subagents`)
 
 **Global Configuration:**
 - No required properties (entire file is optional)

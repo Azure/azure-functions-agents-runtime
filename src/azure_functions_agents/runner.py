@@ -59,7 +59,7 @@ import contextlib
 import json
 import sys
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -90,7 +90,7 @@ from ._observability import (
     record_delegate_call,
     start_span,
 )
-from ._session_id import SESSION_ID_PATTERN
+from ._session_id import SESSION_ID_PATTERN, validate_session_id
 from ._slug import delegate_tool_name
 from .client_manager import InferenceTarget, get_client_manager
 from .config import ResolvedAgent, SubagentRef
@@ -108,6 +108,7 @@ from .discovery.tools import discover_user_tools
 from .registration._handlers import _looks_like_tool_error
 from .registration.capabilities import AgentCapabilities
 from .registration.catalog import AgentCatalog, CatalogEntry
+from .streaming_events import HostedSkillEvent, HostedSkillEventKind
 
 if TYPE_CHECKING:
     # Type-only: the runtime values are always obtained via the lazy,
@@ -312,17 +313,8 @@ class AgentResult:
 
 
 # ---------------------------------------------------------------------------
-# Session id validation + path resolution
+# Session path resolution
 # ---------------------------------------------------------------------------
-
-
-def _validate_session_id(session_id: str | None) -> str | None:
-    """Return ``session_id`` if it matches the safe pattern; raise on invalid input."""
-    if session_id is None:
-        return None
-    if not isinstance(session_id, str) or not _SESSION_ID_PATTERN.match(session_id):
-        raise ValueError(f"Invalid session_id (must match {_SESSION_ID_PATTERN.pattern})")
-    return session_id
 
 
 def _resolve_sessions_dir(agent_slug: str) -> Path:
@@ -856,7 +848,7 @@ async def _build_agent_session(
     client_manager = get_client_manager()
     chat_client, inference_target = client_manager.build_chat_client_with_target(model)
 
-    validated_id = _validate_session_id(session_id)
+    validated_id = validate_session_id(session_id)
     if validated_id is None:
         session = AgentSession()
         resolved_id = session.session_id
@@ -1091,7 +1083,7 @@ async def run_agent(
                 *list(web_request_tools or []),
             ]
         )
-        validated_id = _validate_session_id(session_id)
+        validated_id = validate_session_id(session_id)
         effective_instructions = instructions.strip() if instructions and instructions.strip() else None
         if system_addendum:
             effective_instructions = (effective_instructions or "") + system_addendum
@@ -1224,7 +1216,7 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 
 
-async def run_agent_stream(
+async def run_agent_events(
     prompt: str,
     *,
     instructions: str | None = None,
@@ -1247,8 +1239,8 @@ async def run_agent_stream(
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
     _harness: AppHarness | None = None,
-) -> AsyncIterator[str]:
-    """SSE-formatted async generator yielding ``data: {...}\\n\\n`` lines.
+) -> AsyncGenerator[HostedSkillEvent]:
+    """Yield harness-neutral structured events for one agent turn.
 
     Tool-selection semantics match :func:`run_agent`:
 
@@ -1293,7 +1285,7 @@ async def run_agent_stream(
             reject_unsupported(streaming=True)
     except (ValueError, RuntimeError) as exc:
         logger.error("Agent harness selection failed: %s", exc)
-        yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+        yield HostedSkillEvent(HostedSkillEventKind.ERROR, content=str(exc))
         return
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
     history_agent_slug = validate_agent_slug(
@@ -1331,10 +1323,10 @@ async def run_agent_stream(
         )
     except Exception as exc:
         logger.error("Failed to build agent session: %s", exc, exc_info=True)
-        yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+        yield HostedSkillEvent(HostedSkillEventKind.ERROR, content=str(exc))
         return
 
-    yield f"data: {json.dumps({'type': 'session', 'session_id': resolved_id})}\n\n"
+    yield HostedSkillEvent(HostedSkillEventKind.SESSION, session_id=resolved_id)
 
     # `run_agent_stream` opens its *own* run-level span rather than relying on
     # a caller-provided one (B3): unlike the non-streaming path — where
@@ -1401,22 +1393,24 @@ async def run_agent_stream(
 
                 async def emit_tool_start_if_ready(
                     call_id: str, event: dict[str, Any]
-                ) -> AsyncIterator[str]:
+                ) -> AsyncIterator[HostedSkillEvent]:
                     if call_id in emitted_tool_calls:
                         return
                     if not _is_complete_json_argument(event.get("arguments")):
                         return
                     emitted_tool_calls.add(call_id)
-                    yield f"data: {json.dumps(event)}\n\n"
+                    yield HostedSkillEvent.from_dict(event)
 
-                async def emit_tool_start_before_result(call_id: str | None) -> AsyncIterator[str]:
+                async def emit_tool_start_before_result(
+                    call_id: str | None,
+                ) -> AsyncIterator[HostedSkillEvent]:
                     if call_id is None or call_id in emitted_tool_calls:
                         return
                     event = pending_tool_calls.get(call_id)
                     if event is None:
                         return
                     emitted_tool_calls.add(call_id)
-                    yield f"data: {json.dumps(event)}\n\n"
+                    yield HostedSkillEvent.from_dict(event)
 
                 # B2b: `stream`/`stream_settled` are declared here, outside
                 # the `try:` below, so the `finally:` clause added at the
@@ -1490,17 +1484,21 @@ async def run_agent_stream(
                             if ctype == "text":
                                 text = _content_text(item)
                                 if text:
-                                    yield f"data: {json.dumps({'type': 'delta', 'content': text})}\n\n"
+                                    yield HostedSkillEvent(
+                                        HostedSkillEventKind.DELTA,
+                                        content=text,
+                                    )
                             elif ctype == "text_reasoning":
                                 text = _content_text(item)
                                 if text:
-                                    yield (
-                                        f"data: {json.dumps({'type': 'intermediate', 'content': text})}\n\n"
+                                    yield HostedSkillEvent(
+                                        HostedSkillEventKind.INTERMEDIATE,
+                                        content=text,
                                     )
                             elif ctype == "function_call":
                                 call_id, event = buffer_function_call(item)
                                 if call_id is None:
-                                    yield f"data: {json.dumps(event)}\n\n"
+                                    yield HostedSkillEvent.from_dict(event)
                                 else:
                                     async for output in emit_tool_start_if_ready(call_id, event):
                                         yield output
@@ -1513,17 +1511,17 @@ async def run_agent_stream(
                                 result_event = _function_result_event(item)
                                 if _looks_like_tool_error(result_event.get("result")):
                                     ordinary_tool_error_count += 1
-                                yield f"data: {json.dumps(result_event, default=str)}\n\n"
+                                yield HostedSkillEvent.from_dict(result_event)
                             # Unknown content types are intentionally ignored — the
                             # SSE vocabulary is fixed and the UI doesn't render them.
                     for call_id, event in pending_tool_calls.items():
                         if call_id not in emitted_tool_calls:
                             emitted_tool_calls.add(call_id)
-                            yield f"data: {json.dumps(event)}\n\n"
+                            yield HostedSkillEvent.from_dict(event)
                     span.set_attribute("af.agent.outcome", "success")
                     stream_settled = True
                     try:
-                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        yield HostedSkillEvent(HostedSkillEventKind.DONE)
                     finally:
                         usage_details = None
                         try:
@@ -1548,7 +1546,10 @@ async def run_agent_stream(
                     span.record_exception(
                         TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
                     )
-                    yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
+                    yield HostedSkillEvent(
+                        HostedSkillEventKind.ERROR,
+                        content=f"Timeout after {timeout}s",
+                    )
                 except asyncio.CancelledError:
                     if usage_recorder is not None:
                         usage_recorder.emit()
@@ -1568,7 +1569,7 @@ async def run_agent_stream(
                     logger.error("Agent stream failed: %s", exc, exc_info=True)
                     span.set_attribute("af.agent.outcome", "error")
                     span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
-                    yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+                    yield HostedSkillEvent(HostedSkillEventKind.ERROR, content=str(exc))
                 finally:
                     if not stream_settled:
                         # B2b: reached only when this async generator itself
@@ -1606,7 +1607,10 @@ async def run_agent_stream(
             span.record_exception(
                 TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
             )
-            yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
+            yield HostedSkillEvent(
+                HostedSkillEventKind.ERROR,
+                content=f"Timeout after {timeout}s",
+            )
         finally:
             # Retained through generator completion regardless of outcome
             # (success/timeout/error) so the streaming surface's delegate
@@ -1623,3 +1627,58 @@ async def run_agent_stream(
                 (delegate_error_tracker.count if delegate_error_tracker else 0)
                 + ordinary_tool_error_count,
             )
+
+
+async def run_agent_stream(
+    prompt: str,
+    *,
+    instructions: str | None = None,
+    timeout: float | None = None,
+    tools: list[AgentFunctionTool] | None = None,
+    mcp_tools: list[MCPTool] | None = None,
+    skill_paths: list[Path] | None = None,
+    model: str | None = None,
+    session_id: str | None = None,
+    sandbox_tools: list[FunctionTool] | None = None,
+    system_addendum: str | None = None,
+    workflow_enabled: bool = False,
+    workflow_durable_client: Any | None = None,
+    workflow_agent_slug: str | None = None,
+    agent_name: str | None = None,
+    display_name: str | None = None,
+    web_request_tools: list[FunctionTool] | None = None,
+    agent_configuration: AgentConfiguration | None = None,
+    subagents: list[SubagentRef] | None = None,
+    catalog: AgentCatalog | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
+    _harness: AppHarness | None = None,
+) -> AsyncIterator[str]:
+    """Yield events using the existing ``data: <JSON>\n\n`` SSE contract."""
+    events = run_agent_events(
+        prompt,
+        instructions=instructions,
+        timeout=timeout,
+        tools=tools,
+        mcp_tools=mcp_tools,
+        skill_paths=skill_paths,
+        model=model,
+        session_id=session_id,
+        sandbox_tools=sandbox_tools,
+        system_addendum=system_addendum,
+        workflow_enabled=workflow_enabled,
+        workflow_durable_client=workflow_durable_client,
+        workflow_agent_slug=workflow_agent_slug,
+        agent_name=agent_name,
+        display_name=display_name,
+        web_request_tools=web_request_tools,
+        agent_configuration=agent_configuration,
+        subagents=subagents,
+        catalog=catalog,
+        workflow_policy=workflow_policy,
+        _harness=_harness,
+    )
+    try:
+        async for event in events:
+            yield event.to_sse()
+    finally:
+        await events.aclose()

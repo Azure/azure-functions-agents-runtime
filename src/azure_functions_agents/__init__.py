@@ -109,6 +109,7 @@ except ImportError:
 
 
 from ._function_tool import tool, workflow_tool  # noqa: E402
+from ._hosted_skill_app import HostedSkillDFApp, HostedSkillFunctionApp  # noqa: E402
 from .app import create_function_app  # noqa: E402
 from .client_manager import (  # noqa: E402
     ClientManager,
@@ -118,6 +119,8 @@ from .client_manager import (  # noqa: E402
     shutdown_client_manager,
 )
 from .config.paths import resolve_config_dir, set_app_root  # noqa: E402
+from .hosted_skill import HostedSkill  # noqa: E402
+from .response_contract import HostedSkillResponseError  # noqa: E402
 from .runner import (  # noqa: E402
     DEFAULT_MODEL,
     DEFAULT_TIMEOUT,
@@ -125,6 +128,7 @@ from .runner import (  # noqa: E402
     run_agent,
     run_agent_stream,
 )
+from .streaming_events import HostedSkillEvent, HostedSkillEventKind  # noqa: E402
 from .system_tools.sandbox import create_sandbox_tools  # noqa: E402
 from .system_tools.web_request import create_web_request_tools  # noqa: E402
 from .workflows.context import (  # noqa: E402
@@ -143,6 +147,12 @@ __all__ = [
     "DEFAULT_TIMEOUT",
     "AgentResult",
     "ClientManager",
+    "HostedSkill",
+    "HostedSkillDFApp",
+    "HostedSkillEvent",
+    "HostedSkillEventKind",
+    "HostedSkillFunctionApp",
+    "HostedSkillResponseError",
     "MAFClientManager",
     "WorkflowRetryBackoff",
     "WorkflowRetryPolicy",
