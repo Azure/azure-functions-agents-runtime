@@ -36,6 +36,23 @@ class _StringResult(str):
         return {"nested": "string extension"}
 
 
+class _NonCallableDictionaryResult:
+    def __init__(self, to_dict, with_text):
+        self.to_dict = to_dict
+        if with_text:
+            self.text = "looks successful"
+
+
+@pytest.mark.parametrize("parser", [FunctionTool.parse_result, tool_result_text], ids=["maf", "shared"])
+@pytest.mark.parametrize("to_dict", [None, 42], ids=["none", "integer"])
+@pytest.mark.parametrize("with_text", [False, True], ids=["without-text", "with-text"])
+def test_noncallable_to_dict_preserves_conversion_failure(parser, to_dict, with_text):
+    value = _NonCallableDictionaryResult(to_dict, with_text)
+
+    with pytest.raises(TypeError, match="not callable"):
+        parser(value)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "value",

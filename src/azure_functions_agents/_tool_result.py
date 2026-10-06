@@ -25,9 +25,9 @@ def tool_result_text(
             return {key: ordinary(item) for key, item in value.items()}
         if isinstance(value, BaseModel):
             return value.model_dump()
-        to_dict = getattr(value, "to_dict", None)
-        if callable(to_dict):
-            return cast(object, to_dict())
+        if hasattr(value, "to_dict"):
+            to_dict = cast(Callable[[], object], value.to_dict)
+            return to_dict()
         text = getattr(value, "text", None)
         return text if isinstance(text, str) else value
 
