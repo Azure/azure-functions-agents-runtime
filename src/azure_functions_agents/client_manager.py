@@ -26,9 +26,7 @@ ABC surface
 from __future__ import annotations
 
 import os
-import sys
 from abc import ABC, abstractmethod
-from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, cast
@@ -310,10 +308,5 @@ async def shutdown_client_manager() -> None:
     """Close the active manager (if any). Idempotent."""
     global _INSTANCE
     manager, _INSTANCE = _INSTANCE, None
-    async with AsyncExitStack() as cleanup:
-        if manager is not None:
-            cleanup.push_async_callback(manager.close)
-        if "azure_functions_agents._copilot" in sys.modules:
-            from ._copilot import shutdown
-
-            cleanup.push_async_callback(shutdown)
+    if manager is not None:
+        await manager.close()

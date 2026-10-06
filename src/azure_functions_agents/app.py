@@ -10,7 +10,6 @@ import azure.durable_functions as df
 import azure.functions as func
 
 from ._agent_identity import agent_id
-from ._harness import get_harness, validate_agent
 from ._logger import logger
 from ._observability import configure_observability
 from ._source_marker import source_marker
@@ -26,6 +25,7 @@ from .config.validation import (
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
 from .discovery.tools import discover_project_tools
+from .harness._harness_binding import get_harness, validate_agent
 from .registration.capabilities import (
     build_capabilities,
     validate_subagent_tool_names,

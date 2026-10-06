@@ -1,4 +1,4 @@
-"""Tests for :mod:`azure_functions_agents._blob_history`.
+"""Tests for :mod:`azure_functions_agents.harness.agent_framework._maf_blob_history`.
 
 Azure SDK clients are stubbed out — we replace the
 :func:`_build_service_client` factory with an in-memory fake so the tests
@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any, ClassVar
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from azure.core.exceptions import (
@@ -18,8 +20,8 @@ from azure.core.exceptions import (
     ResourceNotFoundError,
 )
 
-from azure_functions_agents import _blob_history
-from azure_functions_agents._blob_history import (
+from azure_functions_agents.harness.agent_framework import _maf_blob_history
+from azure_functions_agents.harness.agent_framework._maf_blob_history import (
     DEFAULT_BLOB_PREFIX,
     DEFAULT_CONTAINER_NAME,
     BlobHistoryProvider,
@@ -91,6 +93,9 @@ class _FakeServiceClient:
     def __init__(self, account: _FakeAccount) -> None:
         self._account = account
 
+    async def close(self) -> None:
+        self._account.service_close_calls += 1
+
     def get_container_client(self, container: str) -> _FakeContainerClient:
         return _FakeContainerClient(self._account, container)
 
@@ -109,6 +114,7 @@ class _FakeAccount:
         self.container_create_calls: list[str] = []
         self.download_calls: list[tuple[str, str]] = []
         self.properties_calls: list[tuple[str, str]] = []
+        self.service_close_calls = 0
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +134,7 @@ def fake_account(monkeypatch: pytest.MonkeyPatch) -> _FakeAccount:
     def _build(*, connection_string=None, blob_service_url=None, credential=None) -> Any:
         return _FakeServiceClient(account)
 
-    monkeypatch.setattr(_blob_history, "_build_service_client", _build)
+    monkeypatch.setattr(_maf_blob_history, "_build_service_client", _build)
     return account
 
 
@@ -311,7 +317,7 @@ def test_save_messages_handles_concurrent_create_race(
 
     monkeypatch.setattr(_FakeBlobClient, "append_block", append_with_race)
     monkeypatch.setattr(
-        _blob_history,
+        _maf_blob_history,
         "_build_service_client",
         lambda **_: _FakeServiceClient(account),
     )
@@ -506,13 +512,13 @@ def test_service_client_cached_across_calls(
     monkeypatch: pytest.MonkeyPatch, fake_account: _FakeAccount
 ) -> None:
     build_calls: list[None] = []
-    original_build = _blob_history._build_service_client
+    original_build = _maf_blob_history._build_service_client
 
     def counting_build(**kwargs: Any) -> Any:
         build_calls.append(None)
         return original_build(**kwargs)
 
-    monkeypatch.setattr(_blob_history, "_build_service_client", counting_build)
+    monkeypatch.setattr(_maf_blob_history, "_build_service_client", counting_build)
     provider = BlobHistoryProvider(
         agent_slug="billing",
         connection_string="UseDevelopmentStorage=true",
@@ -570,7 +576,7 @@ def test_build_service_client_prefers_storage_specific_client_id(
 ) -> None:
     monkeypatch.setenv("AzureWebJobsStorage__clientId", "storage-uaid")
     monkeypatch.setenv("AZURE_CLIENT_ID", "app-uaid")
-    _blob_history._build_service_client(
+    _maf_blob_history._build_service_client(
         connection_string=None,
         blob_service_url="https://example.blob.core.windows.net",
         credential=None,
@@ -583,7 +589,7 @@ def test_build_service_client_falls_back_to_azure_client_id(
 ) -> None:
     monkeypatch.delenv("AzureWebJobsStorage__clientId", raising=False)
     monkeypatch.setenv("AZURE_CLIENT_ID", "app-uaid")
-    _blob_history._build_service_client(
+    _maf_blob_history._build_service_client(
         connection_string=None,
         blob_service_url="https://example.blob.core.windows.net",
         credential=None,
@@ -596,9 +602,64 @@ def test_build_service_client_bare_credential_when_no_env(
 ) -> None:
     monkeypatch.delenv("AzureWebJobsStorage__clientId", raising=False)
     monkeypatch.delenv("AZURE_CLIENT_ID", raising=False)
-    _blob_history._build_service_client(
+    _maf_blob_history._build_service_client(
         connection_string=None,
         blob_service_url="https://example.blob.core.windows.net",
         credential=None,
     )
     assert _credential_spies.instances == [{}]
+
+
+@pytest.mark.asyncio
+async def test_selected_maf_storage_closes_at_harness_shutdown_without_changing_history(
+    monkeypatch, fake_account,
+):
+    from azure_functions_agents.harness import _harness_lifecycle
+
+    monkeypatch.setattr(_harness_lifecycle, "_SHUTDOWN_CALLBACKS", set())
+    provider = BlobHistoryProvider(agent_slug="billing", connection_string="fixture")
+    await provider.save_messages("session", [_make_message("persisted")])
+    original = dict(fake_account.blobs)
+
+    await _harness_lifecycle._shutdown_harnesses()
+
+    assert fake_account.service_close_calls == 1
+    assert not _maf_blob_history._SERVICE_CLIENTS
+    assert not _maf_blob_history._ENSURED_CONTAINERS
+    assert fake_account.blobs == original
+    assert [message.text for message in await provider.get_messages("session")] == ["persisted"]
+    await _harness_lifecycle._shutdown_harnesses()
+    assert fake_account.service_close_calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("borrowed", [False, True])
+async def test_maf_shutdown_closes_only_owned_storage_credentials(monkeypatch, borrowed):
+    import azure.storage.blob.aio
+
+    from azure_functions_agents import _credential
+    from azure_functions_agents.harness import _harness_lifecycle
+
+    monkeypatch.setattr(_harness_lifecycle, "_SHUTDOWN_CALLBACKS", set())
+    credential = SimpleNamespace(get_token=AsyncMock(), close=AsyncMock())
+    service = _FakeServiceClient(_FakeAccount())
+    service.close = AsyncMock()
+    monkeypatch.setattr(
+        azure.storage.blob.aio, "BlobServiceClient", Mock(return_value=service)
+    )
+    monkeypatch.setattr(
+        _credential, "build_async_credential_with_client_id", Mock(return_value=credential)
+    )
+    provider = BlobHistoryProvider(
+        agent_slug="billing", blob_service_url="https://fixture.invalid",
+        credential=credential if borrowed else None,
+    )
+    await provider.get_messages("session")
+
+    await _harness_lifecycle._shutdown_harnesses()
+
+    service.close.assert_awaited_once()
+    if borrowed:
+        credential.close.assert_not_awaited()
+    else:
+        credential.close.assert_awaited_once()
