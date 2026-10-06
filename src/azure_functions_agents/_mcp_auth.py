@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from ._credential import build_credential, build_credential_with_client_id
+from ._logger import logger
 from .config.env import has_unresolved_placeholders
 from .discovery.mcp import MCPServerDescriptor
 
@@ -23,6 +24,25 @@ def _build_mcp_credential(client_id: str | None) -> TokenCredential:
     if not selected_client_id or has_unresolved_placeholders(selected_client_id):
         return build_credential()
     return build_credential_with_client_id(selected_client_id)
+
+
+def _close_credential(credential: TokenCredential) -> None:
+    close = getattr(credential, "close", None)
+    if callable(close):
+        close()
+
+
+def _authorization_headers(
+    *, static_headers: dict[str, str], scope: str, credential: TokenCredential
+) -> dict[str, str]:
+    token = credential.get_token(scope)
+    if not token.token.strip():
+        raise ValueError("MCP authentication returned an empty token")
+    result = {
+        key: value for key, value in static_headers.items() if key.lower() != "authorization"
+    }
+    result["Authorization"] = "******"
+    return result
 
 
 def build_mcp_header_provider(server: MCPServerDescriptor) -> MCPHeaderProvider | None:
@@ -53,21 +73,43 @@ def build_mcp_header_provider(server: MCPServerDescriptor) -> MCPHeaderProvider 
         ):
             if credential is None:
                 credential = _build_mcp_credential(client_id)
-            token = credential.get_token(scope)
-            if not token.token.strip():
+            cached_token = credential.get_token(scope)
+            if not cached_token.token.strip():
                 raise ValueError("MCP authentication returned an empty token")
-            cached_token = token
 
-        result = {
+        return {
             key: value for key, value in static_headers.items() if key.lower() != "authorization"
-        }
-        result["Authorization"] = f"Bearer {cached_token.token}"
-        return result
+        } | {"Authorization": "******"}
 
     return credential_header_provider
 
 
 def materialize_mcp_headers(server: MCPServerDescriptor) -> dict[str, str]:
     """Return fresh static/auth headers without retaining a token between calls."""
-    provider = build_mcp_header_provider(server)
-    return provider({}) if provider is not None else {}
+    static_headers = dict(server.headers)
+    scope = server.auth_scope
+    if scope is None:
+        return static_headers
+    scope = scope.strip()
+    if not scope:
+        return static_headers
+
+    credential = _build_mcp_credential(server.client_id)
+    try:
+        headers = _authorization_headers(
+            static_headers=static_headers,
+            scope=scope,
+            credential=credential,
+        )
+    except BaseException:
+        try:
+            _close_credential(credential)
+        except BaseException:
+            logger.error("MCP credential cleanup failed.", exc_info=True)
+        raise
+    try:
+        _close_credential(credential)
+    except Exception:
+        logger.error("MCP credential cleanup failed.", exc_info=True)
+        raise
+    return headers

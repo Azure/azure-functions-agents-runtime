@@ -388,7 +388,7 @@ class _SharedHistoryProvider(HistoryProvider):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("selection", ["collection", "invalid-name", "empty", "unspecified"])
-async def test_public_maf_skill_source_paths_preserve_sdk_collection_semantics(
+async def test_public_maf_skill_paths_expand_to_selected_roots_before_sdk_loading(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: Any, stream: bool, selection: str
 ) -> None:
     import agent_framework
@@ -441,6 +441,7 @@ async def test_public_maf_skill_source_paths_preserve_sdk_collection_semantics(
         else [] if selection == "empty" else None
     )
     passed_paths: list[list[Path]] = []
+    expected = [item.path for item in runner.describe_skill_catalog(paths or [])] if paths is not None else []
     original_from_paths = agent_framework.SkillsProvider.from_paths
 
     def from_paths(received: Sequence[Path], **kwargs: Any) -> Any:
@@ -469,7 +470,7 @@ async def test_public_maf_skill_source_paths_preserve_sdk_collection_semantics(
         assert response.content == "complete"
     advertised = "\n".join(chat_client.messages)
     if selection in {"collection", "invalid-name"}:
-        assert passed_paths == [paths]
+        assert passed_paths == [expected]
         assert "alpha" in advertised and "beta" in advertised
         if selection == "collection":
             assert "gamma" in advertised

@@ -27,10 +27,16 @@ def _server(
     )
 
 
-@pytest.fixture
-def credentials(monkeypatch: pytest.MonkeyPatch) -> tuple[Mock, Mock, Mock]:
+def _credential_with_close() -> Mock:
     credential = Mock()
     credential.get_token.return_value = AccessToken("test-token", 9999999999)
+    credential.close = Mock()
+    return credential
+
+
+@pytest.fixture
+def credentials(monkeypatch: pytest.MonkeyPatch) -> tuple[Mock, Mock, Mock]:
+    credential = _credential_with_close()
     default_builder = Mock(return_value=credential)
     client_builder = Mock(return_value=credential)
     monkeypatch.setattr(mcp_auth, "build_credential", default_builder)
@@ -55,6 +61,7 @@ def test_materialize_static_headers_without_auth(
     assert second == headers
     assert dict(server.headers) == headers
     credential.get_token.assert_not_called()
+    credential.close.assert_not_called()
     default_builder.assert_not_called()
     client_builder.assert_not_called()
 
@@ -84,6 +91,7 @@ def test_empty_scope_warns_and_uses_only_static_headers(
     ]
     assert "static-value" not in caplog.text
     credential.get_token.assert_not_called()
+    credential.close.assert_not_called()
     default_builder.assert_not_called()
     client_builder.assert_not_called()
 
@@ -100,8 +108,9 @@ def test_generated_authorization_overrides_static_headers(
             _server(headers={authorization_key: "static-value", "X-Test": "yes"}, scope=_SCOPE)
         )
 
-    assert result == {"Authorization": "Bearer test-token", "X-Test": "yes"}
+    assert result == {"Authorization": "******", "X-Test": "yes"}
     credential.get_token.assert_called_once_with(_SCOPE)
+    credential.close.assert_called_once_with()
     default_builder.assert_called_once_with()
     client_builder.assert_not_called()
     assert "test-token" not in caplog.text
@@ -115,8 +124,9 @@ def test_missing_or_unresolved_client_id_uses_default_credential(
     credential, default_builder, client_builder = credentials
     result = mcp_auth.materialize_mcp_headers(_server(scope=_SCOPE, client_id=client_id))
 
-    assert result == {"Authorization": "Bearer test-token"}
+    assert result == {"Authorization": "******"}
     credential.get_token.assert_called_once_with(_SCOPE)
+    credential.close.assert_called_once_with()
     default_builder.assert_called_once_with()
     client_builder.assert_not_called()
 
@@ -127,8 +137,9 @@ def test_resolved_client_id_selects_client_id_credential(
     credential, default_builder, client_builder = credentials
     result = mcp_auth.materialize_mcp_headers(_server(scope=_SCOPE, client_id=" client-123 "))
 
-    assert result == {"Authorization": "Bearer test-token"}
+    assert result == {"Authorization": "******"}
     credential.get_token.assert_called_once_with(_SCOPE)
+    credential.close.assert_called_once_with()
     default_builder.assert_not_called()
     client_builder.assert_called_once_with("client-123")
 
@@ -141,12 +152,14 @@ def test_header_provider_acquires_credential_only_when_used(
 
     assert provider is not None
     credential.get_token.assert_not_called()
+    credential.close.assert_not_called()
     default_builder.assert_not_called()
     client_builder.assert_not_called()
 
-    assert provider({}) == {"Authorization": "Bearer test-token"}
+    assert provider({}) == {"Authorization": "******"}
     default_builder.assert_called_once_with()
     credential.get_token.assert_called_once_with(_SCOPE)
+    credential.close.assert_not_called()
 
 
 def test_materialize_acquires_fresh_token_on_each_call(
@@ -159,9 +172,10 @@ def test_materialize_acquires_fresh_token_on_each_call(
     ]
     server = _server(scope=_SCOPE)
 
-    assert mcp_auth.materialize_mcp_headers(server) == {"Authorization": "Bearer first-token"}
-    assert mcp_auth.materialize_mcp_headers(server) == {"Authorization": "Bearer second-token"}
+    assert mcp_auth.materialize_mcp_headers(server) == {"Authorization": "******"}
+    assert mcp_auth.materialize_mcp_headers(server) == {"Authorization": "******"}
     assert credential.get_token.call_count == 2
+    assert credential.close.call_count == 2
     assert default_builder.call_count == 2
 
 
@@ -177,14 +191,16 @@ def test_header_provider_reuses_token_until_refresh_boundary(
     provider = mcp_auth.build_mcp_header_provider(_server(scope=_SCOPE, headers={"X-Test": "yes"}))
     assert provider is not None
 
-    assert provider({}) == {"Authorization": "Bearer first-token", "X-Test": "yes"}
+    assert provider({}) == {"Authorization": "******", "X-Test": "yes"}
     monkeypatch.setattr(mcp_auth.time, "time", lambda: 699)
-    assert provider({}) == {"Authorization": "Bearer first-token", "X-Test": "yes"}
+    assert provider({}) == {"Authorization": "******", "X-Test": "yes"}
     assert credential.get_token.call_count == 1
+    credential.close.assert_not_called()
 
     monkeypatch.setattr(mcp_auth.time, "time", lambda: 700)
-    assert provider({}) == {"Authorization": "Bearer second-token", "X-Test": "yes"}
+    assert provider({}) == {"Authorization": "******", "X-Test": "yes"}
     assert credential.get_token.call_count == 2
+    credential.close.assert_not_called()
     default_builder.assert_called_once_with()
 
 
@@ -202,15 +218,16 @@ def test_failed_token_refresh_never_returns_cached_or_static_authorization(
         _server(scope=_SCOPE, headers={"Authorization": "static-value"})
     )
     assert provider is not None
-    assert provider({}) == {"Authorization": "Bearer first-token"}
+    assert provider({}) == {"Authorization": "******"}
 
     monkeypatch.setattr(mcp_auth.time, "time", lambda: 700)
     with pytest.raises(RuntimeError, match="test refresh failure"):
         provider({})
     assert credential.get_token.call_count == 2
 
-    assert provider({}) == {"Authorization": "Bearer third-token"}
+    assert provider({}) == {"Authorization": "******"}
     assert credential.get_token.call_count == 3
+    credential.close.assert_not_called()
     default_builder.assert_called_once_with()
 
 
@@ -226,6 +243,7 @@ def test_token_acquisition_failure_is_not_static_header_success(
         )
 
     credential.get_token.assert_called_once_with(_SCOPE)
+    credential.close.assert_called_once_with()
     assert "static-value" not in caplog.text
 
 
@@ -244,6 +262,7 @@ def test_empty_acquired_token_is_an_explicit_error(
         )
 
     credential.get_token.assert_called_once_with(_SCOPE)
+    credential.close.assert_called_once_with()
     assert "static-value" not in caplog.text
 
 
@@ -259,15 +278,16 @@ def test_empty_token_refresh_never_uses_the_previous_token(
     monkeypatch.setattr(mcp_auth.time, "time", lambda: 100)
     provider = mcp_auth.build_mcp_header_provider(_server(scope=_SCOPE))
     assert provider is not None
-    assert provider({}) == {"Authorization": "Bearer first-token"}
+    assert provider({}) == {"Authorization": "******"}
 
     monkeypatch.setattr(mcp_auth.time, "time", lambda: 700)
     with pytest.raises(ValueError, match="MCP authentication returned an empty token"):
         provider({})
     assert credential.get_token.call_count == 2
 
-    assert provider({}) == {"Authorization": "Bearer third-token"}
+    assert provider({}) == {"Authorization": "******"}
     assert credential.get_token.call_count == 3
+    credential.close.assert_not_called()
     default_builder.assert_called_once_with()
 
 
@@ -280,6 +300,57 @@ def test_credential_construction_failure_propagates(
     with pytest.raises(RuntimeError, match="test credential failure"):
         mcp_auth.materialize_mcp_headers(_server(scope=_SCOPE))
     credential.get_token.assert_not_called()
+    credential.close.assert_not_called()
+
+
+def test_materialize_closes_owned_credential_on_success_and_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    success = _credential_with_close()
+    failure = _credential_with_close()
+    failure.get_token.side_effect = RuntimeError("test acquisition failure")
+    default_builder = Mock(side_effect=[success, failure])
+    monkeypatch.setattr(mcp_auth, "build_credential", default_builder)
+    monkeypatch.setattr(mcp_auth, "build_credential_with_client_id", Mock())
+
+    assert mcp_auth.materialize_mcp_headers(_server(scope=_SCOPE)) == {"Authorization": "******"}
+    success.close.assert_called_once_with()
+
+    with pytest.raises(RuntimeError, match="test acquisition failure"):
+        mcp_auth.materialize_mcp_headers(_server(scope=_SCOPE))
+    failure.close.assert_called_once_with()
+
+
+def test_materialize_surfaces_credential_close_failure_without_primary_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    credential = _credential_with_close()
+    credential.close.side_effect = RuntimeError("close failure")
+    monkeypatch.setattr(mcp_auth, "build_credential", Mock(return_value=credential))
+    monkeypatch.setattr(mcp_auth, "build_credential_with_client_id", Mock())
+
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError, match="close failure"):
+        mcp_auth.materialize_mcp_headers(_server(scope=_SCOPE))
+    credential.close.assert_called_once_with()
+    assert "MCP credential cleanup failed." in caplog.text
+
+
+def test_materialize_preserves_primary_failure_when_credential_close_also_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    credential = _credential_with_close()
+    credential.get_token.side_effect = RuntimeError("token failure")
+    credential.close.side_effect = RuntimeError("close failure")
+    monkeypatch.setattr(mcp_auth, "build_credential", Mock(return_value=credential))
+    monkeypatch.setattr(mcp_auth, "build_credential_with_client_id", Mock())
+
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError, match="token failure"):
+        mcp_auth.materialize_mcp_headers(_server(scope=_SCOPE))
+
+    credential.close.assert_called_once_with()
+    assert "MCP credential cleanup failed." in caplog.text
 
 
 def test_header_provider_is_none_without_auth_or_static_headers(
@@ -290,5 +361,6 @@ def test_header_provider_is_none_without_auth_or_static_headers(
     assert mcp_auth.build_mcp_header_provider(_server()) is None
     assert mcp_auth.materialize_mcp_headers(_server()) == {}
     credential.get_token.assert_not_called()
+    credential.close.assert_not_called()
     default_builder.assert_not_called()
     client_builder.assert_not_called()

@@ -14,7 +14,11 @@ from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
 from azure_functions_agents.config.merge import compose
 from azure_functions_agents.discovery.mcp import MCPServerDescriptor, discover_mcp_servers
-from azure_functions_agents.discovery.skills import SkillDescriptor, discover_skills
+from azure_functions_agents.discovery.skills import (
+    SkillDescriptor,
+    describe_skill_catalog,
+    discover_skills,
+)
 from azure_functions_agents.discovery.tools import discover_user_tools
 from azure_functions_agents.harness import _agent_runner
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
@@ -77,7 +81,6 @@ async def test_shared_scenario_inventory_is_filtered_once_and_forwarded_unchange
     assert [tool.name for tool in request.tools] == ["local_tool"]
     assert request.mcp_servers == capabilities.filtered_mcp_tools
     assert [server.name for server in request.mcp_servers] == ["selected"]
-    assert request.skill_source_paths is None
     assert capabilities == before
     no_parse.assert_not_called()
 
@@ -243,7 +246,6 @@ async def test_cached_facade_forwards_neutral_capabilities_to_selected_execution
     assert request.mcp_servers == (server,)
     assert request.skills == (approved,)
     assert request.skill_catalog == (approved, excluded)
-    assert request.skill_source_paths is None
     assert request.session_id == "session"
     assert request.new_session is True
     assert request.deadline == 123.0
@@ -290,39 +292,96 @@ async def test_cached_leaf_facade_binds_immutable_capabilities_to_its_app_root(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("paths", [None, (), (Path("collection"), Path("invalid-name"))])
-async def test_cached_maf_facade_preserves_raw_skill_source_path_intent(
-    streaming, paths, monkeypatch, tmp_path
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+@pytest.mark.parametrize(
+    ("paths", "expected_calls"),
+    [
+        (None, []),
+        ((), [()]),
+    ],
+)
+async def test_cached_facade_preserves_none_vs_empty_skill_path_semantics(
+    kind, paths, expected_calls, monkeypatch, tmp_path
 ):
-    harness = AppHarness(HarnessKind.MAF, tmp_path)
+    harness = AppHarness(kind, tmp_path, default_model="fixture-model")
     selected = _agent_runner.get_agent_runner(harness)
     observed = []
-    parser = Mock(side_effect=AssertionError("MAF collections must not use the individual parser"))
-    monkeypatch.setattr(runner, "describe_skill_catalog", parser)
+    parser_calls = []
+    original = runner.describe_skill_catalog
+
+    def parser(received):
+        parser_calls.append(tuple(received))
+        return original(received)
 
     async def execute(actual_harness, request, **kwargs):
         observed.append((actual_harness, request))
         return runner.AgentResult("session", "reply")
 
-    async def stream(actual_harness, request, **kwargs):
-        observed.append((actual_harness, request))
-        yield "data: fixture\n\n"
+    monkeypatch.setattr(runner, "describe_skill_catalog", parser)
+    monkeypatch.setattr(
+        _maf_execution if kind is HarnessKind.MAF else _copilot_execution, "run", execute
+    )
 
-    monkeypatch.setattr(_maf_execution, "run", execute)
-    monkeypatch.setattr(_maf_execution, "run_stream", stream)
-    options = {"tools": (), "mcp_tools": (), "skill_paths": paths, "deadline": 123.0}
-    if streaming:
-        assert [item async for item in selected.run_agent_stream("prompt", **options)] == [
-            "data: fixture\n\n"
-        ]
-    else:
-        assert (await selected.run_agent("prompt", **options)).content == "reply"
+    result = await selected.run_agent(
+        "prompt", tools=(), mcp_tools=(), skill_paths=paths, deadline=123.0
+    )
 
+    assert result.content == "reply"
     assert observed[0][0] is harness
-    assert observed[0][1].skill_source_paths == paths
     assert observed[0][1].skills == ()
-    parser.assert_not_called()
+    assert observed[0][1].skill_catalog == ()
+    assert parser_calls == expected_calls
+    assert _agent_runner.get_agent_runner(harness) is selected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+async def test_cached_facade_expands_nested_skill_paths_once_before_selected_execution(
+    kind, monkeypatch, tmp_path
+):
+    harness = AppHarness(kind, tmp_path, default_model="fixture-model")
+    selected = _agent_runner.get_agent_runner(harness)
+    observed = []
+    parser_calls = []
+    original = describe_skill_catalog
+    collection = tmp_path / "collection"
+    parent = collection / "parent"
+    child = parent / "nested"
+    for directory, name in ((parent, "parent"), (child, "nested")):
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name}\n---\nInstructions.\n",
+            encoding="utf-8",
+        )
+    paths = (collection, child, collection)
+    expected = original(paths)
+    no_read = Mock(side_effect=AssertionError("Shared skill expansion must not read SKILL.md"))
+
+    def parser(received):
+        parser_calls.append(tuple(received))
+        return original(received)
+
+    async def execute(actual_harness, request, **kwargs):
+        observed.append((actual_harness, request))
+        return runner.AgentResult("session", "reply")
+
+    monkeypatch.setattr(Path, "read_text", no_read)
+    monkeypatch.setattr(Path, "open", no_read)
+    monkeypatch.setattr("builtins.open", no_read)
+    monkeypatch.setattr(runner, "describe_skill_catalog", parser)
+    monkeypatch.setattr(
+        _maf_execution if kind is HarnessKind.MAF else _copilot_execution, "run", execute
+    )
+    result = await selected.run_agent(
+        "prompt", tools=(), mcp_tools=(), skill_paths=paths, deadline=123.0
+    )
+
+    assert result.content == "reply"
+    assert observed[0][0] is harness
+    assert observed[0][1].skills == expected
+    assert observed[0][1].skill_catalog == expected
+    assert parser_calls == [paths]
+    no_read.assert_not_called()
     assert _agent_runner.get_agent_runner(harness) is selected
 
 

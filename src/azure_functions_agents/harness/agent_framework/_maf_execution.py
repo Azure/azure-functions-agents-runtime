@@ -596,11 +596,7 @@ async def run(
             session_id=session_id,
             tools=request.tools,
             mcp_tools=request.mcp_servers,
-            skill_paths=(
-                request.skill_source_paths
-                if request.skill_source_paths is not None
-                else tuple(skill.path for skill in request.skills) or None
-            ),
+            skill_paths=tuple(skill.path for skill in request.skills) or None,
             model=model,
             sandbox_tools=None,
             system_addendum=system_addendum,
@@ -725,11 +721,7 @@ async def run_stream(
                 session_id=session_id,
                 tools=request.tools,
                 mcp_tools=request.mcp_servers,
-                skill_paths=(
-                    request.skill_source_paths
-                    if request.skill_source_paths is not None
-                    else tuple(skill.path for skill in request.skills) or None
-                ),
+                skill_paths=tuple(skill.path for skill in request.skills) or None,
                 model=model,
                 sandbox_tools=None,
                 system_addendum=system_addendum,

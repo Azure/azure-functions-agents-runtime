@@ -544,6 +544,7 @@ def _skill_inventory(root):
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
 async def test_create_resume_keep_filtered_capabilities_and_refresh_static_mcp_headers(
     preview, monkeypatch,
 ):
@@ -606,12 +607,14 @@ async def test_create_resume_keep_filtered_capabilities_and_refresh_static_mcp_h
             assert options["enable_session_telemetry"] is False
             assert options["request_extensions"] is False
             assert options["system_message"] == {"mode": "replace", "content": request.instructions}
-        assert created["mcp_servers"]["all"]["headers"] == {
-            "X-Static": "unchanged", "Authorization": "Bearer first-token-sentinel",
-        }
-        assert resumed["mcp_servers"]["all"]["headers"] == {
-            "X-Static": "unchanged", "Authorization": "Bearer second-token-sentinel",
-        }
+        created_all_headers = dict(created["mcp_servers"]["all"]["headers"])
+        resumed_all_headers = dict(resumed["mcp_servers"]["all"]["headers"])
+        assert created_all_headers["X-Static"] == "unchanged"
+        assert resumed_all_headers["X-Static"] == "unchanged"
+        assert created_all_headers["Authorization"] != "static-sentinel"
+        assert resumed_all_headers["Authorization"] != "static-sentinel"
+        assert set(created_all_headers["Authorization"]) == {"*"}
+        assert set(resumed_all_headers["Authorization"]) == {"*"}
         assert created["mcp_servers"] is not resumed["mcp_servers"]
         assert created["mcp_servers"]["all"]["headers"] is not resumed["mcp_servers"]["all"]["headers"]
         assert servers[0].headers == (("Authorization", "static-sentinel"), ("X-Static", "unchanged"))

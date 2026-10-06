@@ -37,7 +37,6 @@ from .discovery.tools import discover_user_tools as discover_user_tools
 from .harness._agent_runner import get_agent_runner
 from .harness._harness_binding import (
     AppHarness,
-    HarnessKind,
     HarnessRequest,
     get_harness,
 )
@@ -311,14 +310,12 @@ def _request(
         if mcp_tools is None
         else tuple(mcp_tools)
     )
-    skill_source_paths: tuple[Path, ...] | None = None
-    if harness.name is HarnessKind.MAF and skills is None:
-        approved: tuple[SkillDescriptor, ...] = ()
-        skill_source_paths = tuple(skill_paths) if skill_paths is not None else None
-    elif skills is not None:
+    if skills is not None:
         approved = tuple(skills)
+    elif skill_paths is not None:
+        approved = describe_skill_catalog(skill_paths)
     else:
-        approved = describe_skill_catalog(skill_paths or ())
+        approved = ()
     discovered = tuple(skill_catalog) if skill_catalog is not None else approved
     validated_id = _validate_session_id(session_id)
     effective = instructions.strip() if instructions and instructions.strip() else None
@@ -338,7 +335,6 @@ def _request(
         mcp_servers=servers,
         skills=approved,
         skill_catalog=_merge_skill_descriptors(discovered, approved),
-        skill_source_paths=skill_source_paths,
         max_output_tokens=configuration.max_output_tokens,
         deadline=deadline,
     )

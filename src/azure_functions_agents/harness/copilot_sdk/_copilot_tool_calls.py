@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..._tool_descriptor import is_harness_object
-from ..._tool_result import tool_result_text as _ordinary_tool_result_text
+from ._tool_result import tool_result_text as _ordinary_tool_result_text
 
 if TYPE_CHECKING:
     from copilot.session_events import ToolExecutionCompleteData, ToolExecutionStartData
@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 _NATIVE_TOOL_FAILURE = '{"error":"Native tool failed or was denied."}'
 _REDACTED = "[REDACTED]"
+
+
 def _reject_harness_result(value: object) -> None:
     if is_harness_object(value):
         raise TypeError(

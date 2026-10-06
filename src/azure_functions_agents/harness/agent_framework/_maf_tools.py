@@ -8,7 +8,7 @@ from typing import Any
 
 from agent_framework import FunctionTool
 
-from ..._tool_descriptor import ToolCallable, ToolDescriptor, requires_maf_context
+from ..._tool_descriptor import ToolCallable, ToolDescriptor
 
 
 def _maf_callable(descriptor: ToolDescriptor) -> ToolCallable:
@@ -34,7 +34,7 @@ def build_maf_tools(descriptors: Sequence[ToolDescriptor]) -> list[FunctionTool]
     """Let MAF validate authored options and own each constructed tool's state."""
     tools: list[FunctionTool] = []
     for descriptor in descriptors:
-        sdk_owned = bool(descriptor.maf_options) or requires_maf_context(descriptor.func)
+        sdk_owned = bool(descriptor.maf_options)
         tools.append(FunctionTool(
             name=descriptor.name,
             description=descriptor.description,

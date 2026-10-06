@@ -18,44 +18,6 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
 - **MAF execution controls** — set output limits and optional Microsoft Agent Framework token-budget conversation compaction
 
-### Experimental Copilot harness
-
-MAF remains the default. A separate
-[Copilot preview sample](samples/copilot-preview/README.md) supports an explicit
-`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=true` opt-in for **internal local
-qualification only**, not a customer-facing production contract, covering non-streaming HTTP,
-filtered explicit Python tools, remote HTTP MCP servers, scoped project skills,
-the configured `web_request` tool, session-bound
-ACA `execute_python` adapter wiring, host-validated structured results on
-authored HTTP-trigger routes, and SDK-owned native sessions. The flag is read
-once per app: **restart the host** to opt in or out. Each app caches one selected
-execution runner; direct, streaming and leaf entry points use that same binding
-without re-reading the selector. Unsupported Copilot operations still fail before
-native/provider acquisition. Each harness
-constructs, uses and closes only its own persistence adapter: MAF keeps its
-history provider; Copilot uses the SDK's `SessionFs` callbacks. Copilot stores
-ordinary local files or one Blob per SDK file, using the existing
-`AzureWebJobsStorage` settings to select Blob and local files only when neither
-Blob setting is configured. Configured Blob failures never fall back to disk.
-The SDK owns sessions, continuation, recovery, compaction and file formats;
-the host supplies filesystem operations, metadata and path containment.
-ACA catalog/session scoping is unit-qualified; real Copilot-to-ACA
-execution remains a separately gated acceptance item. Native `skill`, `view`,
-and `bash` helpers are limited to approved skill loading, resource reads, and
-literal script invocations; general shell/project-file access and other ambient
-SDK tools remain disabled or denied. This is **not**
-production activation: the preview remains local-only and single-worker.
-Earlier real-service results do not qualify the rewritten filesystem adapter.
-Deployed-host and dual-harness end-to-end qualification remain in #1357 and
-final rollout remains in #1337. Delegation, workflow roles, and streaming
-remain unsupported. Configured output-token caps are not supported in this
-Copilot preview; MAF retains its output-limit controls. See
-[`docs/copilot-preview-operations.md`](docs/copilot-preview-operations.md) for
-MCP auth limits, scoped skill helpers, storage settings, errors and targeted cleanup.
-The sample documents OpenAI key, Azure OpenAI key/Entra and Foundry Entra setup.
-Custom `ClientManager`
-implementations remain MAF-only and are rejected explicitly when Copilot is on.
-
 ## Installation
 
 The package is published on PyPI as **`azurefunctions-agents-runtime`**.

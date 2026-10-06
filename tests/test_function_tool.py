@@ -235,40 +235,20 @@ async def test_maf_validates_and_honors_authored_result_parser_and_extension_opt
 
 
 @pytest.mark.asyncio
-async def test_maf_owns_authored_invocation_context_injection() -> None:
-    from agent_framework import FunctionInvocationContext
-
-    contexts = []
-
-    def contextual(value, context):
-        contexts.append(context)
-        return value
-
-    contextual.__annotations__ = {"value": str, "context": FunctionInvocationContext}
-    descriptor = tool(contextual)
-    assert "context" not in descriptor.parameters()["properties"]
-    with pytest.raises(UnsupportedCapabilityError):
-        prepare_tools((descriptor,))
-    [wrapped] = _maf_tools.build_maf_tools((descriptor,))
-    context = FunctionInvocationContext(wrapped, {"value": "ok"})
-    assert await wrapped.invoke(
-        arguments={"value": "ok"}, context=context, skip_parsing=True,
-    ) == "ok"
-    assert contexts == [context]
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("source", [None, (), (Path("collection"), Path("invalid-name"))])
-async def test_maf_adapter_preserves_caller_skill_source_path_intent(
-    streaming: bool, source: tuple[Path, ...] | None, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("skills", [(), ("selected", "nested")])
+async def test_maf_adapter_uses_skill_descriptor_paths(
+    streaming: bool, skills: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import agent_framework
 
     provider = Mock()
     monkeypatch.setattr(agent_framework, "SkillsProvider", provider)
     monkeypatch.setattr(agent_framework, "create_harness_agent", Mock())
-    selected = SkillDescriptor(name="selected", path=Path("selected"))
+    selected = tuple(
+        SkillDescriptor(name=name, path=Path(name))
+        for name in skills
+    )
     request = HarnessRequest(
         prompt="test",
         instructions=None,
@@ -279,10 +259,9 @@ async def test_maf_adapter_preserves_caller_skill_source_path_intent(
         tools=(),
         max_output_tokens=None,
         deadline=0,
-        skills=(selected,),
-        skill_source_paths=source,
+        skills=selected,
     )
-    expected = source if source is not None else (selected.path,)
+    expected = tuple(skill.path for skill in selected) or None
     seen: list[tuple[Path, ...] | None] = []
 
     async def capture(**kwargs: Any) -> Any:

@@ -111,19 +111,6 @@ def _parameter_annotation(annotation: Any) -> Any:
     return annotation
 
 
-def _is_invocation_context(annotation: Any) -> bool:
-    candidates = get_args(annotation) or (annotation,)
-    return any(
-        candidate == "FunctionInvocationContext"
-        or (
-            isinstance(candidate, type)
-            and candidate.__name__ == "FunctionInvocationContext"
-            and candidate.__module__.startswith("agent_framework")
-        )
-        for candidate in candidates
-    )
-
-
 def _function_hints(func: ToolCallable) -> dict[str, Any]:
     try:
         return get_type_hints(func, include_extras=True)
@@ -132,16 +119,6 @@ def _function_hints(func: ToolCallable) -> dict[str, Any]:
             parameter.name: parameter.annotation
             for parameter in inspect.signature(func).parameters.values()
         }
-
-
-def requires_maf_context(func: ToolCallable) -> bool:
-    return any(
-        _is_invocation_context(annotation)
-        for name, annotation in _function_hints(func).items()
-        if name != "return"
-    )
-
-
 def _input_model(name: str, func: ToolCallable) -> type[BaseModel]:
     signature = inspect.signature(func)
     hints = _function_hints(func)
@@ -153,8 +130,6 @@ def _input_model(name: str, func: ToolCallable) -> type[BaseModel]:
         }:
             continue
         annotation = hints.get(parameter.name, parameter.annotation)
-        if _is_invocation_context(annotation):
-            continue
         if annotation is inspect.Parameter.empty:
             annotation = str
         default = parameter.default if parameter.default is not inspect.Parameter.empty else ...
@@ -213,7 +188,7 @@ class ToolDescriptor:
         self, *, arguments: dict[str, Any], tool_call_id: str | None = None
     ) -> Any:
         """Validate arguments before calling once and awaiting at most once."""
-        if self.maf_options or requires_maf_context(self.func):
+        if self.maf_options:
             raise TypeError("This tool requires the MAF adapter.")
         values = dict(arguments)
         if self.input_model is not None:

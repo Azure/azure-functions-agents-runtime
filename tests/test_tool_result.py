@@ -6,7 +6,7 @@ import pytest
 from agent_framework import FunctionTool
 from pydantic import BaseModel
 
-from azure_functions_agents._tool_result import tool_result_text
+from azure_functions_agents.harness.copilot_sdk._tool_result import tool_result_text
 
 
 class _MappingResult:
@@ -43,7 +43,7 @@ class _NonCallableDictionaryResult:
             self.text = "looks successful"
 
 
-@pytest.mark.parametrize("parser", [FunctionTool.parse_result, tool_result_text], ids=["maf", "shared"])
+@pytest.mark.parametrize("parser", [FunctionTool.parse_result, tool_result_text], ids=["maf", "copilot"])
 @pytest.mark.parametrize("to_dict", [None, 42], ids=["none", "integer"])
 @pytest.mark.parametrize("with_text", [False, True], ids=["without-text", "with-text"])
 def test_noncallable_to_dict_preserves_conversion_failure(parser, to_dict, with_text):

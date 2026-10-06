@@ -1,4 +1,4 @@
-"""SDK-free ordinary Python tool-result conversion compatible with MAF defaults."""
+"""Ordinary Python tool-result conversion used by the Copilot adapter."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ def tool_result_text(
     result: object, *, validate_result: Callable[[object], None] | None = None
 ) -> str:
     """Convert ordinary values while letting the adapter reject unsupported rich results."""
+
     def check(value: object) -> None:
         if validate_result is not None:
             validate_result(value)

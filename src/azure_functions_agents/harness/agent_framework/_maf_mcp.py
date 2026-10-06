@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
+from typing import Any
 from weakref import ReferenceType, ref
 
 from agent_framework import MCPStreamableHTTPTool
-from httpx import AsyncClient, Request
 
-from ..._mcp_auth import MCPHeaderProvider, build_mcp_header_provider
+from ..._logger import logger
+from ..._mcp_auth import build_mcp_header_provider
 from ...discovery.mcp import MCPServerDescriptor
 
 _MAF_MCP_TOOLS_CACHE: dict[
@@ -17,21 +18,55 @@ _MAF_MCP_TOOLS_CACHE: dict[
 ] = {}
 
 
+class _OwnedHTTPClientMCPStreamableHTTPTool(MCPStreamableHTTPTool):
+    """Close SDK-created HTTP clients when the MCP transport context ends."""
+
+    @asynccontextmanager
+    async def get_mcp_client(self) -> AsyncIterator[Any]:
+        prior_http_client = self._httpx_client
+        context = super().get_mcp_client()
+        owned_http_client = (
+            self._httpx_client
+            if self._header_provider is not None
+            and prior_http_client is None
+            and self._httpx_client is not None
+            else None
+        )
+        try:
+            async with context as transport:
+                yield transport
+        except BaseException:
+            try:
+                await _close_owned_http_client(self, owned_http_client)
+            except BaseException:
+                logger.error("MAF MCP HTTP client cleanup failed.", exc_info=True)
+            raise
+        finally:
+            if owned_http_client is not None and self._httpx_client is owned_http_client:
+                try:
+                    await _close_owned_http_client(self, owned_http_client)
+                except Exception:
+                    logger.error("MAF MCP HTTP client cleanup failed.", exc_info=True)
+                    raise
+
+
+async def _close_owned_http_client(
+    tool: _OwnedHTTPClientMCPStreamableHTTPTool, owned_http_client: Any | None
+) -> None:
+    if owned_http_client is None:
+        return
+    try:
+        await owned_http_client.aclose()
+    finally:
+        if tool._httpx_client is owned_http_client:
+            tool._httpx_client = None
+        if hasattr(tool, "_inject_headers_hook"):
+            delattr(tool, "_inject_headers_hook")
+
+
 def clear_maf_mcp_cache() -> None:
     """Forget wrapper mappings without taking ownership of MAF connection lifetime."""
     _MAF_MCP_TOOLS_CACHE.clear()
-
-
-def _build_http_client(header_provider: MCPHeaderProvider | None) -> AsyncClient | None:
-    if header_provider is None:
-        return None
-
-    async def inject_headers(request: Request) -> None:
-        headers = await asyncio.to_thread(header_provider, {})
-        for key, value in headers.items():
-            request.headers[key] = value
-
-    return AsyncClient(follow_redirects=True, event_hooks={"request": [inject_headers]})
 
 
 def _build_maf_mcp_tool(server: MCPServerDescriptor) -> MCPStreamableHTTPTool:
@@ -41,7 +76,7 @@ def _build_maf_mcp_tool(server: MCPServerDescriptor) -> MCPStreamableHTTPTool:
         return cached[1]
 
     header_provider = build_mcp_header_provider(server)
-    tool = MCPStreamableHTTPTool(
+    tool = _OwnedHTTPClientMCPStreamableHTTPTool(
         name=server.name,
         url=server.url,
         allowed_tools=list(server.tools) if server.tools is not None else None,
@@ -49,7 +84,6 @@ def _build_maf_mcp_tool(server: MCPServerDescriptor) -> MCPStreamableHTTPTool:
         load_prompts=False,
         approval_mode="never_require",
         header_provider=header_provider,
-        http_client=_build_http_client(header_provider),
     )
 
     def forget_descriptor(_reference: ReferenceType[MCPServerDescriptor]) -> None:

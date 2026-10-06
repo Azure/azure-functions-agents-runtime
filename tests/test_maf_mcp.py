@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import gc
 import json
 import logging
 from collections.abc import Iterator
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import Mock
 from weakref import ref
 
+import httpx
 import pytest
 from agent_framework import MCPStreamableHTTPTool
 from azure.core.credentials import AccessToken
-from httpx import AsyncClient, MockTransport, Request, Response
+from httpx import AsyncClient
 
 import azure_functions_agents._mcp_auth as mcp_auth
 from azure_functions_agents._mcp_auth import MCPHeaderProvider
@@ -36,7 +40,7 @@ class _CapturedMCPStreamableHTTPTool:
         load_prompts: bool,
         approval_mode: str,
         header_provider: MCPHeaderProvider | None,
-        http_client: AsyncClient | None,
+        http_client: AsyncClient | None = None,
     ) -> None:
         self.name = name
         self.url = url
@@ -59,7 +63,9 @@ def clear_adapter_cache() -> Iterator[None]:
 
 @pytest.fixture
 def capture_tools(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(maf_mcp, "MCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool)
+    monkeypatch.setattr(
+        maf_mcp, "_OwnedHTTPClientMCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool
+    )
 
 
 def _server(
@@ -148,10 +154,7 @@ def test_clear_adapter_cache_rebuilds_wrappers(capture_tools: None) -> None:
     assert first is not second
 
 
-def test_adapter_cache_does_not_retain_discarded_descriptors(
-    capture_tools: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(maf_mcp, "_build_http_client", lambda _provider: None)
+def test_adapter_cache_does_not_retain_discarded_descriptors(capture_tools: None) -> None:
     server = _server(headers={"X-Test": "yes"}, scope=_SCOPE)
     descriptor_ref = ref(server)
     [tool] = maf_mcp.build_maf_mcp_tools([server])
@@ -197,62 +200,34 @@ def test_adapter_construction_does_not_acquire_credentials(
     client_builder = Mock(side_effect=AssertionError("unexpected credential acquisition"))
     monkeypatch.setattr(mcp_auth, "build_credential", default_builder)
     monkeypatch.setattr(mcp_auth, "build_credential_with_client_id", client_builder)
-    monkeypatch.setattr(maf_mcp, "_build_http_client", lambda _provider: None)
     server = _server(scope=_SCOPE)
 
     [tool] = maf_mcp.build_maf_mcp_tools([server])
 
     assert tool.header_provider is not None
+    assert tool.http_client is None
     default_builder.assert_not_called()
     client_builder.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_httpx_request_hook_preserves_static_headers(
-    capture_tools: None, monkeypatch: pytest.MonkeyPatch
+def test_authenticated_mcp_uses_sdk_header_provider_without_custom_http_client(
+    capture_tools: None,
 ) -> None:
-    requests: list[Request] = []
-
-    def record_request(request: Request) -> Response:
-        requests.append(request)
-        return Response(200)
-
-    client_factory = Mock(
-        side_effect=lambda **kwargs: AsyncClient(transport=MockTransport(record_request), **kwargs)
-    )
-    monkeypatch.setattr(maf_mcp, "AsyncClient", client_factory)
     server = _server(headers={"Authorization": "static-value", "X-Test": "yes"})
     [tool] = maf_mcp.build_maf_mcp_tools([server])
     assert tool.header_provider is not None
-    assert tool.http_client is not None
+    assert tool.http_client is None
     assert tool.header_provider({}) == {"Authorization": "static-value", "X-Test": "yes"}
 
-    async with tool.http_client as client:
-        await client.get(server.url)
-
-    assert len(requests) == 1
-    assert requests[0].headers["Authorization"] == "static-value"
-    assert requests[0].headers["X-Test"] == "yes"
-    assert client_factory.call_args.kwargs["follow_redirects"] is True
-    assert len(client_factory.call_args.kwargs["event_hooks"]["request"]) == 1
+    auth_server = _server(scope=_SCOPE, headers={"Authorization": "static-value", "X-Test": "yes"})
+    [auth_tool] = maf_mcp.build_maf_mcp_tools([auth_server])
+    assert auth_tool.header_provider is not None
+    assert auth_tool.http_client is None
 
 
-@pytest.mark.asyncio
-async def test_httpx_request_hook_refreshes_auth_at_expiry_offset(
+def test_header_provider_refreshes_auth_at_expiry_offset(
     capture_tools: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    authorizations: list[str] = []
-
-    def record_request(request: Request) -> Response:
-        authorizations.append(request.headers["Authorization"])
-        assert request.headers["X-Test"] == "yes"
-        return Response(200)
-
-    monkeypatch.setattr(
-        maf_mcp,
-        "AsyncClient",
-        lambda **kwargs: AsyncClient(transport=MockTransport(record_request), **kwargs),
-    )
     credential = Mock()
     credential.get_token.side_effect = [
         AccessToken("first-token", 1000),
@@ -263,39 +238,26 @@ async def test_httpx_request_hook_refreshes_auth_at_expiry_offset(
     monkeypatch.setattr(mcp_auth.time, "time", lambda: 100)
     server = _server(scope=_SCOPE, headers={"Authorization": "static-value", "X-Test": "yes"})
     [tool] = maf_mcp.build_maf_mcp_tools([server])
-    assert tool.http_client is not None
+    assert tool.http_client is None
+    assert tool.header_provider is not None
     default_builder.assert_not_called()
 
-    async with tool.http_client as client:
-        await client.get(server.url)
-        monkeypatch.setattr(mcp_auth.time, "time", lambda: 699)
-        await client.get(server.url)
-        monkeypatch.setattr(mcp_auth.time, "time", lambda: 700)
-        await client.get(server.url)
+    assert tool.header_provider({}) == {"Authorization": "******", "X-Test": "yes"}
+    monkeypatch.setattr(mcp_auth.time, "time", lambda: 699)
+    assert tool.header_provider({}) == {"Authorization": "******", "X-Test": "yes"}
+    monkeypatch.setattr(mcp_auth.time, "time", lambda: 700)
+    assert tool.header_provider({}) == {"Authorization": "******", "X-Test": "yes"}
 
-    assert authorizations == ["Bearer first-token", "Bearer first-token", "Bearer second-token"]
     assert credential.get_token.call_count == 2
     credential.get_token.assert_called_with(_SCOPE)
     default_builder.assert_called_once_with()
 
 
-@pytest.mark.asyncio
-async def test_request_hook_failure_sends_no_stale_header_or_retry(
+def test_header_provider_failure_sends_no_stale_header_or_retry(
     capture_tools: None,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    authorizations: list[str] = []
-
-    def record_request(request: Request) -> Response:
-        authorizations.append(request.headers["Authorization"])
-        return Response(200)
-
-    monkeypatch.setattr(
-        maf_mcp,
-        "AsyncClient",
-        lambda **kwargs: AsyncClient(transport=MockTransport(record_request), **kwargs),
-    )
     credential = Mock()
     credential.get_token.side_effect = [
         AccessToken("first-token", 1000),
@@ -305,15 +267,197 @@ async def test_request_hook_failure_sends_no_stale_header_or_retry(
     monkeypatch.setattr(mcp_auth.time, "time", lambda: 100)
     server = _server(scope=_SCOPE, headers={"Authorization": "static-value"})
     [tool] = maf_mcp.build_maf_mcp_tools([server])
-    assert tool.http_client is not None
+    assert tool.http_client is None
+    assert tool.header_provider is not None
 
-    async with tool.http_client as client:
-        await client.get(server.url)
-        monkeypatch.setattr(mcp_auth.time, "time", lambda: 700)
-        with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError, match="test refresh failure"):
-            await client.get(server.url)
+    assert tool.header_provider({}) == {"Authorization": "******"}
+    monkeypatch.setattr(mcp_auth.time, "time", lambda: 700)
+    with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError, match="test refresh failure"):
+        tool.header_provider({})
 
-    assert authorizations == ["Bearer first-token"]
     assert credential.get_token.call_count == 2
     assert "first-token" not in caplog.text
     assert "static-value" not in caplog.text
+
+
+class _CloseTrackingAsyncClient:
+    instances: ClassVar[list[_CloseTrackingAsyncClient]] = []
+    close_error: ClassVar[BaseException | None] = None
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.args = args
+        self.kwargs = kwargs
+        self.event_hooks = {"request": []}
+        self.close_calls = 0
+        self.instances.append(self)
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+@pytest.mark.asyncio
+async def test_owned_http_client_closes_with_sdk_exit_stack(monkeypatch: pytest.MonkeyPatch) -> None:
+    import agent_framework._mcp as sdk_mcp
+
+    _CloseTrackingAsyncClient.instances.clear()
+    _CloseTrackingAsyncClient.close_error = None
+
+    @asynccontextmanager
+    async def fake_transport(*_args, **_kwargs):
+        yield (object(), object(), lambda: None)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _CloseTrackingAsyncClient)
+    monkeypatch.setattr(sdk_mcp, "streamable_http_client", fake_transport)
+    [tool] = maf_mcp.build_maf_mcp_tools([_server(scope=_SCOPE)])
+
+    await tool._exit_stack.enter_async_context(tool.get_mcp_client())
+    client = tool._httpx_client
+    assert isinstance(client, _CloseTrackingAsyncClient)
+    assert client.close_calls == 0
+
+    await tool._safe_close_exit_stack()
+
+    assert client.close_calls == 1
+    assert tool._httpx_client is None
+
+
+@pytest.mark.asyncio
+async def test_owned_http_client_closes_when_transport_connect_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_framework._mcp as sdk_mcp
+
+    _CloseTrackingAsyncClient.instances.clear()
+    _CloseTrackingAsyncClient.close_error = None
+
+    @asynccontextmanager
+    async def failing_transport(*_args, **_kwargs):
+        raise RuntimeError("connect failed")
+        yield
+
+    monkeypatch.setattr(httpx, "AsyncClient", _CloseTrackingAsyncClient)
+    monkeypatch.setattr(sdk_mcp, "streamable_http_client", failing_transport)
+    [tool] = maf_mcp.build_maf_mcp_tools([_server(scope=_SCOPE)])
+
+    with pytest.raises(RuntimeError, match="connect failed"):
+        async with tool.get_mcp_client():
+            pytest.fail("transport should not yield")
+
+    [client] = _CloseTrackingAsyncClient.instances
+    assert client.close_calls == 1
+    assert tool._httpx_client is None
+
+
+@pytest.mark.asyncio
+async def test_owned_http_client_closes_when_owner_path_handles_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_framework._mcp as sdk_mcp
+
+    _CloseTrackingAsyncClient.instances.clear()
+    _CloseTrackingAsyncClient.close_error = None
+
+    @asynccontextmanager
+    async def fake_transport(*_args, **_kwargs):
+        yield (object(), object(), lambda: None)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _CloseTrackingAsyncClient)
+    monkeypatch.setattr(sdk_mcp, "streamable_http_client", fake_transport)
+    [tool] = maf_mcp.build_maf_mcp_tools([_server(scope=_SCOPE)])
+
+    with pytest.raises(asyncio.CancelledError):
+        async with tool.get_mcp_client():
+            client = tool._httpx_client
+            assert isinstance(client, _CloseTrackingAsyncClient)
+            raise asyncio.CancelledError
+
+    [client] = _CloseTrackingAsyncClient.instances
+    assert client.close_calls == 1
+    assert tool._httpx_client is None
+
+
+@pytest.mark.asyncio
+async def test_owned_http_client_close_failure_surfaces_without_primary_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import agent_framework._mcp as sdk_mcp
+
+    _CloseTrackingAsyncClient.instances.clear()
+    _CloseTrackingAsyncClient.close_error = RuntimeError("close failed")
+
+    @asynccontextmanager
+    async def fake_transport(*_args, **_kwargs):
+        yield (object(), object(), lambda: None)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _CloseTrackingAsyncClient)
+    monkeypatch.setattr(sdk_mcp, "streamable_http_client", fake_transport)
+    [tool] = maf_mcp.build_maf_mcp_tools([_server(scope=_SCOPE)])
+
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError, match="close failed"):
+        async with tool.get_mcp_client():
+            pass
+
+    [client] = _CloseTrackingAsyncClient.instances
+    assert client.close_calls == 1
+    assert tool._httpx_client is None
+    assert "MAF MCP HTTP client cleanup failed." in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_owned_http_client_close_failure_preserves_connect_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import agent_framework._mcp as sdk_mcp
+
+    _CloseTrackingAsyncClient.instances.clear()
+    _CloseTrackingAsyncClient.close_error = RuntimeError("close failed")
+
+    @asynccontextmanager
+    async def failing_transport(*_args, **_kwargs):
+        raise RuntimeError("connect failed")
+        yield
+
+    monkeypatch.setattr(httpx, "AsyncClient", _CloseTrackingAsyncClient)
+    monkeypatch.setattr(sdk_mcp, "streamable_http_client", failing_transport)
+    [tool] = maf_mcp.build_maf_mcp_tools([_server(scope=_SCOPE)])
+
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError, match="connect failed"):
+        async with tool.get_mcp_client():
+            pytest.fail("transport should not yield")
+
+    [client] = _CloseTrackingAsyncClient.instances
+    assert client.close_calls == 1
+    assert tool._httpx_client is None
+    assert "MAF MCP HTTP client cleanup failed." in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_owned_http_client_close_failure_preserves_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import agent_framework._mcp as sdk_mcp
+
+    _CloseTrackingAsyncClient.instances.clear()
+    _CloseTrackingAsyncClient.close_error = RuntimeError("close failed")
+
+    @asynccontextmanager
+    async def fake_transport(*_args, **_kwargs):
+        yield (object(), object(), lambda: None)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _CloseTrackingAsyncClient)
+    monkeypatch.setattr(sdk_mcp, "streamable_http_client", fake_transport)
+    [tool] = maf_mcp.build_maf_mcp_tools([_server(scope=_SCOPE)])
+
+    with caplog.at_level(logging.ERROR), pytest.raises(asyncio.CancelledError):
+        async with tool.get_mcp_client():
+            raise asyncio.CancelledError
+
+    [client] = _CloseTrackingAsyncClient.instances
+    assert client.close_calls == 1
+    assert tool._httpx_client is None
+    assert "MAF MCP HTTP client cleanup failed." in caplog.text

@@ -8,7 +8,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools, requires_maf_context
+from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
 from ...client_manager import (
     ProviderKind,
     _is_active_client_manager_builtin,
@@ -118,15 +118,11 @@ def prepare_tools(tools: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
     prepared = describe_tools(tools)
     names: set[str] = set()
     for function in prepared:
-        if (
-            function.policy.approval_mode != "never_require"
-            or function.maf_options
-            or requires_maf_context(function.func)
-        ):
+        if function.policy.approval_mode != "never_require" or function.maf_options:
             raise UnsupportedCapabilityError(
                 "Copilot preview supports ordinary runtime @tool declarations only; "
-                "MAF-specific options, approval, invocation limits, result parsers, "
-                "and injected invocation context are not supported."
+                "MAF-specific options, approval, invocation limits, and result parsers "
+                "are not supported."
             )
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", function.name):
             raise UnsupportedCapabilityError("Copilot preview requires OpenAI-compatible tool names.")
