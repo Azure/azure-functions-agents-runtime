@@ -81,6 +81,10 @@ def _is_workflow_marked(obj: object) -> bool:
 
 
 def _workflow_tool_from_member(module_name: str, name: str, obj: object) -> WorkflowTool | None:
+    if is_harness_object(obj):
+        warn_unsupported_tool()
+        return None
+
     handler: Callable[..., Any] | None = None
     default_tool_name = name
     default_description = ""

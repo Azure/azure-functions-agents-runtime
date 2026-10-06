@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from azure_functions_agents._function_tool import tool, workflow_tool
 from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.discovery.tools import (
+    _workflow_tool_from_member,
     clear_tool_discovery_cache,
     discover_project_tools,
     discover_user_tools,
@@ -173,6 +174,40 @@ def test_raw_maf_tools_are_ignored_in_discovery(tmp_path: Path, caplog) -> None:
     assert discover_project_tools(tmp_path).user_tools == []
     assert "Ignoring unsupported custom tool" in caplog.text
     assert "legacy_lookup" not in caplog.text
+
+
+@pytest.mark.parametrize("subclass", [False, True])
+@pytest.mark.parametrize("stacked", [False, True])
+def test_workflow_member_rejects_raw_sdk_before_metadata(
+    subclass: bool, stacked: bool, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    from agent_framework import FunctionTool
+
+    from azure_functions_agents.discovery import tools as discovery_tools
+
+    class OpaqueTool(FunctionTool):
+        def __getattribute__(self, name):
+            raise AssertionError("No SDK attributes may be inspected")
+
+    raw = (
+        object.__new__(OpaqueTool)
+        if subclass
+        else FunctionTool(name="sensitive_sdk_name", func=lambda value: value)
+    )
+    if stacked:
+        assert workflow_tool(name="sensitive_workflow_name")(raw) is raw
+    caplog.clear()
+
+    def forbidden_metadata(target):
+        raise AssertionError("SDK rejection must precede workflow metadata extraction")
+
+    monkeypatch.setattr(discovery_tools, "get_workflow_tool_metadata", forbidden_metadata)
+
+    assert _workflow_tool_from_member(__name__, "sensitive_member_name", raw) is None
+    assert [record.getMessage() for record in caplog.records] == [
+        "Ignoring unsupported custom tool; use the runtime @tool decorator "
+        "or a local public function in tools/."
+    ]
 
 
 def test_discovery_ignores_sdk_attributes_and_keeps_local_fallback(tmp_path: Path) -> None:
