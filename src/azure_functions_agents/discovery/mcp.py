@@ -135,6 +135,19 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> tuple[MCPTool | None, 
             error = f"could not resolve url '{url}'"
             logger.warning("MCP server '%s': %s, skipping", name, error)
             return None, error
+
+        headers = server.get("headers")
+        if isinstance(headers, dict):
+            for key, value in headers.items():
+                if has_unresolved_placeholders(str(key)):
+                    error = f"could not resolve header name '{key}'"
+                    logger.warning("MCP server '%s': %s, skipping", name, error)
+                    return None, error
+                if has_unresolved_placeholders(str(value)):
+                    error = f"could not resolve header '{key}' value '{value}'"
+                    logger.warning("MCP server '%s': %s, skipping", name, error)
+                    return None, error
+
         header_provider = _build_header_provider(server)
 
         return MCPStreamableHTTPTool(
