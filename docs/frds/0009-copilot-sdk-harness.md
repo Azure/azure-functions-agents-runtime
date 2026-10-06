@@ -506,23 +506,42 @@ existing role contract already adds it.
 ### 4.4 Native runtime lifetime
 
 The proposed default is the external native Rust runtime over stdio, with one
-lazily initialized, process-long SDK client owned by each frozen app binding in a
-Functions worker, reused across invocations with isolated sessions. Distinct app
-bindings, including bindings for the same root, do not share that client.
+lazily initialized SDK client owned by each frozen app binding in a warm
+Functions worker and reused across invocations with isolated sessions. Distinct
+app bindings, including bindings for the same root, do not share that client.
 Concurrent initialization must not launch duplicate runtimes for one binding.
-Request cancellation must not close the shared client or poison unrelated
-sessions; worker shutdown must release its client/process.
+The runtime startup path uses a single startup lock and reuses one shared
+credential owner per app binding for provider and storage authentication.
+Request cancellation, session failure, or adapter failure must not close the
+shared client or poison unrelated sessions; worker shutdown must release its
+client/process and credential owner through the explicit async shutdown path.
 Initialization, process-local session-lock waits, execution, and storage
 operations are bounded by the request deadline.
 
 The standalone first-use cache retains app bindings, not conversation state.
-A shared shutdown callback set may retain acquired resource owners so all can be
-closed without importing unselected implementations. The selected app binding
-owns its client, credentials, and open filesystem handles; the SDK remains the
-sole session authority. Supported Azure Functions handlers reuse the worker's
-active event loop. Standalone callers still shut down acquired preview
-resources before closing that loop, and reuse across separately created loops
-is not diagnosed or supported.
+A shared shutdown callback set may retain only acquired resource owners so all
+can be closed without importing unselected implementations. Resource ownership
+is intentionally simplified: the selected app binding owns only its lazy SDK
+client and shared credential. The request cleanup scope owns its `SessionFs`
+adapter directly, keeping the adapter open until session disconnect cleanup
+finishes and then closing it before the request returns, even on cancellation
+or failure. The runtime does not retain open adapter handles across requests,
+does not keep a failed-client retry registry, and does not install a process-exit
+`atexit` fallback. Supported Azure Functions handlers reuse the worker's active
+event loop. Standalone callers still shut down acquired preview resources
+before closing that loop, and reuse across separately created loops is not
+diagnosed or supported.
+
+Startup failures attempt bounded immediate cleanup and report the original
+startup error as authoritative. Request cancellation or turn failure likewise
+keeps the original cancellation/failure authoritative over abort, disconnect,
+or adapter-close cleanup errors. Explicit shutdown attempts graceful client stop
+with a bounded `force_stop` fallback, attempts credential cleanup even if client
+cleanup fails, reports cleanup failures instead of deferring retry to a later
+registry, and clears cached client/credential handles so a stopped or closing
+resource is never reused. This is a deliberate tradeoff: failed cleanup is
+reported immediately, and the runtime does not promise later retry or
+process-exit cleanup if the host does not await shutdown.
 
 No embedded FFI dependency is proposed. A compatible Python SDK/native-runtime/
 protocol combination, deployment asset acquisition, and supported Functions
@@ -745,6 +764,7 @@ persistence, or compatibility contracts.
 | 46 | Harness organizational containment | Persistence-only separation / contain harness-specific execution and persistence together | Keep common app binding/request contracts, cleanup plumbing, and neutral storage settings under `harness/`; place MAF execution/history in `harness/agent_framework/` and Copilot execution/providers/SessionFs in `harness/copilot_sdk/`. Preserve public runner signatures, app-owned resource lifetimes, selected-persistence isolation, and all existing selection, persistence, role, and preview contracts. This supersedes only the persistence-only organizational restriction, not its prohibition on unrelated tool/model/discovery redesign. | Human (larohra) | 2026-10-05 |
 | 47 | Shared agent identity authority | Retain owner/deployment correlation / consume the current shared site-qualified helper unchanged | Use `_agent_identity.agent_id(slug)` as the sole authority: trimmed, lower-case `WEBSITE_SITE_NAME` or `local`, followed by canonical slug. Keep `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}` and existing validation/containment; do not cache a separate identity prefix, restore owner/deployment inputs, or add migration/version logic. This supersedes the older correlation-key assumption only; SDK ownership, storage selection and app-resource/provider/settings lifetimes remain unchanged. | Human (larohra) | 2026-10-05 |
 | 48 | Bound runner composition | Keep harness branches in public runner helpers / introduce a broad lifecycle or history interface / bind one private three-method execution implementation per app context | Keep `AppHarness` as the once-selected app binding and cache one concrete private `AgentRunner` facade per app context. That facade forwards `run_agent`, `run_agent_stream`, and `run_leaf_agent_task` to one selected backend implementation housed in its harness package, with no additional history or lifecycle interface. Public runner exports remain compatibility shims, inactive backend imports stay lazy, unsupported Copilot stream/leaf methods fail before runtime/provider acquisition, and existing deadlines, SSE error boundaries, cleanup, standalone caching, and app-clone isolation remain unchanged. | Human (larohra) | 2026-10-05 |
+| 49 | Runtime owner lifetime | Retain failed-client/filesystem registries and process-exit fallback / bounded app-owned client+credential only, with request-owned adapter cleanup | Keep one lazy reused SDK client and shared credential per app binding behind a startup lock. Remove failed-client retention, runtime-owned filesystem retention, request-deferred adapter registries, and process-exit cleanup. Startup failures do bounded immediate cleanup and report the original error; request-local abort/disconnect/adapter cleanup preserves original failure or cancellation precedence; explicit async shutdown attempts graceful stop then bounded force-stop, also attempts credential cleanup, reports cleanup failures immediately, and clears cached handles so stopped/closing resources are never reused. | Human (larohra) | 2026-10-05 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -773,10 +793,10 @@ where mocks cannot establish process, transport, authentication, or durability.
 | Identity/path isolation | Verify native paths consume the unchanged shared site-qualified agent ID exactly once, followed by validated session ID and SDK-relative path. Cover trimmed/mixed-case/blank site names, ignored owner/deployment values, local fallback and containment without adding identity hashes or cached prefixes. |
 | Backend configuration/errors | Verify Blob selection from existing storage configuration, local selection only when no Blob configuration is present, reuse of existing identity/container behavior, and explicit surfacing of Blob auth/network/configuration failures without fallback to local storage. |
 | Persistence boundary isolation | Verify that only the selected harness's persistence implementation is imported, initialized, exercised, and closed. The Copilot path must not probe or clean up MAF history storage, and the MAF path must not initialize Copilot SessionFs. |
-| Harness containment | Verify unchanged public runner exports/signatures and shared result, usage, and lock behavior after containing private execution/persistence implementations. App-bound resources remain isolated, standalone defaults remain cached, shutdown visits only acquired owners, and one cached backend facade per app binding reuses the selected implementation without per-operation reselection. |
+| Harness containment | Verify unchanged public runner exports/signatures and shared result, usage, and lock behavior after containing private execution/persistence implementations. App-bound resources remain isolated, standalone defaults remain cached, shutdown visits only acquired owners, one cached backend facade per app binding reuses the selected implementation without per-operation reselection, and no failed-client/filesystem retry registry or process-exit callback remains. |
 | Same-process concurrency | Verify bounded waiting and serialization for concurrent turns targeting the same `(agent, session)` within one Python process, while independent sessions remain concurrent. Do not require distributed exclusion, cross-worker ownership, or OS-level locking for this feature. |
 | SDK integration boundary | Exercise real SDK callbacks against the adapter and verify that the host does not interpret native session contents, claim recovery semantics, or impose its own compaction/summary protocol. |
-| Hosting/telemetry | Demonstrate supported Functions deployment assets, lazy single-client startup, concurrent isolation, bounded cancellation/shutdown, and no orphan native process. Verify usage/correlation/error accounting and sensitive-data-off behavior in host and native telemetry. |
+| Hosting/telemetry | Demonstrate supported Functions deployment assets, lazy single-client startup, concurrent isolation, bounded cancellation/shutdown, and no reuse of stopped/closing handles. Verify startup-failure and cancellation cleanup precedence, graceful-stop then force-stop shutdown behavior, reported shutdown failures without deferred retry/process-exit guarantees, and usage/correlation/error accounting with sensitive-data-off behavior in host and native telemetry. |
 
 ## 7. Docs impact
 
@@ -858,3 +878,9 @@ The sample must be copy/paste complete for setup, request, expected failure, and
   site-qualified identity authority on 2026-10-05. It replaces the older
   owner/deployment assumption without changing SDK session ownership or storage
   configuration and without authorizing existing-data work.
+- **Lifecycle sign-off:** A dedicated architecture checkpoint on 2026-10-05
+  returned **APPROVE** for decision 28's bounded runtime lifetime contract:
+  app-owned lazy client plus shared credential, request-owned adapter cleanup,
+  explicit async shutdown only, preserved failure/cancellation precedence, and
+  no failed-handle retry registry or process-exit fallback. Laveesh Rohra
+  (`larohra`) had already explicitly approved that behavior contract the same day.

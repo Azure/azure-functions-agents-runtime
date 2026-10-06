@@ -24,7 +24,6 @@ def test_owner_construction_is_thread_safe_and_resource_free(preview):
     assert all(owner is owners[0] for owner in owners)
     assert preview._resources.runtime is owners[0]
     assert owners[0]._client is owners[0]._credential is None
-    assert not owners[0]._filesystems
     assert not owners[0].workspace.exists()
     assert not lifecycle._SHUTDOWN_CALLBACKS
 
@@ -74,7 +73,7 @@ async def test_concurrent_startup_shares_one_client(preview, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_failed_start_cleanup_retains_process_for_retry(preview, monkeypatch):
+async def test_failed_start_cleanup_drops_the_failed_handle(preview, monkeypatch):
     import copilot
 
     client = _fake_client()
@@ -86,21 +85,16 @@ async def test_failed_start_cleanup_retains_process_for_retry(preview, monkeypat
     owner = runtime.get_runtime(preview)
     with pytest.raises(RuntimeError, match="startup failed"):
         await owner.client()
-    assert owner._failed_client is client
+    assert owner._client is None
     assert owner._close_callback in lifecycle._SHUTDOWN_CALLBACKS
-    with pytest.raises(CopilotPreviewError):
-        await owner.close()
-    assert preview._resources.runtime is owner
-    assert owner._failed_client is client
-    client.stop.side_effect = None
-    await lifecycle._shutdown_harnesses()
+    await owner.close()
     assert preview._resources.runtime is None
     assert not lifecycle._SHUTDOWN_CALLBACKS
     factory.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_owner_shutdown_keeps_failed_credential_and_visits_every_owner(preview, monkeypatch):
+async def test_owner_shutdown_clears_failed_credential_and_visits_every_owner(preview, monkeypatch):
     import copilot
 
     failed_credential = SimpleNamespace(close=AsyncMock(side_effect=RuntimeError("close failed")))
@@ -121,13 +115,10 @@ async def test_owner_shutdown_keeps_failed_credential_and_visits_every_owner(pre
     failed_credential.close.assert_awaited_once()
     good_credential.close.assert_awaited_once()
     client.stop.assert_awaited_once()
-    assert first._credential is failed_credential
-    assert preview._resources.runtime is first
-    assert first._close_callback in lifecycle._SHUTDOWN_CALLBACKS
-    assert second_binding._resources.runtime is None
-    failed_credential.close.side_effect = None
-    await lifecycle._shutdown_harnesses()
+    assert first._credential is None
     assert preview._resources.runtime is None
+    assert first._close_callback not in lifecycle._SHUTDOWN_CALLBACKS
+    assert second_binding._resources.runtime is None
     assert not lifecycle._SHUTDOWN_CALLBACKS
 
 
@@ -163,7 +154,7 @@ async def test_startup_has_a_bound_and_cleanup_retries(preview, monkeypatch):
     with pytest.raises(TimeoutError):
         await owner.client()
     client.stop.assert_awaited_once()
-    assert owner._failed_client is None
+    assert owner._client is None
     client.start.side_effect = None
     assert await owner.client() is client
     await owner.close()
@@ -220,12 +211,10 @@ async def test_shutdown_closes_every_app_owner_even_if_one_fails(preview, monkey
     failed_client.stop.assert_awaited_once()
     failed_client.force_stop.assert_awaited_once()
     good_client.stop.assert_awaited_once()
-    assert preview._resources.runtime is first
-    assert first._client is failed_client
-    assert second_binding._resources.runtime is None
-    failed_client.stop.side_effect = None
-    await lifecycle._shutdown_harnesses()
+    assert first._client is None
     assert preview._resources.runtime is None
+    assert second_binding._resources.runtime is None
+    assert not lifecycle._SHUTDOWN_CALLBACKS
 
 
 @pytest.mark.asyncio

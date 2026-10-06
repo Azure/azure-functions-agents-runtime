@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import atexit
 from collections.abc import Awaitable, Callable
-from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Final, Literal
 
 from ..._credential import build_async_credential
@@ -19,8 +17,6 @@ if TYPE_CHECKING:
     from azure.core.credentials_async import AsyncTokenCredential
     from copilot import CopilotClient
     from copilot.session import ProviderTokenArgs
-
-    from ._copilot_session_fs import CopilotSessionFs
 
 _START_TIMEOUT_SECONDS = 30
 _EMPTY_CLIENT_MODE: Final[Literal["empty"]] = "empty"
@@ -36,31 +32,12 @@ class CopilotRuntime:
         self.native_root = harness.storage_root / "native"
         self.workspace = self.native_root / "workspace"
         self._client: CopilotClient | None = None
-        self._failed_client: CopilotClient | None = None
         self._start_lock = asyncio.Lock()
         self._credential: AsyncTokenCredential | None = None
-        self._filesystems: set[CopilotSessionFs] = set()
         self._close_callback = self.close
-        self._exit_callback = self._exit
 
     def _register_resources(self) -> None:
         _harness_lifecycle._register_shutdown(self._close_callback)
-        atexit.unregister(self._exit_callback)
-        atexit.register(self._exit_callback)
-
-    def own_filesystem(self, provider: CopilotSessionFs) -> None:
-        self._filesystems.add(provider)
-        self._register_resources()
-
-    async def release_filesystem(self, provider: CopilotSessionFs) -> None:
-        await asyncio.wait_for(provider.close(), timeout=5)
-        self._filesystems.discard(provider)
-
-    def _forget_client(self, client: CopilotClient) -> None:
-        if self._client is client:
-            self._client = None
-        if self._failed_client is client:
-            self._failed_client = None
 
     async def _stop_client(self, client: CopilotClient, timeout: float = 10) -> None:
         try:
@@ -71,16 +48,11 @@ class CopilotRuntime:
                 await asyncio.wait_for(client.force_stop(), timeout=5)
             except Exception:
                 raise CopilotPreviewError("Copilot forced SDK shutdown failed.") from None
-            self._forget_client(client)
-            raise CopilotPreviewError("Copilot graceful shutdown failed.") from None
-        self._forget_client(client)
 
     async def client(self) -> CopilotClient:
         async with self._start_lock:
             if self._client is not None:
                 return self._client
-            if self._failed_client is not None:
-                await self._stop_client(self._failed_client, timeout=5)
             self.workspace.mkdir(parents=True, exist_ok=True)
             from copilot import CopilotClient, RuntimeConnection
 
@@ -99,7 +71,6 @@ class CopilotRuntime:
                     "conventions": HOST_PATH_CONVENTIONS,
                 },
             )
-            self._failed_client = client
             self._register_resources()
             try:
                 await asyncio.wait_for(client.start(), timeout=_START_TIMEOUT_SECONDS)
@@ -109,45 +80,44 @@ class CopilotRuntime:
                 except BaseException:
                     logger.error("Copilot native startup cleanup failed.")
                 raise
-            self._failed_client = None
             self._client = client
             logger.info("Agent harness ready: harness=copilot transport=stdio")
             return client
 
-    async def _close_credential(self) -> None:
-        if self._credential is not None:
-            await asyncio.wait_for(self._credential.close(), timeout=5)
-            self._credential = None
+    async def _close_credential(self, credential: AsyncTokenCredential) -> None:
+        await asyncio.wait_for(credential.close(), timeout=5)
 
-    def _forget_if_released(self) -> None:
-        if (
-            self._client is not None
-            or self._failed_client is not None
-            or self._credential is not None
-            or self._filesystems
-        ):
-            return
+    def _release_runtime(self) -> None:
         with self._harness._resources.guard:
             if self._harness._resources.runtime is self:
                 self._harness._resources.runtime = None
         _harness_lifecycle._unregister_shutdown(self._close_callback)
-        atexit.unregister(self._exit_callback)
 
     async def close(self) -> None:
-        """Visit all acquired handles, retaining each one until its close succeeds."""
+        """Close acquired handles once, then discard them regardless of cleanup outcome."""
+        failure = False
         try:
-            async with self._start_lock, AsyncExitStack() as cleanup:
-                cleanup.push_async_callback(self._close_credential)
-                for provider in tuple(self._filesystems):
-                    cleanup.push_async_callback(self.release_filesystem, provider)
-                for client in (self._client, self._failed_client):
-                    if client is not None:
-                        cleanup.push_async_callback(self._stop_client, client)
-        except Exception:
-            logger.error("Copilot runtime owner cleanup failed.")
-            raise CopilotPreviewError("Copilot preview shutdown did not complete cleanly.") from None
+            async with self._start_lock:
+                client = self._client
+                credential = self._credential
+                self._client = None
+                self._credential = None
+            if client is not None:
+                try:
+                    await self._stop_client(client)
+                except CopilotPreviewError:
+                    failure = True
+                    logger.error("Copilot runtime client cleanup failed.")
+            if credential is not None:
+                try:
+                    await self._close_credential(credential)
+                except Exception:
+                    failure = True
+                    logger.error("Copilot runtime credential cleanup failed.")
         finally:
-            self._forget_if_released()
+            self._release_runtime()
+        if failure:
+            raise CopilotPreviewError("Copilot preview shutdown did not complete cleanly.") from None
 
     def credential(self) -> AsyncTokenCredential:
         if self._credential is None:
@@ -171,15 +141,6 @@ class CopilotRuntime:
             return await self._entra_token(scope, diagnostic)
 
         return token
-
-    def _exit(self) -> None:
-        """Best-effort SDK fallback when the host does not await shutdown."""
-        for client in (self._client, self._failed_client):
-            if client is not None:
-                try:
-                    asyncio.run(asyncio.wait_for(client.force_stop(), timeout=2))
-                except Exception:
-                    logger.error("Copilot native process-exit cleanup failed.")
 
 
 def get_runtime(harness: AppHarness) -> CopilotRuntime:

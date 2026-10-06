@@ -698,6 +698,15 @@ async def test_mcp_authentication_failure_stops_before_native_session_without_re
     monkeypatch.setattr(_copilot_capabilities, "materialize_mcp_headers", materialize)
     factory = Mock(side_effect=AssertionError("no native process or fallback"))
     monkeypatch.setattr(copilot, "CopilotClient", factory)
+    providers = []
+    original_open = _copilot.open_session_fs
+
+    async def observe_open(*args, **kwargs):
+        provider = await original_open(*args, **kwargs)
+        providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(_copilot, "open_session_fs", observe_open)
     server = MCPServerDescriptor.create(
         name="selected", url="https://remote.example/mcp", auth_scope="https://remote.example/.default"
     )
@@ -709,7 +718,8 @@ async def test_mcp_authentication_failure_stops_before_native_session_without_re
         assert "private auth sentinel" not in str(caught.value)
         materialize.assert_called_once_with(server)
         factory.assert_not_called()
-        assert not _runtime.get_runtime(preview)._filesystems
+        assert len(providers) == 1
+        assert providers[0]._closed
     finally:
         await _lifecycle._shutdown_harnesses()
 
@@ -1366,10 +1376,62 @@ async def test_startup_failure_closes_the_open_filesystem(preview, monkeypatch):
             await _copilot.run(preview, _request())
         assert len(providers) == 1
         assert providers[0]._closed
-        assert not _runtime.get_runtime(preview)._filesystems
         client.create_session.assert_not_awaited()
         client.stop.assert_awaited_once()
         client.get_session_metadata.assert_not_awaited()
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_public_run_reports_startup_failure_without_cleanup_masking(
+    preview, monkeypatch, cleanup_fails
+):
+    import copilot
+
+    client = _fake_client()
+    client.start.side_effect = RuntimeError("private startup failure")
+    if cleanup_fails:
+        client.stop.side_effect = RuntimeError("private stop failure")
+        client.force_stop.side_effect = RuntimeError("private force-stop failure")
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        with pytest.raises(CopilotPreviewError, match="runtime startup failed"):
+            await _copilot.run(preview, _request())
+        client.stop.assert_awaited_once()
+        if cleanup_fails:
+            client.force_stop.assert_awaited_once()
+        else:
+            client.force_stop.assert_not_awaited()
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_public_run_distinguishes_startup_timeout_from_request_deadline(
+    preview, monkeypatch, cleanup_fails
+):
+    import copilot
+
+    client = _fake_client()
+
+    async def stalled_start():
+        await asyncio.sleep(60)
+
+    client.start.side_effect = stalled_start
+    if cleanup_fails:
+        client.stop.side_effect = RuntimeError("private stop failure")
+        client.force_stop.side_effect = RuntimeError("private force-stop failure")
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    monkeypatch.setattr(_runtime, "_START_TIMEOUT_SECONDS", 0.01)
+    try:
+        with pytest.raises(CopilotPreviewError, match="startup timed out"):
+            await _copilot.run(preview, _request())
+        client.stop.assert_awaited_once()
+        if cleanup_fails:
+            client.force_stop.assert_awaited_once()
     finally:
         await _lifecycle._shutdown_harnesses()
 
@@ -1396,24 +1458,44 @@ async def test_filesystem_failure_stops_before_native_start_without_fallback(pre
 
 
 @pytest.mark.asyncio
-async def test_detach_failure_does_not_mask_the_original_failure(preview, monkeypatch):
+@pytest.mark.parametrize("boundary", ["send", "catalog"])
+async def test_detach_failure_does_not_mask_the_original_failure(preview, monkeypatch, boundary):
     import copilot
 
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
     client = _fake_client()
     session = client.create_session.return_value
     original_failure = CopilotPreviewError("original failure")
-    session.send_and_wait.side_effect = original_failure
+    providers = []
+    original_open = _copilot.open_session_fs
+
+    async def observe_open(*args, **kwargs):
+        provider = await original_open(*args, **kwargs)
+        providers.append(provider)
+        return provider
+
+    if boundary == "send":
+        session.send_and_wait.side_effect = original_failure
+    else:
+        session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(tools=None)
     session.disconnect.side_effect = RuntimeError("disconnect failed")
+    monkeypatch.setattr(_copilot, "open_session_fs", observe_open)
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
-        with pytest.raises(CopilotPreviewError, match="original failure") as caught:
+        diagnostic = "original failure" if boundary == "send" else "model-visible tool catalog"
+        with pytest.raises(CopilotPreviewError, match=diagnostic) as caught:
             await _copilot.run(preview, _request())
-        assert caught.value is original_failure
-        session.send_and_wait.assert_awaited_once()
-        session.abort.assert_awaited_once()
+        if boundary == "send":
+            assert caught.value is original_failure
+            session.send_and_wait.assert_awaited_once()
+            session.abort.assert_awaited_once()
+            session.unsubscribe.assert_called_once()
+        else:
+            session.send_and_wait.assert_not_awaited()
+            session.abort.assert_not_awaited()
+            session.on.assert_not_called()
         session.disconnect.assert_awaited_once()
-        assert not _runtime.get_runtime(preview)._filesystems
+        assert providers[0]._closed
     finally:
         await _lifecycle._shutdown_harnesses()
 
@@ -1424,12 +1506,21 @@ async def test_detach_failure_alone_still_fails_the_turn(preview, monkeypatch):
 
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-credential")
     client = _fake_client()
+    providers = []
+    original_open = _copilot.open_session_fs
+
+    async def observe_open(*args, **kwargs):
+        provider = await original_open(*args, **kwargs)
+        providers.append(provider)
+        return provider
+
     client.create_session.return_value.disconnect.side_effect = RuntimeError("disconnect failed")
+    monkeypatch.setattr(_copilot, "open_session_fs", observe_open)
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     try:
         with pytest.raises(CopilotPreviewError, match="could not be disconnected"):
             await _copilot.run(preview, _request())
-        assert not _runtime.get_runtime(preview)._filesystems
+        assert providers[0]._closed
     finally:
         await _lifecycle._shutdown_harnesses()
 
@@ -1578,8 +1669,7 @@ async def test_interrupted_turn_aborts_disconnects_and_closes_only_its_adapter(
     order = []
     client = _fake_client()
     session = client.create_session.return_value
-    owner = _runtime.get_runtime(preview)
-    original_release = owner.release_filesystem
+    original_open = _copilot.open_session_fs
 
     async def wait_forever(*_args, **_kwargs):
         started.set()
@@ -1591,14 +1681,21 @@ async def test_interrupted_turn_aborts_disconnects_and_closes_only_its_adapter(
     async def disconnect():
         order.append("disconnect")
 
-    async def release(provider):
-        order.append("close")
-        await original_release(provider)
+    async def observe_open(*args, **kwargs):
+        provider = await original_open(*args, **kwargs)
+        original_close = provider.close
+
+        async def close():
+            order.append("close")
+            await original_close()
+
+        provider.close = close
+        return provider
 
     session.send_and_wait.side_effect = wait_forever
     session.abort.side_effect = abort
     session.disconnect.side_effect = disconnect
-    monkeypatch.setattr(owner, "release_filesystem", release)
+    monkeypatch.setattr(_copilot, "open_session_fs", observe_open)
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
     request = _request()
     if not cancel:
@@ -1614,7 +1711,6 @@ async def test_interrupted_turn_aborts_disconnects_and_closes_only_its_adapter(
             with pytest.raises(CopilotPreviewError, match="deadline"):
                 await asyncio.wait_for(task, timeout=2)
         assert order == ["abort", "disconnect", "close"]
-        assert not owner._filesystems
         client.stop.assert_not_awaited()
         session.send_and_wait.side_effect = None
         peer = await _copilot.run(preview, replace(_request(), session_id="peer"))
@@ -1629,7 +1725,7 @@ async def test_interrupted_turn_aborts_disconnects_and_closes_only_its_adapter(
 
 
 @pytest.mark.asyncio
-async def test_failed_adapter_close_is_retained_for_selected_owner_shutdown(preview, monkeypatch):
+async def test_failed_adapter_close_is_reported_without_owner_retention(preview, monkeypatch):
     import copilot
 
     client = _fake_client()
@@ -1649,15 +1745,16 @@ async def test_failed_adapter_close_is_retained_for_selected_owner_shutdown(prev
     owner = _runtime.get_runtime(preview)
     with pytest.raises(CopilotPreviewError, match="storage"):
         await _copilot.run(preview, _request())
-    assert owner._filesystems == {providers[0]}
+    assert owner._client is client
     client.create_session.return_value.disconnect.assert_awaited_once()
-
-    await _lifecycle._shutdown_harnesses()
-
     providers[0].backend.close.assert_awaited()
-    assert providers[0].backend.close.await_count == 2
-    assert providers[0]._closed
-    assert not owner._filesystems
+    assert providers[0].backend.close.await_count == 1
+    assert not providers[0]._closed
+    assert preview._resources.runtime is owner
+    monkeypatch.setattr(_copilot, "open_session_fs", original_open)
+    peer = await _copilot.run(preview, replace(_request(), session_id="peer"))
+    assert peer.content == "synthetic reply"
+    await _lifecycle._shutdown_harnesses()
     client.stop.assert_awaited_once()
     assert preview._resources.runtime is None
 
@@ -1817,10 +1914,11 @@ async def test_cleanup_failures_preserve_original_request_cancellation(preview, 
     session.abort.assert_awaited_once()
     session.unsubscribe.assert_called_once()
     session.disconnect.assert_awaited_once()
-    assert owner._filesystems == {opened[0]}
+    assert owner._client is client
+    assert opened[0].backend.close.await_count == 1
     client.stop.assert_not_awaited()
     await _lifecycle._shutdown_harnesses()
-    assert opened[0]._closed
+    assert not opened[0]._closed
     assert preview._resources.runtime is None
 
 
@@ -1868,3 +1966,129 @@ async def test_real_sdk_wait_timeout_requires_the_host_abort():
     assert [call.args[0] for call in client.request.await_args_list] == [
         "session.send", "session.abort",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "send_failure", "setup_failure", "cancelled"])
+async def test_invocation_owned_cleanup_unsubscribes_before_disconnect_and_filesystem_close(
+    preview, monkeypatch, outcome
+):
+    import copilot
+    from copilot.session_events import (
+        AssistantUsageData,
+        SessionEventType,
+        ToolExecutionCompleteData,
+        ToolExecutionCompleteResult,
+        ToolExecutionStartData,
+    )
+
+    client = _fake_client()
+    session = client.create_session.return_value
+    order = []
+    opened = []
+    original_open = _copilot.open_session_fs
+    original_on = session.on.side_effect
+    final = session.send_and_wait.return_value
+    recorder = Mock()
+    original_failure = CopilotPreviewError("original send failure")
+    original_cancel = asyncio.CancelledError("original cancellation")
+
+    async def observe_open(*args, **kwargs):
+        provider = await original_open(*args, **kwargs)
+        original_close = provider.close
+
+        async def close():
+            assert session.handlers == []
+            order.append("filesystem_close")
+            await original_close()
+
+        provider.close = close
+        opened.append(provider)
+        return provider
+
+    def subscribe(handler):
+        order.append("subscribe")
+        unsubscribe = original_on(handler)
+
+        def release():
+            order.append("unsubscribe")
+            unsubscribe()
+
+        return release
+
+    async def send(*args, **kwargs):
+        order.append("send")
+        [observer] = session.handlers
+        observer(_sdk_event(
+            SessionEventType.ASSISTANT_USAGE,
+            AssistantUsageData(model="fixture", input_tokens=2, output_tokens=3),
+        ))
+        observer(_sdk_event(
+            SessionEventType.TOOL_EXECUTION_START,
+            ToolExecutionStartData(
+                tool_call_id="denied-view", tool_name="view", arguments={"path": "denied"}
+            ),
+        ))
+        observer(_sdk_event(
+            SessionEventType.TOOL_EXECUTION_COMPLETE,
+            ToolExecutionCompleteData(
+                tool_call_id="denied-view", success=False,
+                result=ToolExecutionCompleteResult(content="private denied detail"),
+            ),
+        ))
+        if outcome == "send_failure":
+            raise original_failure
+        if outcome == "cancelled":
+            raise original_cancel
+        observer(final)
+        return final
+
+    async def abort():
+        order.append("abort")
+
+    async def disconnect():
+        assert session.handlers == []
+        assert not opened[0]._closed
+        order.append("disconnect")
+
+    session.on = Mock(side_effect=subscribe)
+    session.send_and_wait.side_effect = send
+    session.abort.side_effect = abort
+    session.disconnect.side_effect = disconnect
+    if outcome == "setup_failure":
+        session.rpc.tools.get_current_metadata.return_value = SimpleNamespace(tools=None)
+    monkeypatch.setattr(_copilot, "open_session_fs", observe_open)
+    monkeypatch.setattr(_execution, "_AgentUsageRecorder", Mock(return_value=recorder))
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        if outcome == "success":
+            result = await _copilot.run(preview, _request())
+            assert len(result.tool_calls) == 1
+            assert result.tool_calls[0]["tool_call_id"] == "denied-view"
+            assert result.tool_calls[0]["success"] is False
+            assert "private denied detail" not in repr(result.tool_calls)
+        else:
+            error = asyncio.CancelledError if outcome == "cancelled" else CopilotPreviewError
+            with pytest.raises(error) as caught:
+                await _copilot.run(preview, _request())
+            if outcome == "send_failure":
+                assert caught.value is original_failure
+            elif outcome == "cancelled":
+                assert caught.value is original_cancel
+        expected = (
+            ["disconnect", "filesystem_close"]
+            if outcome == "setup_failure"
+            else ["subscribe", "send"]
+            + (["abort"] if outcome in {"send_failure", "cancelled"} else [])
+            + ["unsubscribe", "disconnect", "filesystem_close"]
+        )
+        assert order == expected
+        assert opened[0]._closed
+        if outcome == "setup_failure":
+            recorder.emit_counts.assert_not_called()
+        else:
+            recorder.emit_counts.assert_called_once_with(input_tokens=2, output_tokens=3)
+        client.stop.assert_not_awaited()
+        assert preview._resources.runtime._client is client
+    finally:
+        await _lifecycle._shutdown_harnesses()

@@ -58,7 +58,6 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
             workspace_path=str(owner.workspace),
             deadline=asyncio.get_running_loop().time() + 120,
         )
-        owner.own_filesystem(storage)
         client = await owner.client()
         session = await _open_session(client, native_id, phase, storage)
         result["event_count"] = len(await session.get_events())
@@ -77,7 +76,7 @@ async def _run(phase: int, session_dir: Path, storage_root: Path, out: Path) -> 
         finally:
             try:
                 if storage is not None:
-                    await owner.release_filesystem(storage)
+                    await storage.close()
             finally:
                 await _harness_lifecycle._shutdown_harnesses()
     root = session_dir / "copilot-native" / "local" / "agent" / "restore"
