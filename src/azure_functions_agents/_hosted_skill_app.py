@@ -154,6 +154,7 @@ class _HostedSkillAppMixin:
                     HostedSkill(entry, self._hosted_skill_harness),
                 )
 
+            async_wrapper.__annotations__ = dict(async_wrapper.__annotations__)
             async_wrapper.__annotations__.pop(arg_name, None)
             async_wrapper.__signature__ = visible_signature  # type: ignore[attr-defined]
             return cast(_F, async_wrapper)

@@ -69,6 +69,6 @@ def validate_response_contract(
     if response_schema is not None:
         try:
             jsonschema.validate(instance=parsed, schema=response_schema)
-        except jsonschema.ValidationError as exc:
+        except (jsonschema.SchemaError, jsonschema.ValidationError) as exc:
             raise ResponseSchemaValidationError(exc.message) from exc
     return parsed

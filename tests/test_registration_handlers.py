@@ -1113,6 +1113,29 @@ def test_workflow_http_handler_rejects_invalid_schema_response(
     assert json.loads(response.body)["error"] == "Agent response validation failed"
 
 
+def test_http_handler_translates_invalid_response_schema(monkeypatch: Any) -> None:
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            content='{"message":"ok"}',
+            session_id=kwargs["session_id"],
+            tool_calls=[],
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema={"type": 123}),
+        AgentCapabilities(),
+    )
+
+    response = asyncio.run(handler(DummyRequest({"prompt": "start"})))
+
+    assert response.status_code == 500
+    assert json.loads(response.body)["error"] == "Agent response validation failed"
+
+
 # ---------------------------------------------------------------------------
 # agent_configuration forwarding
 # ---------------------------------------------------------------------------

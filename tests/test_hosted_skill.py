@@ -30,6 +30,7 @@ class _CapturedSpan:
     def __init__(self, attributes: dict[str, Any]) -> None:
         self.attributes = dict(attributes)
         self.exceptions: list[BaseException] = []
+        self.fault_domains: list[str | None] = []
 
     def set_attribute(self, key: str, value: Any) -> None:
         if value is not None:
@@ -40,6 +41,7 @@ class _CapturedSpan:
 
     def record_exception(self, exc: BaseException, *, fault_domain: str | None = None) -> None:
         self.exceptions.append(exc)
+        self.fault_domains.append(fault_domain)
 
 
 def _install_start_span_capture(monkeypatch: pytest.MonkeyPatch) -> list[_CapturedSpan]:
@@ -231,6 +233,59 @@ async def test_stream_validates_completed_response_before_done(
     ]
     assert output[-1].content == "Agent response validation failed"
     assert closed is True
+
+
+@pytest.mark.asyncio
+async def test_stream_validation_failure_marks_runner_span_as_app_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skill, _ = _make_skill(
+        tmp_path,
+        response_schema={
+            "type": "object",
+            "required": ["ok"],
+            "properties": {"ok": {"type": "boolean"}},
+        },
+    )
+    span = _CapturedSpan({"af.agent.outcome": "success"})
+
+    async def events() -> AsyncIterator[HostedSkillEvent]:
+        yield HostedSkillEvent(HostedSkillEventKind.SESSION, session_id="session-one")
+        yield HostedSkillEvent(HostedSkillEventKind.DELTA, content='{"wrong": true}')
+        yield HostedSkillEvent(HostedSkillEventKind.DONE)
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent_events", lambda *_a, **_k: events())
+    monkeypatch.setattr(hosted_skill_module, "current_span", lambda: span, raising=False)
+
+    output = [event async for event in skill.stream("Return JSON")]
+
+    assert output[-1].kind is HostedSkillEventKind.ERROR
+    assert span.attributes["af.agent.outcome"] == "error"
+    assert len(span.exceptions) == 1
+    assert span.fault_domains == ["app"]
+
+
+@pytest.mark.asyncio
+async def test_stream_translates_invalid_response_schema_to_error_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skill, _ = _make_skill(tmp_path, response_schema={"type": 123})
+
+    async def events() -> AsyncIterator[HostedSkillEvent]:
+        yield HostedSkillEvent(HostedSkillEventKind.SESSION, session_id="session-one")
+        yield HostedSkillEvent(HostedSkillEventKind.DELTA, content='{"message":"ok"}')
+        yield HostedSkillEvent(HostedSkillEventKind.DONE)
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent_events", lambda *_a, **_k: events())
+
+    output = [event async for event in skill.stream("Return JSON")]
+
+    assert output[-1] == HostedSkillEvent(
+        HostedSkillEventKind.ERROR,
+        content="Agent response validation failed",
+    )
 
 
 @pytest.mark.asyncio

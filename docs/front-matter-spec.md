@@ -165,10 +165,11 @@ valid `session_id` to continue a conversation, or omit it to receive a new
 public session ID in the result/events.
 
 HostedSkill direct execution reuses `instructions`, `model`, `timeout`,
-`agent_configuration`, `response_schema`, tools, skills, MCP servers, sandbox,
-and `web_request` settings. `trigger`, `builtin_endpoints`, `logger`,
-`response_example`, and `metadata` configure other surfaces and do not change
-the call. `input_schema` is not applied because v1 accepts a string prompt.
+`agent_configuration`, `response_schema`, `response_example`, tools, skills,
+MCP servers, sandbox, and `web_request` settings. `trigger`,
+`builtin_endpoints`, `logger`, and `metadata` configure other surfaces and do
+not change the call. `input_schema` is not applied because v1 accepts a string
+prompt.
 
 HostedSkill v1 runs only through the Microsoft Agent Framework. Decorator
 application rejects agents that declare chat-time `subagents`, enable Dynamic

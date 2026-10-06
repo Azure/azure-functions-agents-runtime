@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
-from typing import Any
+from typing import Any, get_type_hints
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -96,6 +96,7 @@ async def test_decorator_hides_parameter_and_injects_fresh_facades(
     assert list(inspect.signature(registered_handler).parameters) == ["req"]
     assert "skill" not in registered_handler.__annotations__
     assert registered_handler.__wrapped__.__name__ == "handler"
+    assert get_type_hints(registered_handler.__wrapped__)["skill"] is HostedSkill
 
     request = object()
     first = await registered_handler(request)

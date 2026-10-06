@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from ._harness import AppHarness
-from ._observability import FaultDomain, LifecycleStage, start_span
+from ._observability import FaultDomain, LifecycleStage, current_span, start_span
 from ._session_id import validate_session_id
 from .registration._handlers import (
     _set_run_result_attributes,
@@ -140,7 +140,10 @@ class HostedSkill:
                             "".join(response_parts),
                             resolved.response_schema,
                         )
-                    except HostedSkillResponseError:
+                    except HostedSkillResponseError as exc:
+                        span = current_span()
+                        span.set_attribute("af.agent.outcome", "error")
+                        span.record_exception(exc, fault_domain=FaultDomain.APP)
                         yield HostedSkillEvent(
                             HostedSkillEventKind.ERROR,
                             content="Agent response validation failed",
