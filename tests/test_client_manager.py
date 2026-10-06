@@ -263,6 +263,21 @@ def test_foundry_provider_validation_requires_nonblank_endpoint(
         MAFClientManager().validate_provider_settings(None)
 
 
+@pytest.mark.parametrize("api_key", [None, "", "  "])
+def test_openai_provider_validation_requires_nonblank_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+    api_key: str | None,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
+    if api_key is None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("OPENAI_API_KEY", api_key)
+
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY to be set"):
+        MAFClientManager().validate_provider_settings(None)
+
+
 def test_foundry_provider_validation_uses_model_fallback_without_side_effects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

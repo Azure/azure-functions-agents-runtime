@@ -1276,6 +1276,7 @@ async def run_agent_events(
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
     _harness: AppHarness | None = None,
+    _execution_surface: str | None = None,
 ) -> AsyncGenerator[HostedSkillEvent]:
     """Yield harness-neutral structured events for one agent turn.
 
@@ -1376,24 +1377,20 @@ async def run_agent_events(
     # actually runs. Opening one here ensures delegate-error accounting (and
     # timeout/exception outcomes) always lands somewhere for the streaming
     # surface too, matching the non-streaming path's `AgentResult.delegate_error_count`.
+    span_attributes = {
+        "af.agent.name": agent_name,
+        "af.agent.display_name": display_name,
+        "af.agent.trigger_type": "stream",
+        "af.agent.session_id": resolved_id,
+        "af.agent.model": model,
+    }
+    if _execution_surface is not None:
+        span_attributes["af.agent.execution_surface"] = _execution_surface
+
     with start_span(
         f"agent.run {agent_name or 'agent'}",
         lifecycle_stage=LifecycleStage.AGENT_RUN,
-        attributes={
-            "af.agent.name": agent_name,
-            # S1b: mirrors what `registration/endpoints.py`'s own
-            # `agent.run {name}` spans already set (`af.agent.name` = slug,
-            # `af.agent.display_name` = human-readable name) for the
-            # non-streaming/MCP surfaces. Those surfaces open their own span
-            # around `run_agent`, which has none of its own — but nothing
-            # upstream of *this* function does the same for the streaming
-            # surface (see the comment above), so this span is the only
-            # place `af.agent.display_name` can be recorded here.
-            "af.agent.display_name": display_name,
-            "af.agent.trigger_type": "stream",
-            "af.agent.session_id": resolved_id,
-            "af.agent.model": model,
-        },
+        attributes=span_attributes,
     ) as span:
         ordinary_tool_error_count = 0
         try:

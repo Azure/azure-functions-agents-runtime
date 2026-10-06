@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import contextlib
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,40 @@ from azure_functions_agents.streaming_events import (
     HostedSkillEvent,
     HostedSkillEventKind,
 )
+
+
+class _CapturedSpan:
+    def __init__(self, attributes: dict[str, Any]) -> None:
+        self.attributes = dict(attributes)
+        self.exceptions: list[BaseException] = []
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        if value is not None:
+            self.attributes[key] = value
+
+    def set_content(self, key: str, value: str) -> None:
+        pass
+
+    def record_exception(self, exc: BaseException, *, fault_domain: str | None = None) -> None:
+        self.exceptions.append(exc)
+
+
+def _install_start_span_capture(monkeypatch: pytest.MonkeyPatch) -> list[_CapturedSpan]:
+    spans: list[_CapturedSpan] = []
+
+    @contextlib.contextmanager
+    def fake_start_span(
+        _name: str,
+        *,
+        lifecycle_stage: str | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> Iterator[_CapturedSpan]:
+        span = _CapturedSpan(attributes or {})
+        spans.append(span)
+        yield span
+
+    monkeypatch.setattr(hosted_skill_module, "start_span", fake_start_span)
+    return spans
 
 
 def _make_skill(
@@ -99,6 +134,34 @@ async def test_run_forwards_catalog_values_with_one_session_identity(
 
     await skill.run("Prepare another order")
     assert captured["tools"] == ["tool"]
+
+
+@pytest.mark.asyncio
+async def test_run_records_hosted_skill_span_and_result_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skill, _ = _make_skill(tmp_path)
+    spans = _install_start_span_capture(monkeypatch)
+
+    async def run_agent(_prompt: str, **kwargs: Any) -> AgentResult:
+        return AgentResult(
+            kwargs["session_id"],
+            "complete",
+            tool_calls=[{"name": "lookup", "result": "ok"}],
+        )
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+
+    await skill.run("Prepare order", session_id="session-one")
+
+    [span] = spans
+    assert span.attributes["af.agent.name"] == "internal"
+    assert span.attributes["af.agent.execution_surface"] == "hosted_skill"
+    assert span.attributes["af.agent.session_id"] == "session-one"
+    assert span.attributes["af.agent.tool_call_count"] == 1
+    assert span.attributes["af.agent.response_bytes"] == len("complete")
+    assert span.attributes["af.agent.outcome"] == "success"
 
 
 @pytest.mark.asyncio
@@ -186,6 +249,7 @@ async def test_stream_binds_sandbox_and_runner_to_same_public_session(
 
     async def events(_prompt: str, **kwargs: Any) -> AsyncIterator[HostedSkillEvent]:
         captured["runner"] = kwargs["session_id"]
+        captured["execution_surface"] = kwargs["_execution_surface"]
         yield HostedSkillEvent(
             HostedSkillEventKind.SESSION,
             session_id=kwargs["session_id"],
@@ -198,6 +262,7 @@ async def test_stream_binds_sandbox_and_runner_to_same_public_session(
     output = [event async for event in skill.stream("Prepare order", session_id=session_id)]
 
     assert captured["sandbox"] == captured["runner"] == output[0].session_id
+    assert captured["execution_surface"] == "hosted_skill"
     if session_id is not None:
         assert output[0].session_id == session_id
 

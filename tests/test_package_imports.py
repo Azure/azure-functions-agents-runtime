@@ -52,6 +52,7 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "set_client_manager",
         "shutdown_client_manager",
         "tool",
+        "validate_session_id",
         "workflow_tool",
     ]
     assert not hasattr(azure_functions_agents, "run_copilot_agent")

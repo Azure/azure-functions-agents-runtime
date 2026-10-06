@@ -110,6 +110,7 @@ except ImportError:
 
 from ._function_tool import tool, workflow_tool  # noqa: E402
 from ._hosted_skill_app import HostedSkillDFApp, HostedSkillFunctionApp  # noqa: E402
+from ._session_id import validate_session_id  # noqa: E402
 from .app import create_function_app  # noqa: E402
 from .client_manager import (  # noqa: E402
     ClientManager,
@@ -172,5 +173,6 @@ __all__ = [
     "set_client_manager",
     "shutdown_client_manager",
     "tool",
+    "validate_session_id",
     "workflow_tool",
 ]

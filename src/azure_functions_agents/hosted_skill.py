@@ -7,8 +7,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from ._harness import AppHarness
+from ._observability import FaultDomain, LifecycleStage, start_span
 from ._session_id import validate_session_id
-from .registration._handlers import build_sandbox_tools_for_session
+from .registration._handlers import (
+    _set_run_result_attributes,
+    build_sandbox_tools_for_session,
+)
 from .registration.catalog import CatalogEntry
 from .response_contract import (
     HostedSkillResponseError,
@@ -48,28 +52,46 @@ class HostedSkill:
         capabilities = self._entry.capabilities
         effective_prompt = self._effective_prompt(_validate_prompt(prompt))
         resolved_session_id, is_new_session = _resolve_session_id(session_id)
-        result = await run_agent(
-            effective_prompt,
-            instructions=resolved.instructions,
-            timeout=resolved.timeout,
-            tools=list(capabilities.filtered_user_tools or []),
-            mcp_tools=list(capabilities.filtered_mcp_tools or []),
-            skill_paths=list(capabilities.enabled_skill_paths),
-            model=resolved.model,
-            session_id=resolved_session_id,
-            sandbox_tools=build_sandbox_tools_for_session(
-                resolved,
-                resolved_session_id,
-            ),
-            web_request_tools=list(capabilities.web_request_tools or []),
-            agent_configuration=resolved.agent_configuration,
-            agent_name=resolved.slug,
-            _harness=self._harness,
-            _session_is_new=is_new_session,
-        )
-        if resolved.response_example or resolved.response_schema:
-            validate_response_contract(result.content, resolved.response_schema)
-        return result
+        with start_span(
+            f"agent.run {resolved.slug}",
+            lifecycle_stage=LifecycleStage.AGENT_RUN,
+            attributes={
+                "af.agent.name": resolved.slug,
+                "af.agent.display_name": resolved.name,
+                "af.agent.execution_surface": "hosted_skill",
+                "af.agent.session_id": resolved_session_id,
+                "af.agent.model": resolved.model,
+            },
+        ) as span:
+            try:
+                result = await run_agent(
+                    effective_prompt,
+                    instructions=resolved.instructions,
+                    timeout=resolved.timeout,
+                    tools=list(capabilities.filtered_user_tools or []),
+                    mcp_tools=list(capabilities.filtered_mcp_tools or []),
+                    skill_paths=list(capabilities.enabled_skill_paths),
+                    model=resolved.model,
+                    session_id=resolved_session_id,
+                    sandbox_tools=build_sandbox_tools_for_session(
+                        resolved,
+                        resolved_session_id,
+                    ),
+                    web_request_tools=list(capabilities.web_request_tools or []),
+                    agent_configuration=resolved.agent_configuration,
+                    agent_name=resolved.slug,
+                    _harness=self._harness,
+                    _session_is_new=is_new_session,
+                )
+                if resolved.response_example or resolved.response_schema:
+                    validate_response_contract(result.content, resolved.response_schema)
+                _set_run_result_attributes(span, result)
+                span.set_attribute("af.agent.outcome", "success")
+                return result
+            except Exception as exc:
+                span.set_attribute("af.agent.outcome", "error")
+                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                raise
 
     async def stream(
         self,
@@ -100,6 +122,7 @@ class HostedSkill:
             agent_name=resolved.slug,
             display_name=resolved.name,
             _harness=self._harness,
+            _execution_surface="hosted_skill",
         )
         response_parts: list[str] = []
         try:

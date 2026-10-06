@@ -124,6 +124,10 @@ class MAFClientManager(ClientManager):
         """Validate built-in MAF provider settings without constructing a client."""
         provider = self._provider()
         self._resolve_model(model, provider)
+        if provider == ProviderKind.OPENAI and not self._env("OPENAI_API_KEY"):
+            raise RuntimeError(
+                "AZURE_FUNCTIONS_AGENTS_PROVIDER=openai requires OPENAI_API_KEY to be set."
+            )
         if provider == ProviderKind.AZURE_OPENAI and not self._env("AZURE_OPENAI_ENDPOINT"):
             raise RuntimeError(
                 "AZURE_FUNCTIONS_AGENTS_PROVIDER=azure_openai requires "

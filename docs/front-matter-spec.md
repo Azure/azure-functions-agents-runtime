@@ -80,9 +80,9 @@ YAML front matter at the top of each agent file.
 **Required properties:**
 - `name` — String, display name for the agent
 - `description` — String, brief description of the agent's purpose
-- `trigger` — Optional object defining an automatically registered invocation surface
 
 **Optional properties:**
+- `trigger` — Object defining an automatically registered invocation surface
 - `builtin_endpoints` — Object or boolean for enabling built-in chat UI, chat API, and MCP tool endpoints
 - `agent_configuration` — Portable and Microsoft Agent Framework-specific execution settings; recursively inherits global values
 - `model` — String to override global default model
