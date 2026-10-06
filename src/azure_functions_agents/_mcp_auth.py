@@ -65,9 +65,3 @@ def build_mcp_header_provider(server: MCPServerDescriptor) -> MCPHeaderProvider 
         return result
 
     return credential_header_provider
-
-
-def materialize_mcp_headers(server: MCPServerDescriptor) -> dict[str, str]:
-    """Return fresh static/auth headers without retaining a token between calls."""
-    provider = build_mcp_header_provider(server)
-    return provider({}) if provider is not None else {}

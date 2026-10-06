@@ -518,8 +518,10 @@ def test_discover_mcp_servers_auth_without_scope_keeps_static_headers_and_warnin
     with caplog.at_level(logging.WARNING):
         server = discover_mcp_servers(tmp_path).servers["demo"]
         assert discover_mcp_servers(tmp_path).servers["demo"] is server
-        assert mcp_auth.materialize_mcp_headers(server) == {"X-Test": "yes"}
-        assert mcp_auth.materialize_mcp_headers(server) == {"X-Test": "yes"}
+        provider = mcp_auth.build_mcp_header_provider(server)
+        assert provider is not None
+        assert provider({}) == {"X-Test": "yes"}
+        assert provider({}) == {"X-Test": "yes"}
 
     assert server.auth_scope is None
     assert server.headers == (("X-Test", "yes"),)

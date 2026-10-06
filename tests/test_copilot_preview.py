@@ -277,7 +277,8 @@ def test_foundry_configuration_is_frozen_without_authentication(preview, monkeyp
     assert not selected.storage_root.exists()
 
 
-def test_registered_mcp_and_skill_descriptors_are_supported(preview):
+@pytest.mark.parametrize("capability", ["mcp", "skills"])
+def test_registered_deferred_capabilities_are_rejected(preview, capability):
     resolved, capabilities = _sample()
     server = MCPServerDescriptor(
         name="selected", url="https://fixture.invalid/mcp", transport="streamable-http",
@@ -287,16 +288,99 @@ def test_registered_mcp_and_skill_descriptors_are_supported(preview):
     excluded = SkillDescriptor(name="excluded", path=preview / "excluded")
     capabilities = replace(
         capabilities,
-        filtered_mcp_tools=(server,),
-        enabled_skill_paths=(approved.path,),
-        skills=(approved,),
+        filtered_mcp_tools=(server,) if capability == "mcp" else (),
+        enabled_skill_paths=(approved.path,) if capability == "skills" else (),
+        skills=(approved,) if capability == "skills" else (),
         skill_catalog=(approved, excluded),
     )
 
-    _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
-
-    assert capabilities.skills == (approved,)
+    with pytest.raises(UnsupportedCapabilityError, match=capability):
+        _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
     assert capabilities.skill_catalog == (approved, excluded)
+
+
+@pytest.mark.parametrize("capability", ["mcp", "skills"])
+def test_composition_rejects_inherited_deferred_capability_before_app_mutation(
+    preview, monkeypatch, capability,
+):
+    from azure_functions_agents import app as app_module
+
+    (preview / "main.agent.md").write_text(
+        "---\nname: Custom preview\ndescription: Test inherited capabilities.\n"
+        "builtin_endpoints:\n  chat_api: true\n  debug_chat_ui: false\n  mcp: false\n"
+        "---\nUse configured capabilities.\n",
+        encoding="utf-8",
+    )
+    if capability == "mcp":
+        (preview / "mcp.json").write_text(
+            '{"servers":{"remote":{"url":"https://fixture.invalid/mcp"}}}', encoding="utf-8"
+        )
+    else:
+        skill = preview / "skills" / "approved"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("SDK-owned content", encoding="utf-8")
+    constructor = Mock(side_effect=AssertionError("No FunctionApp before capability validation"))
+    monkeypatch.setattr(app_module.func, "FunctionApp", constructor)
+    with pytest.raises(UnsupportedCapabilityError, match=capability):
+        create_function_app(preview)
+    constructor.assert_not_called()
+
+
+@pytest.mark.parametrize("surface", ["mcp", "discovered_mcp", "skills", "skill_paths"])
+def test_standalone_deferred_selection_rejects_before_backend_execution(
+    preview, monkeypatch, surface,
+):
+    invoke = AsyncMock(side_effect=AssertionError("No backend before capability validation"))
+    monkeypatch.setattr(_copilot, "run", invoke)
+    kwargs = {"tools": [], "mcp_tools": []}
+    if surface == "mcp":
+        kwargs["mcp_tools"] = [
+            MCPServerDescriptor.create(name="remote", url="https://fixture.invalid/mcp")
+        ]
+    elif surface == "discovered_mcp":
+        (preview / "mcp.json").write_text(
+            '{"servers":{"remote":{"url":"https://fixture.invalid/mcp"}}}', encoding="utf-8"
+        )
+        kwargs["mcp_tools"] = None
+    elif surface == "skills":
+        kwargs["skills"] = [SkillDescriptor.create(name="approved", path=preview)]
+    else:
+        kwargs["skill_paths"] = [preview / "collection"]
+    selected = _harness.get_harness()
+    with pytest.raises(UnsupportedCapabilityError, match="mcp" if "mcp" in surface else "skills"):
+        asyncio.run(_harness_runner(selected, **kwargs))
+    invoke.assert_not_called()
+
+
+async def _harness_runner(selected, **kwargs):
+    from azure_functions_agents.harness._agent_runner import get_agent_runner
+
+    return await get_agent_runner(selected).run_agent(
+        "no inference", deadline=asyncio.get_running_loop().time() + 1, **kwargs
+    )
+
+
+@pytest.mark.parametrize("paths", [None, []])
+def test_standalone_empty_skill_grants_and_ownership_only_metadata_are_accepted(
+    preview, monkeypatch, paths,
+):
+    from azure_functions_agents.harness._agent_runner import get_agent_runner
+
+    invoke = AsyncMock(return_value=runner.AgentResult("session", "reply"))
+    monkeypatch.setattr(_copilot, "run", invoke)
+    selected = _harness.get_harness()
+
+    async def run():
+        return await get_agent_runner(selected).run_agent(
+            "hello", deadline=asyncio.get_running_loop().time() + 1,
+            tools=[], mcp_tools=[], skill_paths=paths, skills=[],
+            skill_catalog=[SkillDescriptor.create(name="excluded", path=preview)],
+        )
+
+    assert asyncio.run(run()).content == "reply"
+    request = invoke.call_args.args[1]
+    assert request.skills == request.mcp_servers == ()
+    assert [skill.name for skill in request.skill_catalog] == ["excluded"]
 
 
 def test_direct_preview_keeps_other_roles_and_surfaces_rejected(preview):
@@ -440,7 +524,7 @@ def test_direct_preview_forks_before_maf_construction_or_blob(preview, monkeypat
     maf.assert_not_called()
 
 
-def test_standalone_skill_root_does_not_promote_implicit_nested_documents(preview, monkeypatch):
+def test_standalone_skill_root_is_rejected_before_execution(preview, monkeypatch):
     parent = preview / "skills" / "parent"
     child = parent / "excluded-child"
     child.mkdir(parents=True)
@@ -452,20 +536,16 @@ def test_standalone_skill_root_does_not_promote_implicit_nested_documents(previe
     )
     invoke = AsyncMock(return_value=runner.AgentResult("session", "reply"))
     monkeypatch.setattr(_copilot, "run", invoke)
-    asyncio.run(
-        runner.run_agent(
-            "hello", tools=[], mcp_tools=[], skill_paths=[parent],
+    with pytest.raises(UnsupportedCapabilityError, match="skills"):
+        asyncio.run(
+            runner.run_agent(
+                "hello", tools=[], mcp_tools=[], skill_paths=[parent],
+            )
         )
-    )
-    request = invoke.call_args.args[1]
-    assert [skill.name for skill in request.skills] == ["parent"]
-    assert {skill.name for skill in request.skill_catalog} == {"parent"}
-    assert request.skills[0].path == parent.resolve()
-    assert request.mcp_servers == ()
-    assert type(request.tools) is tuple
+    invoke.assert_not_called()
 
 
-def test_independently_explicit_roots_outside_app_preserve_nested_ownership(preview, monkeypatch):
+def test_explicit_external_skill_roots_are_rejected_before_parsing(preview, monkeypatch):
     app_root = preview / "app"
     app_root.mkdir()
     parent = preview / "external" / "external-parent"
@@ -489,16 +569,12 @@ def test_independently_explicit_roots_outside_app_preserve_nested_ownership(prev
 
     monkeypatch.setattr(runner, "describe_skill_catalog", catalog)
 
-    asyncio.run(runner.run_agent(
-        "hello", tools=[], mcp_tools=[], skill_paths=[parent, child], _harness=harness,
-    ))
-
-    request = invoke.call_args.args[1]
-    assert [skill.name for skill in request.skills] == ["external-parent", "external-child"]
-    assert {skill.name for skill in request.skill_catalog} == {
-        "external-parent", "external-child",
-    }
-    assert catalog_calls == [(parent, child)]
+    with pytest.raises(UnsupportedCapabilityError, match="skills"):
+        asyncio.run(runner.run_agent(
+            "hello", tools=[], mcp_tools=[], skill_paths=[parent, child], _harness=harness,
+        ))
+    invoke.assert_not_called()
+    assert catalog_calls == []
 
 
 def test_maf_standalone_does_not_discover_unrequested_skills(tmp_path, monkeypatch):

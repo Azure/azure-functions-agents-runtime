@@ -118,13 +118,13 @@ spans and the sandbox/`web_request` tool spans together.
 
 Plus `af.lifecycle_stage=agent_run`, and `af.fault_domain` if the run fails.
 
-In the default-off Copilot preview, native MCP and `skill` / `view` / `bash` calls,
-including permission denials, populate `AgentResult.tool_calls` and the existing
-tool/error counts from public SDK `tool.execution_start` / `tool.execution_complete`
-events once per `toolCallId`. Custom wrapper calls are deduplicated;
-`skill.invoked` metadata is not an extra call. The same sensitive-data policy
-applies; raw native envelopes, MCP headers, and credentials are not exposed.
-Counting once is not a guarantee of exactly-once tool effects.
+In the default-off custom-only Copilot preview, custom wrappers populate
+`AgentResult.tool_calls` and existing tool/error counts. Tool failures return
+sanitized recoverable results; cancellation propagates without inventing a
+completed result. The send-scoped observer records messages and usage, not
+native tool events or permission requests. Selected MCP servers and skills
+are rejected before effects. The same sensitive-data policy applies, and raw
+native envelopes are not exposed.
 
 #### Stable agent ID
 

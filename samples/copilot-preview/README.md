@@ -154,8 +154,8 @@ $web = Invoke-RestMethod http://127.0.0.1:7071/agents/main/chat -Method Post `
 $web.tool_calls | ConvertTo-Json -Depth 8
 ```
 
-Optional outbound MCP servers and project skills use the existing authoring
-and per-agent filters; see the [MCP and scoped skills guide](../../docs/copilot-preview-operations.md#mcp-and-scoped-skills)
+Outbound MCP and project skills must remain disabled for this custom-only preview;
+see the [MCP and scoped skills boundary](../../docs/copilot-preview-operations.md#mcp-and-scoped-skills)
 before enabling them. This walkthrough requires neither and keeps the receipt
 and `web_request` behavior unchanged.
 

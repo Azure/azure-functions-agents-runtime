@@ -17,7 +17,11 @@ from azure_functions_agents.discovery.mcp import MCPServerDescriptor, discover_m
 from azure_functions_agents.discovery.skills import SkillDescriptor, discover_skills
 from azure_functions_agents.discovery.tools import discover_user_tools
 from azure_functions_agents.harness import _agent_runner
-from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
+from azure_functions_agents.harness._harness_binding import (
+    AppHarness,
+    HarnessKind,
+    UnsupportedCapabilityError,
+)
 from azure_functions_agents.harness.agent_framework import _maf_execution
 from azure_functions_agents.harness.copilot_sdk import _copilot_execution, _copilot_runtime
 from azure_functions_agents.registration.capabilities import AgentCapabilities, build_capabilities
@@ -57,7 +61,7 @@ async def test_shared_scenario_inventory_is_filtered_once_and_forwarded_unchange
     monkeypatch.setattr(runner, "describe_skill_catalog", no_parse)
     harness = AppHarness(kind, root, default_model="fixture-model")
 
-    await _agent_runner.get_agent_runner(harness).run_agent(
+    operation = _agent_runner.get_agent_runner(harness).run_agent(
         "prompt",
         deadline=123.0,
         tools=capabilities.filtered_user_tools,
@@ -65,6 +69,14 @@ async def test_shared_scenario_inventory_is_filtered_once_and_forwarded_unchange
         skills=capabilities.skills,
         skill_catalog=capabilities.skill_catalog,
     )
+    if kind is HarnessKind.COPILOT:
+        with pytest.raises(UnsupportedCapabilityError, match="mcp"):
+            await operation
+        execution.assert_not_awaited()
+        assert capabilities == before
+        no_parse.assert_not_called()
+        return
+    await operation
 
     request = execution.call_args.args[1]
     assert set(discovered.skills) == {"parent", "grouped", "excluded"}
@@ -224,7 +236,7 @@ async def test_cached_facade_forwards_neutral_capabilities_to_selected_execution
     backend = _maf_execution if kind is HarnessKind.MAF else _copilot_execution
     monkeypatch.setattr(backend, "run", execution)
 
-    result = await selected.run_agent(
+    operation = selected.run_agent(
         "prompt",
         instructions="instructions",
         deadline=123.0,
@@ -235,6 +247,13 @@ async def test_cached_facade_forwards_neutral_capabilities_to_selected_execution
         session_id="session",
         session_is_new=True,
     )
+    if kind is HarnessKind.COPILOT:
+        with pytest.raises(UnsupportedCapabilityError, match=r"mcp.*skills"):
+            await operation
+        execution.assert_not_awaited()
+        assert _agent_runner.get_agent_runner(harness) is selected
+        return
+    result = await operation
 
     assert result.content == "answer"
     actual_harness, request = execution.call_args.args

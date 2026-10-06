@@ -42,14 +42,15 @@ def credentials(monkeypatch: pytest.MonkeyPatch) -> tuple[Mock, Mock, Mock]:
     "headers",
     [{}, {"X-Test": "yes"}, {"Authorization": "static-value", "X-Test": "yes"}],
 )
-def test_materialize_static_headers_without_auth(
+def test_provider_static_headers_without_auth(
     headers: dict[str, str], credentials: tuple[Mock, Mock, Mock]
 ) -> None:
     credential, default_builder, client_builder = credentials
     server = _server(headers=headers)
 
-    first = mcp_auth.materialize_mcp_headers(server)
-    second = mcp_auth.materialize_mcp_headers(server)
+    provider = mcp_auth.build_mcp_header_provider(server)
+    first = provider({}) if provider is not None else {}
+    second = provider({}) if provider is not None else {}
     first["X-Added"] = "changed"
 
     assert second == headers
@@ -73,9 +74,8 @@ def test_empty_scope_warns_and_uses_only_static_headers(
         assert [record.getMessage() for record in caplog.records] == [
             "MCP server auth requires a non-empty 'scope'"
         ]
-        result = mcp_auth.materialize_mcp_headers(server)
-        assert mcp_auth.materialize_mcp_headers(server) == headers
         provider = mcp_auth.build_mcp_header_provider(server)
+        result = provider({}) if provider is not None else {}
         assert (provider({}) if provider is not None else {}) == headers
 
     assert result == headers
@@ -96,9 +96,11 @@ def test_generated_authorization_overrides_static_headers(
 ) -> None:
     credential, default_builder, client_builder = credentials
     with caplog.at_level(logging.DEBUG):
-        result = mcp_auth.materialize_mcp_headers(
+        provider = mcp_auth.build_mcp_header_provider(
             _server(headers={authorization_key: "static-value", "X-Test": "yes"}, scope=_SCOPE)
         )
+        assert provider is not None
+        result = provider({})
 
     assert result == {"Authorization": "Bearer test-token", "X-Test": "yes"}
     credential.get_token.assert_called_once_with(_SCOPE)
@@ -113,7 +115,9 @@ def test_missing_or_unresolved_client_id_uses_default_credential(
     client_id: str | None, credentials: tuple[Mock, Mock, Mock]
 ) -> None:
     credential, default_builder, client_builder = credentials
-    result = mcp_auth.materialize_mcp_headers(_server(scope=_SCOPE, client_id=client_id))
+    provider = mcp_auth.build_mcp_header_provider(_server(scope=_SCOPE, client_id=client_id))
+    assert provider is not None
+    result = provider({})
 
     assert result == {"Authorization": "Bearer test-token"}
     credential.get_token.assert_called_once_with(_SCOPE)
@@ -125,7 +129,9 @@ def test_resolved_client_id_selects_client_id_credential(
     credentials: tuple[Mock, Mock, Mock],
 ) -> None:
     credential, default_builder, client_builder = credentials
-    result = mcp_auth.materialize_mcp_headers(_server(scope=_SCOPE, client_id=" client-123 "))
+    provider = mcp_auth.build_mcp_header_provider(_server(scope=_SCOPE, client_id=" client-123 "))
+    assert provider is not None
+    result = provider({})
 
     assert result == {"Authorization": "Bearer test-token"}
     credential.get_token.assert_called_once_with(_SCOPE)
@@ -147,22 +153,6 @@ def test_header_provider_acquires_credential_only_when_used(
     assert provider({}) == {"Authorization": "Bearer test-token"}
     default_builder.assert_called_once_with()
     credential.get_token.assert_called_once_with(_SCOPE)
-
-
-def test_materialize_acquires_fresh_token_on_each_call(
-    credentials: tuple[Mock, Mock, Mock],
-) -> None:
-    credential, default_builder, _client_builder = credentials
-    credential.get_token.side_effect = [
-        AccessToken("first-token", 9999999999),
-        AccessToken("second-token", 9999999999),
-    ]
-    server = _server(scope=_SCOPE)
-
-    assert mcp_auth.materialize_mcp_headers(server) == {"Authorization": "Bearer first-token"}
-    assert mcp_auth.materialize_mcp_headers(server) == {"Authorization": "Bearer second-token"}
-    assert credential.get_token.call_count == 2
-    assert default_builder.call_count == 2
 
 
 def test_header_provider_reuses_token_until_refresh_boundary(
@@ -219,11 +209,13 @@ def test_token_acquisition_failure_is_not_static_header_success(
 ) -> None:
     credential, _default_builder, _client_builder = credentials
     credential.get_token.side_effect = RuntimeError("test acquisition failure")
+    provider = mcp_auth.build_mcp_header_provider(
+        _server(scope=_SCOPE, headers={"Authorization": "static-value"})
+    )
+    assert provider is not None
 
     with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError, match="test acquisition failure"):
-        mcp_auth.materialize_mcp_headers(
-            _server(scope=_SCOPE, headers={"Authorization": "static-value"})
-        )
+        provider({})
 
     credential.get_token.assert_called_once_with(_SCOPE)
     assert "static-value" not in caplog.text
@@ -235,13 +227,15 @@ def test_empty_acquired_token_is_an_explicit_error(
 ) -> None:
     credential, _default_builder, _client_builder = credentials
     credential.get_token.return_value = AccessToken(token, 9999999999)
+    provider = mcp_auth.build_mcp_header_provider(
+        _server(scope=_SCOPE, headers={"Authorization": "static-value"})
+    )
+    assert provider is not None
 
     with caplog.at_level(logging.DEBUG), pytest.raises(
         ValueError, match="MCP authentication returned an empty token"
     ):
-        mcp_auth.materialize_mcp_headers(
-            _server(scope=_SCOPE, headers={"Authorization": "static-value"})
-        )
+        provider({})
 
     credential.get_token.assert_called_once_with(_SCOPE)
     assert "static-value" not in caplog.text
@@ -276,9 +270,11 @@ def test_credential_construction_failure_propagates(
 ) -> None:
     credential, default_builder, _client_builder = credentials
     default_builder.side_effect = RuntimeError("test credential failure")
+    provider = mcp_auth.build_mcp_header_provider(_server(scope=_SCOPE))
+    assert provider is not None
 
     with pytest.raises(RuntimeError, match="test credential failure"):
-        mcp_auth.materialize_mcp_headers(_server(scope=_SCOPE))
+        provider({})
     credential.get_token.assert_not_called()
 
 
@@ -288,7 +284,6 @@ def test_header_provider_is_none_without_auth_or_static_headers(
     credential, default_builder, client_builder = credentials
 
     assert mcp_auth.build_mcp_header_provider(_server()) is None
-    assert mcp_auth.materialize_mcp_headers(_server()) == {}
     credential.get_token.assert_not_called()
     default_builder.assert_not_called()
     client_builder.assert_not_called()
