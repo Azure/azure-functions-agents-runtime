@@ -15,7 +15,7 @@ from azurefunctions.extensions.http.fastapi import Request, Response, StreamingR
 
 from .._logger import logger
 from .._observability import FaultDomain, LifecycleStage, start_span
-from .._session_id import SESSION_ID_PATTERN
+from .._session_id import SESSION_ID_PATTERN, validate_session_id
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
 from ..harness._harness_binding import AppHarness, HarnessKind, bind_harness, get_harness
@@ -83,8 +83,10 @@ def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     value = value.strip()
-    if _SAFE_SESSION_ID_PATTERN.match(value):
-        return value
+    try:
+        return validate_session_id(value)
+    except ValueError:
+        pass
     # The MCP extension mints its own transport session id (e.g. the
     # streamable-HTTP ``Mcp-Session-Id``), whose format we do not control and
     # which may contain characters the runner rejects or exceed its length
@@ -715,7 +717,9 @@ def _register_history_endpoint(
                 media_type="application/json",
             )
         # session_id becomes part of the blob path; reject anything unsafe.
-        if not _SAFE_SESSION_ID_PATTERN.match(session_id):
+        try:
+            validate_session_id(session_id)
+        except ValueError:
             return Response(
                 json.dumps({"error": "invalid session id"}),
                 status_code=400,

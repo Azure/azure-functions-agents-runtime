@@ -744,7 +744,7 @@ def test_extract_mcp_session_id_sanitizes_transport_ids() -> None:
     raw = "urn:mcp:session:9f8b/6a2c+d4==@conn"
     sanitized = _extract_mcp_session_id({"sessionId": raw})
     assert sanitized is not None
-    assert _SESSION_ID_PATTERN.match(sanitized), sanitized
+    assert _SESSION_ID_PATTERN.fullmatch(sanitized), sanitized
     # Deterministic: same transport id -> same agent session (continuity).
     assert sanitized == _extract_mcp_session_id({"sessionId": raw})
     # Different transport id -> different agent session.
@@ -754,7 +754,7 @@ def test_extract_mcp_session_id_sanitizes_transport_ids() -> None:
     long_id = "a" * 200
     long_sanitized = _extract_mcp_session_id({"sessionId": long_id})
     assert long_sanitized is not None
-    assert _SESSION_ID_PATTERN.match(long_sanitized), long_sanitized
+    assert _SESSION_ID_PATTERN.fullmatch(long_sanitized), long_sanitized
 
 
 

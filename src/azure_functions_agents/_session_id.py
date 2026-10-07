@@ -16,9 +16,9 @@ SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
 def validate_session_id(session_id: str | None) -> str | None:
-	"""Return a safe session ID or raise for invalid input."""
-	if session_id is None:
-		return None
-	if not isinstance(session_id, str) or not SESSION_ID_PATTERN.match(session_id):
-		raise ValueError(f"Invalid session_id (must match {SESSION_ID_PATTERN.pattern})")
-	return session_id
+    """Return a safe session ID or raise for invalid input."""
+    if session_id is None:
+        return None
+    if not isinstance(session_id, str) or SESSION_ID_PATTERN.fullmatch(session_id) is None:
+        raise ValueError(f"Invalid session_id (must match {SESSION_ID_PATTERN.pattern})")
+    return session_id

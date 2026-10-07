@@ -234,6 +234,22 @@ async def test_run_raises_response_contract_errors(
 
 
 @pytest.mark.asyncio
+async def test_run_empty_response_schema_still_requires_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skill, _ = _make_skill(tmp_path, response_schema={})
+
+    async def run_agent(_prompt: str, **kwargs: Any) -> AgentResult:
+        return AgentResult(kwargs["session_id"], "not JSON")
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent", run_agent)
+
+    with pytest.raises(InvalidResponseJsonError):
+        await skill.run("Return JSON")
+
+
+@pytest.mark.asyncio
 async def test_run_records_response_contract_failure_as_app_fault_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -360,6 +376,28 @@ async def test_stream_validates_completed_response_before_done(
     ]
     assert output[-1].content == "Agent response validation failed"
     assert closed is True
+
+
+@pytest.mark.asyncio
+async def test_stream_empty_response_schema_still_requires_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skill, _ = _make_skill(tmp_path, response_schema={})
+
+    async def events() -> AsyncIterator[HostedSkillEvent]:
+        yield HostedSkillEvent(HostedSkillEventKind.SESSION, session_id="session-one")
+        yield HostedSkillEvent(HostedSkillEventKind.DELTA, content="not JSON")
+        yield HostedSkillEvent(HostedSkillEventKind.DONE)
+
+    monkeypatch.setattr(hosted_skill_module, "run_agent_events", lambda *_a, **_k: events())
+
+    output = [event async for event in skill.stream("Return JSON")]
+
+    assert output[-1] == HostedSkillEvent(
+        HostedSkillEventKind.ERROR,
+        content="Agent response validation failed",
+    )
 
 
 @pytest.mark.asyncio

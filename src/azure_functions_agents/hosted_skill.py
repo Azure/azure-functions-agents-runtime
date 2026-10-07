@@ -84,7 +84,7 @@ class HostedSkill:
                     _harness=self._harness,
                     _session_is_new=is_new_session,
                 )
-                if resolved.response_example or resolved.response_schema:
+                if resolved.response_example or resolved.response_schema is not None:
                     try:
                         validate_response_contract(result.content, resolved.response_schema)
                     except HostedSkillResponseError as exc:
@@ -141,7 +141,7 @@ class HostedSkill:
                 } and event.content:
                     response_parts.append(event.content)
                 if event.kind is HostedSkillEventKind.DONE and (
-                    resolved.response_example or resolved.response_schema
+                    resolved.response_example or resolved.response_schema is not None
                 ):
                     try:
                         validate_response_contract(

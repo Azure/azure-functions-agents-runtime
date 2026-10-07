@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from ._function_tool import FunctionTool, tool
 from ._logger import logger
 from ._observability import FaultDomain, RuntimeSpan, current_span, record_delegate_call
-from ._session_id import SESSION_ID_PATTERN
+from ._session_id import SESSION_ID_PATTERN, validate_session_id
 from ._slug import delegate_tool_name
 from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
@@ -65,6 +65,7 @@ def _runtime_timeout_default() -> float:
 DEFAULT_TIMEOUT = _runtime_timeout_default()
 DEFAULT_MODEL: str | None = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL") or None
 _SESSION_ID_PATTERN = SESSION_ID_PATTERN
+_validate_session_id = validate_session_id
 
 
 @dataclass
@@ -79,15 +80,6 @@ class AgentResult:
     events: list[dict[str, Any]] = field(default_factory=list)
     delegate_error_count: int = 0
     model: str = "unknown"
-
-
-def _validate_session_id(session_id: str | None) -> str | None:
-    """Return ``session_id`` if it matches the safe pattern; raise on invalid input."""
-    if session_id is None:
-        return None
-    if not isinstance(session_id, str) or not _SESSION_ID_PATTERN.match(session_id):
-        raise ValueError(f"Invalid session_id (must match {_SESSION_ID_PATTERN.pattern})")
-    return session_id
 
 
 def _resolve_history_agent_slug(

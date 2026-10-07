@@ -36,7 +36,7 @@ def response_format_instructions(resolved: ResolvedAgent) -> list[str]:
             "Your response must match this example format:\n"
             f"```json\n{resolved.response_example}\n```"
         ]
-    if resolved.response_schema:
+    if resolved.response_schema is not None:
         schema = json.dumps(resolved.response_schema, indent=2)
         return [
             "You MUST respond with ONLY a valid JSON object "

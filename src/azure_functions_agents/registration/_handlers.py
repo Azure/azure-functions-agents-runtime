@@ -445,7 +445,7 @@ def make_http_agent_handler(
                         ),
                     )
 
-                if resolved.response_example or resolved.response_schema:
+                if resolved.response_example or resolved.response_schema is not None:
                     try:
                         parsed = validate_response_contract(
                             result.content,

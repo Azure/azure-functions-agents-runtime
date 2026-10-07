@@ -170,6 +170,25 @@ def test_http_handler_response_schema_invalid_output_returns_500(monkeypatch: An
     }
 
 
+def test_http_handler_empty_response_schema_still_requires_json(monkeypatch: Any) -> None:
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(content="not JSON", session_id="session-123")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema={}),
+        AgentCapabilities(),
+    )
+
+    response = asyncio.run(handler(DummyRequest({"hello": "world"})))
+
+    assert response.status_code == 500
+    assert json.loads(response.body)["error"] == "Agent returned invalid JSON"
+
+
 def test_copilot_http_handler_keeps_host_owned_structured_output_validation(
     monkeypatch: Any,
     tmp_path: Path,
