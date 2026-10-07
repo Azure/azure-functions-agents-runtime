@@ -39,16 +39,8 @@ import azure_functions_agents.runner as runner
 from azure_functions_agents._function_tool import tool
 from azure_functions_agents._function_tool import tool as runtime_tool
 from azure_functions_agents._tool_descriptor import ToolDescriptor
-from azure_functions_agents.client_manager import (
-    ClientManager,
-    InferenceTarget,
-    get_client_manager,
-    set_client_manager,
-)
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
-    AgentFrameworkCompactionConfig,
-    AgentFrameworkConfiguration,
     BuiltinEndpointsConfig,
     ResolvedAgent,
     SubagentRef,
@@ -56,6 +48,7 @@ from azure_functions_agents.config.schema import (
 )
 from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
+from azure_functions_agents.harness._provider_config import InferenceTarget
 from azure_functions_agents.harness.agent_framework import _maf_execution as maf
 from azure_functions_agents.harness.agent_framework._maf_tools import build_maf_tools
 from azure_functions_agents.registration.capabilities import AgentCapabilities
@@ -98,19 +91,9 @@ def _targeted_agent(agent: Any) -> tuple[Any, InferenceTarget]:
     return agent, InferenceTarget()
 
 
-class _FakeClientManager(ClientManager):
-    """A ``ClientManager`` that never touches a real model provider."""
-
-    def resolve_model(self, requested: str | None) -> str:
-        return requested or "fake-model"
-
-    def build_chat_client(self, model: str | None) -> Any:
-        return SimpleNamespace(model=self.resolve_model(model))
-
-
 class _RunnableFakeChatClient:
     """A minimal chat client that actually satisfies ``agent_framework``'s
-    ``SupportsChatGetResponse`` protocol, unlike ``_FakeClientManager``'s bare
+    ``SupportsChatGetResponse`` protocol, unlike the default test client's bare
     ``SimpleNamespace`` (good enough for construction/tool-listing assertions,
     but not runnable).
 
@@ -152,22 +135,6 @@ class _RunnableFakeChatClient:
         return _get_response()
 
 
-class _RunnableFakeClientManager(ClientManager):
-    """A ``ClientManager`` whose chat client can actually run a real ``Agent``.
-
-    Used only by the real-instrumentation test below — everything else in
-    this module uses ``_FakeClientManager``, which is sufficient for the
-    construction/tool-listing assertions the other tests make but cannot
-    drive a real ``Agent.run()``.
-    """
-
-    def resolve_model(self, requested: str | None) -> str:
-        return requested or "fake-model"
-
-    def build_chat_client(self, model: str | None) -> Any:
-        return _RunnableFakeChatClient()
-
-
 @pytest.fixture(autouse=True)
 def _isolate_app_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("WEBSITE_OWNER_NAME", "WEBSITE_DEPLOYMENT_ID", "WEBSITE_SITE_NAME"):
@@ -175,16 +142,13 @@ def _isolate_app_identity(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _restore_client_manager() -> Any:
-    """Snapshot/restore the process-wide ``ClientManager`` singleton around every test.
-
-    ``_build_delegated_agent`` calls ``get_client_manager().build_chat_client(...)``;
-    tests that exercise it install ``_FakeClientManager`` and must not leak that
-    substitution into unrelated tests/modules.
-    """
-    original = get_client_manager()
-    yield
-    set_client_manager(original)
+def _stub_maf_client_builder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Avoid external provider construction in delegation tests by default."""
+    monkeypatch.setattr(
+        maf,
+        "build_chat_client",
+        lambda model: (SimpleNamespace(model=model or "fake-model"), InferenceTarget()),
+    )
 
 
 class _RecordingSpan:
@@ -421,8 +385,6 @@ def test_assemble_agent_inputs_for_direct_role_has_full_tool_superset(
 
 
 def test_build_delegated_agent_never_wires_its_own_declared_subagents() -> None:
-    set_client_manager(_FakeClientManager())
-
     resolved = _make_resolved(
         slug="billing",
         subagents=[SubagentRef(agent="shipping")],
@@ -444,7 +406,6 @@ async def test_agent_configuration_applies_to_each_stateless_leaf_role(
     monkeypatch: pytest.MonkeyPatch,
     execution_role: Any,
 ) -> None:
-    set_client_manager(_FakeClientManager())
     captured: list[dict[str, Any]] = []
 
     async def respond(task: str) -> str:
@@ -456,12 +417,7 @@ async def test_agent_configuration_applies_to_each_stateless_leaf_role(
 
     monkeypatch.setattr(maf, "_build_role_agent", build_harness)
 
-    config = AgentConfiguration(
-        max_output_tokens=4096,
-        agent_framework=AgentFrameworkConfiguration(
-            compaction=AgentFrameworkCompactionConfig(max_context_window_tokens=8192)
-        ),
-    )
+    config = AgentConfiguration(max_output_tokens=4096)
     local_tool = tool(lambda: "ok", name="billing_lookup")
     resolved = _make_resolved(
         slug="billing",
@@ -493,7 +449,6 @@ def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A delegated specialist builds from its own model, prompt, tools, and skills."""
-    set_client_manager(_FakeClientManager())
     captured: list[tuple[Any, dict[str, Any]]] = []
 
     def fake_create_harness_agent(client: Any, **kwargs: Any) -> Any:
@@ -524,7 +479,7 @@ def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and
         enabled_skill_paths=[billing_skill_path],
     )
 
-    coordinator_chat_client = get_client_manager().build_chat_client("coordinator-model")
+    coordinator_chat_client = SimpleNamespace(model="coordinator-model")
     maf._build_role_agent(
         coordinator_chat_client,
         agent_instructions="be a coordinator",
@@ -562,10 +517,12 @@ async def test_single_level_delegation_end_to_end_with_mutual_subagents_refs_doe
     Since each call now builds its specialist ``Agent`` fresh, INSIDE the
     handler, rather than at tool-build time (FRD 0007 §5 Decision #20),
     ``_build_delegated_agent`` is not called at all until the tool is
-    actually invoked — this test calls it via ``_RunnableFakeClientManager``
+    actually invoked — this test calls it via a runnable fake client
     so the specialist's ``run()`` genuinely succeeds end to end.
     """
-    set_client_manager(_RunnableFakeClientManager())
+    monkeypatch.setattr(
+        maf, "build_chat_client", lambda model: (_RunnableFakeChatClient(), InferenceTarget())
+    )
 
     resolved_a = _make_resolved(slug="a", subagents=[SubagentRef(agent="b")])
     resolved_b = _make_resolved(slug="b", subagents=[SubagentRef(agent="a")])
@@ -1253,7 +1210,9 @@ async def test_real_maf_leaf_span_reports_agent_name_and_stable_id(
     if site_name is not None:
         monkeypatch.setenv("WEBSITE_SITE_NAME", site_name)
     expected_name = f"{site_name}/billing" if site_name else "billing"
-    set_client_manager(_RunnableFakeClientManager())
+    monkeypatch.setattr(
+        maf, "build_chat_client", lambda model: (_RunnableFakeChatClient(), InferenceTarget())
+    )
 
     resolved = _make_resolved(
         name="Billing Specialist",
@@ -1422,16 +1381,6 @@ class _NeverRespondingChatClient:
         return _get_response()
 
 
-class _NeverRespondingClientManager(ClientManager):
-    """A ``ClientManager`` whose chat client hangs forever — see ``_NeverRespondingChatClient``."""
-
-    def resolve_model(self, requested: str | None) -> str:
-        return requested or "fake-model"
-
-    def build_chat_client(self, model: str | None) -> Any:
-        return _NeverRespondingChatClient()
-
-
 def _install_maf_tracer(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Swap MAF's OTel tracer provider for an in-memory exporter and force MAF's own
     instrumentation on, for the duration of one test.
@@ -1471,7 +1420,7 @@ async def test_delegate_handler_finalizes_real_maf_agent_span_on_specialist_time
     until a nondeterministic GC-timed ``weakref.finalize`` safety net
     eventually runs.
 
-    ``_NeverRespondingClientManager`` makes the specialist's non-streaming
+    ``_NeverRespondingChatClient`` makes the specialist's non-streaming
     response never resolve, forcing the handler's own ``asyncio.wait_for`` to
     time out while awaiting ``specialist_agent.run(task)`` — the
     ``except TimeoutError`` branch this proves exercises returns the
@@ -1486,7 +1435,9 @@ async def test_delegate_handler_finalizes_real_maf_agent_span_on_specialist_time
     span = _install_span_capture(monkeypatch)
     calls = _install_counter_capture(monkeypatch)
 
-    set_client_manager(_NeverRespondingClientManager())
+    monkeypatch.setattr(
+        maf, "build_chat_client", lambda model: (_NeverRespondingChatClient(), InferenceTarget())
+    )
 
     resolved = _make_resolved(
         name="Billing Specialist",
@@ -1539,7 +1490,9 @@ async def test_delegate_handler_finalizes_real_maf_agent_span_on_outer_cancellat
     span = _install_span_capture(monkeypatch)
     calls = _install_counter_capture(monkeypatch)
 
-    set_client_manager(_NeverRespondingClientManager())
+    monkeypatch.setattr(
+        maf, "build_chat_client", lambda model: (_NeverRespondingChatClient(), InferenceTarget())
+    )
 
     resolved = _make_resolved(
         name="Billing Specialist",
@@ -1694,7 +1647,9 @@ async def test_real_delegate_tool_invoke_produces_nested_execute_tool_and_invoke
     if site_name is not None:
         monkeypatch.setenv("WEBSITE_SITE_NAME", site_name)
     invoke_name = f"invoke_agent {site_name}/billing" if site_name else "invoke_agent billing"
-    set_client_manager(_RunnableFakeClientManager())
+    monkeypatch.setattr(
+        maf, "build_chat_client", lambda model: (_RunnableFakeChatClient(), InferenceTarget())
+    )
 
     resolved = _make_resolved(
         name="Billing Specialist", slug="billing", instructions="Handle billing questions."

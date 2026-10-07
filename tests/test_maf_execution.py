@@ -25,16 +25,14 @@ from agent_framework import (
 from azure_functions_agents import runner
 from azure_functions_agents._agent_identity import agent_id
 from azure_functions_agents._function_tool import tool
-from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
-    AgentFrameworkCompactionConfig,
-    AgentFrameworkConfiguration,
     SubagentRef,
 )
 from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.harness import _harness_execution as shared
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
+from azure_functions_agents.harness._provider_config import InferenceTarget
 from azure_functions_agents.harness.agent_framework import _maf_execution as maf
 from azure_functions_agents.harness.agent_framework import _maf_mcp
 
@@ -125,7 +123,9 @@ def test_backend_uses_canonical_host_and_accounting_without_private_facade_expor
         assert not hasattr(runner, name)
 
 
-def test_role_constructor_keeps_identity_options_compaction_and_skills(monkeypatch, tmp_path):
+def test_role_constructor_keeps_identity_options_native_compaction_and_skills(
+    monkeypatch, tmp_path
+):
     import agent_framework
 
     monkeypatch.setenv("WEBSITE_SITE_NAME", " Fixture-Site ")
@@ -134,12 +134,7 @@ def test_role_constructor_keeps_identity_options_compaction_and_skills(monkeypat
     skills = Mock(return_value=object())
     monkeypatch.setattr(agent_framework, "create_harness_agent", create)
     monkeypatch.setattr(agent_framework.SkillsProvider, "from_paths", skills)
-    configuration = AgentConfiguration(
-        max_output_tokens=128,
-        agent_framework=AgentFrameworkConfiguration(
-            compaction=AgentFrameworkCompactionConfig(max_context_window_tokens=4096)
-        ),
-    )
+    configuration = AgentConfiguration(max_output_tokens=128)
     tools = [object()]
     history = object()
     client = object()
@@ -165,7 +160,6 @@ def test_role_constructor_keeps_identity_options_compaction_and_skills(monkeypat
         disable_web_search=True,
         disable_todo=True,
         disable_mode=True,
-        max_context_window_tokens=4096,
         max_output_tokens=128,
         disable_file_memory=True,
         default_options={"store": False},
@@ -198,10 +192,8 @@ async def test_session_builder_consumes_actual_host_hooks_and_none_vs_empty(
     monkeypatch.setattr(runner, "build_subagent_tools", delegates)
     assemble = Mock(wraps=maf.assemble_agent_inputs)
     monkeypatch.setattr(maf, "assemble_agent_inputs", assemble)
-    manager = SimpleNamespace(
-        build_chat_client_with_target=Mock(return_value=(object(), InferenceTarget()))
-    )
-    monkeypatch.setattr(maf, "get_client_manager", lambda: manager)
+    build_client = Mock(return_value=(object(), InferenceTarget()))
+    monkeypatch.setattr(maf, "build_chat_client", build_client)
     history = object()
     monkeypatch.setattr(maf, "_build_history_provider", lambda slug: history)
     role = Mock(return_value=object())
@@ -228,7 +220,7 @@ async def test_session_builder_consumes_actual_host_hooks_and_none_vs_empty(
     )
     assert session.session_id == session_id == "shared"
     assert returned_tracker is tracker
-    manager.build_chat_client_with_target.assert_called_once_with(None)
+    build_client.assert_called_once_with(None)
     delegates.assert_awaited_once_with(
         references, catalog, coordinator_deadline=123.0, harness=None
     )
@@ -264,10 +256,7 @@ class _RecordingChatClient(ChatMiddlewareLayer, BaseChatClient):
 @pytest.mark.asyncio
 async def test_real_maf_turns_reload_scoped_history_from_fresh_sessions(monkeypatch, tmp_path):
     client = _RecordingChatClient()
-    manager = SimpleNamespace(
-        build_chat_client_with_target=lambda model: (client, InferenceTarget())
-    )
-    monkeypatch.setattr(maf, "get_client_manager", lambda: manager)
+    monkeypatch.setattr(maf, "build_chat_client", lambda model: (client, InferenceTarget()))
     monkeypatch.setattr(maf, "resolve_config_dir", lambda: tmp_path)
     first = await runner.run_agent(
         "one", tools=[], mcp_tools=[], session_id="shared", agent_name="billing", timeout=5

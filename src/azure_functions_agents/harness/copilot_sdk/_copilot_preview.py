@@ -9,15 +9,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
-from ...client_manager import (
-    ProviderKind,
-    _is_active_client_manager_builtin,
-    _resolve_builtin_inference_target,
-)
 from ...config.env import EnvVar, raw_env_value
 from ...config.schema import AgentConfiguration, ResolvedAgent
 from ...workflows.tools import build_workflow_tools
 from .._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
+from .._provider_config import ProviderKind, resolve_inference_target
 
 if TYPE_CHECKING:
     from ...registration.capabilities import AgentCapabilities
@@ -42,25 +38,14 @@ def check_sdk_dependency() -> None:
         ) from None
 
 
-def validate_copilot_client_manager() -> None:
-    if not _is_active_client_manager_builtin():
-        raise UnsupportedCapabilityError(
-            "Copilot preview accepts only the runtime-created MAFClientManager singleton. "
-            "An explicitly installed ClientManager, including MAFClientManager(), is a MAF-only "
-            f"replacement; restart with {FLAG}=false to use it through MAF. "
-            "No client or fallback was constructed."
-        )
-
-
 def select_copilot_harness(root: Path) -> AppHarness:
     """Freeze provider and storage settings without acquiring runtime resources."""
     from ._copilot_providers import _PROVIDERS
     from ._copilot_session_identity import resolve_route
 
-    validate_copilot_client_manager()
     check_sdk_dependency()
     try:
-        target = _resolve_builtin_inference_target(None)
+        target = resolve_inference_target(None)
         if target.provider is None:
             raise ValueError
         provider = ProviderKind(target.provider)
@@ -105,11 +90,6 @@ def reject_unsupported(**capabilities: bool) -> None:
 
 def validate_configuration(configuration: AgentConfiguration) -> None:
     reject_unsupported(
-        agent_framework=(
-            configuration.agent_framework is not None
-            and configuration.agent_framework.compaction is not None
-            and configuration.agent_framework.compaction.max_context_window_tokens is not None
-        ),
         max_output_tokens=configuration.max_output_tokens is not None,
     )
 
@@ -138,7 +118,6 @@ def validate_copilot_agent(
     """Reject unsupported effective configuration before registration or execution."""
     from ...registration.capabilities import SANDBOX_TOOL_NAME
 
-    validate_copilot_client_manager()
     validate_configuration(resolved.agent_configuration)
     if not (resolved.model or harness.default_model):
         raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")

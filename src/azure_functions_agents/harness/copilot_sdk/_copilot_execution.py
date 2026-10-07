@@ -11,15 +11,15 @@ from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
 
 from ..._logger import logger
 from ..._skill_policy import SkillPolicy
-from ...client_manager import InferenceTarget
 from .. import _harness_execution
 from .._harness_binding import AppHarness, HarnessRequest, UnsupportedCapabilityError
+from .._provider_config import InferenceTarget
 from ._copilot_capabilities import (
     available_tools,
     mcp_configuration,
     permission_handler,
 )
-from ._copilot_preview import CopilotPreviewError, validate_copilot_client_manager
+from ._copilot_preview import CopilotPreviewError
 from ._copilot_runtime import CopilotRuntime, get_runtime
 from ._copilot_session_fs import open_session_fs
 from ._copilot_session_identity import CopilotSessionError, StorageRoute, session_prefix
@@ -417,7 +417,6 @@ async def _run_session_turn(
 
 
 async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
-    validate_copilot_client_manager()
     if request.max_output_tokens is not None:
         raise UnsupportedCapabilityError(
             "Copilot preview cannot enforce max_output_tokens with the pinned SDK/runtime. "
@@ -545,6 +544,7 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
                     options=options,
                     on_permission_request=on_permission_request,
                 )
+                request.session_state.resumable = True
                 async with _bounded_cleanup(
                     session.disconnect, "Copilot native session could not be disconnected."
                 ):

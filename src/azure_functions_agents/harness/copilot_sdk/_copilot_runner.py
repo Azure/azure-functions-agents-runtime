@@ -23,7 +23,13 @@ from ...discovery.skills import SkillDescriptor
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
 from .._agent_runner import AgentFunctionTool, AgentRunner
-from .._harness_binding import AppHarness, HarnessRequest, UnsupportedCapabilityError
+from .._harness_binding import (
+    AppHarness,
+    HarnessRequest,
+    HarnessSessionState,
+    SessionHistory,
+    UnsupportedCapabilityError,
+)
 from . import _copilot_execution, _copilot_preview
 
 if TYPE_CHECKING:
@@ -101,6 +107,7 @@ class _CopilotHarnessRunner:
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
+        session_state: HarnessSessionState | None = None,
     ) -> AgentResult:
         del timeout
 
@@ -137,6 +144,7 @@ class _CopilotHarnessRunner:
             workflow_agent_slug=workflow_agent_slug,
             agent_configuration=configuration,
             deadline=deadline,
+            session_state=session_state,
         )
 
         delegate_tools: list[ToolDescriptor] = []
@@ -199,13 +207,18 @@ class _CopilotHarnessRunner:
         skills: Sequence[SkillDescriptor] | None = None,
         skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
+        session_state: HarnessSessionState | None = None,
     ) -> AsyncGenerator[str]:
         execution: asyncio.Task[AgentResult] | None = None
         try:
             validated_id = _validate_session_id(session_id)
             resolved_id = validated_id or uuid.uuid4().hex
+            session_state = session_state or HarnessSessionState(
+                caller_supplied=validated_id is not None
+            )
             events = _StreamEventQueue()
             emitted_text = False
+            emitted_session = session_state.caller_supplied
 
             async def execute() -> AgentResult:
                 try:
@@ -234,6 +247,7 @@ class _CopilotHarnessRunner:
                         skill_catalog=skill_catalog,
                         session_is_new=session_is_new or validated_id is None,
                         event_sink=events.emit,
+                        session_state=session_state,
                     )
                 finally:
                     events.finish()
@@ -252,6 +266,10 @@ class _CopilotHarnessRunner:
                 execution = asyncio.create_task(execute())
                 try:
                     while (event := await events.next_event()) is not None:
+                        if event["type"] == "session":
+                            if emitted_session:
+                                continue
+                            emitted_session = True
                         if event["type"] == "delta":
                             emitted_text = True
                         yield f"data: {json.dumps(event, default=str)}\n\n"
@@ -283,6 +301,8 @@ class _CopilotHarnessRunner:
                 except Exception as exc:
                     span.set_attribute("af.agent.outcome", "error")
                     span.record_exception(exc, fault_domain=FaultDomain.RUNTIME)
+                    if session_state.resumable and not emitted_session:
+                        yield f"data: {json.dumps({'type': 'session', 'session_id': resolved_id})}\n\n"
                     yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
         except asyncio.CancelledError:
             raise
@@ -332,6 +352,11 @@ class _CopilotHarnessRunner:
             ),
         )
         return result.content
+
+    async def get_session_history(self, agent_slug: str, session_id: str) -> SessionHistory:
+        del agent_slug, session_id
+        _copilot_preview.reject_unsupported(transcript_replay=True)
+        raise AssertionError("Copilot transcript replay should have been rejected.")
 
 
 def _validate_session_id(session_id: str | None) -> str | None:

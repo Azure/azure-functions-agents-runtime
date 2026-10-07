@@ -7,11 +7,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 from weakref import ReferenceType, ref
 
-from agent_framework import MCPStreamableHTTPTool
-
 from ..._logger import logger
 from ..._mcp_auth import build_mcp_header_provider
 from ...discovery.mcp import MCPServerDescriptor
+from ._maf_warnings import suppress_experimental_warnings
+
+with suppress_experimental_warnings():
+    from agent_framework import MCPStreamableHTTPTool
 
 _MAF_MCP_TOOLS_CACHE: dict[
     int, tuple[ReferenceType[MCPServerDescriptor], MCPStreamableHTTPTool]

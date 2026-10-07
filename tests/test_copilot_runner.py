@@ -343,7 +343,7 @@ async def test_sse_failure_boundaries_never_advertise_success(preview, native, b
             )
         ]
         assert [event["type"] for event in events] == (
-            ["session", "error"] if boundary == "interrupt" else ["error"]
+            ["error"] if boundary == "create" else ["session", "error"]
         )
         if boundary == "interrupt":
             session.abort.assert_awaited_once()
@@ -367,6 +367,30 @@ async def test_stream_invalid_session_id_emits_sse_error_without_native_executio
     assert [event["type"] for event in events] == ["error"]
     assert "Invalid session_id" in events[0]["content"]
     native.create_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_resume", [False, True])
+async def test_sse_supplied_session_id_is_emitted_once_even_when_resume_fails(
+    preview, native, fail_resume,
+):
+    if fail_resume:
+        native.resume_session.side_effect = RuntimeError("private resume failure")
+    try:
+        events = [
+            json.loads(chunk.removeprefix("data: "))
+            async for chunk in runner.run_agent_stream(
+                "hello", _harness=preview, tools=[], mcp_tools=[], session_id="caller-id",
+            )
+        ]
+        assert [event for event in events if event["type"] == "session"] == [
+            {"type": "session", "session_id": "caller-id"},
+        ]
+        assert events[-1]["type"] == ("error" if fail_resume else "done")
+        native.create_session.assert_not_awaited()
+        native.resume_session.assert_awaited_once()
+    finally:
+        await _harness_lifecycle._shutdown_harnesses()
 
 
 @pytest.mark.asyncio

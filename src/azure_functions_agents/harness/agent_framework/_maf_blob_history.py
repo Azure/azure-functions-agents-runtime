@@ -11,7 +11,6 @@ from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from agent_framework import HistoryProvider, Message
 from azure.core.exceptions import AzureError, ResourceExistsError, ResourceNotFoundError
 
 from ..._logger import logger
@@ -23,6 +22,10 @@ from .._session_storage import (
     blob_storage_from_environment,
     storage_client_id,
 )
+from ._maf_warnings import suppress_experimental_warnings
+
+with suppress_experimental_warnings():
+    from agent_framework import HistoryProvider, Message
 
 if TYPE_CHECKING:
     from azure.core.credentials_async import AsyncTokenCredential

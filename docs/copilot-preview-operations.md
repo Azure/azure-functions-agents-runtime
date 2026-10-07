@@ -221,7 +221,7 @@ and report the startup failure rather than any cleanup follow-on error.
 
 There is no retained failed-client/filesystem retry registry and no process-exit
 `atexit` fallback. The supported shutdown path is the runtime's explicit async
-shutdown (`shutdown_client_manager()` / harness shutdown), which attempts a
+`shutdown_runtime()`, which attempts a
 bounded graceful stop and then bounded `force_stop`, still attempts credential
 cleanup, reports cleanup failures immediately, and clears cached handles so a
 stopped or closing resource is never reused. This preview does **not** claim
@@ -281,10 +281,10 @@ belong to the SDK. Removing live files does not erase service-retained copies.
 
 Native compaction is enabled with the SDK's own defaults; the host adds no
 summarizer, no second compacted-context format and no token-threshold mapping.
-MAF-specific `agent_configuration.agent_framework.compaction.max_context_window_tokens`
-is rejected on the Copilot path when its effective value is non-null; clearing
-it with `null` (or omitting it) selects native defaults. The portable
-`max_output_tokens` cap remains rejected in this preview.
+Legacy `agent_configuration.agent_framework.compaction.max_context_window_tokens`
+configuration emits a warning and is ignored; MAF and Copilot each use their
+native defaults. The portable `max_output_tokens` cap remains rejected in this
+preview.
 
 All compaction artifacts are persisted as opaque SDK files. Filesystem tests
 alone do not prove native compaction or session restoration, and the host adds

@@ -47,10 +47,6 @@ def test_configure_observability_enabled_when_provider_active(monkeypatch) -> No
     _reset_bootstrap(monkeypatch)
     monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: True)
     monkeypatch.setattr(obs, "_configure_azure_monitor", lambda connection: None)
-    enable_calls: list[bool] = []
-    monkeypatch.setattr(
-        obs, "_enable_agent_framework_instrumentation", lambda capture: enable_calls.append(capture)
-    )
 
     resolved = obs.configure_observability()
 
@@ -58,22 +54,16 @@ def test_configure_observability_enabled_when_provider_active(monkeypatch) -> No
     assert resolved.capture_sensitive_data is True
     assert obs.capture_sensitive_data() is True
     assert obs.is_observability_enabled() is True
-    assert enable_calls == [True]  # MAF instrumentation enabled with the resolved capture flag
 
 
 def test_configure_observability_noop_without_provider_or_connection(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _clear_env(monkeypatch)
     _reset_bootstrap(monkeypatch)
     monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: False)
-    enable_calls: list[bool] = []
-    monkeypatch.setattr(
-        obs, "_enable_agent_framework_instrumentation", lambda capture: enable_calls.append(capture)
-    )
 
     resolved = obs.configure_observability()
 
     assert resolved.enabled is False
-    assert enable_calls == []
     assert obs.is_observability_enabled() is False
 
 
@@ -87,8 +77,6 @@ def test_configure_observability_rides_existing_worker_provider(monkeypatch) -> 
     monkeypatch.setattr(
         obs, "_configure_azure_monitor", lambda connection: configure_calls.append(connection)
     )
-    monkeypatch.setattr(obs, "_enable_agent_framework_instrumentation", lambda capture: None)
-
     resolved = obs.configure_observability()
 
     assert resolved.enabled is True
@@ -104,16 +92,10 @@ def test_configure_observability_warns_when_connection_but_no_exporter(  # type:
     # Exporter missing / no provider becomes active after the configure attempt.
     monkeypatch.setattr(obs, "_configure_azure_monitor", lambda connection: None)
     monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: False)
-    enable_calls: list[bool] = []
-    monkeypatch.setattr(
-        obs, "_enable_agent_framework_instrumentation", lambda capture: enable_calls.append(capture)
-    )
-
     with caplog.at_level(logging.WARNING, logger="azure.functions.AgentRuntime"):
         resolved = obs.configure_observability()
 
     assert resolved.enabled is False
-    assert enable_calls == []
     assert "azurefunctions-agents-runtime[monitor]" in caplog.text
 
 

@@ -7,8 +7,6 @@ from pydantic import ValidationError
 
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
-    AgentFrameworkCompactionConfig,
-    AgentFrameworkConfiguration,
     AgentSpec,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
@@ -140,34 +138,21 @@ def test_global_config_extra_forbidden() -> None:
 def test_agent_configuration_defaults() -> None:
     config = AgentConfiguration()
     assert config.max_output_tokens is None
-    assert config.agent_framework is None
 
 
 def test_agent_configuration_with_fields() -> None:
-    config = AgentConfiguration(
-        max_output_tokens=4_096,
-        agent_framework=AgentFrameworkConfiguration(
-            compaction=AgentFrameworkCompactionConfig(max_context_window_tokens=128_000)
-        ),
-    )
+    config = AgentConfiguration(max_output_tokens=4_096)
     assert config.max_output_tokens == 4_096
-    assert config.agent_framework is not None
-    assert config.agent_framework.compaction is not None
-    assert config.agent_framework.compaction.max_context_window_tokens == 128_000
 
 
 @pytest.mark.parametrize(
     ("model", "data"),
     [
         (AgentConfiguration, {"unknown_field": True}),
-        (AgentFrameworkConfiguration, {"unknown_field": True}),
-        (AgentFrameworkCompactionConfig, {"unknown_field": True}),
+        (AgentConfiguration, {"agent_framework": {"unrelated": True}}),
     ],
 )
-def test_agent_configuration_extra_forbidden(
-    model: type[AgentConfiguration | AgentFrameworkConfiguration | AgentFrameworkCompactionConfig],
-    data: dict[str, Any],
-) -> None:
+def test_agent_configuration_extra_forbidden(model: type[AgentConfiguration], data: dict[str, Any]) -> None:
     with pytest.raises(ValidationError):
         model.model_validate(data)
 
@@ -175,7 +160,7 @@ def test_agent_configuration_extra_forbidden(
 @pytest.mark.parametrize("field", ["disable_file_memory", "disable_mode"])
 def test_agent_configuration_runtime_owned_fields_forbidden(field: str) -> None:
     with pytest.raises(ValidationError):
-        AgentConfiguration.model_validate({"agent_framework": {field: True}})
+        AgentConfiguration.model_validate({field: True})
 
 
 @pytest.mark.parametrize(
@@ -183,12 +168,10 @@ def test_agent_configuration_runtime_owned_fields_forbidden(field: str) -> None:
     [
         (AgentConfiguration, {"max_output_tokens": 0}),
         (AgentConfiguration, {"max_output_tokens": True}),
-        (AgentFrameworkCompactionConfig, {"max_context_window_tokens": 0}),
-        (AgentFrameworkCompactionConfig, {"max_context_window_tokens": True}),
     ],
 )
 def test_agent_configuration_rejects_invalid_token_limits(
-    model: type[AgentConfiguration | AgentFrameworkCompactionConfig], data: dict[str, Any]
+    model: type[AgentConfiguration], data: dict[str, Any]
 ) -> None:
     with pytest.raises(ValidationError):
         model.model_validate(data)
@@ -202,10 +185,7 @@ def test_global_and_agent_configuration_defaults() -> None:
 
 
 def test_global_and_agent_config_accept_agent_configuration() -> None:
-    data = {
-        "max_output_tokens": 4096,
-        "agent_framework": {"compaction": {"max_context_window_tokens": 8192}},
-    }
+    data = {"max_output_tokens": 4096}
     global_config = GlobalConfig.model_validate({"agent_configuration": data})
     spec = AgentSpec.model_validate(
         {"name": "X", "description": "Y", "agent_configuration": data}
@@ -215,14 +195,7 @@ def test_global_and_agent_config_accept_agent_configuration() -> None:
 
 def test_agent_configuration_accepts_partial_and_null_shapes() -> None:
     assert AgentConfiguration(max_output_tokens=4096).max_output_tokens == 4096
-    assert (
-        AgentConfiguration.model_validate(
-            {"agent_framework": {"compaction": {}}}
-        ).agent_framework
-        is not None
-    )
     assert AgentConfiguration.model_validate({"max_output_tokens": None}).max_output_tokens is None
-    assert AgentConfiguration.model_validate({"agent_framework": None}).agent_framework is None
 
 
 def test_resolved_agent_configuration_defaults_empty() -> None:

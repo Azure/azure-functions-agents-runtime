@@ -23,8 +23,8 @@ from agent_framework import (
 
 from azure_functions_agents import runner
 from azure_functions_agents._function_tool import tool
-from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.harness import _harness_execution as shared
+from azure_functions_agents.harness._provider_config import InferenceTarget
 from azure_functions_agents.harness.agent_framework import _maf_execution as maf
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 

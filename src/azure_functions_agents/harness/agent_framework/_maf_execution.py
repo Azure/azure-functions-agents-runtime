@@ -16,7 +16,6 @@ from ..._agent_identity import agent_id
 from ..._logger import logger
 from ..._observability import FaultDomain, LifecycleStage, start_span
 from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
-from ...client_manager import InferenceTarget, get_client_manager
 from ...config import ResolvedAgent, SubagentRef
 from ...config.env import EnvVar, runtime_env_value
 from ...config.paths import get_app_root
@@ -28,9 +27,12 @@ from ...registration._handlers import _looks_like_tool_error
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
 from .. import _harness_execution
-from .._harness_binding import AppHarness, ExecutionRole, HarnessRequest
+from .._harness_binding import AppHarness, ExecutionRole, HarnessRequest, HarnessSessionState
 from .._history_identity import validate_agent_slug
+from .._provider_config import InferenceTarget
+from ._maf_client import build_chat_client
 from ._maf_tools import build_maf_tools
+from ._maf_warnings import suppress_experimental_warnings
 
 if TYPE_CHECKING:
     from agent_framework import (
@@ -222,19 +224,20 @@ def _resolve_sessions_dir(agent_slug: str) -> Path:
 
 def _build_history_provider(agent_slug: str) -> Any:
     """Choose MAF Blob history when configured, otherwise scoped local JSONL."""
-    from ._maf_blob_history import build_blob_provider_from_environment
+    with suppress_experimental_warnings():
+        from ._maf_blob_history import build_blob_provider_from_environment
 
-    blob_provider = build_blob_provider_from_environment(agent_slug=agent_slug)
-    if blob_provider is not None:
-        return blob_provider
+        blob_provider = build_blob_provider_from_environment(agent_slug=agent_slug)
+        if blob_provider is not None:
+            return blob_provider
 
-    from ._maf_file_history import ScopedFileHistoryProvider
+        from ._maf_file_history import ScopedFileHistoryProvider
 
-    scoped_dir = _resolve_sessions_dir(agent_slug)
-    return ScopedFileHistoryProvider(
-        storage_root=scoped_dir.parent,
-        agent_slug=agent_slug,
-    )
+        scoped_dir = _resolve_sessions_dir(agent_slug)
+        return ScopedFileHistoryProvider(
+            storage_root=scoped_dir.parent,
+            agent_slug=agent_slug,
+        )
 
 
 def _build_chat_options_from_environment() -> _ChatOptions | None:
@@ -315,30 +318,25 @@ def _build_role_agent(
     agent_configuration: AgentConfiguration,
 ) -> Agent[Any]:
     """Build one conservatively configured MAF harness agent for any role."""
-    import warnings
+    with suppress_experimental_warnings():
+        from agent_framework import SkillsProvider, create_harness_agent
 
-    from agent_framework import SkillsProvider, create_harness_agent
-    from agent_framework._feature_stage import ExperimentalWarning
-
-    adapted_tools = [
-        build_maf_tools((candidate,))[0] if isinstance(candidate, ToolDescriptor) else candidate
-        for candidate in tools
-    ]
-    skills_provider = (
-        SkillsProvider.from_paths(
-            list(skill_paths),
-            disable_load_skill_approval=True,
-            disable_read_skill_resource_approval=True,
-            disable_run_skill_script_approval=True,
+        adapted_tools = [
+            build_maf_tools((candidate,))[0] if isinstance(candidate, ToolDescriptor) else candidate
+            for candidate in tools
+        ]
+        skills_provider = (
+            SkillsProvider.from_paths(
+                list(skill_paths),
+                disable_load_skill_approval=True,
+                disable_read_skill_resource_approval=True,
+                disable_run_skill_script_approval=True,
+            )
+            if skill_paths
+            else None
         )
-        if skill_paths
-        else None
-    )
-    site_name = runtime_env_value(EnvVar.WEBSITE_SITE_NAME)
-    maf_agent_name = f"{site_name}/{agent_name or 'main'}" if site_name else agent_name
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=ExperimentalWarning)
+        site_name = runtime_env_value(EnvVar.WEBSITE_SITE_NAME)
+        maf_agent_name = f"{site_name}/{agent_name or 'main'}" if site_name else agent_name
         return create_harness_agent(
             chat_client,
             id=agent_id(agent_name or "main"),
@@ -352,25 +350,16 @@ def _build_role_agent(
             disable_web_search=True,
             disable_todo=True,
             disable_mode=True,
-            max_context_window_tokens=_max_context_window_tokens(agent_configuration),
             max_output_tokens=agent_configuration.max_output_tokens,
             disable_file_memory=True,
             default_options={"store": False},
         )
 
-
-def _max_context_window_tokens(config: AgentConfiguration) -> int | None:
-    if config.agent_framework is None or config.agent_framework.compaction is None:
-        return None
-    return config.agent_framework.compaction.max_context_window_tokens
-
-
 def _build_delegated_agent(
     resolved: ResolvedAgent, capabilities: AgentCapabilities
 ) -> tuple[Agent[Any], InferenceTarget]:
     """Build a stateless specialist without expanding its own subagents."""
-    client_manager = get_client_manager()
-    chat_client, inference_target = client_manager.build_chat_client_with_target(resolved.model)
+    chat_client, inference_target = build_chat_client(resolved.model)
     resolved_tools, effective_instructions = assemble_agent_inputs(
         instructions=resolved.instructions,
         tools=list(capabilities.filtered_user_tools or []),
@@ -471,13 +460,14 @@ async def _build_agent_session(
     workflow_policy: WorkflowPlanPolicy | None = None,
     app_root: Path | None = None,
     _harness: AppHarness | None = None,
+    session_state: HarnessSessionState | None = None,
 ) -> tuple[Agent[Any], AgentSession, str, _runner._DelegateErrorTracker | None, InferenceTarget]:
     """Construct the existing fresh MAF agent/session and invocation metadata."""
-    from agent_framework import AgentSession
+    with suppress_experimental_warnings():
+        from agent_framework import AgentSession
 
     resolved_config = agent_configuration or AgentConfiguration()
-    client_manager = get_client_manager()
-    chat_client, inference_target = client_manager.build_chat_client_with_target(model)
+    chat_client, inference_target = build_chat_client(model)
 
     validated_id = _runner._validate_session_id(session_id)
     if validated_id is None:
@@ -489,6 +479,8 @@ async def _build_agent_session(
 
     history_agent_slug = _runner._resolve_history_agent_slug(agent_name, workflow_agent_slug)
     history_provider = _build_history_provider(history_agent_slug)
+    if session_state is not None:
+        session_state.resumable = True
 
     delegate_tools: list[ToolDescriptor] | None = None
     delegate_error_tracker: _runner._DelegateErrorTracker | None = None
@@ -620,6 +612,7 @@ async def run(
     subagents: list[SubagentRef] | None,
     catalog: AgentCatalog | None,
     workflow_policy: WorkflowPlanPolicy | None,
+    session_state: HarnessSessionState | None = None,
 ) -> _runner.AgentResult:
     """Execute one neutral request through MAF without changing its role policy."""
     loop = asyncio.get_running_loop()
@@ -647,6 +640,7 @@ async def run(
             workflow_policy=workflow_policy,
             app_root=harness.app_root,
             _harness=harness,
+            session_state=session_state or request.session_state,
         )
     )
 
@@ -744,6 +738,7 @@ async def run_stream(
     subagents: list[SubagentRef] | None,
     catalog: AgentCatalog | None,
     workflow_policy: WorkflowPlanPolicy | None,
+    session_state: HarnessSessionState | None = None,
 ) -> AsyncGenerator[str]:
     """Yield the existing SSE vocabulary for a selected MAF invocation."""
     loop = asyncio.get_running_loop()
@@ -772,6 +767,7 @@ async def run_stream(
                 workflow_policy=workflow_policy,
                 app_root=harness.app_root,
                 _harness=harness,
+                session_state=session_state or request.session_state,
             )
         )
     except Exception as exc:
@@ -779,7 +775,8 @@ async def run_stream(
         yield _sse_frame({"type": "error", "content": str(exc)})
         return
 
-    yield _sse_frame({"type": "session", "session_id": resolved_id})
+    if not request.session_state.caller_supplied:
+        yield _sse_frame({"type": "session", "session_id": resolved_id})
 
     with start_span(
         f"agent.run {agent_name or 'agent'}",

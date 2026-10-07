@@ -7,8 +7,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.harness import _harness_execution as execution
+from azure_functions_agents.harness._provider_config import InferenceTarget
 
 
 @pytest.fixture(autouse=True)

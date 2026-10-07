@@ -168,27 +168,22 @@ and [evaluation sample](samples/agent-evaluation/).
 
 ### Agent configuration
 
-By default, agents execute through Microsoft Agent Framework's harness-agent mechanism. Optional global
-defaults and recursive per-agent overrides configure model output and conversation compaction
-limits. The Copilot opt-in rejects configured output limits rather than silently
-dropping them, and rejects a non-null `max_context_window_tokens`; clearing that
-value with `null` selects Copilot's native compaction defaults. The underlying
-Copilot SDK/provider surface has similarly named token-budget fields, but this
-bounded preview does not map or expose them as a supported authoring contract.
+By default, agents execute through Microsoft Agent Framework's harness-agent mechanism. Optional
+global defaults and recursive per-agent overrides configure model output limits. Both harnesses use
+their own native compaction defaults. The Copilot opt-in rejects configured output limits rather
+than silently dropping them; it does not expose the SDK's similarly named token-budget fields as a
+supported authoring contract.
 
 ```yaml
 # agents.config.yaml
 agent_configuration:
   max_output_tokens: 4096
-  agent_framework:
-    compaction:
-      max_context_window_tokens: 8192
 ```
 
 Agents recursively inherit global `agent_configuration` values. Per-agent values override individual
-leaves, while explicit `null` clears inherited values. `max_output_tokens` may stand alone;
-Microsoft Agent Framework compaction requires an effective output limit smaller than
-`max_context_window_tokens`. See
+leaves, while explicit `null` clears inherited values. Legacy
+`agent_framework.compaction.max_context_window_tokens` configuration emits a warning and is ignored;
+remove it to use the selected harness's native compaction default. See
 [`docs/front-matter-spec.md#agent_configuration`](docs/front-matter-spec.md#agent_configuration).
 
 #### Securing endpoints

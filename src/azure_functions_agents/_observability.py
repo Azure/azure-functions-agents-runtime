@@ -5,11 +5,10 @@ exporter extra (``azurefunctions-agents-runtime[monitor]``) and setting the stan
 ``APPLICATIONINSIGHTS_CONNECTION_STRING`` — no app code required. The app's ``function_app.py`` stays
 a two-line file; this module owns:
 
-* turning on Microsoft Agent Framework (MAF) ``gen_ai`` instrumentation and, when the optional
-  ``[monitor]`` exporter is installed, the Azure Monitor exporter;
+* configuring the optional Azure Monitor exporter;
 * the span/attribute conventions the rest of the runtime uses so failures self-classify as
   ``app`` vs ``runtime`` vs ``platform`` (see :data:`ATTR_FAULT_DOMAIN`);
-* a single resolved ``capture_sensitive_data`` flag (from MAF's ``ENABLE_SENSITIVE_DATA``) that gates
+* a single resolved ``capture_sensitive_data`` flag (from ``ENABLE_SENSITIVE_DATA``) that gates
   whether prompts, payloads, tool arguments, code, and model output are attached to telemetry
   (default off).
 
@@ -101,7 +100,7 @@ class ResolvedObservability:
     capture_sensitive_data: bool
 
 
-_MAF_SENSITIVE_ENV = "ENABLE_SENSITIVE_DATA"
+_SENSITIVE_DATA_ENV = "ENABLE_SENSITIVE_DATA"
 _CONNECTION_ENV = "APPLICATIONINSIGHTS_CONNECTION_STRING"
 _AAD_AUTH_STRING_ENV = "APPLICATIONINSIGHTS_AUTHENTICATION_STRING"
 
@@ -123,13 +122,11 @@ def capture_sensitive_data() -> bool:
 
 
 def _resolve_capture_sensitive_data() -> bool:
-    """Resolve the content-capture flag from Microsoft Agent Framework's ``ENABLE_SENSITIVE_DATA``.
+    """Resolve the runtime content-capture flag from ``ENABLE_SENSITIVE_DATA``.
 
-    The runtime deliberately reuses MAF's own switch (default off) so a single environment variable
-    governs both MAF ``gen_ai`` content and the runtime's ``af.*`` content, with no divergence and
-    nothing to reconcile. See FRD 0003 (sensitive-data exposure decision).
+    The setting is shared by runtime-owned and selected-harness telemetry, and defaults off.
     """
-    value = runtime_env_value(_MAF_SENSITIVE_ENV)
+    value = runtime_env_value(_SENSITIVE_DATA_ENV)
     return _to_bool(value, default=False) if value else False
 
 
@@ -171,7 +168,6 @@ def configure_observability() -> ResolvedObservability:
     _configured = True
 
     if _enabled:
-        _enable_agent_framework_instrumentation(_capture_sensitive_data)
         logger.info("Observability enabled (capture_sensitive_data=%s)", _capture_sensitive_data)
     elif connection:
         logger.warning(
@@ -184,15 +180,6 @@ def configure_observability() -> ResolvedObservability:
         logger.info("Observability inactive (no OpenTelemetry provider or exporter configured)")
 
     return ResolvedObservability(enabled=_enabled, capture_sensitive_data=_capture_sensitive_data)
-
-
-def _enable_agent_framework_instrumentation(capture: bool) -> None:
-    try:
-        from agent_framework.observability import enable_instrumentation
-
-        enable_instrumentation(enable_sensitive_data=capture)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("Could not enable Agent Framework instrumentation: %s", exc)
 
 
 def _otel_provider_already_configured() -> bool:
@@ -231,8 +218,8 @@ def _configure_azure_monitor(connection_string: str) -> None:
         logger.info(
             "OpenTelemetry is already configured in this worker process (likely the Functions "
             "worker via PYTHON_APPLICATIONINSIGHTS_ENABLE_TELEMETRY / PYTHON_ENABLE_OPENTELEMETRY); "
-            "skipping the runtime's Azure Monitor setup to avoid duplicate export. Runtime spans "
-            "and Agent Framework gen_ai instrumentation will use the existing provider."
+            "skipping the runtime's Azure Monitor setup to avoid duplicate export. Runtime "
+            "instrumentation will use the existing provider."
         )
         return
     try:
@@ -292,18 +279,13 @@ def _quiet_noisy_loggers() -> None:
 
 
 def get_tracer() -> Any:
-    """Return an OpenTelemetry tracer, preferring MAF's shared provider."""
+    """Return the runtime's SDK-neutral OpenTelemetry tracer."""
     try:
-        from agent_framework.observability import get_tracer as _maf_get_tracer
+        from opentelemetry import trace
 
-        return _maf_get_tracer()
-    except Exception:
-        try:
-            from opentelemetry import trace
-
-            return trace.get_tracer(_TRACER_NAME)
-        except Exception:  # pragma: no cover - OTel always present via agent-framework-core
-            return None
+        return trace.get_tracer(_TRACER_NAME)
+    except Exception:  # pragma: no cover - OTel always present via agent-framework-core
+        return None
 
 
 def current_operation_id() -> str | None:
@@ -472,16 +454,11 @@ def _ensure_metrics() -> None:
         return
     _metrics_ready = True
     try:
-        from agent_framework.observability import get_meter
+        from opentelemetry import metrics
 
-        _meter = get_meter()
-    except Exception:
-        try:
-            from opentelemetry import metrics
-
-            _meter = metrics.get_meter(_TRACER_NAME)
-        except Exception:  # pragma: no cover - defensive
-            _meter = None
+        _meter = metrics.get_meter(_TRACER_NAME)
+    except Exception:  # pragma: no cover - defensive
+        _meter = None
     if _meter is None:
         return
     try:

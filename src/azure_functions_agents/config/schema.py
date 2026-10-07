@@ -239,29 +239,12 @@ class SystemToolsAgentOverride(BaseModel):
     web_request: bool | None = None
 
 
-class AgentFrameworkCompactionConfig(BaseModel):
-    """Microsoft Agent Framework conversation-compaction settings."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    max_context_window_tokens: PositiveTokenLimit | None = None
-
-
-class AgentFrameworkConfiguration(BaseModel):
-    """Microsoft Agent Framework-specific agent configuration."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    compaction: AgentFrameworkCompactionConfig | None = None
-
-
 class AgentConfiguration(BaseModel):
-    """Portable and framework-specific agent configuration."""
+    """Portable agent configuration."""
 
     model_config = ConfigDict(extra="forbid")
 
     max_output_tokens: PositiveTokenLimit | None = None
-    agent_framework: AgentFrameworkConfiguration | None = None
 
 
 class GlobalConfig(BaseModel):

@@ -104,6 +104,36 @@ def _normalize_agent_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     return cast(dict[str, Any], resolve_env_vars_in_data(normalized))
 
 
+def _ignore_retired_compaction_setting(
+    data: dict[str, Any], source_file: Path
+) -> dict[str, Any]:
+    """Drop only the retired MAF compaction setting while preserving strict validation."""
+    configuration = data.get("agent_configuration")
+    if not isinstance(configuration, dict):
+        return data
+    agent_framework = configuration.get("agent_framework")
+    if not isinstance(agent_framework, dict):
+        return data
+    compaction = agent_framework.get("compaction")
+    if not isinstance(compaction, dict) or "max_context_window_tokens" not in compaction:
+        return data
+
+    logger.warning(
+        "Ignoring retired configuration field "
+        "agent_configuration.agent_framework.compaction.max_context_window_tokens: file=%s "
+        "MAF uses its native model-aware compaction default.",
+        source_file,
+    )
+    compaction.pop("max_context_window_tokens")
+    if not compaction:
+        agent_framework.pop("compaction")
+    if not agent_framework:
+        configuration.pop("agent_framework")
+    if not configuration:
+        data.pop("agent_configuration")
+    return data
+
+
 def _format_validation_error(source_file: Path, exc: ValidationError) -> ValueError:
     location, message = _most_specific_validation_issue(exc)
     return ValueError(
@@ -139,6 +169,7 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
         instructions = substitute_env_vars_in_text(post.content)
     else:
         instructions = post.content
+    normalized = _ignore_retired_compaction_setting(normalized, source_file)
 
     # Resolve once to avoid redundant filesystem calls
     resolved_source = source_file.resolve()
@@ -197,7 +228,7 @@ def load_global_config(app_root: Path) -> GlobalConfig:
             f"{source_file}: field `<root>`: expected a YAML mapping. See {_FRONTMATTER_SCHEMA_LINK}"
         )
 
-    normalized = _normalize_global_config_dict(data)
+    normalized = _ignore_retired_compaction_setting(_normalize_global_config_dict(data), source_file)
     try:
         return GlobalConfig.model_validate(normalized)
     except ValidationError as exc:

@@ -37,10 +37,11 @@ The runtime now auto-detects an already-configured OpenTelemetry provider and sk
 Monitor setup, so the worker path will not double-export — though it is still unnecessary when the
 runtime is already configuring the exporter.
 
-The runtime bootstraps everything from `create_function_app()`
-(`_observability.configure_observability()`): it enables Microsoft Agent Framework (MAF) `gen_ai`
-instrumentation and, when the `[monitor]` extra is installed and no OpenTelemetry provider is
-already active, the Azure Monitor exporter. When no OpenTelemetry provider is active it is a no-op.
+`create_function_app()` calls `_observability.configure_observability()` to configure the optional
+Azure Monitor exporter when available and no OpenTelemetry provider is already active. This shared
+bootstrap does not import or initialize an agent harness. MAF `gen_ai` instrumentation is enabled
+only when the MAF harness initializes; the Copilot path does not load MAF instrumentation. Runtime
+span/content helpers continue using the active OpenTelemetry provider or no-op when none is active.
 
 ## Where the runtime's output shows up (traces, not logs)
 

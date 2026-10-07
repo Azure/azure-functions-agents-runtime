@@ -32,8 +32,6 @@ from pydantic.fields import FieldInfo
 # Extract models from the dynamically loaded schema module
 AgentSpec = schema.AgentSpec
 AgentConfiguration = schema.AgentConfiguration
-AgentFrameworkCompactionConfig = schema.AgentFrameworkCompactionConfig
-AgentFrameworkConfiguration = schema.AgentFrameworkConfiguration
 BuiltinEndpointsConfig = schema.BuiltinEndpointsConfig
 DynamicSessionsCodeInterpreterConfig = schema.DynamicSessionsCodeInterpreterConfig
 GlobalConfig = schema.GlobalConfig
@@ -103,8 +101,6 @@ def format_type(field_info: FieldInfo, field_name: str) -> str:
         "EndpointAuthConfig",
         "EntraAuthConfig",
         "AgentConfiguration",
-        "AgentFrameworkConfiguration",
-        "AgentFrameworkCompactionConfig",
         "McpFilter",
         "SkillsFilter",
         "ToolsFilter",
@@ -326,16 +322,7 @@ AGENT_SPEC_OPTIONAL_DESCRIPTIONS = {
 }
 
 AGENT_CONFIGURATION_DESCRIPTIONS = {
-    "max_output_tokens": "Positive model output-token limit. May be configured without compaction.",
-    "agent_framework": "Microsoft Agent Framework-specific settings.",
-}
-
-AGENT_FRAMEWORK_CONFIGURATION_DESCRIPTIONS = {
-    "compaction": "Microsoft Agent Framework conversation-compaction settings.",
-}
-
-AGENT_FRAMEWORK_COMPACTION_DESCRIPTIONS = {
-    "max_context_window_tokens": "Positive total context budget used by conversation compaction. Requires an effective `max_output_tokens` smaller than this value.",
+    "max_output_tokens": "Positive model output-token limit.",
 }
 
 TRIGGER_SPEC_DESCRIPTIONS = {
@@ -507,25 +494,18 @@ def generate_markdown() -> str:
     lines.extend([
         "### Global and agent: `agent_configuration`",
         "",
-        "Configure portable output limits and Microsoft Agent Framework-specific conversation compaction:",
+        "Configure portable output limits:",
         "",
         "```yaml",
         "agent_configuration:",
         "  max_output_tokens: 4096",
-        "  agent_framework:",
-        "    compaction:",
-        "      max_context_window_tokens: 8192",
         "```",
         "",
     ])
     lines.extend(generate_model_table(AgentConfiguration, descriptions=AGENT_CONFIGURATION_DESCRIPTIONS))
-    lines.extend(["", "#### `agent_configuration.agent_framework`", ""])
-    lines.extend(generate_model_table(AgentFrameworkConfiguration, descriptions=AGENT_FRAMEWORK_CONFIGURATION_DESCRIPTIONS))
-    lines.extend(["", "#### `agent_configuration.agent_framework.compaction`", ""])
-    lines.extend(generate_model_table(AgentFrameworkCompactionConfig, descriptions=AGENT_FRAMEWORK_COMPACTION_DESCRIPTIONS))
     lines.extend([
         "",
-        "Agent values recursively inherit global values. Explicit `null` clears an inherited leaf or subtree. When context compaction is configured, the effective `max_output_tokens` must be present and less than `max_context_window_tokens`.",
+        "Agent values recursively inherit global values. Explicit `null` clears an inherited value.",
         "",
         "**See:** [Front Matter Spec - agent_configuration](./front-matter-spec.md#agent_configuration)",
         "",
