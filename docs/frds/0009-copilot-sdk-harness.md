@@ -4,7 +4,7 @@ title: Copilot SDK agent harness
 status: Finalized
 author: larohra
 created: 2026-09-28
-updated: 2026-10-06
+updated: 2026-10-07
 issues:
   - https://github.com/Azure/azure-functions-bucees-planning/issues/1332
 pull_requests: []
@@ -15,949 +15,300 @@ branch: null
 
 ## 1. Summary
 
-Replace Microsoft Agent Framework (MAF) with the GitHub Copilot Python SDK as
-the agent-execution harness, while retaining this runtime's markdown authoring,
-Azure Functions surfaces, capability policy, and workflow behavior. Copilot
-becomes the sole harness in the end state, not another public plugin. A temporary
-app-level preview flag leaves MAF as the default and enables isolated Copilot
-previews with explicit capability checks. Today's shipped runtime still keeps
-MAF as the default and limits Copilot to an internal local-only preview. For
-Copilot-owned sessions, the host provides only a thin filesystem adapter and
-storage selection boundary; the SDK owns continuation, compaction, recovery,
-file contents, and format compatibility.
+Add an internal GitHub Copilot SDK execution path without changing the runtime's
+markdown authoring model, Azure Functions registration surfaces, capability
+filters, or workflow ownership. Microsoft Agent Framework (MAF) remains the
+default production harness. Copilot is a bounded, once-per-app preview selected
+only by `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`; it never enables per-agent
+selection, mixed-harness roles, or fallback after selection.
+
+The design goal is architectural separation, not a public harness plug-in model.
+Discovery, merge, validation, and registration remain SDK-neutral. Selected
+execution adapters own SDK object creation, provider auth timing, native event
+translation, and persistence details.
 
 ## 2. Motivation / problem
 
-The application owns discovery, configuration, registration, authorization,
-delegation policy, and Dynamic Workflows; MAF currently supplies the agent loop,
-tool wrappers, model-client integration, and message/context management.
-Replacing only `ClientManager` cannot replace that harness: `runner.py`,
-discovery, history providers, and observability also contain MAF-specific seams.
-The desired replacement uses Copilot's native loop and native session persistence
-without recreating session protocols in the host or changing how an application
-defines agents.
+The runtime already owns discovery, configuration, capability policy, endpoint
+registration, workflow policy, and system-tool boundaries. MAF currently also
+owns the agent loop, tool adaptation, chat-client construction, history, and
+streaming behavior. Supporting a Copilot path therefore requires more than
+swapping `ClientManager`: the execution boundary, capability adaptation,
+session/persistence model, and native event handling must all move behind a
+selected internal harness boundary.
 
-This specification describes intended behavior for the bounded Copilot preview.
-The current [architecture](../architecture.md) and
-[authoring specification](../front-matter-spec.md) document today's runtime;
-this FRD defines the future Copilot-path contracts that preserve those product
-surfaces while narrowing the host's persistence responsibility. The preview
-described here is the current bounded implementation path toward that end state.
+The runtime must make that change without:
+
+- changing `.agent.md`, `agents.config.yaml`, `mcp.json`, `tools/`, or `skills/`
+  authoring;
+- re-parsing authored files at execution time;
+- turning the host into a second skill loader, session protocol, or MCP policy
+  engine; or
+- weakening existing validation by silently dropping unsupported behavior.
 
 ## 3. Goals / Non-goals
 
 **Goals**
 
-- Preserve discover -> translate -> register -> lazy execute, with resolved
-  configuration and capabilities remaining the authority for every execution role.
-- Preserve model/provider selection, timeouts, authoring inheritance, HTTP/SSE
-  contracts, local tools, MCP, scoped skills, structured responses, and safe telemetry.
-- Preserve direct agents, chat-time delegation, Workflow Sub Agents, Dynamic
-  Workflow management/Activities, `web_request`, and ACA Dynamic Sessions `execute_python`.
-- Support Copilot-owned session files through a thin SessionFs adapter backed by
-  Blob when configured or local files otherwise, isolated by shared readable
-  app/agent/session identity and opaque SDK-relative paths.
-- Reject unsupported configured behavior explicitly; never silently remove a
-  capability, weaken its policy, or fall back to MAF after selecting Copilot.
+- Preserve the existing discover -> translate -> register -> execute pipeline,
+  with `ResolvedAgent` and `AgentCapabilities` remaining authoritative.
+- Keep MAF as the default path; make Copilot an explicit app-level preview.
+- Introduce immutable SDK-neutral descriptors for tools, MCP servers, and skill
+  roots, with SDK construction deferred to the selected adapter.
+- Preserve current authoring and role contracts where supported, and reject
+  unsupported Copilot preview behavior explicitly.
+- Keep Copilot session persistence as a thin SessionFs boundary: the SDK owns
+  session contents, continuation, compaction, and recovery semantics.
 
 **Non-goals**
 
-- A permanent multi-harness extension framework, per-agent selection, or revival
-  of legacy `runtime:` frontmatter as a harness selector.
-- A host-owned session format, summarizer, continuation protocol, recovery
-  controller, or format-compatibility layer.
-- Durable mid-turn checkpoints, custom durable `ask_human`, empty `send_messages`
-  continuation, exactly-once effects, or general Brain/Hands dispatch.
-- Replacing the existing Durable Functions workflow engine. Its current features
-  are required parity, not part of the excluded durable-agent-loop work.
+- A public multi-harness extension framework or per-agent harness selector.
+- A host-owned Copilot session format, recovery protocol, compaction policy, or
+  skill catalog.
+- Host parsing of `SKILL.md` metadata, host-managed skill advertising, or a
+  runtime-owned script engine for parity.
+- Silent MAF fallback, silent capability drops, or hidden accommodations for
+  harness-specific callable signatures.
 
 ## 4. Proposed design
 
-Use a thin internal Copilot adapter at the execution boundary. Reuse
-`ResolvedAgent`, `AgentCapabilities`, `AgentCatalog`, `AgentResult`, and existing
-workflow types; do not expose a harness registry or a new public plugin protocol.
-Some current capability payloads are MAF objects. Section 4.3.1 defines their
-planned SDK-neutral representation and per-harness adaptation. The persistence
-interface in section 4.5 is narrower: it routes storage without changing shared
-tool definitions or discovery contracts.
+### 4.1 App-level harness selection
 
-**Internal containment.** Keep the public `runner.py` exports and signatures.
-Place common app binding and request contracts, resource-cleanup plumbing, and
-neutral storage settings under `harness/`; contain MAF-specific execution and history in
-`harness/agent_framework/`, and Copilot-specific execution, providers, and
-SessionFs in `harness/copilot_sdk/`. Shared boundaries do not import either
-harness's persistence implementation. Implementation-specific execution and
-persistence SDK types stay inside their selected implementation, without a new
-public plugin protocol or changes to tool, model, discovery, role, or preview
-contracts. Private host identifiers name Copilot explicitly; SDK-owned APIs and
-persisted path segments stay unchanged.
-App bindings, requests, and harness vocabularies each have one canonical shared
-definition. Both implementations consume the same result, usage, and session-lock
-contracts rather than duplicate them. The execution facade is a private
-three-operation composition: one neutral backend contract exposing only
-`run_agent`, `run_agent_stream`, and `run_leaf_agent_task`; one concrete
-app-bound `AgentRunner` facade that holds the already selected implementation;
-and one implementation per harness under `harness/agent_framework/` and
-`harness/copilot_sdk/`. No separate history or lifecycle interface is introduced.
-
-| Pipeline stage | Modules / boundaries | Required responsibility |
-| --- | --- | --- |
-| discover | `discovery/tools.py`, `discovery/mcp.py`, `discovery/skills.py`, `_function_tool.py` | Keep project inventories and discovery rules; separate framework wrapping from author intent. Do not run inference or launch the native runtime during discovery. |
-| translate | `config/schema.py`, `config/merge.py`, `config/validation.py` | Preserve typed composition, inheritance/null semantics, and effective capability validation. Interpret no new harness selector in agent files. |
-| compose/register | `app.py`, `registration/capabilities.py`, `registration/catalog.py`, `registration/_handlers.py`, `registration/endpoints.py`, `registration/triggers.py` | Resolve the app's preview choice before harness-specific bootstrap; validate the complete catalog before FunctionApp mutation; pass resolved values to lazy handlers. Keep Azure registration and inbound authorization here. |
-| execute | Public `runner.py`, `client_manager.py`, common `harness/` binding, app-bound private runner composition, implementations under `harness/agent_framework/` and `harness/copilot_sdk/` | Create/resume sessions, bind approved tools, enforce deadlines, and translate events/results. Public runner entry points remain compatibility shims that forward to one already selected three-method implementation per app binding. `ClientManager` remains provider access, not the agent loop, tool dispatcher, or session manager. |
-| persist | `_agent_identity.py`, `_session_id.py`, shared identity validation and storage settings under `harness/`, selected harness's history or SessionFs implementation | Route persistence only through the selected harness. Preserve validation and path-containment rules, reuse the shared readable agent ID for native paths, and treat Copilot session bytes as opaque SDK-owned files. |
-| cross-cutting | `workflows/*`, `system_tools/*`, `_observability.py` | Preserve workflow authorization/Activities, system-tool policies, correlation, and content controls independently of SDK object types. |
-
-### 4.1 App-level preview selection
-
-The only preview selector is `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`:
+`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` is the only selector:
 
 | Value | Selected harness |
 | --- | --- |
 | Unset, `false`, `0` | MAF |
-| `true`, `1` | Copilot |
+| `true`, `1` | Copilot preview |
 | Any other value, including an empty string | Explicit configuration error |
 
-Boolean text is case-insensitive; arbitrary nonempty strings are not truthy.
-Proposed normalization trims surrounding whitespace, but preserves whether the
-variable is present: an empty or whitespace-only value is invalid, not unset.
-The existing `runtime_env_value()` helper collapses that distinction and cannot
-be reused without preserving presence.
+Selection happens once per app construction and produces a frozen internal
+binding (`AppHarness`) that is captured by handlers, delegates, and workflow
+closures. Execution entry points receive that bound selection; they do not
+re-read environment state, choose a harness per request, or retry under MAF if
+Copilot fails. Standalone runner calls use the same resolution boundary.
 
-**Selection boundary and propagation.** The public app-creation boundary,
-`create_function_app()`, resolves the flag once before harness-specific bootstrap.
-It creates a small immutable internal app execution context containing the
-resolved app-root identity and the selected execution adapter. This is a bound
-execution interface, not a public harness registry; selecting it does not create
-a native client or start inference.
-The immutable binding may hold an app-owned mutable resource holder; that holder
-does not own conversation semantics or acquire SDK/storage resources at selection.
+### 4.2 SDK-neutral capability boundary
 
-Registration accepts that context explicitly and captures it in HTTP, streaming,
-MCP, non-HTTP trigger, and history-handler closures. `register_workflow_runtime()`
-passes the same context to `register_workflows()`, whose Activity closures retain
-it. The runner entry points `run_agent()`, `run_agent_stream()`, and
-`run_leaf_agent_task()` accept the context as a keyword argument and dispatch
-through its already-selected adapter. Delegate-tool closures pass their parent's
-context into leaf execution. None of these paths independently selects a harness
-or rereads the flag.
+Discovery and registration emit immutable SDK-free capability descriptors:
 
-The concrete runner facade is cached once per bound app context, alongside the
-existing lazy native-runtime resource cell, so public runner helpers do not
-repeat per-operation harness branching after selection. Creating that facade does
-not itself acquire native processes, credentials, history providers, or session
-filesystems. Those remain lazy backend responsibilities, and unsupported Copilot
-streaming or leaf operations must still fail before native/provider acquisition
-using the same current user-visible errors. Public helper signatures, deadline
-timing, SSE error boundaries, and cleanup guarantees stay unchanged.
-
-Each constructed app gets its own context, including two apps constructed from
-the same root; there is no process-global "last registered app wins" selection.
-Standalone runner calls may supply a context explicitly. If omitted, the shared
-resolver creates a default standalone context on first use for that resolved app
-root and reuses it; constructing a FunctionApp does not replace that default.
-Changing the environment does not mutate any existing context. Callers needing a
-new standalone app lifetime create a fresh context through the same resolver.
-
-With the flag off, there is no Copilot native-process launch, runtime download,
-authentication, or telemetry bootstrap. MAF client extensions, authored runtime
-tool options, and MAF observability remain intact. With it on, missing SDK assets, unsupported
-configuration, or runtime failures are errors, never reasons to retry under MAF.
-All roles served by one initialized app instance use its selected harness; a
-delegate cannot switch away from its parent's context. This is an app-instance
-guarantee, not a promise to pin a persisted workflow across deployments.
-
-**Durable lifecycle.** Follow the app's existing Durable Functions deployment,
-replay, retry, and version-routing behavior. A worker restart does not itself
-terminate persisted workflows: completed Activity results can be replayed, and
-pending or redelivered Activities can execute on a replacement worker. An Activity
-uses the execution context captured by the app instance serving it. If deployment
-routing sends later work to an app initialized with a different flag value, that
-work uses the new selection; we do not introduce a harness-mismatch rejection.
-Any coexistence or draining of old and new workers remains platform/deployment
-behavior, not something this feature promises to control.
-
-Do not persist the execution context or a new harness selector in orchestration
-history, read the flag during orchestrator replay, or add a custom workflow
-pinning, cancellation, migration, or restart controller. Preserve existing
-Activity contracts and at-least-once semantics. Breaking deployment changes
-still need the application's normal Durable compatibility/versioning practices.
-
-An isolated preview may use only capabilities actually supported by its build.
-Validate effective configuration, including inherited and default-on features,
-before inference or tool effects; reject known incompatibilities during app
-composition, or before execution when only invocation-time information is
-available. For example, unavailable default-on `web_request` must be explicitly
-disabled by the author, not silently omitted by the adapter. No additional
-per-capability preview flags are introduced.
-
-This temporary app-level choice deliberately changes the current `AGENTS.md`
-MAF-only convention when implemented; it does not restore per-agent/frontmatter
-runtime branching.
-
-### 4.2 Authoring and response contracts
-
-Keep `.agent.md`, `agents.config.yaml`, `mcp.json`, `tools/`, and `skills/`
-conventions; agent identity, trigger routes, endpoint authentication, and
-capability filters do not change. Omission and empty objects inherit; explicit
-`null` clears the inherited leaf/subtree, including the whole
-`agent_configuration` object. A specialist uses its own resolved configuration,
-never its coordinator's overrides. Existing model and timeout precedence,
-environment substitution, and standalone runner `None` versus explicit-empty
-tool-list semantics remain unchanged.
-
-Preserve `AgentResult` and the built-in chat envelope
-`{session_id, response, tool_calls}`, the `x-ms-session-id` header, and each
-trigger/MCP surface's existing response shape. SSE remains `data: <JSON>\n\n`
-with the currently emitted `session`, `delta`, `intermediate`, `tool_start`,
-`tool_end`, `done`, and `error`; correlate tool IDs and emit a start before its
-result. The documented/UI-tolerated `message` event is not currently emitted by
-the runner and is not a newly required emission.
-Reasoning remains optional, not fabricated. SDK/internal events and specialist
-text must not leak into the public stream. Errors are terminal, not followed by
-a success `done`. Exact token chunk boundaries are not a compatibility promise.
-
-Keep `input_schema`, `response_example`, and `response_schema` semantics and
-existing HTTP JSON parsing/schema-validation errors. An SDK structured-output
-mechanism must not weaken host validation or imply that every existing endpoint
-has the same structured-output behavior.
-
-The read-only history endpoint retains `{messages: [{role, text}], truncated}`,
-its 200-message bound, and its projection of nonempty user/assistant text only,
-excluding internal/tool entries. Keep empty success for an absent session ID or
-unconfigured Blob storage, and invalid-ID errors. Local native persistence does
-not by itself expand today's Blob-only transcript endpoint. The Copilot path
-needs a supported read-only native projection, not MAF deserialization or host
-interpretation of SDK-owned files. That projection, especially after compaction,
-remains an open design question.
-
-### 4.3 Models, tools, and execution roles
-
-Retain configured OpenAI, Azure OpenAI, and Foundry access through BYOK and
-refreshable Entra credentials where applicable, including model/deployment
-precedence and authoritative `InferenceTarget` metadata. Do not silently use
-ambient Copilot login or an interactive login flow instead of the configured
-provider. Credential/token failures surface explicitly; tokens stay out of logs.
-Provider-side conversation storage remains disabled (today's `store=false`
-behavior); a retained provider conversation ID must not become another
-continuation authority. The supported SDK/provider mapping, including that
-setting and custom-manager compatibility, requires the unresolved support choices in section 4.8.
-
-| Role/capability | Required behavior under Copilot |
-| --- | --- |
-| Direct agent | Its own instructions, resolved model/configuration, filtered tools/MCP/skills, allowed system tools, workflow management, and declared delegates; persistent native history when continuing a session. |
-| Non-HTTP trigger (direct role) | Keep trigger serialization, fresh runtime-generated session identity, allowed direct-role capabilities, and existing fire-and-forget completion/error behavior. Native execution does not add a trigger continuation API. |
-| Chat-time `delegate_<slug>` | Host-named custom tool with the existing `task: str` schema and immutable catalog lookup. Each call gets a fresh isolated specialist session with its own instructions/model/configuration, static tools/MCP/skills and `web_request`; no parent history, persistent conversation, sandbox, workflow-management tools, or nested delegation. |
-| Delegation concurrency/errors | Concurrent calls to the same specialist remain independent and may overlap. Only the final result returns through the coordinator's tool result; no specialist SSE. Specialist-local failures/timeouts remain sanitized recoverable tool failures; parent cancellation propagates. The deadline is bounded by both the specialist timeout and the parent's remaining time. |
-| Workflow Sub Agent | A fresh leaf execution in an existing Durable Activity, using the specialist's allowed static capabilities and `web_request`, with no parent history, nested delegates, request sandbox, or workflow tools. Preserve `{agent, text}`, policy authorization, failure/cancellation, and at-least-once Activity semantics. |
-| Dynamic Workflows | Keep independent `workflows.subagents` grants, management tools, complete handler catalog, per-agent policy, Activity reauthorization, decorator-owned retry/timeout behavior, and existing orchestration/status contracts. |
-
-Local public sync/async functions in `tools/`, runtime `@tool(schema=...)` with Pydantic validation,
-and `@workflow_tool` discovery/decorator-order semantics remain supported.
-Invalid arguments must fail before the callable runs; a sync result or awaitable
-must be handled once, with existing names, descriptions, and return semantics.
-Raw SDK tools and undecorated programmatic functions outside discovery are
-ignored in either harness with a sanitized warning. MAF-specific runtime
-`@tool(**kwargs)` options pass to MAF for SDK-owned validation and invocation;
-reject unsupported authored options in Copilot before effects.
-
-Preserve remote HTTP MCP configuration, per-server tool allowlists, headers,
-Entra auth inputs, and per-agent filtering, with the accepted refresh limit in
-section 4.3.2. SDK support for additional MCP transports does not expand the
-product's supported authoring surface. Skills stay
-limited to resolved paths and harness-supported skill behavior; workflow-only
-runtime guidance must not become a global skill. Native ambient skills,
-shell/file tools, planning, memory, search, or native `task` delegation must not
-bypass this capability set. Native `builtin:skill` is allowed only for selected
-approved skill directories.
-Host-authorized autonomous execution must not acquire an interactive SDK
-approval gate. Preserve authored approval semantics where supported; reject
-unmapped approval options instead of granting blanket native permissions.
-
-Keep the host `web_request` implementation's default, disable/exclude behavior,
-SSRF controls, budgets, and error shape. Keep ACA Dynamic Sessions
-`execute_python` endpoint/authentication/session scoping and result/error behavior;
-do not replace remote execution with a local SDK shell or code interpreter.
-
-#### 4.3.1 Harness-neutral capability interface
-
-A capability descriptor is the runtime's SDK-free description of something an
-agent may use. Discovery and registration produce only immutable capability
-descriptors. They do not produce MAF objects or Copilot SDK objects. Discovery
-stays read-only.
-
-The descriptor set has three shapes:
-
-- **Tool descriptor.** Name, description, JSON input schema, a sync or async
-  callable, and policy fields that affect execution, including approval
-  requirements. It is immutable after registration filters it for a role.
-- **MCP server descriptor.** Server name, URL, transport, repr-hidden static
-  headers, a tool filter of all, none, or a finite set, and optional Entra scope
-  and client ID. It does not contain an SDK client, live token, or wrapper tool.
-- **Skill descriptor.** Canonical candidate directory path and its directory-name
-  filter identity. Descriptors contain no authored description, provider state,
-  parsed metadata, or loaded content.
-
-The ordinary runtime `@tool` authoring seam stays stable. Authors keep using
-runtime `@tool` syntax, schema validation, sync or async callables, and current
-invocation semantics. Tool discovery records neutral runtime tool metadata. The
-MAF adapter maps that metadata to MAF `FunctionTool`; the Copilot adapter maps it
-to Copilot tools. Authors do not rewrite tools with SDK-specific decorators.
-Raw SDK tools, including MAF subclasses, are not an authoring surface.
-Runtime `@tool` accepts only the portable runtime surface: `name`,
-`description`, `schema`, and `approval_mode`. Unsupported extra keyword
-arguments are logged once by name and then ignored; for example,
-`max_invocations` is not enforced in any harness. The runtime does not
-preserve a harness-specific passthrough path.
-The runtime does not recognize or accommodate harness-specific callable
-signatures such as `FunctionInvocationContext`. If ordinary schema generation or
-SDK validation rejects those annotations or parameters, that failure is the
-supported outcome; the host adds no detection policy, hidden parameter
-injection, fallback schema, or alternate raw-callable route.
-
-Supplied JSON schemas retain MAF's top-level required-field,
-additional-property, enum, and primitive-type validation. Do not add full JSON
-Schema constraint enforcement in the Copilot adapter. Pydantic model constraints
-and coercion remain unchanged. Shared lightweight checks and invocation use the
-same Python-mode normalized values, without JSON reserialization. Copilot keeps
-the existing ordinary Python result formatting for lists/dicts, Pydantic
-models, custom `to_dict()`, and string `.text` values inside its own adapter;
-SDK-specific rich-result handling remains adapter-owned.
-
-`HarnessRequest` carries only these descriptors and other scalar execution
-settings. It does not carry `agent_framework` or Copilot SDK types. Registration
-remains the authority for per-agent filtering. The runner receives the filtered
-request and passes it to the selected adapter.
-
-Each harness has one adapter that maps descriptors to its SDK:
-
-- The MAF adapter builds `FunctionTool`, `MCPStreamableHTTPTool`, and MAF
-  `SkillsProvider.from_paths` configuration without changing MAF behavior.
-- The Copilot adapter builds Copilot custom tools, MCP server configuration, and
-  Copilot skill directory/enable/exclusion configuration.
-
-Only the MAF adapter may import `agent_framework`. Only the Copilot adapter may
-import Copilot SDK modules. Runtime `@tool` is the supported decorator, not
-SDK-specific decorators or a public `FunctionTool` export. No raw MAF snapshot
-registry, private SDK attribute whitelist, or opaque compatibility key remains.
-
-Skill discovery and filtering stay shared. Discovery finds directory candidates;
-registration applies directory-name exclusions. The selected SDK owns metadata
-parsing, validation, duplicate-name selection, and content loading. A candidate
-is not a confirmed loaded skill. The runtime passes approved paths to the selected
-adapter. The harness SDK owns how skills advertise
-instructions, load content, access resources, or execute supported skill
-mechanisms. Do not create a runtime-owned skill loader, prompt engine, three-tool
-abstraction, or script executor only to force parity between SDKs.
-
-This interface maps to the pipeline as follows:
-
-| Stage | Modules | Contract |
+| Descriptor | Required contents | Excluded from the descriptor |
 | --- | --- | --- |
-| discover | `discovery/tools.py`, `discovery/mcp.py`, `discovery/skills.py`, `_function_tool.py` | Read project files and imports, accept runtime descriptors/local public functions, and emit neutral inventories. Ignore raw SDK tools without inspecting attributes. Do not create harness SDK objects. |
-| translate | `config/schema.py`, `config/merge.py`, `config/validation.py` | Keep typed config composition and validation independent of harness SDK types. |
-| register | `registration/capabilities.py`, `registration/catalog.py`, `harness/_harness_binding.py` | Filter neutral inventories into immutable role capabilities; bind the app context without mutating them. |
-| execute | `runner.py`, `harness/_agent_runner.py`, `harness/agent_framework/_maf_runner.py`, `harness/agent_framework/_maf_execution.py`, `harness/agent_framework/_maf_tools.py`, `harness/agent_framework/_maf_mcp.py`, `harness/copilot_sdk/_copilot_runner.py`, `harness/copilot_sdk/_copilot_execution.py`, `harness/copilot_sdk/_copilot_capabilities.py` | Forward neutral inputs through one cached app-bound facade; the selected runner uses the canonical SDK-free `HarnessRequest` factory and maps descriptors only at its SDK execution boundary. |
+| Tool | name, description, JSON schema, callable, approval mode | SDK tool objects, harness-only keyword passthrough |
+| MCP server | name, URL, transport, static headers, tool filter, optional Entra scope/client ID | SDK transport/client objects, live tokens |
+| Skill | canonical candidate directory path, directory-name identity | parsed `SKILL.md`, authored description, loaded content |
 
-Phase-out acceptance is structural for the neutral core. Removing MAF from that
-core means deleting the MAF adapter and its dependency. Discovery, registration,
-`HarnessRequest`, runner contracts, and Copilot execution do not change. Raw SDK
-authoring has been retired; runtime `@tool` now keeps only the portable
-decorator surface. Add an import-boundary test that fails if `agent_framework`
-appears outside the MAF adapter and the named MAF-compat public surfaces, or if
-Copilot imports appear outside the Copilot adapter.
+`HarnessRequest` carries only these descriptors plus scalar execution settings.
+It does not carry MAF or Copilot SDK types.
 
-#### 4.3.2 Issue #1336 MCP and skills compatibility
+Adapters own SDK construction:
 
-This amendment defines Model Context Protocol (MCP) and scoped-skill
-compatibility. MCP uses the existing remote HTTP/streamable-HTTP transports.
-The local-only preview limit applies to Azure Functions app hosting, not to
-MCP URLs. Scoped skills are project skill folders exposed only when
-configuration allows them. MAF remains the default; Copilot remains an
-app-level, default-off preview with no automatic fallback.
+- `harness/agent_framework/*` maps descriptors to MAF tools, MCP wrappers, and
+  `SkillsProvider.from_paths`.
+- `harness/copilot_sdk/*` maps descriptors to Copilot custom tools, MCP server
+  configuration, and skill-directory configuration.
 
-MCP scope is MAF parity only, with the accepted between-turn auth limit below.
-Bring any further gap to human review rather than adding host policy.
+The selected adapter also owns auth materialization timing, native event
+handling, SDK session lifecycle, and SDK-specific result conversion.
 
-**Discovery and filtering.** Keep existing `mcp.json` authoring and discovery.
-Preserve existing discovery warnings, skipped entries, and `failed_loads`
-reporting. Discovery emits the immutable SDK-free MCP server descriptors
-from section 4.3.1. Registration preserves the existing per-agent `mcp: false`
-and `mcp.exclude` filters; `HarnessRequest` carries only selected descriptors.
+### 4.3 Tool authoring contract
 
-Per-server `tools` already exists in MAF; it is not a new field:
+The supported runtime authoring surface is intentionally narrow:
 
-- Omitted, or any list containing `"*"`: map to `["*"]` for all tools.
-- `[]`: no tools.
-- Any other list: the existing exact-name allowlist.
+- Runtime `@tool(...)` declarations remain supported.
+- A `tools/*.py` module may still contribute its first public local function as
+  the tool fallback.
+- Raw SDK tool objects, SDK decorators, and undecorated direct programmatic
+  inputs outside discovery are ignored with a sanitized warning.
 
-Map the selected remote HTTP/streamable-HTTP servers and their filters to public
-SDK `mcpServers` configuration. Use normal SDK connection, initialization, and
-tool loading.
+Runtime `@tool` supports only `name`, `description`, `schema`, and
+`approval_mode`. Extra keyword arguments are logged once by name and ignored;
+they are not forwarded to either harness, and `max_invocations` is not enforced.
+`ToolDescriptor.maf_options` is removed.
 
-**MCP lifecycle and auth.** Supply the filtered configuration at public session
-create/resume. Reuse the existing per-session lock and per-turn
-create/resume/disconnect lifecycle. Resume the same native session ID and
-history after a completed turn. Fresh static headers replace the old ones.
+The runtime does not recognize or adapt harness-specific callable signatures
+such as `FunctionInvocationContext`. If normal schema generation or SDK
+validation rejects such callables, that explicit failure is the supported
+behavior.
 
-For a server without `auth`, pass static headers unchanged, including
-`Authorization`. Empty or whitespace-only `auth.scope` keeps the existing
-warning and static-only behavior, without a token attempt. For nonempty scope,
-use the authored scope and existing credential selection: absent or unresolved
-`client_id` uses the default credential; a resolved client ID uses the client-ID
-credential. Acquire a fresh token before create/resume. Generated
-`Authorization` overrides static `Authorization`. Never log headers or tokens.
+### 4.4 Skills boundary
 
-Copilot receives static headers only at create/resume, with no mid-turn refresh.
-This is the accepted limit relative to MAF's per-request token refresh.
-Propagate token-acquisition, create/resume, connection, and tool errors through
-ordinary SDK and runtime error/result paths. Do not add automatic retries of
-possibly side-effecting calls or fall back to stale credentials, dropped
-capabilities, SDK OAuth, or a new empty session.
+Skill discovery is path-only and shared:
 
-**MCP approvals.** Ordinary configured calls remain noninteractive, matching
-MAF's existing `never_require` default. The adapter installs its internal
-`on_permission_request` callback on create and resume. This is not user-facing
-configuration.
+- search each configured root through two child levels;
+- stop at directories containing `SKILL.md`;
+- use directory basenames as the filter identity; and
+- keep full canonical discovered roots only as ownership metadata.
 
-For ordinary configured MCP requests (`kind == "mcp"`), the callback delegates
-to `PermissionHandler.approve_all`, the SDK's approve-once helper.
-Native `mcpServers.tools` enforces the authored filter. All other request kinds
-retain the agreed skill-helper handling and default deny. Do not install a
-global approve-all handler or broaden shell/read/edit access. The helper's
-managed-approval limits still apply; section 8 records the qualification limits.
+The host does **not** parse `SKILL.md`, project a manual catalog, validate
+authored names/descriptions, or claim qualified native skill advertising.
+Registration filters candidate paths into immutable approved descriptors.
+Each SDK then owns metadata validation, advertising, instruction loading,
+duplicate selection, and supported skill-resource/script behavior.
 
-**Skills adaptation.** `discovery/skills.py` searches each input directory through
-two child levels, checking the input itself first and stopping at each `SKILL.md`
-root. Grouping folders are allowed. Discovery reads no content and imports no
-SDK. Directory basenames supply the common exclusion identity; the selected SDK
-validates authored metadata. Missing and non-directory inputs are ignored;
-unreadable directory scans are skipped with host diagnostics. Explicit inputs and
-directory traversal retain their order. Distinct same-name candidates reach the
-SDK rather than being discarded before content validation.
+Copilot receives selected paths and disabled directory identities only. MAF
+retains its existing `SkillsProvider.from_paths` behavior. An approved parent
+does not authorize an excluded nested child; independently supplied overlapping
+roots still use most-specific ownership for helper permissions.
 
-`registration/capabilities.py` applies `skills: false` and `skills.exclude` to this
-same candidate inventory for both harnesses. Nested documents under a skill root
-belong to that skill, not independently selectable skills. Separately supplied
-explicit parent and child paths can still produce overlapping roots.
-Canonical discovered paths, including excluded candidates, remain read-only
-target-ownership metadata. Add no authoring keys or access grants.
+### 4.5 MCP and scoped helper behavior
 
-The adapter defines how skills run for its harness. Both harnesses receive the
-same expanded approved skill-directory descriptors, including standalone calls
-that started from collection-style `skill_paths` inputs. MAF uses public
-`SkillsProvider.from_paths` over those selected individual roots. Its current
-resource/script recursion includes nested documents under an approved parent.
-Preserve that resource-loading behavior without a separate raw collection-path
-bypass.
+The product MCP surface remains remote HTTP/streamable-HTTP `mcp.json`
+configuration plus existing per-agent filtering. No new MCP authoring keys are
+introduced.
 
-Copilot registers only individual approved skill directory paths and explicit
-`disabled_skills` names from the same frontmatter selections, using supported
-public configuration and native `builtin:skill`. Do not register an unfiltered
-ancestor root or copy skills into a collection folder.
+For `auth.scope`:
 
-Each resource or script target belongs to the most-specific canonical discovered
-skill root containing it. Permit a target only when its owning skill is in the
-agent's approved inventory. For independently supplied overlapping roots, an
-enabled parent cannot authorize an excluded child, and an independently enabled
-child keeps its grant when its ancestor is excluded. Implicit nested documents
-remain part of their parent. Resolve canonical paths before ownership checks; reject traversal,
-symlink or alias escapes, out-of-root targets, missing or ambiguous ownership,
-and string-prefix overlaps that are not path containment. No broad ancestor
-grant is allowed. `skills: false` exposes no skill or helper capabilities.
+- empty/whitespace scope normalizes to `None` after a discovery warning;
+- nonempty scope acquires a fresh bearer token at native session create/resume;
+- generated `Authorization` overrides any static `Authorization` header; and
+- Copilot does not claim mid-turn header refresh parity with MAF.
 
-Distinct canonical roots sharing a directory slug are not ambiguous owners.
-Resource/script grants still require the exact approved `(slug, path)` pair.
-Conflicting identities for the same canonical root remain denied; selecting a
-slug does not authorize an unapproved sibling candidate path.
+Configured MCP calls remain noninteractive. Copilot's permission callback may
+approve configured MCP requests and scoped skill helper actions only. It does
+not become a global approve-all channel.
 
-Skill content validation and its errors/skips belong to each SDK, not app indexing.
-The host no longer parses metadata, checks name/directory matching, validates
-descriptions, or rejects duplicate authored names. Discovery may cache candidate
-paths, never parsed content or provider state. All provider state is per-role and per-run.
-Supported skill execution is owned by the selected SDK's configured
-capabilities. Do not add a host script runner, new execution limits, or interactive
-approval gates in this amendment. Skills remain trusted deployment-owned code, not
-an OS sandbox. Untrusted or adversarially mutable skill trees are unsupported.
+For native skill helpers, scoped ownership checks remain the source of truth.
+Allowed resource reads and approved-script invocations are derived from approved
+skill roots; general file reads and general shell commands stay denied.
 
-Native instruction loading under the unchanged replace mode remains unqualified
-after removing host catalog projection. Resource access and script execution
-through native skills use targeted native helpers. For enabled skills, the
-intended Linux Python-worker allowlist is `builtin:skill`, `builtin:view`, and
-`builtin:bash`. The host owns the
-permission policy for those helpers. Use `on_permission_request` on create and
-resume with default deny. Return `ApproveOnce` only for approved resource files
-in their permitted owning skill tree or validated approved skill-script commands.
-Reject general Bash commands, including commands from an approved skill directory
-or after a skill is loaded. Never use approve-all, session-wide cached grants,
-or a callback bypass.
+### 4.6 Execution and result boundaries
 
-Native `view` may read only approved resource files in their owning skill tree.
-Native `bash` remains visible, and a validated approved script invocation may run
-from any turn because the SDK does not attest skill origin. This does not permit
-general Bash execution. Validate stable permission-request data, including request
-kind, full command text and arguments, and canonical target ownership. A loaded
-skill, model or caller intent, working directory (`cwd`), `toolCallId`,
-`possiblePaths` alone, or `allowedTools` metadata cannot grant arbitrary Bash.
-Skill frontmatter and event metadata cannot expand these grants.
+The public runner surface stays stable. One cached private runner facade binds
+the already selected harness per app context and forwards:
 
-Support only narrow literal approved-script invocation forms with validated
-arguments, not broad shell prefixes or a generic shell parser/executor. Deny
-unknown, ambiguous, or compound command forms. Do not grant blanket command
-chaining, substitution, pipeline, or redirection permission.
+- `run_agent`
+- `run_agent_stream`
+- `run_leaf_agent_task`
 
-Once approved, a skill script runs with host privileges. This policy restricts
-which native helper actions may start; it does not sandbox the script's internal
-effects. Supported command forms and arguments need implementation coverage under
-this contract. They are not a new authoring surface or another user policy
-question.
+Common contracts stay outside adapters only where they are truly shared:
 
-Pass selected directories to the SDK without a host-generated skill catalog.
-Preserve authored instructions and the existing replace prompt mode. The SDK owns
-skill advertising, instruction loading, and metadata validation. Native automatic
-advertising under replace mode remains unqualified; do not add a catalog fallback
-or change prompt modes to hide that limit. Shared candidate discovery does not
-establish identical SDK parsing or loading results.
+- `ResolvedAgent` and `AgentCapabilities` remain the product authority.
+- `AgentResult` and normalized tool-call accounting remain the product result
+  contract.
+- Process-local same-session locking and deadline handling remain shared.
 
-The disabled SDK built-ins list reflects SDK 1.0.14. The runtime may expose more
-later. For enabled skills on Linux, `builtin:skill`, `builtin:view`, and
-`builtin:bash` are the targeted allowlist exceptions. Skill loading is limited to
-approved names. Visible `view` and `bash` helpers permit only approved skill
-resource reads and validated approved-script actions. General Bash execution and
-other file reads are denied by the callback, not represented as separate generic
-tools. Other built-ins remain excluded by the custom-tool allowlist unless
-separately approved. Disabled built-ins: files
-(`create`, `edit`, `grep`, `glob`), network
-(`web_fetch`), agents (`task`, `read_agent`, `write_agent`, `list_agents`),
-interaction/planning (`ask_user`,
-`task_complete`, `exit_plan_mode`, `send_inbox`, `context_board`), tool search,
-and infinite sessions.
+Adapter-local behavior stays local:
 
-Add structural tests that capability copies cannot mutate catalog leaves and
-ordinary project skill roots do not receive workflow-only guidance unless the
-existing role contract already adds it.
+- MAF usage decoding remains in the MAF adapter.
+- Copilot result/event conversion remains in the Copilot adapter.
+- Shared code normalizes counts and public result shapes only after those
+  adapter-local translations.
 
-### 4.4 Native runtime lifetime
+Native custom-tool, MCP, and helper evidence comes from the selected adapter's
+wrappers or native tool events. Those events must populate existing tool/error
+accounting once per native tool call without duplicating wrapper-owned calls.
 
-The proposed default is the external native Rust runtime over stdio, with one
-lazily initialized SDK client owned by each frozen app binding in a warm
-Functions worker and reused across invocations with isolated sessions. Distinct
-app bindings, including bindings for the same root, do not share that client.
-Concurrent initialization must not launch duplicate runtimes for one binding.
-The runtime startup path uses a single startup lock and reuses one shared
-credential owner per app binding for provider and storage authentication.
-Request cancellation, session failure, or adapter failure must not close the
-shared client or poison unrelated sessions; worker shutdown must release its
-client/process and credential owner through the explicit async shutdown path.
-Initialization, process-local session-lock waits, execution, and storage
-operations are bounded by the request deadline.
+### 4.7 Persistence and lifecycle boundary
 
-The standalone first-use cache retains app bindings, not conversation state.
-A shared shutdown callback set may retain only acquired resource owners so all
-can be closed without importing unselected implementations. Resource ownership
-is intentionally simplified: the selected app binding owns only its lazy SDK
-client and shared credential. The request cleanup scope owns its `SessionFs`
-adapter directly, keeping the adapter open until session disconnect cleanup
-finishes and then closing it before the request returns, even on cancellation
-or failure. The runtime does not retain open adapter handles across requests,
-does not keep a failed-client retry registry, and does not install a process-exit
-`atexit` fallback. Supported Azure Functions handlers reuse the worker's active
-event loop. Standalone callers still shut down acquired preview resources
-before closing that loop, and reuse across separately created loops is not
-diagnosed or supported.
+Copilot persistence is a thin SessionFs implementation, not a host session
+protocol.
 
-Startup failures attempt bounded immediate cleanup and report the original
-startup error as authoritative. Request cancellation or turn failure likewise
-keeps the original cancellation/failure authoritative over abort, disconnect,
-or adapter-close cleanup errors. Explicit shutdown attempts graceful client stop
-with a bounded `force_stop` fallback, attempts credential cleanup even if client
-cleanup fails, reports cleanup failures instead of deferring retry to a later
-registry, and clears cached client/credential handles so a stopped or closing
-resource is never reused. This is a deliberate tradeoff: failed cleanup is
-reported immediately, and the runtime does not promise later retry or
-process-exit cleanup if the host does not await shutdown.
+**Storage selection**
 
-No embedded FFI dependency is proposed. A compatible Python SDK/native-runtime/
-protocol combination, deployment asset acquisition, and supported Functions
-hosting behavior need explicit qualification. Do not download a runtime at
-invocation time.
+- Reuse `AzureWebJobsStorage` or `AzureWebJobsStorage__blobServiceUri`.
+- Use Blob when either is configured; use local files only when neither is
+  configured.
+- Configured Blob failures do not fall back to local files.
 
-### 4.5 Native session persistence boundary
+**Path scheme**
 
-The Copilot path implements SessionFs, the SDK's filesystem callback interface.
-The host provides correct filesystem operations, path containment, file metadata,
-and SDK-shaped errors. The SDK owns continuation semantics, compaction, recovery,
-file contents, file formats, and format compatibility across versions. The host
-does not add its own session format, state machine, recovery logic, or native
-format-version checks.
+Store Copilot files under:
 
-**Backend selection and configuration.** There is no new storage app setting.
-Reuse the existing `AzureWebJobsStorage` connection string or
-`AzureWebJobsStorage__blobServiceUri`, together with the current storage-specific
-identity and container behavior. Select Blob whenever either Blob configuration
-path is configured; select local files only when neither is configured.
-Configured Blob errors surface as errors; there is no auth/network failure
-fallback to local storage and no deployed-versus-local environment heuristic.
-Shared app/configuration/registration logic routes persistence through the
-selected harness. The Copilot path constructs, uses, and closes only its
-SessionFs adapter; the MAF path constructs, uses, and closes only its existing
-history provider. Do not import, initialize, probe, or clean up the opposite
-harness's persistence implementation.
+`copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`
 
-**Identity and path construction.** Store ordinary local files or individual
-blobs at `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`.
-Reuse `_agent_identity.agent_id(slug)` unchanged: its readable result already
-includes the trimmed, lower-case `WEBSITE_SITE_NAME` (or `local` when blank or
-unset) and canonical agent slug. Owner and deployment metadata do not affect
-the ID. Consume this helper directly rather than freezing a separate identity
-prefix or duplicating its normalization. Do not add another app-identity segment
-or a separate hash/version scheme. Preserve existing session-ID validation and
-path containment. Store every SDK-requested file without a filename whitelist
-or interpretation of its contents.
+`agent_id` comes directly from `_agent_identity.agent_id(slug)`; the host does
+not invent a second identity layer. Session ID validation and path containment
+rules stay shared.
 
-**Isolation and concurrency.** Match the current MAF boundary: only one active
-turn per `(agent, session)` within a Python process, using process-local
-serialization with bounded waiting. Independent sessions remain concurrent.
-There is no distributed exclusion, lease/fencing protocol, cross-process OS
-lock, or worker-to-worker recovery ownership contract in this feature. Cross-worker
-overlap is unsupported and owned by the caller/platform. Blob-backed rename may
-require copy/delete and therefore cannot be described as crash-atomic; the
-adapter's responsibility is to implement the SDK's required file operations and
-surface SDK-shaped errors, not to promote those operations into a host-owned
-session-consistency protocol. Adapter operation failures use the SDK filesystem
-error contract rather than substituting empty or absent data.
+**Ownership**
 
-**SDK integration contract.** Preserve all SDK-requested files and operations
-opaquely: read, write, append, exists, stat, directory listing (including entry
-types), mkdir, remove, and rename must conform to the SDK's SessionFs contract.
-The host does not interpret compaction artifacts or replace SDK session
-behavior. Native compaction uses the SDK defaults.
+- The SDK owns session contents, continuation, compaction, recovery, and format
+  compatibility.
+- The host owns filesystem operations, metadata, containment, and SDK-shaped
+  errors only.
+- Only the selected harness's persistence implementation is imported,
+  initialized, and cleaned up.
 
-### 4.6 Configuration and extension compatibility
+**Lifecycle**
 
-The portable `agent_configuration.max_output_tokens` contract must be enforced
-through a verified SDK/provider mapping or rejected as unsupported. The exact
-mapping is unresolved. The MAF-specific
-`agent_configuration.agent_framework.compaction.max_context_window_tokens`
-cannot silently become a Copilot utilization threshold or an ignored field.
-Until an explicit compatibility decision is made, a non-null effective
-MAF-specific setting is rejected on the Copilot path; clearing it via existing
-`null` semantics allows native defaults, not MAF compaction parity.
+- Each app binding owns at most one lazy reusable Copilot client and shared
+  credential.
+- Each request owns its SessionFs adapter.
+- Cleanup preserves the original execution or cancellation failure over later
+  disconnect, filesystem-close, transport-stop, or credential-cleanup errors.
 
-Likewise, an installed custom `ClientManager` or unsupported runtime-tool
-contract must either have an explicitly supported mapping or fail before
-inference/tool effects. Neither a silent default provider nor an incomplete
-callable adapter is acceptable. Check the active manager at agent/session
-construction too:
-`set_client_manager()` can replace it after app composition. These extensions
-continue to behave as before when the flag is off. Provider/model precedence,
-auth behavior, and the built-in-manager-only Copilot preview contract remain as
-approved in section 4.8.1.
+### 4.8 Compatibility and preview limits
 
-### 4.7 Errors and observability
+Copilot remains a bounded preview. Unsupported behavior fails explicitly.
 
-Preserve runtime spans, provider/model attribution, usage accounting, delegate
-error counts, workflow correlation, and system-tool metrics without double
-counting host and native events. A specialist failure must remain attributed to
-the delegate boundary, not accidentally treated as a successful ordinary tool.
-Do not invent token counts or expose hidden model reasoning to fill SDK gaps.
+Current supported direction:
 
-Native `skill`, `view`, and `bash` invocations, including permission-denied calls,
-feed `AgentResult.tool_calls`, tool/error counts, and existing telemetry through
-the generic public SDK `tool.execution_start` and `tool.execution_complete`
-events. Account for each `toolCallId` exactly once, not once per event. Do not
-duplicate custom calls already captured by wrappers or count `skill.invoked`
-metadata as another generic tool call. Preserve the existing public `tool_start`,
-`tool_end`, and `error` meanings, sanitized results, and sensitive-data/redaction
-policy. Never expose raw native envelopes or add a public logging interface.
+- same authoring/config surfaces as MAF;
+- once-per-app local preview selection;
+- direct-role execution with neutral tool/MCP/skill descriptors;
+- SDK-owned session files behind SessionFs; and
+- no silent weakening of policy or validation.
 
-Keep the shared logger, optional exporter behavior, and `ENABLE_SENSITIVE_DATA`
-content policy. Native SDK/runtime telemetry must obey the same policy; prompts,
-instructions, tool arguments/results, credentials, and native session files must
-not escape through a second default-on export path. The flag-off path must not
-bootstrap Copilot telemetry.
+Still outside this FRD's supported preview contract:
 
-Unsupported capability, invalid configuration, adapter-path validation, backend
-configuration, and filesystem/provider failures must be diagnosable without
-sensitive payloads. Map them through existing HTTP/MCP error envelopes and
-terminal SSE `error`, not a new success-shaped response or an automatic MAF
-fallback. Cancellation stays cancellation. Already-dispatched tool effects may
-remain after an unsuccessful turn; the feature does not claim transactional or
-exactly-once execution.
+- per-agent harness selection or mixed-harness execution in one app;
+- host-owned skill metadata/catalog behavior;
+- silent compatibility shims for unsupported tool callables or tool options;
+- silent provider/client-manager fallback; and
+- claims that unqualified native advertising/loading behavior is production-ready.
 
-### 4.8 Preview limits and approved provider contract
-
-The Copilot preview remains local-only and requires a single Functions worker.
-Azure Functions hosting, streaming, delegation, workflows, and cross-worker
-session overlap remain unsupported. MCP and scoped skills are available in the
-direct, non-streaming preview under section 4.3.2, but Linux native skill-helper
-execution and SDK managed-approval scenarios remain unqualified. Full
-structured-response and system-tool parity are not claimed.
-Unsupported capabilities fail explicitly without fallback. Configured output caps
-are rejected because this path does not yet expose a verified provider generation
-cap mapping.
-
-This FRD records intended product behavior and architecture boundaries. It does
-not claim implementation completion, real-service qualification, or production
-activation for the persistence redesign in section 4.5.
-
-#### 4.8.1 Architecture-approved provider contract
-
-The provider contract preserves MAF behavior and provider/model precedence,
-including explicit/autodetected provider selection and authored/per-agent model
-merge and `null` semantics. Storage, history, hosting, and tool behavior remain
-bounded by the feature-level contracts above until separately qualified.
-
-Decision: OpenAI, Azure OpenAI (API key or Entra), and Foundry project (Entra)
-map to the Copilot SDK's singular `ProviderConfig` using the Responses API, with
-settings and auth mode frozen at harness selection and no fallback. Copilot
-accepts only the built-in `ClientManager`. The provider mappings, credential
-handling, and `ClientManager` rules are documented once in
-[architecture.md § Bounded Copilot migration preview](../architecture.md#bounded-copilot-migration-preview).
-Azure OpenAI intentionally accepts host-only HTTPS custom domains (for example,
-APIM); its Entra scope targets public Azure cloud only, so sovereign clouds are
-unsupported.
-
-The preview remains local-only and single-worker. Configured output caps are
-rejected rather than silently dropped.
+Client-manager compatibility remains narrow: MAF keeps its existing extension
+behavior, while the Copilot preview accepts only the runtime's built-in manager.
 
 ## 5. Decisions log
 
-Entries retain earlier proposals and later human decisions. The original feature
-and provider sign-offs are separate from the amendment sign-off in section 8.
-
-The MAF-parity-only scope supersedes earlier MCP host-policy, provenance/catalog
-approval checks, explicit MAF approval overrides, and post-create staging
-proposals. The thin SDK-owned skills contract supersedes the earlier shared
-runner, MAF-dependent Copilot skills, common three-tool abstraction, runtime
-skill engine, and stricter discovery proposals. Linux Bash replaces the earlier
-PowerShell target under the same scoped helper policy. The neutral descriptor
-contract, nested skill ownership, unchanged role contracts, and minimal flag-off
-validation supersede the older conflicting proposals. Section 4.3 defines the
-current requirements.
-
-The SDK-owned persistence boundary supersedes earlier completed-turn durability,
-lease-fenced envelopes, workspace aliases, host rollback/recovery, and native
-format-version guard proposals. Earlier qualification evidence belongs to those
-superseded designs, not to the redesigned thin adapter. Section 4.5 defines the
-current persistence contract; its interface separation does not replace the
-planned capability adaptation in section 4.3.1.
-
-The approved harness-package containment supersedes only the older
-persistence-only organizational restriction, not selected-persistence isolation.
-The shared site-qualified identity authority supersedes the older
-owner/deployment correlation assumption without changing SDK ownership.
-The approved bound-runner composition extends that containment with one cached
-private three-operation facade, without changing lazy selection, capability,
-persistence, or compatibility contracts.
+This cleanup intentionally consolidates earlier iterative rows into the durable
+final contract approved for PR 245. Superseded explorations, review back-and-forth,
+and temporary proposals are omitted here; the FRD retains only the decisions that
+still govern the feature.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Harness destination | Permanent plugins / sole Copilot harness | Sole Copilot end state; thin internal adapter, no public harness framework | Human (supplied requirements) | 2026-09-28 |
-| 2 | Preview selection | Per-agent controls / app-level opt-in | `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`; MAF default, strict Boolean values, one selection per app, no mixed roles or fallback | Human (supplied requirements) | 2026-09-28 |
-| 3 | Product boundary | Reduced runtime / preserve existing capabilities | Preserve authoring/API/role/workflow/system-tool contracts; unsupported previews fail explicitly | Human (supplied requirements) | 2026-09-28 |
-| 4 | Conversation state | MAF import or host summarizer / native state | New SessionFs namespace, Blob/local backing, completed-turn continuation, native compaction only | Human (supplied requirements) | 2026-09-28 |
-| 5 | Recovery scope | Include durable agent loop / completed turns only | Exclude mid-turn controllers/checkpoints, durable human wait, transcript injection, experimental continuation, and exactly-once claims | Human (supplied requirements) | 2026-09-28 |
-| 6 | Native transport/lifetime | External stdio / embedded FFI | Propose lazy process-long stdio client per worker, consistent with assessment evidence; version/hosting contract still open | Agent proposal | 2026-09-28 |
-| 7 | Storage and compatibility details | Implicit reset/best effort / explicit failure contracts | Propose sections 4.5-4.6; concrete SDK/storage mappings remain open in section 4.8 | Agent proposal | 2026-09-28 |
-| 8 | Architecture-review clarifications | Assume SDK parity / retain explicit contracts | Clarify provider-side storage, approval behavior, selector presence, history projection, direct/leaf storage lifetimes, and packaging; retain unresolved mappings in section 4.8 | Agent review/proposal | 2026-09-28 |
-| 9 | App execution selection | Repeated environment reads / one bound app execution interface | Select once at the app boundary and propagate the same immutable context through handlers, delegates, and registered Activities; use the same resolution boundary for standalone calls | Human | 2026-09-28 |
-| 10 | Workflows across app restarts/deployments | Custom harness pinning/lifecycle rules / existing Durable behavior | Follow Durable replay, retry, worker lifetime, and configured deployment routing; each executing app instance supplies its own selection, with no new persisted harness pin or mismatch rejection | Human | 2026-09-28 |
-| 11 | Session startup failures | Prescribe marker sequencing / specify observable behavior | Require one active turn per agent/session, safe retry after a startup failure that did not begin a turn or damage state, and explicit errors for uncertain continuation; leave marker ordering and cleanup to implementation | Human | 2026-09-28 |
-| 12 | Feature specification sign-off | Keep In review / finalize the agreed feature contracts | Finalized after approving the safe startup failure behavior; section 4.8 remains an explicit record of unresolved implementation choices and required evidence, not a claim of parity or production readiness | Human (larohra) | 2026-09-28 |
-| 13 | MAF compatibility and Copilot provider boundary | Adjust MAF or precedence / preserve MAF exactly and isolate Copilot SDK types | Keep MAF behavior and provider/model precedence byte-for-byte behaviorally unchanged, including provider selection and authored/per-agent merge/`null` semantics. Use one stable singular pure typed target and lazily construct SDK `ProviderConfig` in `_copilot_providers.py`; do not optionally import the SDK in shared/default-off code | Human (larohra) | 2026-09-29 |
-| 14 | Copilot provider mappings | Generic/fallback mapping / explicit matrix | Map OpenAI, Azure OpenAI, and Foundry exactly as section 4.8.1 specifies with Responses for all supported providers; reject unsupported providers/settings without fallback | Human (larohra) | 2026-09-29 |
-| 15 | Credential lifecycle | Persist credentials / re-supply and refresh | Freeze provider settings at harness selection, re-supply credentials on resume from that provider object, permit overlapping Entra callbacks that acquire per request through Azure Identity, and exclude credentials from persistence, session metadata, launch arguments, and logs while acknowledging native request memory | Human (larohra) | 2026-09-29 |
-| 16 | Custom `ClientManager` migration | Adapt custom managers / built-in only on Copilot | Leave MAF unchanged; on Copilot accept only the exact runtime-created built-in manager, treating an explicitly installed `MAFClientManager()` or any other replacement as MAF-only. Reject replacement before app mutation and recheck before execution. `build_chat_client`-only managers remain MAF-only; this is not a future extension hook | Human (larohra) | 2026-09-29 |
-| 17 | Issue #1336 version/API seam | Upgrade or loosen versions / retain the version pin and public experimental staging | Retain `github-copilot-sdk` 1.0.14, native 1.0.85, and protocol 3; the proposed post-create refresh/start sequence is superseded by the between-turn header refresh decision | Agent proposal; lifecycle superseded by the between-turn header refresh decision | 2026-09-29 |
-| 18 | MCP authority and safety | SDK discovery/ambient permissions / host-filtered descriptors and verified catalog | Keep registration authoritative, pass only filtered neutral descriptors, verify server/tool provenance before prompt, and deny ambient, unattributed, mismatched, or policy-flagged requests. The proposed dynamic-header broker is superseded by the between-turn header refresh decision. The older descriptor shape is superseded by the harness-neutral capability interface. The remaining mapping awaits review. | Agent proposal; partially superseded, otherwise pending human sign-off | 2026-09-29 |
-| 19 | Skills and script execution | SDK-native skills or exposed tools without execution / exact public-MAF adaptation and shared runner | Historical proposal to adapt exact per-role roots into the custom-tool seam. Its shared runner, Copilot dependency on MAF `FileSkillsSource`/`SkillsProvider`, and stricter discovery correction are superseded by the preserve-existing-skill-behavior and harness-neutral capability-interface decisions; the remaining adaptation details await fresh review. | Agent proposal; partially superseded by later human decisions | 2026-09-29 |
-| 20 | Compatibility role boundary | Enable workflow/delegate roles opportunistically / direct supported runs only | Remove MCP/skills rejection only for direct Copilot runs; retain delegation, Dynamic Workflow, and Workflow Sub Agent rejection without bypasses, with structural non-leakage tests | Agent proposal/pending human sign-off | 2026-09-29 |
-| 21 | MAF skill behavior during Copilot compatibility work | Change shared discovery/execution behavior / preserve existing MAF behavior | Preserve current malformed-frontmatter logging-and-skip behavior in both harnesses; keep existing name validation; preserve `load_skill`, `read_skill_resource`, and `run_skill_script` behavior without adding a host runner, new limits, or approval gates. The earlier MAF-tool reuse wording is superseded by the harness-neutral capability interface. | Human | 2026-09-29 |
-| 22 | MCP tool approvals | Interactive approval / explicit autonomous policy | Configured MCP tools require no interactive user approval; set MAF `approval_mode="never_require"` and use a Copilot callback to approve only catalog-verified configured MCP calls, rejecting other requests. Validate behavior on the pinned SDK/native pair; its v1.0.14 source documents managed approval for Shell/Read/Edit/Domain, not MCP. | Human | 2026-09-29 |
-| 23 | Authenticated MCP continuity between turns | Mid-turn dynamic refresh or new session / detach and resume the same native session with fresh static headers | Proceed with public non-destructive disconnect/resume of the same native session ID and history after a completed turn; obtain fresh Entra headers as needed before the next create/resume. No mid-turn replacement, automatic side-effect retry, stale-token/drop-tools fallback, or claim of full MAF parity. | Human (larohra) | 2026-09-30 |
-| 24 | Empty MCP auth scope | Reject or use a Copilot-only policy / preserve MAF behavior | Preserve MAF behavior: warn and use authored static headers (or no headers) when `auth.scope` is empty; valid-scope token acquisition failures remain explicit errors. Preserve unresolved/missing client-ID fallback to the default credential and existing generated-Authorization precedence. | Human (larohra) | 2026-09-30 |
-| 25 | Harness-neutral capability interface | Share MAF types across harnesses / neutral descriptors with one adapter per SDK | Use immutable SDK-free tool, MCP server, and skill descriptors through discovery, registration, and `HarnessRequest`; map them only inside one adapter per harness so MAF can be removed by deleting the MAF adapter and dependency. | Human (larohra) | 2026-10-01 |
-| 26 | MCP filter and readiness parity | Extra host-side catalog/readiness attestation / match MAF filtering and connection behavior | Preserve existing authored filters: per-agent disable/exclude and per-server all, none, or named tool allowlist. Do not require a separate host preflight proving every configured tool is present; rely on normal SDK connection, initialization, tool loading, and explicit surfaced errors. | Human (larohra) | 2026-10-01 |
-| 27 | Remote MCP static-header boundary | Disallow remote MCP or add dynamic-header machinery / allow remote URLs with static create-resume headers | Remote HTTP/streamable-HTTP MCP URLs are allowed by the intended design. Accept static headers and Entra tokens supplied at create/resume between completed turns, with no mid-turn refresh, automatic retry of side-effecting calls, proxy, private API, or dynamic-header broker. | Human (larohra) | 2026-10-01 |
-| 28 | Amendment role scope | Specify direct-only support and workflow/delegate rejection / leave roles to separate work | Do not add new role restrictions or new workflow/delegate support claims in this amendment. Neutral descriptors are reusable by callers under their existing role contracts. | Human (larohra) | 2026-10-01 |
-| 29 | Flag-off validation | Exhaustive new regression suite / ordinary or minimal check | Preserve flag-off MAF behavior. Existing coverage or a minimal focused check is acceptable; this is not an open design decision. | Human (larohra) | 2026-10-01 |
-| 30 | Runtime `@tool` SDK mapping | Author SDK-specific decorators / map runtime tools through adapters | Keep ordinary runtime `@tool` authoring, schema validation, and sync/async invocation stable. Discovery emits neutral tool metadata; the MAF adapter constructs MAF `FunctionTool`, and the Copilot adapter constructs Copilot tools. MAF-specific subclasses and keyword arguments stay in the MAF compatibility layer and fail explicitly on Copilot when unmapped. | Human (larohra) | 2026-10-01 |
-| 31 | Thin SDK-owned skills integration | Runtime-owned skill engine / harness interface with SDK-owned skill behavior | Keep shared discovery, validation, exclusions, and approved skill paths/metadata. Let each harness adapter map those paths into its SDK: MAF through public `SkillsProvider.from_paths`, Copilot through supported public skill directory/enable/exclusion configuration and native `builtin:skill`. Do not create a runtime-owned loader, prompt engine, three-tool abstraction, or script executor for parity. | Human (larohra) | 2026-10-02 |
-| 32 | Native skill helper permissions | Hide helper tools or broadly trust them / visible helpers with approve-once scoped actions | Keep native skill helpers visible when needed, but approve only valid resource reads under approved skill trees and validated approved skill-script invocations. Reject general PowerShell and other generic helper use. There is no skill-origin attestation or sandbox guarantee once a script is approved. | Human (larohra) | 2026-10-02 |
-| 33 | Explicit frontmatter skill exclusions and nested ownership | Name-only exclusion / owning-skill subtree enforcement | Apply existing `skills: false` and `skills.exclude` selections to individual approved paths, explicit `disabled_skills` names, and canonical most-specific target ownership. An enabled parent cannot authorize an excluded nested child; an independently enabled child keeps its own grant under an excluded parent. Preserve the flag-off MAF baseline, which does not guarantee nested subtree exclusions. | Human (larohra) | 2026-10-02 |
-| 34 | Linux native skill helper target | Windows PowerShell / Linux Bash | Use `builtin:skill`, `builtin:view`, and `builtin:bash` for enabled skills on the intended Linux Python worker, with PowerShell disabled. This supersedes the earlier Windows PowerShell helper target, not the default-deny approve-once policy for approved resource reads and validated approved-script invocations. Linux execution remains untested; scripts have host privileges, not a sandbox. | Human (larohra) | 2026-10-02 |
-| 35 | MCP parity-only scope | Add host MCP policy / preserve current MAF behavior | Keep existing MAF MCP behavior and the accepted between-turn header limit. Add no host MCP policy. Raise any further gap for joint review before changing scope. | Human (larohra) | 2026-10-02 |
-| 36 | MCP-only SDK helper branch | Global approve-all / SDK helper restricted to MCP requests | Use the SDK standard `PermissionHandler.approve_all` approve-once helper only for `request.kind == "mcp"` in the shared callback. All other request kinds retain scoped skill checks and default deny; no global approve-all. | Human (larohra) | 2026-10-02 |
-| 37 | Full MCP/skills amendment sign-off | Keep In review / finalize with comment cleanups | Finalize the full amendment with the internal MCP-only SDK approve-once branch and Linux helper wording clarified. Scoped skills, SDK managed-approval limits, and skill-resource-only `view` are unchanged. | Human (larohra) | 2026-10-02 |
-| 38 | Native session delivery and persistence | Shared MAF JSONL or fragmented native Blob tree / one isolated lease-fenced envelope | Propose sections 4.5/4.9's encoded identities, frozen context, single-object local/Blob SessionFs, serialized/latching callbacks, safe pre-handoff rollback, uncertain post-handoff state, metadata-only history guards, tombstone deletion and native compaction after #241. Dedicated architecture-agent re-review APPROVED these mechanics on 2026-09-29 after two REVISE reviews; qualification was still open at this decision and is completed by the later #1335 qualification decision. Human-approved contracts/status are unchanged. | Agent proposal; architecture-agent approval | 2026-09-29 |
-| 39 | Recorded host workspace on resume | Fuzzy suffix matching of recorded paths / protocol v4 native envelopes with virtual workspace aliases | Use protocol v4 native envelopes; persist and alias the creating and current worker host workspace paths to virtual `/workspace` for cross-worker restore. Reject protocol v3 preview envelopes, requiring fresh session IDs, and leave MAF unaffected. Dedicated architecture re-review approved this design conditional on explicit human acknowledgement; that acknowledgement is recorded by this decision. | Human (larohra); architecture re-review approved conditional on acknowledgement | 2026-09-30 |
-| 40 | #1335 qualification boundary | Treat mocked/local evidence as sufficient / qualify real Blob continuation and compaction while retaining later gates | Accept the sanitized section 4.8 evidence as completing #1335: real Entra Blob protocol tests, replacement-process tool-result continuation and semantic compacted-summary reuse. Do not claim verbatim arbitrary-token retention, Functions hosting, dual-harness end-to-end qualification or production activation; retain those gates in #1357/#1337. | Human (supplied qualification evidence) | 2026-09-30 |
-| 41 | Copilot session persistence ownership | Host recovery/state protocol / thin SessionFs adapter | The host provides only filesystem operations, containment, metadata, and SDK-shaped errors. The SDK owns continuation, compaction, recovery, file contents, formats, and format compatibility. No host envelope, completed-turn guarantee, rollback logic, native-state checks, handoff markers, tombstones, or recovery/controller protocol. | Human (larohra) | 2026-10-02 |
-| 42 | Persistence backend selection | New Copilot-specific setting or environment heuristic / reuse existing storage configuration | Reuse `AzureWebJobsStorage` connection string or `AzureWebJobsStorage__blobServiceUri` with existing storage-specific identity/container behavior. Select Blob when configured, local only when neither is configured, and never fall back from configured Blob failures to local storage. | Human (larohra) | 2026-10-02 |
-| 43 | Native identity and path scheme | New opaque hash scheme / shared readable identity | Use `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`, with `agent_id` supplied by the shared helper and already containing the app correlation key and canonical slug. Retain session-ID validation and path containment without a separate hash scheme or host format version. | Human (larohra) | 2026-10-02 |
-| 44 | Session concurrency boundary | Distributed leases/fencing/OS locks / process-local serialization | Match the current MAF boundary: serialize only same-session turns within a Python process, with bounded waiting and no distributed exclusion. Cross-worker overlap is unsupported and caller-owned. | Human (larohra) | 2026-10-02 |
-| 45 | Interface separation scope | Broad execution-interface rewrite / persistence-only boundary | Keep the interface split narrowly about persistence. Shared app/configuration/registration routes through the selected harness; MAF owns its existing history provider, Copilot owns SessionFs. Construct/use/close only the selected persistence adapter, without opposite-harness imports, storage initialization, history probes, or cleanup, and without expanding scope into unrelated tool/model/discovery refactors. | Human (larohra) | 2026-10-02 |
-| 46 | Harness organizational containment | Persistence-only separation / contain harness-specific execution and persistence together | Keep common app binding/request contracts, cleanup plumbing, and neutral storage settings under `harness/`; place MAF execution/history in `harness/agent_framework/` and Copilot execution/providers/SessionFs in `harness/copilot_sdk/`. Preserve public runner signatures, app-owned resource lifetimes, selected-persistence isolation, and all existing selection, persistence, role, and preview contracts. This supersedes only the persistence-only organizational restriction, not its prohibition on unrelated tool/model/discovery redesign. | Human (larohra) | 2026-10-05 |
-| 47 | Shared agent identity authority | Retain owner/deployment correlation / consume the current shared site-qualified helper unchanged | Use `_agent_identity.agent_id(slug)` as the sole authority: trimmed, lower-case `WEBSITE_SITE_NAME` or `local`, followed by canonical slug. Keep `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}` and existing validation/containment; do not cache a separate identity prefix, restore owner/deployment inputs, or add migration/version logic. This supersedes the older correlation-key assumption only; SDK ownership, storage selection and app-resource/provider/settings lifetimes remain unchanged. | Human (larohra) | 2026-10-05 |
-| 48 | Bound runner composition | Keep harness branches in public runner helpers / introduce a broad lifecycle or history interface / bind one private three-method execution implementation per app context | Keep `AppHarness` as the once-selected app binding and cache one concrete private `AgentRunner` facade per app context. That facade forwards `run_agent`, `run_agent_stream`, and `run_leaf_agent_task` to one selected backend implementation housed in its harness package, with no additional history or lifecycle interface. Public runner exports remain compatibility shims, inactive backend imports stay lazy, unsupported Copilot stream/leaf methods fail before runtime/provider acquisition, and existing deadlines, SSE error boundaries, cleanup, standalone caching, and app-clone isolation remain unchanged. | Human (larohra) | 2026-10-05 |
-| 49 | Runtime owner lifetime | Retain failed-client/filesystem registries and process-exit fallback / bounded app-owned client+credential only, with request-owned adapter cleanup | Keep one lazy reused SDK client and shared credential per app binding behind a startup lock. Remove failed-client retention, runtime-owned filesystem retention, request-deferred adapter registries, and process-exit cleanup. Startup failures do bounded immediate cleanup and report the original error; request-local abort/disconnect/adapter cleanup preserves original failure or cancellation precedence; explicit async shutdown attempts graceful stop then bounded force-stop, also attempts credential cleanup, reports cleanup failures immediately, and clears cached handles so stopped/closing resources are never reused. | Human (larohra) | 2026-10-05 |
-| 50 | Shared skill-root discovery parity | Unbounded independent nested roots / MAF-compatible shared boundary search | Shared SDK-free discovery searches each input directory through two child levels, stops at a directory containing `SKILL.md`, and permits grouping directories. Both harnesses consume the same frozen filtered project inventory. A nested `SKILL.md` is part of its containing skill unless independently supplied as an explicit root. Preserve raw standalone MAF path behavior and most-specific ownership checks for independently supplied overlapping roots. This supersedes unbounded app discovery and the independently selectable implicit nested-root assumptions, not resource recursion, exclusions on actual discovered names, or helper permission boundaries. | Human (larohra) | 2026-10-06 |
-| 51 | Path-only discovery ownership | Host metadata parser / shared directory candidates with SDK-owned validation | Shared discovery finds roots and registration filters directory identities, without reading `SKILL.md` or importing either SDK. Each SDK validates and loads its selected paths. Preserve distinct same-name candidates for SDK selection and most-specific path ownership; ambiguous helper ownership remains denied. Retain Copilot replace mode with selected directory names only, not host-parsed descriptions. This supersedes host metadata validation, duplicate-name errors, and automatic description projection, not tool/MCP contracts or SDK execution boundaries. Native names-only selection remains to be qualified. | Human (larohra) | 2026-10-06 |
-| 52 | Native skill advertising ownership | Host names-only catalog / SDK-owned advertising | Remove the manual Copilot skill catalog completely, including names-only projection. Forward selected paths as MAF does; preserve authored instructions and the existing prompt mode. Native advertising/loading under replace mode remains unqualified and must not trigger a silent host fallback or prompt-mode change. This supersedes the names-only projection allowance, not shared candidate filtering or SDK-specific permissions. | Human (larohra) | 2026-10-06 |
-| 53 | Breaking custom-tool authoring contract | Accept raw SDK tools and arbitrary programmatic functions / runtime `@tool` and local public functions in `tools/` only | Accept only runtime-owned `ToolDescriptor` declarations from `@tool`, or the existing first local public function candidate in a `tools/` module. Ignore raw `FunctionTool`, SDK decorators/objects, and undecorated programmatic functions outside discovery with a sanitized warning, in both harnesses. Never inspect or unwrap SDK tool attributes. Preserve trusted system, delegate, and workflow declarations. Remove the raw SDK compatibility registry and public exposure. Runtime `@tool` MAF-specific keyword arguments still pass to MAF for SDK-owned validation and invocation; Copilot rejects unsupported authored options before effects. | Human (larohra, explicit sign-off: “no direct @FunctionTool decorator should be allowed at all”; only `@tool` or `/tools`) | 2026-10-06 |
-| 54 | Blank MCP auth and ordinary results | Retain blank scopes or add non-finite result rejection / normalize auth and leave result formatting to the harness | Normalize empty/whitespace MCP scopes to `None` after one discovery warning; retain static headers without token acquisition. Preserve ordinary Python-mode operands/results and existing MAF formatting. Do not add NaN/Infinity rejection or change native advertising, accounting, telemetry, prompt modes, or permission scope. | Human (larohra, explicit sign-off) | 2026-10-06 |
-| 55 | Harness-specific tool-callable compatibility | Detect/inject `FunctionInvocationContext` or add another shim / leave ordinary validation and SDK contracts in charge | Customers author runtime tools without knowing the selected SDK. The host no longer recognizes or accommodates `FunctionInvocationContext` annotations or similar harness-specific callable signatures. If ordinary schema generation or SDK validation rejects them, that explicit failure is acceptable. Keep authored MAF keyword options pass-through only; do not add another detection path, fallback schema, silent success, or compatibility marker. | Human (larohra, explicit simplification approval) | 2026-10-06 |
-| 56 | Shared standalone skill path expansion | Preserve a MAF-only raw collection-path bypass / expand once into common descriptors for both harnesses | Treat public `skill_paths` as convenient source directories only. When present, expand them once through the shared depth-2, stop-at-root scanner into frozen `SkillDescriptor` selections and ownership catalog metadata; both harnesses then receive the selected individual roots. Retain `None` versus empty call-site semantics, explicit descriptor forwarding, duplicate-directory handling, registered exclusions, and SDK-owned parsing/loading. Remove the MAF-only unexpanded collection-path route. | Human (larohra, explicit simplification approval) | 2026-10-06 |
-| 57 | Runtime tool authoring surface | Keep a MAF-only arbitrary `@tool(**kwargs)` passthrough / reduce runtime `@tool` to portable options only | Remove `ToolDescriptor.maf_options` and all arbitrary decorator-keyword forwarding. Runtime `@tool` now accepts only `name`, `description`, `schema`, and `approval_mode`; unsupported extra keywords are logged once by name and ignored instead of being enforced or forwarded. Preserve copies, bound methods, workflow metadata, approval semantics, shared invocation normalization, and SDK-owned rich-result handling. This supersedes the remaining MAF-options passthrough allowance in earlier decisions. | Human (larohra, explicit simplification approval: "Rmeove the maf_options completely") | 2026-10-06 |
-| 58 | Usage-accounting boundary | Keep MAF usage-shape decoding in shared neutral accounting / move backend decoding into the MAF adapter | Shared accounting records only backend-neutral token counts and at-most-once emission. The MAF adapter owns decoding `input_token_count` / `output_token_count` from its final response or stream payloads before calling the shared recorder. Missing or invalid counts still emit one record with nulls, and streaming/error/cancel/final accounting semantics remain unchanged. | Human (larohra, explicit simplification approval) | 2026-10-06 |
-
-### Custom-tool authoring amendment
-
-The current contract deliberately breaks direct SDK-tool authoring. Discovery
-accepts runtime `@tool` descriptors and the existing first local public function
-fallback in `tools/`; workflow-only functions remain workflow-only. Registration
-and all runner inputs accept descriptors only and ignore unsupported values
-without attribute introspection, invocation, or SDK-object retention. Selected
-MAF execution constructs its own wrappers from the portable descriptor contract;
-wrapper validation and invocation state belong to the SDK, not a host snapshot
-registry. Copilot qualification remains inside its backend and precedes runtime
-effects. Tests must cover both inventories, both request paths, ignored SDK
-inputs, trusted generated tools, and real MAF operand/result parity.
-The existing Finalized status includes the explicit human sign-off above.
+| 1 | Harness selection boundary | per-agent selection / app-level binding | Resolve once per app with `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`; MAF stays default, Copilot stays preview, and there is no runtime fallback after selection. | Human (larohra) | 2026-09-28 |
+| 2 | Runtime containment model | public plug-in framework / internal harness boundary | Keep public authoring and runner surfaces stable; move SDK-specific execution, auth timing, and persistence behind internal adapters only. | Human (larohra) | 2026-09-28 |
+| 3 | Capability contract | harness objects in discovery/registration / SDK-neutral descriptors | Use immutable tool, MCP, and skill descriptors through discovery, merge, validation, registration, and `HarnessRequest`; map them only at the selected adapter boundary. | Human (larohra) | 2026-10-01 |
+| 4 | Skill ownership | host metadata/catalog / SDK-owned loading and advertising | Discovery is path-only. The host does not parse `SKILL.md` or maintain a manual catalog; SDKs own metadata validation, advertising, and instruction loading. | Human (larohra) | 2026-10-06 |
+| 5 | Tool authoring surface | raw SDK tools / broad `@tool(**kwargs)` passthrough / runtime-owned portable surface | Support runtime `@tool` plus the existing first-public-function fallback from `tools/`; ignore raw SDK tools with a warning; keep only `name`, `description`, `schema`, and `approval_mode`; log and ignore unsupported extra kwargs. | Human (larohra) | 2026-10-06 |
+| 6 | Harness-specific callable compatibility | hidden callable shims / explicit rejection | Do not accommodate `FunctionInvocationContext` or similar harness-specific signatures. Normal schema generation and SDK validation remain authoritative. | Human (larohra) | 2026-10-06 |
+| 7 | MCP and helper auth boundary | host-managed parity layer / adapter-owned session auth | Preserve existing MCP authoring and filters. Materialize bearer auth at Copilot create/resume between turns, not mid-turn; scoped helper permissions remain ownership-based and default-deny outside approved roots. | Human (larohra) | 2026-10-02 |
+| 8 | Persistence boundary | host session protocol / thin SessionFs adapter | Reuse existing storage settings, use `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`, and keep contents/continuation/compaction/recovery fully SDK-owned. | Human (larohra) | 2026-10-02 |
+| 9 | Execution/result normalization | shared cross-SDK behavior / adapter-local conversion with shared public result contract | Keep MAF usage decoding local to MAF, Copilot result conversion local to Copilot, and normalize only the public `AgentResult`/tool-call accounting contract in shared code. | Human (larohra) | 2026-10-06 |
+| 10 | Failure and cleanup precedence | deferred retry registries / immediate bounded cleanup preserving original failure | Keep one app-owned native client plus request-owned SessionFs adapters, and preserve the original execution or cancellation error over later transport, disconnect, filesystem, or credential cleanup failures. | Human (larohra) | 2026-10-05 |
 
 ## 6. Feature-level acceptance and test plan
 
-Acceptance is behavioral, not an assertion that SDK feature names imply parity.
-Extend tests mirroring the affected source modules, with configuration scenarios
-under `tests/fixtures/config_scenarios/`. Use real SDK/storage/hosting evidence
-where mocks cannot establish process, transport, authentication, or durability.
-
-| Area | Acceptance evidence |
+| Area | Required proof |
 | --- | --- |
-| Selection/isolation | Exercise unset, `false`, `0`, `true`, `1`, mixed-case/padded text, empty/whitespace-only/invalid values, multiple app contexts, and standalone entry points. Off starts no Copilot process/download/auth/telemetry; on is uniform across all roles and never falls back. Existing coverage or a minimal focused flag-off check is sufficient for this amendment; no new exhaustive suite is required. |
-| Context propagation/lifetime | Construct two same-root app contexts with different flag snapshots and frozen storage settings; assert neither changes on environment mutation nor shares a native client. Delayed handlers, delegates, and Activity calls retain their own context. Cover explicit/default standalone contexts. On worker replacement, completed Activity results replay normally and newly executed/redelivered Activities use the serving app's context, without adding harness state to Durable history or changing its scheduling/version-routing rules. |
-| Unsupported features | Effective inherited/default-on capabilities and unmapped configuration/extensions fail before provider inference or tool effects. Isolated previews of supported capabilities execute real SDK turns. |
-| Authoring/API | Existing precedence/null scenarios, tool `None`/empty semantics, routes/auth, response envelopes, structured-output validation/errors, history projection/degradation/errors/bounds, and SSE ordering/cancellation remain compatible. No native or specialist events leak. |
-| Models/extensions | Verify supported providers/Entra refresh, model metadata, disabled provider conversation storage, deadlines, output limits, and explicit custom-manager/tool compatibility, including a manager replaced after composition. MAF hooks remain intact off. |
-| Tools | Cover runtime `@tool` and local-public-function discovery, sync/async, Pydantic, both decorator orders, workflow-only tools, the portable decorator surface, and denied ambient capabilities. Assert both harness inventories and request paths ignore raw SDK/undecorated programmatic values without attribute inspection or effects. Preserve trusted system, delegate, and workflow descriptors; pair neutral operand/result assertions with real MAF boundary tests. Unsupported extra decorator keywords warn once by name and are ignored in both harnesses and workflow forwarding, and unsupported approval policies fail explicitly on Copilot before effects. |
-| Import boundary / neutral interface | Structurally assert `HarnessRequest` and discovery/registration outputs contain only immutable SDK-free descriptors. Assert `agent_framework` imports are limited to the MAF adapter and named MAF-compat public surfaces, and Copilot imports are limited to the Copilot adapter. Delete-or-stub the MAF adapter in a smoke test to prove discovery, registration, runner contracts, and Copilot descriptor mapping do not change. |
-| MCP compatibility | Exercise remote HTTP/streamable-HTTP mapping at public create/resume and existing per-agent disable/exclude filters. Test omitted `tools`, any list containing `"*"`, `[]`, and exact-name allowlists through native `mcpServers.tools`. Preserve discovery warnings, skipped entries, and `failed_loads`. Complete an actual MCP call and turn, then resume the same native session through the existing lock/disconnect lifecycle and make another call with fresh headers. Prove prior user/tool/assistant history reaches the resumed model and new headers replace old ones. Verify static headers without auth; empty/whitespace scope warnings without token acquisition; default credentials for missing/unresolved client IDs; resolved client-ID selection; and generated `Authorization` precedence. Token, connection, initialization, and tool errors follow ordinary SDK/runtime error-result propagation. Verify ordinary configured MCP calls use the MCP-only SDK approve-once branch without interaction. Shell/read/edit requests must retain the scoped skill-helper policy and default deny. Assert no host-added side-effect retry, stale-token, OAuth, dropped-capability, or empty-session fallback. |
-| Skills compatibility | Compare the shared candidate scanner against public MAF file discovery on native-valid documents: input roots, grouping folders, depth boundaries, traversal/input order, missing/unreadable inputs, and stopping at a root even when its contents are invalid. Prove discovery never reads skill content or imports an SDK. Cover directory-name exclusions, `skills: false`, frozen inventory forwarding to both adapters without rediscovery, same-name candidate retention for SDK validation, and shared standalone expansion from collection-style `skill_paths` inputs into the exact selected individual roots. Preserve MAF resource recursion. Copilot receives individual selected paths and disabled directory identities, without any host-generated skill catalog; assert authored instructions and prompt mode are unchanged on create and resume. Independently explicit overlapping roots retain most-specific ownership and traversal/symlink/ambiguity denials; implicit nested documents are not extra roots. No host metadata parser, loader, prompt engine, script runner, or new approval gate is introduced. Native advertising/loading under replace mode requires separate qualification; Python options and scanner tests do not establish native parser parity. |
-| Native skill helpers | Verify the Linux allowlist is `builtin:skill`, `builtin:view`, and `builtin:bash` where skills are enabled. Create and resume both install the same default-deny `on_permission_request` policy. Return `ApproveOnce` only for approved resource files in their permitted owning skill tree or validated approved-script commands. Exercise narrow literal script forms and arguments; deny unknown, ambiguous, and compound forms, broad shell prefixes, chaining, substitution, pipelines, and redirection. Reject arbitrary Bash before and after skill loading, regardless of intent, `cwd`, `toolCallId`, `possiblePaths` alone, or `allowedTools` metadata. A validated approved script may run from any turn; it runs with host privileges without skill-origin attestation or an OS sandbox. No approve-all, session-wide grants, or callback bypass is allowed. Linux execution remains to be exercised during implementation. |
-| Native tool accounting | Through public SDK `tool.execution_start` and `tool.execution_complete` events, verify allowed and permission-denied native `skill`, `view`, and `bash` calls appear exactly once per `toolCallId` in `AgentResult.tool_calls`, tool/error counts, and existing telemetry. Verify custom calls already captured by wrappers are not duplicated and `skill.invoked` metadata is not a second generic call. Preserve public `tool_start`/`tool_end`/`error` meanings, sanitized results, and sensitive-data/redaction policy without raw native envelopes or new public logging interfaces. Existing deadline/cancellation behavior and already-dispatched-effect limits remain unchanged. |
-| Compatibility/role isolation | Verify flag-off MCP/tool behavior and unchanged MAF skill discovery/script behavior without Copilot startup. A minimal focused flag-off check is acceptable for this amendment. Structurally prove per-run provider state, capability-copy/catalog-leaf non-mutation, project-skill retention, and no unintended `data-driven-workflows` leakage. |
-| Delegation/workflows | Prove fresh same-specialist concurrent sessions, catalog/role isolation, no child SSE, parent cancellation and specialist-local errors, Workflow Sub Agent grants/results, existing management/Activity retry/timeout/authorization, and at-least-once semantics. |
-| Role storage/trigger execution | Run a non-HTTP trigger with its generated identity, serialization, logging/error behavior, and direct capabilities. Persistent direct state uses the selected harness's storage path only; delegates and Workflow Sub Agents leave no persistent Copilot session tree and dispose ephemeral state. |
-| SessionFs file contract | Exercise exact byte preservation and SDK-visible behavior for read, write, append, exists, stat, directory listing with entry types, mkdir, remove, rename, and documented file errors on both local and Blob adapters. Preserve all SDK-requested files opaquely rather than host-specific file whitelists or content interpretation. |
-| Identity/path isolation | Verify native paths consume the unchanged shared site-qualified agent ID exactly once, followed by validated session ID and SDK-relative path. Cover trimmed/mixed-case/blank site names, ignored owner/deployment values, local fallback and containment without adding identity hashes or cached prefixes. |
-| Backend configuration/errors | Verify Blob selection from existing storage configuration, local selection only when no Blob configuration is present, reuse of existing identity/container behavior, and explicit surfacing of Blob auth/network/configuration failures without fallback to local storage. |
-| Persistence boundary isolation | Verify that only the selected harness's persistence implementation is imported, initialized, exercised, and closed. The Copilot path must not probe or clean up MAF history storage, and the MAF path must not initialize Copilot SessionFs. |
-| Harness containment | Verify unchanged public runner exports/signatures and shared result, usage, and lock behavior after containing private execution/persistence implementations. App-bound resources remain isolated, standalone defaults remain cached, shutdown visits only acquired owners, one cached backend facade per app binding reuses the selected implementation without per-operation reselection, and no failed-client/filesystem retry registry or process-exit callback remains. |
-| Same-process concurrency | Verify bounded waiting and serialization for concurrent turns targeting the same `(agent, session)` within one Python process, while independent sessions remain concurrent. Do not require distributed exclusion, cross-worker ownership, or OS-level locking for this feature. |
-| SDK integration boundary | Exercise real SDK callbacks against the adapter and verify that the host does not interpret native session contents, claim recovery semantics, or impose its own compaction/summary protocol. |
-| Hosting/telemetry | Demonstrate supported Functions deployment assets, lazy single-client startup, concurrent isolation, bounded cancellation/shutdown, and no reuse of stopped/closing handles. Verify startup-failure and cancellation cleanup precedence, graceful-stop then force-stop shutdown behavior, reported shutdown failures without deferred retry/process-exit guarantees, and usage/correlation/error accounting with sensitive-data-off behavior in host and native telemetry. |
+| Harness selection | Resolve once per app, propagate to handlers/delegates/workflows, and reject invalid selector values without fallback. |
+| Neutral capability boundary | Prove discovery/registration outputs and `HarnessRequest` contain only immutable SDK-free descriptors; enforce import boundaries so MAF imports stay in MAF adapters and Copilot imports stay in Copilot adapters. |
+| Tool authoring | Cover runtime `@tool`, first-public-function fallback, raw SDK tool rejection warnings, ignored extra kwargs, and explicit failure for unsupported callable signatures. |
+| Skills | Cover depth-2 path discovery, basename exclusions, path-only discovery, ownership for overlapping roots, and the absence of host `SKILL.md` parsing or manual catalog generation. |
+| MCP/auth/helpers | Cover existing per-agent/per-server filters, blank-scope normalization, generated bearer precedence, native MCP/helper event accounting, and scoped helper permission denials. |
+| Persistence | Exercise SessionFs read/write/append/stat/list/mkdir/remove/rename behavior on local and Blob backends, selected-harness-only initialization, and shared `agent_id` path routing. |
+| Lifecycle/errors | Verify request cleanup ordering and that execution/cancellation failures remain authoritative over later disconnect, filesystem, transport, or credential cleanup errors. |
 
 ## 7. Docs impact
 
-This specification and its FRD index entry describe intended behavior, not
-shipped implementation.
-Implementation documentation must change with the behavior it documents:
-`docs/architecture.md` for the adapter/lifecycle/storage boundaries and module
-map entries for the MAF adapter, Copilot adapter, and neutral capability modules;
-`docs/front-matter-spec.md` for preserved contracts and explicit incompatible
-settings; `docs/observability.md` for native telemetry; `docs/workflows.md` and
-`docs/triggers.md` where execution/error behavior changes; and `README.md`,
-`docs/index.md`, `docs/getting-started.md`, and relevant samples for supported
-preview use and the SDK-owned persistence boundary. Update the current MAF-only statements in
-`AGENTS.md` when the implementation changes that invariant. Any schema change
-requires regenerating the configuration reference and synchronizing examples;
-this document does not introduce an unimplemented schema or rewrite runtime docs.
-
-Documentation for issue #1336 compatibility must update `README.md`,
-`docs/architecture.md`, `docs/front-matter-spec.md`, the preview compatibility
-matrix, and the local Copilot preview sample. Document existing MCP authoring
-and filters, remote HTTP/streamable-HTTP mapping, same-session create/resume
-and between-turn credential replacement, static-header limits, existing auth
-and error behavior, and minimal unattended approval. Also document thin
-SDK-owned skill integration, trusted-code/non-sandbox boundary, preserved MAF
-skill discovery/filtering and nested resource/script baseline, explicit
-frontmatter disabled names and most-specific nested target ownership, Linux
-`builtin:skill`/`builtin:view`/`builtin:bash` mapping with default-deny approve-once
-resource/script actions, native tool-call/error accounting through sanitized
-public SDK events, ordinary runtime `@tool` mapping, and flag-off behavior.
-Do not claim Linux helper qualification before it is exercised.
-The sample must be copy/paste complete for setup, request, expected failure, and cleanup.
+- `docs/architecture.md` documents the harness boundary, neutral capability
+  model, and selected-harness persistence split at the architecture level.
+- `docs/front-matter-spec.md` documents unchanged authoring surfaces and calls
+  out that Copilot reuses the same MCP/skill filtering fields.
+- `README.md` and operational docs may describe the bounded preview and storage
+  namespace, but should defer detailed operational behavior to dedicated preview
+  documentation rather than expanding this FRD.
 
 ## 8. Status & sign-off
 
-- **Status:** Finalized. The full MCP/skills amendment is design-approved.
-  Finalization does not mean implementation or production qualification; the
-  parent migration remains incomplete.
-- **Original sign-offs:** Laveesh Rohra (`larohra`) approved the behavior-focused
-  session contract on 2026-09-28 and the Copilot provider contracts on 2026-09-29.
-  The amendment sign-off below is separate.
-- **Persistence review and sign-off:** The persistence-only interface and
-  SDK-owned session boundary were architecture-reviewed. Laveesh Rohra
-  (`larohra`) approved the revised persistence design on 2026-10-02. It supersedes
-  earlier storage/recovery mechanics while retaining their historical decisions.
-  App-bound selection, Durable lifecycle, and provider/model contracts remain
-  in force. This storage split leaves MAF with its existing history provider and
-  Copilot with SessionFs; it does not implement the planned capability interface
-  in section 4.3.1.
-- **Architecture review:** The 2026-09-28 review remains historical for the
-  original app-bound selection, Durable lifecycle, and safe startup behavior.
-  The 2026-10-02 amendment review found nested-skill ownership and native tool
-  accounting gaps. This text addresses both and retains the Linux Bash target.
-  No independent re-review of those corrections or this revision has occurred.
-- **Amendment sign-off:** Laveesh Rohra (`larohra`) approved the full MCP/skills
-  amendment on 2026-10-02 with the callback and Linux-helper wording cleanups.
-  The approved contract remains in sections 4.3.1-4.3.2: MAF-parity-only MCP,
-  an internal MCP-only SDK approve-once branch, harness-neutral capabilities,
-  ordinary runtime `@tool` mapping, and thin SDK-owned scoped skills. Nested
-  ownership, Linux helper restrictions, existing role contracts, and minimal
-  flag-off validation are unchanged. Further MCP gaps require human review.
-- **SDK managed-approval limits:** The SDK's standard helper raises when
-  managed settings are enabled and returns no approval when a request requires
-  managed approval. Those limits remain effective; no bypass, workaround, or
-  new managed policy is authorized. The affected unattended MCP scenarios remain
-  unqualified, not demonstrated configured-runtime failures.
-- **Scope boundary:** Native `view` may read approved skill resources only.
-  General project-code reading is outside the agreed scope and has no human
-  approval.
-- **Remaining qualification:** Section 4.8 records current preview support
-  limits; section 6 defines acceptance, not achieved results. Implementation
-  must meet those requirements. Linux helper execution and managed-approval
-  scenarios remain unverified.
-- **Organizational sign-off:** Laveesh Rohra (`larohra`) approved behavior-preserving
-  containment of harness-specific execution and persistence on 2026-10-05.
-  Its separate architecture checkpoint returned **APPROVE** for canonical
-  binding/request contracts, app-owned resource lifetimes, and selected-persistence
-  isolation without changing selection, session ownership, storage, role, or preview behavior.
-- **Identity sign-off:** Laveesh Rohra (`larohra`) approved the unchanged shared
-  site-qualified identity authority on 2026-10-05. It replaces the older
-  owner/deployment assumption without changing SDK session ownership or storage
-  configuration and without authorizing existing-data work.
-- **Lifecycle sign-off:** A dedicated architecture checkpoint on 2026-10-05
-  returned **APPROVE** for the bounded runtime lifetime contract:
-  app-owned lazy client plus shared credential, request-owned adapter cleanup,
-  explicit async shutdown only, preserved failure/cancellation precedence, and
-  no failed-handle retry registry or process-exit fallback. Laveesh Rohra
-  (`larohra`) had already explicitly approved that behavior contract the same day.
-- **Shared discovery sign-off:** Laveesh Rohra (`larohra`) approved MAF-compatible
-  shared discovery on 2026-10-06: "please fix it to match exactly how the MAF code
-  handels it" and "the discovery code should be the same for both harnesses and
-  the discovered capabilities should be frowarded to the right harness."
-  A separate architecture checklist accepts one SDK-free root scanner,
-  existing registration-owned exclusions, neutral frozen adapter inputs, and
-  unchanged shared expanded skill selections. The shared skill-root discovery amendment
-  supersedes implicit nested-root selection; historical decisions remain recorded.
-- **Path-only ownership sign-off:** Laveesh Rohra (`larohra`) clarified that
-  exclusions use slugs and "We should never need to read the SKILL.md, that
-  should only be part of the harness internal implementation, not our job."
-  The bounded implementation follows that separation with SDK-owned content
-  validation and no private parser dependency. The smallest prompt adaptation
-  retains replace mode without host-generated skill advertising. Architecture review checks shared
-  candidate ownership, frozen filtering, shared expanded skill selections, and explicit
-  native qualification limits. This does not approve a prompt-mode expansion.
+- **Status:** Finalized
+- **Human sign-off:** @larohra approved the feature contract on 2026-09-28 and
+  approved the consolidated capability, skills, tool-authoring, and lifecycle
+  simplifications through 2026-10-06.
+- **Scope note:** This FRD records the durable feature contract only. It does
+  not preserve superseded iteration history, review churn, or qualification
+  narratives that no longer change the product boundary.
