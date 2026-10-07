@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections import UserDict
 from unittest.mock import Mock
 
 import pytest
@@ -19,21 +18,6 @@ def isolated_locks(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("details", "expected"),
-    [
-        (None, {}),
-        (UserDict(input_token_count=0, output_token_count=4), {"input_tokens": 0, "output_tokens": 4}),
-        ({"input_token_count": True, "output_token_count": -1}, {}),
-        ({"input_token_count": 1.5, "output_token_count": "4"}, {}),
-        ({"input_tokens": 7, "total_token_count": 8}, {}),
-        ({"input_token_count": 3, "reasoning_output_token_count": 8}, {"input_tokens": 3}),
-    ],
-)
-def test_canonical_usage_normalization(details, expected):
-    assert execution._normalize_usage_details(details) == expected
-
-
-@pytest.mark.parametrize(
     ("provider", "expected"),
     [("openai", "openai"), ("azure_openai", "openai"), ("foundry", None), (None, None)],
 )
@@ -41,7 +25,7 @@ def test_publisher_mapping(provider, expected):
     assert execution._model_publisher(provider) == expected
 
 
-def test_backend_neutral_and_maf_usage_share_one_emission_attempt(caplog):
+def test_backend_neutral_usage_emits_once(caplog):
     recorder = execution._AgentUsageRecorder(
         agent_name="billing",
         execution_role="workflow_subagent",
@@ -49,7 +33,7 @@ def test_backend_neutral_and_maf_usage_share_one_emission_attempt(caplog):
     )
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         recorder.emit_counts(input_tokens=3, output_tokens=None)
-        recorder.emit({"input_token_count": 99, "output_token_count": 99})
+        recorder.emit_counts(input_tokens=99, output_tokens=99)
     records = [
         record for record in caplog.records
         if record.getMessage().startswith("Agent token usage: ")
@@ -74,7 +58,7 @@ def test_failed_logging_is_not_retried_or_propagated(monkeypatch):
     log = Mock(side_effect=RuntimeError("fixture logging failure"))
     monkeypatch.setattr(execution.logger, "info", log)
     recorder = execution._AgentUsageRecorder(agent_name="main", execution_role="primary")
-    recorder.emit()
+    recorder.emit_counts(input_tokens=None, output_tokens=None)
     recorder.emit_counts(input_tokens=4, output_tokens=2)
     log.assert_called_once()
 

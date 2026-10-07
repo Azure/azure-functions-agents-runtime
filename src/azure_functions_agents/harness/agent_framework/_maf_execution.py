@@ -62,6 +62,10 @@ type _DelegatedExecutionRole = Literal["delegate", "workflow_subagent"]
 _FINAL_USAGE_TIMEOUT_SECONDS = 1.0
 _ASSISTANT_ROLE: Final[RoleLiteral] = "assistant"
 _PRIMARY_EXECUTION_ROLE: Final[ExecutionRole] = "primary"
+_USAGE_FIELD_NAMES: Final[dict[str, str]] = {
+    "input_token_count": "input_tokens",
+    "output_token_count": "output_tokens",
+}
 
 
 class _ReasoningOptions(TypedDict, total=False):
@@ -98,6 +102,37 @@ class _CleanupHookStream(Protocol):
 
 class _StreamErrorCarrier(Protocol):
     _stream_error: BaseException | None
+
+
+def _normalize_usage_details(usage_details: Any) -> dict[str, int]:
+    """Return the valid canonical token counts reported by MAF."""
+    if not isinstance(usage_details, Mapping):
+        return {}
+
+    normalized: dict[str, int] = {}
+    for source_name, record_name in _USAGE_FIELD_NAMES.items():
+        value = usage_details.get(source_name)
+        if (
+            record_name not in normalized
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+        ):
+            normalized[record_name] = value
+    return normalized
+
+
+def _emit_usage(
+    recorder: _harness_execution._AgentUsageRecorder, usage_details: Any = None
+) -> None:
+    try:
+        usage = _normalize_usage_details(usage_details)
+    except Exception:
+        usage = {}
+    recorder.emit_counts(
+        input_tokens=usage.get("input_tokens"),
+        output_tokens=usage.get("output_tokens"),
+    )
 
 
 def _response_usage_details(response: _UsageDetailsCarrier) -> UsageDetails | None:
@@ -385,15 +420,15 @@ async def run_leaf_agent_task(
             timeout=timeout,
         )
     except asyncio.CancelledError:
-        usage_recorder.emit()
+        _emit_usage(usage_recorder)
         raise
     except TimeoutError:
-        usage_recorder.emit()
+        _emit_usage(usage_recorder)
         raise
     except Exception:
-        usage_recorder.emit()
+        _emit_usage(usage_recorder)
         raise
-    usage_recorder.emit(_response_usage_details(response))
+    _emit_usage(usage_recorder, _response_usage_details(response))
     return response.text
 
 
@@ -639,15 +674,15 @@ async def run(
                     timeout=remaining_after_lock,
                 )
             except asyncio.CancelledError:
-                usage_recorder.emit()
+                _emit_usage(usage_recorder)
                 raise
             except TimeoutError:
-                usage_recorder.emit()
+                _emit_usage(usage_recorder)
                 raise
             except Exception:
-                usage_recorder.emit()
+                _emit_usage(usage_recorder)
                 raise
-            usage_recorder.emit(_response_usage_details(response))
+            _emit_usage(usage_recorder, _response_usage_details(response))
     except TimeoutError:
         raise RuntimeError(f"Agent run timed out after {timeout}s") from None
 
@@ -881,10 +916,10 @@ async def run_stream(
                                 remaining_timeout=max(0.0, deadline - loop.time()),
                             )
                         finally:
-                            usage_recorder.emit(usage_details)
+                            _emit_usage(usage_recorder, usage_details)
                 except TimeoutError as exc:
                     if usage_recorder is not None:
-                        usage_recorder.emit()
+                        _emit_usage(usage_recorder)
                     if not stream_settled:
                         await _finalize_maf_stream(stream, exc)
                         stream_settled = True
@@ -895,11 +930,11 @@ async def run_stream(
                     yield _sse_frame({"type": "error", "content": f"Timeout after {timeout}s"})
                 except asyncio.CancelledError:
                     if usage_recorder is not None:
-                        usage_recorder.emit()
+                        _emit_usage(usage_recorder)
                     raise
                 except Exception as exc:
                     if usage_recorder is not None:
-                        usage_recorder.emit()
+                        _emit_usage(usage_recorder)
                     if not stream_settled:
                         await _finalize_maf_stream(stream, exc)
                         stream_settled = True
@@ -914,7 +949,7 @@ async def run_stream(
                         )
                         await _finalize_maf_stream(stream, exc_at_teardown)
                         if usage_recorder is not None:
-                            usage_recorder.emit()
+                            _emit_usage(usage_recorder)
         except TimeoutError:
             span.set_attribute("af.agent.outcome", "error")
             span.record_exception(

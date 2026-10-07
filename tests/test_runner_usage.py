@@ -79,7 +79,7 @@ async def _collect_stream(stream: AsyncIterator[str]) -> list[str]:
 
 
 def test_normalize_usage_details_keeps_only_non_negative_integer_counts() -> None:
-    assert shared._normalize_usage_details(
+    assert maf._normalize_usage_details(
         {
             "input_token_count": 0,
             "output_token_count": 12,
@@ -98,14 +98,14 @@ def test_normalize_usage_details_keeps_only_non_negative_integer_counts() -> Non
         "output_tokens": 12,
     }
 
-    assert shared._normalize_usage_details(
+    assert maf._normalize_usage_details(
         {
             "input_token_count": True,
             "output_token_count": -1,
             "total_token_count": "12",
         }
     ) == {}
-    assert shared._normalize_usage_details(None) == {}
+    assert maf._normalize_usage_details(None) == {}
 
 
 @pytest.mark.parametrize(
@@ -131,7 +131,7 @@ def test_normalize_usage_details_ignores_additional_maf_13_usage_details(
         **provider_usage,
     )
 
-    assert shared._normalize_usage_details(usage_details) == {
+    assert maf._normalize_usage_details(usage_details) == {
         "input_tokens": 10,
         "output_tokens": 8,
     }
@@ -161,7 +161,8 @@ def test_usage_recorder_emits_deterministic_json_once_through_shared_logger(capl
     )
 
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
-        recorder.emit(
+        maf._emit_usage(
+            recorder,
             {
                 "input_token_count": 10,
                 "output_token_count": 20,
@@ -170,7 +171,7 @@ def test_usage_recorder_emits_deterministic_json_once_through_shared_logger(capl
                 "openai.reasoning_tokens": 5,
             }
         )
-        recorder.emit()
+        maf._emit_usage(recorder)
 
     records = [record for record in caplog.records if record.message.startswith("Agent token usage")]
     assert len(records) == 1
@@ -195,7 +196,7 @@ def test_usage_recorder_logs_null_counts_when_usage_is_unavailable(caplog: Any) 
     )
 
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
-        recorder.emit()
+        recorder.emit_counts(input_tokens=None, output_tokens=None)
 
     payload = _usage_payload(caplog.records[-1])
     _assert_exact_usage_fields(payload)
@@ -210,11 +211,7 @@ def test_usage_recorder_logs_available_token_counts_independently(caplog: Any) -
     )
 
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
-        recorder.emit(
-            {
-                "input_token_count": 10,
-            },
-        )
+        recorder.emit_counts(input_tokens=10, output_tokens=None)
 
     payload = _usage_payload(caplog.records[-1])
     _assert_exact_usage_fields(payload)
@@ -231,7 +228,7 @@ def test_usage_recorder_accepts_backend_neutral_counts_once(caplog: Any) -> None
 
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         recorder.emit_counts(input_tokens=7, output_tokens=3)
-        recorder.emit({"input_token_count": 99, "output_token_count": 99})
+        maf._emit_usage(recorder, {"input_token_count": 99, "output_token_count": 99})
 
     records = [record for record in caplog.records if record.message.startswith("Agent token usage")]
     assert len(records) == 1
@@ -252,8 +249,8 @@ def test_usage_recorder_never_changes_agent_behavior_when_logging_fails(monkeypa
     monkeypatch.setattr(shared.logger, "info", fail_logging)
     recorder = shared._AgentUsageRecorder(agent_name="main", execution_role="primary")
 
-    recorder.emit({"input_token_count": 4})
-    recorder.emit()
+    maf._emit_usage(recorder, {"input_token_count": 4})
+    recorder.emit_counts(input_tokens=None, output_tokens=None)
 
     assert logging_attempts == 1
 

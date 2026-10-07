@@ -31,20 +31,14 @@ def _maf_callable(descriptor: ToolDescriptor) -> ToolCallable:
 
 
 def build_maf_tools(descriptors: Sequence[ToolDescriptor]) -> list[FunctionTool]:
-    """Let MAF validate authored options and own each constructed tool's state."""
+    """Adapt neutral runtime tool descriptors into MAF FunctionTool instances."""
     tools: list[FunctionTool] = []
     for descriptor in descriptors:
-        sdk_owned = bool(descriptor.maf_options)
         tools.append(FunctionTool(
             name=descriptor.name,
             description=descriptor.description,
-            func=descriptor.func if sdk_owned else _maf_callable(descriptor),
-            input_model=(
-                descriptor.input_model or descriptor.parameters()
-                if not sdk_owned or descriptor.input_model_is_explicit
-                else None
-            ),
+            func=_maf_callable(descriptor),
+            input_model=descriptor.input_model or descriptor.parameters(),
             approval_mode=descriptor.policy.approval_mode,
-            **dict(descriptor.maf_options),
         ))
     return tools

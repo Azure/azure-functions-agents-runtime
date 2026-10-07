@@ -509,7 +509,7 @@ def test_workflow_tool_rejects_invalid_retry_type() -> None:
 
 
 def test_workflow_tool_rejects_continue_on_error() -> None:
-    with pytest.raises(TypeError, match=r"unknown workflow_tool argument.*continue_on_error"):
+    with pytest.raises(TypeError, match=r"unexpected keyword argument 'continue_on_error'"):
         workflow_tool(continue_on_error=True)  # type: ignore[call-overload]
 
 

@@ -54,7 +54,7 @@ authorization independent of file order.
 A few boundaries are worth calling out explicitly:
 
 - **Discovery is read-only.** These modules inspect the project tree and return inventories; they do not decide what any one agent is allowed to use or create SDK clients, live tokens, or MCP connections.
-- **Capabilities are harness-neutral.** Ordinary tools, MCP servers, and skills use immutable SDK-free descriptors. Registration filters them; the selected execution adapter constructs SDK objects. Raw SDK tools are ignored; authored runtime `@tool` MAF-specific options pass to the MAF adapter.
+- **Capabilities are harness-neutral.** Ordinary tools, MCP servers, and skills use immutable SDK-free descriptors. Registration filters them; the selected execution adapter constructs SDK objects. Raw SDK tools are ignored, and runtime `@tool` accepts only the portable runtime surface.
 - **Translation is type-driven.** The loader and merge layers convert loose YAML/markdown input into `AgentSpec`, `GlobalConfig`, and then `ResolvedAgent`.
 - **Composition is two-pass and side-effect-free until pass 2.** `app.py` builds
   the slug index and validates references, then
@@ -97,15 +97,15 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/runner.py` | Public result/defaults/signatures, role/delegate policy, compatibility hooks and the single SDK-free request factory. Computes deadlines before selection/preparation and forwards every execution entry point through the cached bound runner. Keeps canonical `AgentResult` / `ToolCallEvidence`, including effective model and completed tool evidence. | `AgentResult`, `ToolCallEvidence`, `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
 | `azure_functions_agents/harness/_agent_runner.py` | SDK-free cached execution facade and one private three-operation contract carrying neutral tools/MCP/approved skills/full ownership catalogs. Resolves one backend runner per `AppHarness` resource cell without re-reading selection; separate app bindings and clones retain independent facades. | `AgentRunner`, `get_agent_runner()` |
 | `azure_functions_agents/harness/agent_framework/_maf_runner.py` | MAF-local bound runner. Uses the canonical request factory with the bound app root, forwards expanded approved skill descriptors to MAF, and binds a shallow immutable capability copy for stateless leaf roles. | `create_runner()` |
-| `azure_functions_agents/harness/agent_framework/_maf_execution.py` | MAF role/session construction, neutral request adaptation, typed tool/MCP assembly, non-streaming/streaming execution, event interpretation and teardown. Owns MAF-local helpers directly; retains top-level hooks only for shared result, session validation and role/delegate policy. Preserves stable IDs, readable names, provider options, shared expanded skill descriptors, history and leaf roles. | `assemble_agent_inputs()`, `run()`, `run_stream()`, `run_leaf_agent_task()` |
-| `azure_functions_agents/harness/agent_framework/_maf_tools.py` | Constructs selected runtime descriptors as MAF tools; passes authored MAF options to SDK-owned validation and invocation. No raw-object registry, SDK attribute snapshots, or host-owned invocation counters. | `build_maf_tools()` |
+| `azure_functions_agents/harness/agent_framework/_maf_execution.py` | MAF role/session construction, neutral request adaptation, typed tool/MCP assembly, MAF-local usage decoding, non-streaming/streaming execution, event interpretation and teardown. Owns MAF-local helpers directly; retains top-level hooks only for shared result, session validation and role/delegate policy. Preserves stable IDs, readable names, provider options, shared expanded skill descriptors, history and leaf roles. | `assemble_agent_inputs()`, `run()`, `run_stream()`, `run_leaf_agent_task()` |
+| `azure_functions_agents/harness/agent_framework/_maf_tools.py` | Constructs selected runtime descriptors as MAF tools from the portable runtime contract only. No raw-object registry, authored-option passthrough, SDK attribute snapshots, or host-owned invocation counters. | `build_maf_tools()` |
 | `azure_functions_agents/harness/agent_framework/_maf_mcp.py` | Lazily maps selected remote MCP descriptors to existing MAF HTTP wrappers, preserves SDK-owned origin-scoped header injection, and closes any SDK-created HTTP client when the transport lifecycle ends. | `build_maf_mcp_tools()` |
 | `azure_functions_agents/_mcp_auth.py` | Shared SDK-free MCP header/auth boundary. Materializes fresh static headers for Copilot create/resume; supplies the existing cached outbound header provider for MAF. Preserves scope warnings, credential precedence, and generated `Authorization` without exposing secrets. | `materialize_mcp_headers()`, `build_mcp_header_provider()` |
-| `azure_functions_agents/harness/_harness_execution.py` | One shared usage recorder and bounded process-local `(agent_slug, session_id)` lock implementation, consumed through module-qualified access by both harnesses. | `_AgentUsageRecorder`, `_session_lock_bounded_by()` |
+| `azure_functions_agents/harness/_harness_execution.py` | One shared backend-neutral usage recorder plus the bounded process-local `(agent_slug, session_id)` lock implementation, consumed through module-qualified access by both harnesses. | `_AgentUsageRecorder`, `_session_lock_bounded_by()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable MAF inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. Its pure internal built-in resolver preserves MAF provider/model precedence without constructing a chat client; an identity check protects Copilot from custom-manager fallback. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
 | `azure_functions_agents/harness/_harness_binding.py` | Canonical frozen SDK-free binding/request and harness vocabulary. Requests carry immutable tool/MCP/approved-skill descriptors and full skill ownership metadata. Once-per-app-instance selection has a separate first-use standalone cache per root; Copilot selection/validation is lazy. Each binding owns a fresh private guard/runtime resource cell, including `dataclasses.replace` clones; capability catalogs are never mutated by binding. | `AppHarness`, `HarnessRequest`, `get_harness()`, `bind_harness()`, `validate_agent()` |
 | `azure_functions_agents/harness/_harness_lifecycle.py` | Acquired-owner shutdown callbacks only; visits every registered owner even if cleanup fails, without backend discovery/imports. | `_register_shutdown()`, `_unregister_shutdown()`, `_shutdown_harnesses()` |
-| `azure_functions_agents/harness/copilot_sdk/_copilot_preview.py` | Copilot dependency/provider/hosting qualification, effective-capability validation, and neutral custom-tool qualification. Rejects unsupported MAF extensions before effects, without fallback. | `select_copilot_harness()`, `validate_copilot_agent()`, `prepare_tools()`, `CopilotPreviewError` |
+| `azure_functions_agents/harness/copilot_sdk/_copilot_preview.py` | Copilot dependency/provider/hosting qualification, effective-capability validation, and neutral custom-tool qualification. Rejects unsupported preview contracts before effects, without fallback. | `select_copilot_harness()`, `validate_copilot_agent()`, `prepare_tools()`, `CopilotPreviewError` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_providers.py` | Copilot provider interface, registry, sanitized settings and frozen OpenAI / Azure OpenAI / Foundry mappings. SDK provider config is built lazily. | `CopilotProvider`, `OpenAIProvider`, `AzureOpenAIProvider`, `FoundryProvider`, `_PROVIDERS` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_runner.py` | Copilot-local bound runner. Qualifies existing preview operations before effects, maps neutral inputs through the single request factory, and forwards supported execution without introducing role/streaming support. | `create_runner()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_execution.py` | Invocation-owned session and SessionFs create/resume, neutral custom/MCP/skill capabilities, conditional custom-only catalog validation, send-scoped synchronous `session.on`, result/usage translation and bounded immediate cleanup. Unsubscribe precedes disconnect, which precedes filesystem close; original failures/cancellation remain authoritative. | `run()` |
@@ -126,7 +126,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/workflows/schema.py`, `workflows/tools.py` | Define workflow plans and policies, including the data-driven `when` predicate, bounded `for_each`, plan-authored retry, timeout, and continuation, and per-field decorator precedence. Start-time validation freezes the effective execution policy into orchestration input. Continuation stays plan-only. List/status/cancel/terminate operations use the captured workflow-agent policy and agent/session identity. | `WorkflowPlanPolicy`, `WorkflowTaskExecution`, `WorkflowCondition`, `validate_plan()`, `resolve_workflow_task_execution()`, `build_workflow_tools()` |
 | `azure_functions_agents/_tool_descriptor.py` | Frozen SDK-free tool name, description, callable, Pydantic input model, execution policy, and workflow metadata. Returns a fresh JSON schema and ordinary Python invocation values. | `ToolDescriptor`, `parameters()`, `invoke(arguments, tool_call_id)` |
 | `azure_functions_agents/harness/copilot_sdk/_tool_result.py` | Ordinary Python result conversion used by the Copilot adapter and kept behaviorally aligned with MAF's default text formatting, while rich SDK result policy stays adapter-owned. | `tool_result_text()` |
-| `azure_functions_agents/_function_tool.py` | Runtime `@tool` authoring produces neutral descriptors; `@workflow_tool` retains Activity metadata in either decorator order. MAF-specific keyword arguments are carried directly to MAF, not silently flattened for Copilot. | `tool()`, `workflow_tool()` |
+| `azure_functions_agents/_function_tool.py` | Runtime `@tool` authoring produces neutral descriptors from the portable runtime surface only; `@workflow_tool` retains Activity metadata in either decorator order. Unsupported extra `@tool` keywords are warned and ignored, never passed through. | `tool()`, `workflow_tool()` |
 | `azure_functions_agents/_logger.py` | Shared package logger used across discovery, registration, and runtime code. | `logger` |
 | `integrations/vally-executor-azure-functions/` | Private, path-loadable Vally 0.16.0 executor for the existing synchronous chat endpoint. Owns target authentication, isolated sessions, hard deadlines, response checking and trajectory conversion, not graders, scoring or reports. Python runtime modules do not import Vally contracts. | `AzureFunctionsAgentExecutor`, `registerExecutors()` |
 | `azure_functions_agents/_observability.py` | Cross-cutting OpenTelemetry bootstrap and conventions: enables MAF `gen_ai` instrumentation and, when the optional `[monitor]` extra is installed, the Azure Monitor exporter, provides the `af.*` span/attribute helpers (fault domain, lifecycle stage), the resolved sensitive-data flag from `ENABLE_SENSITIVE_DATA`, minimal dynamic-session and delegate-call metrics, and third-party log-noise control. | `configure_observability()`, `start_span()`, `current_span()`, `FaultDomain`, `LifecycleStage`, `record_delegate_call()` |
@@ -370,7 +370,7 @@ remain a separately gated acceptance item, not a production-qualification
 claim.
 
 The Copilot backend runner calls `prepare_tools()` to validate the custom catalog
-and reject duplicate names or unsupported authored MAF options before
+and reject duplicate names or unsupported approval policies before
 `_copilot_execution.run()` can initialize a native
 client. SDK 1.0.14 availability is source-qualified: `custom:<name>` for selected
 custom tools, `mcp:*` for configured MCP tools subject to each server's filter,
@@ -878,12 +878,15 @@ Discovery, registration factories, and runner inputs never unwrap SDK attributes
 or retain raw objects as registered tools. Runtime-generated system, delegate,
 and workflow tools remain trusted descriptors.
 
-Runtime `@tool` MAF-specific keyword arguments are retained directly on the
-descriptor and passed to MAF for SDK-owned validation and invocation. Each
-selected wrapper owns its own SDK state; there is no host snapshot registry or
-cross-wrapper identity/counter guarantee. Copilot rejects unsupported authored
-options, approval, or invocation context before effects. The shared request
-factory does not import Copilot qualification logic.
+Runtime `@tool` accepts only the portable runtime surface (`name`,
+`description`, `schema`, and `approval_mode`). Unsupported extra keyword
+arguments are logged once by name and then ignored; for example,
+`max_invocations` is not enforced in any harness. The runtime does not preserve
+any harness-specific passthrough or invocation context shim. Each selected
+wrapper owns its own SDK state; there is no host
+snapshot registry or cross-wrapper identity/counter guarantee. Copilot rejects
+unsupported approval policies before effects. The shared request factory does
+not import Copilot qualification logic.
 
 These tools enter the pipeline during discovery, are filtered in `build_capabilities()`, and are finally passed into `runner.run_agent()` alongside sandbox tools, the `web_request` tool, MCP tools, and (when declared) `delegate_<slug>` tools. In other words, adding a file under `tools/` affects discovery only; the rest of the pipeline remains unchanged.
 

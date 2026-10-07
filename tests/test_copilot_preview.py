@@ -374,15 +374,15 @@ def test_sandbox_name_collision_fails_during_registration(preview):
         _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
 
 
-def test_maf_keeps_authored_options_that_copilot_cannot_adapt(tmp_path):
+def test_maf_keeps_authored_approval_that_copilot_cannot_adapt(tmp_path):
     resolved, capabilities = _sample()
-    descriptor = tool(name="bounded", max_invocations=1)(lambda: "ok")
+    descriptor = tool(name="bounded", approval_mode="always_require")(lambda: "ok")
     capabilities = replace(capabilities, filtered_user_tools=(descriptor,))
 
     _harness.validate_agent(AppHarness(HarnessKind.MAF, tmp_path), resolved, capabilities)
 
     assert capabilities.filtered_user_tools == (descriptor,)
-    assert build_maf_tools(capabilities.filtered_user_tools)[0].max_invocations == 1
+    assert build_maf_tools(capabilities.filtered_user_tools)[0].approval_mode == "always_require"
 
 
 def test_maf_only_configuration_is_not_silently_discarded(preview):
@@ -412,16 +412,10 @@ def test_standalone_output_limit_fails_before_native_execution(preview, monkeypa
     invoke.assert_not_called()
 
 
-@pytest.mark.parametrize("policy", [
-    {"max_invocations": 1},
-    {"max_invocation_exceptions": 1},
-    {"approval_mode": "always_require"},
-    {"result_parser": str},
-    {"kind": "custom"},
-])
+@pytest.mark.parametrize("policy", [{"approval_mode": "always_require"}])
 def test_unsupported_tool_policies_are_not_silently_lost(policy):
     descriptor = tool(name="bounded", **policy)(lambda value: value)
-    with pytest.raises(UnsupportedCapabilityError, match="runtime @tool"):
+    with pytest.raises(UnsupportedCapabilityError, match="approval"):
         _preview.prepare_tools([descriptor])
 
 

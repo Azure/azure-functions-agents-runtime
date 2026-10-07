@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -14,29 +14,6 @@ from ..client_manager import InferenceTarget
 
 if TYPE_CHECKING:
     from ._harness_binding import ExecutionRole
-
-_USAGE_FIELD_NAMES: dict[str, str] = {
-    "input_token_count": "input_tokens",
-    "output_token_count": "output_tokens",
-}
-
-
-def _normalize_usage_details(usage_details: Any) -> dict[str, int]:
-    """Return the valid canonical token counts reported by MAF."""
-    if not isinstance(usage_details, Mapping):
-        return {}
-
-    normalized: dict[str, int] = {}
-    for source_name, record_name in _USAGE_FIELD_NAMES.items():
-        value = usage_details.get(source_name)
-        if (
-            record_name not in normalized
-            and isinstance(value, int)
-            and not isinstance(value, bool)
-            and value >= 0
-        ):
-            normalized[record_name] = value
-    return normalized
 
 
 def _model_publisher(provider: str | None) -> str | None:
@@ -51,16 +28,6 @@ class _AgentUsageRecorder:
     execution_role: ExecutionRole
     inference_target: InferenceTarget = field(default_factory=InferenceTarget)
     _emission_attempted: bool = field(default=False, init=False)
-
-    def emit(self, usage_details: Any = None) -> None:
-        try:
-            usage = _normalize_usage_details(usage_details)
-        except Exception:
-            usage = {}
-        self.emit_counts(
-            input_tokens=usage.get("input_tokens"),
-            output_tokens=usage.get("output_tokens"),
-        )
 
     def emit_counts(self, *, input_tokens: int | None, output_tokens: int | None) -> None:
         """Record backend-neutral token counts without a MAF-shaped intermediate."""

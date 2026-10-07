@@ -305,24 +305,25 @@ invocation semantics. Tool discovery records neutral runtime tool metadata. The
 MAF adapter maps that metadata to MAF `FunctionTool`; the Copilot adapter maps it
 to Copilot tools. Authors do not rewrite tools with SDK-specific decorators.
 Raw SDK tools, including MAF subclasses, are not an authoring surface.
-Runtime `@tool` MAF-specific keyword arguments remain available through direct
-SDK-owned validation/pass-through in the MAF adapter. Unsupported authored
-options fail explicitly on Copilot instead of being silently flattened.
+Runtime `@tool` accepts only the portable runtime surface: `name`,
+`description`, `schema`, and `approval_mode`. Unsupported extra keyword
+arguments are logged once by name and then ignored; for example,
+`max_invocations` is not enforced in any harness. The runtime does not
+preserve a harness-specific passthrough path.
 The runtime does not recognize or accommodate harness-specific callable
 signatures such as `FunctionInvocationContext`. If ordinary schema generation or
 SDK validation rejects those annotations or parameters, that failure is the
 supported outcome; the host adds no detection policy, hidden parameter
-injection, fallback schema, or alternate raw-callable route beyond the existing
-MAF options pass-through.
+injection, fallback schema, or alternate raw-callable route.
 
 Supplied JSON schemas retain MAF's top-level required-field,
 additional-property, enum, and primitive-type validation. Do not add full JSON
 Schema constraint enforcement in the Copilot adapter. Pydantic model constraints
 and coercion remain unchanged. Shared lightweight checks and invocation use the
-same Python-mode normalized values, without JSON reserialization. Ordinary result
-conversion preserves MAF defaults for lists/dicts, Pydantic models, custom
-`to_dict()`, and string `.text` values in
-one neutral helper; SDK-specific rich-result handling remains adapter-owned.
+same Python-mode normalized values, without JSON reserialization. Copilot keeps
+the existing ordinary Python result formatting for lists/dicts, Pydantic
+models, custom `to_dict()`, and string `.text` values inside its own adapter;
+SDK-specific rich-result handling remains adapter-owned.
 
 `HarnessRequest` carries only these descriptors and other scalar execution
 settings. It does not carry `agent_framework` or Copilot SDK types. Registration
@@ -362,8 +363,8 @@ This interface maps to the pipeline as follows:
 Phase-out acceptance is structural for the neutral core. Removing MAF from that
 core means deleting the MAF adapter and its dependency. Discovery, registration,
 `HarnessRequest`, runner contracts, and Copilot execution do not change. Raw SDK
-authoring has been retired; authored runtime MAF options still require MAF and
-are rejected on Copilot. Add an import-boundary test that fails if `agent_framework`
+authoring has been retired; runtime `@tool` now keeps only the portable
+decorator surface. Add an import-boundary test that fails if `agent_framework`
 appears outside the MAF adapter and the named MAF-compat public surfaces, or if
 Copilot imports appear outside the Copilot adapter.
 
@@ -644,10 +645,11 @@ Until an explicit compatibility decision is made, a non-null effective
 MAF-specific setting is rejected on the Copilot path; clearing it via existing
 `null` semantics allows native defaults, not MAF compaction parity.
 
-Likewise, an installed custom `ClientManager` or authored MAF-specific tool option
-must either have an explicitly supported mapping or fail before inference/tool
-effects. Neither a silent default provider nor an incomplete callable adapter is
-acceptable. Check the active manager at agent/session construction too:
+Likewise, an installed custom `ClientManager` or unsupported runtime-tool
+contract must either have an explicitly supported mapping or fail before
+inference/tool effects. Neither a silent default provider nor an incomplete
+callable adapter is acceptable. Check the active manager at agent/session
+construction too:
 `set_client_manager()` can replace it after app composition. These extensions
 continue to behave as before when the flag is off. Provider/model precedence,
 auth behavior, and the built-in-manager-only Copilot preview contract remain as
@@ -808,6 +810,8 @@ persistence, or compatibility contracts.
 | 54 | Blank MCP auth and ordinary results | Retain blank scopes or add non-finite result rejection / normalize auth and leave result formatting to the harness | Normalize empty/whitespace MCP scopes to `None` after one discovery warning; retain static headers without token acquisition. Preserve ordinary Python-mode operands/results and existing MAF formatting. Do not add NaN/Infinity rejection or change native advertising, accounting, telemetry, prompt modes, or permission scope. | Human (larohra, explicit sign-off) | 2026-10-06 |
 | 55 | Harness-specific tool-callable compatibility | Detect/inject `FunctionInvocationContext` or add another shim / leave ordinary validation and SDK contracts in charge | Customers author runtime tools without knowing the selected SDK. The host no longer recognizes or accommodates `FunctionInvocationContext` annotations or similar harness-specific callable signatures. If ordinary schema generation or SDK validation rejects them, that explicit failure is acceptable. Keep authored MAF keyword options pass-through only; do not add another detection path, fallback schema, silent success, or compatibility marker. | Human (larohra, explicit simplification approval) | 2026-10-06 |
 | 56 | Shared standalone skill path expansion | Preserve a MAF-only raw collection-path bypass / expand once into common descriptors for both harnesses | Treat public `skill_paths` as convenient source directories only. When present, expand them once through the shared depth-2, stop-at-root scanner into frozen `SkillDescriptor` selections and ownership catalog metadata; both harnesses then receive the selected individual roots. Retain `None` versus empty call-site semantics, explicit descriptor forwarding, duplicate-directory handling, registered exclusions, and SDK-owned parsing/loading. Remove the MAF-only unexpanded collection-path route. | Human (larohra, explicit simplification approval) | 2026-10-06 |
+| 57 | Runtime tool authoring surface | Keep a MAF-only arbitrary `@tool(**kwargs)` passthrough / reduce runtime `@tool` to portable options only | Remove `ToolDescriptor.maf_options` and all arbitrary decorator-keyword forwarding. Runtime `@tool` now accepts only `name`, `description`, `schema`, and `approval_mode`; unsupported extra keywords are logged once by name and ignored instead of being enforced or forwarded. Preserve copies, bound methods, workflow metadata, approval semantics, shared invocation normalization, and SDK-owned rich-result handling. This supersedes the remaining MAF-options passthrough allowance in earlier decisions. | Human (larohra, explicit simplification approval: "Rmeove the maf_options completely") | 2026-10-06 |
+| 58 | Usage-accounting boundary | Keep MAF usage-shape decoding in shared neutral accounting / move backend decoding into the MAF adapter | Shared accounting records only backend-neutral token counts and at-most-once emission. The MAF adapter owns decoding `input_token_count` / `output_token_count` from its final response or stream payloads before calling the shared recorder. Missing or invalid counts still emit one record with nulls, and streaming/error/cancel/final accounting semantics remain unchanged. | Human (larohra, explicit simplification approval) | 2026-10-06 |
 
 ### Custom-tool authoring amendment
 
@@ -816,11 +820,11 @@ accepts runtime `@tool` descriptors and the existing first local public function
 fallback in `tools/`; workflow-only functions remain workflow-only. Registration
 and all runner inputs accept descriptors only and ignore unsupported values
 without attribute introspection, invocation, or SDK-object retention. Selected
-MAF execution constructs its own wrappers and passes authored MAF options directly
-to the SDK. Wrapper validation and invocation state belong to the SDK, not a
-host snapshot registry. Copilot qualification remains inside its backend and
-precedes runtime effects. Tests must cover both inventories, both request paths,
-ignored SDK inputs, trusted generated tools, and real MAF operand/result parity.
+MAF execution constructs its own wrappers from the portable descriptor contract;
+wrapper validation and invocation state belong to the SDK, not a host snapshot
+registry. Copilot qualification remains inside its backend and precedes runtime
+effects. Tests must cover both inventories, both request paths, ignored SDK
+inputs, trusted generated tools, and real MAF operand/result parity.
 The existing Finalized status includes the explicit human sign-off above.
 
 ## 6. Feature-level acceptance and test plan
@@ -837,7 +841,7 @@ where mocks cannot establish process, transport, authentication, or durability.
 | Unsupported features | Effective inherited/default-on capabilities and unmapped configuration/extensions fail before provider inference or tool effects. Isolated previews of supported capabilities execute real SDK turns. |
 | Authoring/API | Existing precedence/null scenarios, tool `None`/empty semantics, routes/auth, response envelopes, structured-output validation/errors, history projection/degradation/errors/bounds, and SSE ordering/cancellation remain compatible. No native or specialist events leak. |
 | Models/extensions | Verify supported providers/Entra refresh, model metadata, disabled provider conversation storage, deadlines, output limits, and explicit custom-manager/tool compatibility, including a manager replaced after composition. MAF hooks remain intact off. |
-| Tools | Cover runtime `@tool` and local-public-function discovery, sync/async, Pydantic, both decorator orders, workflow-only tools, authored MAF options, and denied ambient capabilities. Assert both harness inventories and request paths ignore raw SDK/undecorated programmatic values without attribute inspection or effects. Preserve trusted system, delegate, and workflow descriptors; pair neutral operand/result assertions with real MAF boundary tests. Unsupported authored MAF options fail explicitly on Copilot before effects. |
+| Tools | Cover runtime `@tool` and local-public-function discovery, sync/async, Pydantic, both decorator orders, workflow-only tools, the portable decorator surface, and denied ambient capabilities. Assert both harness inventories and request paths ignore raw SDK/undecorated programmatic values without attribute inspection or effects. Preserve trusted system, delegate, and workflow descriptors; pair neutral operand/result assertions with real MAF boundary tests. Unsupported extra decorator keywords warn once by name and are ignored in both harnesses and workflow forwarding, and unsupported approval policies fail explicitly on Copilot before effects. |
 | Import boundary / neutral interface | Structurally assert `HarnessRequest` and discovery/registration outputs contain only immutable SDK-free descriptors. Assert `agent_framework` imports are limited to the MAF adapter and named MAF-compat public surfaces, and Copilot imports are limited to the Copilot adapter. Delete-or-stub the MAF adapter in a smoke test to prove discovery, registration, runner contracts, and Copilot descriptor mapping do not change. |
 | MCP compatibility | Exercise remote HTTP/streamable-HTTP mapping at public create/resume and existing per-agent disable/exclude filters. Test omitted `tools`, any list containing `"*"`, `[]`, and exact-name allowlists through native `mcpServers.tools`. Preserve discovery warnings, skipped entries, and `failed_loads`. Complete an actual MCP call and turn, then resume the same native session through the existing lock/disconnect lifecycle and make another call with fresh headers. Prove prior user/tool/assistant history reaches the resumed model and new headers replace old ones. Verify static headers without auth; empty/whitespace scope warnings without token acquisition; default credentials for missing/unresolved client IDs; resolved client-ID selection; and generated `Authorization` precedence. Token, connection, initialization, and tool errors follow ordinary SDK/runtime error-result propagation. Verify ordinary configured MCP calls use the MCP-only SDK approve-once branch without interaction. Shell/read/edit requests must retain the scoped skill-helper policy and default deny. Assert no host-added side-effect retry, stale-token, OAuth, dropped-capability, or empty-session fallback. |
 | Skills compatibility | Compare the shared candidate scanner against public MAF file discovery on native-valid documents: input roots, grouping folders, depth boundaries, traversal/input order, missing/unreadable inputs, and stopping at a root even when its contents are invalid. Prove discovery never reads skill content or imports an SDK. Cover directory-name exclusions, `skills: false`, frozen inventory forwarding to both adapters without rediscovery, same-name candidate retention for SDK validation, and shared standalone expansion from collection-style `skill_paths` inputs into the exact selected individual roots. Preserve MAF resource recursion. Copilot receives individual selected paths and disabled directory identities, without any host-generated skill catalog; assert authored instructions and prompt mode are unchanged on create and resume. Independently explicit overlapping roots retain most-specific ownership and traversal/symlink/ambiguity denials; implicit nested documents are not extra roots. No host metadata parser, loader, prompt engine, script runner, or new approval gate is introduced. Native advertising/loading under replace mode requires separate qualification; Python options and scanner tests do not establish native parser parity. |

@@ -131,21 +131,37 @@ def test_runtime_decorators_never_wrap_or_inspect_raw_sdk_tools(caplog) -> None:
 
 
 @pytest.mark.asyncio
-async def test_maf_only_options_retain_sdk_limits_without_entering_neutral_request() -> None:
-    calls: list[str] = []
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ({"max_invocations": 1}, "max_invocations"),
+        ({"result_parser": lambda value: value, "secret_option": "top-secret"}, "result_parser"),
+    ],
+)
+async def test_tool_warns_and_ignores_unexpected_keyword_arguments_at_authoring(
+    args: dict[str, object], expected: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    decorator = tool(**args)
+    direct = tool(lambda value: value, **args)
+    decorated = decorator(lambda value: value)
 
-    @tool(max_invocations=1)
-    def bounded(value: str) -> str:
-        calls.append(value)
-        return value
-
-    with pytest.raises(UnsupportedCapabilityError):
-        prepare_tools((bounded,))
-    [first] = _maf_tools.build_maf_tools((bounded,))
-    assert await first.invoke(arguments={"value": "first"}, skip_parsing=True) == "first"
-    with pytest.raises(Exception, match="maximum invocation limit"):
-        await first.invoke(arguments={"value": "second"}, skip_parsing=True)
-    assert calls == ["first"]
+    assert isinstance(direct, ToolDescriptor)
+    assert isinstance(decorated, ToolDescriptor)
+    assert await direct.invoke(arguments={"value": "ok"}) == "ok"
+    assert await decorated.invoke(arguments={"value": "ok"}) == "ok"
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if "Ignoring unsupported @tool keyword argument(s):" in record.getMessage()
+    ]
+    assert len(warnings) == 2
+    assert all(expected in message for message in warnings)
+    assert all(
+        "Supported @tool keyword arguments are: name, description, schema, approval_mode."
+        in message
+        for message in warnings
+    )
+    assert "top-secret" not in caplog.text
 
 
 def test_raw_maf_subclass_is_ignored_by_both_adapters() -> None:
@@ -167,24 +183,39 @@ def test_authored_approval_is_preserved_for_maf_and_rejected_by_preview() -> Non
         prepare_tools((descriptor,))
 
 
+def test_workflow_tool_rejects_unexpected_keyword_arguments_at_authoring() -> None:
+    with pytest.raises(TypeError, match=r"unexpected keyword argument 'max_invocations'"):
+        workflow_tool(max_invocations=1)
+
+
 @pytest.mark.asyncio
-async def test_authored_options_survive_descriptor_and_workflow_copies() -> None:
+async def test_portable_tool_copies_preserve_schema_policy_and_workflow_metadata() -> None:
+    class Arguments(BaseModel):
+        value: str
+
     calls: list[str] = []
 
-    def echo(value: str) -> str:
-        calls.append(value)
-        return value
+    def echo(arguments: Arguments) -> str:
+        calls.append(arguments.value)
+        return arguments.value
 
-    descriptor = tool(echo, max_invocations=1)
+    descriptor = tool(
+        echo,
+        name="echo",
+        schema=Arguments,
+        approval_mode="always_require",
+        max_invocations=1,
+    )
     copied = replace(descriptor)
     workflow_copy = workflow_tool(name="activity")(descriptor)
-    assert copied.maf_options == workflow_copy.maf_options == (("max_invocations", 1),)
-    for declaration in (copied, workflow_copy):
-        [wrapped] = _maf_tools.build_maf_tools((declaration,))
-        assert await wrapped.invoke(arguments={"value": "first"}, skip_parsing=True) == "first"
-        with pytest.raises(Exception, match="maximum invocation limit"):
-            await wrapped.invoke(arguments={"value": "second"}, skip_parsing=True)
-    assert calls == ["first", "first"]
+
+    assert copied.parameters() == descriptor.parameters() == workflow_copy.parameters()
+    assert copied.policy == descriptor.policy == workflow_copy.policy
+    assert copied.workflow_metadata is None
+    assert workflow_copy.workflow_metadata is not None
+    assert await copied.invoke(arguments={"value": "first"}) == "first"
+    assert await workflow_copy.invoke(arguments={"value": "second"}) == "second"
+    assert calls == ["first", "second"]
 
 
 @pytest.mark.asyncio
@@ -200,7 +231,7 @@ async def test_authored_options_materialize_the_live_bound_descriptor(asynchrono
         async def async_echo(self, value: str) -> str:
             return self.echo(value)
 
-    descriptor = tool(Service.async_echo if asynchronous else Service.echo, max_invocations=1)
+    descriptor = tool(Service.async_echo if asynchronous else Service.echo)
     first_bound = descriptor.__get__(Service("A"), Service)
     second_bound = descriptor.__get__(Service("B"), Service)
     assert first_bound.policy is descriptor.policy
@@ -209,29 +240,32 @@ async def test_authored_options_materialize_the_live_bound_descriptor(asynchrono
     assert first is not second
     assert await first.invoke(arguments={"value": "ok"}, skip_parsing=True) == "A:ok"
     assert await second.invoke(arguments={"value": "ok"}, skip_parsing=True) == "B:ok"
-    for wrapped in (first, second):
-        with pytest.raises(Exception, match="maximum invocation limit"):
-            await wrapped.invoke(arguments={"value": "again"}, skip_parsing=True)
     [fresh] = _maf_tools.build_maf_tools((first_bound,))
     assert fresh is not first
     assert await fresh.invoke(arguments={"value": "fresh"}, skip_parsing=True) == "A:fresh"
 
 
 @pytest.mark.asyncio
-async def test_maf_validates_and_honors_authored_result_parser_and_extension_options() -> None:
+async def test_removed_maf_passthrough_keywords_are_ignored_by_both_harnesses(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     descriptor = tool(
-        lambda: {"value": "ok"}, name="parsed", result_parser=lambda value: value["value"],
-        additional_properties={"authored": True}, kind="custom", max_invocation_exceptions=2,
+        lambda value: value,
+        name="portable",
+        max_invocation_exceptions=2,
+        kind="custom",
+        additional_properties={"authored": True},
     )
-    [wrapped] = _maf_tools.build_maf_tools((descriptor,))
-    assert [item.text for item in await wrapped.invoke(arguments={})] == ["ok"]
-    assert wrapped.additional_properties == {"authored": True}
-    assert wrapped.kind == "custom"
-    assert wrapped.max_invocation_exceptions == 2
-    for option in ("max_invocations", "max_invocation_exceptions"):
-        invalid = tool(lambda: "ok", name="invalid", **{option: 0})
-        with pytest.raises(ValueError, match="must be at least 1"):
-            _maf_tools.build_maf_tools((invalid,))
+
+    assert isinstance(descriptor, ToolDescriptor)
+    [maf_tool] = _maf_tools.build_maf_tools((descriptor,))
+    [copilot_tool] = prepare_tools((descriptor,))
+    assert await descriptor.invoke(arguments={"value": "ok"}) == "ok"
+    assert await maf_tool.invoke(arguments={"value": "ok"}, skip_parsing=True) == "ok"
+    assert copilot_tool is descriptor
+    assert "max_invocation_exceptions" in caplog.text
+    assert "additional_properties" in caplog.text
+    assert "{'authored': True}" not in caplog.text
 
 
 @pytest.mark.asyncio

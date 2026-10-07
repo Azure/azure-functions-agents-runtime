@@ -94,18 +94,18 @@ async def test_both_bound_runners_ignore_unsupported_values_before_execution(
 
 
 @pytest.mark.asyncio
-async def test_copilot_backend_rejects_authored_maf_options_before_effects(monkeypatch):
+async def test_copilot_backend_rejects_authored_approval_before_effects(monkeypatch):
     from azure_functions_agents.harness._harness_binding import UnsupportedCapabilityError
     from azure_functions_agents.harness.copilot_sdk import _copilot_execution
 
-    @tool(max_invocations=1)
+    @tool(approval_mode="always_require")
     def bounded() -> str:
-        raise AssertionError("Unsupported authored option must not execute")
+        raise AssertionError("Unsupported approval policy must not execute")
 
     invoke = AsyncMock()
     monkeypatch.setattr(_copilot_execution, "run", invoke)
     harness = AppHarness(HarnessKind.COPILOT, Path.cwd(), default_model="fixture-model")
-    with pytest.raises(UnsupportedCapabilityError, match="MAF-specific options"):
+    with pytest.raises(UnsupportedCapabilityError, match="approval"):
         await runner.run_agent(
             "fixture", tools=[bounded], mcp_tools=[], _harness=harness,
         )

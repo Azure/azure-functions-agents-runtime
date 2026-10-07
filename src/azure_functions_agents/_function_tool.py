@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 import azure_functions_agents as _package
 
+from ._logger import logger
 from ._tool_descriptor import (
     ApprovalMode,
     ToolDescriptor,
@@ -31,6 +32,7 @@ __all__ = [
 
 _WORKFLOW_TOOL_METADATA_ATTR = "__azure_functions_agents_workflow_tool__"
 _WORKFLOW_TOOL_HANDLER_ATTR = "__azure_functions_agents_workflow_handler__"
+_SUPPORTED_TOOL_KWARGS = ("name", "description", "schema", "approval_mode")
 
 
 def get_workflow_tool_metadata(target: object) -> WorkflowToolMetadata | None:
@@ -76,6 +78,18 @@ def _wrap_with_schema[SchemaT: BaseModel](
         async_workflow_handler if inspect.iscoroutinefunction(func) else workflow_handler,
     )
     return wrapper
+
+
+def _warn_ignored_tool_kwargs(kwargs: dict[str, Any]) -> None:
+    if not kwargs:
+        return
+    names = ", ".join(sorted(kwargs))
+    logger.warning(
+        "Ignoring unsupported @tool keyword argument(s): %s. Supported @tool keyword "
+        "arguments are: %s. Extra keyword arguments are ignored in every harness.",
+        names,
+        ", ".join(_SUPPORTED_TOOL_KWARGS),
+    )
 
 
 @overload
@@ -134,6 +148,8 @@ def tool(
     **kwargs: Any,
 ) -> object:
     """Record a Python tool without constructing a harness SDK wrapper."""
+    _warn_ignored_tool_kwargs(kwargs)
+
     def decorator(inner: object) -> object:
         if is_harness_object(inner):
             warn_unsupported_tool()
@@ -156,10 +172,6 @@ def tool(
             ),
             workflow_metadata=get_workflow_tool_metadata(inner),
         )
-        if kwargs:
-            if "input_model" in kwargs:
-                raise TypeError("tool() supplies input_model through its schema argument.")
-            return replace(descriptor, maf_options=tuple(kwargs.items()))
         return descriptor
 
     if func is not None:
@@ -176,7 +188,6 @@ def workflow_tool[DecoratedT](
     public: bool = True,
     retry: _package.WorkflowRetryPolicy | None = None,
     timeout: str | None = None,
-    **kwargs: Any,
 ) -> DecoratedT: ...
 
 
@@ -188,7 +199,6 @@ def workflow_tool[DecoratedT](
     public: bool = True,
     retry: _package.WorkflowRetryPolicy | None = None,
     timeout: str | None = None,
-    **kwargs: Any,
 ) -> Callable[[DecoratedT], DecoratedT]: ...
 
 
@@ -200,13 +210,8 @@ def workflow_tool[DecoratedT](
     public: bool = True,
     retry: _package.WorkflowRetryPolicy | None = None,
     timeout: str | None = None,
-    **kwargs: Any,
 ) -> DecoratedT | Callable[[DecoratedT], DecoratedT]:
     """Mark a callable for Dynamic Workflow execution without making a normal tool."""
-    if kwargs:
-        unknown = ", ".join(sorted(kwargs))
-        raise TypeError(f"unknown workflow_tool argument(s): {unknown}")
-
     from .workflows.schema import WorkflowRetryPolicy, workflow_timeout_ms
 
     if retry is not None and not isinstance(retry, WorkflowRetryPolicy):

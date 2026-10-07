@@ -118,11 +118,10 @@ def prepare_tools(tools: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
     prepared = describe_tools(tools)
     names: set[str] = set()
     for function in prepared:
-        if function.policy.approval_mode != "never_require" or function.maf_options:
+        if function.policy.approval_mode != "never_require":
             raise UnsupportedCapabilityError(
-                "Copilot preview supports ordinary runtime @tool declarations only; "
-                "MAF-specific options, approval, invocation limits, and result parsers "
-                "are not supported."
+                "Copilot preview supports ordinary runtime @tool declarations only when "
+                'approval_mode="never_require".'
             )
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", function.name):
             raise UnsupportedCapabilityError("Copilot preview requires OpenAI-compatible tool names.")

@@ -145,10 +145,8 @@ class ToolDescriptor:
     description: str
     func: ToolCallable = field(repr=False, compare=False)
     input_model: type[BaseModel] | None = field(default=None, repr=False, compare=False)
-    input_model_is_explicit: bool = False
     policy: ToolPolicy = field(default_factory=ToolPolicy)
     workflow_metadata: WorkflowToolMetadata | None = field(default=None, repr=False)
-    maf_options: tuple[tuple[str, Any], ...] = field(default=(), repr=False)
     _parameters_json: str = field(default="{}", repr=False)
 
     @classmethod
@@ -163,7 +161,6 @@ class ToolDescriptor:
         policy: ToolPolicy | None = None,
         workflow_metadata: WorkflowToolMetadata | None = None,
     ) -> ToolDescriptor:
-        explicit = input_model is not None or parameters is not None
         model = input_model
         if parameters is None:
             model = model or _input_model(name, func)
@@ -173,7 +170,6 @@ class ToolDescriptor:
             description=description,
             func=func,
             input_model=model,
-            input_model_is_explicit=explicit,
             policy=policy or ToolPolicy(),
             workflow_metadata=workflow_metadata,
             _parameters_json=json.dumps(dict(parameters), ensure_ascii=True, allow_nan=False),
@@ -188,8 +184,6 @@ class ToolDescriptor:
         self, *, arguments: dict[str, Any], tool_call_id: str | None = None
     ) -> Any:
         """Validate arguments before calling once and awaiting at most once."""
-        if self.maf_options:
-            raise TypeError("This tool requires the MAF adapter.")
         values = dict(arguments)
         if self.input_model is not None:
             try:

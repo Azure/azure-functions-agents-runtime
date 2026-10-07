@@ -242,11 +242,11 @@ def test_header_provider_refreshes_auth_at_expiry_offset(
     assert tool.header_provider is not None
     default_builder.assert_not_called()
 
-    assert tool.header_provider({}) == {"Authorization": "******", "X-Test": "yes"}
+    assert tool.header_provider({}) == {"Authorization": "Bearer first-token", "X-Test": "yes"}
     monkeypatch.setattr(mcp_auth.time, "time", lambda: 699)
-    assert tool.header_provider({}) == {"Authorization": "******", "X-Test": "yes"}
+    assert tool.header_provider({}) == {"Authorization": "Bearer first-token", "X-Test": "yes"}
     monkeypatch.setattr(mcp_auth.time, "time", lambda: 700)
-    assert tool.header_provider({}) == {"Authorization": "******", "X-Test": "yes"}
+    assert tool.header_provider({}) == {"Authorization": "Bearer second-token", "X-Test": "yes"}
 
     assert credential.get_token.call_count == 2
     credential.get_token.assert_called_with(_SCOPE)
@@ -270,7 +270,7 @@ def test_header_provider_failure_sends_no_stale_header_or_retry(
     assert tool.http_client is None
     assert tool.header_provider is not None
 
-    assert tool.header_provider({}) == {"Authorization": "******"}
+    assert tool.header_provider({}) == {"Authorization": "Bearer first-token"}
     monkeypatch.setattr(mcp_auth.time, "time", lambda: 700)
     with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError, match="test refresh failure"):
         tool.header_provider({})

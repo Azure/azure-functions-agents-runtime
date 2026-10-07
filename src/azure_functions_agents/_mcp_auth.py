@@ -41,7 +41,7 @@ def _authorization_headers(
     result = {
         key: value for key, value in static_headers.items() if key.lower() != "authorization"
     }
-    result["Authorization"] = "******"
+    result["Authorization"] = f"Bearer {token.token}"
     return result
 
 
@@ -79,7 +79,7 @@ def build_mcp_header_provider(server: MCPServerDescriptor) -> MCPHeaderProvider 
 
         return {
             key: value for key, value in static_headers.items() if key.lower() != "authorization"
-        } | {"Authorization": "******"}
+        } | {"Authorization": f"Bearer {cached_token.token}"}
 
     return credential_header_provider
 

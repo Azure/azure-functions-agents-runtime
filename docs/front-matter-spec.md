@@ -693,8 +693,10 @@ Normal custom tools use the runtime's `@tool` or local public functions in
 `tools/*.py`. Discovery selects the first candidate per module, preferring
 runtime `@tool` descriptors. Raw `FunctionTool`, SDK decorators/objects, and
 undecorated programmatic functions outside discovery are ignored with a
-sanitized warning. MAF-specific runtime `@tool` keyword arguments are validated
-and applied by MAF; unsupported authored options fail explicitly on Copilot.
+sanitized warning. Runtime `@tool` accepts only its portable arguments
+(`name`, `description`, `schema`, and `approval_mode`); unexpected keyword
+arguments are warned and ignored instead of being enforced or forwarded. For
+example, `max_invocations` is ignored in both harnesses.
 `@workflow_tool` marks a callable for workflow execution. Use both decorators
 when a callable should be available both directly in chat and inside workflow
 tasks; either decorator order is supported. This does not enable workflow roles
