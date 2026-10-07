@@ -58,6 +58,19 @@ HTTP and non-HTTP completion behavior, and the
 [queue workflow sample](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/workflow-queue-p0-report/README.md) for a
 runnable example.
 
+### Copilot preview
+
+When the internal, default-off Copilot preview is selected
+(`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT`), registered non-HTTP triggers use the same
+registration, JSON-safe binding serialization, and shared runner as MAF. Each
+Functions invocation creates one fresh Copilot session, including a batch
+delivery. Auth, tool, and workflow policies are unchanged.
+
+This is **not live-qualified**: no trigger has been verified against a real Functions
+host and binding service. Offline unit and component tests do not qualify any trigger,
+so treat each trigger as unqualified (not unsupported) until a host registers the
+binding, delivers a test event, and the serialized input reaches inference.
+
 ## Supported Trigger Types
 
 | Agent `trigger.type` | Azure Functions decorator | Status | Notes |

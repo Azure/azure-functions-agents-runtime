@@ -162,8 +162,10 @@ and `web_request` behavior unchanged.
 The local adapter also supports SSE chat, declared chat delegates, Workflow
 Sub Agents, and Dynamic Workflow management when authored in an agent app.
 This sample remains a single-agent tool demonstration and does not configure
-those optional capabilities. Deployed hosting and debug chat UI remain
-unsupported in this preview. Custom `ClientManager`
+those optional capabilities. Deployed hosting remains unsupported in this
+preview. The built-in debug chat UI and non-HTTP triggers are enabled but not
+live-qualified; the UI does not restore earlier transcript messages when you
+resume a session. Custom `ClientManager`
 instances are MAF-only and are rejected when Copilot is on. See
 [the architecture guide](../../docs/architecture.md#bounded-copilot-migration-preview)
 for the capability boundary.

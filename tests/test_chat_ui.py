@@ -124,6 +124,63 @@ def test_delayed_history_response_cannot_replace_newer_chat_activity() -> None:
     _run_node(harness)
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_unavailable_history_shows_notice_only_for_the_current_session() -> None:
+    functions = _history_replay_functions(_script_text())
+    harness = textwrap.dedent(
+        """
+        const state = { baseUrl: "https://example.test", sessionId: "session-a" };
+        let historyReplayGeneration = 0;
+        let historyReplayInFlight = false;
+        let restoredGreetingContent = {};
+        let status = 501;
+        let beforeResponse = () => {};
+        const rendered = [];
+        const chatEl = { innerHTML: "greeting" };
+
+        function isValidSessionId(value) { return Boolean(value); }
+        function getApiBasePath() { return "/agents/main"; }
+        function buildAuthQuery() { return ""; }
+        function hideDetails() {}
+        function stopWorkflowPolling() {}
+        function startWorkflowPolling() {}
+        function scrollChatToBottom() {}
+        function shortSessionId(value) { return value; }
+        function setStatus() {}
+        function renderBubble(role, text, meta) { rendered.push({ role, text, meta }); return {}; }
+        globalThis.fetch = async () => {
+          beforeResponse();
+          return { ok: false, status, json: async () => ({ error: "unsupported" }) };
+        };
+
+        __HISTORY_FUNCTIONS__
+
+        await loadSessionHistory("session-a", { announce: true, replaceView: true });
+        if (rendered.length !== 1 || rendered[0].text !== HISTORY_UNAVAILABLE_NOTICE) {
+          throw new Error("501 history did not render the notice");
+        }
+        if (!HISTORY_UNAVAILABLE_NOTICE.includes("not restored") || chatEl.innerHTML !== "") {
+          throw new Error("notice wording or transcript reset is wrong");
+        }
+
+        rendered.length = 0;
+        beforeResponse = () => { state.sessionId = "session-b"; };
+        await loadSessionHistory("session-a", { announce: false, replaceView: false });
+        if (rendered.length !== 0) {
+          throw new Error("notice leaked into a different session");
+        }
+
+        beforeResponse = () => {};
+        status = 404;
+        await loadSessionHistory("session-b", { announce: false, replaceView: false });
+        if (rendered.length !== 0) {
+          throw new Error("an older server's 404 must stay silent");
+        }
+        """
+    ).replace("__HISTORY_FUNCTIONS__", functions)
+
+    _run_node(harness)
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
 def test_delayed_workflow_response_is_discarded_after_session_switch() -> None:
     script = _script_text()
     start = script.index("function workflowIdentityIsCurrent(")

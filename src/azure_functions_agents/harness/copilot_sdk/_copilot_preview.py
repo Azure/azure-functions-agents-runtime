@@ -15,7 +15,7 @@ from ...client_manager import (
     _resolve_builtin_inference_target,
 )
 from ...config.env import EnvVar, raw_env_value
-from ...config.schema import HTTP_TRIGGER_TYPE, AgentConfiguration, ResolvedAgent
+from ...config.schema import AgentConfiguration, ResolvedAgent
 from ...workflows.tools import build_workflow_tools
 from .._harness_binding import AppHarness, HarnessKind, UnsupportedCapabilityError
 
@@ -140,11 +140,7 @@ def validate_copilot_agent(
 
     validate_copilot_client_manager()
     validate_configuration(resolved.agent_configuration)
-    reject_unsupported(
-        non_http_trigger=resolved.trigger is not None and resolved.trigger.type != HTTP_TRIGGER_TYPE,
-        debug_chat_ui=resolved.builtin_endpoints.debug_chat_ui,
-        mcp_endpoint=resolved.builtin_endpoints.mcp,
-    )
+    reject_unsupported(mcp_endpoint=resolved.builtin_endpoints.mcp)
     if not (resolved.model or harness.default_model):
         raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
     prepared = prepare_tools(

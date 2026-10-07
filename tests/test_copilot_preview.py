@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from azure.functions.timer import TimerRequest
 
 from azure_functions_agents import runner
 from azure_functions_agents._function_tool import tool
@@ -301,19 +302,16 @@ def test_registered_mcp_and_skill_descriptors_are_supported(preview):
 
 def test_direct_preview_rejects_unsupported_surfaces(preview):
     resolved, capabilities = _sample()
-    cases = [
-        ("non_http_trigger", resolved.model_copy(update={"trigger": TriggerSpec(type="queue_trigger")})),
-        ("debug_chat_ui", resolved.model_copy(update={
-            "builtin_endpoints": BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=False),
-        })),
-        ("mcp_endpoint", resolved.model_copy(update={
-            "builtin_endpoints": BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=True, mcp=True),
-        })),
-    ]
-    for diagnostic, candidate in cases:
-        with pytest.raises(UnsupportedCapabilityError, match=diagnostic):
-            _harness.validate_agent(_harness.get_harness(), candidate, capabilities)
+    candidate = resolved.model_copy(update={
+        "builtin_endpoints": BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=True, mcp=True),
+    })
+    with pytest.raises(UnsupportedCapabilityError, match="mcp_endpoint"):
+        _harness.validate_agent(_harness.get_harness(), candidate, capabilities)
     for candidate in (
+        resolved.model_copy(update={"trigger": TriggerSpec(type="queue_trigger")}),
+        resolved.model_copy(update={
+            "builtin_endpoints": BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=False),
+        }),
         resolved.model_copy(update={"subagents": [SubagentRef(agent="specialist")]}),
         resolved.model_copy(update={"workflows": WorkflowConfig(enabled=True)}),
     ):
@@ -641,6 +639,47 @@ def test_registered_app_captures_selection_and_newness(preview, monkeypatch):
 
     asyncio.run(call())
 
+
+def test_copilot_timer_trigger_and_debug_ui_register_through_shared_runner(preview, monkeypatch):
+    app_root = preview / "app"
+    app_root.mkdir()
+    (app_root / "main.agent.md").write_text(
+        "---\n"
+        "name: Timer\n"
+        "description: Synthetic timer agent.\n"
+        "builtin_endpoints:\n  chat_api: true\n  debug_chat_ui: true\n  mcp: false\n"
+        "trigger:\n  type: timer_trigger\n  args:\n    schedule: '0 */5 * * * *'\n"
+        "mcp: false\nskills: false\ntools: false\n"
+        "---\nSummarize the trigger.\n",
+        encoding="utf-8",
+    )
+    requests = []
+
+    async def invoke(harness, request):
+        requests.append(request)
+        return runner.AgentResult(request.session_id, "reply")
+
+    monkeypatch.setattr(_copilot, "run", invoke)
+    app = create_function_app(app_root)
+    functions = {f.get_function_name(): f.get_user_function() for f in app.get_functions()}
+
+    async def call():
+        await functions["main"](
+            TimerRequest(past_due=True, schedule_status={}, schedule={})
+        )
+        await functions["main"](
+            TimerRequest(past_due=False, schedule_status={}, schedule={})
+        )
+        history = await functions["agent_main_builtin_history"](
+            SimpleNamespace(headers={"x-ms-session-id": "caller-session"})
+        )
+        assert history.status_code == 501
+        assert "error" in json.loads(history.body)
+
+    asyncio.run(call())
+    assert [request.new_session for request in requests] == [True, True]
+    assert requests[0].session_id != requests[1].session_id
+    assert '"past_due": true' in requests[0].prompt
 
 def test_registered_agent_model_override_reaches_copilot_provider(preview, monkeypatch, tmp_path):
     root = tmp_path / "agent-model"

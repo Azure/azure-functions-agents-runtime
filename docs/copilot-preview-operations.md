@@ -298,8 +298,9 @@ Use isolated local settings or offline fixtures, not a customer's storage:
    `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` value fails app construction.
 2. **Configured Blob failure** — an invalid or unavailable configured storage
    target surfaces an error rather than writing session files locally.
-3. **Unsupported surfaces** — `/agents/main/history` returns 501 rather than
-   an empty success shape. `/agents/main/chatstream` supports SSE; a native
+3. **Unsupported surfaces** — the built-in MCP endpoint is rejected, and
+   `/agents/main/history` returns a 501 JSON error rather than an empty
+   success shape (the Debug UI turns it into a "transcript not restored" notice). `/agents/main/chatstream` supports SSE; a native
    creation/catalog failure emits terminal `error` without advertising a session.
 
 ## Known limits
@@ -314,8 +315,16 @@ Use isolated local settings or offline fixtures, not a customer's storage:
   `UnsupportedCapabilityError`s raised before any native process, download or
   provider call. They stay until deployed-host and multi-worker qualification
   lands (issues #1357 and #1337).
-- History projection, non-HTTP triggers, and the debug chat UI remain
-  rejected before inference on the Copilot path.
+- History projection and the built-in MCP endpoint remain unsupported on the
+  Copilot path. Native session files are never projected into MAF history.
+- Registered non-HTTP triggers and the built-in Debug UI (live chat, streaming,
+  and continuation by pasting or picking a session ID) are enabled through the
+  shared registration and runner path. Resuming an explicit ID continues the
+  native session without restoring earlier transcript messages; the UI says so.
+  A failed resume is an error and never creates a replacement session. These
+  surfaces are **not live-qualified**: unit and component tests are not
+  Functions-host qualification, and no trigger or binding service has been
+  exercised against a real host.
 - HTTP streaming, declared delegates, Workflow Sub Agents, and workflow management
   are supported by the local adapter. Leaf state is isolated locally and deleted;
   it does not use the primary persistent storage route. These adapter tests do
