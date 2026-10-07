@@ -113,7 +113,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/harness/copilot_sdk/_copilot_tool_calls.py` | Accounts for generic native events, including denials, once per tool-call ID; deduplicates custom wrapper records, preserves success evidence, and redacts protected headers without exposing native envelopes. | `CopilotToolCalls`, `tool_result_text()` |
 | `azure_functions_agents/_skill_policy.py` | SDK-free default-deny helper policy. Most-specific canonical discovered-root ownership permits only approved skill resources and narrow literal script invocations; excluded roots remain ownership metadata. Not an OS sandbox or skill-origin attestation. | `SkillPolicy` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_runtime.py` | Lazy app-owned SDK stdio client and shared credential owner, acquired once through the binding cell behind a startup lock. Registers its own stable close callback; explicit async shutdown clears cached handles after bounded cleanup so stopped or closing resources are never reused, without clearing standalone selection. No global runtime-owner map, deferred retry registry, or process-exit cleanup path. | `CopilotRuntime`, `get_runtime()` |
-| `azure_functions_agents/harness/copilot_sdk/_copilot_session_fs.py` | Actual SDK `SessionFsProvider` implementation for opaque files, with one route-based backend factory selection, callback serialization/deadlines, text conversion and SDK-shaped errors. | `CopilotSessionFs`, `SessionFileBackend`, `open_session_fs()` |
+| `azure_functions_agents/harness/copilot_sdk/_copilot_session_fs.py` | Actual SDK `SessionFsProvider` implementation for opaque files, with one route-based backend factory selection, callback serialization/deadlines, text conversion, SDK-shaped errors, and read-only projection of approved physical skill files. | `CopilotSessionFs`, `SessionFileBackend`, `open_session_fs()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_session_paths.py` | Selected Windows/POSIX callback path policies and independently selected physical-host policy; exact workspace mapping, lexical containment and local platform rules. | `SessionPathPolicy`, `select_session_path_policy()` |
 | `azure_functions_agents/harness/copilot_sdk/_copilot_session_local.py`, `_copilot_session_blob.py` | Ordinary byte filesystem operations and flat-Blob filesystem adaptation, structurally conforming to the shared backend Protocol. No native-file interpretation or storage format changes. | `LocalSessionFileBackend`, `BlobSessionFileBackend` |
 | `azure_functions_agents/__init__.py` | Public API exports and shutdown of acquired, harness-owned resources plus the active client manager, without importing unselected persistence implementations. | `shutdown_client_manager()` |
@@ -328,6 +328,13 @@ is stored under `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`,
 where `agent_id` comes directly from the shared `_agent_identity.agent_id(slug)`
 helper. Only the selected harness's persistence implementation is imported,
 initialized, and cleaned up.
+
+The same request-owned `SkillPolicy` used by the permission handler also lets
+SessionFs read, stat, and check existence of approved physical skill files outside
+the virtual workspace. This is a read-only file projection, not a directory mount:
+it preserves canonical-path ownership and excluded-root checks, never copies
+resources into session storage, and does not grant mutation or directory
+enumeration. All other paths retain the virtual workspace/session-state rules.
 
 Lifecycle ownership is deliberately narrow: each app binding owns at most one
 lazy reusable Copilot client plus shared credential, and each request owns its
@@ -705,4 +712,3 @@ This design keeps global config declarative: shared config says what exists, whi
 - [`docs/triggers.md`](triggers.md) — supported trigger types and examples
 - [`docs/observability.md`](observability.md) — OpenTelemetry enablement, the `af.*` span/attribute reference, sensitive-data gating, and cost control
 - [`docs/frds/0007-multi-agent-delegation.md`](frds/0007-multi-agent-delegation.md) — the FRD behind Section 5, including the full Decisions log
-

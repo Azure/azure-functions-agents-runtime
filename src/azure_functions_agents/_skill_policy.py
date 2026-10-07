@@ -111,7 +111,12 @@ class SkillPolicy:
 
     def allows_read(self, path: str) -> bool:
         """Permit only regular files in an approved, unambiguous owning skill tree."""
-        return bool(self.approved) and self._owned_file(path) is not None
+        return self.resolve_read(path) is not None
+
+    def resolve_read(self, path: str) -> Path | None:
+        """Resolve an approved regular file without granting access to other host paths."""
+        owned = self._owned_file(path) if self.approved else None
+        return owned[1] if owned is not None else None
 
     def allows_shell(self, command: str) -> bool:
         """Permit python/python3 .py, bash .sh, or direct POSIX executable .py/.sh.

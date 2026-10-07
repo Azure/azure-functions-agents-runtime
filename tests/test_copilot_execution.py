@@ -662,6 +662,20 @@ async def test_native_skill_exposure_matches_approved_inventory_on_create_and_re
     monkeypatch.setattr(Path, "read_text", forbid_skill_reads)
     client = _fake_client()
     monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+
+    async def read_resource_during_turn(*_args, **_kwargs):
+        session_call = client.create_session.call_args if new_session else client.resume_session.call_args
+        storage = session_call.kwargs["create_session_fs_handler"](None)
+        resource = str(skills[0].path / "reference.txt")
+        if enabled:
+            assert await storage.exists(resource)
+            assert await storage.read_file(resource) == Path(resource).read_text(encoding="utf-8")
+        else:
+            with pytest.raises(OSError):
+                await storage.read_file(resource)
+        return client.create_session.return_value.send_and_wait.return_value
+
+    client.create_session.return_value.send_and_wait.side_effect = read_resource_during_turn
     try:
         await _copilot.run(preview, replace(
             _request(new_session=new_session),
@@ -678,8 +692,9 @@ async def test_native_skill_exposure_matches_approved_inventory_on_create_and_re
         )
         assert options["included_builtin_skills"] == []
         handler = options["on_permission_request"]
+        resource = str(skills[0].path / "reference.txt")
         read = handler(
-            PermissionRequestRead(intention="resource", path=str(skills[0].path / "reference.txt")),
+            PermissionRequestRead(intention="resource", path=resource),
             {"session_id": "main.example"},
         )
         assert read.kind == (

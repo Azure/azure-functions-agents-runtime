@@ -344,12 +344,18 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
         ), asyncio.timeout_at(request.deadline):
             if harness.session_storage is None:
                 raise CopilotPreviewError("Native session storage is not configured.")
+            skill_policy = SkillPolicy.create(
+                approved=request.skills,
+                discovered=request.skill_catalog,
+                working_directory=owner.workspace,
+            )
             storage = await open_session_fs(
                 harness.session_storage,
                 request.agent_slug,
                 request.session_id,
                 workspace_path=str(owner.workspace),
                 deadline=request.deadline,
+                skill_policy=skill_policy,
             )
             async with _bounded_cleanup(
                 lambda: _close_storage(storage),
@@ -357,11 +363,6 @@ async def run(harness: AppHarness, request: HarnessRequest) -> AgentResult:
             ):
                 mcp_servers = await mcp_configuration(
                     request.mcp_servers, protect_headers=calls.protect_headers
-                )
-                skill_policy = SkillPolicy.create(
-                    approved=request.skills,
-                    discovered=request.skill_catalog,
-                    working_directory=owner.workspace,
                 )
                 on_permission_request = permission_handler(skill_policy)
                 client = await _acquire_client(owner, request.deadline)
