@@ -361,9 +361,12 @@ remain host-owned. Tool exceptions become recoverable model-visible failures;
 cancellation propagates. Workflow management tools and `delegate_<slug>` tools
 follow the static/system tools in that order. Management closures retain the
 public session ID, Durable client, coordinator slug, and per-agent policy.
-Workflow-enabled agents inject only the packaged workflow guidance into
-instructions; approved skills and configured MCP servers use the filtered
-descriptor inventories passed through the selected harness.
+Workflow-enabled direct roles receive the packaged `data-driven-workflows`
+skill through the same filtered skill inventory passed through the selected
+harness. The host keeps the short workflow addendum separate from that skill
+and never reads `SKILL.md` into instructions. Catalog entries and leaf roles
+keep their project-only skill inventories, so delegates and Workflow Sub Agent
+leaves do not inherit the runtime-only workflow skill.
 
 Delegates and Workflow Sub Agents retain their parent app binding and run with
 fresh UUID native identities and specialist-local instructions/model/tools.
@@ -410,10 +413,11 @@ For each workflow-enabled agent, `workflows/integration.py` uses the cataloged i
 `WorkflowPlanPolicy` to generate model guidance and agent-scoped management
 tools. Built-in chat/MCP handlers receive the chat addendum; declared-trigger
 handlers receive the trigger addendum, Durable client, workflow-agent slug, and policy.
-MAF exposes the packaged `data-driven-workflows` skill's narrow selection
-description normally and loads its detailed grammar only on demand. The shared
-workflow addendum does not mention the skill: keeping the selection pointer in
-skill metadata avoids prompting fixed-DAG turns to load it speculatively.
+Workflow-enabled direct roles expose the packaged `data-driven-workflows`
+skill's narrow selection description normally, and the selected SDK loads its
+detailed grammar only on demand. The shared workflow addendum does not mention
+the skill: keeping the selection pointer in skill metadata avoids prompting
+fixed-DAG turns to load it speculatively.
 `start_workflow` validates the submitted plan against that policy and **persists** the
 owner's allowed tool/Sub Agent sets into the Durable client input, so the orchestrator
 re-validates every materialized `for_each` instance's static target against the identical
@@ -740,7 +744,7 @@ This design keeps global config declarative: shared config says what exists, whi
 
 ### Other notable boundaries
 
-- **Skills:** shared discovery finds directory candidates without parsing `SKILL.md`; registration filters directory identities into frozen `AgentCapabilities`. Grouping directories are supported through two child levels below each search input. A root's nested documents remain part of that skill unless separately supplied as explicit search inputs. SDKs own advertising, metadata validation, name/directory matching, duplicate selection, instruction loading, and supported resource/script mechanisms; a discovered candidate is not a confirmed loaded skill. MAF retains `load_skill` / `read_skill_resource` and nested resource recursion. Copilot receives selected paths without a host-generated catalog; authored instructions and replace prompt mode are unchanged. Native advertising under replace mode remains unqualified. Helper permissions retain canonical most-specific ownership for independently supplied overlapping roots. The packaged `data-driven-workflows` skill remains a MAF workflow-only addition to the direct capability copy, never the project catalog or delegated roles.
+- **Skills:** shared discovery finds directory candidates without parsing `SKILL.md`; registration filters directory identities into frozen `AgentCapabilities`. Grouping directories are supported through two child levels below each search input. A root's nested documents remain part of that skill unless separately supplied as explicit search inputs. SDKs own advertising, metadata validation, name/directory matching, duplicate selection, instruction loading, and supported resource/script mechanisms; a discovered candidate is not a confirmed loaded skill. MAF retains `load_skill` / `read_skill_resource` and nested resource recursion. Copilot receives selected paths without a host-generated catalog; authored instructions and replace prompt mode are unchanged. Native advertising under replace mode remains unqualified. Helper permissions retain canonical most-specific ownership for independently supplied overlapping roots. The packaged `data-driven-workflows` skill remains a runtime-owned addition only on the shallow direct-role capability copy used for workflow-enabled MAF and Copilot registrations. It is delivered through approved SDK skill paths, never merged back into the project catalog or delegated/Workflow Sub Agent leaf roles.
 - **Connectors:** connector actions are exposed to agents through MCP servers in `mcp.json`; connector-triggered agents use `trigger.type: connector_trigger`.
 - **Built-in endpoints:** endpoint registration is a separate module so the trigger-registration path stays focused on Azure Function bindings rather than UI and chat surface concerns.
 - **Multi-agent delegation:** `subagents:` is itself an extension point of sorts — it lets an agent's own front matter opt other, already-registered agents into its tool set without any code changes. See Section 5.

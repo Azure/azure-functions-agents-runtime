@@ -1,12 +1,15 @@
 # Dynamic workflows (experimental v1)
 
 The app-level Copilot opt-in supports the same five management tools,
-per-agent policy authorization, and Workflow Sub Agent Activities in the
-single-worker local preview. Each leaf gets a fresh native session that is
-deleted after use. MCP and authored skills remain unsupported; the packaged
-data-driven workflow grammar is included only in workflow-enabled direct
-agents' prompts rather than loaded as a native skill. This does not qualify
-Azure hosting or multi-worker native persistence.
+per-agent policy authorization, Workflow Sub Agent Activities, configured MCP
+servers, and approved authored skills in the single-worker local preview. Each
+leaf gets a fresh native session that is deleted after use. Workflow-enabled
+direct roles receive the packaged `data-driven-workflows` skill through the
+same native skill-directory path as approved authored skills; the host keeps a
+separate concise workflow addendum and does not read `SKILL.md` into the
+prompt. Delegated leaves and Workflow Sub Agent leaves do not inherit that
+runtime-only skill. This does not qualify Azure hosting or multi-worker native
+persistence.
 
 > [!NOTE]
 > **Status: public experimental v1.** The API is intentionally small and
@@ -185,11 +188,12 @@ not need to document the tools or the heuristics in their markdown — the
 agent markdown stays focused on the domain.
 
 Direct workflow-enabled agents also receive the runtime-owned
-`data-driven-workflows` skill. Its short description is always available, but
-MAF loads the detailed `when` / `for_each` grammar only when a data-driven plan
-needs it. This system skill is independent of project `skills` filtering
-(including `skills: false`) and is not exposed when the same agent runs as a
-delegated or Workflow Sub Agent leaf.
+`data-driven-workflows` skill. The selected SDK loads it natively from the
+packaged skill directory, so the detailed `when` / `for_each` grammar stays in
+SDK-owned skill loading instead of being copied into the host prompt. This
+system skill is independent of project `skills` filtering (including
+`skills: false`), can coexist with approved authored skills, and is not
+exposed when the same agent runs as a delegated or Workflow Sub Agent leaf.
 
 Any agent may enable workflows by setting `workflows.enabled: true`.
 Invocation remains independent: triggers and built-in endpoints determine how
@@ -340,10 +344,10 @@ model enumerating every task before submission. Plans that omit both keep
 their exact prior validation, scheduling, result, and status behavior; the
 fields are dropped from serialized plans when unset.
 
-The MAF skill inventory describes `data-driven-workflows` as applicable only
-when submitted tasks will contain one of these fields. The shared workflow
-addendum does not mention it, which avoids drawing fixed-DAG turns toward an
-unnecessary load while keeping the full grammar available on demand.
+The packaged skill metadata describes `data-driven-workflows` as applicable
+only when submitted tasks will contain one of these fields. The shared
+workflow addendum does not mention it, which avoids drawing fixed-DAG turns
+toward an unnecessary load while keeping the full grammar available on demand.
 
 - **`when`** — a constrained predicate that decides whether a logical task
   (or one materialized `for_each` instance) runs. It is available on every

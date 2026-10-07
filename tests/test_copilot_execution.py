@@ -24,6 +24,7 @@ from azure_functions_agents.client_manager import (
     set_client_manager,
 )
 from azure_functions_agents.config import paths
+from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness import (
     _harness_binding as _harness,
 )
@@ -62,6 +63,7 @@ from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import
     resolve_route,
 )
 from azure_functions_agents.harness.copilot_sdk._copilot_tool_calls import CopilotToolCalls
+from azure_functions_agents.workflows.integration import data_driven_workflows_skill_path
 
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "copilot-preview" / "src"
 
@@ -754,6 +756,48 @@ async def test_native_skill_exposure_matches_approved_inventory_on_create_and_re
         )
         assert denied.kind == PermissionDecisionDeniedByRules.kind
         assert options["system_message"] == {"mode": "replace", "content": "Be helpful."}
+    finally:
+        await _lifecycle._shutdown_harnesses()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_authored_skill", [False, True])
+async def test_native_workflow_skill_directories_follow_approved_inventory(
+    preview, monkeypatch, include_authored_skill,
+):
+    import copilot
+
+    authored_skills = _skill_inventory(preview.app_root)
+    runtime_skill = SkillDescriptor.create(
+        name="data-driven-workflows",
+        path=data_driven_workflows_skill_path(),
+    )
+    approved = (runtime_skill,)
+    catalog = (*authored_skills, runtime_skill)
+    expected_directories = [str(runtime_skill.path)]
+    expected_disabled = {"approved", "excluded"}
+    if include_authored_skill:
+        approved = (authored_skills[0], runtime_skill)
+        expected_directories = [str(authored_skills[0].path), str(runtime_skill.path)]
+        expected_disabled = {"excluded"}
+
+    client = _fake_client()
+    monkeypatch.setattr(copilot, "CopilotClient", Mock(return_value=client))
+    try:
+        await _copilot.run(preview, replace(
+            _request(),
+            instructions="Base instructions.\n\nShort workflow guidance.",
+            skills=approved,
+            skill_catalog=catalog,
+        ))
+        options = client.create_session.call_args.kwargs
+        assert options["enable_skills"] is True
+        assert options["skill_directories"] == expected_directories
+        assert set(options["disabled_skills"]) == expected_disabled
+        assert options["system_message"] == {
+            "mode": "replace",
+            "content": "Base instructions.\n\nShort workflow guidance.",
+        }
     finally:
         await _lifecycle._shutdown_harnesses()
 

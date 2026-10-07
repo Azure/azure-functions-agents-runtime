@@ -32,27 +32,6 @@ if TYPE_CHECKING:
     from ...workflows.schema import WorkflowPlanPolicy
 
 
-def _resolve_workflow_guidance(
-    skill_paths: Sequence[Path] | None,
-    skills: Sequence[SkillDescriptor] | None,
-    system_addendum: str | None,
-) -> tuple[list[Path] | None, str]:
-    """Inject the packaged workflow grammar where the pinned SDK reads it eagerly."""
-    from ...workflows.integration import data_driven_workflows_skill_path
-
-    workflow_skill = data_driven_workflows_skill_path()
-    remaining_skill_paths = (
-        None if skill_paths is None else [path for path in skill_paths if path != workflow_skill]
-    )
-    if skills or remaining_skill_paths:
-        _copilot_preview.reject_unsupported(skills=True)
-    workflow_grammar = (workflow_skill / "SKILL.md").read_text(encoding="utf-8")
-    return (
-        remaining_skill_paths,
-        f"{system_addendum}\n\n{workflow_grammar}" if system_addendum else workflow_grammar,
-    )
-
-
 class _CopilotHarnessRunner:
     def __init__(self, harness: AppHarness) -> None:
         self._harness = harness
@@ -101,15 +80,6 @@ class _CopilotHarnessRunner:
         if not resolved_model:
             raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
 
-        effective_skill_paths = None if skill_paths is None else list(skill_paths)
-        effective_addendum = system_addendum
-        if workflow_enabled:
-            effective_skill_paths, effective_addendum = _resolve_workflow_guidance(
-                effective_skill_paths,
-                skills,
-                system_addendum,
-            )
-
         request = _runner._request(
             self._harness,
             prompt,
@@ -118,12 +88,12 @@ class _CopilotHarnessRunner:
             session_is_new=session_is_new,
             tools=tools,
             mcp_tools=mcp_tools,
-            skill_paths=effective_skill_paths,
+            skill_paths=skill_paths,
             skills=skills,
             skill_catalog=skill_catalog,
             sandbox_tools=sandbox_tools,
             web_request_tools=web_request_tools,
-            system_addendum=effective_addendum,
+            system_addendum=system_addendum,
             model=resolved_model,
             agent_name=agent_name,
             workflow_agent_slug=workflow_agent_slug,

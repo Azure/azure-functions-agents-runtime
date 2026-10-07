@@ -236,8 +236,12 @@ Azure Functions hosting, structured-response parity, full system-tool parity,
 and cross-worker session overlap are unsupported in this preview unless
 separately qualified. Local HTTP SSE, declared delegates, Workflow Sub Agents,
 Dynamic Workflow management, configured MCP servers, and approved project
-skills use the existing host contracts. Leaves use disposable local SessionFs
-trees even when primary sessions select Blob, and never acquire a persistent
+skills use the existing host contracts. Workflow-enabled direct roles receive
+the packaged `data-driven-workflows` skill through the same approved native
+skill-directory path as authored skills; the host keeps the concise workflow
+addendum separate and does not read `SKILL.md` into instructions. Leaves use
+disposable local SessionFs trees even when primary sessions select Blob, do
+not inherit the runtime-only workflow skill, and never acquire a persistent
 session lock. SSE emits its session after native/catalog acceptance and `done`
 only after a successful, non-interrupted SDK result plus disconnect. If the
 SDK reports an interruption or abort during the turn, the host aborts that turn
@@ -310,7 +314,8 @@ still govern the feature.
 | 8 | Persistence boundary | host session protocol / thin SessionFs adapter | Reuse existing storage settings, use `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`, and keep contents/continuation/compaction/recovery fully SDK-owned. | Human (larohra) | 2026-10-02 |
 | 9 | Execution/result normalization | shared cross-SDK behavior / adapter-local conversion with shared public result contract | Keep MAF usage decoding local to MAF, Copilot result conversion local to Copilot, and normalize only the public `AgentResult`/tool-call accounting contract in shared code. | Human (larohra) | 2026-10-06 |
 | 10 | Failure and cleanup precedence | deferred retry registries / immediate bounded cleanup preserving original failure | Keep one app-owned native client plus request-owned SessionFs adapters, and preserve the original execution or cancellation error over later transport, disconnect, filesystem, or credential cleanup failures. | Human (larohra) | 2026-10-05 |
-| 11 | Local role parity and turn acceptance | reject streaming/leaves / retain host role contracts | Support local SSE, chat delegates, Workflow Sub Agent Activities, workflow-management tools, and the same filtered MCP/skill inventories through the bound runner. Preserve isolated disposable leaves, host tool ordering, cancellation/deadlines, and completed-turn event barriers before continuation and successful SSE completion. | Human (larohra) | 2026-10-06 |
+| 11 | Local role parity and turn acceptance | reject streaming/leaves / retain host role contracts | Support local SSE, chat delegates, Workflow Sub Agent Activities, workflow-management tools, and the same filtered MCP/skill inventories through the bound runner. Workflow-enabled direct roles also keep the packaged `data-driven-workflows` skill as an approved native skill directory while leaves retain project-only skills. Preserve isolated disposable leaves, host tool ordering, cancellation/deadlines, and completed-turn event barriers before continuation and successful SSE completion. | Human (larohra) | 2026-10-06 |
+| 12 | Turn acceptance follow-up after SDK contract review | host history scans rejecting any prior aborted turn / request-local live interruption check with SDK-owned resume-waiting | Grounded in the SDK-contract follow-up in this PR, supersede only row 11's turn-acceptance clause: keep `continue_pending_work=False`; delegate resume/idle waiting to the SDK without host history scans or rejecting prior aborted history; reject only a live abort/interruption observed during the current request before a successful result/`done`; cancellation still aborts and rethrows; SSE still emits no success/`done` on interruption. | Human (larohra) | 2026-10-07 |
 
 ## 6. Feature-level acceptance and test plan
 

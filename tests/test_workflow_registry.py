@@ -522,6 +522,13 @@ def test_data_driven_control_flow_grammar_uses_progressive_skill_disclosure():
     assert "already bounded" in skill
 
 
+def test_data_driven_workflow_skill_is_content_only():
+    skill_path = integration.data_driven_workflows_skill_path()
+
+    assert (skill_path / "SKILL.md").is_file()
+    assert not (skill_path / "scripts").exists()
+
+
 def test_integration_builds_owner_specific_policy_and_sub_agent_guidance() -> None:
     result = integration.build_workflow_integration(
         _FakeApp(),

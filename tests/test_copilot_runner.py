@@ -18,13 +18,14 @@ from azure_functions_agents.config.schema import (
     SubagentRef,
     ToolsFilter,
 )
+from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness import _harness_execution, _harness_lifecycle
 from azure_functions_agents.harness.copilot_sdk import _copilot_execution
-from azure_functions_agents.harness.copilot_sdk._copilot_preview import (
-    CopilotPreviewError,
-    UnsupportedCapabilityError,
+from azure_functions_agents.harness.copilot_sdk._copilot_preview import CopilotPreviewError
+from azure_functions_agents.registration.capabilities import (
+    AgentCapabilities,
+    with_runtime_skill_paths,
 )
-from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows.integration import data_driven_workflows_skill_path
 from azure_functions_agents.workflows.schema import WorkflowPlanPolicy
@@ -167,32 +168,85 @@ async def test_delegate_tool_retains_parent_binding_and_counts_sanitized_failure
 
 
 @pytest.mark.asyncio
-async def test_workflow_management_uses_bound_policy_and_runtime_guidance(preview, monkeypatch):
+@pytest.mark.parametrize("include_authored_skill", [False, True])
+async def test_workflow_management_uses_native_skill_loading_without_prompt_injection(
+    preview, monkeypatch, tmp_path, include_authored_skill,
+):
     invoke = AsyncMock(return_value=runner.AgentResult("public-session", "ready"))
     monkeypatch.setattr(_copilot_execution, "run", invoke)
     policy = WorkflowPlanPolicy(
         allowed_tools=frozenset({"inspect"}), allowed_subagents=frozenset({"analyst"}),
     )
+    runtime_skill = data_driven_workflows_skill_path()
+    capabilities = AgentCapabilities.create()
+    expected_skill_names = ["data-driven-workflows"]
+    if include_authored_skill:
+        authored = tmp_path / "skills" / "authored"
+        authored.mkdir(parents=True)
+        (authored / "SKILL.md").write_text(
+            "---\nname: authored\ndescription: Authored skill.\n---\n",
+            encoding="utf-8",
+        )
+        capabilities = AgentCapabilities.create(
+            skills=(SkillDescriptor.create(name="authored", path=authored),),
+        )
+        expected_skill_names = ["authored", "data-driven-workflows"]
+    direct_capabilities = with_runtime_skill_paths(capabilities, [runtime_skill])
     await runner.run_agent(
-        "Create workflow", _harness=preview, tools=[], mcp_tools=[],
-        skill_paths=[data_driven_workflows_skill_path()],
+        "Create workflow",
+        _harness=preview,
+        tools=[],
+        mcp_tools=[],
+        instructions="Base instructions.",
+        system_addendum="\n\nShort workflow guidance.",
+        skill_paths=direct_capabilities.enabled_skill_paths,
+        skills=direct_capabilities.skills,
+        skill_catalog=direct_capabilities.skill_catalog,
         workflow_enabled=True, workflow_policy=policy,
         workflow_agent_slug="coordinator", workflow_durable_client=Mock(),
     )
     harness, request = invoke.call_args.args
     assert harness is preview
     assert request.agent_slug == "coordinator"
+    assert [skill.name for skill in request.skills] == expected_skill_names
+    assert [skill.name for skill in request.skill_catalog] == expected_skill_names
     assert {function.name for function in request.tools} == {
         "start_workflow", "get_workflow_status", "list_workflows",
         "cancel_workflow", "terminate_workflow",
     }
-    assert "Collection fan-out" in request.instructions
-    with pytest.raises(UnsupportedCapabilityError, match="skills"):
-        await runner.run_agent(
-            "hello", _harness=preview, tools=[], mcp_tools=[],
-            skill_paths=[preview.app_root / "authored-skill"],
-            workflow_enabled=True, workflow_policy=policy,
-        )
+    assert request.instructions == "Base instructions.\n\nShort workflow guidance."
+    assert "Collection fan-out" not in request.instructions
+    assert "name: data-driven-workflows" not in request.instructions
+
+
+@pytest.mark.asyncio
+async def test_leaf_roles_keep_project_skills_without_runtime_workflow_skill(preview, monkeypatch):
+    invoke = AsyncMock(return_value=runner.AgentResult("leaf-session", "ready"))
+    monkeypatch.setattr(_copilot_execution, "run", invoke)
+    authored = preview.app_root / "skills" / "authored"
+    authored.mkdir(parents=True)
+    (authored / "SKILL.md").write_text(
+        "---\nname: authored\ndescription: Project skill.\n---\n",
+        encoding="utf-8",
+    )
+    capabilities = AgentCapabilities.create(
+        skills=(SkillDescriptor.create(name="authored", path=authored),),
+    )
+
+    result = await runner.run_leaf_agent_task(
+        _specialist(),
+        capabilities,
+        "Investigate",
+        timeout=3,
+        execution_role="workflow_subagent",
+        _harness=preview,
+    )
+
+    assert result == "ready"
+    _, request = invoke.call_args.args
+    assert request.execution_role == "workflow_subagent"
+    assert [skill.name for skill in request.skills] == ["authored"]
+    assert "data-driven-workflows" not in [skill.name for skill in request.skill_catalog]
 
 
 @pytest.mark.asyncio
