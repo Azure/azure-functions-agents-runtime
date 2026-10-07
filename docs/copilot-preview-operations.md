@@ -298,8 +298,7 @@ Use isolated local settings or offline fixtures, not a customer's storage:
    `AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT` value fails app construction.
 2. **Configured Blob failure** — an invalid or unavailable configured storage
    target surfaces an error rather than writing session files locally.
-3. **Unsupported surfaces** — the built-in MCP endpoint is rejected, and
-   `/agents/main/history` returns a 501 JSON error rather than an empty
+3. **Transcript replay** — `/agents/main/history` returns a 501 JSON error rather than an empty
    success shape (the Debug UI turns it into a "transcript not restored" notice). `/agents/main/chatstream` supports SSE; a native
    creation/catalog failure emits terminal `error` without advertising a session.
 
@@ -315,8 +314,17 @@ Use isolated local settings or offline fixtures, not a customer's storage:
   `UnsupportedCapabilityError`s raised before any native process, download or
   provider call. They stay until deployed-host and multi-worker qualification
   lands (issues #1357 and #1337).
-- History projection and the built-in MCP endpoint remain unsupported on the
-  Copilot path. Native session files are never projected into MAF history.
+- History projection remains unsupported on the Copilot path. Native session
+  files are never projected into MAF history.
+- The inbound built-in MCP tool (`builtin_endpoints.mcp: true`) is enabled
+  through the existing bound runner. It validates `arguments.prompt`, returns
+  the agent's session ID, and resumes a supplied `sessionId`/`sessionid` without
+  retrying as a new session on failure. Omitted IDs create fresh sessions.
+  The Functions MCP extension owns `/runtime/webhooks/mcp` and its system-key
+  authentication (`x-functions-key`); `builtin_endpoints.http_auth` controls
+  HTTP chat only, not this webhook. This is distinct from outbound `mcp.json`
+  tools. Inbound MCP remains **not live-qualified**: no real Functions host or
+  extension-authenticated request has been exercised.
 - Registered non-HTTP triggers and the built-in Debug UI (live chat, streaming,
   and continuation by pasting or picking a session ID) are enabled through the
   shared registration and runner path. Resuming an explicit ID continues the

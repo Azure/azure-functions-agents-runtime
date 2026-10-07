@@ -140,7 +140,6 @@ def validate_copilot_agent(
 
     validate_copilot_client_manager()
     validate_configuration(resolved.agent_configuration)
-    reject_unsupported(mcp_endpoint=resolved.builtin_endpoints.mcp)
     if not (resolved.model or harness.default_model):
         raise UnsupportedCapabilityError("Copilot preview requires an explicit model.")
     prepared = prepare_tools(

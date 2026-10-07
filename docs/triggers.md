@@ -66,6 +66,12 @@ registration, JSON-safe binding serialization, and shared runner as MAF. Each
 Functions invocation creates one fresh Copilot session, including a batch
 delivery. Auth, tool, and workflow policies are unchanged.
 
+The inbound built-in MCP endpoint is also enabled through the bound runner
+with existing prompt and session-ID handling. Its transport and system-key
+authentication belong to the Functions MCP extension, not
+`builtin_endpoints.http_auth` (see [Built-in endpoint authentication](#built-in-endpoint-authentication)).
+It remains not live-qualified.
+
 This is **not live-qualified**: no trigger has been verified against a real Functions
 host and binding service. Offline unit and component tests do not qualify any trigger,
 so treat each trigger as unqualified (not unsupported) until a host registers the

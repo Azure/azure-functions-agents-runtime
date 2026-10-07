@@ -403,8 +403,12 @@ never recreated on failure. The history route keeps returning a 501 JSON error
 (no native-file projection into MAF history), and the UI shows a notice that
 earlier transcript messages are not restored. Trigger and Debug UI behavior is
 not live-qualified until a real Functions host exercises it; offline tests do
-not qualify a binding. The built-in MCP endpoint remains unsupported and is
-rejected before inference. The SDK owns compaction and its artifacts; the host adds no
+not qualify a binding. The inbound built-in MCP endpoint also uses the bound
+runner, preserving prompt validation, session-ID normalization, and error
+responses without fallback. Its `/runtime/webhooks/mcp` transport and
+system-key authentication are owned by the Functions MCP extension;
+`builtin_endpoints.http_auth` does not govern it. This endpoint is enabled but
+not live-qualified. The SDK owns compaction and its artifacts; the host adds no
 summarizer or recovery controller. Operational setup, supported script forms,
 inspection, and cleanup details live in
 [copilot-preview-operations.md](copilot-preview-operations.md), and the runnable

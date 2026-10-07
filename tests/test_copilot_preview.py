@@ -300,13 +300,12 @@ def test_registered_mcp_and_skill_descriptors_are_supported(preview):
     assert capabilities.skill_catalog == (approved, excluded)
 
 
-def test_direct_preview_rejects_unsupported_surfaces(preview):
+def test_direct_preview_accepts_existing_entrypoints(preview):
     resolved, capabilities = _sample()
     candidate = resolved.model_copy(update={
         "builtin_endpoints": BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=True, mcp=True),
     })
-    with pytest.raises(UnsupportedCapabilityError, match="mcp_endpoint"):
-        _harness.validate_agent(_harness.get_harness(), candidate, capabilities)
+    _harness.validate_agent(_harness.get_harness(), candidate, capabilities)
     for candidate in (
         resolved.model_copy(update={"trigger": TriggerSpec(type="queue_trigger")}),
         resolved.model_copy(update={
@@ -680,6 +679,83 @@ def test_copilot_timer_trigger_and_debug_ui_register_through_shared_runner(previ
     assert [request.new_session for request in requests] == [True, True]
     assert requests[0].session_id != requests[1].session_id
     assert '"past_due": true' in requests[0].prompt
+
+def test_registered_copilot_mcp_preserves_prompt_sessions_and_errors(preview, monkeypatch):
+    app_root = preview / "mcp-app"
+    app_root.mkdir()
+    (app_root / "main.agent.md").write_text(
+        (SAMPLE / "main.agent.md").read_text(encoding="utf-8").replace(
+            "  mcp: false", "  mcp: true"
+        ),
+        encoding="utf-8",
+    )
+    requests = []
+    fail_resume = False
+
+    async def invoke(harness, request):
+        assert harness.name is HarnessKind.COPILOT
+        requests.append(request)
+        if fail_resume:
+            raise CopilotPreviewError("Native resume failed.")
+        return runner.AgentResult(request.session_id, "reply")
+
+    monkeypatch.setattr(_copilot, "run", invoke)
+    app = create_function_app(app_root)
+    function = next(
+        f for f in app.get_functions() if f.get_function_name() == "agent_main_builtin_mcp"
+    )
+    binding = next(b.get_dict_repr() for b in function.get_bindings()
+                   if b.get_dict_repr()["type"] == "mcpToolTrigger")
+    assert binding["name"] == "context"
+    handler = function.get_user_function()
+    # Later flag changes must not switch an already-registered handler to MAF.
+    monkeypatch.setenv(_harness.FLAG, "false")
+
+    async def call():
+        nonlocal fail_resume
+        for arguments in ({}, {"prompt": " "}, {"prompt": 42}):
+            response = json.loads(await handler(json.dumps({"arguments": arguments})))
+            assert response == {"error": "Missing 'prompt'"}
+        assert requests == []
+        malformed = json.loads(await handler("{"))
+        assert "error" in malformed
+        assert requests == []
+
+        first = json.loads(await handler(json.dumps({"arguments": {"prompt": " first "}})))
+        assert first["response"] == "reply"
+        assert first["session_id"] == requests[0].session_id
+        assert requests[0].prompt == "first"
+        assert requests[0].new_session is True
+        context = json.dumps({
+            "arguments": {"prompt": "continue"},
+            "sessionId": f" {first['session_id']} ",
+        })
+        second = json.loads(await handler(context))
+        assert second["session_id"] == first["session_id"]
+        assert requests[1].session_id == first["session_id"]
+        assert requests[1].new_session is False
+
+        transport_context = json.dumps({
+            "arguments": {"prompt": "continue"},
+            "sessionid": "transport/session",
+        })
+        mapped = json.loads(await handler(transport_context))
+        assert mapped["session_id"].startswith("mcp-")
+        assert requests[-1].new_session is False
+        repeated = json.loads(await handler(transport_context))
+        assert repeated["session_id"] == mapped["session_id"]
+        assert requests[-1].new_session is False
+
+        fail_resume = True
+        calls_before_failure = len(requests)
+        failed = json.loads(await handler(context))
+        assert failed == {"error": "Native resume failed."}
+        assert len(requests) == calls_before_failure + 1
+        assert requests[-1].new_session is False
+        assert requests[-1].session_id == first["session_id"]
+
+    asyncio.run(call())
+
 
 def test_registered_agent_model_override_reaches_copilot_provider(preview, monkeypatch, tmp_path):
     root = tmp_path / "agent-model"

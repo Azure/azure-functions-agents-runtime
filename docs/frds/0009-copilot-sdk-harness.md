@@ -276,6 +276,14 @@ history behavior remains unchanged. A failed native resume is surfaced as an
 error and is never retried as a new session. Debug UI and per-trigger support
 claims also require real Functions-host qualification.
 
+The inbound built-in MCP endpoint uses the same bound runner and existing
+prompt validation and session-ID normalization. Calls without an ID create a
+native session; a supplied ID requests continuation, with errors surfaced
+without retry-as-create. The Functions MCP extension owns the transport and
+system-key authentication; HTTP endpoint auth settings do not alter that
+boundary. Inbound MCP behavior remains unqualified until exercised on a real
+Functions host.
+
 **Ownership**
 
 - The SDK owns session contents, continuation, compaction, recovery, and format
@@ -340,6 +348,7 @@ still govern the feature.
 | 11 | Local role parity and turn acceptance | reject streaming/leaves / retain host role contracts | Support local SSE, chat delegates, Workflow Sub Agent Activities, workflow-management tools, and the same filtered MCP/skill inventories through the bound runner. Workflow-enabled direct roles also keep the packaged `data-driven-workflows` skill as an approved native skill directory while leaves retain project-only skills. Preserve isolated disposable leaves, host tool ordering, cancellation/deadlines, and completed-turn event barriers before continuation and successful SSE completion. | Human (larohra) | 2026-10-06 |
 | 12 | Turn acceptance follow-up after SDK contract review | host history scans rejecting any prior aborted turn / request-local live interruption check with SDK-owned resume-waiting | Grounded in the SDK-contract follow-up in this PR, supersede only row 11's turn-acceptance clause: keep `continue_pending_work=False`; delegate resume/idle waiting to the SDK without host history scans or rejecting prior aborted history; reject only a live abort/interruption observed during the current request before a successful result/`done`; cancellation still aborts and rethrows; SSE still emits no success/`done` on interruption. | Human (larohra) | 2026-10-07 |
 | 13 | Debug UI history under Copilot | unsupported UI / live-only / native continuation with MAF transcript replay | Support live chat, streaming, and explicit native-session continuation. Show that prior transcript messages are not restored; do not project Copilot native files into MAF history; surface resume failures without creating a replacement session. MAF history stays unchanged. | Human (larohra) | 2026-10-07 |
+| 14 | Inbound built-in MCP endpoint | reject under Copilot / reuse bound runner | Enable the existing MCP handler with prompt validation, native continuation, honest errors without fallback, and Functions-extension-owned system-key authentication. Keep real-host qualification separate from offline adapter evidence. | Human (larohra, relayed by coordinator) | 2026-10-07 |
 
 ## 6. Feature-level acceptance and test plan
 
@@ -354,6 +363,7 @@ still govern the feature.
 | Lifecycle/errors | Verify request cleanup ordering and that execution/cancellation failures remain authoritative over later disconnect, filesystem, transport, or credential cleanup errors. |
 | Debug UI/history | Verify live chat/streaming and native continuation, display the no-transcript-restore notice, preserve MAF transcript replay, and surface native resume failures without retry-as-create. |
 | Non-HTTP entrypoints | Exercise each existing binding serializer and shared-handler contract offline; separately qualify each trigger on a real Functions host with actual binding delivery before marking it supported. Resource-blocked triggers remain unqualified, not unsupported. |
+| Inbound built-in MCP | Verify preview acceptance and bound-handler dispatch, prompt validation, omitted/provided/normalized session IDs, and errors without replacement sessions. Real-host transport and system-key auth qualification remains separate. |
 
 ## 7. Docs impact
 
