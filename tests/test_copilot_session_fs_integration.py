@@ -23,6 +23,9 @@ from azure_functions_agents.harness._session_storage import (
     open_blob_service,
 )
 from azure_functions_agents.harness.copilot_sdk import (
+    _copilot_execution as _copilot,
+)
+from azure_functions_agents.harness.copilot_sdk import (
     _copilot_session_blob as blob_backend,
 )
 from azure_functions_agents.harness.copilot_sdk import (
@@ -122,11 +125,15 @@ async def test_real_sdk_handler_reports_missing_file(tmp_path, monkeypatch):
 async def test_real_sdk_create_resume_factory_registers_callbacks_before_rpc(file_case, tmp_path, resume):
     from copilot import CopilotClient, RuntimeConnection
 
-    from azure_functions_agents.harness.copilot_sdk._copilot_execution import _deny_permission
+    from azure_functions_agents._skill_policy import SkillPolicy
+    from azure_functions_agents.harness.copilot_sdk._copilot_capabilities import permission_handler
 
     provider, route, _ = file_case
     workspace = tmp_path / "host-workspace"
     workspace.mkdir()
+    on_permission_request = permission_handler(
+        SkillPolicy.create(approved=(), discovered=(), working_directory=workspace)
+    )
     await provider.close()
     provider = await open_session_fs(
         route, "agent", "session",
@@ -146,7 +153,7 @@ async def test_real_sdk_create_resume_factory_registers_callbacks_before_rpc(fil
     )
     methods, factory_sessions = [], []
     content = "\x00opaque\r\nSDK callback"
-    native_id = "main.sdk-session"
+    native_id = _copilot._copilot_session_id("main", SDK_SESSION)
 
     def factory(session):
         factory_sessions.append(session.session_id)
@@ -183,7 +190,7 @@ async def test_real_sdk_create_resume_factory_registers_callbacks_before_rpc(fil
             "tools": [],
             "available_tools": [],
             "create_session_fs_handler": factory,
-            "on_permission_request": _deny_permission,
+            "on_permission_request": on_permission_request,
         }
         if resume:
             session = await client.resume_session(native_id, **options)

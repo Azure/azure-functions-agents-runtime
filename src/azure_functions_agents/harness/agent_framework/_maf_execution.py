@@ -6,27 +6,32 @@ import asyncio
 import contextlib
 import json
 import sys
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypedDict, cast
 
+from azure_functions_agents import runner as _runner
+
 from ..._agent_identity import agent_id
-from ..._function_tool import FunctionTool
 from ..._logger import logger
 from ..._observability import FaultDomain, LifecycleStage, start_span
+from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
 from ...client_manager import InferenceTarget, get_client_manager
 from ...config import ResolvedAgent, SubagentRef
 from ...config.env import EnvVar, runtime_env_value
-from ...config.paths import get_app_root, resolve_config_dir
+from ...config.paths import get_app_root
+from ...config.paths import resolve_config_dir as resolve_config_dir
 from ...config.schema import AgentConfiguration
-from ...discovery.mcp import MCPTool, discover_mcp_servers
+from ...discovery.mcp import MCPServerDescriptor, discover_mcp_servers
 from ...discovery.tools import discover_user_tools
 from ...registration._handlers import _looks_like_tool_error
 from ...registration.capabilities import AgentCapabilities
 from ...registration.catalog import AgentCatalog
 from ...streaming_events import HostedSkillEvent, HostedSkillEventKind
 from .. import _harness_execution
+from .._harness_binding import AppHarness, ExecutionRole, HarnessRequest
 from .._history_identity import validate_agent_slug
+from ._maf_tools import build_maf_tools
 
 if TYPE_CHECKING:
     from agent_framework import (
@@ -35,7 +40,9 @@ if TYPE_CHECKING:
         AgentResponseUpdate,
         AgentSession,
         Content,
+        FunctionTool,
         HistoryProvider,
+        MCPStreamableHTTPTool,
         Message,
         ResponseStream,
         RoleLiteral,
@@ -44,14 +51,11 @@ if TYPE_CHECKING:
     )
     from azure.durable_functions import DurableFunctionsClient
 
-    from azure_functions_agents import runner
     from azure_functions_agents.runner import ToolCallEvidence
 
     from ...workflows.schema import WorkflowPlanPolicy
-    from .._harness_binding import AppHarness, ExecutionRole
-
-type AgentFunctionTool = FunctionTool | Callable[..., Any]
-type AgentTool = AgentFunctionTool | MCPTool
+type AgentFunctionTool = ToolInput
+type AgentTool = FunctionTool | MCPStreamableHTTPTool
 type _AgentResponseStream = ResponseStream[AgentResponseUpdate, AgentResponse[Any]]
 type _FunctionArguments = str | Mapping[str, Any] | None
 type _DelegatedExecutionRole = Literal["delegate", "workflow_subagent"]
@@ -59,6 +63,10 @@ type _DelegatedExecutionRole = Literal["delegate", "workflow_subagent"]
 _FINAL_USAGE_TIMEOUT_SECONDS = 1.0
 _ASSISTANT_ROLE: Final[RoleLiteral] = "assistant"
 _PRIMARY_EXECUTION_ROLE: Final[ExecutionRole] = "primary"
+_USAGE_FIELD_NAMES: Final[dict[str, str]] = {
+    "input_token_count": "input_tokens",
+    "output_token_count": "output_tokens",
+}
 
 
 class _ReasoningOptions(TypedDict, total=False):
@@ -97,63 +105,35 @@ class _StreamErrorCarrier(Protocol):
     _stream_error: BaseException | None
 
 
-def assemble_agent_inputs(
-    *,
-    instructions: str | None,
-    tools: list[AgentFunctionTool] | None,
-    mcp_tools: list[MCPTool] | None,
-    app_root: Path | None = None,
-    sandbox_tools: list[FunctionTool] | None,
-    web_request_tools: list[FunctionTool] | None,
-    system_addendum: str | None,
-    workflow_enabled: bool,
-    workflow_durable_client: DurableFunctionsClient | None,
-    workflow_agent_slug: str | None,
-    agent_name: str | None,
-    resolved_id: str | None,
-    delegate_tools: list[FunctionTool] | None,
-    workflow_policy: WorkflowPlanPolicy | None,
-) -> tuple[list[AgentTool], str | None]:
-    """Assemble tools and system instructions for MAF-backed roles."""
-    from ...workflows.tools import build_workflow_tools
+def _normalize_usage_details(usage_details: Any) -> dict[str, int]:
+    """Return the valid canonical token counts reported by MAF."""
+    if not isinstance(usage_details, Mapping):
+        return {}
 
-    discovery_root = app_root if app_root is not None else get_app_root()
-    resolved_tools: list[AgentTool] = []
-    resolved_tools.extend(discover_user_tools(discovery_root).tools if tools is None else tools)
+    normalized: dict[str, int] = {}
+    for source_name, record_name in _USAGE_FIELD_NAMES.items():
+        value = usage_details.get(source_name)
+        if (
+            record_name not in normalized
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+        ):
+            normalized[record_name] = value
+    return normalized
 
-    if sandbox_tools:
-        resolved_tools.extend(sandbox_tools)
 
-    if web_request_tools:
-        resolved_tools.extend(web_request_tools)
-
-    if workflow_enabled:
-        resolved_tools.extend(
-            build_workflow_tools(
-                session_id=resolved_id or "",
-                workflow_agent_slug=workflow_agent_slug or agent_name or "main",
-                agent_name=agent_name or "main",
-                durable_client=workflow_durable_client,
-                policy=workflow_policy,
-            )
-        )
-
-    resolved_mcp_tools = (
-        list(discover_mcp_servers(discovery_root).servers.values())
-        if mcp_tools is None
-        else list(mcp_tools)
+def _emit_usage(
+    recorder: _harness_execution._AgentUsageRecorder, usage_details: Any = None
+) -> None:
+    try:
+        usage = _normalize_usage_details(usage_details)
+    except Exception:
+        usage = {}
+    recorder.emit_counts(
+        input_tokens=usage.get("input_tokens"),
+        output_tokens=usage.get("output_tokens"),
     )
-    if resolved_mcp_tools:
-        resolved_tools.extend(resolved_mcp_tools)
-
-    if delegate_tools:
-        resolved_tools.extend(delegate_tools)
-
-    effective_instructions = instructions.strip() if instructions and instructions.strip() else None
-    if system_addendum:
-        effective_instructions = (effective_instructions or "") + system_addendum
-
-    return resolved_tools, effective_instructions
 
 
 def _response_usage_details(response: _UsageDetailsCarrier) -> UsageDetails | None:
@@ -268,12 +248,65 @@ def _build_chat_options_from_environment() -> _ChatOptions | None:
     return {"reasoning": reasoning}
 
 
+def assemble_agent_inputs(
+    *,
+    instructions: str | None,
+    tools: Sequence[ToolInput] | None,
+    mcp_tools: Sequence[MCPServerDescriptor] | None,
+    sandbox_tools: Sequence[ToolInput] | None,
+    web_request_tools: Sequence[ToolInput] | None,
+    system_addendum: str | None,
+    workflow_enabled: bool,
+    workflow_durable_client: DurableFunctionsClient | None,
+    workflow_agent_slug: str | None,
+    agent_name: str | None,
+    resolved_id: str | None,
+    delegate_tools: Sequence[ToolInput] | None,
+    workflow_policy: WorkflowPlanPolicy | None,
+    app_root: Path | None = None,
+) -> tuple[list[AgentTool], str | None]:
+    root = app_root or get_app_root()
+    descriptors = [
+        *describe_tools(discover_user_tools(root).tools if tools is None else tools),
+        *describe_tools(sandbox_tools or ()),
+        *describe_tools(web_request_tools or ()),
+    ]
+    if workflow_enabled:
+        from ...workflows.tools import build_workflow_tools
+
+        descriptors.extend(
+            build_workflow_tools(
+                session_id=resolved_id or "",
+                workflow_agent_slug=workflow_agent_slug or agent_name or "main",
+                agent_name=agent_name or "main",
+                durable_client=workflow_durable_client,
+                policy=workflow_policy,
+            )
+        )
+    resolved_tools: list[AgentTool] = list(build_maf_tools(descriptors))
+    servers = (
+        tuple(discover_mcp_servers(root).servers.values())
+        if mcp_tools is None
+        else tuple(mcp_tools)
+    )
+    if servers:
+        from ._maf_mcp import build_maf_mcp_tools
+
+        resolved_tools.extend(build_maf_mcp_tools(servers))
+    if delegate_tools:
+        resolved_tools.extend(build_maf_tools(describe_tools(delegate_tools)))
+    effective = instructions.strip() if instructions and instructions.strip() else None
+    if system_addendum:
+        effective = (effective or "") + system_addendum
+    return resolved_tools, effective
+
+
 def _build_role_agent(
     chat_client: SupportsChatGetResponse[Any],
     *,
     agent_instructions: str | None,
-    tools: list[AgentTool],
-    skill_paths: list[Path] | None,
+    tools: Sequence[AgentTool | ToolDescriptor],
+    skill_paths: Sequence[Path] | None,
     agent_name: str | None,
     history_provider: HistoryProvider | None,
     agent_configuration: AgentConfiguration,
@@ -284,9 +317,13 @@ def _build_role_agent(
     from agent_framework import SkillsProvider, create_harness_agent
     from agent_framework._feature_stage import ExperimentalWarning
 
+    adapted_tools = [
+        build_maf_tools((candidate,))[0] if isinstance(candidate, ToolDescriptor) else candidate
+        for candidate in tools
+    ]
     skills_provider = (
         SkillsProvider.from_paths(
-            skill_paths,
+            list(skill_paths),
             disable_load_skill_approval=True,
             disable_read_skill_resource_approval=True,
             disable_run_skill_script_approval=True,
@@ -305,7 +342,7 @@ def _build_role_agent(
             name=maf_agent_name,
             harness_instructions="",
             agent_instructions=agent_instructions,
-            tools=tools,
+            tools=adapted_tools,
             history_provider=history_provider,
             skills_provider=skills_provider,
             disable_tool_auto_approval=True,
@@ -335,7 +372,6 @@ def _build_delegated_agent(
         instructions=resolved.instructions,
         tools=list(capabilities.filtered_user_tools or []),
         mcp_tools=list(capabilities.filtered_mcp_tools or []),
-        app_root=None,
         sandbox_tools=None,
         web_request_tools=capabilities.web_request_tools,
         system_addendum=None,
@@ -346,6 +382,7 @@ def _build_delegated_agent(
         resolved_id=None,
         delegate_tools=None,
         workflow_policy=None,
+        app_root=capabilities._harness.app_root if capabilities._harness is not None else None,
     )
     agent = _build_role_agent(
         chat_client,
@@ -380,15 +417,15 @@ async def run_leaf_agent_task(
             timeout=timeout,
         )
     except asyncio.CancelledError:
-        usage_recorder.emit()
+        _emit_usage(usage_recorder)
         raise
     except TimeoutError:
-        usage_recorder.emit()
+        _emit_usage(usage_recorder)
         raise
     except Exception:
-        usage_recorder.emit()
+        _emit_usage(usage_recorder)
         raise
-    usage_recorder.emit(_response_usage_details(response))
+    _emit_usage(usage_recorder, _response_usage_details(response))
     return response.text
 
 
@@ -413,34 +450,33 @@ async def _build_agent_session(
     *,
     instructions: str | None,
     session_id: str | None,
-    tools: list[AgentFunctionTool] | None,
-    mcp_tools: list[MCPTool] | None,
-    skill_paths: list[Path] | None,
+    tools: Sequence[AgentFunctionTool] | None,
+    mcp_tools: Sequence[MCPServerDescriptor] | None,
+    skill_paths: Sequence[Path] | None,
     model: str | None,
-    sandbox_tools: list[FunctionTool] | None,
+    sandbox_tools: Sequence[ToolInput] | None,
     system_addendum: str | None,
     workflow_enabled: bool,
     workflow_durable_client: DurableFunctionsClient | None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None,
-    web_request_tools: list[FunctionTool] | None = None,
+    web_request_tools: Sequence[ToolInput] | None = None,
     agent_configuration: AgentConfiguration | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
     coordinator_deadline: float | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
     app_root: Path | None = None,
-) -> tuple[Agent[Any], AgentSession, str, runner._DelegateErrorTracker | None, InferenceTarget]:
+    _harness: AppHarness | None = None,
+) -> tuple[Agent[Any], AgentSession, str, _runner._DelegateErrorTracker | None, InferenceTarget]:
     """Construct the existing fresh MAF agent/session and invocation metadata."""
     from agent_framework import AgentSession
-
-    from azure_functions_agents import runner
 
     resolved_config = agent_configuration or AgentConfiguration()
     client_manager = get_client_manager()
     chat_client, inference_target = client_manager.build_chat_client_with_target(model)
 
-    validated_id = runner._validate_session_id(session_id)
+    validated_id = _runner._validate_session_id(session_id)
     if validated_id is None:
         session = AgentSession()
         resolved_id = session.session_id
@@ -448,19 +484,19 @@ async def _build_agent_session(
         resolved_id = validated_id
         session = AgentSession(session_id=resolved_id)
 
-    history_agent_slug = runner._resolve_history_agent_slug(agent_name, workflow_agent_slug)
+    history_agent_slug = _runner._resolve_history_agent_slug(agent_name, workflow_agent_slug)
     history_provider = _build_history_provider(history_agent_slug)
 
-    delegate_tools: list[FunctionTool] | None = None
-    delegate_error_tracker: runner._DelegateErrorTracker | None = None
+    delegate_tools: list[ToolDescriptor] | None = None
+    delegate_error_tracker: _runner._DelegateErrorTracker | None = None
     if subagents:
         effective_deadline = (
             coordinator_deadline
             if coordinator_deadline is not None
-            else asyncio.get_running_loop().time() + runner.DEFAULT_TIMEOUT
+            else asyncio.get_running_loop().time() + _runner.DEFAULT_TIMEOUT
         )
-        delegate_tools, delegate_error_tracker = await runner.build_subagent_tools(
-            subagents, catalog, coordinator_deadline=effective_deadline
+        delegate_tools, delegate_error_tracker = await _runner.build_subagent_tools(
+            subagents, catalog, coordinator_deadline=effective_deadline, _harness=_harness
         )
 
     resolved_tools, effective_instructions = assemble_agent_inputs(
@@ -564,62 +600,50 @@ def _attach_tool_result(tool_calls: list[ToolCallEvidence], item: Content) -> No
     matched["success"] = not _looks_like_tool_error(item.result)
 
 
-async def run_agent(
-    prompt: str,
+async def run(
+    harness: AppHarness,
+    request: HarnessRequest,
     *,
-    instructions: str | None = None,
-    timeout: float | None = None,
-    tools: list[AgentFunctionTool] | None = None,
-    mcp_tools: list[MCPTool] | None = None,
-    skill_paths: list[Path] | None = None,
-    model: str | None = None,
-    session_id: str | None = None,
-    sandbox_tools: list[FunctionTool] | None = None,
-    system_addendum: str | None = None,
-    workflow_enabled: bool = False,
-    workflow_durable_client: DurableFunctionsClient | None = None,
-    workflow_agent_slug: str | None = None,
-    agent_name: str | None = None,
-    web_request_tools: list[FunctionTool] | None = None,
-    agent_configuration: AgentConfiguration | None = None,
-    subagents: list[SubagentRef] | None = None,
-    catalog: AgentCatalog | None = None,
-    workflow_policy: WorkflowPlanPolicy | None = None,
-    _harness: AppHarness | None = None,
-    _session_is_new: bool = False,
-    _deadline: float | None = None,
-) -> runner.AgentResult:
-    """Execute one non-streaming MAF turn with the public runner's defaults."""
-    from azure_functions_agents import runner
-
-    timeout = timeout if timeout is not None else runner.DEFAULT_TIMEOUT
-    history_agent_slug = validate_agent_slug(
-        runner._resolve_history_agent_slug(agent_name, workflow_agent_slug)
-    )
+    timeout: float,
+    instructions: str | None,
+    system_addendum: str | None,
+    session_id: str | None,
+    model: str | None,
+    agent_name: str | None,
+    agent_configuration: AgentConfiguration | None,
+    workflow_enabled: bool,
+    workflow_durable_client: DurableFunctionsClient | None,
+    workflow_agent_slug: str | None,
+    subagents: list[SubagentRef] | None,
+    catalog: AgentCatalog | None,
+    workflow_policy: WorkflowPlanPolicy | None,
+) -> _runner.AgentResult:
+    """Execute one neutral request through MAF without changing its role policy."""
     loop = asyncio.get_running_loop()
-    coordinator_deadline = _deadline if _deadline is not None else loop.time() + timeout
+    coordinator_deadline = request.deadline
 
     agent, session, resolved_id, delegate_error_tracker, inference_target = (
         await _build_agent_session(
             instructions=instructions,
             session_id=session_id,
-            tools=tools,
-            mcp_tools=mcp_tools,
-            skill_paths=skill_paths,
+            tools=request.tools,
+            mcp_tools=request.mcp_servers,
+            skill_paths=tuple(skill.path for skill in request.skills) or None,
             model=model,
-            sandbox_tools=sandbox_tools,
+            sandbox_tools=None,
             system_addendum=system_addendum,
             workflow_enabled=workflow_enabled,
             workflow_durable_client=workflow_durable_client,
             workflow_agent_slug=workflow_agent_slug,
             agent_name=agent_name,
-            web_request_tools=web_request_tools,
+            web_request_tools=None,
             agent_configuration=agent_configuration,
             subagents=subagents,
             catalog=catalog,
             coordinator_deadline=coordinator_deadline,
             workflow_policy=workflow_policy,
-            app_root=_harness.app_root if _harness is not None else None,
+            app_root=harness.app_root,
+            _harness=harness,
         )
     )
 
@@ -627,7 +651,7 @@ async def run_agent(
         async with _harness_execution._session_lock_bounded_by(
             resolved_id,
             coordinator_deadline,
-            agent_slug=history_agent_slug,
+            agent_slug=request.agent_slug,
         ):
             remaining_after_lock = max(0.0, coordinator_deadline - loop.time())
             if remaining_after_lock <= 0:
@@ -640,22 +664,22 @@ async def run_agent(
             try:
                 response: AgentResponse[Any] = await asyncio.wait_for(
                     agent.run(
-                        prompt,
+                        request.prompt,
                         session=session,
                         options=_build_chat_options_from_environment(),
                     ),
                     timeout=remaining_after_lock,
                 )
             except asyncio.CancelledError:
-                usage_recorder.emit()
+                _emit_usage(usage_recorder)
                 raise
             except TimeoutError:
-                usage_recorder.emit()
+                _emit_usage(usage_recorder)
                 raise
             except Exception:
-                usage_recorder.emit()
+                _emit_usage(usage_recorder)
                 raise
-            usage_recorder.emit(_response_usage_details(response))
+            _emit_usage(usage_recorder, _response_usage_details(response))
     except TimeoutError:
         raise RuntimeError(f"Agent run timed out after {timeout}s") from None
 
@@ -690,7 +714,7 @@ async def run_agent(
     except Exception as exc:
         logger.debug("Failed to extract tool_calls: %s", exc)
 
-    return runner.AgentResult(
+    return _runner.AgentResult(
         session_id=resolved_id,
         content=text,
         model=inference_target.model or model or "unknown",
@@ -699,64 +723,53 @@ async def run_agent(
     )
 
 
-async def run_agent_events(
-    prompt: str,
+async def run_events(
+    harness: AppHarness,
+    request: HarnessRequest,
     *,
-    instructions: str | None = None,
-    timeout: float | None = None,
-    tools: list[AgentFunctionTool] | None = None,
-    mcp_tools: list[MCPTool] | None = None,
-    skill_paths: list[Path] | None = None,
-    model: str | None = None,
-    session_id: str | None = None,
-    sandbox_tools: list[FunctionTool] | None = None,
-    system_addendum: str | None = None,
-    workflow_enabled: bool = False,
-    workflow_durable_client: DurableFunctionsClient | None = None,
-    workflow_agent_slug: str | None = None,
-    agent_name: str | None = None,
-    display_name: str | None = None,
-    web_request_tools: list[FunctionTool] | None = None,
-    agent_configuration: AgentConfiguration | None = None,
-    subagents: list[SubagentRef] | None = None,
-    catalog: AgentCatalog | None = None,
-    workflow_policy: WorkflowPlanPolicy | None = None,
-    execution_surface: str | None = None,
-    _harness: AppHarness | None = None,
-    _deadline: float | None = None,
+    timeout: float,
+    instructions: str | None,
+    system_addendum: str | None,
+    session_id: str | None,
+    model: str | None,
+    agent_name: str | None,
+    display_name: str | None,
+    agent_configuration: AgentConfiguration | None,
+    workflow_enabled: bool,
+    workflow_durable_client: DurableFunctionsClient | None,
+    workflow_agent_slug: str | None,
+    subagents: list[SubagentRef] | None,
+    catalog: AgentCatalog | None,
+    workflow_policy: WorkflowPlanPolicy | None,
+    execution_surface: str | None,
 ) -> AsyncGenerator[HostedSkillEvent]:
     """Yield harness-neutral structured events for a selected MAF invocation."""
-    from azure_functions_agents import runner
-
-    timeout = timeout if timeout is not None else runner.DEFAULT_TIMEOUT
-    history_agent_slug = validate_agent_slug(
-        runner._resolve_history_agent_slug(agent_name, workflow_agent_slug)
-    )
     loop = asyncio.get_running_loop()
-    deadline = _deadline if _deadline is not None else loop.time() + timeout
+    deadline = request.deadline
 
     try:
         agent, session, resolved_id, delegate_error_tracker, inference_target = (
             await _build_agent_session(
                 instructions=instructions,
                 session_id=session_id,
-                tools=tools,
-                mcp_tools=mcp_tools,
-                skill_paths=skill_paths,
+                tools=request.tools,
+                mcp_tools=request.mcp_servers,
+                skill_paths=tuple(skill.path for skill in request.skills) or None,
                 model=model,
-                sandbox_tools=sandbox_tools,
+                sandbox_tools=None,
                 system_addendum=system_addendum,
                 workflow_enabled=workflow_enabled,
                 workflow_durable_client=workflow_durable_client,
                 workflow_agent_slug=workflow_agent_slug,
                 agent_name=agent_name,
-                web_request_tools=web_request_tools,
+                web_request_tools=None,
                 agent_configuration=agent_configuration,
                 subagents=subagents,
                 catalog=catalog,
                 coordinator_deadline=deadline,
                 workflow_policy=workflow_policy,
-                app_root=_harness.app_root if _harness is not None else None,
+                app_root=harness.app_root,
+                _harness=harness,
             )
         )
     except Exception as exc:
@@ -801,7 +814,7 @@ async def run_agent_events(
             async with _harness_execution._session_lock_bounded_by(
                 resolved_id,
                 deadline,
-                agent_slug=history_agent_slug,
+                agent_slug=request.agent_slug,
             ):
                 pending_tool_calls: dict[str, ToolCallEvidence] = {}
                 emitted_tool_calls: set[str] = set()
@@ -859,7 +872,7 @@ async def run_agent_events(
                         inference_target=inference_target,
                     )
                     stream = agent.run(
-                        prompt,
+                        request.prompt,
                         stream=True,
                         session=session,
                         options=_build_chat_options_from_environment(),
@@ -928,10 +941,10 @@ async def run_agent_events(
                                 remaining_timeout=max(0.0, deadline - loop.time()),
                             )
                         finally:
-                            usage_recorder.emit(usage_details)
+                            _emit_usage(usage_recorder, usage_details)
                 except TimeoutError as exc:
                     if usage_recorder is not None:
-                        usage_recorder.emit()
+                        _emit_usage(usage_recorder)
                     if not stream_settled:
                         await _finalize_maf_stream(stream, exc)
                         stream_settled = True
@@ -945,11 +958,11 @@ async def run_agent_events(
                     )
                 except asyncio.CancelledError:
                     if usage_recorder is not None:
-                        usage_recorder.emit()
+                        _emit_usage(usage_recorder)
                     raise
                 except Exception as exc:
                     if usage_recorder is not None:
-                        usage_recorder.emit()
+                        _emit_usage(usage_recorder)
                     if not stream_settled:
                         await _finalize_maf_stream(stream, exc)
                         stream_settled = True
@@ -964,7 +977,7 @@ async def run_agent_events(
                         )
                         await _finalize_maf_stream(stream, exc_at_teardown)
                         if usage_recorder is not None:
-                            usage_recorder.emit()
+                            _emit_usage(usage_recorder)
         except TimeoutError:
             span.set_attribute("af.agent.outcome", "error")
             span.record_exception(
@@ -982,55 +995,44 @@ async def run_agent_events(
             )
 
 
-async def run_agent_stream(
-    prompt: str,
+async def run_stream(
+    harness: AppHarness,
+    request: HarnessRequest,
     *,
-    instructions: str | None = None,
-    timeout: float | None = None,
-    tools: list[AgentFunctionTool] | None = None,
-    mcp_tools: list[MCPTool] | None = None,
-    skill_paths: list[Path] | None = None,
-    model: str | None = None,
-    session_id: str | None = None,
-    sandbox_tools: list[FunctionTool] | None = None,
-    system_addendum: str | None = None,
-    workflow_enabled: bool = False,
-    workflow_durable_client: DurableFunctionsClient | None = None,
-    workflow_agent_slug: str | None = None,
-    agent_name: str | None = None,
-    display_name: str | None = None,
-    web_request_tools: list[FunctionTool] | None = None,
-    agent_configuration: AgentConfiguration | None = None,
-    subagents: list[SubagentRef] | None = None,
-    catalog: AgentCatalog | None = None,
-    workflow_policy: WorkflowPlanPolicy | None = None,
-    _harness: AppHarness | None = None,
-    _deadline: float | None = None,
+    timeout: float,
+    instructions: str | None,
+    system_addendum: str | None,
+    session_id: str | None,
+    model: str | None,
+    agent_name: str | None,
+    display_name: str | None,
+    agent_configuration: AgentConfiguration | None,
+    workflow_enabled: bool,
+    workflow_durable_client: DurableFunctionsClient | None,
+    workflow_agent_slug: str | None,
+    subagents: list[SubagentRef] | None,
+    catalog: AgentCatalog | None,
+    workflow_policy: WorkflowPlanPolicy | None,
 ) -> AsyncGenerator[str]:
     """Serialize canonical MAF events with the existing SSE contract."""
-    events = run_agent_events(
-        prompt,
+    events = run_events(
+        harness,
+        request,
         instructions=instructions,
         timeout=timeout,
-        tools=tools,
-        mcp_tools=mcp_tools,
-        skill_paths=skill_paths,
         model=model,
         session_id=session_id,
-        sandbox_tools=sandbox_tools,
         system_addendum=system_addendum,
         workflow_enabled=workflow_enabled,
         workflow_durable_client=workflow_durable_client,
         workflow_agent_slug=workflow_agent_slug,
         agent_name=agent_name,
         display_name=display_name,
-        web_request_tools=web_request_tools,
         agent_configuration=agent_configuration,
         subagents=subagents,
         catalog=catalog,
         workflow_policy=workflow_policy,
-        _harness=_harness,
-        _deadline=_deadline,
+        execution_surface=None,
     )
     async with contextlib.aclosing(events):
         async for event in events:

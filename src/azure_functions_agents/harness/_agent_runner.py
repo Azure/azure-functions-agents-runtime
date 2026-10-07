@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
-from .._function_tool import FunctionTool
+from .._tool_descriptor import ToolInput
 from ..config import ResolvedAgent, SubagentRef
 from ..config.schema import AgentConfiguration
-from ..discovery.mcp import MCPTool
+from ..discovery.mcp import MCPServerDescriptor
+from ..discovery.skills import SkillDescriptor
 from ..registration.capabilities import AgentCapabilities
 from ..registration.catalog import AgentCatalog
 from ..streaming_events import HostedSkillEvent
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
     from ..runner import AgentResult
     from ..workflows.schema import WorkflowPlanPolicy
 
-type AgentFunctionTool = FunctionTool | Callable[..., Any]
+type AgentFunctionTool = ToolInput
 
 
 class _HarnessRunner(Protocol):
@@ -33,22 +34,24 @@ class _HarnessRunner(Protocol):
         instructions: str | None = None,
         timeout: float | None = None,
         deadline: float,
-        tools: list[AgentFunctionTool] | None = None,
-        mcp_tools: list[MCPTool] | None = None,
-        skill_paths: list[Path] | None = None,
+        tools: Sequence[AgentFunctionTool] | None = None,
+        mcp_tools: Sequence[MCPServerDescriptor] | None = None,
+        skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
         session_id: str | None = None,
-        sandbox_tools: list[FunctionTool] | None = None,
+        sandbox_tools: Sequence[ToolInput] | None = None,
         system_addendum: str | None = None,
         workflow_enabled: bool = False,
         workflow_durable_client: DurableFunctionsClient | None = None,
         workflow_agent_slug: str | None = None,
         agent_name: str | None = None,
-        web_request_tools: list[FunctionTool] | None = None,
+        web_request_tools: Sequence[ToolInput] | None = None,
         agent_configuration: AgentConfiguration | None = None,
         subagents: list[SubagentRef] | None = None,
         catalog: AgentCatalog | None = None,
         workflow_policy: WorkflowPlanPolicy | None = None,
+        skills: Sequence[SkillDescriptor] | None = None,
+        skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
     ) -> AgentResult: ...
 
@@ -59,19 +62,19 @@ class _HarnessRunner(Protocol):
         instructions: str | None = None,
         timeout: float | None = None,
         deadline: float,
-        tools: list[AgentFunctionTool] | None = None,
-        mcp_tools: list[MCPTool] | None = None,
-        skill_paths: list[Path] | None = None,
+        tools: Sequence[AgentFunctionTool] | None = None,
+        mcp_tools: Sequence[MCPServerDescriptor] | None = None,
+        skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
         session_id: str | None = None,
-        sandbox_tools: list[FunctionTool] | None = None,
+        sandbox_tools: Sequence[ToolInput] | None = None,
         system_addendum: str | None = None,
         workflow_enabled: bool = False,
         workflow_durable_client: DurableFunctionsClient | None = None,
         workflow_agent_slug: str | None = None,
         agent_name: str | None = None,
         display_name: str | None = None,
-        web_request_tools: list[FunctionTool] | None = None,
+        web_request_tools: Sequence[ToolInput] | None = None,
         agent_configuration: AgentConfiguration | None = None,
         subagents: list[SubagentRef] | None = None,
         catalog: AgentCatalog | None = None,
@@ -86,23 +89,25 @@ class _HarnessRunner(Protocol):
         instructions: str | None = None,
         timeout: float | None = None,
         deadline: float,
-        tools: list[AgentFunctionTool] | None = None,
-        mcp_tools: list[MCPTool] | None = None,
-        skill_paths: list[Path] | None = None,
+        tools: Sequence[AgentFunctionTool] | None = None,
+        mcp_tools: Sequence[MCPServerDescriptor] | None = None,
+        skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
         session_id: str | None = None,
-        sandbox_tools: list[FunctionTool] | None = None,
+        sandbox_tools: Sequence[ToolInput] | None = None,
         system_addendum: str | None = None,
         workflow_enabled: bool = False,
         workflow_durable_client: DurableFunctionsClient | None = None,
         workflow_agent_slug: str | None = None,
         agent_name: str | None = None,
         display_name: str | None = None,
-        web_request_tools: list[FunctionTool] | None = None,
+        web_request_tools: Sequence[ToolInput] | None = None,
         agent_configuration: AgentConfiguration | None = None,
         subagents: list[SubagentRef] | None = None,
         catalog: AgentCatalog | None = None,
         workflow_policy: WorkflowPlanPolicy | None = None,
+        skills: Sequence[SkillDescriptor] | None = None,
+        skill_catalog: Sequence[SkillDescriptor] | None = None,
     ) -> AsyncGenerator[str]: ...
 
     async def run_leaf_agent_task(
@@ -129,22 +134,24 @@ class AgentRunner:
         instructions: str | None = None,
         timeout: float | None = None,
         deadline: float | None = None,
-        tools: list[AgentFunctionTool] | None = None,
-        mcp_tools: list[MCPTool] | None = None,
-        skill_paths: list[Path] | None = None,
+        tools: Sequence[AgentFunctionTool] | None = None,
+        mcp_tools: Sequence[MCPServerDescriptor] | None = None,
+        skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
         session_id: str | None = None,
-        sandbox_tools: list[FunctionTool] | None = None,
+        sandbox_tools: Sequence[ToolInput] | None = None,
         system_addendum: str | None = None,
         workflow_enabled: bool = False,
         workflow_durable_client: DurableFunctionsClient | None = None,
         workflow_agent_slug: str | None = None,
         agent_name: str | None = None,
-        web_request_tools: list[FunctionTool] | None = None,
+        web_request_tools: Sequence[ToolInput] | None = None,
         agent_configuration: AgentConfiguration | None = None,
         subagents: list[SubagentRef] | None = None,
         catalog: AgentCatalog | None = None,
         workflow_policy: WorkflowPlanPolicy | None = None,
+        skills: Sequence[SkillDescriptor] | None = None,
+        skill_catalog: Sequence[SkillDescriptor] | None = None,
         session_is_new: bool = False,
     ) -> AgentResult:
         effective_deadline = deadline
@@ -171,6 +178,8 @@ class AgentRunner:
             subagents=subagents,
             catalog=catalog,
             workflow_policy=workflow_policy,
+            skills=skills,
+            skill_catalog=skill_catalog,
             session_is_new=session_is_new,
         )
 
@@ -181,19 +190,19 @@ class AgentRunner:
         instructions: str | None = None,
         timeout: float | None = None,
         deadline: float | None = None,
-        tools: list[AgentFunctionTool] | None = None,
-        mcp_tools: list[MCPTool] | None = None,
-        skill_paths: list[Path] | None = None,
+        tools: Sequence[AgentFunctionTool] | None = None,
+        mcp_tools: Sequence[MCPServerDescriptor] | None = None,
+        skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
         session_id: str | None = None,
-        sandbox_tools: list[FunctionTool] | None = None,
+        sandbox_tools: Sequence[ToolInput] | None = None,
         system_addendum: str | None = None,
         workflow_enabled: bool = False,
         workflow_durable_client: DurableFunctionsClient | None = None,
         workflow_agent_slug: str | None = None,
         agent_name: str | None = None,
         display_name: str | None = None,
-        web_request_tools: list[FunctionTool] | None = None,
+        web_request_tools: Sequence[ToolInput] | None = None,
         agent_configuration: AgentConfiguration | None = None,
         subagents: list[SubagentRef] | None = None,
         catalog: AgentCatalog | None = None,
@@ -235,23 +244,25 @@ class AgentRunner:
         instructions: str | None = None,
         timeout: float | None = None,
         deadline: float | None = None,
-        tools: list[AgentFunctionTool] | None = None,
-        mcp_tools: list[MCPTool] | None = None,
-        skill_paths: list[Path] | None = None,
+        tools: Sequence[AgentFunctionTool] | None = None,
+        mcp_tools: Sequence[MCPServerDescriptor] | None = None,
+        skill_paths: Sequence[Path] | None = None,
         model: str | None = None,
         session_id: str | None = None,
-        sandbox_tools: list[FunctionTool] | None = None,
+        sandbox_tools: Sequence[ToolInput] | None = None,
         system_addendum: str | None = None,
         workflow_enabled: bool = False,
         workflow_durable_client: DurableFunctionsClient | None = None,
         workflow_agent_slug: str | None = None,
         agent_name: str | None = None,
         display_name: str | None = None,
-        web_request_tools: list[FunctionTool] | None = None,
+        web_request_tools: Sequence[ToolInput] | None = None,
         agent_configuration: AgentConfiguration | None = None,
         subagents: list[SubagentRef] | None = None,
         catalog: AgentCatalog | None = None,
         workflow_policy: WorkflowPlanPolicy | None = None,
+        skills: Sequence[SkillDescriptor] | None = None,
+        skill_catalog: Sequence[SkillDescriptor] | None = None,
     ) -> AsyncGenerator[str]:
         effective_deadline = deadline
         if effective_deadline is None:
@@ -278,6 +289,8 @@ class AgentRunner:
             subagents=subagents,
             catalog=catalog,
             workflow_policy=workflow_policy,
+            skills=skills,
+            skill_catalog=skill_catalog,
         )
 
     async def run_leaf_agent_task(

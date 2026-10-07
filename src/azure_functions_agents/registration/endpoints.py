@@ -6,6 +6,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -185,7 +186,8 @@ async def _run_builtin_agent(
         web_request_tools=capabilities.web_request_tools,
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
-        skill_paths=capabilities.enabled_skill_paths,
+        skills=capabilities.skills,
+        skill_catalog=capabilities.skill_catalog,
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
@@ -212,6 +214,7 @@ def _run_builtin_agent_stream(
     catalog: AgentCatalog | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> AsyncIterator[str]:
+    harness = bind_harness(resolved, capabilities)
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
     return _run_agent_stream(
@@ -224,7 +227,8 @@ def _run_builtin_agent_stream(
         web_request_tools=capabilities.web_request_tools,
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
-        skill_paths=capabilities.enabled_skill_paths,
+        skills=capabilities.skills,
+        skill_catalog=capabilities.skill_catalog,
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
@@ -240,7 +244,7 @@ def _run_builtin_agent_stream(
         agent_configuration=resolved.agent_configuration,
         subagents=resolved.subagents,
         catalog=catalog,
-        _harness=capabilities._harness,
+        _harness=harness,
     )
 
 
@@ -787,6 +791,7 @@ def register_builtin_endpoints(
     """Register built-in debug chat UI, REST chat, and MCP endpoints for one agent."""
 
     harness = bind_harness(resolved, capabilities)
+    capabilities = replace(capabilities, _harness=harness)
     slug = validate_agent_slug(resolved.slug)
     builtin_endpoints = resolved.builtin_endpoints
 

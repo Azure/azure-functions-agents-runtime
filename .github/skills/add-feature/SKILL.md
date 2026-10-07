@@ -49,6 +49,11 @@ bug fixes.
 6. Keep the FRD focused on intended behavior, contracts, and durable decisions.
    Do not encode delivery mechanics such as PR numbers, commit SHAs, temporary
    slice/phasing labels, or package versions already owned by `pyproject.toml`.
+7. Write in crisp, plain English. Use short sentences, define terms on first use,
+   assume little background context, and state conclusions as facts. Do not narrate
+   investigation history in the FRD; put evidence in PR descriptions.
+8. Never cite Decisions-log numbers in FRD prose or cross-references; describe the
+   decision instead, because numbers shift on merges/renumbering.
 
 ## Phase 2 — Architecture review (planning mode)  *(gate: human sign-off → `status: Finalized`)*
 
@@ -115,6 +120,8 @@ slice its own branch and worktree as described in `AGENTS.md`.
 
 - Never skip a gate. If a gate fails, fix before advancing.
 - Keep the Decisions log focused on the feature contract; it is not a delivery diary.
+- Never cite Decisions-log numbers in FRD prose or cross-references; describe the
+  decision instead, because numbers shift on merges/renumbering.
 - Keep implementation diffs surgical and scoped to the FRD.
 - This skill is repo dev-tooling under `.github/skills/`; it is unrelated to the
   runtime's user-authored agent skills discovered from an app's `skills/` folder.

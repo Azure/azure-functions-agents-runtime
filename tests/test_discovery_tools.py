@@ -7,11 +7,12 @@ import types
 from pathlib import Path
 
 import pytest
-from agent_framework import FunctionTool
 from pydantic import ValidationError
 
 from azure_functions_agents._function_tool import tool, workflow_tool
+from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.discovery.tools import (
+    _workflow_tool_from_member,
     clear_tool_discovery_cache,
     discover_project_tools,
     discover_user_tools,
@@ -24,7 +25,7 @@ def _write_tool_file(app_root: Path, name: str, body: str) -> None:
     (tools_dir / f"{name}.py").write_text(textwrap.dedent(body), encoding="utf-8")
 
 
-def _tool_names(tools: list[FunctionTool]) -> list[str]:
+def _tool_names(tools: list[ToolDescriptor]) -> list[str]:
     return sorted(tool_obj.name for tool_obj in tools)
 
 
@@ -127,6 +128,140 @@ def test_discover_user_tools_returns_empty_when_tools_dir_missing(tmp_path: Path
     result = discover_user_tools(tmp_path)
     assert result.tools == []
     assert result.failed_loads == []
+
+
+def test_discovery_records_neutral_metadata_without_maf_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from azure_functions_agents.harness.agent_framework import _maf_tools
+
+    def forbidden(**kwargs):
+        raise AssertionError("Discovery must not construct MAF tools")
+
+    monkeypatch.setattr(_maf_tools, "FunctionTool", forbidden)
+    _write_tool_file(
+        tmp_path,
+        "ordinary",
+        """
+        from azure_functions_agents import tool
+
+        @tool(name="selected", description="Authored description")
+        def lookup(value: int) -> int:
+            return value
+        """,
+    )
+    [descriptor] = discover_project_tools(tmp_path).user_tools
+
+    assert type(descriptor) is ToolDescriptor
+    assert descriptor.name == "selected"
+    assert descriptor.description == "Authored description"
+    assert descriptor.parameters()["properties"]["value"]["type"] == "integer"
+
+
+def test_raw_maf_tools_are_ignored_in_discovery(tmp_path: Path, caplog) -> None:
+    _write_tool_file(
+        tmp_path,
+        "legacy",
+        """
+        from agent_framework import FunctionTool
+
+        class ExtendedTool(FunctionTool):
+            pass
+
+        lookup = ExtendedTool(name="legacy_lookup", func=lambda value: value)
+        """,
+    )
+    assert discover_project_tools(tmp_path).user_tools == []
+    assert "Ignoring unsupported custom tool" in caplog.text
+    assert "legacy_lookup" not in caplog.text
+
+
+@pytest.mark.parametrize("subclass", [False, True])
+@pytest.mark.parametrize("stacked", [False, True])
+def test_workflow_member_rejects_raw_sdk_before_metadata(
+    subclass: bool, stacked: bool, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    from agent_framework import FunctionTool
+
+    from azure_functions_agents.discovery import tools as discovery_tools
+
+    class OpaqueTool(FunctionTool):
+        def __getattribute__(self, name):
+            raise AssertionError("No SDK attributes may be inspected")
+
+    raw = (
+        object.__new__(OpaqueTool)
+        if subclass
+        else FunctionTool(name="sensitive_sdk_name", func=lambda value: value)
+    )
+    if stacked:
+        assert workflow_tool(name="sensitive_workflow_name")(raw) is raw
+    caplog.clear()
+
+    def forbidden_metadata(target):
+        raise AssertionError("SDK rejection must precede workflow metadata extraction")
+
+    monkeypatch.setattr(discovery_tools, "get_workflow_tool_metadata", forbidden_metadata)
+
+    assert _workflow_tool_from_member(__name__, "sensitive_member_name", raw) is None
+    assert [record.getMessage() for record in caplog.records] == [
+        "Ignoring unsupported custom tool; use the runtime @tool decorator "
+        "or a local public function in tools/."
+    ]
+
+
+def test_discovery_ignores_sdk_attributes_and_keeps_local_fallback(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "opaque",
+        """
+        from agent_framework import FunctionTool
+
+        class OpaqueTool(FunctionTool):
+            def __getattribute__(self, name):
+                raise AssertionError("No SDK attributes may be inspected")
+
+        raw = object.__new__(OpaqueTool)
+
+        def local(value: str) -> str:
+            return value
+        """,
+    )
+    discovered = discover_project_tools(tmp_path)
+    assert discovered.failed_loads == []
+    assert _tool_names(discovered.user_tools) == ["local"]
+
+
+@pytest.mark.parametrize("copilot", [False, True])
+def test_runtime_only_authoring_scenario(copilot, monkeypatch, caplog) -> None:
+    from azure_functions_agents.app import create_function_app
+    from azure_functions_agents.config.loader import load_agent_specs, load_global_config
+    from azure_functions_agents.config.merge import compose
+    from azure_functions_agents.registration.capabilities import build_capabilities
+
+    root = Path(__file__).parent / "fixtures" / "config_scenarios" / "24_runtime_tool_authoring"
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT", str(copilot).lower())
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-only")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_MODEL", "fixture-model")
+    for name in ("WEBSITE_INSTANCE_ID", "FUNCTIONS_WORKER_PROCESS_COUNT"):
+        monkeypatch.delenv(name, raising=False)
+    discovered = discover_project_tools(root)
+    assert discovered.failed_loads == []
+    assert _tool_names(discovered.user_tools) == ["authored", "first_local"]
+    assert sorted(item.name for item in discovered.workflow_tools) == ["authored", "workflow_only"]
+    resolved = compose(
+        load_agent_specs(root)[0], load_global_config(root),
+        discovered_mcp_names=[], discovered_skill_names=[],
+    )
+    capabilities = build_capabilities(
+        resolved, discovered_user_tools=discovered.user_tools,
+        discovered_workflow_tools=discovered.workflow_tools,
+        discovered_mcp_tools={}, discovered_skills={},
+    )
+    assert _tool_names(list(capabilities.filtered_user_tools)) == ["authored", "first_local"]
+    assert create_function_app(root).get_functions()
+    assert "Ignoring unsupported custom tool" in caplog.text
 
 
 def test_workflow_tool_only_is_not_normal_user_tool(tmp_path: Path) -> None:
@@ -374,7 +509,7 @@ def test_workflow_tool_rejects_invalid_retry_type() -> None:
 
 
 def test_workflow_tool_rejects_continue_on_error() -> None:
-    with pytest.raises(TypeError, match=r"unknown workflow_tool argument.*continue_on_error"):
+    with pytest.raises(TypeError, match=r"unexpected keyword argument 'continue_on_error'"):
         workflow_tool(continue_on_error=True)  # type: ignore[call-overload]
 
 

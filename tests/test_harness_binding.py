@@ -116,8 +116,8 @@ def test_replace_gets_fresh_resources_without_changing_settings(binding_root):
     assert original._resources.runtime is owner
 
 
-def test_request_retains_the_existing_frozen_fields_and_tool_list():
-    tools = []
+def test_request_retains_frozen_neutral_descriptors_and_standalone_skill_paths():
+    tools = ()
     request = binding.HarnessRequest(
         prompt="hello",
         instructions=None,
@@ -133,8 +133,10 @@ def test_request_retains_the_existing_frozen_fields_and_tool_list():
     assert [item.name for item in fields(request)] == [
         "prompt", "instructions", "agent_slug", "session_id", "new_session",
         "model", "tools", "max_output_tokens", "deadline",
+        "mcp_servers", "skills", "skill_catalog",
     ]
     assert request.tools is tools
+    assert request.mcp_servers == request.skills == request.skill_catalog == ()
     assert replace(request) == request
     with pytest.raises(FrozenInstanceError):
         request.model = "replacement"
@@ -257,7 +259,7 @@ def test_bind_harness_reuses_an_existing_binding_without_validation(binding_root
     validate.assert_not_called()
 
 
-def test_bind_harness_captures_only_after_successful_validation(binding_root, monkeypatch):
+def test_bind_harness_returns_validated_context_without_mutating_capabilities(binding_root, monkeypatch):
     harness = binding.AppHarness(binding.HarnessKind.MAF, binding_root)
     resolved = Mock()
     capabilities = AgentCapabilities()
@@ -271,7 +273,7 @@ def test_bind_harness_captures_only_after_successful_validation(binding_root, mo
 
     validate.side_effect = None
     assert binding.bind_harness(resolved, capabilities) is harness
-    assert capabilities._harness is harness
+    assert capabilities._harness is None
     validate.assert_called_with(harness, resolved, capabilities)
 
 

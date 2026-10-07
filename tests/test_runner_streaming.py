@@ -7,7 +7,6 @@ import textwrap
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -24,6 +23,7 @@ from agent_framework import (
 
 from azure_functions_agents import runner
 from azure_functions_agents.client_manager import InferenceTarget
+from azure_functions_agents.config import paths
 from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
 from azure_functions_agents.harness import _harness_execution as shared
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
@@ -61,6 +61,15 @@ async def test_bound_harness_run_agent_stream_discovers_tools_and_mcp_from_bound
 ) -> None:
     root_a = tmp_path / "root-a"
     root_a.mkdir()
+    (root_a / "tools").mkdir()
+    (root_a / "tools" / "local.py").write_text(
+        "def user_root_a() -> str:\n    return 'root-a'\n", encoding="utf-8"
+    )
+    (root_a / "mcp.json").write_text(
+        json.dumps({"servers": {"mcp_root_a": {"url": "https://fixture.invalid/mcp"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(paths, "_app_root", tmp_path / "unrelated-root")
     harness = AppHarness(HarnessKind.MAF, root_a)
     seen: list[dict[str, Any]] = []
 
@@ -69,20 +78,6 @@ async def test_bound_harness_run_agent_stream_discovers_tools_and_mcp_from_bound
         return _Agent(), object(), "test-session", None, InferenceTarget()
 
     monkeypatch.setattr(maf, "_build_agent_session", fake_builder)
-    monkeypatch.setattr(
-        maf,
-        "discover_user_tools",
-        lambda app_root: SimpleNamespace(
-            tools=[SimpleNamespace(name=f"user:{Path(app_root).resolve().name}")]
-        ),
-    )
-    monkeypatch.setattr(
-        maf,
-        "discover_mcp_servers",
-        lambda app_root: SimpleNamespace(
-            servers={f"mcp:{Path(app_root).resolve().name}": SimpleNamespace(name=f"mcp:{Path(app_root).resolve().name}")}
-        ),
-    )
     async def collect(**kwargs: Any) -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt", _harness=harness, **kwargs)]
 
@@ -90,8 +85,9 @@ async def test_bound_harness_run_agent_stream_discovers_tools_and_mcp_from_bound
     await collect(tools=[], mcp_tools=[])
 
     assert seen[0]["app_root"] == root_a
-    assert seen[0]["tools"] is None
-    assert seen[0]["mcp_tools"] is None
+    assert [item.name for item in seen[0]["tools"]] == ["user_root_a"]
+    assert [item.name for item in seen[0]["mcp_tools"]] == ["mcp_root_a"]
+    assert seen[0]["_harness"] is harness
     resolved_tools, _ = maf.assemble_agent_inputs(
         instructions=None,
         tools=seen[0]["tools"],
@@ -108,10 +104,11 @@ async def test_bound_harness_run_agent_stream_discovers_tools_and_mcp_from_bound
         delegate_tools=None,
         workflow_policy=None,
     )
-    assert {tool.name for tool in resolved_tools} == {"user:root-a", "mcp:root-a"}
+    assert {tool.name for tool in resolved_tools} == {"user_root_a", "mcp_root_a"}
 
-    assert seen[1]["tools"] == []
-    assert seen[1]["mcp_tools"] == []
+    assert seen[1]["tools"] == ()
+    assert seen[1]["mcp_tools"] == ()
+    assert seen[1]["_harness"] is harness
     assert seen[1]["app_root"] == root_a
     resolved_disabled, _ = maf.assemble_agent_inputs(
         instructions=None,
@@ -291,9 +288,8 @@ class _CapturedSpan:
     """Fake ``RuntimeSpan`` — mirrors ``test_web_request.py``'s ``_CapturedSpan``.
 
     ``run_agent_stream`` opens its *own* span (unlike ``run_agent``, whose
-    callers wrap it in theirs — see the comment above ``start_span`` in
-    ``runner.py``), so tests that assert on that span's attributes replace
-    ``runner.start_span`` itself rather than ``runner.current_span``.
+    callers wrap it in theirs), so tests that assert on that span's attributes replace
+    ``maf.start_span`` itself rather than ``runner.current_span``.
     """
 
     def __init__(self, attributes: dict[str, Any]) -> None:
@@ -1310,7 +1306,7 @@ def test_discover_user_tools_flattens_single_basemodel_parameter(tmp_path: Path)
         assert "path" in parameters["properties"]
         assert "params" not in parameters["properties"]
         assert (
-            asyncio.run(tool.invoke(arguments={"path": "/subscriptions/1"}, skip_parsing=True))
+            asyncio.run(tool.invoke(arguments={"path": "/subscriptions/1"}))
             == "/subscriptions/1"
         )
     finally:

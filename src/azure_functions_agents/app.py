@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -13,6 +15,7 @@ from ._hosted_skill_app import HostedSkillDFApp, HostedSkillFunctionApp
 from ._logger import logger
 from ._observability import configure_observability
 from ._source_marker import source_marker
+from ._tool_descriptor import ToolDescriptor
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
@@ -22,7 +25,7 @@ from .config.validation import (
     validate_subagent_references,
     validate_workflow_subagent_references,
 )
-from .discovery.mcp import discover_mcp_servers
+from .discovery.mcp import MCPServerDescriptor, discover_mcp_servers
 from .discovery.skills import discover_skills
 from .discovery.tools import discover_project_tools
 from .harness._harness_binding import get_harness, validate_agent
@@ -51,14 +54,14 @@ def _tool_name(tool: object) -> str:
 
 def _serialize_capabilities_for_log(
     *,
-    user_tools: list[Any] | None,
-    mcp_tools: list[Any] | None,
-    skill_paths: list[Path],
+    user_tools: Sequence[ToolDescriptor] | None,
+    mcp_tools: Sequence[MCPServerDescriptor] | None,
+    skill_paths: Sequence[Path],
     skill_name_by_path: dict[str, str],
 ) -> dict[str, list[str]]:
     return {
-        "user_tools": sorted(_tool_name(tool) for tool in (user_tools or [])),
-        "mcp_servers": sorted(_tool_name(tool) for tool in (mcp_tools or [])),
+        "user_tools": sorted(tool.name for tool in (user_tools or ())),
+        "mcp_servers": sorted(server.name for server in (mcp_tools or ())),
         "skills": sorted(
             skill_name_by_path.get(str(path.resolve()), path.name) for path in skill_paths
         ),
@@ -206,10 +209,11 @@ def create_function_app(
             discovered_workflow_tools=workflow_tools,
             discovered_mcp_tools=mcp_tools,
             discovered_skills=skills,
+            discovered_skill_descriptors=skill_result.descriptors,
         )
         validate_subagent_tool_names(resolved, capabilities)
         validate_agent(harness, resolved, capabilities)
-        capabilities._harness = harness
+        capabilities = replace(capabilities, _harness=harness)
         catalog_entries[resolved.slug] = CatalogEntry(resolved, capabilities)
 
     catalog: AgentCatalog = build_catalog(catalog_entries)

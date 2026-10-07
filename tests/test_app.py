@@ -103,9 +103,9 @@ def test_runtime_workflow_skill_is_added_only_to_direct_workflow_role(
           chat_api: true
         """,
     )
-    captured_endpoints: dict[str, list[Path]] = {}
-    captured_triggers: dict[str, list[Path]] = {}
-    captured_catalog: dict[str, list[Path]] = {}
+    captured_endpoints: dict[str, tuple[Path, ...]] = {}
+    captured_triggers: dict[str, tuple[Path, ...]] = {}
+    captured_catalog: dict[str, tuple[Path, ...]] = {}
 
     def _capture_builtin_endpoints(
         _app: Any,
@@ -146,9 +146,9 @@ def test_runtime_workflow_skill_is_added_only_to_direct_workflow_role(
     assert [path.name for path in captured_triggers["workflow"]] == [
         "data-driven-workflows"
     ]
-    assert captured_endpoints["static"] == []
-    assert captured_catalog["workflow"] == []
-    assert captured_catalog["static"] == []
+    assert captured_endpoints["static"] == ()
+    assert captured_catalog["workflow"] == ()
+    assert captured_catalog["static"] == ()
 
 
 def test_create_function_app_fails_fast_on_duplicate_function_names(

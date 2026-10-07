@@ -358,10 +358,6 @@ MCP_FILTER_DESCRIPTIONS = {
     "exclude": "MCP server names to exclude. Must match servers in `mcp.json`.",
 }
 
-SKILLS_FILTER_DESCRIPTIONS = {
-    "exclude": "Skill names to exclude. Matched against `SKILL.md` `name` field.",
-}
-
 AGENT_TOOLS_FILTER_DESCRIPTIONS = {
     "exclude": "Tool names to exclude (in addition to global excludes)",
 }

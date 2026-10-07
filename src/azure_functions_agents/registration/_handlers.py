@@ -7,7 +7,7 @@ import re
 import uuid
 from collections.abc import Callable
 from importlib import import_module
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import azure.functions as func
 import jsonschema
@@ -22,6 +22,7 @@ from .._observability import (
     start_span,
 )
 from .._source_marker import source_marker
+from .._tool_descriptor import ToolDescriptor, describe_tools
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
 from ..harness._harness_binding import HarnessKind, bind_harness
 from ..harness._session_storage import SessionStorageError
@@ -57,7 +58,7 @@ def normalize_timer_schedule(schedule: str) -> str:
 
 def build_sandbox_tools_for_session(
     resolved: ResolvedAgent, session_id: str | None
-) -> list[Any] | None:
+) -> list[ToolDescriptor] | None:
     """Build per-request sandbox tools using the resolved session id."""
     if resolved.tools_disabled:
         return None
@@ -66,13 +67,11 @@ def build_sandbox_tools_for_session(
     fallback = session_id or uuid.uuid4().hex
     sandbox_module = import_module("azure_functions_agents.system_tools.sandbox")
     create_sandbox_tools = sandbox_module.create_sandbox_tools
-    return cast(
-        list[Any],
+    return list(describe_tools(
         create_sandbox_tools(
-            resolved.sandbox_config.model_dump(),
-            fallback_session_id=fallback,
-        ),
-    )
+            resolved.sandbox_config.model_dump(), fallback_session_id=fallback
+        )
+    ))
 
 
 def validate_request_body(body: Any, input_schema: dict[str, Any] | None) -> Response | None:
@@ -263,7 +262,8 @@ def make_agent_handler(
                     web_request_tools=capabilities.web_request_tools,
                     tools=capabilities.filtered_user_tools,
                     mcp_tools=capabilities.filtered_mcp_tools,
-                    skill_paths=capabilities.enabled_skill_paths,
+                    skills=capabilities.skills,
+                    skill_catalog=capabilities.skill_catalog,
                     agent_configuration=resolved.agent_configuration,
                     subagents=resolved.subagents,
                     catalog=catalog,
@@ -415,7 +415,8 @@ def make_http_agent_handler(
                     web_request_tools=capabilities.web_request_tools,
                     tools=capabilities.filtered_user_tools,
                     mcp_tools=capabilities.filtered_mcp_tools,
-                    skill_paths=capabilities.enabled_skill_paths,
+                    skills=capabilities.skills,
+                    skill_catalog=capabilities.skill_catalog,
                     agent_configuration=resolved.agent_configuration,
                     subagents=resolved.subagents,
                     catalog=catalog,

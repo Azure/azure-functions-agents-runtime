@@ -27,7 +27,7 @@ from azure.identity.aio import get_bearer_token_provider
 from pydantic import BaseModel, Field
 
 from .._credential import build_async_credential, build_async_credential_with_client_id
-from .._function_tool import FunctionTool, tool
+from .._function_tool import tool
 from .._logger import logger
 from .._observability import (
     ATTR_OPERATION_ID,
@@ -37,6 +37,7 @@ from .._observability import (
     record_sandbox_execution,
     start_span,
 )
+from .._tool_descriptor import ToolDescriptor
 from ..config.env import has_unresolved_placeholders, substitute_env_vars_in_value
 
 if TYPE_CHECKING:
@@ -316,7 +317,7 @@ def create_sandbox_tools(
     config: dict[str, Any],
     *,
     fallback_session_id: str | None = None,
-) -> list[FunctionTool]:
+) -> list[ToolDescriptor]:
     """Create an ``execute_python`` tool bound to a specific ACA session pool.
 
     Parameters
