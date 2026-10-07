@@ -20,6 +20,9 @@ from azure_functions_agents.config.schema import (
     ResolvedAgent,
     ToolsFilter,
 )
+from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+from azure_functions_agents.discovery.skills import SkillDescriptor
+from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.registration._naming import _function_name_from_source
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
@@ -142,6 +145,47 @@ def _resolved_agent(
         metadata={},
         source_file=str(source) if source is not None else None,
     )
+
+
+def test_unbound_stream_captures_validated_harness_before_runtime_effects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from azure_functions_agents.registration import endpoints
+
+    resolved = _resolved_agent(
+        name="Agent", is_main=True, builtin_endpoints=BuiltinEndpointsConfig(), slug="agent"
+    )
+    capabilities = AgentCapabilities()
+    harness = AppHarness(HarnessKind.MAF, tmp_path)
+    order: list[str] = []
+    captured: dict[str, Any] = {}
+    expected = object()
+
+    def bind(actual_resolved: ResolvedAgent, actual_capabilities: AgentCapabilities) -> AppHarness:
+        assert actual_resolved is resolved
+        assert actual_capabilities is capabilities
+        order.append("bind")
+        return harness
+
+    def sandbox(*args: Any) -> list[Any]:
+        order.append("sandbox")
+        return []
+
+    def stream(prompt: str, **kwargs: Any) -> Any:
+        order.append("stream")
+        captured.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(endpoints, "bind_harness", bind)
+    monkeypatch.setattr(endpoints, "build_sandbox_tools_for_session", sandbox)
+    monkeypatch.setattr(endpoints, "_run_agent_stream", stream)
+
+    assert _run_builtin_agent_stream(
+        "prompt", resolved=resolved, capabilities=capabilities, session_id="session"
+    ) is expected
+    assert order == ["bind", "sandbox", "stream"]
+    assert captured["_harness"] is harness
+    assert capabilities._harness is None
 
 
 def _response_text(response: func.HttpResponse) -> str:
@@ -386,6 +430,52 @@ def test_run_builtin_agent_stream_generates_session_id_before_building_sandbox_t
     assert calls["run_agent_stream"]["agent_name"] == resolved.slug
     assert calls["run_agent_stream"]["workflow_agent_slug"] == resolved.slug
     assert calls["run_agent_stream"]["agent_name"] != resolved.name
+
+
+def test_builtin_execution_paths_forward_filtered_and_discovered_inventory(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    from azure_functions_agents.registration import endpoints
+
+    resolved = _resolved_agent(
+        name="Agent", slug="agent", is_main=True, builtin_endpoints=BuiltinEndpointsConfig(),
+    )
+    server = MCPServerDescriptor(
+        name="remote", url="https://fixture.invalid/mcp", transport="http",
+        headers=(), tools=(), auth_scope=None, client_id=None,
+    )
+    approved = SkillDescriptor(name="parent", path=tmp_path / "parent")
+    excluded = SkillDescriptor(
+        name="child", path=approved.path / "child",
+    )
+    capabilities = AgentCapabilities.create(
+        filtered_user_tools=(), filtered_mcp_tools=(server,),
+        skills=(approved,), skill_catalog=(approved, excluded),
+        _harness=AppHarness(HarnessKind.MAF, tmp_path),
+    )
+    calls: list[dict[str, Any]] = []
+
+    async def run(prompt: str, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(session_id=kwargs["session_id"], content="reply", tool_calls=[])
+
+    def stream(prompt: str, **kwargs: Any) -> str:
+        calls.append(kwargs)
+        return "stream"
+
+    monkeypatch.setattr(endpoints, "_run_agent", run)
+    monkeypatch.setattr(endpoints, "_run_agent_stream", stream)
+    asyncio.run(_run_builtin_agent(
+        "hello", resolved=resolved, capabilities=capabilities, session_id="session",
+    ))
+    assert _run_builtin_agent_stream(
+        "hello", resolved=resolved, capabilities=capabilities, session_id="session",
+    ) == "stream"
+    for call in calls:
+        assert call["mcp_tools"] == (server,)
+        assert call["skills"] == (approved,)
+        assert call["skill_catalog"] == (approved, excluded)
+        assert call["_harness"] is capabilities._harness
 
 
 def test_register_builtin_endpoints_chat_also_registers_http_routes_for_non_main_agent(

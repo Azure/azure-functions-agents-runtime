@@ -8,7 +8,7 @@ import pytest
 
 
 def test_indexing_log_includes_failed_loads(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    """Test that failed tool/skill/MCP loads are logged in the indexing summary."""
+    """Report startup-owned failures, leaving skill content validation to the SDK."""
     from azure_functions_agents.app import create_function_app
     
     # Create a broken tool
@@ -70,8 +70,8 @@ Test
     assert len(log_json["failed_loads"]["user_tools"]) == 1
     assert "broken.py" in log_json["failed_loads"]["user_tools"][0]
     
-    assert len(log_json["failed_loads"]["skills"]) == 1
-    assert "bad-skill" in log_json["failed_loads"]["skills"][0]
+    assert log_json["failed_loads"]["skills"] == []
+    assert log_json["discovered_capability_names"]["skills"] == ["bad-skill"]
     
     assert len(log_json["failed_loads"]["mcp_servers"]) == 1
     assert "broken" in log_json["failed_loads"]["mcp_servers"][0]

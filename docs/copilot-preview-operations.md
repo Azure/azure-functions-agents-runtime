@@ -1,7 +1,7 @@
-# Copilot preview: session storage operations
+# Copilot preview operations
 
 Operational reference for the **default-off internal** Copilot harness preview and its
-native session persistence. Design rationale lives in
+MCP, scoped skills, and native session persistence. Design rationale lives in
 [`architecture.md`](architecture.md#bounded-copilot-migration-preview); the
 runnable local walkthrough lives in the
 [preview sample](https://github.com/Azure/azure-functions-agents-runtime/tree/main/samples/copilot-preview).
@@ -17,6 +17,10 @@ authentication, SDK continuation or Functions hosting. Earlier Blob
 continuation and compaction runs exercised a different persistence
 implementation and do **not** qualify this thin filesystem adapter.
 Deployed-host and multi-worker behavior remain unqualified.
+
+Actual Linux native skill-helper execution and SDK managed-settings/approval
+scenarios remain unqualified. Earlier Windows mechanics checks are not Linux or
+production qualification.
 
 The SDK owns continuation, recovery and compaction. The host does not promise
 transactional turns or exactly-once tool effects.
@@ -42,6 +46,96 @@ Copilot is selected. The legacy `runtime:` front-matter field remains ignored.
 Restarting with the flag off selects MAF and its existing history provider.
 Only the selected harness constructs, uses and closes its persistence adapter;
 shared configuration does not initialize or probe the other implementation.
+
+## MCP and scoped skills
+
+These are outbound capabilities of the existing direct, non-streaming HTTP
+preview, not new triggers or endpoint support. Keep the local, single-worker
+hosting limit and the same `SessionFs`, lock, and create/resume/disconnect
+lifecycle. The checked-in sample does not require MCP credentials or skills.
+
+### MCP configuration and auth
+
+Use existing remote HTTP/streamable-HTTP `mcp.json` entries and frontmatter
+`mcp: false` / `mcp.exclude` filters. The per-server `tools` field keeps its
+existing all/none/exact-name semantics, not wildcard patterns; see
+[per-server tool selection](front-matter-spec.md#mcp).
+Discovery reads declarations only; the selected SDK connects and loads tools.
+
+MCP header handling preserves the existing auth contract:
+
+- Without `auth`, static headers pass through unchanged, including `Authorization`.
+- Empty or whitespace-only `auth.scope` warns and stays static-only, with no token attempt.
+- A nonempty scope uses the authored scope and existing credential precedence:
+  a resolved `auth.client_id` selects that client's credential; an absent, empty,
+  or unresolved client ID uses the app-wide/default credential selection.
+- Generated `Authorization` replaces static `Authorization`. Headers and tokens
+  are never logged.
+
+Copilot receives freshly materialized static headers at session create/resume,
+between completed turns on the same native session ID. There is no mid-turn
+refresh or full MAF per-request-auth parity. Auth, connection, resume, and tool
+errors use normal SDK/runtime paths; there is no automatic retry of
+possibly side-effecting calls, stale-token fallback, dropped capability, or
+reset to an empty session.
+
+Ordinary configured MCP requests are noninteractive. The internal permission
+callback is installed on create and resume; only `kind == "mcp"` delegates to
+the SDK's `PermissionHandler.approve_all` approve-once helper. Native server tool
+filters still apply. There is no user callback setting or global approve-all
+policy. Standard SDK managed settings and approval restrictions remain in force.
+
+### Skill ownership and helpers
+
+Use existing `SKILL.md`, `skills: false`, and `skills.exclude` authoring.
+Both harnesses receive the same filtered directory candidates from shared discovery.
+The scan stops at `SKILL.md` roots and searches through two child levels; it does
+not read metadata or resources. Copilot receives individual approved directories
+and disabled directory names. The host adds no skill catalog to the authored
+instructions; the existing replace prompt mode is unchanged. The SDK advertises, validates, and loads
+skill content; a candidate is not a confirmed loaded skill. Native `skill` loads
+instructions, `view` reads approved resources, and `bash` can start only approved
+literal script invocations. Other ambient SDK tools remain excluded or denied.
+
+Every resource or script target must belong to an approved most-specific
+canonical discovered skill root. Excluded roots remain ownership metadata:
+independently supplied overlapping roots keep separate grants. An enabled parent
+cannot authorize an explicitly indexed excluded child. Implicit nested documents
+belong to the containing skill rather than becoming independently selectable roots.
+Traversal, symlink escapes, ambiguous ownership, and general project-file access
+are denied. `skills: false` exposes no skill/helper capabilities.
+
+Working directory, a loaded skill, and caller/model intent do not grant access.
+An approved script invocation may start from any turn; the SDK does not attest
+that it originated in a skill. Skills are trusted deployment-owned code.
+Permitted scripts run with host privileges, not in an OS sandbox, and the policy
+does not constrain their internal effects. MAF retains its existing skill
+behavior, including nested resource recursion; this does not establish MAF
+file-script parity. Native automatic skill advertising and instruction loading
+under the unchanged replace prompt mode have not been live-qualified. Python
+session options alone do not prove that this mode preserves native advertising.
+
+### Supported native script forms
+
+The target must be an absolute approved `.py` or `.sh` file under its owning
+skill's `scripts/` tree. Interpreter forms are `python` / `python3` for `.py` and
+`bash` for `.sh`; direct POSIX invocation requires an executable script.
+Arguments must be literal. Quote paths or arguments containing spaces.
+
+These are native helper command-shape examples with placeholders, not
+PowerShell setup commands or evidence of Linux execution:
+
+```text
+python "<absolute-approved-script.py>" "literal argument"
+python3 "<absolute-approved-script.py>" "literal argument"
+bash "<absolute-approved-script.sh>" "literal argument"
+"<absolute-approved-executable.py>" "literal argument"
+"<absolute-approved-executable.sh>" "literal argument"
+```
+
+Relative or ambiguous commands, general shell commands, chaining/operators,
+substitution, pipelines, and redirection are denied. The host adds no script
+runner, loader, prompt engine, or new script settings.
 
 ## Storage selection
 
@@ -219,7 +313,7 @@ Use isolated local settings or offline fixtures, not a customer's storage:
   `UnsupportedCapabilityError`s raised before any native process, download or
   provider call. They stay until deployed-host and multi-worker qualification
   lands (issues #1357 and #1337).
-- Streaming, history projection, MCP, skills, delegation, Workflow Sub Agents,
+- Streaming, history projection, delegation, Workflow Sub Agents,
   workflow-enabled agents, non-HTTP triggers and the debug chat UI remain
   rejected before inference on the Copilot path.
 - Same-session serialization is process-local only. Callers must avoid

@@ -18,38 +18,6 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
 - **MAF execution controls** — set output limits and optional Microsoft Agent Framework token-budget conversation compaction
 
-### Experimental Copilot harness
-
-MAF remains the default. A separate
-[Copilot preview sample](samples/copilot-preview/README.md) supports an explicit
-`AZURE_FUNCTIONS_AGENTS_ENABLE_COPILOT=true` opt-in for **internal local
-qualification only**, not a customer-facing production contract, covering non-streaming HTTP,
-filtered explicit Python tools, the configured `web_request` tool, session-bound
-ACA `execute_python` adapter wiring, host-validated structured results on
-authored HTTP-trigger routes, and SDK-owned native sessions. The flag is read
-once per app: **restart the host** to opt in or out. Each harness
-constructs, uses and closes only its own persistence adapter: MAF keeps its
-history provider; Copilot uses the SDK's `SessionFs` callbacks. Copilot stores
-ordinary local files or one Blob per SDK file, using the existing
-`AzureWebJobsStorage` settings to select Blob and local files only when neither
-Blob setting is configured. Configured Blob failures never fall back to disk.
-The SDK owns sessions, continuation, recovery, compaction and file formats;
-the host supplies filesystem operations, metadata and path containment.
-ACA catalog/session scoping is unit-qualified; real Copilot-to-ACA
-execution remains a separately gated acceptance item. Ambient SDK
-shell/file/web/todo/task/human-input tools are disabled. This is **not**
-production activation: the preview remains local-only and single-worker.
-Earlier real-service results do not qualify the rewritten filesystem adapter.
-Deployed-host and dual-harness end-to-end qualification remain in #1357 and
-final rollout remains in #1337. MCP/skills/role/streaming
-parity is unchanged. Configured output-token caps are not supported in this
-Copilot preview; MAF retains its output-limit controls. See
-[`docs/copilot-preview-operations.md`](docs/copilot-preview-operations.md) for
-storage settings, inspection, errors and targeted cleanup.
-The sample documents OpenAI key, Azure OpenAI key/Entra and Foundry Entra setup.
-Custom `ClientManager`
-implementations remain MAF-only and are rejected explicitly when Copilot is on.
-
 ## Installation
 
 The package is published on PyPI as **`azurefunctions-agents-runtime`**.
@@ -250,7 +218,7 @@ my-app/
 
 ### Shared capabilities
 - **Markdown-first** — agent instructions, trigger config, and tool bindings in `.agent.md` files
-- **Skills** — progressive-disclosure prompt modules under `skills/<name>/SKILL.md` (loaded on demand via MAF's `SkillsProvider`)
+- **Skills** — shared directory discovery under `skills/` searches through two child levels and stops at each `SKILL.md` root. Filter by directory name; the selected SDK validates metadata and loads content on demand. Nested documents remain resources of the containing skill, not independent skill roots.
 - **Custom tools** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and they become callable
 - **Connector-backed MCP tools** — call Office 365, Teams, SQL, Salesforce, SAP, and other connectors through HTTP MCP servers
 - **MCP servers** — connect to external remote HTTP MCP servers for additional tools
@@ -477,7 +445,15 @@ def reverse_string(text: str) -> str:
     return text[::-1]
 ```
 
-`@tool` is re-exported from `agent_framework`. Functions can be sync or async; types in the signature feed MAF's automatic JSON-Schema generation. Tools that need richer schemas can be declared with `agent_framework.FunctionTool` directly.
+The runtime's ordinary `@tool` produces an SDK-free descriptor. Functions can be
+sync or async; signature types and Pydantic schemas supply input validation, and
+the selected harness adapts the descriptor to its SDK. Tools return ordinary
+Python values. Custom tools must use this runtime's `@tool`, or be local public
+functions in `tools/` (the first candidate per module is selected, preferring
+decorated tools). Raw `agent_framework.FunctionTool`, SDK decorators/objects,
+and undecorated functions passed programmatically are ignored with a warning.
+MAF-specific `@tool` keyword arguments pass to MAF for SDK-owned validation;
+unsupported authored options fail explicitly on the Copilot preview.
 
 Dynamic Workflow tools live in the same `tools/` directory but must opt in
 explicitly with `@workflow_tool` so they can run safely as Durable
@@ -601,12 +577,21 @@ Tools from configured MCP servers are automatically available to the agent at ru
 - **`type`** — optional. When set, must be `"http"` or `"streamable-http"`. When omitted, an entry with a `url` is treated as HTTP.
 - **`url`** — the MCP server endpoint URL (required)
 - **`headers`** — optional HTTP headers (e.g. for authentication)
-- **`tools`** — optional array of tool name patterns to allow (default: `["*"]`)
+- **`tools`** — optional exact-name allowlist. Omitted or any list containing `"*"` allows all tools; `[]` allows none; other lists allow only the named tools. Patterns such as `"get_*"` are not supported.
 - **`auth`** — optional Azure Identity authentication configuration. Set `auth.scope` to the token scope required by the MCP server. The runtime uses `DefaultAzureCredential` to acquire the token.
 
-The runtime loads MCP tools and skips MCP prompts. This avoids startup/runtime failures from connector-backed MCP servers that support tools but reject `prompts/list`.
+MCP tools are the supported capability; MCP prompts are not surfaced. The MAF
+adapter skips prompt loading for connector-backed servers that reject
+`prompts/list`. Copilot uses normal native SDK connection and tool loading.
+Per-agent [`mcp: false` / `mcp.exclude`](docs/front-matter-spec.md#mcp) can further
+narrow the selected servers.
 
 By default, MCP auth follows the app-wide identity selection: `AZURE_CLIENT_ID` when set, otherwise the system-assigned identity/default Azure credential chain. To choose a user-assigned managed identity for a single MCP server without changing the app-wide identity, set `auth.client_id` in that server's `mcp.json` entry. If the configured client ID is empty or an unresolved placeholder, the runtime falls back to the app-wide identity selection.
+
+In the Copilot preview, fresh MCP headers are supplied at native session
+create/resume between completed turns, not refreshed mid-turn. This is not full
+MAF auth parity. See the [MCP and scoped skills boundary](docs/copilot-preview-operations.md#mcp-and-scoped-skills)
+for noninteractive approvals, auth precedence, and unqualified scenarios.
 
 > **Note**: Entries without a `url`, with unresolved placeholders in `url`, or with a `type` other than `"http"` / `"streamable-http"`, are ignored with a warning. Use the remote HTTP transport instead.
 
@@ -643,8 +628,8 @@ Lines, one record per message:
 
 Copilot session files use a separate namespace:
 `copilot-native/{agent_id}/{session_id}/{sdk_relative_path}`. Here `agent_id`
-is the shared readable app correlation key plus canonical agent slug, for
-example `local/main` when platform metadata is absent. Files are opaque
+is the shared trimmed, lower-case `WEBSITE_SITE_NAME` plus canonical agent slug,
+or `local/main` when the site name is blank or unset. Files are opaque
 to the host; their contents, continuation, recovery and compaction belong to
 the SDK. This separate namespace applies only to the current internal Copilot
 preview; the default MAF path and its `agent-sessions/` history layout are

@@ -18,19 +18,25 @@ from agent_framework import (
     BaseChatClient,
     ChatMiddlewareLayer,
     ChatResponse,
+    ChatResponseUpdate,
     Content,
+    FunctionInvocationLayer,
     HistoryProvider,
     Message,
+    ResponseStream,
     SessionContext,
 )
 
 from azure_functions_agents import runner
+from azure_functions_agents._function_tool import tool
 from azure_functions_agents.client_manager import InferenceTarget
+from azure_functions_agents.config import paths
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     AgentFrameworkCompactionConfig,
     AgentFrameworkConfiguration,
 )
+from azure_functions_agents.discovery.mcp import MCPServerDescriptor
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.harness.agent_framework import _maf_execution as maf
 
@@ -48,6 +54,62 @@ def test_agent_result_preserves_existing_positional_argument_order() -> None:
     assert result.events is events
     assert result.delegate_error_count == 2
     assert result.model == "unknown"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [HarnessKind.MAF, HarnessKind.COPILOT])
+async def test_both_bound_runners_ignore_unsupported_values_before_execution(
+    kind, monkeypatch, caplog,
+):
+    from agent_framework import FunctionTool
+
+    from azure_functions_agents.harness.copilot_sdk import _copilot_execution
+
+    calls = []
+
+    def undecorated() -> str:
+        calls.append("unsupported")
+        return "ignored"
+
+    @tool
+    def authored() -> str:
+        return "allowed"
+
+    raw = FunctionTool(name="private-raw-name", func=undecorated, max_invocations=1)
+    harness = AppHarness(kind, Path.cwd(), default_model="fixture-model")
+    invoke = AsyncMock(return_value=runner.AgentResult("session", "captured"))
+    backend = maf if kind is HarnessKind.MAF else _copilot_execution
+    monkeypatch.setattr(backend, "run", invoke)
+    result = await runner.run_agent(
+        "fixture", tools=[raw, undecorated, authored], mcp_tools=[],
+        sandbox_tools=[raw, undecorated], web_request_tools=[raw, undecorated],
+        _harness=harness,
+    )
+    assert result.content == "captured"
+    request = invoke.call_args.args[1]
+    assert request.tools == (authored,)
+    assert calls == []
+    assert "Ignoring unsupported custom tool" in caplog.text
+    assert "private-raw-name" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_copilot_backend_rejects_authored_approval_before_effects(monkeypatch):
+    from azure_functions_agents.harness._harness_binding import UnsupportedCapabilityError
+    from azure_functions_agents.harness.copilot_sdk import _copilot_execution
+
+    @tool(approval_mode="always_require")
+    def bounded() -> str:
+        raise AssertionError("Unsupported approval policy must not execute")
+
+    invoke = AsyncMock()
+    monkeypatch.setattr(_copilot_execution, "run", invoke)
+    harness = AppHarness(HarnessKind.COPILOT, Path.cwd(), default_model="fixture-model")
+    with pytest.raises(UnsupportedCapabilityError, match="approval"):
+        await runner.run_agent(
+            "fixture", tools=[bounded], mcp_tools=[], _harness=harness,
+        )
+    invoke.assert_not_called()
 
 
 def test_run_agent_reports_model_and_tool_evidence_by_assistant_message(monkeypatch: Any) -> None:
@@ -195,6 +257,15 @@ async def test_bound_harness_run_agent_discovers_tools_and_mcp_from_bound_root(
 ) -> None:
     root_a = tmp_path / "root-a"
     root_a.mkdir()
+    (root_a / "tools").mkdir()
+    (root_a / "tools" / "local.py").write_text(
+        "def user_root_a() -> str:\n    return 'root-a'\n", encoding="utf-8"
+    )
+    (root_a / "mcp.json").write_text(
+        json.dumps({"servers": {"mcp_root_a": {"url": "https://fixture.invalid/mcp"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(paths, "_app_root", tmp_path / "unrelated-root")
     harness = AppHarness(HarnessKind.MAF, root_a)
     seen: list[dict[str, Any]] = []
 
@@ -203,26 +274,13 @@ async def test_bound_harness_run_agent_discovers_tools_and_mcp_from_bound_root(
         return _FakeAgent(), object(), "session", None, InferenceTarget()
 
     monkeypatch.setattr(maf, "_build_agent_session", fake_builder)
-    monkeypatch.setattr(
-        maf,
-        "discover_user_tools",
-        lambda app_root: SimpleNamespace(
-            tools=[SimpleNamespace(name=f"user:{Path(app_root).resolve().name}")]
-        ),
-    )
-    monkeypatch.setattr(
-        maf,
-        "discover_mcp_servers",
-        lambda app_root: SimpleNamespace(
-            servers={f"mcp:{Path(app_root).resolve().name}": SimpleNamespace(name=f"mcp:{Path(app_root).resolve().name}")}
-        ),
-    )
     await runner.run_agent("prompt", _harness=harness, tools=None, mcp_tools=None)
     await runner.run_agent("prompt", _harness=harness, tools=[], mcp_tools=[])
 
     assert seen[0]["app_root"] == root_a
-    assert seen[0]["tools"] is None
-    assert seen[0]["mcp_tools"] is None
+    assert [item.name for item in seen[0]["tools"]] == ["user_root_a"]
+    assert [item.name for item in seen[0]["mcp_tools"]] == ["mcp_root_a"]
+    assert seen[0]["_harness"] is harness
     resolved_tools, _ = maf.assemble_agent_inputs(
         instructions=None,
         tools=seen[0]["tools"],
@@ -239,10 +297,11 @@ async def test_bound_harness_run_agent_discovers_tools_and_mcp_from_bound_root(
         delegate_tools=None,
         workflow_policy=None,
     )
-    assert {tool.name for tool in resolved_tools} == {"user:root-a", "mcp:root-a"}
+    assert {tool.name for tool in resolved_tools} == {"user_root_a", "mcp_root_a"}
 
-    assert seen[1]["tools"] == []
-    assert seen[1]["mcp_tools"] == []
+    assert seen[1]["tools"] == ()
+    assert seen[1]["mcp_tools"] == ()
+    assert seen[1]["_harness"] is harness
     assert seen[1]["app_root"] == root_a
     resolved_disabled, _ = maf.assemble_agent_inputs(
         instructions=None,
@@ -324,6 +383,108 @@ class _SharedHistoryProvider(HistoryProvider):
         **kwargs: Any,
     ) -> None:
         self.messages.extend(messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("selection", ["collection", "invalid-name", "empty", "unspecified"])
+async def test_public_maf_skill_paths_expand_to_selected_roots_before_sdk_loading(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: Any, stream: bool, selection: str
+) -> None:
+    import agent_framework
+
+    class SkillMetadataChatClient(FunctionInvocationLayer[Any], BaseChatClient[Any]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.messages: list[str] = []
+
+        def _inner_get_response(
+            self,
+            *,
+            messages: Sequence[Message],
+            stream: bool,
+            options: Mapping[str, Any],
+            **kwargs: Any,
+        ) -> Any:
+            self.messages.extend(message.text for message in messages)
+            self.messages.append(str(options.get("instructions") or ""))
+            if stream:
+                async def updates() -> Any:
+                    yield ChatResponseUpdate(
+                        contents=[Content.from_text("complete")], role="assistant"
+                    )
+
+                return ResponseStream(updates(), finalizer=ChatResponse.from_updates)
+
+            async def response() -> ChatResponse[Any]:
+                return ChatResponse(messages=[Message("assistant", ["complete"])])
+
+            return response()
+
+    collection = tmp_path / "collection"
+    extra = tmp_path / "extra-collection"
+    invalid = tmp_path / "invalid-skill"
+    for directory, name in (
+        (collection / "alpha", "alpha"),
+        (collection / "beta", "beta"),
+        (extra / "gamma", "gamma"),
+        (invalid, "Bad_Name"),
+    ):
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Description for {name}\n---\nInstructions.\n",
+            encoding="utf-8",
+        )
+    paths = (
+        [extra, collection] if selection == "collection"
+        else [invalid, collection] if selection == "invalid-name"
+        else [] if selection == "empty" else None
+    )
+    passed_paths: list[list[Path]] = []
+    expected = [item.path for item in runner.describe_skill_catalog(paths or [])] if paths is not None else []
+    original_from_paths = agent_framework.SkillsProvider.from_paths
+
+    def from_paths(received: Sequence[Path], **kwargs: Any) -> Any:
+        passed_paths.append(list(received))
+        return original_from_paths(received, **kwargs)
+
+    monkeypatch.setattr(agent_framework.SkillsProvider, "from_paths", from_paths)
+    chat_client = SkillMetadataChatClient()
+    monkeypatch.setattr(
+        maf.get_client_manager(),
+        "build_chat_client_with_target",
+        lambda _model: (chat_client, InferenceTarget()),
+    )
+    monkeypatch.setattr(maf, "_build_history_provider", lambda _slug: None)
+    harness = AppHarness(HarnessKind.MAF, tmp_path)
+    kwargs = dict(tools=[], mcp_tools=[], skill_paths=paths, _harness=harness)
+    if stream:
+        events = [
+            json.loads(chunk.removeprefix("data: ").strip())
+            async for chunk in runner.run_agent_stream("prompt", **kwargs)
+        ]
+        assert any(event["type"] == "done" for event in events)
+        assert not any(event["type"] == "error" for event in events)
+    else:
+        response = await runner.run_agent("prompt", **kwargs)
+        assert response.content == "complete"
+    advertised = "\n".join(chat_client.messages)
+    if selection in {"collection", "invalid-name"}:
+        assert passed_paths == [expected]
+        assert "alpha" in advertised and "beta" in advertised
+        if selection == "collection":
+            assert "gamma" in advertised
+        else:
+            assert "Bad_Name" not in advertised
+            assert any(
+                record.name == "agent_framework._skills"
+                and "invalid name" in record.getMessage()
+                and "Bad_Name" in record.getMessage()
+                for record in caplog.records
+            )
+    else:
+        assert passed_paths == []
+        assert "alpha" not in advertised and "beta" not in advertised
 
 
 def test_build_agent_session_forces_provider_managed_history(
@@ -547,11 +708,14 @@ def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
     """Harness agents receive all shared tools and return their delegation error tracker."""
     captured_agent_options: list[dict[str, Any]] = []
     captured_delegate_options: list[tuple[Any, Any, float]] = []
-    local_tool = SimpleNamespace(name="local_tool")
-    mcp_tool = SimpleNamespace(name="mcp_tool")
-    sandbox_tool = SimpleNamespace(name="sandbox_tool")
-    web_request_tool = SimpleNamespace(name="web_request_tool")
-    delegate_tool = SimpleNamespace(name="delegate_billing")
+    local_tool = tool(lambda: "ok", name="local_tool")
+    mcp_tool = MCPServerDescriptor(
+        name="mcp_tool", url="https://fixture.invalid/mcp", transport="streamable-http",
+        headers=(), tools=None, auth_scope=None, client_id=None,
+    )
+    sandbox_tool = tool(lambda: "ok", name="sandbox_tool")
+    web_request_tool = tool(lambda: "ok", name="web_request_tool")
+    delegate_tool = tool(lambda: "ok", name="delegate_billing")
     delegate_tracker = runner._DelegateErrorTracker()
     subagents = [SimpleNamespace(agent="billing")]
     catalog = object()
@@ -566,6 +730,7 @@ def test_build_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
         received_catalog: Any,
         *,
         coordinator_deadline: float,
+        _harness: Any = None,
     ) -> tuple[list[Any], runner._DelegateErrorTracker]:
         captured_delegate_options.append(
             (received_subagents, received_catalog, coordinator_deadline)

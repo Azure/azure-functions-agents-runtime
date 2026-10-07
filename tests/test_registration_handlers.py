@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from azure_functions_agents._function_tool import tool
+from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     AgentFrameworkCompactionConfig,
@@ -20,6 +22,8 @@ from azure_functions_agents.config.schema import (
     ResolvedAgent,
     ToolsFilter,
 )
+from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.harness._harness_binding import AppHarness, HarnessKind
 from azure_functions_agents.registration._handlers import (
     _tool_error_count,
@@ -422,9 +426,9 @@ def test_http_handler_records_response_schema_validation_failed_event(monkeypatc
 def test_build_sandbox_tools_skips_disabled_tools(monkeypatch: Any) -> None:
     create_calls: list[tuple[dict[str, Any], str]] = []
 
-    def fake_create_sandbox_tools(config: dict[str, Any], *, fallback_session_id: str) -> list[str]:
+    def fake_create_sandbox_tools(config: dict[str, Any], *, fallback_session_id: str) -> list[ToolDescriptor]:
         create_calls.append((config, fallback_session_id))
-        return ["execute_python"]
+        return [tool(lambda: "ok", name="execute_python")]
 
     monkeypatch.setattr(
         "azure_functions_agents.registration._handlers.import_module",
@@ -448,7 +452,7 @@ def test_build_sandbox_tools_skips_disabled_tools(monkeypatch: Any) -> None:
     )
 
     assert disabled is None
-    assert enabled == ["execute_python"]
+    assert [descriptor.name for descriptor in enabled] == ["execute_python"]
     assert create_calls == [
         (
             {"endpoint": "https://sandbox.example", "client_id": None},
@@ -460,9 +464,9 @@ def test_build_sandbox_tools_skips_disabled_tools(monkeypatch: Any) -> None:
 def test_build_sandbox_tools_generates_unique_guid_when_session_missing(monkeypatch: Any) -> None:
     create_calls: list[str] = []
 
-    def fake_create_sandbox_tools(config: dict[str, Any], *, fallback_session_id: str) -> list[str]:
+    def fake_create_sandbox_tools(config: dict[str, Any], *, fallback_session_id: str) -> list[ToolDescriptor]:
         create_calls.append(fallback_session_id)
-        return [fallback_session_id]
+        return [tool(lambda: fallback_session_id, name="execute_python")]
 
     monkeypatch.setattr(
         "azure_functions_agents.registration._handlers.import_module",
@@ -477,13 +481,56 @@ def test_build_sandbox_tools_generates_unique_guid_when_session_missing(monkeypa
     first = build_sandbox_tools_for_session(resolved, None)
     second = build_sandbox_tools_for_session(resolved, None)
 
-    assert first == [create_calls[0]]
-    assert second == [create_calls[1]]
+    assert first[0].func() == create_calls[0]
+    assert second[0].func() == create_calls[1]
     assert len(create_calls) == 2
     assert re.fullmatch(r"[0-9a-f]{32}", create_calls[0])
     assert re.fullmatch(r"[0-9a-f]{32}", create_calls[1])
     assert create_calls[0] != create_calls[1]
     assert "default" not in create_calls
+
+
+def test_trigger_handlers_forward_selected_descriptors_and_full_skill_metadata(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    from azure_functions_agents.registration import _handlers
+
+    server = MCPServerDescriptor(
+        name="selected", url="https://fixture.invalid/mcp", transport="http",
+        headers=(), tools=("lookup",), auth_scope=None, client_id=None,
+    )
+    approved = SkillDescriptor(name="parent", path=tmp_path / "parent")
+    excluded = SkillDescriptor(
+        name="excluded-child", path=approved.path / "child",
+    )
+    capabilities = AgentCapabilities.create(
+        filtered_user_tools=(), filtered_mcp_tools=(server,),
+        skills=(approved,), skill_catalog=(approved, excluded),
+        _harness=AppHarness(HarnessKind.MAF, tmp_path),
+    )
+    requests: list[dict[str, Any]] = []
+
+    async def fake_run(prompt: str, **kwargs: Any) -> Any:
+        requests.append(kwargs)
+        return SimpleNamespace(
+            session_id=kwargs["session_id"], content="ok", tool_calls=[], delegate_error_count=0,
+        )
+
+    monkeypatch.setattr(_handlers, "_run_agent", fake_run)
+    _install_recording_span(monkeypatch)
+    resolved = _resolved_agent(response_schema=None)
+    http = make_http_agent_handler(resolved, capabilities)
+    trigger = make_agent_handler(resolved, "queue_trigger", capabilities)
+    asyncio.run(http(DummyRequest({"prompt": "hello"})))
+    asyncio.run(trigger("queue message"))
+
+    assert len(requests) == 2
+    for request in requests:
+        assert request["mcp_tools"] == (server,)
+        assert request["skills"] == (approved,)
+        assert request["skill_catalog"] == (approved, excluded)
+        assert "skill_paths" not in request
+        assert request["_harness"] is capabilities._harness
 
 
 def test_http_handler_uses_case_insensitive_session_header(monkeypatch: Any) -> None:

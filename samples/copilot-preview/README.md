@@ -154,7 +154,12 @@ $web = Invoke-RestMethod http://127.0.0.1:7071/agents/main/chat -Method Post `
 $web.tool_calls | ConvertTo-Json -Depth 8
 ```
 
-This local preview does not support streaming, MCP, skills, delegation,
+Optional outbound MCP servers and project skills use the existing authoring
+and per-agent filters; see the [MCP and scoped skills guide](../../docs/copilot-preview-operations.md#mcp-and-scoped-skills)
+before enabling them. This walkthrough requires neither and keeps the receipt
+and `web_request` behavior unchanged.
+
+This local preview does not support streaming, delegation,
 workflows or deployed hosting. Custom `ClientManager`
 instances are MAF-only and are rejected when Copilot is on. See
 [the architecture guide](../../docs/architecture.md#bounded-copilot-migration-preview)

@@ -14,7 +14,8 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from azure_functions_agents import runner
-from azure_functions_agents._function_tool import FunctionTool
+from azure_functions_agents._function_tool import tool
+from azure_functions_agents._tool_descriptor import ToolDescriptor
 from azure_functions_agents.app import create_function_app
 from azure_functions_agents.client_manager import (
     ClientManager,
@@ -36,6 +37,8 @@ from azure_functions_agents.config.schema import (
     TriggerSpec,
     WorkflowConfig,
 )
+from azure_functions_agents.discovery.mcp import MCPServerDescriptor
+from azure_functions_agents.discovery.skills import SkillDescriptor
 from azure_functions_agents.discovery.tools import discover_user_tools
 from azure_functions_agents.harness import _harness_binding as _harness
 from azure_functions_agents.harness._harness_binding import (
@@ -44,6 +47,7 @@ from azure_functions_agents.harness._harness_binding import (
     UnsupportedCapabilityError,
 )
 from azure_functions_agents.harness.agent_framework import _maf_execution
+from azure_functions_agents.harness.agent_framework._maf_tools import build_maf_tools
 from azure_functions_agents.harness.copilot_sdk import (
     _copilot_execution as _copilot,
 )
@@ -261,12 +265,38 @@ def test_flag_off_does_not_reject_custom_manager(tmp_path, monkeypatch, replace_
     assert get_client_manager() is custom
 
 
-@pytest.mark.parametrize("field", ["filtered_mcp_tools", "enabled_skill_paths"])
-def test_enabled_unsupported_capabilities_fail(preview, field):
+def test_foundry_configuration_is_frozen_without_authentication(preview, monkeypatch):
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://fixture.services.ai.azure.com/api/projects/test")
+    monkeypatch.setenv("FOUNDRY_MODEL", "deployed-model")
+    selected = _harness.get_harness()
+    assert selected.provider is not None
+    assert selected.provider.kind == "foundry"
+    assert selected.default_model == "deployed-model"
+    assert "fixture.services.ai.azure.com" not in repr(selected)
+    assert not selected.storage_root.exists()
+
+
+def test_registered_mcp_and_skill_descriptors_are_supported(preview):
     resolved, capabilities = _sample()
-    capabilities = replace(capabilities, **{field: [object()]})
-    with pytest.raises(UnsupportedCapabilityError):
-        _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
+    server = MCPServerDescriptor(
+        name="selected", url="https://fixture.invalid/mcp", transport="streamable-http",
+        headers=(), tools=("lookup",), auth_scope=None, client_id=None,
+    )
+    approved = SkillDescriptor(name="approved", path=preview / "approved")
+    excluded = SkillDescriptor(name="excluded", path=preview / "excluded")
+    capabilities = replace(
+        capabilities,
+        filtered_mcp_tools=(server,),
+        enabled_skill_paths=(approved.path,),
+        skills=(approved,),
+        skill_catalog=(approved, excluded),
+    )
+
+    _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
+
+    assert capabilities.skills == (approved,)
+    assert capabilities.skill_catalog == (approved, excluded)
 
 
 def test_direct_preview_keeps_other_roles_and_surfaces_rejected(preview):
@@ -290,7 +320,7 @@ def test_direct_preview_keeps_other_roles_and_surfaces_rejected(preview):
 def test_direct_preview_accepts_explicit_host_system_tools(preview):
     resolved, capabilities = _sample()
     capabilities = replace(
-        capabilities, web_request_tools=[FunctionTool(name="web_request", func=lambda url: url)]
+        capabilities, web_request_tools=[tool(name="web_request")(lambda url: url)]
     )
     resolved = resolved.model_copy(update={
         "sandbox_config": DynamicSessionsCodeInterpreterConfig(
@@ -338,18 +368,21 @@ def test_sandbox_name_collision_fails_during_registration(preview):
     })
     capabilities = replace(
         capabilities,
-        filtered_user_tools=[FunctionTool(name="execute_python", func=lambda code: code)],
+        filtered_user_tools=[tool(name="execute_python")(lambda code: code)],
     )
     with pytest.raises(UnsupportedCapabilityError, match="unique custom tool names"):
         _harness.validate_agent(_harness.get_harness(), resolved, capabilities)
 
 
-def test_maf_keeps_tool_objects_that_copilot_cannot_adapt(tmp_path):
+def test_maf_keeps_authored_approval_that_copilot_cannot_adapt(tmp_path):
     resolved, capabilities = _sample()
-    maf_only = FunctionTool(name="bounded", func=lambda: "ok", max_invocations=1)
-    capabilities = replace(capabilities, filtered_user_tools=[maf_only])
+    descriptor = tool(name="bounded", approval_mode="always_require")(lambda: "ok")
+    capabilities = replace(capabilities, filtered_user_tools=(descriptor,))
+
     _harness.validate_agent(AppHarness(HarnessKind.MAF, tmp_path), resolved, capabilities)
-    assert capabilities.filtered_user_tools == [maf_only]
+
+    assert capabilities.filtered_user_tools == (descriptor,)
+    assert build_maf_tools(capabilities.filtered_user_tools)[0].approval_mode == "always_require"
 
 
 def test_maf_only_configuration_is_not_silently_discarded(preview):
@@ -379,17 +412,11 @@ def test_standalone_output_limit_fails_before_native_execution(preview, monkeypa
     invoke.assert_not_called()
 
 
-@pytest.mark.parametrize("policy", [
-    {"max_invocations": 1},
-    {"max_invocation_exceptions": 1},
-    {"approval_mode": "always_require"},
-    {"result_parser": str},
-    {"func": None},
-])
+@pytest.mark.parametrize("policy", [{"approval_mode": "always_require"}])
 def test_unsupported_tool_policies_are_not_silently_lost(policy):
-    options = {"name": "bounded", "func": lambda value: value, **policy}
-    with pytest.raises(UnsupportedCapabilityError, match="simple FunctionTool"):
-        _preview.prepare_tools([FunctionTool(**options)])
+    descriptor = tool(name="bounded", **policy)(lambda value: value)
+    with pytest.raises(UnsupportedCapabilityError, match="approval"):
+        _preview.prepare_tools([descriptor])
 
 
 def test_direct_preview_forks_before_maf_construction_or_blob(preview, monkeypatch):
@@ -407,20 +434,90 @@ def test_direct_preview_forks_before_maf_construction_or_blob(preview, monkeypat
     maf.assert_not_called()
 
 
-def test_standalone_unsupported_call_fails_before_backend(preview, monkeypatch):
-    invoke = AsyncMock()
+def test_standalone_skill_root_does_not_promote_implicit_nested_documents(preview, monkeypatch):
+    parent = preview / "skills" / "parent"
+    child = parent / "excluded-child"
+    child.mkdir(parents=True)
+    (parent / "SKILL.md").write_text(
+        "---\nname: parent\ndescription: Parent skill\n---\n", encoding="utf-8"
+    )
+    (child / "SKILL.md").write_text(
+        "---\nname: excluded-child\ndescription: Excluded child\n---\n", encoding="utf-8"
+    )
+    invoke = AsyncMock(return_value=runner.AgentResult("session", "reply"))
     monkeypatch.setattr(_copilot, "run", invoke)
-    with pytest.raises(UnsupportedCapabilityError, match="skills"):
-        asyncio.run(runner.run_agent(
-            "hello", tools=[], mcp_tools=[], skill_paths=[preview / "unsupported-skill"],
-        ))
-    invoke.assert_not_called()
+    asyncio.run(
+        runner.run_agent(
+            "hello", tools=[], mcp_tools=[], skill_paths=[parent],
+        )
+    )
+    request = invoke.call_args.args[1]
+    assert [skill.name for skill in request.skills] == ["parent"]
+    assert {skill.name for skill in request.skill_catalog} == {"parent"}
+    assert request.skills[0].path == parent.resolve()
+    assert request.mcp_servers == ()
+    assert type(request.tools) is tuple
+
+
+def test_independently_explicit_roots_outside_app_preserve_nested_ownership(preview, monkeypatch):
+    app_root = preview / "app"
+    app_root.mkdir()
+    parent = preview / "external" / "external-parent"
+    child = parent / "external-child"
+    child.mkdir(parents=True)
+    (parent / "SKILL.md").write_text(
+        "---\nname: external-parent\ndescription: Parent\n---\n", encoding="utf-8",
+    )
+    (child / "SKILL.md").write_text(
+        "---\nname: external-child\ndescription: Child\n---\n", encoding="utf-8",
+    )
+    harness = _harness.get_harness(app_root, new_app=True)
+    invoke = AsyncMock(return_value=runner.AgentResult("session", "reply"))
+    monkeypatch.setattr(_copilot, "run", invoke)
+    original_catalog = runner.describe_skill_catalog
+    catalog_calls = []
+
+    def catalog(paths):
+        catalog_calls.append(tuple(paths))
+        return original_catalog(paths)
+
+    monkeypatch.setattr(runner, "describe_skill_catalog", catalog)
+
+    asyncio.run(runner.run_agent(
+        "hello", tools=[], mcp_tools=[], skill_paths=[parent, child], _harness=harness,
+    ))
+
+    request = invoke.call_args.args[1]
+    assert [skill.name for skill in request.skills] == ["external-parent", "external-child"]
+    assert {skill.name for skill in request.skill_catalog} == {
+        "external-parent", "external-child",
+    }
+    assert catalog_calls == [(parent, child)]
+
+
+def test_maf_standalone_does_not_discover_unrequested_skills(tmp_path, monkeypatch):
+    unused = tmp_path / "skills" / "unused"
+    unused.mkdir(parents=True)
+    (unused / "SKILL.md").write_text(
+        "---\nname: invalid--name\ndescription: Not requested\n---\n", encoding="utf-8",
+    )
+    invoke = AsyncMock(return_value=runner.AgentResult("session", "reply"))
+    monkeypatch.setattr(_maf_execution, "run", invoke)
+
+    result = asyncio.run(runner.run_agent(
+        "hello", tools=[], mcp_tools=[], skill_paths=None,
+        _harness=AppHarness(HarnessKind.MAF, tmp_path),
+    ))
+
+    request = invoke.call_args.args[1]
+    assert result.content == "reply"
+    assert request.skills == request.skill_catalog == ()
 
 
 def test_direct_preview_composes_host_tools_in_maf_order(preview, monkeypatch):
-    user = FunctionTool(name="user_tool", func=lambda: "user")
-    sandbox = FunctionTool(name="execute_python", func=lambda code: code)
-    web = FunctionTool(name="web_request", func=lambda url: url)
+    user = tool(name="user_tool")(lambda: "user")
+    sandbox = tool(name="execute_python")(lambda code: code)
+    web = tool(name="web_request")(lambda url: url)
     invoke = AsyncMock(return_value=runner.AgentResult("public-id", "native reply"))
     monkeypatch.setattr(_copilot, "run", invoke)
     result = asyncio.run(runner.run_agent(
@@ -434,7 +531,7 @@ def test_direct_preview_composes_host_tools_in_maf_order(preview, monkeypatch):
 def test_combined_tool_collision_fails_before_native_startup(preview, monkeypatch):
     invoke = AsyncMock()
     monkeypatch.setattr(_copilot, "run", invoke)
-    duplicate = FunctionTool(name="web_request", func=lambda: "duplicate")
+    duplicate = tool(name="web_request")(lambda: "duplicate")
     with pytest.raises(UnsupportedCapabilityError, match="unique custom tool names"):
         asyncio.run(runner.run_agent(
             "hello", tools=[duplicate], mcp_tools=[], web_request_tools=[duplicate],
@@ -557,16 +654,18 @@ def test_copilot_sandbox_tool_uses_public_http_session_id(preview, monkeypatch):
     from azure_functions_agents.registration import _handlers
 
     resolved, capabilities = _sample()
-    resolved = resolved.model_copy(update={
-        "sandbox_config": DynamicSessionsCodeInterpreterConfig(
-            endpoint="https://fixture.dynamicsessions.io"
-        ),
-    })
-    capabilities._harness = _harness.get_harness()
+    resolved = resolved.model_copy(
+        update={
+            "sandbox_config": DynamicSessionsCodeInterpreterConfig(
+                endpoint="https://fixture.dynamicsessions.io"
+            ),
+        }
+    )
+    capabilities = replace(capabilities, _harness=_harness.get_harness())
     requests = []
 
     def build_sandbox(_resolved, session_id):
-        return [FunctionTool(name="execute_python", func=lambda code: f"{session_id}:{code}")]
+        return [tool(name="execute_python")(lambda code: f"{session_id}:{code}")]
 
     async def invoke(_selected, request):
         requests.append(request)
@@ -580,9 +679,14 @@ def test_copilot_sandbox_tool_uses_public_http_session_id(preview, monkeypatch):
     )
     public_id = response.headers["x-ms-session-id"]
     assert requests[0].session_id == public_id
-    assert [function.name for function in requests[0].tools] == ["make_receipt", "execute_python", "web_request"]
-    contents = asyncio.run(requests[0].tools[1].invoke(arguments={"code": "6 * 7"}))
-    assert contents[0].text == f"{public_id}:6 * 7"
+    assert [function.name for function in requests[0].tools] == [
+        "make_receipt",
+        "execute_python",
+        "web_request",
+    ]
+    result = asyncio.run(requests[0].tools[1].invoke(arguments={"code": "6 * 7"}))
+    assert result == f"{public_id}:6 * 7"
+    assert all(type(descriptor) is ToolDescriptor for descriptor in requests[0].tools)
 
 
 def test_off_import_and_index_do_not_import_sdk_or_launch_process(tmp_path):

@@ -1,0 +1,6 @@
+{
+  "servers": {
+    "selected": {"type": "http", "url": "https://selected.invalid/mcp", "tools": ["lookup"]},
+    "hidden": {"type": "http", "url": "https://hidden.invalid/mcp"}
+  }
+}

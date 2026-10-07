@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Iterable
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from ..._function_tool import FunctionTool, tool
+from ..._tool_descriptor import ToolDescriptor, ToolInput, describe_tools
 from ...client_manager import (
     ProviderKind,
     _is_active_client_manager_builtin,
@@ -113,32 +113,21 @@ def validate_configuration(configuration: AgentConfiguration) -> None:
     )
 
 
-def prepare_tools(tools: list[FunctionTool | Callable[..., Any]]) -> list[FunctionTool]:
+def prepare_tools(tools: Iterable[ToolInput]) -> tuple[ToolDescriptor, ...]:
     """Preserve existing schemas and invocation without silently dropping policy."""
-    prepared: list[FunctionTool] = []
+    prepared = describe_tools(tools)
     names: set[str] = set()
-    for candidate in tools:
-        function = candidate if isinstance(candidate, FunctionTool) else tool(candidate)
-        if (
-            type(function) is not FunctionTool
-            or function.approval_mode != "never_require"
-            or function.max_invocations is not None
-            or function.max_invocation_exceptions is not None
-            or function.declaration_only
-            or function.result_parser is not None
-            or getattr(function, "_context_parameter_name", None) is not None
-        ):
+    for function in prepared:
+        if function.policy.approval_mode != "never_require":
             raise UnsupportedCapabilityError(
-                "Copilot preview supports simple FunctionTool callables only; custom tool "
-                "classes, approval, invocation limits, declaration-only tools, result parsers, "
-                "and injected invocation context are not supported."
+                "Copilot preview supports ordinary runtime @tool declarations only when "
+                'approval_mode="never_require".'
             )
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", function.name):
             raise UnsupportedCapabilityError("Copilot preview requires OpenAI-compatible tool names.")
         if function.name in names:
             raise UnsupportedCapabilityError("Copilot preview requires unique custom tool names.")
         names.add(function.name)
-        prepared.append(function)
     return prepared
 
 
@@ -154,8 +143,6 @@ def validate_copilot_agent(
         non_http_trigger=resolved.trigger is not None and resolved.trigger.type != HTTP_TRIGGER_TYPE,
         debug_chat_ui=resolved.builtin_endpoints.debug_chat_ui,
         mcp_endpoint=resolved.builtin_endpoints.mcp,
-        mcp=bool(capabilities.filtered_mcp_tools),
-        skills=bool(capabilities.enabled_skill_paths),
         subagents=bool(resolved.subagents),
         workflows=resolved.workflows is not None and resolved.workflows.enabled,
     )

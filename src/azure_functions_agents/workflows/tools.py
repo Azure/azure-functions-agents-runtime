@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from azure_functions_agents._function_tool import tool as define_tool
 from azure_functions_agents._logger import logger
+from azure_functions_agents._tool_descriptor import ToolDescriptor
 
 from . import registry
 from .context import (
@@ -717,7 +718,7 @@ def build_workflow_tools(
     agent_name: str = "main",
     durable_client: DurableFunctionsClient | None = None,
     policy: WorkflowPlanPolicy | None = None,
-) -> list[Any]:
+) -> list[ToolDescriptor]:
     """Return the list of workflow tool objects to inject for an agent."""
     session = _build_session(
         workflow_agent_slug, session_id, agent_name, durable_client

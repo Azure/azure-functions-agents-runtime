@@ -39,6 +39,108 @@ SENTINEL = "not-a-credential-native-persistence-sentinel"
 AUTH_FAILURE_SENTINEL = "sentinel-private-native-provider-403"
 
 
+@pytest.mark.asyncio
+async def test_native_skill_then_view_reads_approved_physical_reference(monkeypatch, tmp_path):
+    from copilot import CopilotClient, RuntimeConnection
+    from copilot._cli_version import get_runtime_platform
+    from copilot.copilot_request_handler import CopilotRequestHandler
+    from copilot.generated.rpc import ToolResultType, ToolsExecuteRequest
+    from copilot.session import ProviderConfig
+
+    from azure_functions_agents._skill_policy import SkillPolicy
+    from azure_functions_agents.discovery.skills import SkillDescriptor
+    from azure_functions_agents.harness.copilot_sdk._copilot_capabilities import permission_handler
+    from azure_functions_agents.harness.copilot_sdk._copilot_session_fs import open_session_fs
+    from azure_functions_agents.harness.copilot_sdk._copilot_session_identity import StorageRoute
+    from azure_functions_agents.harness.copilot_sdk._copilot_session_paths import (
+        HOST_PATH_CONVENTIONS,
+        SESSION_STATE_ROOT,
+    )
+
+    executable = "copilot-runtime.exe" if os.name == "nt" else "copilot-runtime"
+    assets = CACHE / "prebuilds" / get_runtime_platform()
+    if not all((assets / name).is_file() for name in (
+        executable, "runtime.node", ".hostless-runtime-assets-v2",
+    )):
+        pytest.skip("No approved cached native runtime bundle; never download during this test")
+    monkeypatch.setenv("COPILOT_CLI_EXTRACT_DIR", str(CACHE))
+    monkeypatch.setenv("COPILOT_SKIP_CLI_DOWNLOAD", "1")
+    monkeypatch.delenv("COPILOT_CLI_PATH", raising=False)
+    monkeypatch.delenv("COPILOT_SDK_DEFAULT_CONNECTION", raising=False)
+
+    class NoInference(CopilotRequestHandler):
+        async def send_request(self, request, options):
+            raise AssertionError("This regression must execute tools without model inference")
+
+    workspace = tmp_path / "native-workspace"
+    workspace.mkdir()
+    skill_root = tmp_path / "skills" / "preview-check"
+    skill_root.mkdir(parents=True)
+    reference = skill_root / "reference.txt"
+    reference.write_text("NATIVE_REFERENCE_7C42A9", encoding="utf-8")
+    (skill_root / "SKILL.md").write_text(
+        "---\nname: preview-check\ndescription: Offline resource check\n---\n"
+        f"Read the reference at {reference}.\n",
+        encoding="utf-8",
+    )
+    unapproved = tmp_path / "unapproved.txt"
+    unapproved.write_text("must not be exposed", encoding="utf-8")
+    skill = SkillDescriptor.create(name="preview-check", path=skill_root)
+    policy = SkillPolicy.create(
+        approved=(skill,), discovered=(skill,), working_directory=workspace
+    )
+    route = StorageRoute(local_dir=tmp_path / "opaque-session-files")
+    storage = await open_session_fs(
+        route, "agent", "resources", workspace_path=str(workspace), skill_policy=policy,
+    )
+    client = CopilotClient(
+        connection=RuntimeConnection.for_stdio(),
+        mode="empty", base_directory=str(tmp_path / "native-state"),
+        working_directory=str(workspace), use_logged_in_user=False,
+        log_level="none", request_handler=NoInference(),
+        session_fs={
+            "initial_working_directory": str(workspace),
+            "session_state_path": SESSION_STATE_ROOT,
+            "conventions": HOST_PATH_CONVENTIONS,
+        },
+    )
+    session = None
+    try:
+        await client.start()
+        session = await client.create_session(
+            session_id="native-skill-reference", model="unused-offline-model",
+            provider=ProviderConfig(
+                type="openai", base_url="http://127.0.0.1:1/v1", api_key="offline-fixture",
+            ),
+            system_message={"mode": "replace", "content": ""},
+            enable_skills=True, skill_directories=[str(skill_root)],
+            included_builtin_skills=[], available_tools=["builtin:skill", "builtin:view"],
+            on_permission_request=permission_handler(policy),
+            create_session_fs_handler=lambda _request: storage,
+        )
+        loaded = await session.rpc.tools.execute(
+            ToolsExecuteRequest(name="skill", arguments={"skill": "preview-check"}),
+            timeout=30,
+        )
+        assert loaded.result_type == ToolResultType.SUCCESS, loaded
+        viewed = await session.rpc.tools.execute(
+            ToolsExecuteRequest(name="view", arguments={"path": str(reference)}),
+            timeout=30,
+        )
+        assert viewed.result_type == ToolResultType.SUCCESS, viewed
+        assert "NATIVE_REFERENCE_7C42A9" in viewed.text_result_for_llm
+        denied = await session.rpc.tools.execute(
+            ToolsExecuteRequest(name="view", arguments={"path": str(unapproved)}),
+            timeout=30,
+        )
+        assert denied.result_type != ToolResultType.SUCCESS, denied
+    finally:
+        if session is not None:
+            await session.disconnect()
+        await client.stop()
+        await storage.close()
+
+
 def _tag(user: str) -> str:
     match = re.search(r"""tag\s+\\*['"]([A-Za-z0-9_-]+)\\*['"]""", user)
     assert match is not None, "Synthetic provider needs the first-turn tag"

@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-import azure_functions_agents.discovery.mcp as mcp_discovery
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
 from azure_functions_agents.config.merge import compose
 from azure_functions_agents.config.schema import (
@@ -27,33 +26,15 @@ from azure_functions_agents.config.validation import (
     validate_subagent_references,
     validate_workflow_subagent_references,
 )
-from azure_functions_agents.discovery.mcp import clear_mcp_cache, discover_mcp_servers
+from azure_functions_agents.discovery.mcp import (
+    MCPServerDescriptor,
+    clear_mcp_cache,
+    discover_mcp_servers,
+)
 from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
 from azure_functions_agents.registration.capabilities import build_capabilities
 
 FIXTURES_ROOT = Path(__file__).resolve().parent / "fixtures" / "config_scenarios"
-
-
-class _CapturedMCPStreamableHTTPTool:
-    def __init__(
-        self,
-        name: str,
-        url: str,
-        *,
-        allowed_tools: list[str] | None = None,
-        load_tools: bool = True,
-        load_prompts: bool = True,
-        header_provider: object = None,
-        http_client: object = None,
-        **_: object,
-    ) -> None:
-        self.name = name
-        self.url = url
-        self.allowed_tools = allowed_tools
-        self.load_tools = load_tools
-        self.load_prompts = load_prompts
-        self.header_provider = header_provider
-        self.http_client = http_client
 
 
 def _specs_by_name(specs):
@@ -413,7 +394,6 @@ def test_mcp_json_env_substitution(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NODE_BIN", "/usr/local/bin/node")
     monkeypatch.setenv("WORKSPACE_ROOT", "/srv/workspace")
     monkeypatch.setenv("MCP_LOG_LEVEL", "debug")
-    monkeypatch.setattr(mcp_discovery, "MCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool)
     # Intentionally leave UNSET_API_KEY unset to confirm it stays literal.
 
     # The agent file itself should also load cleanly through the loader.
@@ -432,24 +412,31 @@ def test_mcp_json_env_substitution(monkeypatch: pytest.MonkeyPatch) -> None:
     assert set(servers) == {"github", "internal"}
 
     github = servers["github"]
-    assert isinstance(github, _CapturedMCPStreamableHTTPTool)
+    assert type(github) is MCPServerDescriptor
+    assert github.name == "github"
+    assert github.transport == "http"
     assert github.url == "https://api.githubcopilot.com/mcp/"
-    assert github.allowed_tools == ["search_issues", "list_pull_requests"]
-    header_provider = github.header_provider
-    assert callable(header_provider)
-    headers = header_provider(None)
+    assert github.tools == ("search_issues", "list_pull_requests")
+    assert type(github.headers) is tuple
+    assert github.auth_scope is None
+    assert github.client_id is None
+    headers = dict(github.headers)
     assert headers == {
         "Authorization": "Bearer ghp_live_token",
         "X-Tenant": "contoso",
     }
 
     internal = servers["internal"]
-    assert isinstance(internal, _CapturedMCPStreamableHTTPTool)
+    assert type(internal) is MCPServerDescriptor
+    assert internal.name == "internal"
+    assert internal.transport == "http"
     # Both $VAR and %VAR% styles are substituted in the URL.
     assert internal.url == "https://debug.internal.example.test//srv/workspace"
-    # allowed_tools is None when the original config omits a "tools" entry.
-    assert internal.allowed_tools is None
-    internal_headers = internal.header_provider(None)
+    assert internal.tools is None
+    assert type(internal.headers) is tuple
+    assert internal.auth_scope is None
+    assert internal.client_id is None
+    internal_headers = dict(internal.headers)
     # Resolved values flow through, unresolved placeholders stay literal.
     assert internal_headers == {
         "X-Node": "/usr/local/bin/node",
@@ -717,9 +704,9 @@ def test_no_subagent_regression_fixture() -> None:
         discovered_skills={},
     )
 
-    assert main_caps.filtered_user_tools == discovered.tools
-    assert nightly_report_caps.filtered_user_tools == discovered.tools
-    assert resource_summary_caps.filtered_user_tools == []
+    assert main_caps.filtered_user_tools == tuple(discovered.tools)
+    assert nightly_report_caps.filtered_user_tools == tuple(discovered.tools)
+    assert resource_summary_caps.filtered_user_tools == ()
 
 
 # ---------------------------------------------------------------------------
